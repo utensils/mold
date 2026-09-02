@@ -51,7 +51,6 @@ use crate::wan::model::transformer::WanTransformerConfig;
 use crate::wan::model::vae::{WanVaeConfig, WanVideoVae};
 use crate::wan::sampler::{
     apply_cfg, FlowDmd, FlowDpmPp, FlowEuler, FlowUniPc, WanSchedule, WanScheduleConfig, WanSolver,
-    DMD_TABLE_SHIFT,
 };
 use crate::wan::text::umt5::WanTextEncoder;
 
@@ -669,12 +668,14 @@ fn resolve_wan_solver(
 /// wrong image, not a slow one.
 ///
 /// Returns the ladder alongside the kind because the caller needs the rungs
-/// to build the schedule — there is no step/shift config that produces them.
+/// AND the table shift they are timesteps on to build the schedule — there is
+/// no step/shift config that produces them, and the shipped distills do not
+/// share a table.
 fn resolve_wan_solver_for_model(
     model_name: &str,
     requested: Option<mold_core::Scheduler>,
     two_expert: bool,
-) -> Result<(WanSolverKind, Option<&'static [u32]>)> {
+) -> Result<(WanSolverKind, Option<mold_core::manifest::WanDmdLadder>)> {
     // Normalized the way the neighbouring `find_manifest` normalizes: the
     // engine is handed whatever name the caller resolved, and a legacy dash
     // or bare form must not silently miss the ladder and render the distill
@@ -687,7 +688,7 @@ fn resolve_wan_solver_for_model(
                  {} fixed rungs and is re-noised into the next, so walking it with \
                  '{scheduler}' is not a slower render but a different, worse one — drop \
                  --sample-solver (or --scheduler, which fills the same slot)",
-                ladder.len()
+                ladder.rungs.len()
             );
         }
         return Ok((WanSolverKind::Dmd, Some(ladder)));
@@ -704,16 +705,17 @@ fn resolve_wan_solver_for_model(
 /// than failing. Refuse here too, naming the tier.
 fn enforce_dmd_ladder_request(
     model_name: &str,
-    ladder: &[u32],
+    ladder: mold_core::manifest::WanDmdLadder,
     steps: u32,
     guidance: f64,
     sample_shift: Option<f64>,
 ) -> Result<()> {
-    if steps as usize != ladder.len() {
+    if steps as usize != ladder.rungs.len() {
         bail!(
-            "{model_name} is a {}-step DMD distill and walks exactly the rungs {ladder:?}; \
+            "{model_name} is a {}-step DMD distill and walks exactly the rungs {:?}; \
              {steps} steps is not a longer render, it is an untrained schedule",
-            ladder.len()
+            ladder.rungs.len(),
+            ladder.rungs
         );
     }
     // Exactly 1.0, matching the generation profile's fixed control: the
@@ -729,8 +731,9 @@ fn enforce_dmd_ladder_request(
     }
     if let Some(shift) = sample_shift {
         bail!(
-            "{model_name} reads its sigmas from FastVideo's fixed shift-{DMD_TABLE_SHIFT} table, \
-             the one the student was distilled against; --sample-shift {shift} cannot apply"
+            "{model_name} reads its sigmas from FastVideo's fixed shift-{:.0} table, the one \
+             THIS student was distilled against; --sample-shift {shift} cannot apply",
+            ladder.table_shift
         );
     }
     Ok(())
@@ -745,20 +748,21 @@ fn enforce_dmd_ladder_request(
 /// turbo clip fail — while the same values arriving on the REQUEST are hard
 /// errors in [`enforce_dmd_ladder_request`] and
 /// [`resolve_wan_solver_for_model`].
-fn dmd_ignored_env_disclosures(ladder: &[u32]) -> Vec<String> {
+fn dmd_ignored_env_disclosures(ladder: mold_core::manifest::WanDmdLadder) -> Vec<String> {
     let is_set = |name: &str| std::env::var(name).is_ok_and(|raw| !raw.trim().is_empty());
     let mut disclosures = Vec::new();
     if is_set(SOLVER_ENV) {
         disclosures.push(format!(
             "{SOLVER_ENV} ignored: this DMD tier walks its {}-rung ladder, which is not a solver \
              choice",
-            ladder.len()
+            ladder.rungs.len()
         ));
     }
     if is_set(FLOW_SHIFT_ENV) {
         disclosures.push(format!(
             "{FLOW_SHIFT_ENV} ignored: this DMD tier reads its sigmas from FastVideo's fixed \
-             shift-{DMD_TABLE_SHIFT} table, the one the student was distilled against"
+             shift-{:.0} table, the one THIS student was distilled against",
+            ladder.table_shift
         ));
     }
     disclosures
@@ -1969,7 +1973,7 @@ impl WanEngine {
                 for disclosure in dmd_ignored_env_disclosures(ladder) {
                     progress.info(&disclosure);
                 }
-                DMD_TABLE_SHIFT
+                ladder.table_shift
             }
             None => resolve_flow_shift(req.sample_shift, low_noise_expert.is_some())?,
         };
@@ -2011,9 +2015,9 @@ impl WanEngine {
         }
         if let Some(ladder) = dmd_ladder {
             progress.info(&format!(
-                "DMD distill: walking the fixed rungs {ladder:?} on FastVideo's shift-{:.1} \
+                "DMD distill: walking the fixed rungs {:?} on FastVideo's shift-{:.0} \
                  sigma table (one conditional forward per rung, re-noised between them)",
-                DMD_TABLE_SHIFT
+                ladder.rungs, ladder.table_shift
             ));
         }
         if !needs_cfg {
@@ -2193,8 +2197,8 @@ impl WanEngine {
         // schedule must come FROM the solver, never be built beside it.
         let mut solver = match dmd_ladder {
             Some(ladder) => WanSolver::Dmd(FlowDmd::new(WanSchedule::from_rungs(
-                ladder,
-                DMD_TABLE_SHIFT,
+                ladder.rungs,
+                ladder.table_shift,
             )?)),
             None => build_wan_solver(solver_kind, WanScheduleConfig::new(steps as usize, shift))?,
         };
@@ -4691,53 +4695,97 @@ mod tests {
     /// else: the env fallback cannot reach it and an explicit `scheduler` is
     /// refused rather than honored. Every other Wan tier keeps the old
     /// request > env > UniPC precedence.
+    ///
+    /// Run over every shipped ladder, each with its OWN table shift, because
+    /// the disclosure the user reads names that shift — and the two distills
+    /// do not share one.
     #[test]
     fn wan_dmd_tier_pins_its_solver_and_refuses_a_scheduler_override() {
         use mold_core::Scheduler;
         let previous = std::env::var(SOLVER_ENV).ok();
+        let shift_previous = std::env::var(FLOW_SHIFT_ENV).ok();
         unsafe { std::env::remove_var(SOLVER_ENV) };
+        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
 
-        let tier = "wan21-t2v-1.3b:turbo";
-        let ladder =
-            mold_core::manifest::wan_dmd_ladder(tier).expect("the turbo tier is the laddered one");
-        assert_eq!(ladder, &[1000u32, 757, 522]);
+        let mut ladders = Vec::new();
+        for (tier, dashed, table_shift) in [
+            ("wan21-t2v-1.3b:turbo", "wan21-t2v-1.3b-turbo", 8.0f64),
+            ("wan22-ti2v-5b:dmd", "wan22-ti2v-5b-dmd", 5.0),
+        ] {
+            let ladder = mold_core::manifest::wan_dmd_ladder(tier)
+                .expect("the DMD tiers are the laddered ones");
+            assert_eq!(ladder.rungs, &[1000u32, 757, 522]);
+            assert_eq!(ladder.table_shift, table_shift);
 
-        let (kind, resolved) = resolve_wan_solver_for_model(tier, None, false).unwrap();
-        assert_eq!(kind, WanSolverKind::Dmd);
-        assert_eq!(resolved, Some(ladder));
-        assert_eq!(kind.label(), "dmd");
+            let (kind, resolved) = resolve_wan_solver_for_model(tier, None, false).unwrap();
+            assert_eq!(kind, WanSolverKind::Dmd);
+            assert_eq!(resolved, Some(ladder));
+            assert_eq!(kind.label(), "dmd");
 
-        // The env fallback is not consulted for a laddered tier.
-        unsafe { std::env::set_var(SOLVER_ENV, "euler") };
-        assert_eq!(
-            resolve_wan_solver_for_model(tier, None, false).unwrap().0,
-            WanSolverKind::Dmd
-        );
-        unsafe { std::env::remove_var(SOLVER_ENV) };
+            // The env fallback is not consulted for a laddered tier.
+            unsafe { std::env::set_var(SOLVER_ENV, "euler") };
+            assert_eq!(
+                resolve_wan_solver_for_model(tier, None, false).unwrap().0,
+                WanSolverKind::Dmd
+            );
+            unsafe { std::env::remove_var(SOLVER_ENV) };
 
-        // An explicit request is refused by name — including uni-pc, which is
-        // what a client that never heard of this tier would send.
-        for scheduler in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
-            let error = resolve_wan_solver_for_model(tier, Some(scheduler), false)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(tier), "{error}");
-            assert!(error.contains("DMD"), "{error}");
-            // The wan-facing flag is `--sample-solver`; `--scheduler` is the
-            // other spelling clap conflicts it with. Naming only the second
-            // sends the user looking for a flag they did not pass.
-            assert!(error.contains("--sample-solver"), "{error}");
-            assert!(error.contains("--scheduler"), "{error}");
+            // An explicit request is refused by name — including uni-pc,
+            // which is what a client that never heard of this tier would
+            // send.
+            for scheduler in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
+                let error = resolve_wan_solver_for_model(tier, Some(scheduler), false)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(tier), "{error}");
+                assert!(error.contains("DMD"), "{error}");
+                // The wan-facing flag is `--sample-solver`; `--scheduler` is
+                // the other spelling clap conflicts it with. Naming only the
+                // second sends the user looking for a flag they did not pass.
+                assert!(error.contains("--sample-solver"), "{error}");
+                assert!(error.contains("--scheduler"), "{error}");
+            }
+
+            // The legacy dash spelling normalizes into the same ladder — the
+            // engine is handed whatever name its caller resolved.
+            assert_eq!(
+                resolve_wan_solver_for_model(dashed, None, false).unwrap().1,
+                Some(ladder)
+            );
+
+            ladders.push((tier, ladder, table_shift));
         }
 
-        // The legacy dash spelling normalizes into the same ladder — the
-        // engine is handed whatever name its caller resolved.
-        assert_eq!(
-            resolve_wan_solver_for_model("wan21-t2v-1.3b-turbo", None, false)
-                .unwrap()
-                .1,
-            Some(ladder)
-        );
+        // Both env knobs are read past for a laddered tier, and both say so:
+        // a silently dropped override reads as a broken variable. Held in ONE
+        // tight window over every tier rather than a window per tier —
+        // `MOLD_WAN_SOLVER` and `MOLD_WAN_SHIFT` are process-wide, and the
+        // solver/shift env tests above run in parallel with this one.
+        unsafe { std::env::remove_var(SOLVER_ENV) };
+        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
+        for (tier, ladder, _) in &ladders {
+            assert!(dmd_ignored_env_disclosures(*ladder).is_empty(), "{tier}");
+        }
+        unsafe { std::env::set_var(SOLVER_ENV, "euler") };
+        unsafe { std::env::set_var(FLOW_SHIFT_ENV, "5.0") };
+        let disclosed: Vec<(&str, f64, Vec<String>)> = ladders
+            .iter()
+            .map(|(tier, ladder, shift)| (*tier, *shift, dmd_ignored_env_disclosures(*ladder)))
+            .collect();
+        unsafe { std::env::remove_var(SOLVER_ENV) };
+        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
+        for (tier, table_shift, disclosures) in disclosed {
+            assert_eq!(disclosures.len(), 2, "{tier}: {disclosures:?}");
+            assert!(disclosures[0].contains(SOLVER_ENV), "{disclosures:?}");
+            assert!(disclosures[1].contains(FLOW_SHIFT_ENV), "{disclosures:?}");
+            // The shift disclosure names the table this tier was distilled
+            // on. Naming a constant here would tell a 5B user their sigmas
+            // come from a table their student never saw.
+            assert!(
+                disclosures[1].contains(&format!("shift-{table_shift:.0}")),
+                "{tier}: {disclosures:?}"
+            );
+        }
 
         // A tier with no ladder is untouched.
         let (kind, ladder) = resolve_wan_solver_for_model("wan21-t2v-1.3b", None, false).unwrap();
@@ -4752,22 +4800,6 @@ mod tests {
 
         // And a ladder has no step/shift form to build from.
         assert!(build_wan_solver(WanSolverKind::Dmd, WanScheduleConfig::new(3, 8.0)).is_err());
-
-        // Both env knobs are read past for a laddered tier, and both say so:
-        // a silently dropped override reads as a broken variable.
-        let shift_previous = std::env::var(FLOW_SHIFT_ENV).ok();
-        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
-        let rungs = mold_core::manifest::wan_dmd_ladder(tier).expect("laddered");
-        assert!(dmd_ignored_env_disclosures(rungs).is_empty());
-
-        unsafe { std::env::set_var(SOLVER_ENV, "euler") };
-        unsafe { std::env::set_var(FLOW_SHIFT_ENV, "5.0") };
-        let disclosures = dmd_ignored_env_disclosures(rungs);
-        assert_eq!(disclosures.len(), 2, "{disclosures:?}");
-        assert!(disclosures[0].contains(SOLVER_ENV), "{disclosures:?}");
-        assert!(disclosures[1].contains(FLOW_SHIFT_ENV), "{disclosures:?}");
-        unsafe { std::env::remove_var(SOLVER_ENV) };
-        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
 
         match shift_previous {
             Some(value) => unsafe { std::env::set_var(FLOW_SHIFT_ENV, value) },
@@ -4784,28 +4816,78 @@ mod tests {
     /// forced-local callers never run profile validation.
     #[test]
     fn wan_dmd_ladder_refuses_steps_guidance_and_shift_overrides() {
-        let tier = "wan21-t2v-1.3b:turbo";
-        let ladder = mold_core::manifest::wan_dmd_ladder(tier).unwrap();
+        for tier in ["wan21-t2v-1.3b:turbo", "wan22-ti2v-5b:dmd"] {
+            let ladder = mold_core::manifest::wan_dmd_ladder(tier).unwrap();
+            let steps = ladder.rungs.len() as u32;
 
-        enforce_dmd_ladder_request(tier, ladder, 3, 1.0, None).expect("the pinned request runs");
+            enforce_dmd_ladder_request(tier, ladder, steps, 1.0, None)
+                .expect("the pinned request runs");
 
-        // The profile fixes guidance at exactly 1.0 and admission refuses
-        // every other value, so the backstop must agree: a 0.0 that slipped
-        // past a client would be a silently different render, not a refused
-        // one.
-        for (steps, guidance, shift, needle) in [
-            (30u32, 1.0f64, None, "untrained schedule"),
-            (2, 1.0, None, "untrained schedule"),
-            (3, 0.0, None, "guidance"),
-            (3, 0.5, None, "guidance"),
-            (3, 6.0, None, "guidance"),
-            (3, 1.0, Some(5.0), "sample-shift"),
-        ] {
-            let error = enforce_dmd_ladder_request(tier, ladder, steps, guidance, shift)
+            // The profile fixes guidance at exactly 1.0 and admission refuses
+            // every other value, so the backstop must agree: a 0.0 that
+            // slipped past a client would be a silently different render, not
+            // a refused one.
+            for (steps, guidance, shift, needle) in [
+                (30u32, 1.0f64, None, "untrained schedule"),
+                (2, 1.0, None, "untrained schedule"),
+                (3, 0.0, None, "guidance"),
+                (3, 0.5, None, "guidance"),
+                (3, 6.0, None, "guidance"),
+                (3, 1.0, Some(5.0), "sample-shift"),
+            ] {
+                let error = enforce_dmd_ladder_request(tier, ladder, steps, guidance, shift)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(tier), "{error}");
+                assert!(error.contains(needle), "expected {needle:?} in {error}");
+            }
+
+            // The shift refusal names the tier's own table, so a user who
+            // passed `--sample-shift` learns which schedule they cannot move.
+            let error = enforce_dmd_ladder_request(tier, ladder, steps, 1.0, Some(9.0))
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains(tier), "{error}");
-            assert!(error.contains(needle), "expected {needle:?} in {error}");
+            assert!(
+                error.contains(&format!("shift-{:.0}", ladder.table_shift)),
+                "{tier}: {error}"
+            );
+        }
+    }
+
+    /// The one boundary neither crate can test alone: the manifest publishes
+    /// rungs and a table shift, the sampler turns a `(rungs, shift)` pair into
+    /// sigmas, and nothing until here checks that each SHIPPED tier's pair
+    /// lands on the sigmas FastVideo's own scheduler would hand its student.
+    /// The rungs are identical across the two tiers, so only the shift can
+    /// distinguish them — which is exactly the mistake this asserts against.
+    #[test]
+    fn wan_dmd_ladders_land_on_the_fastvideo_sigmas() {
+        // Table entries at indices 0/720/880 (shift 8) and 0/616/821
+        // (shift 5) of the 1000-point grid.
+        for (tier, expected) in [
+            (
+                "wan21-t2v-1.3b:turbo",
+                [1.0f64, 0.7567567567567568, 0.5217391304347826],
+            ),
+            (
+                "wan22-ti2v-5b:dmd",
+                [1.0, 0.7570977917981072, 0.5215617715617716],
+            ),
+        ] {
+            let ladder = mold_core::manifest::wan_dmd_ladder(tier).expect("tier is laddered");
+            let schedule = WanSchedule::from_rungs(ladder.rungs, ladder.table_shift).unwrap();
+            // The DiT is conditioned on the integer rungs, not on the shifted
+            // table values (`fastvideo/pipelines/stages/denoising.py:1318`).
+            assert_eq!(schedule.timesteps, vec![1000i64, 757, 522], "{tier}");
+            assert_eq!(schedule.sigmas.len(), 4, "{tier}");
+            assert_eq!(schedule.sigmas[3], 0.0, "{tier}");
+            for (index, want) in expected.iter().enumerate() {
+                assert!(
+                    (schedule.sigmas[index] - want).abs() < 1e-9,
+                    "{tier} rung {index}: got {}, want {want}",
+                    schedule.sigmas[index]
+                );
+            }
         }
     }
 
@@ -4839,7 +4921,7 @@ mod tests {
 
         let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
         let ladder = mold_core::manifest::wan_dmd_ladder("wan21-t2v-1.3b:turbo").unwrap();
-        let schedule = WanSchedule::from_rungs(ladder, DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(ladder.rungs, ladder.table_shift).unwrap();
         let total = schedule.steps();
         assert_eq!(total, 3);
         // The DiT is conditioned on the integer rungs, not on the shifted
@@ -5055,10 +5137,17 @@ mod tests {
     /// Build a tiny model pair and drive the *real* denoise loop for one
     /// conditioning mode. Returns the final latents plus the decoded frames, so
     /// tests can assert both the latent invariant and the pixel outcome.
+    ///
+    /// `dmd` swaps the 4-step UniPC schedule for a DMD rung ladder built from
+    /// a manifest tier's own rungs and table shift. It is a parameter rather
+    /// than a second copy of this harness because the frame-0 re-imposition
+    /// under test is the loop's, not the solver's, and the two must be shown
+    /// to compose.
     fn tiny_i2v_runs(
         shape: WanConditioningShape,
         source_seeds: &[u64],
         guidance: f64,
+        dmd: Option<mold_core::manifest::WanDmdLadder>,
     ) -> Vec<(Tensor, Tensor, Vec<image::RgbImage>)> {
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -5155,9 +5244,16 @@ mod tests {
             };
 
             let context = Tensor::zeros((1, 6, 32), dtype, &device).unwrap();
-            let schedule = WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap();
-            // A fresh solver per source: `FlowUniPc` carries multistep history.
-            let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
+            let schedule = match dmd {
+                Some(ladder) => WanSchedule::from_rungs(ladder.rungs, ladder.table_shift).unwrap(),
+                None => WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap(),
+            };
+            // A fresh solver per source: `FlowUniPc` carries multistep history,
+            // and `FlowDmd` records the last rung's x0.
+            let mut solver = match dmd {
+                Some(_) => WanSolver::Dmd(FlowDmd::new(schedule.clone())),
+                None => WanSolver::UniPc(FlowUniPc::new(schedule.clone())),
+            };
             let latents = seeded_randn(
                 7,
                 &[1, z, latent_frames, latent_h, latent_w],
@@ -5217,7 +5313,7 @@ mod tests {
         source_seed: u64,
         guidance: f64,
     ) -> (Tensor, Tensor, Vec<image::RgbImage>) {
-        tiny_i2v_runs(shape, &[source_seed], guidance)
+        tiny_i2v_runs(shape, &[source_seed], guidance, None)
             .pop()
             .expect("one source seed yields one outcome")
     }
@@ -5250,6 +5346,48 @@ mod tests {
         assert!(flat(&latents).iter().all(|v| v.is_finite()));
     }
 
+    /// The 5B DMD ladder and the TI2V latent-inpaint path must compose: the
+    /// distill re-noises the whole latent between rungs, so frame 0 is
+    /// re-randomized three times over and only the loop's re-imposition after
+    /// each step puts the source back. This is the one place that shows the
+    /// two together, and it is written against
+    /// `manifest::FASTWAN_2_2_TI2V_5B_LADDER` rather than the manifest entry
+    /// on purpose: image conditioning on this checkpoint is mold's own
+    /// extension and the manifest field is UAT-gated, but the ladder-plus-
+    /// inpaint composition is worth holding either way.
+    ///
+    /// Note what is deliberately NOT asserted: the solver's per-rung
+    /// `last_x0`. `reimpose_clean_frame` acts on the stepped latent, not on
+    /// the previewed x0, so x0 legitimately drifts at frame 0 — asserting on
+    /// it would fail by construction rather than catch a regression.
+    #[test]
+    fn tiny_dmd_ladder_i2v_run_keeps_latent_frame_zero_pinned() {
+        let ladder = mold_core::manifest::FASTWAN_2_2_TI2V_5B_LADDER;
+        let (latents, condition, frames) = tiny_i2v_runs(
+            WanConditioningShape::Plain,
+            &[11],
+            // A DMD student runs one conditional forward per rung.
+            1.0,
+            Some(ladder),
+        )
+        .pop()
+        .expect("one source seed yields one outcome");
+
+        assert_eq!(latents.dims(), &[1, 4, 2, 4, 4]);
+        assert_eq!(frames.len(), 5);
+
+        let got = flat(&latents.narrow(2, 0, 1).unwrap().contiguous().unwrap());
+        let want = flat(&condition.narrow(2, 0, 1).unwrap().contiguous().unwrap());
+        assert_eq!(
+            got, want,
+            "latent frame 0 must survive every rung and every re-noise untouched"
+        );
+
+        let later = flat(&latents.narrow(2, 1, 1).unwrap().contiguous().unwrap());
+        assert_ne!(later, want, "frames after the first must actually denoise");
+        assert!(flat(&latents).iter().all(|v| v.is_finite()));
+    }
+
     /// The source image must control latent frame 0 *exactly*, and must reach
     /// the decoded pixels.
     ///
@@ -5266,7 +5404,7 @@ mod tests {
     /// The latent-space statement is exact and holds regardless of weights.
     #[test]
     fn tiny_ti2v_source_image_controls_frame_zero() {
-        let runs = tiny_i2v_runs(WanConditioningShape::Plain, &[11, 29], 1.0);
+        let runs = tiny_i2v_runs(WanConditioningShape::Plain, &[11, 29], 1.0, None);
         let frame_zero = |t: &Tensor| flat(&t.narrow(2, 0, 1).unwrap().contiguous().unwrap());
         let l1 = frame_zero(&runs[0].0);
         let l2 = frame_zero(&runs[1].0);
@@ -5304,7 +5442,7 @@ mod tests {
     /// path introduces no nondeterminism of its own.
     #[test]
     fn tiny_ti2v_is_deterministic_for_one_source() {
-        let runs = tiny_i2v_runs(WanConditioningShape::Plain, &[11, 11], 1.0);
+        let runs = tiny_i2v_runs(WanConditioningShape::Plain, &[11, 11], 1.0, None);
         assert_eq!(flat(&runs[0].0), flat(&runs[1].0), "latents must match");
         for (left, right) in runs[0].2.iter().zip(&runs[1].2) {
             assert_eq!(left.as_raw(), right.as_raw(), "frames must match");
@@ -5346,7 +5484,7 @@ mod tests {
     /// proof the image actually reaches the block rather than only the mask.
     #[test]
     fn channel_concat_conditioning_depends_on_the_source_image() {
-        let runs = tiny_i2v_runs(WanConditioningShape::ChannelConcat, &[11, 29], 1.0);
+        let runs = tiny_i2v_runs(WanConditioningShape::ChannelConcat, &[11, 29], 1.0, None);
         let (a, b) = (&runs[0].1, &runs[1].1);
         // Mask halves identical, latent halves different.
         let mask_a = flat(&a.narrow(1, 0, 4).unwrap().contiguous().unwrap());

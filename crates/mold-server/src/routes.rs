@@ -3631,14 +3631,16 @@ async fn enforce_source_image_capability(
     request: &mold_core::GenerateRequest,
     resolved_family: Option<&str>,
 ) -> Result<(), ApiError> {
-    // Wan probes the resolved checkpoint's own headers FIRST: `ModelPaths`
-    // honors config/env path overrides, so the artifacts actually loaded can
-    // differ from the manifest's task structure — the shape-driven read is
-    // the engine's exact truth. The manifest stays the cold fallback (not
-    // yet downloaded, unreadable headers). Non-wan families have no header
-    // probe; their manifest contract binds directly — plain LTX-Video
-    // declares Unsupported and its engine really does ignore an attached
-    // image.
+    // Wan probes the resolved checkpoint's own headers: `ModelPaths` honors
+    // config/env path overrides, so the artifacts actually loaded can differ
+    // from the manifest's task structure, and the shape-driven read is the
+    // engine's exact truth about what the WEIGHTS accept. It cannot lift a
+    // manifest refusal, though — see `SourceImageCapability::resolve`, which
+    // owns that precedence for every door. The manifest stays the answer when
+    // there is nothing to probe (not yet downloaded, unreadable headers).
+    // Non-wan families have no header probe; their manifest contract binds
+    // directly — plain LTX-Video declares Unsupported and its engine really
+    // does ignore an attached image.
     let manifest_contract = mold_core::manifest::find_manifest(&request.model)
         .and_then(|manifest| manifest.defaults.source_image);
     let capability = if resolved_family == Some("wan") {
@@ -3648,7 +3650,7 @@ async fn enforce_source_image_capability(
                 mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
             })
         };
-        probed.or(manifest_contract)
+        mold_core::SourceImageCapability::resolve(manifest_contract, probed)
     } else {
         manifest_contract
     };

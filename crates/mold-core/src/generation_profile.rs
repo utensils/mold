@@ -1210,7 +1210,7 @@ pub fn resolve_generation_profile(input: GenerationProfileInput<'_>) -> Generati
 /// escape by picking a Dev checkpoint.
 fn fixed_guidance_note(
     family: &str,
-    dmd_ladder: Option<&'static [u32]>,
+    dmd_ladder: Option<crate::manifest::WanDmdLadder>,
     guidance_caps: GuidanceCapabilities,
     scale: f64,
 ) -> Option<String> {
@@ -1253,16 +1253,21 @@ fn fixed_turbo_steps_note(tier: &crate::minimax_h3::TurboManifestTier) -> String
 /// The sentence explaining a DMD-distilled Wan tier's fixed step count.
 ///
 /// The ladder is not a budget the user spends: the student was trained to
-/// predict x0 at exactly these timesteps, so naming them is the note.
-fn fixed_dmd_steps_note(ladder: &'static [u32]) -> String {
+/// predict x0 at exactly these timesteps, so naming them is the note. The
+/// table is named alongside them because a timestep means nothing without
+/// one, and the shipped distills do not share a table — the 1.3B sits on
+/// shift 8 and the TI2V-5B on shift 5.
+fn fixed_dmd_steps_note(ladder: crate::manifest::WanDmdLadder) -> String {
     let rungs = ladder
+        .rungs
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Fixed by the DMD distill: {} denoise rungs at timesteps {rungs}.",
-        ladder.len()
+        "Fixed by the DMD distill: {} denoise rungs at timesteps {rungs} on FastVideo's shift-{:.0} sigma table.",
+        ladder.rungs.len(),
+        ladder.table_shift
     )
 }
 
@@ -1450,7 +1455,7 @@ fn recipe(
     let wan_dmd_ladder = wan
         .then(|| crate::manifest::wan_dmd_ladder(&normalized_model))
         .flatten();
-    let wan_dmd_steps = wan_dmd_ladder.map(|ladder| ladder.len() as u32);
+    let wan_dmd_steps = wan_dmd_ladder.map(|ladder| ladder.rungs.len() as u32);
     // BFL's own FP8 Flux.2 conversions store `weight / weight_scale`, and a
     // LoRA merge widens the weight it patches — dropping the scale on exactly
     // the layers the adapter touches. `Flux2Engine::load_transformer` refuses
@@ -1713,7 +1718,7 @@ fn recipe(
             output,
             wan_recipe: WanRecipeCapabilitiesProfile {
                 // A DMD ladder has no solver and no shift to choose: the
-                // rungs and the shift-8 table they sit on are the published
+                // rungs and the sigma table they sit on are the published
                 // schedule, so the whole sampler group is hidden rather than
                 // shown with controls the engine ignores.
                 mode: if wan && wan_dmd_ladder.is_none() {
@@ -1725,11 +1730,16 @@ fn recipe(
                     && wan_dmd_ladder.is_none()
                     && (normalized_model.ends_with("a14b:q4")
                         || normalized_model.ends_with("a14b:q5")),
+                // Keyed on the source-image contract, never on the ladder: a
+                // fixed sampler says nothing about whether the checkpoint can
+                // be handed two frames, and the server recomputes this field
+                // (and `keyframes.mode`) from exactly `source_image` once the
+                // runtime probe answers
+                // (`model_manager::synchronize_generation_profile_capabilities`),
+                // so a ladder-keyed cold profile would contradict the hot one.
                 supports_first_last_frame: wan
-                    && wan_dmd_ladder.is_none()
                     && input.source_image != Some(SourceImageCapability::Unsupported),
-                first_last_frame_min_frames: (wan && wan_dmd_ladder.is_none())
-                    .then_some(validation::WAN_TI2V_FLF_MIN_FRAMES),
+                first_last_frame_min_frames: wan.then_some(validation::WAN_TI2V_FLF_MIN_FRAMES),
                 reason: if wan_dmd_ladder.is_some() {
                     Some(
                         "This DMD distill walks a fixed rung ladder; its solver and flow shift \
@@ -2702,88 +2712,179 @@ mod tests {
     /// no rungs to walk, CFG has no unconditional branch to weight, and a
     /// UniPC or Euler pass over a DMD student is a different, worse render.
     /// So the profile fixes all four, and admission refuses each one.
+    ///
+    /// Run over EVERY laddered tier against its own base, because the tiers
+    /// do not share a sigma table: the note must name the shift the tier was
+    /// distilled on, not a constant.
     #[test]
     fn wan_dmd_ladder_tiers_fix_the_whole_schedule() {
-        let manifest = crate::manifest::find_manifest("wan21-t2v-1.3b:turbo")
-            .expect("the FastWan distill ships");
-        let profile = generation_profile_for_manifest(manifest);
-        let recipe = profile.default_recipe().expect("wan has a default recipe");
-        let ladder =
-            crate::manifest::wan_dmd_ladder("wan21-t2v-1.3b:turbo").expect("tier is laddered");
+        for (tier, base_tier) in [
+            ("wan21-t2v-1.3b:turbo", "wan21-t2v-1.3b:bf16"),
+            ("wan22-ti2v-5b:dmd", "wan22-ti2v-5b:fp16"),
+        ] {
+            let manifest = crate::manifest::find_manifest(tier).expect("the FastWan distill ships");
+            let profile = generation_profile_for_manifest(manifest);
+            let recipe = profile.default_recipe().expect("wan has a default recipe");
+            let ladder = crate::manifest::wan_dmd_ladder(tier).expect("tier is laddered");
+            let steps = ladder.rungs.len() as u32;
 
-        assert_eq!(recipe.steps.mode, ControlMode::Fixed);
-        assert_eq!(recipe.steps.default, ladder.len() as u32);
-        assert_eq!(recipe.steps.min, ladder.len() as u32);
-        assert_eq!(recipe.steps.max, ladder.len() as u32);
-        assert!(
-            recipe
-                .steps
-                .note
-                .as_deref()
-                .is_some_and(|note| note.to_ascii_lowercase().contains("dmd")),
-            "the fixed step count must say why: {:?}",
-            recipe.steps.note
-        );
-
-        assert_eq!(recipe.guidance.mode, ControlMode::Fixed);
-        assert_eq!(recipe.guidance.default, 1.0);
-        assert!(!recipe.capabilities.guidance.adjustable);
-        assert!(!recipe.capabilities.guidance.supports_negative_prompt);
-
-        // No solver is offered, and the Wan sampler group is hidden with a
-        // reason rather than shown with dead controls.
-        assert!(
-            recipe.capabilities.schedulers.is_empty(),
-            "a DMD ladder is not a solver choice"
-        );
-        assert_eq!(
-            recipe.capabilities.wan_recipe.mode,
-            ControlMode::Hidden,
-            "the shift/solver group has nothing to offer here"
-        );
-        assert!(recipe.capabilities.wan_recipe.reason.is_some());
-        assert!(!recipe.capabilities.wan_recipe.supports_distill_strength);
-
-        // The advertised defaults are submittable.
-        let accepted = request_for(&profile, recipe.defaults.width, recipe.defaults.height);
-        validate_request_against_generation_profile(&profile, &accepted).unwrap();
-
-        let mut off_ladder = accepted.clone();
-        off_ladder.steps = 4;
-        let error = validate_request_against_generation_profile(&profile, &off_ladder).unwrap_err();
-        assert!(error.contains("steps is fixed at 3"), "{error}");
-
-        let mut guided = accepted.clone();
-        guided.guidance = 5.0;
-        let error = validate_request_against_generation_profile(&profile, &guided).unwrap_err();
-        assert!(error.contains("guidance is fixed at 1"), "{error}");
-
-        for scheduler in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
-            let mut solved = accepted.clone();
-            solved.scheduler = Some(scheduler);
-            let error = validate_request_against_generation_profile(&profile, &solved).unwrap_err();
+            assert_eq!(recipe.steps.mode, ControlMode::Fixed, "{tier}");
+            assert_eq!(recipe.steps.default, steps, "{tier}");
+            assert_eq!(recipe.steps.min, steps, "{tier}");
+            assert_eq!(recipe.steps.max, steps, "{tier}");
+            let note = recipe.steps.note.clone().unwrap_or_default();
             assert!(
-                error.contains("is not available for this recipe"),
-                "{scheduler}: {error}"
+                note.to_ascii_lowercase().contains("dmd"),
+                "{tier}: the fixed step count must say why: {note:?}"
+            );
+            // The tier's OWN table, named in the sentence a user reads. A
+            // hardcoded shift here would render the 5B on the 1.3B's sigmas
+            // and say so confidently.
+            assert!(
+                note.contains(&format!("shift-{:.0}", ladder.table_shift)),
+                "{tier}: the note must name the tier's own sigma table: {note:?}"
+            );
+
+            assert_eq!(recipe.guidance.mode, ControlMode::Fixed, "{tier}");
+            assert_eq!(recipe.guidance.default, 1.0, "{tier}");
+            assert!(!recipe.capabilities.guidance.adjustable, "{tier}");
+            assert!(
+                !recipe.capabilities.guidance.supports_negative_prompt,
+                "{tier}"
+            );
+
+            // No solver is offered, and the Wan sampler group is hidden with
+            // a reason rather than shown with dead controls.
+            assert!(
+                recipe.capabilities.schedulers.is_empty(),
+                "{tier}: a DMD ladder is not a solver choice"
+            );
+            assert_eq!(
+                recipe.capabilities.wan_recipe.mode,
+                ControlMode::Hidden,
+                "{tier}: the shift/solver group has nothing to offer here"
+            );
+            assert!(recipe.capabilities.wan_recipe.reason.is_some(), "{tier}");
+            assert!(
+                !recipe.capabilities.wan_recipe.supports_distill_strength,
+                "{tier}"
+            );
+
+            // The advertised defaults are submittable.
+            let accepted = request_for(&profile, recipe.defaults.width, recipe.defaults.height);
+            validate_request_against_generation_profile(&profile, &accepted).unwrap();
+
+            let mut off_ladder = accepted.clone();
+            off_ladder.steps = steps + 1;
+            let error =
+                validate_request_against_generation_profile(&profile, &off_ladder).unwrap_err();
+            assert!(
+                error.contains(&format!("steps is fixed at {steps}")),
+                "{error}"
+            );
+
+            let mut guided = accepted.clone();
+            guided.guidance = 5.0;
+            let error = validate_request_against_generation_profile(&profile, &guided).unwrap_err();
+            assert!(error.contains("guidance is fixed at 1"), "{error}");
+
+            for scheduler in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
+                let mut solved = accepted.clone();
+                solved.scheduler = Some(scheduler);
+                let error =
+                    validate_request_against_generation_profile(&profile, &solved).unwrap_err();
+                assert!(
+                    error.contains("is not available for this recipe"),
+                    "{tier} {scheduler}: {error}"
+                );
+            }
+
+            // The base tier is untouched: it still takes a step range, CFG,
+            // and the family's three flow solvers.
+            let base = generation_profile_for_manifest(
+                crate::manifest::find_manifest(base_tier).expect("base tier ships"),
+            );
+            let base_recipe = base.default_recipe().unwrap();
+            assert_eq!(
+                base_recipe.steps.mode,
+                ControlMode::Adjustable,
+                "{base_tier}"
+            );
+            assert_eq!(
+                base_recipe.guidance.mode,
+                ControlMode::Adjustable,
+                "{base_tier}"
+            );
+            assert_eq!(
+                base_recipe.capabilities.wan_recipe.mode,
+                ControlMode::Adjustable,
+                "{base_tier}"
+            );
+            assert_eq!(
+                base_recipe.capabilities.schedulers,
+                vec![Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp],
+                "{base_tier}"
             );
         }
+    }
 
-        // The base tier is untouched: it still takes a step range, CFG, and
-        // the family's three flow solvers.
-        let base = generation_profile_for_manifest(
-            crate::manifest::find_manifest("wan21-t2v-1.3b:bf16").expect("base tier ships"),
+    /// A DMD ladder pins the SAMPLER, and nothing about the sampler decides
+    /// whether a checkpoint can be handed a first and a last frame. That is
+    /// the source-image contract's answer, and the server recomputes it from
+    /// exactly that once the runtime probe replies
+    /// (`model_manager::synchronize_generation_profile_capabilities`), so a
+    /// cold profile keyed on the ladder would disagree with the hot one.
+    ///
+    /// Both shipped ladder tiers refuse a source image today, so the manifest
+    /// alone cannot show which of the two facts gates the control. This holds
+    /// the laddered model name constant and varies only the contract.
+    #[test]
+    fn a_dmd_ladder_does_not_by_itself_refuse_keyframes() {
+        let mut conditioned = input("wan22-ti2v-5b:dmd", "wan");
+        conditioned.source_image = Some(SourceImageCapability::Optional);
+        let conditioned = resolve_generation_profile(conditioned);
+        let caps = &conditioned.default_recipe().unwrap().capabilities;
+        assert!(
+            caps.wan_recipe.supports_first_last_frame,
+            "a ladder tier that took an image would take two of them"
         );
-        let base_recipe = base.default_recipe().unwrap();
-        assert_eq!(base_recipe.steps.mode, ControlMode::Adjustable);
-        assert_eq!(base_recipe.guidance.mode, ControlMode::Adjustable);
         assert_eq!(
-            base_recipe.capabilities.wan_recipe.mode,
-            ControlMode::Adjustable
+            caps.wan_recipe.first_last_frame_min_frames,
+            Some(validation::WAN_TI2V_FLF_MIN_FRAMES)
         );
-        assert_eq!(
-            base_recipe.capabilities.schedulers,
-            vec![Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp]
+        // The solver group stays hidden all the same: the ladder still owns
+        // the shift and the solver, which is the half it does decide.
+        assert_eq!(caps.wan_recipe.mode, ControlMode::Hidden);
+
+        let mut plain = input("wan22-ti2v-5b:dmd", "wan");
+        plain.source_image = Some(SourceImageCapability::Unsupported);
+        let plain = resolve_generation_profile(plain);
+        assert!(
+            !plain
+                .default_recipe()
+                .unwrap()
+                .capabilities
+                .wan_recipe
+                .supports_first_last_frame
         );
+
+        // What actually ships: the GPU A/B found this student abandons the
+        // pinned frame within ~4 frames, so its manifest refuses conditioning
+        // and the control follows.
+        for tier in ["wan22-ti2v-5b:dmd", "wan21-t2v-1.3b:turbo"] {
+            let shipped = generation_profile_for_manifest(
+                crate::manifest::find_manifest(tier).expect("ships"),
+            );
+            assert!(
+                !shipped
+                    .default_recipe()
+                    .unwrap()
+                    .capabilities
+                    .wan_recipe
+                    .supports_first_last_frame,
+                "{tier}"
+            );
+        }
     }
 
     #[test]

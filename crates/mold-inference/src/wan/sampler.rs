@@ -19,17 +19,6 @@ use candle_core::{DType, Tensor};
 /// `num_train_timesteps` for every Wan checkpoint.
 pub(crate) const WAN_NUM_TRAIN_TIMESTEPS: usize = 1000;
 
-/// The flow shift FastVideo's DMD stage builds its *own* scheduler with —
-/// `FlowMatchEulerDiscreteScheduler(shift=8.0)`, hardcoded in
-/// `DmdDenoisingStage.__init__`
-/// (`fastvideo/pipelines/stages/denoising.py:1257`, commit `40b93784`).
-///
-/// This is a property of the distillation, not of the tier or the request: the
-/// student was trained against the sigmas this table produces, so it is never
-/// [`resolve_flow_shift`](crate::wan::pipeline)'s answer and never a user
-/// knob.
-pub(crate) const DMD_TABLE_SHIFT: f64 = 8.0;
-
 /// UniPC order. Wan ships 2 for guided sampling (`fm_solvers_unipc.py:82`).
 const SOLVER_ORDER: usize = 2;
 
@@ -2055,7 +2044,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // DMD rung ladder (FastVideo FastWan2.1-T2V-1.3B, commit `40b93784`)
+    // FastWan DMD rung ladders (FastVideo, commit `40b93784`)
     // ------------------------------------------------------------------
 
     /// The sigmas FastVideo's own `FlowMatchEulerDiscreteScheduler(shift=8.0)`
@@ -2065,7 +2054,7 @@ mod tests {
 
     #[test]
     fn dmd_from_rungs_matches_the_fastvideo_shift8_table() {
-        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         assert_eq!(schedule.timesteps, vec![1000i64, 757, 522]);
         assert_eq!(schedule.sigmas.len(), 4);
         assert_eq!(schedule.sigmas[3], 0.0);
@@ -2085,9 +2074,15 @@ mod tests {
     /// same rungs resolve to different table entries and different sigmas.
     /// A `from_rungs` that ignored its shift argument, or that returned
     /// `rung / 1000` outright, would fail here.
+    ///
+    /// Both columns are shipped, which is why this is a two-tier test and not
+    /// a curiosity: `wan21-t2v-1.3b:turbo` was distilled on the shift-8 table
+    /// and `wan22-ti2v-5b:dmd` on the shift-5 one, on identical rungs
+    /// (`manifest::wan_dmd_ladder`). Reading either against the other's
+    /// column is a silently wrong render.
     #[test]
     fn dmd_from_rungs_uses_the_table_shift() {
-        let eight = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let eight = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         let five = WanSchedule::from_rungs(&[1000, 757, 522], 5.0).unwrap();
         assert_eq!(eight.timesteps, five.timesteps);
         // Table indices 616 and 821 at shift 5, against 720 and 880 at shift 8.
@@ -2109,14 +2104,14 @@ mod tests {
 
     #[test]
     fn dmd_from_rungs_refuses_malformed_ladders() {
-        assert!(WanSchedule::from_rungs(&[], DMD_TABLE_SHIFT).is_err());
+        assert!(WanSchedule::from_rungs(&[], 8.0).is_err());
         // Ascending.
-        assert!(WanSchedule::from_rungs(&[522, 757], DMD_TABLE_SHIFT).is_err());
+        assert!(WanSchedule::from_rungs(&[522, 757], 8.0).is_err());
         // Repeated is not strictly descending either.
-        assert!(WanSchedule::from_rungs(&[757, 757], DMD_TABLE_SHIFT).is_err());
+        assert!(WanSchedule::from_rungs(&[757, 757], 8.0).is_err());
         // Out of the 1..=1000 training range.
-        assert!(WanSchedule::from_rungs(&[1001, 500], DMD_TABLE_SHIFT).is_err());
-        assert!(WanSchedule::from_rungs(&[500, 0], DMD_TABLE_SHIFT).is_err());
+        assert!(WanSchedule::from_rungs(&[1001, 500], 8.0).is_err());
+        assert!(WanSchedule::from_rungs(&[500, 0], 8.0).is_err());
         // A nonsense table shift.
         assert!(WanSchedule::from_rungs(&[1000, 757, 522], 0.0).is_err());
     }
@@ -2129,7 +2124,7 @@ mod tests {
     #[test]
     fn dmd_trace_follows_the_x0_then_renoise_identity() {
         let device = Device::Cpu;
-        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         let mut solver = FlowDmd::new(schedule.clone());
         let mut x = Tensor::from_vec(vec![0.4f32, -1.1, 0.9, 0.25], 4, &device).unwrap();
         let noise = Tensor::from_vec(vec![0.31f32, 1.7, -0.6, 0.05], 4, &device).unwrap();
@@ -2185,7 +2180,7 @@ mod tests {
     #[test]
     fn dmd_requires_noise_on_every_non_terminal_rung() {
         let device = Device::Cpu;
-        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         let mut solver = FlowDmd::new(schedule);
         let x = Tensor::from_vec(vec![0.4f32, -1.1], 2, &device).unwrap();
         let v = Tensor::from_vec(vec![0.1f32, 0.2], 2, &device).unwrap();
@@ -2199,7 +2194,7 @@ mod tests {
     #[test]
     fn dmd_refuses_out_of_order_drive() {
         let device = Device::Cpu;
-        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         let mut solver = FlowDmd::new(schedule);
         let x = Tensor::from_vec(vec![0.4f32, -1.1], 2, &device).unwrap();
         let v = Tensor::from_vec(vec![0.1f32, 0.2], 2, &device).unwrap();
@@ -2215,7 +2210,7 @@ mod tests {
 
     #[test]
     fn dmd_wants_fresh_noise_on_every_rung_but_the_last() {
-        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         let dmd = WanSolver::Dmd(FlowDmd::new(schedule));
         assert!(dmd.wants_fresh_noise(0));
         assert!(dmd.wants_fresh_noise(1));
@@ -2240,7 +2235,7 @@ mod tests {
     #[test]
     fn dmd_refuses_the_noiseless_step_entry_point() {
         let device = Device::Cpu;
-        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], 8.0).unwrap();
         let mut solver = WanSolver::Dmd(FlowDmd::new(schedule));
         let x = Tensor::from_vec(vec![0.4f32, -1.1], 2, &device).unwrap();
         let v = Tensor::from_vec(vec![0.1f32, 0.2], 2, &device).unwrap();

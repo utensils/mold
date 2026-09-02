@@ -6139,11 +6139,60 @@ pub fn default_negative_prompt_for_family(family: &str) -> Option<&'static str> 
 /// constant is what makes that contract hold.
 pub const WAN_A14B_QUALITY_GUIDANCE: f64 = 3.5;
 
-/// Denoising ladder for `wan21-t2v-1.3b:turbo`: FastVideo's FastWan2.1 DMD
-/// distill walks exactly these three rungs, no more and no fewer
+/// Denoising rungs for `wan21-t2v-1.3b:turbo`: FastVideo's FastWan2.1 DMD
+/// distill walks exactly these three, no more and no fewer
 /// (`fastvideo/configs/pipelines/wan.py:117-123`,
 /// `FastWan2_1_T2V_480P_Config.dmd_denoising_steps`, at commit `40b93784`).
-pub const FASTWAN_1_3B_LADDER: [u32; 3] = [1000, 757, 522];
+pub const FASTWAN_1_3B_RUNGS: [u32; 3] = [1000, 757, 522];
+
+/// Denoising rungs for `wan22-ti2v-5b:dmd`: FastVideo's FastWan2.2 DMD
+/// distill of the TI2V-5B (`fastvideo/configs/pipelines/wan.py:275-279`,
+/// `FastWan2_2_TI2V_5B_Config.dmd_denoising_steps`, commit `40b93784`).
+///
+/// Deliberately a second array rather than a reference to
+/// [`FASTWAN_1_3B_RUNGS`]. The integers being equal is a property of the
+/// recipe FastVideo happened to reuse, not a shared constant: they are two
+/// independent upstream declarations, on two different sigma tables, and a
+/// revision to one must not move the other.
+pub const FASTWAN_2_2_TI2V_5B_RUNGS: [u32; 3] = [1000, 757, 522];
+
+/// The published schedule of a DMD-distilled Wan tier: the rungs it walks and
+/// the sigma table those rungs are timesteps ON.
+///
+/// The shift belongs here rather than in the sampler because it is a property
+/// of the TIER, not of the distillation technique. FastWan2.1's 1.3B was
+/// distilled at `flow_shift = 8.0` and FastWan2.2's TI2V-5B at `5.0`
+/// (`fastvideo/configs/pipelines/wan.py:117-123` and `:275-279`, commit
+/// `40b93784`; the training pipeline reads that config value —
+/// `fastvideo/training/distillation_pipeline.py:142-144`, and
+/// `examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/distill_dmd_t2v_5B.sh`
+/// passes `--flow_shift 5`). mold follows the shift each student was TRAINED
+/// on; upstream's own `DmdDenoisingStage.__init__` hardcodes
+/// `FlowMatchEulerDiscreteScheduler(shift=8.0)` for every tier
+/// (`fastvideo/pipelines/stages/denoising.py:1255-1257`), which is an
+/// inference bug the 5B would otherwise inherit. Rungs without their table
+/// would render the 5B on the 1.3B's sigmas with no error anywhere — a
+/// silently wrong clip, which is the failure this struct exists to make
+/// impossible.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WanDmdLadder {
+    /// The timesteps the student predicts x0 at, strictly descending.
+    pub rungs: &'static [u32],
+    /// The flow shift of the sigma table those timesteps index.
+    pub table_shift: f64,
+}
+
+/// The 1.3B distill's published schedule.
+pub const FASTWAN_1_3B_LADDER: WanDmdLadder = WanDmdLadder {
+    rungs: &FASTWAN_1_3B_RUNGS,
+    table_shift: 8.0,
+};
+
+/// The TI2V-5B distill's published schedule.
+pub const FASTWAN_2_2_TI2V_5B_LADDER: WanDmdLadder = WanDmdLadder {
+    rungs: &FASTWAN_2_2_TI2V_5B_RUNGS,
+    table_shift: 5.0,
+};
 
 /// The fixed denoising ladder of a DMD-distilled Wan tier, or `None` for a
 /// tier that walks an ordinary `(steps, shift)` schedule.
@@ -6151,15 +6200,16 @@ pub const FASTWAN_1_3B_LADDER: [u32; 3] = [1000, 757, 522];
 /// This is the ONE authority for "this checkpoint is a rung-ladder distill":
 /// the generation profile pins `steps` to the ladder's length and guidance to
 /// 1.0 and empties the scheduler list, admission refuses anything else, and
-/// the Wan engine builds its DMD solver from the same rungs. A DMD student
-/// predicts x0 at each rung and is re-noised to the next
-/// (`fastvideo/pipelines/stages/denoising.py`, `DmdDenoisingStage`); walking
-/// it with UniPC or Euler, or at any other step count, is not a slower
-/// render but a different, worse one, which is why nothing here is a user
-/// preference.
-pub fn wan_dmd_ladder(model_name: &str) -> Option<&'static [u32]> {
+/// the Wan engine builds its DMD solver from the same rungs and the same
+/// table shift. A DMD student predicts x0 at each rung and is re-noised to
+/// the next (`fastvideo/pipelines/stages/denoising.py`, `DmdDenoisingStage`);
+/// walking it with UniPC or Euler, at any other step count, or on any other
+/// sigma table, is not a slower render but a different, worse one, which is
+/// why nothing here is a user preference.
+pub fn wan_dmd_ladder(model_name: &str) -> Option<WanDmdLadder> {
     match model_name {
-        "wan21-t2v-1.3b:turbo" => Some(&FASTWAN_1_3B_LADDER),
+        "wan21-t2v-1.3b:turbo" => Some(FASTWAN_1_3B_LADDER),
+        "wan22-ti2v-5b:dmd" => Some(FASTWAN_2_2_TI2V_5B_LADDER),
         _ => None,
     }
 }
@@ -6233,6 +6283,35 @@ fn wan_manifests() -> Vec<ModelManifest> {
     let defaults_ti2v_turbo = ManifestDefaults {
         steps: 4,
         guidance: 1.0,
+        ..defaults_ti2v.clone()
+    };
+    // FastVideo's DMD distill of the same 5B differs from the base tier only
+    // in the denoise budget: 3 rungs, and guidance 1.0 so `needs_cfg_pass`
+    // drops the unconditional forward. That is 3 transformer forwards against
+    // the base's 20 x 2 = 40 for the same clip. Everything else — the 2.2 VAE
+    // grid, 1280x704, 121 frames at 24 fps, the tuned negative prompt — is
+    // the base checkpoint's.
+    //
+    // `source_image` is `Unsupported` here where the base tiers are
+    // `Optional`, and it is the one field that does not follow from the
+    // denoise budget. Upstream distilled this student data-free on T2V
+    // trajectories with a SCALAR timestep; its DMD stage has no image branch
+    // at all and its model card says text-to-video. mold's TI2V
+    // latent-inpaint path still runs on it — the engine pins latent frame 0
+    // and re-imposes it after every rung, and it does hold, bit-exact — but
+    // the student never saw a per-token `t=0` and does not treat that pinned
+    // frame as where the clip starts: measured on an L40S against
+    // `:turbo` from the same stills and seeds, it lurches to a tighter,
+    // more saturated framing within ~4 frames and, on a person, changes
+    // clothing and build while it does so, leaving the pinned frame an
+    // orphan. `:turbo` holds the same sources across the whole clip. So the
+    // conditioning is refused at admission rather than shipped half-working;
+    // this one field also turns off first/last frame and extend, and the
+    // server's own capability sync hides keyframes with them.
+    let defaults_ti2v_dmd = ManifestDefaults {
+        steps: 3,
+        guidance: 1.0,
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
         ..defaults_ti2v.clone()
     };
     // FastVideo's DMD distill of the 1.3B differs from the base tier only in
@@ -6465,6 +6544,66 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults_ti2v_turbo,
+            hidden: false,
+        },
+        ModelManifest {
+            name: "wan22-ti2v-5b:dmd".to_string(),
+            family: "wan".to_string(),
+            description: "Wan 2.2 TI2V 5B DMD — 3-step 720p24 text-to-video (FastVideo DMD \
+                 distill)"
+                .to_string(),
+            files: {
+                let mut files = shared_wan_files();
+                // FastVideo's DMD distill of the same 5B transformer
+                // (`FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers`,
+                // apache-2.0, ungated), published as one unsharded diffusers
+                // file — all 825 tensors bf16, 9.3 GiB, the same on-disk size
+                // as the base fp16 tier.
+                //
+                // Its tensor key set is EXACTLY the base
+                // `Wan-AI/Wan2.2-TI2V-5B-Diffusers` one (no sparse-attention
+                // gates, no image embedder) and its `transformer/config.json`
+                // is the base geometry — in_channels 48, 30 layers, 24 heads
+                // x 128, ffn 14336, patch [1,2,2] — so mold's shape-driven
+                // detection needs no new arm.
+                //
+                // The tag is `:dmd`, not `:turbo`: `:turbo` on this
+                // checkpoint is already yetter-ai's Self-Forcing 4-step
+                // distill, which takes an adjustable guidance scale and walks
+                // an ordinary solver schedule. This one does neither.
+                //
+                // The distill is the whole delta, and none of it is a user
+                // preference: the rungs AND the shift-5 table they sit on are
+                // pinned by `wan_dmd_ladder`, and the solver is DMD (predict
+                // x0, re-noise to the next rung), not UniPC — which is why
+                // the generation profile fixes steps, guidance, scheduler and
+                // shift rather than defaulting them.
+                files.push(ModelFile {
+                    hf_repo: "FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_999_660_080,
+                    gated: false,
+                    sha256: Some(
+                        "a1cf4acd5d0242ca0cad68e115064f4ac7e748686c9cf0da050ce87decc6b9bf",
+                    ),
+                });
+                // The VAE and UMT5 in FastVideo's repo are byte-identical to
+                // the base 2.2 stack, so the tier pulls the same Comfy-Org
+                // 2.2 VAE the other 5B tiers already have on disk.
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                    hf_filename: "split_files/vae/wan2.2_vae.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 1_409_400_960,
+                    gated: false,
+                    sha256: Some(
+                        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+                    ),
+                });
+                files
+            },
+            defaults: defaults_ti2v_dmd,
             hidden: false,
         },
         a14b_manifest(A14bTier::Fast, A14bTask::T2v),
@@ -8865,7 +9004,11 @@ mod tests {
         // Wan DMD bump: +1. `wan21-t2v-1.3b:turbo` — FastVideo's 3-rung DMD
         // distill of the same 1.3B transformer, on the same shared UMT5 and
         // 2.1 VAE, so it contributes exactly one manifest.
-        assert_eq!(known_manifests().len(), 201);
+        // Wan DMD 5B bump: +1. `wan22-ti2v-5b:dmd` — the same DMD recipe
+        // applied to the 2.2 TI2V-5B, one unsharded FastVideo transformer on
+        // the shared UMT5 and the 2.2 VAE the other 5B tiers already pull, so
+        // it too is exactly one manifest.
+        assert_eq!(known_manifests().len(), 202);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
@@ -9034,7 +9177,7 @@ mod tests {
             "the tier exists for a 20x forward-count reduction",
         );
         assert_eq!(
-            wan_dmd_ladder("wan21-t2v-1.3b:turbo").map(<[u32]>::len),
+            wan_dmd_ladder("wan21-t2v-1.3b:turbo").map(|ladder| ladder.rungs.len()),
             Some(turbo.defaults.steps as usize),
             "the pinned ladder is what the advertised step count means",
         );
@@ -9087,6 +9230,94 @@ mod tests {
         assert!(!turbo.hidden);
     }
 
+    /// The 5B DMD tier's whole reason to exist is the denoise budget: 3 rungs
+    /// at guidance 1.0, where `needs_cfg_pass` skips the unconditional
+    /// forward, against the base tier's 20 steps with CFG. Everything else —
+    /// the 2.2 VAE grid, 1280x704, 121 frames at 24 fps, the tuned negative
+    /// prompt — is the base checkpoint's, because it *is* the base checkpoint
+    /// distilled (FastVideo distilled data-free from its own trajectories).
+    #[test]
+    fn the_5b_dmd_tier_changes_only_the_denoise_budget() {
+        let base = find_manifest("wan22-ti2v-5b:fp16").expect("base tier ships");
+        let dmd = find_manifest("wan22-ti2v-5b:dmd").expect("dmd tier ships");
+
+        assert_eq!(dmd.defaults.steps, 3);
+        assert_eq!(dmd.defaults.guidance, 1.0);
+        assert!(
+            dmd.defaults.guidance <= 1.0,
+            "guidance above 1.0 would reinstate the unconditional forward the distill removes",
+        );
+        // 40 against 3, stated as two numbers rather than a ratio: 40/3 is not
+        // integral, and rounding it would hide which side moved.
+        let forwards = |d: &ManifestDefaults| d.steps * if d.guidance > 1.0 { 2 } else { 1 };
+        assert_eq!(forwards(&base.defaults), 40);
+        assert_eq!(forwards(&dmd.defaults), 3);
+        assert_eq!(
+            wan_dmd_ladder("wan22-ti2v-5b:dmd").map(|ladder| ladder.rungs.len()),
+            Some(dmd.defaults.steps as usize),
+            "the pinned ladder is what the advertised step count means",
+        );
+
+        // Everything else is the base checkpoint's.
+        assert_eq!(dmd.family, base.family);
+        assert_eq!(dmd.defaults.width, base.defaults.width);
+        assert_eq!(dmd.defaults.height, base.defaults.height);
+        assert_eq!(dmd.defaults.frames, base.defaults.frames);
+        assert_eq!(dmd.defaults.fps, base.defaults.fps);
+        assert_eq!(dmd.defaults.negative_prompt, base.defaults.negative_prompt);
+        assert_eq!(dmd.defaults.scheduler, base.defaults.scheduler);
+        assert_eq!(dmd.defaults.is_schnell, base.defaults.is_schnell);
+
+        // Image conditioning is asserted EXPLICITLY, never as "equals the base
+        // tier", because this is the one default that deliberately DIFFERS
+        // from `:fp16`. FastVideo distilled and documents this checkpoint as
+        // text-to-video only, and the GPU A/B agreed: mold's TI2V
+        // latent-inpaint path pins frame 0 bit-exact on this student, but the
+        // clip lurches away from it within ~4 frames where `:turbo` holds the
+        // same source, so the tier refuses conditioning rather than
+        // advertising it half-working.
+        assert_eq!(
+            dmd.defaults.source_image,
+            Some(crate::types::SourceImageCapability::Unsupported)
+        );
+        assert!(!crate::catalog::extend_capable_model(
+            "wan",
+            dmd.defaults.source_image
+        ));
+
+        // FastVideo publishes one unsharded diffusers file, so the tier
+        // carries a single `Transformer` rather than a shard pair.
+        assert_eq!(
+            dmd.files
+                .iter()
+                .filter(|f| f.component == ModelComponent::Transformer)
+                .count(),
+            1,
+        );
+        assert!(!dmd
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::TransformerShard));
+        for component in [
+            ModelComponent::Vae,
+            ModelComponent::TextEncoder,
+            ModelComponent::TextTokenizer,
+        ] {
+            assert!(
+                dmd.files.iter().any(|f| f.component == component),
+                "dmd missing {component:?}"
+            );
+        }
+        for file in &dmd.files {
+            assert!(
+                file.sha256.is_some(),
+                "dmd: {} must carry a SHA-256",
+                file.hf_filename
+            );
+        }
+        assert!(!dmd.hidden);
+    }
+
     /// `wan_dmd_ladder` is the ONE authority for "this tier walks a fixed rung
     /// ladder", so the manifest it names must agree with it: as many steps as
     /// rungs, no CFG, and a strictly descending ladder inside the flow-match
@@ -9103,7 +9334,7 @@ mod tests {
             laddered += 1;
             assert_eq!(
                 manifest.defaults.steps as usize,
-                ladder.len(),
+                ladder.rungs.len(),
                 "{}: the advertised step count is the ladder length",
                 manifest.name
             );
@@ -9112,33 +9343,72 @@ mod tests {
                 "{}: a DMD student runs one forward per rung",
                 manifest.name
             );
-            for window in ladder.windows(2) {
+            for window in ladder.rungs.windows(2) {
                 assert!(
                     window[0] > window[1],
-                    "{}: rungs must strictly descend, got {ladder:?}",
-                    manifest.name
+                    "{}: rungs must strictly descend, got {:?}",
+                    manifest.name,
+                    ladder.rungs
                 );
             }
-            for &rung in ladder {
+            for &rung in ladder.rungs {
                 assert!(
                     (1..=1000).contains(&rung),
                     "{}: rung {rung} is outside the flow-match timestep range",
                     manifest.name
                 );
             }
+            assert!(
+                ladder.table_shift.is_finite() && ladder.table_shift > 0.0,
+                "{}: the rungs are timesteps on a real sigma table",
+                manifest.name
+            );
         }
-        assert_eq!(laddered, 1, "only the FastWan 1.3B distill is laddered");
+        assert_eq!(laddered, 2, "the two FastWan DMD distills are laddered");
 
-        for manifest in known_manifests()
-            .iter()
-            .filter(|m| m.family == "wan" && m.name != "wan21-t2v-1.3b:turbo")
-        {
+        for manifest in known_manifests().iter().filter(|m| {
+            m.family == "wan" && m.name != "wan21-t2v-1.3b:turbo" && m.name != "wan22-ti2v-5b:dmd"
+        }) {
             assert!(
                 wan_dmd_ladder(&manifest.name).is_none(),
                 "{} walks an ordinary (steps, shift) schedule",
                 manifest.name
             );
         }
+    }
+
+    /// The rungs alone do not describe a DMD schedule: they are timesteps on
+    /// a sigma table, and the two shipped distills sit on DIFFERENT tables —
+    /// FastWan2.1's 1.3B on shift 8, FastWan2.2's TI2V-5B on shift 5
+    /// (`fastvideo/configs/pipelines/wan.py:117-123` and `:275-279`, commit
+    /// `40b93784`). The rung integers being equal today is a coincidence of
+    /// the distillation recipe, not a shared constant, which is exactly why a
+    /// ladder carries its own table shift and each tier its own rung array.
+    /// Reading one tier's rungs against the other's table is a silently wrong
+    /// render, never an error.
+    #[test]
+    fn wan_dmd_ladders_carry_the_shift_they_were_distilled_on() {
+        let small = wan_dmd_ladder("wan21-t2v-1.3b:turbo").expect("the 1.3B distill ships");
+        let large = wan_dmd_ladder("wan22-ti2v-5b:dmd").expect("the 5B distill ships");
+
+        assert_eq!(small.rungs, &[1000u32, 757, 522]);
+        assert_eq!(small.table_shift, 8.0);
+        assert_eq!(large.rungs, &[1000u32, 757, 522]);
+        assert_eq!(large.table_shift, 5.0);
+        assert_ne!(
+            small.table_shift, large.table_shift,
+            "a ladder that did not carry its shift would render one of these on the other's table"
+        );
+
+        // Each ladder names its OWN rung const, so a later upstream revision
+        // to one tier's ladder cannot silently move the other's. That the two
+        // are separate declarations is a source fact and not an observable
+        // one — rustc is free to unify constants holding equal bytes — so
+        // this asserts the wiring rather than the addresses.
+        assert_eq!(small.rungs, &FASTWAN_1_3B_RUNGS);
+        assert_eq!(large.rungs, &FASTWAN_2_2_TI2V_5B_RUNGS);
+        assert_eq!(FASTWAN_1_3B_LADDER, small);
+        assert_eq!(FASTWAN_2_2_TI2V_5B_LADDER, large);
     }
 
     /// exists — a listed model that cannot load is worse than none.
@@ -9185,6 +9455,13 @@ mod tests {
             resolve_model_name("wan22-ti2v-5b-turbo"),
             "wan22-ti2v-5b:turbo"
         );
+        // The FastVideo DMD distill takes `:dmd` because `:turbo` is already
+        // the Self-Forcing 4-step tier on this checkpoint. Same rule as every
+        // other added tag: reachable only by its own name, and the bare name
+        // is unmoved.
+        assert_eq!(resolve_model_name("wan22-ti2v-5b:dmd"), "wan22-ti2v-5b:dmd");
+        assert_eq!(resolve_model_name("wan22-ti2v-5b-dmd"), "wan22-ti2v-5b:dmd");
+        assert_eq!(resolve_model_name("wan22-ti2v-5b"), "wan22-ti2v-5b:fp16");
 
         for name in [
             "wan21-t2v-1.3b:bf16",
@@ -9193,6 +9470,7 @@ mod tests {
             "wan21-t2v-14b:q8",
             "wan22-ti2v-5b:fp16",
             "wan22-ti2v-5b:q8",
+            "wan22-ti2v-5b:dmd",
         ] {
             let manifest = find_manifest(name).unwrap_or_else(|| panic!("{name} must resolve"));
             assert_eq!(manifest.family, "wan");
@@ -9241,6 +9519,7 @@ mod tests {
         assert!(vae_file("wan21-t2v-1.3b:bf16").contains("wan_2.1_vae"));
         assert!(vae_file("wan22-ti2v-5b:fp16").contains("wan2.2_vae"));
         assert!(vae_file("wan22-ti2v-5b:q8").contains("wan2.2_vae"));
+        assert!(vae_file("wan22-ti2v-5b:dmd").contains("wan2.2_vae"));
 
         // The `:q8` tag is the same 5B transformer as QuantStack's Q8_0 GGUF
         // — the ~5.4 GB pull that reaches small cards (#794).

@@ -3568,6 +3568,36 @@ pub enum SourceImageCapability {
     Required,
 }
 
+impl SourceImageCapability {
+    /// Resolve the contract a request is admitted against from the manifest's
+    /// answer and the downloaded checkpoint's header probe.
+    ///
+    /// The probe reads what the WEIGHTS can accept, which is why it normally
+    /// outranks the manifest: a config path override can point one manifest
+    /// name at a different checkpoint, and the shape-driven read is then the
+    /// engine's exact truth. But a manifest `Unsupported` is not a guess about
+    /// the weights, it is the TIER REFUSING a conditioning its weights would
+    /// otherwise accept, and no header can overturn that.
+    ///
+    /// `wan22-ti2v-5b:dmd` is the case that forced the distinction: it carries
+    /// the base TI2V-5B geometry exactly (in 48 over the 48-channel 2.2 VAE),
+    /// so it probes `Optional` like its siblings, while the tier refuses an
+    /// image because the DMD student abandons the pinned frame within a few
+    /// frames. Letting the probe win advertised first/last frame, keyframes
+    /// and extend on it, and admitted a conditioned render over HTTP that the
+    /// CLI refused — the two doors disagreeing about one model.
+    ///
+    /// The probe keeps its whole job in the other direction: it may still
+    /// DOWNGRADE a manifest `Optional`/`Required` to whatever the checkpoint
+    /// on disk can actually do. Only the refusal is one-way.
+    pub fn resolve(manifest: Option<Self>, probed: Option<Self>) -> Option<Self> {
+        match (manifest, probed) {
+            (Some(Self::Unsupported), _) => Some(Self::Unsupported),
+            (manifest, probed) => probed.or(manifest),
+        }
+    }
+}
+
 impl ModelInfoExtended {
     /// Human-readable presentation label. The stable `name` remains the value
     /// used for API requests, persistence, and model identity.
@@ -8081,16 +8111,70 @@ mod tests {
         );
     }
 
+    /// A header probe answers what the WEIGHTS accept. It must not be able to
+    /// hand a tier back a conditioning the tier refuses: `wan22-ti2v-5b:dmd`
+    /// carries the base TI2V-5B geometry, so it probes `Optional` exactly like
+    /// its siblings, and letting that win admitted a conditioned render over
+    /// HTTP that the CLI refused.
+    #[test]
+    fn a_manifest_refusal_outranks_the_header_probe() {
+        use SourceImageCapability::{Optional, Required, Unsupported};
+
+        // The refusal is one-way: nothing the probe reads can lift it.
+        for probed in [None, Some(Optional), Some(Required), Some(Unsupported)] {
+            assert_eq!(
+                SourceImageCapability::resolve(Some(Unsupported), probed),
+                Some(Unsupported),
+                "probed {probed:?}"
+            );
+        }
+
+        // In the other direction the probe keeps its whole job: a path
+        // override pointing this name at a text-to-video checkpoint still
+        // downgrades the manifest's guess.
+        assert_eq!(
+            SourceImageCapability::resolve(Some(Optional), Some(Unsupported)),
+            Some(Unsupported)
+        );
+        assert_eq!(
+            SourceImageCapability::resolve(Some(Optional), Some(Required)),
+            Some(Required)
+        );
+        // And an unreadable header leaves the manifest's answer standing.
+        assert_eq!(
+            SourceImageCapability::resolve(Some(Optional), None),
+            Some(Optional)
+        );
+        assert_eq!(SourceImageCapability::resolve(None, None), None);
+
+        // The shipped tier: manifest refuses, and its own geometry probes
+        // Optional, which is precisely the collision.
+        let dmd =
+            crate::manifest::find_manifest("wan22-ti2v-5b:dmd").expect("the 5B distill ships");
+        assert_eq!(dmd.defaults.source_image, Some(Unsupported));
+        assert_eq!(
+            SourceImageCapability::resolve(dmd.defaults.source_image, Some(Optional)),
+            Some(Unsupported)
+        );
+        assert!(!crate::catalog::extend_capable_model(
+            "wan",
+            SourceImageCapability::resolve(dmd.defaults.source_image, Some(Optional))
+        ));
+    }
+
     /// A DMD-distilled Wan tier predicts x0 at each pinned rung and is
     /// re-noised to the next; there is no unconditional branch to weight, so
     /// the scale is pinned at 1.0 and there is no negative prompt to encode.
     /// Every other Wan tier keeps ordinary adjustable CFG.
     #[test]
     fn wan_dmd_ladder_tiers_pin_guidance_at_one() {
-        assert_eq!(
-            GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b:turbo", None),
-            GuidanceCapabilities::FIXED_ONE,
-        );
+        for laddered in ["wan21-t2v-1.3b:turbo", "wan22-ti2v-5b:dmd"] {
+            assert_eq!(
+                GuidanceCapabilities::for_recipe("wan", laddered, None),
+                GuidanceCapabilities::FIXED_ONE,
+                "{laddered}",
+            );
+        }
         // The bare name still resolves to the base tier, which keeps CFG.
         assert_eq!(
             GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b", None),
@@ -8100,7 +8184,9 @@ mod tests {
             "wan21-t2v-1.3b:bf16",
             "wan22-ti2v-5b:fp16",
             // The Self-Forcing 5B distill runs at guidance 1.0 by DEFAULT but
-            // is not rung-pinned, so its scale stays adjustable.
+            // is not rung-pinned, so its scale stays adjustable. Its
+            // rung-pinned sibling on the same checkpoint is
+            // `wan22-ti2v-5b:dmd`, asserted above.
             "wan22-ti2v-5b:turbo",
             "wan22-t2v-a14b:q8",
         ] {

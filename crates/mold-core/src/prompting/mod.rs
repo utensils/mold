@@ -383,9 +383,44 @@ pub fn is_known_family(family: &str) -> bool {
 }
 
 fn identity_leaf(family: &str, model: &str) -> Option<&'static TaskLeaf> {
-    TASK_LEAVES.iter().find(|leaf| {
+    let matched = TASK_LEAVES.iter().find(|leaf| {
         leaf.family == family && leaf.identity.is_specific() && leaf.identity.matches(model)
-    })
+    });
+    match matched {
+        // The name matched an image-only leaf, but this checkpoint refuses a
+        // source image. Hand back the family's text-to-video guide rather than
+        // the image one — or nothing, which would drop the task guide
+        // entirely.
+        Some(leaf) if leaf_contradicts_model_conditioning(leaf, model) => TASK_LEAVES
+            .iter()
+            .find(|leaf| leaf.family == family && leaf.tasks.contains(&ExpandTask::TextToVideo)),
+        other => other,
+    }
+}
+
+/// A leaf that covers ONLY image-conditioned tasks cannot describe a
+/// checkpoint that refuses a source image.
+///
+/// Identity matching is textual, and `wan22-ti2v-5b:dmd` is where that breaks:
+/// the family's image leaf matches on `i2v-`, which `ti2v-` contains, so the
+/// text-to-video-only DMD tier would be handed a guide opening "Drop
+/// description already visible in the frame, which owns appearance" — advice
+/// for a frame it will never receive. Its image-capable siblings share the
+/// base name, so no name fragment can separate them; the manifest's
+/// `source_image` contract can, and it is the same authority admission uses.
+fn leaf_contradicts_model_conditioning(leaf: &TaskLeaf, model: &str) -> bool {
+    let image_only = leaf.tasks.iter().all(|task| {
+        matches!(
+            task,
+            ExpandTask::ImageToVideo | ExpandTask::KeyframeInterpolation
+        )
+    });
+    if !image_only || leaf.tasks.is_empty() {
+        return false;
+    }
+    crate::manifest::find_manifest(&crate::manifest::resolve_model_name(model))
+        .and_then(|manifest| manifest.defaults.source_image)
+        == Some(crate::types::SourceImageCapability::Unsupported)
 }
 
 fn task_leaf(
@@ -888,6 +923,33 @@ mod tests {
             documented.len(),
             "duplicate family base"
         );
+    }
+
+    /// Identity matching is textual, and `i2v-` is a substring of `ti2v-`, so
+    /// every TI2V-5B tier matches the family's image-conditioned leaf. Three of
+    /// them should; `:dmd` refuses a source image and must get the
+    /// text-to-video guide instead of advice about a frame it never receives.
+    #[test]
+    fn a_text_only_ti2v_tier_does_not_route_to_the_image_guide() {
+        let dmd = route("wan", Some("wan22-ti2v-5b:dmd"), None).unwrap();
+        let dmd_leaf = dmd.task.expect("a wan model always carries a task leaf");
+        assert_eq!(dmd_leaf.path, "wan/text-to-video.md");
+
+        for conditioned in [
+            "wan22-ti2v-5b:fp16",
+            "wan22-ti2v-5b:q8",
+            "wan22-ti2v-5b:turbo",
+        ] {
+            let route = route("wan", Some(conditioned), None).unwrap();
+            assert_eq!(
+                route.task.expect("task leaf").path,
+                "wan/image-conditioned.md",
+                "{conditioned}"
+            );
+        }
+
+        // The model leaf is shared by base name, so all four still read it.
+        assert!(dmd.paths().iter().any(|p| p.contains("wan22-ti2v-5b")));
     }
 
     #[test]
