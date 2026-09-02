@@ -410,7 +410,12 @@ function requestFormat(
         extension === "gif" ||
         extension === "apng" ||
         extension === "mp4" ||
-        extension === "wav"
+        extension === "wav" ||
+        // The stored 3-D container. Without it a `.glb` the host settled on
+        // fell back to the request's own format, and a client that had
+        // pinned anything else published a mesh completion claiming to be a
+        // raster — which is the one thing every viewer arm keys on.
+        extension === "glb"
       ? extension
       : fallback;
 }

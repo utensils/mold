@@ -570,4 +570,38 @@ describe("a canvasless mesh recipe", () => {
   it("is false for every raster recipe", () => {
     expect(shape().result.canvasless).toBe(false);
   });
+
+  /**
+   * A client that cannot resolve the model row — Create aimed at a machine
+   * that must download the checkpoint first, or a host advertising no profile
+   * at all — still knows the family. Reading the missing recipe as "has a
+   * canvas" is what bound a Shape and Resolution pair to a 3-D print's own
+   * 0 × 0 and rendered it as `NaN×NaN px`.
+   */
+  it("stays canvasless on the family rule when no recipe is in hand", () => {
+    const result = resolveOutputShape({
+      model: null,
+      family: "hunyuan3d",
+      pipeline: null,
+      width: 0,
+      height: 0,
+      intent: "model-default",
+    });
+    expect(result.canvasless).toBe(true);
+    expect(result.families).toEqual([]);
+    expect(result.sizes).toEqual([]);
+    expect(result.status).toContain("3-D");
+  });
+
+  it("keeps a raster family's canvas when no recipe is in hand", () => {
+    const result = resolveOutputShape({
+      model: null,
+      family: "sdxl",
+      pipeline: null,
+      width: 1024,
+      height: 1024,
+      intent: "model-default",
+    });
+    expect(result.canvasless).toBe(false);
+  });
 });

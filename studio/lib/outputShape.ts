@@ -37,6 +37,7 @@ import {
   type SourceDimensions,
   type SourceResolutionResult,
 } from "./sourceResolution";
+import { isMeshFamily } from "./legacyRecipeRules";
 
 /** A model contract as both the profile and the resolution helpers read it. */
 export type OutputShapeModel = GenerationProfileModel & ModelResolutionContract;
@@ -399,7 +400,12 @@ export function resolveOutputShape(input: OutputShapeInput): OutputShape {
   const { model, pipeline, width, height, intent } = input;
   const contract: OutputShapeModel | string = model ?? input.family ?? "";
   const recipe = model ? effectiveGenerationRecipe(model, pipeline) : null;
-  if (recipeIsCanvasless(recipe)) return canvaslessShape(width, height);
+  // The recipe answers when there is one; the pre-profile family rule answers
+  // for a model row this client could not resolve (aimed at a machine that
+  // must download the checkpoint first) and for a host that advertises no
+  // profile at all. Either way a 3-D print has no canvas to pick.
+  if (recipe ? recipeIsCanvasless(recipe) : isMeshFamily(input.family))
+    return canvaslessShape(width, height);
   const source = input.source ?? null;
   const sourceExact = source
     ? resolveSourceResolution(source, contract, pipeline)

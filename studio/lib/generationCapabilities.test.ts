@@ -507,6 +507,39 @@ describe("prompt mode, strength, and mesh from the advertised recipe", () => {
     expect(caps.mesh).toBeUndefined();
   });
 
+  /**
+   * A recipe is not always in hand: Create aimed at a machine that must
+   * download the checkpoint first resolves no model row, and an older host
+   * advertises no profile at all. The pre-profile family rule answers then —
+   * a 3-D print has no pixel canvas either way, and reading absence as "has
+   * one" put a Shape and Resolution pair on a mesh model's 0 × 0.
+   */
+  it("keeps a mesh family canvasless when no recipe is advertised", () => {
+    const caps = baseGenerationCapabilities(
+      "hunyuan3d",
+      "hunyuan3d-mini-turbo:fp16",
+      null,
+      null,
+      "required",
+      null,
+    );
+    expect(caps.canvasless).toBe(true);
+    // Nothing can invent the advertised block; only the canvas rule survives.
+    expect(caps.mesh).toBeUndefined();
+  });
+
+  it("keeps a raster family's canvas when no recipe is advertised", () => {
+    const caps = baseGenerationCapabilities(
+      "sdxl",
+      "cyberrealistic-pony:fp16",
+      null,
+      null,
+      null,
+      null,
+    );
+    expect(caps.canvasless).toBe(false);
+  });
+
   it("trusts an advertised supports_strength over the family heuristic", () => {
     // The host says a flux checkpoint does not read strength; the client
     // must not overrule it with the old "every image family does" rule.

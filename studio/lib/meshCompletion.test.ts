@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { isAudioCompletion } from "./ltx2Pipeline";
-import { isMeshCompletion } from "./meshCompletion";
+import {
+  isMeshArtifact,
+  isMeshCompletion,
+  type MeshArtifactProbe,
+} from "./meshCompletion";
 
 describe("isMeshCompletion", () => {
   it("keys on the vertex count, the server's own mesh marker", () => {
@@ -28,5 +32,33 @@ describe("isMeshCompletion", () => {
     const mesh = { mesh_vertices: 12, audio_sample_rate: null };
     expect(isMeshCompletion(mesh)).toBe(true);
     expect(isAudioCompletion(mesh)).toBe(false);
+  });
+});
+
+describe("isMeshArtifact", () => {
+  it("accepts a live completion the server reported mesh facts for", () => {
+    expect(isMeshArtifact({ mesh_vertices: 24_576, format: "glb" })).toBe(true);
+  });
+
+  it("accepts a durable completion that names only the glTF container", () => {
+    // A durable batch child reports a filename and a container, never counts.
+    expect(isMeshArtifact({ format: "glb" })).toBe(true);
+    expect(isMeshArtifact({ format: "GLB" })).toBe(true);
+  });
+
+  it("leaves every raster, video and audio container on its own arm", () => {
+    expect(isMeshArtifact({ format: "png" })).toBe(false);
+    expect(
+      isMeshArtifact({ format: "mp4", video_frames: 97 } as MeshArtifactProbe),
+    ).toBe(false);
+    expect(
+      isMeshArtifact({
+        format: "wav",
+        audio_sample_rate: 48_000,
+      } as MeshArtifactProbe),
+    ).toBe(false);
+    expect(isMeshArtifact({})).toBe(false);
+    expect(isMeshArtifact(null)).toBe(false);
+    expect(isMeshArtifact(undefined)).toBe(false);
   });
 });
