@@ -572,10 +572,49 @@ describe("mobile gallery viewer", () => {
     expect(media?.[1]).toMatch(/max-width:\s*100%\s*;/);
   });
 
+  /**
+   * The media is the page: the stage is the whole dialog, the header floats
+   * over its top edge, and the details sheet is parked below the bottom one
+   * with only its peek showing. Both insets are named once, so the stage can
+   * never be sized out from under the picture again.
+   */
+  it("gives the whole viewport to the media and parks the sheet at its peek", () => {
+    const viewer = css.match(/\.gallery-viewer\s*\{([^}]*)\}/s);
+    const stage = css.match(/\.gallery-viewer-stage\s*\{([^}]*)\}/s);
+    const header = css.match(/\.gallery-viewer-header\s*\{([^}]*)\}/s);
+    const sheet = css.match(/(?:^|\n)\.gallery-viewer-sheet\s*\{([^}]*)\}/s);
+    const expanded = css.match(/\.gallery-viewer-sheet\.is-expanded\s*\{([^}]*)\}/s);
+    const handle = css.match(/\.gallery-viewer-sheet-handle\s*\{([^}]*)\}/s);
+
+    expect(viewer?.[1]).toMatch(
+      /--viewer-header-inset:\s*calc\(52px \+ env\(safe-area-inset-top\)\)/,
+    );
+    expect(viewer?.[1]).toMatch(/--viewer-peek:\s*calc\(68px \+ env\(safe-area-inset-bottom\)\)/);
+    expect(stage?.[1]).toMatch(/position:\s*absolute\s*;/);
+    expect(stage?.[1]).toMatch(/inset:\s*0\s*;/);
+    expect(stage?.[1]).toMatch(
+      /padding:\s*var\(--viewer-header-inset\) 0 var\(--viewer-peek\)\s*;/,
+    );
+    expect(header?.[1]).toMatch(/position:\s*absolute\s*;/);
+    // The collapsed sheet shows exactly the peek the stage reserved for it.
+    expect(sheet?.[1]).toMatch(
+      /transform:\s*translateY\(calc\(100% - var\(--viewer-peek\) \+ var\(--viewer-sheet-drag, 0px\)\)\)\s*;/,
+    );
+    expect(expanded?.[1]).toMatch(/transform:\s*translateY\(var\(--viewer-sheet-drag, 0px\)\)\s*;/);
+    // The handle's own height is the peek the stage reserved, minus the inset.
+    expect(handle?.[1]).toMatch(/min-height:\s*68px\s*;/);
+  });
+
+  it("drops the sheet's spring, not the sheet, under reduced motion", () => {
+    expect(css).toMatch(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\.gallery-viewer-sheet\s*\{\s*transition:\s*none;/,
+    );
+  });
+
   it("keeps the header and actions within the same viewport column", () => {
     const header = css.match(/\.gallery-viewer-header\s*\{([^}]*)\}/s);
     const origin = css.match(/\.gallery-viewer-origin\s*\{([^}]*)\}/s);
-    const details = css.match(/\.gallery-viewer-details\s*\{([^}]*)\}/s);
+    const details = css.match(/(?:^|\n)\.gallery-viewer-details\s*\{([^}]*)\}/s);
     const prompt = css.match(/\.gallery-viewer-prompt\s*\{([^}]*)\}/s);
     const promptText = css.match(/\.gallery-viewer-prompt p\s*\{([^}]*)\}/s);
     const actions = css.match(/\.gallery-viewer-actions\s*\{([^}]*)\}/s);
