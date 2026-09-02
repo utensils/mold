@@ -1693,6 +1693,7 @@ fn valid_media_version(media_version: &str) -> bool {
 pub(crate) async fn resolve_thumbnail<F, Fut>(
     cache: &Arc<ThumbnailCache>,
     digest: &str,
+    filename: &str,
     fetch: F,
 ) -> Result<(), String>
 where
@@ -1710,7 +1711,8 @@ where
     let bytes = fetch().await?;
     let cache = cache.clone();
     let digest = digest.to_string();
-    tokio::task::spawn_blocking(move || cache.put(&digest, &bytes))
+    let filename = filename.to_string();
+    tokio::task::spawn_blocking(move || cache.put(&digest, &filename, &bytes))
         .await
         .map_err(|error| format!("The thumbnail cache write was cancelled: {error}"))?
 }
@@ -1982,7 +1984,7 @@ pub async fn prepare_gallery_thumbnail(
     // An older host answers a 512 request with its 256 tile: record that,
     // file the bytes under the tier they really are, and answer that URL.
     let downgraded = AtomicBool::new(false);
-    resolve_thumbnail(cache_ref, &digest, || async {
+    resolve_thumbnail(cache_ref, &digest, &filename, || async {
         let bytes = match target.as_ref() {
             Some(target) => {
                 let _permit = tokio::select! {
@@ -2053,7 +2055,8 @@ pub async fn prepare_gallery_thumbnail(
             }
             .digest();
             let cache = cache_ref.clone();
-            tokio::task::spawn_blocking(move || cache.put(&real, &bytes))
+            let name = filename.clone();
+            tokio::task::spawn_blocking(move || cache.put(&real, &name, &bytes))
                 .await
                 .map_err(|error| format!("The thumbnail cache write was cancelled: {error}"))??;
             return Err("downgraded".to_string());
@@ -2259,7 +2262,9 @@ pub fn thumb_protocol_response(
                         let put = {
                             let cache = cache.clone();
                             let bytes = bytes.clone();
-                            tokio::task::spawn_blocking(move || cache.put(&digest, &bytes)).await
+                            let name = filename.clone();
+                            tokio::task::spawn_blocking(move || cache.put(&digest, &name, &bytes))
+                                .await
                         };
                         if let Ok(Err(error)) = put {
                             tracing::debug!(error = %error, "offline thumbnail not cached");
@@ -2925,7 +2930,7 @@ mod tests {
         for _ in 0..3 {
             let counter = fetches.clone();
             let bytes = png.clone();
-            resolve_thumbnail(&cache, &digest, || async move {
+            resolve_thumbnail(&cache, &digest, "a.png", || async move {
                 counter.fetch_add(1, Ordering::SeqCst);
                 Ok(bytes)
             })
@@ -2943,8 +2948,10 @@ mod tests {
             size: SizeTier::S256,
         }
         .digest();
-        let refused =
-            resolve_thumbnail(&cache, &other, || async { Err("offline".to_string()) }).await;
+        let refused = resolve_thumbnail(&cache, &other, "b.png", || async {
+            Err("offline".to_string())
+        })
+        .await;
         assert!(refused.is_err());
         assert!(!cache.contains(&other));
     }

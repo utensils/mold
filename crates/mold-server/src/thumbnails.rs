@@ -218,11 +218,22 @@ pub fn render_mesh_poster_sized(source: &Path, size: u32) -> anyhow::Result<Vec<
 
 /// Write one tile atomically (temp + rename) so a concurrent reader never
 /// sees a half-written PNG.
+///
+/// The temp name carries a per-call nonce as well as the pid, because two
+/// writers of the SAME destination inside one process are ordinary here and
+/// nothing serializes them: the thumbnail route's singleflight covers only
+/// itself, so an import deriving `mirrored.glb`'s poster while a thumbnail
+/// request renders the same file are two threads on one path. With a
+/// pid-only name they interleave `write` and `rename` on a shared temp — a
+/// torn sidecar, or a spurious failure when the loser's rename finds the
+/// file already gone.
 pub fn write_bytes_atomically(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
+    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dest.with_extension(format!("{}.{nonce}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     if let Err(error) = std::fs::rename(&tmp, dest) {
         let _ = std::fs::remove_file(&tmp);
@@ -540,6 +551,45 @@ mod tests {
             None,
         )
         .expect("write the GLB fixture")
+    }
+
+    /// Two writers of one destination is the ordinary case, not a race to
+    /// design out: the thumbnail route's singleflight does not cover the
+    /// import route, so an import and a tile request can derive the same
+    /// poster at once. Each must land a whole file and leave no temp behind.
+    #[test]
+    fn concurrent_writers_of_one_tile_leave_a_valid_file_and_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("mold-hunyuan3d-1.glb.png");
+        let a = encode(&gradient(64, 64, false), ThumbFormat::Png)
+            .unwrap()
+            .bytes;
+        let b = encode(&gradient(48, 48, false), ThumbFormat::Png)
+            .unwrap()
+            .bytes;
+        assert_ne!(a, b);
+        std::thread::scope(|scope| {
+            for bytes in [&a, &b] {
+                let dest = dest.clone();
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        write_bytes_atomically(&dest, bytes).expect("concurrent write");
+                    }
+                });
+            }
+        });
+        let written = std::fs::read(&dest).unwrap();
+        assert!(
+            written == a || written == b,
+            "the survivor is one whole writer's bytes, never a blend"
+        );
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp files left behind: {strays:?}");
     }
 
     #[test]

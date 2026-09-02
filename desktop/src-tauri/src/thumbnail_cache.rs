@@ -245,7 +245,18 @@ impl ThumbnailCache {
     }
 
     /// Store one tile atomically, then prune to the byte/count budget.
-    pub fn put(&self, digest: &str, bytes: &[u8]) -> Result<(), String> {
+    ///
+    /// `filename` is the gallery file the tile depicts. It decides one thing:
+    /// whether an SVG placeholder may be kept. This cache is keyed on content
+    /// version and never expires an entry, so a placeholder stored for a MESH
+    /// pinned the wireframe cube for the life of the file even after the host
+    /// learned to render the poster — and a mesh poster is always derivable,
+    /// so the placeholder is transient by construction and never worth
+    /// keeping. Audio is the opposite case: nothing anywhere derives a
+    /// waveform from a WAV, so a mirrored audio print's placeholder is the
+    /// host's real and permanent answer, and refusing it would re-fetch the
+    /// same SVG on every launch and every scroll, forever.
+    pub fn put(&self, digest: &str, filename: &str, bytes: &[u8]) -> Result<(), String> {
         if !valid_digest(digest) {
             return Err("Invalid thumbnail cache key.".into());
         }
@@ -254,17 +265,13 @@ impl ThumbnailCache {
         }
         match sniff_content_type(bytes) {
             None => return Err("The thumbnail is not a recognised image.".into()),
-            // A placeholder is what a host could answer at one moment, not
-            // the print's tile, and this cache is keyed on content version
-            // with no expiry — so storing one pinned a mesh's wireframe cube
-            // or an audio waveform's fallback for the life of the file, even
-            // after the host learned to render the real thing. Placeholders
-            // are the only SVGs mold serves as tiles; refusing them keeps the
-            // durable cache to real rasters. Both callers degrade cleanly:
-            // the protocol handler logs and still serves the bytes, and
+            // Both callers degrade cleanly on this refusal: the protocol
+            // handler logs and still serves the bytes, and
             // `prepareNativeThumbnail` answers null so the blob route keeps
             // the tile visible.
-            Some("image/svg+xml") => return Err("Placeholder tiles are not cached durably.".into()),
+            Some("image/svg+xml") if mold_server::thumbnails::is_mesh_filename(filename) => {
+                return Err("A mesh placeholder is not cached durably.".into())
+            }
             Some(_) => {}
         }
         let path = self.path_for(digest);
@@ -457,7 +464,7 @@ mod tests {
         assert!(cache.get(&digest).unwrap().is_none());
         assert!(!cache.contains(&digest));
 
-        cache.put(&digest, PNG).unwrap();
+        cache.put(&digest, "a.png", PNG).unwrap();
         assert!(cache.contains(&digest));
         let hit = cache.get(&digest).unwrap().unwrap();
         assert_eq!(hit.bytes, PNG);
@@ -511,7 +518,7 @@ mod tests {
             .map(|i| key("local", &format!("{i}.png"), "1:1", SizeTier::S256).digest())
             .collect();
         for (i, digest) in digests.iter().enumerate() {
-            cache.put(digest, PNG).unwrap();
+            cache.put(digest, &format!("{i}.png"), PNG).unwrap();
             // Distinct mtimes so LRU order is unambiguous.
             let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + i as u64);
             filetime::set_file_mtime(
@@ -544,7 +551,7 @@ mod tests {
         );
         for i in 0..4 {
             let digest = key("local", &format!("{i}.png"), "1:1", SizeTier::S256).digest();
-            cache.put(&digest, JPEG).unwrap();
+            cache.put(&digest, &format!("{i}.png"), JPEG).unwrap();
         }
         assert_eq!(cache.usage().unwrap().1, 2);
     }
@@ -560,8 +567,8 @@ mod tests {
         assert!(cache.get(&digest).unwrap().is_none());
         assert!(!path.exists());
         // And a put refuses foreign bytes outright.
-        assert!(cache.put(&digest, b"garbage").is_err());
-        assert!(cache.put(&digest, &[]).is_err());
+        assert!(cache.put(&digest, "a.png", b"garbage").is_err());
+        assert!(cache.put(&digest, "a.png", &[]).is_err());
     }
 
     #[test]
@@ -570,7 +577,7 @@ mod tests {
         let digest = key("local", "a.png", "1:10", SizeTier::S256).digest();
         {
             let cache = cache_in(&dir);
-            cache.put(&digest, PNG).unwrap();
+            cache.put(&digest, "a.png", PNG).unwrap();
         }
         let cache = cache_in(&dir);
         let shard = cache.root().join(&digest[..2]);
@@ -629,31 +636,40 @@ mod tests {
         assert_eq!(sniff_content_type(b"\x7fELF"), None);
     }
 
-    /// A placeholder is what a host could answer at one moment, not the
-    /// print's tile — and this cache never expires an entry, so storing one
-    /// pinned a mesh's wireframe cube for the life of the file even after the
-    /// host learned to render the real poster.
+    /// This cache never expires an entry, so whether a placeholder may be
+    /// kept turns on whether the real tile is derivable. A mesh poster always
+    /// is, so its placeholder is transient and storing one pinned a wireframe
+    /// cube for the life of the file. A waveform never is — nothing anywhere
+    /// derives one from a WAV — so a mirrored audio print's placeholder is
+    /// the host's permanent answer and must be cached like any other tile,
+    /// or it is re-fetched on every launch forever.
     #[test]
-    fn refuses_to_store_a_placeholder_svg_as_a_durable_tile() {
+    fn refuses_a_mesh_placeholder_but_keeps_an_audio_one() {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(&dir);
         let mesh = key("local", "armchair.glb", "1:10", SizeTier::S256).digest();
         assert!(cache
             .put(
                 &mesh,
+                "armchair.glb",
                 mold_server::thumbnails::MESH_PLACEHOLDER_SVG.as_bytes()
-            )
-            .is_err());
-        assert!(cache
-            .put(
-                &mesh,
-                mold_server::thumbnails::AUDIO_PLACEHOLDER_SVG.as_bytes()
             )
             .is_err());
         assert!(!cache.contains(&mesh));
         // The real poster, under the same key, is stored as any tile is.
-        assert!(cache.put(&mesh, PNG).is_ok());
+        assert!(cache.put(&mesh, "armchair.glb", PNG).is_ok());
         assert!(cache.contains(&mesh));
+
+        let audio = key("local", "score.wav", "1:10", SizeTier::S256).digest();
+        assert!(cache
+            .put(
+                &audio,
+                "score.wav",
+                mold_server::thumbnails::AUDIO_PLACEHOLDER_SVG.as_bytes()
+            )
+            .is_ok());
+        let hit = cache.get(&audio).unwrap().unwrap();
+        assert_eq!(hit.content_type, "image/svg+xml");
     }
 
     #[test]
@@ -661,7 +677,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache_in(&dir);
         assert!(cache.get("../../etc/passwd").is_err());
-        assert!(cache.put("..", PNG).is_err());
+        assert!(cache.put("..", "a.png", PNG).is_err());
         assert!(!cache.contains("zz"));
     }
 }

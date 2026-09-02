@@ -363,9 +363,10 @@ function selectPrint(job: Job) {
     if (job.result?.filename) {
       // The store no-ops on a fresh URL and re-mints an expired media
       // ticket, so a print re-selected an hour later opens on the canvas
-      // instead of failing its fetch against a dead URL.
+      // instead of failing its fetch against a dead URL. Every rejection
+      // path in the store nulls `resultUrl` first, so a failure here always
+      // means the print can only be opened from the Library.
       void generation.refreshRemoteResultUrl(job.clientId).catch(() => {
-        if (job.resultUrl) return;
         toasts.push("Open this older print in Library");
         void router.push("/library");
       });
