@@ -13,7 +13,9 @@ import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
+import { emptyMeshForm } from "@studio/lib/meshControls";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -88,6 +90,64 @@ const guidanceControl = computed(() => recipe.value?.guidance);
 const stepsNote = computed(() => controlNote(stepsControl.value));
 const guidanceNote = computed(() => controlNote(guidanceControl.value));
 const fpsControl = computed(() => recipe.value?.temporal?.fps);
+/**
+ * The 3-D controls, exactly as the recipe advertises them. The phone carries
+ * no octree ladder, threshold range or face budget of its own: an absent
+ * `mesh` block means the group does not render, and a control left untouched
+ * stays `null` so `buildRequest` omits it and the engine's own default is
+ * what renders (and what the print records).
+ */
+const meshCaps = computed(() => guidanceCaps.value.mesh ?? null);
+const meshForm = computed(() => (props.form.mesh ??= emptyMeshForm()));
+const octreeSegments = computed(() =>
+  (meshCaps.value?.octree_resolutions ?? []).map((resolution) => ({
+    value: resolution,
+    label: String(resolution),
+  })),
+);
+/** The default is LIT while the control is untouched — the value that renders. */
+const octreeSelected = computed(
+  () => meshForm.value.octreeResolution ?? meshCaps.value?.octree_default ?? 0,
+);
+const thresholdControl = computed(() => meshCaps.value?.threshold ?? null);
+const thresholdNote = computed(() => controlNote(thresholdControl.value));
+const thresholdValue = computed(
+  () => meshForm.value.threshold ?? thresholdControl.value?.default ?? 0,
+);
+
+function setOctreeResolution(value: string | number): void {
+  meshForm.value.octreeResolution = Number(value);
+}
+
+function setThreshold(event: Event): void {
+  if (thresholdControl.value?.mode === "fixed") return;
+  meshForm.value.threshold = Number((event.target as HTMLInputElement).value);
+}
+
+/**
+ * Blank is the raw decimated surface the engine produces on its own, which is
+ * why this control is optional rather than pre-filled. A typed budget is
+ * snapped into the advertised bounds here rather than shipped for the server
+ * to refuse — the same self-correcting idiom the resolution fields use.
+ */
+function setTargetFaces(event: Event): void {
+  const raw = (event.target as HTMLInputElement).value.trim();
+  const caps = meshCaps.value;
+  if (!raw || !caps) {
+    meshForm.value.targetFaces = null;
+    return;
+  }
+  const parsed = Math.round(Number(raw));
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    meshForm.value.targetFaces = null;
+    return;
+  }
+  meshForm.value.targetFaces = Math.min(
+    caps.target_faces_max,
+    Math.max(caps.target_faces_min, parsed),
+  );
+}
+
 const draft = useSequenceDraftStore();
 const sourceDimensions = computed(() => {
   if (props.showFps) {
@@ -225,6 +285,75 @@ const sourceDimensions = computed(() => {
   >
     {{ stepsError || guidanceError }}
   </p>
+  <!-- 3-D: rendered only for a recipe that advertises a `mesh` block, which
+       is also the only request the server accepts `mesh` on. -->
+  <fieldset
+    v-if="meshCaps"
+    class="mobile-mesh-controls"
+    :disabled="disabled"
+    data-test="mobile-mesh-controls"
+  >
+    <legend class="mobile-mesh-legend">Mesh</legend>
+    <div v-if="octreeSegments.length" class="mobile-mesh-group">
+      <span class="mobile-mesh-label">Octree detail</span>
+      <SegmentedControl
+        wrap
+        data-test="mobile-mesh-octree"
+        :model-value="octreeSelected"
+        :options="octreeSegments"
+        label="Octree detail"
+        :disabled="disabled"
+        @update:model-value="setOctreeResolution"
+      />
+    </div>
+    <label
+      v-if="thresholdControl"
+      class="mobile-range-field"
+      :class="{ 'field--with-note': thresholdNote }"
+    >
+      <span
+        >Iso threshold <output>{{ thresholdValue.toFixed(2) }}</output></span
+      >
+      <input
+        type="range"
+        :value="thresholdValue"
+        :min="thresholdControl.min"
+        :max="thresholdControl.max"
+        :step="thresholdControl.step"
+        :disabled="thresholdControl.mode === 'fixed'"
+        aria-label="Iso threshold"
+        data-test="mobile-mesh-threshold"
+        @input="setThreshold"
+      />
+      <small
+        v-if="thresholdNote"
+        class="mobile-generate-hint"
+        data-test="mobile-mesh-threshold-note"
+      >
+        {{ thresholdNote }}
+      </small>
+    </label>
+    <label class="field">
+      <span>Target faces</span>
+      <input
+        class="control"
+        type="number"
+        inputmode="numeric"
+        placeholder="Leave blank for the raw surface"
+        :value="meshForm.targetFaces ?? ''"
+        :min="meshCaps.target_faces_min"
+        :max="meshCaps.target_faces_max"
+        step="1"
+        data-test="mobile-mesh-target-faces"
+        @change="setTargetFaces"
+      />
+      <small class="mobile-generate-hint">
+        Optional — decimates to this budget, between
+        {{ meshCaps.target_faces_min.toLocaleString("en-US") }} and
+        {{ meshCaps.target_faces_max.toLocaleString("en-US") }} triangles.
+      </small>
+    </label>
+  </fieldset>
   <MobileSeedPicker
     :model-value="form.seed"
     :last-seed="lastSeed"

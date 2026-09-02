@@ -44,6 +44,16 @@ const props = withDefaults(
     promptOptional?: boolean;
     /** Model-specific required-prompt wording. */
     requiredPlaceholder?: string;
+    /** Fully resolved prompt-bed placeholder from the page that holds the
+     * recipe (`promptPlaceholder`). It wins over the two props above, which
+     * remain the fallback for a caller with no recipe in scope — a recipe
+     * that IGNORES the prompt is neither "required" nor "optional" wording. */
+    placeholder?: string | null;
+    /** Why Expand and Remix are unavailable for the resolved recipe (a family
+     * that IGNORES the prompt has no text encoder to rewrite for), or `null`
+     * when they are available. Shown as the tooltip on both controls and as a
+     * visible line beside the summary. */
+    transformBlockedReason?: string | null;
     /** Prompt history (newest first) for ↑/↓ recall. */
     history?: string[];
   }>(),
@@ -55,6 +65,8 @@ const props = withDefaults(
     disabledReason: null,
     promptOptional: false,
     requiredPlaceholder: "Describe the image you want to create…",
+    placeholder: null,
+    transformBlockedReason: null,
     history: () => [],
   },
 );
@@ -76,14 +88,22 @@ const activePreset = computed(() => stylePresetById(props.stylePreset));
 const styleLabel = computed(() => activePreset.value?.name ?? "None");
 
 const summaryLine = computed(() => {
-  const base = `${props.aspectLabel} · ${props.width}×${props.height} · ${props.steps} steps`;
+  // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so the
+  // shape/pixel clause is dropped rather than reading "3-D · 0×0".
+  const canvas =
+    props.width > 0 && props.height > 0
+      ? `${props.aspectLabel} · ${props.width}×${props.height} · `
+      : "";
+  const base = `${canvas}${props.steps} steps`;
   return props.batchSize > 1 ? `${base} · ×${props.batchSize}` : base;
 });
 
-const placeholder = computed(() =>
-  props.promptOptional
-    ? OPTIONAL_PROMPT_PLACEHOLDER
-    : props.requiredPlaceholder,
+const promptFieldPlaceholder = computed(
+  () =>
+    props.placeholder?.trim() ||
+    (props.promptOptional
+      ? OPTIONAL_PROMPT_PLACEHOLDER
+      : props.requiredPlaceholder),
 );
 
 const expandLabel = computed(() =>
@@ -91,6 +111,15 @@ const expandLabel = computed(() =>
 );
 const generateDisabled = computed(
   () => !props.cancellable && (props.busy || Boolean(props.disabledReason)),
+);
+// Generate is deliberately untouched: only the two prompt TRANSFORMS are
+// unavailable when the recipe reads no prompt — the render itself is fine.
+const transformsDisabled = computed(
+  () =>
+    props.busy || !props.prompt.trim() || Boolean(props.transformBlockedReason),
+);
+const transformTitle = computed(
+  () => props.transformBlockedReason?.trim() || undefined,
 );
 
 // Shell-style ↑/↓ prompt-history recall. The cycler is fed the latest history
@@ -176,7 +205,7 @@ watch(
       class="composer__prompt"
       data-test="composer-prompt"
       :value="prompt"
-      :placeholder="placeholder"
+      :placeholder="promptFieldPlaceholder"
       rows="2"
       @input="onInput"
       @keydown="onKeydown"
@@ -218,6 +247,12 @@ watch(
       <span class="composer__summary" data-test="composer-summary">{{
         summaryLine
       }}</span>
+      <span
+        v-if="transformBlockedReason"
+        class="composer__summary"
+        data-test="composer-transform-blocked"
+        >{{ transformBlockedReason }}</span
+      >
       <button
         v-if="expanded"
         type="button"
@@ -233,7 +268,8 @@ watch(
         type="button"
         class="composer__expand"
         data-test="composer-expand"
-        :disabled="busy || !prompt.trim()"
+        :disabled="transformsDisabled"
+        :title="transformTitle"
         @click="emit('expand')"
       >
         <Icon name="sparkle" :size="15" />
@@ -243,7 +279,8 @@ watch(
         type="button"
         class="composer__expand"
         data-test="composer-remix"
-        :disabled="busy || !prompt.trim()"
+        :disabled="transformsDisabled"
+        :title="transformTitle"
         @click="emit('remix')"
       >
         <Icon name="sparkle" :size="15" />

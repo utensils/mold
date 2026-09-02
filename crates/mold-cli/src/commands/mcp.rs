@@ -884,7 +884,8 @@ impl McpServer {
         }))
     }
 
-    /// Transcode one stored `.glb` and hand the bytes back as a resource.
+    /// Transcode one stored `.glb` (or render its turntable) and hand the
+    /// bytes back as a resource.
     ///
     /// Deliberately NOT a generation tool: the geometry already exists, and
     /// every container here loses something the stored glTF carries. The
@@ -902,9 +903,21 @@ impl McpServer {
             ));
         }
         let format: mold_core::MeshExportFormat = args.format.parse()?;
+        let turntable = mold_core::MeshTurntableOptions {
+            playback: args.playback.as_deref().map(str::parse).transpose()?,
+            repeat: args.repeat.as_deref().map(str::parse).transpose()?,
+            max_dimension: args.max_dimension,
+            frames: args.frames,
+            fps: args.fps,
+        };
+        if !format.is_animation() && turntable != mold_core::MeshTurntableOptions::default() {
+            return Err(format!(
+                "playback, repeat, max_dimension, frames and fps shape a turntable; they apply to format gif, apng, or webp, not {format}"
+            ));
+        }
         let bytes = self
             .client
-            .export_gallery_mesh(&args.filename, format)
+            .export_gallery_mesh(&args.filename, format, &turntable)
             .await
             .map_err(|e| format!("failed to export mesh: {e}"))?;
         // The blob IS the export, so the resource is named for the exported
@@ -1346,12 +1359,18 @@ impl ListGalleryArgs {
     }
 }
 
-/// Arguments for `export_mesh`.
+/// Arguments for `export_mesh`. The turntable fields are the gallery export
+/// route's own names and only mean something for an animated `format`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportMeshArgs {
     filename: String,
     format: String,
+    playback: Option<String>,
+    repeat: Option<String>,
+    max_dimension: Option<u32>,
+    frames: Option<u32>,
+    fps: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -3231,7 +3250,7 @@ fn builtin_tool_definitions() -> Value {
         },
         {
             "name": "export_mesh",
-            "description": "Export one stored 3-D print as OBJ, STL, or PLY (or fetch the stored GLB unchanged). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Each container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target.",
+            "description": "Export one stored 3-D print as OBJ, STL, or PLY (or fetch the stored GLB unchanged), or as a 360° turntable animation (GIF, APNG, WebP). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Each geometry container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target. A turntable is a RENDER of the mesh from the gallery poster's own view (the first frame is the poster), spun through a full turn; it is the way to share what a mesh looks like where no viewer can open a GLB. Only the formats the host advertises on capabilities.mesh.export_formats succeed (WebP needs a build with the webp feature).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3241,8 +3260,36 @@ fn builtin_tool_definitions() -> Value {
                     },
                     "format": {
                         "type": "string",
-                        "enum": ["glb", "obj", "stl", "ply"],
-                        "description": "Container to export as. 'glb' returns the stored bytes unchanged."
+                        "enum": ["glb", "obj", "stl", "ply", "gif", "apng", "webp"],
+                        "description": "Container to export as. 'glb' returns the stored bytes unchanged; 'gif', 'apng' and 'webp' render a turntable."
+                    },
+                    "playback": {
+                        "type": "string",
+                        "enum": ["loop", "bounce"],
+                        "description": "Turntable GIF only. 'loop' (default) is one seamless full turn; 'bounce' sweeps half a turn and plays it back."
+                    },
+                    "repeat": {
+                        "type": "string",
+                        "enum": ["forever", "once"],
+                        "description": "Turntable GIF only. 'forever' (default) loops; 'once' plays through and rests on the final frame."
+                    },
+                    "max_dimension": {
+                        "type": "integer",
+                        "minimum": 240,
+                        "maximum": 2048,
+                        "description": "Turntable frame edge in pixels. Default 512, the poster's size."
+                    },
+                    "frames": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 180,
+                        "description": "Turntable views rendered around the mesh. Default 36, a 10° step."
+                    },
+                    "fps": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "description": "Turntable playback rate. Default 10."
                     }
                 },
                 "required": ["filename", "format"],
@@ -3627,6 +3674,65 @@ mod tests {
         assert!(!required.contains(&Value::from("prompt")));
     }
 
+    /// `export_mesh` offers every container the export route takes — the
+    /// geometry ones and the turntable ones — with the turntable knobs named
+    /// exactly as the route's fields and bounded as the route bounds them, so
+    /// an agent never learns a limit from a 422.
+    #[test]
+    fn the_export_tool_schema_offers_turntables_with_the_route_s_own_fields() {
+        let tools = tool_definitions();
+        let export = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("export_mesh"))
+            .expect("export_mesh must be registered");
+        assert_eq!(
+            export["inputSchema"]["properties"]["format"]["enum"],
+            json!(["glb", "obj", "stl", "ply", "gif", "apng", "webp"])
+        );
+        let props = &export["inputSchema"]["properties"];
+        assert_eq!(props["playback"]["enum"], json!(["loop", "bounce"]));
+        assert_eq!(props["repeat"]["enum"], json!(["forever", "once"]));
+        for (field, min, max) in [
+            ("max_dimension", 240, 2048),
+            ("frames", 8, 180),
+            ("fps", 1, 30),
+        ] {
+            assert_eq!(props[field]["minimum"].as_u64(), Some(min), "{field}");
+            assert_eq!(props[field]["maximum"].as_u64(), Some(max), "{field}");
+        }
+        assert_eq!(
+            export["inputSchema"]["required"],
+            json!(["filename", "format"]),
+            "every turntable knob is optional"
+        );
+        assert!(export["description"]
+            .as_str()
+            .unwrap()
+            .contains("turntable"));
+
+        // The argument struct parses what the schema offers, and a turntable
+        // knob on a geometry export is refused rather than silently ignored.
+        let args: ExportMeshArgs = serde_json::from_value(json!({
+            "filename": "chair.glb",
+            "format": "gif",
+            "playback": "bounce",
+            "repeat": "once",
+            "max_dimension": 480,
+            "frames": 24,
+            "fps": 12
+        }))
+        .unwrap();
+        assert_eq!(args.frames, Some(24));
+        assert!(serde_json::from_value::<ExportMeshArgs>(json!({
+            "filename": "chair.glb",
+            "format": "gif",
+            "spin": true
+        }))
+        .is_err());
+    }
+
     /// The schema advertises the SAME bounds admission enforces — the octree
     /// allowlist, the iso range and default, the face bounds — from the core
     /// constants rather than literals that could drift, and points an agent
@@ -3728,7 +3834,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(formats, ["glb", "obj", "stl", "ply"]);
+        assert_eq!(formats, ["glb", "obj", "stl", "ply", "gif", "apng", "webp"]);
         assert_eq!(export["inputSchema"]["additionalProperties"], json!(false));
         assert_eq!(
             mesh_export_filename("chair.glb", mold_core::MeshExportFormat::Stl),
@@ -3773,6 +3879,49 @@ mod tests {
             unknown_field.contains("invalid arguments"),
             "{unknown_field}"
         );
+    }
+
+    /// A turntable knob on a geometry container is refused before any HTTP,
+    /// naming the formats it applies to — the same sentence the CLI's flags
+    /// get, because the server would silently ignore it.
+    #[tokio::test]
+    async fn export_mesh_refuses_turntable_knobs_on_a_geometry_format_before_any_request() {
+        let mcp = McpServer {
+            client: MoldClient::new("http://127.0.0.1:1"),
+            jobs: AsyncJobRegistry::default(),
+        };
+        for (arguments, format) in [
+            (
+                json!({ "filename": "chair.glb", "format": "stl", "frames": 24 }),
+                "stl",
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "obj", "playback": "bounce" }),
+                "obj",
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "glb", "max_dimension": 1024 }),
+                "glb",
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "ply", "fps": 12, "repeat": "once" }),
+                "ply",
+            ),
+        ] {
+            let refused = mcp.tool_export_mesh(arguments.clone()).await.unwrap_err();
+            assert!(
+                refused.contains("shape a turntable"),
+                "{arguments}: {refused}"
+            );
+            assert!(
+                refused.contains("gif, apng, or webp"),
+                "{arguments}: {refused}"
+            );
+            assert!(
+                refused.ends_with(&format!("not {format}")),
+                "{arguments}: {refused}"
+            );
+        }
     }
 
     /// The exported bytes come back as an embedded resource named for the

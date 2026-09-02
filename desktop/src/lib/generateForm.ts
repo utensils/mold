@@ -19,11 +19,20 @@ import type {
 } from "./api/types";
 import {
   MAX_LORA_STACK,
+  coerceFormOutputFormat,
   defaultOutputFormat,
   generationCapabilitiesForFamily,
   outputFormatsForFamily,
   pruneRequestForFamily,
+  recipeCapabilitiesSnapshot,
+  type RecipeCapabilitiesSnapshot,
 } from "./capabilities";
+import {
+  emptyMeshForm,
+  meshFormFromMetadata,
+  meshRequestFromForm,
+  type MeshFormState,
+} from "@studio/lib/meshControls";
 import {
   coerceSourceFitForMaskless,
   defaultSourceFitPolicy,
@@ -78,6 +87,7 @@ import {
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isAudioOnlyPipeline, stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import { requestVideoOnly } from "@studio/lib/videoOnly";
 import {
@@ -332,6 +342,15 @@ export interface GenerateForm {
    * the same reason as `guidanceOverrides`: the field must stay off the wire
    * so the resolved tier keeps its own value. */
   wanRecipe: WanRecipeState;
+  /** 3-D mesh controls; `null` entries take the recipe's advertised default.
+   * Rendered only while `recipeCapabilities.mesh` is present, and never on
+   * the wire otherwise. */
+  mesh: MeshFormState;
+  /** The resolved recipe's request-shaping facts (formats, prompt mode,
+   * strength, canvasless, mesh controls), snapshotted when a model or
+   * pipeline is applied so the request builder needs only the form. `null`
+   * on a host that advertises no recipe. */
+  recipeCapabilities: RecipeCapabilitiesSnapshot | null;
   /** Conditioning audio for the a2-vid pipeline; base64 on the wire. */
   audioFile: PickedFile | null;
   /** LTX-2 camera-motion LoRA: a preset id (dolly-in, …, static) or an
@@ -407,6 +426,8 @@ export function newGenerateForm(): GenerateForm {
     temporalUpscale: null,
     guidanceOverrides: emptyGuidanceOverrides(),
     wanRecipe: emptyWanRecipe(),
+    mesh: emptyMeshForm(),
+    recipeCapabilities: null,
     audioFile: null,
     cameraControl: null,
     stylePreset: "",
@@ -449,6 +470,13 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
     retakeRange: form.retakeRange ? { ...form.retakeRange } : null,
     guidanceOverrides: { ...form.guidanceOverrides },
     wanRecipe: { ...form.wanRecipe },
+    mesh: { ...(form.mesh ?? emptyMeshForm()) },
+    recipeCapabilities: form.recipeCapabilities
+      ? {
+          ...form.recipeCapabilities,
+          outputFormats: [...form.recipeCapabilities.outputFormats],
+        }
+      : null,
     audioFile: form.audioFile ? { ...form.audioFile } : null,
     h3Authoring: cloneMinimaxH3AuthoringState(form.h3Authoring),
   };
@@ -518,12 +546,23 @@ export function applyRecipeDefaults(
   // capability — re-resolve it here or a pipeline switch would keep the
   // previous recipe's answer.
   form.identitySupported = supportsIdentity(recipe, m);
+  form.recipeCapabilities = recipeCapabilitiesSnapshot(
+    recipe,
+    m?.family ?? form.family,
+    m?.name ?? form.model,
+    pipeline,
+    m?.source_image,
+  );
+  if (!form.recipeCapabilities?.mesh) form.mesh = emptyMeshForm();
   form.width = recipe.defaults.width;
   form.height = recipe.defaults.height;
   form.steps = recipe.defaults.steps;
   form.guidance = recipe.defaults.guidance;
   if (recipe.defaults.frames != null) form.frames = recipe.defaults.frames;
   if (recipe.defaults.fps != null) form.fps = recipe.defaults.fps;
+  form.outputFormat =
+    coerceFormOutputFormat(form.outputFormat, form.family, form.recipeCapabilities) ??
+    form.outputFormat;
 
   const negativeDefault = recipe.defaults.negative_prompt ?? "";
   form.negativePrompt = negativeDefault;
@@ -619,6 +658,22 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   // validator can strand Generate behind an error the user cannot correct.
   // Shared with web so the surfaces cannot drift.
   Object.assign(form, fixedRecipeControlOverrides(recipe));
+  form.recipeCapabilities = recipeCapabilitiesSnapshot(
+    recipe,
+    m.family,
+    m.name,
+    form.pipeline,
+    m.source_image,
+  );
+  // Pre-mesh snapshots restored via Object.assign may lack the slot.
+  form.mesh ??= emptyMeshForm();
+  if (!form.recipeCapabilities?.mesh) form.mesh = emptyMeshForm();
+  if (form.recipeCapabilities?.canvasless) {
+    // A canvasless recipe advertises a zero canvas; the model row's
+    // `default_width`/`default_height` describe nothing the request reads.
+    form.width = recipe?.defaults.width ?? 0;
+    form.height = recipe?.defaults.height ?? 0;
+  }
   const caps = generationCapabilitiesForFamily(
     m.family,
     m.name,
@@ -1048,10 +1103,21 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     } else {
       req.source_image = form.sourceImage;
       if (form.sourceImageName) req.source_image_name = form.sourceImageName;
-      // Wan pins the first frame exactly; it never reads strength.
-      if (caps.supportsStrength) req.strength = form.strength;
+      // Wan pins the first frame exactly; it never reads strength, and the
+      // advertised recipe is the authority when the host sends one.
+      if (caps.supportsStrength && form.recipeCapabilities?.supportsStrength !== false) {
+        req.strength = form.strength;
+      }
       if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
     }
+  }
+
+  // The 3-D controls travel only for a recipe that advertises them, and only
+  // the values that differ from the advertised defaults (the server applies
+  // the same defaults and the print records what actually rendered).
+  if (form.recipeCapabilities?.mesh) {
+    const mesh = meshRequestFromForm(form.mesh ?? emptyMeshForm(), form.recipeCapabilities.mesh);
+    if (mesh) req.mesh = mesh;
   }
 
   // Face identity is its own conditioning partition (#1224), gated on the
@@ -1154,7 +1220,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // transition keeps the user's source media intact if they switch back.
   const finalized = stripAudioOnlyIncompatibleFields(
     serializeMinimaxH3Authoring(
-      pruneRequestForFamily(req, form.family, form.model, form.sourceImageCapability),
+      pruneRequestForFamily(
+        req,
+        form.family,
+        form.model,
+        form.sourceImageCapability,
+        form.recipeCapabilities,
+      ),
       form.family,
       form.model,
       form.h3Authoring ?? emptyMinimaxH3AuthoringState(),
@@ -1162,8 +1234,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   );
   // Crop provenance rides only when the wire actually carries fitted source
   // media (the server echoes it verbatim into OutputMetadata so Reuse
-  // settings and running-job selection can restore the crop controls).
-  if (finalized.source_image || finalized.edit_images?.length || finalized.keyframes?.length) {
+  // settings and running-job selection can restore the crop controls). A
+  // canvasless recipe never fits the source to a canvas, so it records none.
+  const canvasless = form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family);
+  if (
+    !canvasless &&
+    (finalized.source_image || finalized.edit_images?.length || finalized.keyframes?.length)
+  ) {
     finalized.source_fit = form.sourceFit;
   }
   return finalized;
@@ -1288,6 +1365,7 @@ export function applyMetadataToForm(
     form.model = metadata.model;
     form.family = "";
     form.negativePromptDefault = "";
+    form.recipeCapabilities = null;
   }
 
   form.prompt = metadata.prompt ?? "";
@@ -1344,6 +1422,16 @@ export function applyMetadataToForm(
   if (metadata.control_scale != null) form.controlScale = metadata.control_scale;
   form.upscaleModel = metadata.upscale_model ?? "";
   if (metadata.output_format) form.outputFormat = metadata.output_format;
+  form.outputFormat =
+    coerceFormOutputFormat(form.outputFormat, form.family, form.recipeCapabilities) ??
+    form.outputFormat;
+  // A mesh print recorded the resolved controls; a raster print has none.
+  form.mesh = meshFormFromMetadata(metadata.mesh);
+  if (form.recipeCapabilities?.canvasless) {
+    // `width`/`height` on a mesh print describe its poster, not a canvas.
+    form.width = 0;
+    form.height = 0;
+  }
 
   // Video params (`video_frames`/`video_fps` are legacy desktop aliases).
   const frames = metadata.frames ?? metadata.video_frames;
@@ -1474,7 +1562,13 @@ export function applyRequestToForm(
   form.scheduler = request.scheduler ?? "default";
   form.cfgPlus = request.cfg_plus ?? false;
   form.batchSize = request.batch_size ?? 1;
-  form.outputFormat = request.output_format ?? form.outputFormat;
+  form.outputFormat =
+    coerceFormOutputFormat(
+      request.output_format ?? form.outputFormat,
+      form.family,
+      form.recipeCapabilities,
+    ) ?? form.outputFormat;
+  form.mesh = meshFormFromMetadata(request.mesh);
   form.upscaleModel = request.upscale_model ?? "";
   form.strength = request.strength ?? form.strength;
   form.sourceImage = request.source_image ?? null;

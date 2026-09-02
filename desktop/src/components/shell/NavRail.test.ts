@@ -201,6 +201,37 @@ describe("NavRail developing jobs", () => {
     expect(wrapper.text()).toContain("nothing developing");
   });
 
+  // A mesh print's saved file is binary glTF: neither the gallery-thumbnail
+  // arm nor the result-URL arm can draw it, so the rendered poster the
+  // complete event carries is the rail's only picture of it.
+  it("draws a finished mesh print from its poster, not its glTF bytes", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      {
+        clientId: 11,
+        model: "hunyuan3d-mini-turbo:fp16",
+        prompt: "an armchair",
+        status: "complete",
+        settledAtMs: Date.now(),
+        resultUrl: "blob:mesh",
+        result: {
+          image: "R0xURg==",
+          format: "glb",
+          filename: "mold-hunyuan3d.glb",
+          mesh_vertices: 24_576,
+          mesh_faces: 49_152,
+          mesh_poster: "UE9TVEVS",
+        },
+      } as never,
+    ];
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='developing-print']");
+    const poster = row.get("[data-test='rail-mesh-poster']");
+    expect(poster.attributes("src")).toBe("data:image/png;base64,UE9TVEVS");
+    expect(row.find("[data-test='rail-library-thumbnail']").exists()).toBe(false);
+  });
+
   it("shows an unknown outcome in the muted ink, never as a failure", async () => {
     const wrapper = await mountAt("/create");
     useGenerationStore().jobs = [

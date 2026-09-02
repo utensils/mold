@@ -21,62 +21,170 @@ fn decode_image(data_b64: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn sanitize_animation_filename(filename: &str) -> Result<String, String> {
+/// A container the phone may hand to the native share sheet.
+///
+/// This is a share ALLOWLIST, not a media-type registry: every entry is
+/// something `POST /api/gallery/export/:filename` actually returns — the
+/// turntable animations the export sheet collects options for, and the
+/// geometry transcodes of a stored GLB. A container the phone never exports
+/// this way (mp4, say) stays out, so the list must not be reused as a general
+/// media check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportedMediaKind {
+    /// GIF turntable or clip animation.
+    Gif,
+    /// APNG animation, which carries the ordinary PNG signature.
+    Apng,
+    /// WebP animation, on hosts that advertise it.
+    Webp,
+    /// Binary glTF — the only container mold STORES for a mesh.
+    Glb,
+    /// Wavefront OBJ geometry transcode.
+    Obj,
+    /// Stereolithography geometry transcode, binary or ASCII.
+    Stl,
+    /// Polygon File Format geometry transcode.
+    Ply,
+}
+
+/// How many leading bytes the share path keeps before it decides a download
+/// really is what its filename claims. Binary STL states its facet count at
+/// offset 80 and has no signature at all, so the probe has to reach the whole
+/// 84-byte header.
+#[cfg(any(target_os = "ios", test))]
+const EXPORT_HEADER_PROBE_BYTES: usize = 84;
+
+/// The statements a Wavefront OBJ may legally open with. `v `/`vn `/`vt `/`f `
+/// keep their separator so a bare `v` cannot pass for geometry.
+#[cfg(any(target_os = "ios", test))]
+const OBJ_LINE_PREFIXES: [&[u8]; 8] = [b"#", b"v ", b"vn ", b"vt ", b"f ", b"o ", b"g ", b"mtllib"];
+
+impl ExportedMediaKind {
+    /// The media type an Android share intent advertises for this container.
+    /// iOS derives its own UTType from the staged file's extension, so only
+    /// the Android path reads this.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn mime(self) -> &'static str {
+        match self {
+            Self::Gif => "image/gif",
+            Self::Apng => "image/png",
+            Self::Webp => "image/webp",
+            Self::Glb => "model/gltf-binary",
+            Self::Obj => "model/obj",
+            Self::Stl => "model/stl",
+            Self::Ply => "application/x-ply",
+        }
+    }
+
+    /// Whether an export's bytes match the container its filename claims.
+    ///
+    /// `head` is the download's leading bytes (up to
+    /// [`EXPORT_HEADER_PROBE_BYTES`]) and `total_bytes` its full length: a
+    /// binary STL is well-formed only when the facet count in its header
+    /// accounts for exactly the rest of the file.
+    #[cfg(any(target_os = "ios", test))]
+    fn matches(self, head: &[u8], total_bytes: u64) -> bool {
+        match self {
+            Self::Gif => head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a"),
+            // APNG uses the ordinary PNG signature. WebP remains available on
+            // hosts that advertise it even though the current default is
+            // GIF/APNG.
+            Self::Apng => head.starts_with(b"\x89PNG\r\n\x1a\n"),
+            Self::Webp => {
+                head.starts_with(b"RIFF") && head.get(8..12).is_some_and(|tag| tag == b"WEBP")
+            }
+            Self::Glb => head.starts_with(b"glTF"),
+            Self::Obj => first_content_line(head).is_some_and(|line| {
+                OBJ_LINE_PREFIXES
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+            }),
+            Self::Stl => head.starts_with(b"solid") || binary_stl_covers(head, total_bytes),
+            Self::Ply => head.starts_with(b"ply\n") || head.starts_with(b"ply\r\n"),
+        }
+    }
+}
+
+/// The first line of a text export that carries content, trimmed of ASCII
+/// whitespace. A probe that stops mid-line still answers, because every
+/// prefix that identifies an OBJ is far shorter than the probe.
+#[cfg(any(target_os = "ios", test))]
+fn first_content_line(head: &[u8]) -> Option<&[u8]> {
+    head.split(|byte| *byte == b'\n')
+        .map(|line| {
+            let start = line
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .unwrap_or(line.len());
+            let end = line
+                .iter()
+                .rposition(|byte| !byte.is_ascii_whitespace())
+                .map_or(start, |index| index + 1);
+            &line[start..end]
+        })
+        .find(|line| !line.is_empty())
+}
+
+/// Binary STL is an 80-byte comment, a little-endian facet count, then 50
+/// bytes per facet — and no magic bytes of its own, so the length IS the
+/// check.
+#[cfg(any(target_os = "ios", test))]
+fn binary_stl_covers(head: &[u8], total_bytes: u64) -> bool {
+    head.get(80..84).is_some_and(|count| {
+        let facets = u32::from_le_bytes([count[0], count[1], count[2], count[3]]);
+        84 + 50 * u64::from(facets) == total_bytes
+    })
+}
+
+/// The container a requested export claims, or `None` when it is not one the
+/// phone shares natively.
+fn exported_media_kind(filename: &str) -> Option<ExportedMediaKind> {
+    let extension = std::path::Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "gif" => Some(ExportedMediaKind::Gif),
+        "png" => Some(ExportedMediaKind::Apng),
+        "webp" => Some(ExportedMediaKind::Webp),
+        "glb" => Some(ExportedMediaKind::Glb),
+        "obj" => Some(ExportedMediaKind::Obj),
+        "stl" => Some(ExportedMediaKind::Stl),
+        "ply" => Some(ExportedMediaKind::Ply),
+        _ => None,
+    }
+}
+
+/// The bare filename an export may be staged under, with the container it
+/// claims. A path is never accepted as one.
+fn sanitize_export_filename(filename: &str) -> Result<(String, ExportedMediaKind), String> {
     let filename = std::path::Path::new(filename)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| "the exported animation does not have a valid filename".to_string())?;
-    let extension = std::path::Path::new(filename)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "gif" | "png" | "webp") {
-        return Err("the exported animation format does not match its filename".to_string());
-    }
-    Ok(filename.to_string())
-}
-
-#[cfg(any(target_os = "ios", test))]
-fn validate_animation(bytes: &[u8], filename: &str) -> Result<String, String> {
-    let filename = sanitize_animation_filename(filename)?;
-    let extension = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let valid = match extension.as_str() {
-        "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        // APNG uses the ordinary PNG signature. WebP remains available on
-        // hosts that advertise it even though the current default is GIF/APNG.
-        "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12).is_some_and(|tag| tag == b"WEBP"),
-        _ => false,
-    };
-    if !valid {
-        return Err("the exported animation format does not match its filename".to_string());
-    }
-    Ok(filename)
+        .ok_or_else(|| "the export does not have a valid filename".to_string())?;
+    let kind = exported_media_kind(filename)
+        .ok_or_else(|| "the exported format is not one this phone can share".to_string())?;
+    Ok((filename.to_string(), kind))
 }
 
 #[cfg(target_os = "ios")]
 #[derive(Debug)]
-struct CachedAnimationExport {
+struct CachedMediaExport {
     reuse_key: String,
     path: std::path::PathBuf,
 }
 
 #[cfg(target_os = "ios")]
-fn animation_export_cache() -> &'static std::sync::Mutex<Option<CachedAnimationExport>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedAnimationExport>>> =
+fn media_export_cache() -> &'static std::sync::Mutex<Option<CachedMediaExport>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedMediaExport>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 #[cfg(target_os = "ios")]
-fn take_cached_animation(reuse_key: &str) -> Option<std::path::PathBuf> {
-    let cached = animation_export_cache().lock().ok()?.take()?;
+fn take_cached_export(reuse_key: &str) -> Option<std::path::PathBuf> {
+    let cached = media_export_cache().lock().ok()?.take()?;
     if cached.reuse_key == reuse_key && cached.path.is_file() {
         Some(cached.path)
     } else {
@@ -86,16 +194,16 @@ fn take_cached_animation(reuse_key: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "ios")]
-fn cache_animation(reuse_key: String, path: std::path::PathBuf) {
-    if let Ok(mut cache) = animation_export_cache().lock()
-        && let Some(replaced) = cache.replace(CachedAnimationExport { reuse_key, path })
+fn cache_export(reuse_key: String, path: std::path::PathBuf) {
+    if let Ok(mut cache) = media_export_cache().lock()
+        && let Some(replaced) = cache.replace(CachedMediaExport { reuse_key, path })
     {
         let _ = std::fs::remove_file(replaced.path);
     }
 }
 
 #[cfg(any(target_os = "ios", test))]
-fn cleanup_animation_exports_in(directory: &std::path::Path) {
+fn cleanup_media_exports_in(directory: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -112,8 +220,8 @@ fn cleanup_animation_exports_in(directory: &std::path::Path) {
 }
 
 #[cfg(target_os = "ios")]
-pub(crate) fn cleanup_stale_animation_exports() {
-    cleanup_animation_exports_in(&std::env::temp_dir());
+pub(crate) fn cleanup_stale_media_exports() {
+    cleanup_media_exports_in(&std::env::temp_dir());
 }
 
 #[cfg(any(target_os = "ios", test))]
@@ -394,6 +502,14 @@ async fn platform_save_video(_app: tauri::AppHandle, _url: String) -> Result<(),
     Err("saving videos is available in the mobile builds".to_string())
 }
 
+/// Export a print through `POST /api/gallery/export/:filename` and hand the
+/// result to the phone's own share sheet.
+///
+/// This covers every container the phone exports — a turntable or clip
+/// animation and, since the mesh family shipped, the geometry transcodes of a
+/// stored GLB. The command keeps its original `share_exported_animation` name
+/// because the Android plugin's permission contract is generated from it; the
+/// Rust behind it is container-agnostic.
 #[tauri::command]
 pub async fn share_exported_animation(
     window: tauri::WebviewWindow,
@@ -404,7 +520,7 @@ pub async fn share_exported_animation(
     reuse_key: String,
 ) -> Result<String, String> {
     validate_video_url(&url)?;
-    let filename = sanitize_animation_filename(&filename)?;
+    let (filename, media_kind) = sanitize_export_filename(&filename)?;
 
     #[cfg(target_os = "ios")]
     {
@@ -414,7 +530,7 @@ pub async fn share_exported_animation(
         use objc2_ui_kit::{UIActivityType, UIActivityViewController, UIViewController};
         use std::io::Write;
 
-        let staged = if let Some(cached) = take_cached_animation(&reuse_key) {
+        let staged = if let Some(cached) = take_cached_export(&reuse_key) {
             cached
         } else {
             let unique = std::time::SystemTime::now()
@@ -427,9 +543,9 @@ pub async fn share_exported_animation(
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(600))
                     .build()
-                    .map_err(|error| format!("could not prepare the animation export: {error}"))?;
+                    .map_err(|error| format!("could not prepare the export: {error}"))?;
                 let body = serde_json::to_vec(&request)
-                    .map_err(|error| format!("could not encode the animation options: {error}"))?;
+                    .map_err(|error| format!("could not encode the export options: {error}"))?;
                 let mut request = client
                     .post(&url)
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -441,34 +557,36 @@ pub async fn share_exported_animation(
                     .send()
                     .await
                     .and_then(reqwest::Response::error_for_status)
-                    .map_err(|error| format!("could not export the animation: {error}"))?;
+                    .map_err(|error| format!("could not export this print: {error}"))?;
                 let mut file = std::fs::File::create(&staged)
-                    .map_err(|error| format!("could not stage the animation export: {error}"))?;
-                let mut header = Vec::with_capacity(12);
+                    .map_err(|error| format!("could not stage the export: {error}"))?;
+                let mut header = Vec::with_capacity(EXPORT_HEADER_PROBE_BYTES);
                 let mut written = 0_u64;
                 const MAX_EXPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
                 while let Some(chunk) = response
                     .chunk()
                     .await
-                    .map_err(|error| format!("could not download the animation export: {error}"))?
+                    .map_err(|error| format!("could not download the export: {error}"))?
                 {
                     written = written.saturating_add(chunk.len() as u64);
                     if written > MAX_EXPORT_BYTES {
-                        return Err(
-                            "the animation export exceeds the 2 GB iPhone limit".to_string()
-                        );
+                        return Err("the export exceeds the 2 GB iPhone limit".to_string());
                     }
-                    if header.len() < 12 {
-                        let remaining = 12 - header.len();
+                    if header.len() < EXPORT_HEADER_PROBE_BYTES {
+                        let remaining = EXPORT_HEADER_PROBE_BYTES - header.len();
                         header.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                     }
-                    file.write_all(&chunk).map_err(|error| {
-                        format!("could not stage the animation export: {error}")
-                    })?;
+                    file.write_all(&chunk)
+                        .map_err(|error| format!("could not stage the export: {error}"))?;
                 }
                 file.sync_all()
-                    .map_err(|error| format!("could not finish the animation export: {error}"))?;
-                validate_animation(&header, &filename)?;
+                    .map_err(|error| format!("could not finish the export: {error}"))?;
+                if !media_kind.matches(&header, written) {
+                    return Err(
+                        "the exported file does not match the format its filename claims"
+                            .to_string(),
+                    );
+                }
                 Ok::<(), String>(())
             }
             .await;
@@ -546,7 +664,7 @@ pub async fn share_exported_animation(
             }
         });
         if let Err(error) = schedule {
-            cache_animation(reuse_key, staged);
+            cache_export(reuse_key, staged);
             return Err(format!("could not open the iOS share sheet: {error}"));
         }
         let received = tauri::async_runtime::spawn_blocking(move || {
@@ -562,7 +680,7 @@ pub async fn share_exported_animation(
         if result.as_deref() == Ok("shared") {
             let _ = std::fs::remove_file(staged);
         } else {
-            cache_animation(reuse_key, staged);
+            cache_export(reuse_key, staged);
         }
         result
     }
@@ -572,18 +690,21 @@ pub async fn share_exported_animation(
         #[cfg(target_os = "android")]
         {
             use tauri::Manager;
-            use tauri_plugin_mold_mobile_native::{MoldMobileNativeExt, ShareAnimationRequest};
+            use tauri_plugin_mold_mobile_native::{MoldMobileNativeExt, ShareExportRequest};
 
             let request_json = serde_json::to_string(&request)
-                .map_err(|error| format!("could not encode the animation options: {error}"))?;
+                .map_err(|error| format!("could not encode the export options: {error}"))?;
             return window
                 .app_handle()
                 .mold_mobile_native()
-                .share_exported_animation(ShareAnimationRequest {
+                .share_exported_media(ShareExportRequest {
                     url,
                     api_key,
                     request_json,
                     filename,
+                    // Android names the type its chooser advertises; the
+                    // allowlist above is the single authority on it.
+                    mime_type: media_kind.mime().to_string(),
                     reuse_key,
                 })
                 .await
@@ -592,8 +713,8 @@ pub async fn share_exported_animation(
 
         #[cfg(not(target_os = "android"))]
         {
-            let _ = (window, api_key, request, filename, reuse_key);
-            Err("sharing animations is available in the mobile builds".to_string())
+            let _ = (window, api_key, request, filename, media_kind, reuse_key);
+            Err("sharing exports is available in the mobile builds".to_string())
         }
     }
 }
@@ -629,18 +750,94 @@ mod tests {
         assert!(super::validate_video_url("javascript:alert(1)").is_err());
     }
 
-    #[test]
-    fn animation_shares_require_matching_safe_formats() {
-        assert!(super::validate_animation(b"GIF89a rest", "clip.gif").is_ok());
-        assert!(super::validate_animation(b"\x89PNG\r\n\x1a\nrest", "clip.png").is_ok());
-        assert!(super::validate_animation(b"RIFFxxxxWEBPrest", "clip.webp").is_ok());
-        assert!(super::validate_animation(b"GIF89a rest", "clip.png").is_err());
-        assert!(super::validate_animation(b"GIF89a rest", "clip.mp4").is_err());
-        assert!(super::validate_animation(b"GIF89a rest", "../clip.gif").is_ok());
+    /// The share path only ever sees a leading probe of the download, so this
+    /// mirrors it: the whole slice is the head, and its length is the export's
+    /// length.
+    fn validate(bytes: &[u8], filename: &str) -> Result<String, String> {
+        let (filename, kind) = super::sanitize_export_filename(filename)?;
+        if kind.matches(bytes, bytes.len() as u64) {
+            Ok(filename)
+        } else {
+            Err("format mismatch".to_string())
+        }
+    }
+
+    /// A binary STL of `triangles` facets: an 80-byte comment header, the
+    /// little-endian facet count, then 50 bytes each.
+    fn binary_stl(triangles: u32) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 80];
+        bytes.extend_from_slice(&triangles.to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0_u8, 50 * triangles as usize));
+        bytes
     }
 
     #[test]
-    fn startup_cleanup_removes_only_staged_animation_exports() {
+    fn animation_shares_require_matching_safe_formats() {
+        assert!(validate(b"GIF89a rest", "clip.gif").is_ok());
+        assert!(validate(b"\x89PNG\r\n\x1a\nrest", "clip.png").is_ok());
+        assert!(validate(b"RIFFxxxxWEBPrest", "clip.webp").is_ok());
+        assert!(validate(b"GIF89a rest", "clip.png").is_err());
+        assert!(validate(b"GIF89a rest", "clip.mp4").is_err());
+        assert!(validate(b"GIF89a rest", "../clip.gif").is_ok());
+    }
+
+    /// The geometry transcodes `POST /api/gallery/export/:filename` returns
+    /// for a stored GLB reach the native share sheet exactly like a turntable
+    /// does.
+    #[test]
+    fn mesh_shares_accept_every_advertised_geometry_container() {
+        assert!(validate(b"glTF\x02\x00\x00\x00rest", "armchair.glb").is_ok());
+        assert!(validate(b"# Exported by mold\nv 0 0 0\n", "armchair.obj").is_ok());
+        assert!(validate(b"\n\nmtllib armchair.mtl\n", "armchair.obj").is_ok());
+        assert!(validate(b"vn 0 1 0\n", "armchair.obj").is_ok());
+        assert!(validate(b"solid armchair\nfacet normal 0 0 1\n", "armchair.stl").is_ok());
+        assert!(validate(&binary_stl(3), "armchair.stl").is_ok());
+        assert!(validate(b"ply\nformat binary_little_endian 1.0\n", "armchair.ply").is_ok());
+        assert!(validate(b"ply\r\nformat ascii 1.0\r\n", "armchair.ply").is_ok());
+        assert!(validate(b"glTF\x02\x00\x00\x00rest", "../meshes/armchair.glb").is_ok());
+    }
+
+    /// The allowlist stays tight, and the bytes have to agree with the name:
+    /// neither a container the phone never exports nor a mislabelled download
+    /// reaches the share sheet.
+    #[test]
+    fn mesh_shares_reject_unknown_containers_and_mismatched_bytes() {
+        assert!(validate(b"# Exported by mold\n", "armchair.txt").is_err());
+        assert!(validate(b"glTF\x02\x00\x00\x00", "armchair.mp4").is_err());
+        assert!(validate(b"glTF\x02\x00\x00\x00", "armchair").is_err());
+        assert!(validate(b"GIF89a rest", "armchair.stl").is_err());
+        assert!(validate(b"GIF89a rest", "armchair.ply").is_err());
+        assert!(validate(b"GIF89a rest", "armchair.glb").is_err());
+        assert!(validate(b"GIF89a rest", "armchair.obj").is_err());
+        assert!(validate(b"\x89PNG\r\n\x1a\nrest", "armchair.glb").is_err());
+        // A truncated binary STL claims more facets than it carries.
+        let mut short = binary_stl(3);
+        short.truncate(short.len() - 1);
+        assert!(validate(&short, "armchair.stl").is_err());
+    }
+
+    #[test]
+    fn every_shareable_container_names_its_own_media_type() {
+        let mime = |filename: &str| super::sanitize_export_filename(filename).unwrap().1.mime();
+        assert_eq!(mime("clip.gif"), "image/gif");
+        assert_eq!(mime("clip.png"), "image/png");
+        assert_eq!(mime("clip.webp"), "image/webp");
+        assert_eq!(mime("armchair.glb"), "model/gltf-binary");
+        assert_eq!(mime("armchair.obj"), "model/obj");
+        assert_eq!(mime("armchair.stl"), "model/stl");
+        assert_eq!(mime("armchair.ply"), "application/x-ply");
+    }
+
+    /// Binary STL states its facet count at offset 80 and carries no
+    /// signature, so a probe shorter than its 84-byte header could not tell a
+    /// real export from an arbitrary download.
+    #[test]
+    fn the_header_probe_reaches_the_binary_stl_facet_count() {
+        assert!(super::EXPORT_HEADER_PROBE_BYTES >= 84);
+    }
+
+    #[test]
+    fn startup_cleanup_removes_only_staged_media_exports() {
         let directory =
             std::env::temp_dir().join(format!("mold-media-cleanup-test-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -649,7 +846,7 @@ mod tests {
         std::fs::write(&staged, b"GIF89a").unwrap();
         std::fs::write(&unrelated, b"GIF89a").unwrap();
 
-        super::cleanup_animation_exports_in(&directory);
+        super::cleanup_media_exports_in(&directory);
 
         assert!(!staged.exists());
         assert!(unrelated.exists());

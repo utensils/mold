@@ -20,6 +20,7 @@ import {
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
+import { promptRecipeFromForm } from "../lib/promptRecipe";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
@@ -38,6 +39,7 @@ import {
   conditioningFingerprint,
   defaultRemixDimensions,
   promptSource,
+  promptTransformBlockedReason,
   remixDimensionsForTask,
   validateRemixVariants,
   DEFAULT_REMIX_VARIATIONS,
@@ -298,7 +300,9 @@ import {
   mobileMediaBudgetValidationError,
   sourceConditioningValidationError,
 } from "../lib/generateValidation";
-import { blobToBase64, isStillImageFile } from "../lib/image";
+import { base64ToDataUrl, blobToBase64, isStillImageFile } from "../lib/image";
+import { meshStatsLabel } from "@studio/lib/meshControls";
+import { isMobileMeshResult, meshResultBlob } from "./meshResult";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import { resolveExpansionRoute } from "@studio/lib/expansionRouting";
 import {
@@ -459,6 +463,7 @@ import MobileBatchControl from "./MobileBatchControl.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileFileUnder from "./MobileFileUnder.vue";
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
@@ -1688,9 +1693,29 @@ watch(
     if (automatic) void refreshRoutingModels();
   },
 );
+/**
+ * Why Expand and Remix are unavailable for the selected recipe, or `null`
+ * when they are available.
+ *
+ * The ADVERTISED recipe answers: a family with no text encoder anywhere
+ * (Hunyuan3D) reports `capabilities.prompt.mode: "ignored"`, and a rewritten
+ * prompt cannot change a render nothing encodes. The host answers a transform
+ * for such a recipe with exactly ONE result — the guide's image-preparation
+ * advice — rather than N variants, so every control here is disabled with the
+ * reason instead of spending a round trip to learn it. `caps.promptMode` is
+ * the shared projection of that mode (`generationCapabilitiesForFamily`), so
+ * the composer, the programmatic entry points, and the pull offer below
+ * cannot drift apart or carry a family allowlist of their own.
+ */
+const promptTransformBlocked = computed(() => promptTransformBlockedReason(caps.value.promptMode));
+/** The host will answer a transform for this recipe with one advisory result. */
+const promptIgnored = computed(() => promptTransformBlocked.value !== null);
 const expansionMissingModel = computed(() => {
   const recovery = expansionRecovery.value;
-  return recovery ? { model: recovery.model, route: recovery.route, host: recovery.host } : null;
+  // Never offer to install an expander for a recipe that reads no prompt:
+  // the rewrite it would unlock changes nothing about the render.
+  if (!recovery || promptTransformBlocked.value) return null;
+  return { model: recovery.model, route: recovery.route, host: recovery.host };
 });
 const preparedStaleReasons = computed(() => {
   const batch = preparedBatch.value;
@@ -2140,8 +2165,20 @@ const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(f
 // Desktop parity: a conditioned LTX-2 render may go out undescribed, so the
 // Develop button and the pre-submit guard both stop demanding a prompt the
 // host would accept. The placeholder carries the same news.
-const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
-const promptFieldPlaceholder = computed(() => promptPlaceholder(form, "Describe the print…"));
+// The ADVERTISED recipe answers the prompt question — a family rule cannot
+// see `ignored`, which is what a checkpoint with no text encoder anywhere
+// (Hunyuan3D) reports, and reading the form alone would leave Develop
+// disabled forever on a model whose prompt the host never encodes.
+const promptConditioning = computed(() => ({
+  ...form,
+  recipe: effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
+}));
+const promptMissing = computed(
+  () => promptRequired(promptConditioning.value) && !form.prompt.trim(),
+);
+const promptFieldPlaceholder = computed(() =>
+  promptPlaceholder(promptConditioning.value, "Describe the print…"),
+);
 const developBlockerReason = computed<string | null>(() => {
   // An empty prompt is self-evident beside the composer and does not warrant
   // a persistent banner. Everything outside the visible composer names the
@@ -3108,7 +3145,51 @@ const latestResultJob = computed(() => {
   return null;
 });
 const resultUrl = computed(() => latestResultJob.value?.resultUrl ?? "");
-const resultIsVideo = computed(() => latestResultJob.value?.result?.format === "mp4");
+// A mesh is probed BEFORE every other kind: it carries neither frames nor
+// samples, so a wider test running first would classify glTF bytes as a still
+// and try to draw them into an `<img>`.
+const resultIsMesh = computed(() => isMobileMeshResult(latestResultJob.value?.result ?? null));
+const resultIsVideo = computed(
+  () => !resultIsMesh.value && latestResultJob.value?.result?.format === "mp4",
+);
+/** The rendered poster PNG — the only raster a mesh print has. */
+const resultPoster = computed(() => {
+  const poster = latestResultJob.value?.result?.mesh_poster;
+  return poster ? base64ToDataUrl(poster, "image/png") : "";
+});
+const resultMeshStats = computed(() => {
+  const result = latestResultJob.value?.result;
+  if (!result) return "";
+  return meshStatsLabel(
+    result.mesh_vertices,
+    result.mesh_faces,
+    result.mesh_bounds_min,
+    result.mesh_bounds_max,
+  );
+});
+/**
+ * A completion that carried its glTF inline is shown from those exact bytes;
+ * a metadata-only one is streamed from the host's gallery like any other
+ * saved print. The object URL is released the moment the shown print changes
+ * and again at teardown, so a rail of 3-D results cannot leak meshes.
+ */
+const resultMeshBlobUrl = ref("");
+watch(
+  () => (resultIsMesh.value ? (latestResultJob.value?.result?.image ?? "") : ""),
+  (base64) => {
+    if (resultMeshBlobUrl.value) {
+      revokeObjectUrl(resultMeshBlobUrl.value);
+      resultMeshBlobUrl.value = "";
+    }
+    const blob = meshResultBlob(base64);
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    objectUrls.add(url);
+    resultMeshBlobUrl.value = url;
+  },
+  { immediate: true },
+);
+const resultMeshSrc = computed(() => resultMeshBlobUrl.value || resultUrl.value);
 const generatedPreviewItem = computed<GalleryImage | null>(() => {
   const job = latestResultJob.value;
   const result = job?.result;
@@ -3128,6 +3209,21 @@ const generatedPreviewItem = computed<GalleryImage | null>(() => {
     },
   };
 });
+/**
+ * The containers the OWNING machine says it can transcode a stored mesh into.
+ * Read from that host's `/api/capabilities.mesh.export_formats` and never from
+ * a client constant, so a machine that adds a container advertises it and one
+ * that has none offers nothing.
+ */
+function meshExportFormatsForHost(hostId: string | null | undefined): string[] {
+  return hostId ? (serverCapabilities[hostId]?.mesh?.export_formats ?? []) : [];
+}
+const selectedPrintMeshExportFormats = computed(() =>
+  meshExportFormatsForHost(selectedPrint.value?.hostId),
+);
+const generatedMeshExportFormats = computed(() =>
+  meshExportFormatsForHost(latestResultJob.value?.hostId),
+);
 const generatedPreviewHost = computed(() => {
   const job = latestResultJob.value;
   return hosts.value.find((candidate) => candidate.id === job?.hostId) ?? null;
@@ -5583,7 +5679,9 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     task: expansionTaskForRequest(form.family, request),
-    context: expansionContextForRequest(form.family, request),
+    // The resolved recipe is the one authority on whether the model reads
+    // its prompt; the server derives the mode itself when it is absent.
+    context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
@@ -5817,7 +5915,10 @@ function commitExpandedPrompts(
   replacePrepared: boolean,
   focus: ReplacementFocusOwnership,
 ): void {
-  if (inputs.requestedCount === 1) {
+  // One result answers a Batch-1 request and is also what a prompt-ignoring
+  // recipe returns for any requested count, so the count actually received
+  // decides the shape — a reviewed batch of one is not a thing.
+  if (inputs.requestedCount === 1 || prompts.length === 1) {
     remixUndo.value = null;
     appliedRemix.value = null;
     quickExpansionOriginal.value = inputs.sourcePrompt;
@@ -5855,10 +5956,39 @@ function commitExpandedPrompts(
   if (replacePrepared) restoreReplacementFocus(focus, "prepared");
 }
 
+/**
+ * Refuse a prompt transform the selected recipe cannot use, naming the reason
+ * where the user is already looking. Returns `true` when the caller must stop
+ * — no request is built, so nothing reaches the host.
+ */
+function refusePromptTransform(): boolean {
+  const reason = promptTransformBlocked.value;
+  if (!reason) return false;
+  expansionError.value = reason;
+  setGenerationStatus(reason, true);
+  return true;
+}
+
+/**
+ * `validateExpandedPrompts` with the recipe's prompt-ignored allowance: a
+ * recipe that ignores the prompt is answered with exactly ONE result (the
+ * guide's image-preparation advice) whatever count was requested, and the
+ * shared validator accepts that single answer while every other short answer
+ * still fails naming the count that was requested.
+ */
+function validateExpandedPromptsForRecipe(
+  prompts: readonly string[],
+  expected: number,
+  promptIgnoredAnswer: boolean,
+): string[] {
+  return validateExpandedPrompts(prompts, expected, { promptIgnored: promptIgnoredAnswer });
+}
+
 async function expandForCurrentBatch(
   replacePrepared = false,
   routeOverride: HostRoute | null = null,
 ): Promise<void> {
+  if (refusePromptTransform()) return;
   const count = effectiveBatchSize.value;
   const inputs = expansionInputs(count);
   const host = routeOverride
@@ -5908,7 +6038,7 @@ async function expandForCurrentBatch(
       expandOn.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
-    const prompts = validateExpandedPrompts(response.expanded, count);
+    const prompts = validateExpandedPromptsForRecipe(response.expanded, count, promptIgnored.value);
     const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
     const current = expansionInputs(count);
     if (
@@ -5970,6 +6100,7 @@ async function remixCurrent(
   routeOverride: HostRoute | null = null,
   replacePrepared = false,
 ): Promise<void> {
+  if (refusePromptTransform()) return;
   const { prepared, remix, visiblePrompt } = remixInputs();
   const route = routeOverride ?? selectedRoute.value;
   const host = route ? hosts.value.find((candidate) => candidate.id === route.hostId) : undefined;
@@ -6023,7 +6154,9 @@ async function remixCurrent(
     ) {
       throw new Error("The host returned Remix provenance for a different source prompt.");
     }
-    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
+    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS, {
+      promptIgnored: promptIgnored.value,
+    });
     const current = remixInputs(remix.sourceKind);
     const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
     if (
@@ -6244,7 +6377,7 @@ function restoreQuickExpansion(): void {
 }
 
 async function developExpandedAnyway(): Promise<void> {
-  if (!quickExpansionSnapshot.value) return;
+  if (!quickExpansionSnapshot.value || refusePromptTransform()) return;
   submissionAttempts.invalidate();
   quickExpansionSnapshot.value = null;
   expansionError.value = "";
@@ -6252,7 +6385,13 @@ async function developExpandedAnyway(): Promise<void> {
 }
 
 async function reexpandAndDevelop(): Promise<void> {
-  if (!quickExpansionSnapshot.value || quickExpansionOriginal.value === null) return;
+  if (
+    !quickExpansionSnapshot.value ||
+    quickExpansionOriginal.value === null ||
+    refusePromptTransform()
+  ) {
+    return;
+  }
   restoreQuickExpansion();
   await nextTick();
   await expandForCurrentBatch();
@@ -6367,7 +6506,7 @@ function discardPreparedBatch(): void {
 
 async function pullExpansionModel(): Promise<void> {
   const recovery = expansionRecovery.value;
-  if (!recovery || expansionRunning.value) return;
+  if (!recovery || expansionRunning.value || refusePromptTransform()) return;
   releaseExpansionPullLease(recovery);
   const stale = recoveryStaleReason(recovery);
   if (stale) {
@@ -6444,7 +6583,15 @@ async function pullExpansionModel(): Promise<void> {
 async function retryExpansionAfterPull(): Promise<void> {
   const recovery = expansionRecovery.value;
   const attempt = expansionPullAttempt.value;
-  if (!recovery || !attempt || attempt.recoveryId !== recovery.id || expansionRunning.value) return;
+  if (
+    !recovery ||
+    !attempt ||
+    attempt.recoveryId !== recovery.id ||
+    expansionRunning.value ||
+    refusePromptTransform()
+  ) {
+    return;
+  }
   const stale = recoveryStaleReason(recovery);
   if (stale) {
     markExpansionRecoveryStale(recovery, stale);
@@ -6500,7 +6647,9 @@ async function retryExpansionAfterPull(): Promise<void> {
     if (recovery.remix) {
       if (!("variants" in response))
         throw new Error("The host returned an invalid Remix response.");
-      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
+      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS, {
+        promptIgnored: promptIgnored.value,
+      });
       commitRemixReview(
         { ...recovery.inputs },
         {
@@ -6516,7 +6665,11 @@ async function retryExpansionAfterPull(): Promise<void> {
     } else {
       if (!("expanded" in response))
         throw new Error("The host returned an invalid expansion response.");
-      const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
+      const prompts = validateExpandedPromptsForRecipe(
+        response.expanded,
+        recovery.inputs.requestedCount,
+        promptIgnored.value,
+      );
       commitExpandedPrompts(
         { ...recovery.inputs },
         { ...recovery.route, target: { ...recovery.route.target } },
@@ -7343,7 +7496,10 @@ async function refreshDurableGenerationResultUrl(job: Job, force = false): Promi
     const url = await streamableMediaUrl(galleryMediaPath(filename, "host"), {
       target: mobileHostTarget(host),
       cacheKey: host.id,
-      allowLegacyBlob: result.format !== "mp4",
+      // A mesh, like a clip, is fetched whole by its own viewer and must not
+      // take the legacy whole-file blob path — the same rule the gallery
+      // viewer applies.
+      allowLegacyBlob: result.format !== "mp4" && !isMobileMeshResult(result),
     });
     const previousUrl = job.resultUrl;
     if (previousUrl?.startsWith("blob:") && previousUrl !== url) {
@@ -11919,6 +12075,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :remix-source="remixSource"
               :remix-dimensions="remixDimensions"
               :task="currentExpansionTask"
+              :blocked-reason="promptTransformBlocked"
               @expand="expandForCurrentBatch()"
               @remix="remixCurrent()"
               @undo="undoPromptPreparation"
@@ -11933,6 +12090,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             >
               <div class="mobile-generate-validation-copy">
                 <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
+                <p v-if="promptTransformBlocked" data-test="mobile-quick-transform-blocked">
+                  {{ promptTransformBlocked }}
+                </p>
                 <button
                   class="mobile-error-copy"
                   type="button"
@@ -11961,7 +12121,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   class="primary-button mobile-touch-action"
                   type="button"
                   data-test="mobile-reexpand-and-develop"
-                  :disabled="expansionRunning || preparedSubmitting"
+                  :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
                   @click="recoverQuickPromptTransform"
                 >
                   {{ appliedRemix ? "Re-remix" : "Re-expand and Develop" }}
@@ -11970,7 +12130,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   class="secondary-button mobile-touch-action"
                   type="button"
                   data-test="mobile-develop-expanded-anyway"
-                  :disabled="expansionRunning || preparedSubmitting"
+                  :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
                   @click="developExpandedAnyway"
                 >
                   Develop anyway
@@ -12036,6 +12196,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :stale-reasons="remixStaleReasons"
               :running="expansionRunning"
               :error="expansionMissingModel ? '' : expansionError"
+              :blocked-reason="promptTransformBlocked"
               @toggle="toggleRemixVariant"
               @edit="editRemixVariant"
               @reremix="remixCurrent()"
@@ -12050,6 +12211,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :preparing="expansionRunning"
               :error="expansionMissingModel ? '' : expansionError"
               :submitting="preparedSubmitting"
+              :blocked-reason="promptTransformBlocked"
               @edit="editPreparedPrompt"
               @remove="removePreparedPrompt"
               @collapse="collapsePreparedBatch"
@@ -12308,8 +12470,34 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 </button>
               </template>
             </ErrorNotice>
+            <!-- 3-D lands first: a mesh carries neither frames nor samples,
+                 so any wider arm above it would draw glTF into an <img>. -->
+            <figure
+              v-if="resultIsMesh && resultMeshSrc"
+              class="result-mesh"
+              data-test="mobile-generated-mesh"
+            >
+              <MeshViewer
+                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+                class="result-media"
+                :src="resultMeshSrc"
+                :poster="resultPoster"
+                :alt="latestResultJob?.prompt || 'Generated 3-D print'"
+                auto-rotate
+                expandable
+                @ready="generatedMediaReady"
+                @fail="recoverGeneratedMedia"
+              />
+              <figcaption
+                v-if="resultMeshStats"
+                class="status-line"
+                data-test="mobile-generated-mesh-stats"
+              >
+                {{ resultMeshStats }}
+              </figcaption>
+            </figure>
             <video
-              v-if="resultUrl && resultIsVideo"
+              v-else-if="resultUrl && resultIsVideo"
               :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
               class="result-media"
               :src="resultUrl"
@@ -13478,6 +13666,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :has-next="selectedPrintIndex >= 0 && selectedPrintIndex < gallery.length - 1"
       :organization="selectedPrintOrganization ?? null"
       :organize-enabled="libraryOrganizeEnabled"
+      :mesh-export-formats="selectedPrintMeshExportFormats"
       :upscale-enabled="canUpscalePrint(selectedPrint)"
       :trashed="selectedPrintTrashed"
       :organizing="organizationBusy"
@@ -13522,8 +13711,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :target="generatedPreviewTarget"
       :cache-key="latestResultJob?.hostId ?? 'generated'"
       :host-name="latestResultJob?.hostLabel ?? selectedHost?.name ?? 'Mold host'"
-      :thumbnail-url="resultUrl"
-      :media-url-override="resultUrl"
+      :thumbnail-url="resultPoster || resultUrl"
+      :media-url-override="resultIsMesh ? resultMeshSrc : resultUrl"
+      :mesh-export-formats="generatedMeshExportFormats"
       :export-enabled="generatedPreviewHost !== null"
       :upscale-enabled="generatedUpscalePrint !== null"
       :generation-announcement="generationAnnouncement"

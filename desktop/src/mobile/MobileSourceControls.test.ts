@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../lib/api/types";
 import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValidation";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
@@ -689,6 +690,54 @@ describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
     const wrapper = mount(MobileSourceControls, { props: { form, model } });
     expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
     expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(true);
+  });
+});
+
+/**
+ * A canvasless (3-D) recipe fits its source to nothing: there is no canvas to
+ * crop, pad or upscale toward, so the phone must not offer a fit policy —
+ * `buildRequest` records none for a mesh print either. Strength and the mask
+ * follow the same recipe, which refuses both.
+ */
+describe("MobileSourceControls on a canvasless recipe", () => {
+  function meshForm(): GenerateForm {
+    const form = formFor("hunyuan3d");
+    form.model = "hunyuan3d-mini-turbo:fp16";
+    form.sourceImage = "c291cmNl";
+    form.sourceImageName = "armchair.png";
+    return form;
+  }
+
+  const meshModel = {
+    name: "hunyuan3d-mini-turbo:fp16",
+    family: "hunyuan3d",
+    source_image: "required",
+    generation_profile: {
+      schema_version: 1,
+      profile_id: "hunyuan3d.mini",
+      profile_hash: "hunyuan3d-mini-hash",
+      default_recipe_id: "default",
+      recipes: [hunyuan3dRecipe()],
+    },
+  } as ModelEntry;
+
+  it("offers the source well but no fit policy, strength, or mask", () => {
+    const form = meshForm();
+    const wrapper = mount(MobileSourceControls, { props: { form, model: meshModel } });
+
+    expect(wrapper.find("[data-test='mobile-source-preview']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-source-fit']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-strength']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-mask-well']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Source fit");
+  });
+
+  it("still offers the fit policy on a raster recipe", () => {
+    const form = formFor("sdxl");
+    form.sourceImage = "c291cmNl";
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+
+    expect(wrapper.find("[data-test='mobile-source-fit']").exists()).toBe(true);
   });
 });
 

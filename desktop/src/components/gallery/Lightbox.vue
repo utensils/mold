@@ -40,6 +40,11 @@ import {
 import type { TagCount } from "@studio/lib/api/galleryOrganization";
 import { saveGalleryMedia, showSavedMediaToast } from "../../lib/mediaSave";
 import { suggestedSaveName } from "../../lib/gallery/saveName";
+import {
+  meshAnimationExportFormats,
+  meshExportFilename,
+  meshFileExportFormats,
+} from "../../lib/gallery/meshExport";
 
 /** The print's organization across every copy (the Library's
  *  `organizationOf(entry)` union). Optional so callers that predate the
@@ -94,9 +99,14 @@ const props = withDefaults(
     collectionCounts?: ((slug: string) => number) | null;
     /** Host-merged tags for the tag editor's suggestions. */
     tagSuggestions?: TagCount[];
+    /** `capabilities.mesh.export_formats` of the host that HOLDS this print.
+     *  GLB is the only stored form; every entry here is a transcode that host
+     *  offers, so the menu is never a client constant. */
+    meshExportFormats?: string[];
   }>(),
   {
     mesh: false,
+    meshExportFormats: () => [],
     audio: false,
     upscaleEnabled: true,
     source: "host",
@@ -391,6 +401,49 @@ async function saveMedia() {
   } finally {
     saveBusy.value = false;
   }
+}
+
+// ── 3-D exports ─────────────────────────────────────────────────────────────
+// The holding host is the authority on what it can transcode a stored GLB
+// into. Direct containers get one entry each; animated turntables share the
+// export sheet's playback options, so they collapse into one entry that opens
+// it with just those containers.
+const meshFileExports = computed(() =>
+  props.mesh ? meshFileExportFormats(props.meshExportFormats) : [],
+);
+const meshAnimationExports = computed(() =>
+  props.mesh ? meshAnimationExportFormats(props.meshExportFormats) : [],
+);
+
+async function exportMesh(format: string) {
+  if (exportBusy.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const saved = await saveGalleryMedia(
+      props.target,
+      props.item.filename,
+      meshExportFilename(suggestedSaveName({ ...props.item, title: currentTitle.value }), format),
+      { format },
+      fromTrash.value,
+    );
+    showSavedMediaToast(toasts, saved);
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+/** The turntable sheet needs no capability probe: the advertised containers
+ * arrived with the host's own capabilities on connect. */
+function openMeshAnimationExport() {
+  exportError.value = "";
+  exportCapabilities.value = {
+    ...DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+    formats: meshAnimationExports.value,
+  };
+  exportOpen.value = true;
 }
 
 async function openVideoExport() {
@@ -839,7 +892,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </button>
         </div>
         <button
-          v-if="upscaleEnabled && !audio && !trashed"
+          v-if="upscaleEnabled && !audio && !mesh && !trashed"
           type="button"
           data-test="lightbox-upscale"
           class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
@@ -847,6 +900,35 @@ async function performVideoExport(options: VideoExportOptions) {
         >
           {{ video ? "Framewise upscale…" : "Upscale…" }}
         </button>
+        <!-- 3-D transcodes, straight from the holding host's own
+             `mesh.export_formats`. GLB is what is stored; these are made on
+             request. -->
+        <div
+          v-if="meshFileExports.length > 0 || meshAnimationExports.length > 0"
+          class="mt-2 flex flex-wrap gap-2.5"
+          data-test="mesh-exports"
+        >
+          <button
+            v-for="format in meshFileExports"
+            :key="format"
+            type="button"
+            :data-test="`mesh-export-${format}`"
+            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            :disabled="exportBusy"
+            @click="exportMesh(format)"
+          >
+            Export as {{ format.toUpperCase() }}…
+          </button>
+          <button
+            v-if="meshAnimationExports.length > 0"
+            type="button"
+            data-test="mesh-export-animation"
+            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            @click="openMeshAnimationExport"
+          >
+            Export turntable…
+          </button>
+        </div>
         <div class="mt-2 flex gap-2.5">
           <button
             v-if="canExportVideo"

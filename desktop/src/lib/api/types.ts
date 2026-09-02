@@ -15,6 +15,9 @@ import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
+import type { MeshRequestOptions } from "@studio/lib/meshControls";
+
+export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   GalleryCollectionsChangedEvent,
@@ -132,8 +135,23 @@ export interface ExpandCapabilities {
   model?: string | null;
 }
 
+/** `/api/capabilities.mesh` — mirrors `mold_core::types::MeshCapabilities`. */
+export interface MeshServerCapabilities {
+  generation: boolean;
+  formats: string[];
+  /** The export menu is built from THIS list, never a client constant: a
+   * host that adds an animated turntable container advertises it here. */
+  export_formats: string[];
+  textures: boolean;
+}
+
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
+  /** 3-D mesh support (additive; absent on servers that predate it):
+   * whether a mesh family has a runnable engine here, the containers this
+   * host stores (GLB only), the containers `POST /api/gallery/export/:filename`
+   * can transcode a stored mesh into, and whether textures are available. */
+  mesh?: MeshServerCapabilities | null;
   /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
   durable_media?: DurableMediaCapabilities | null;
   video_upscale?: {
@@ -538,6 +556,8 @@ export interface GenerateRequest {
   seed?: number;
   batch_size?: number;
   output_format?: OutputFormat;
+  /** 3-D controls; refused at admission on a recipe with no `mesh` block. */
+  mesh?: MeshRequestOptions | null;
   scheduler?: Scheduler;
   cfg_plus?: boolean;
   /** img2img source, base64 (no data-URI prefix). */
@@ -733,6 +753,17 @@ export interface CompleteEvent {
   audio_duration_ms?: number | null;
   /** Rendered waveform PNG, base64. The only image an audio print has. */
   audio_thumbnail?: string | null;
+  /** Mesh completion. `image` then carries the binary glTF and `format` is
+   * `glb`; probe `mesh_vertices` BEFORE the audio and video fields, since a
+   * mesh has neither samples nor frames. `width`/`height` describe the poster. */
+  mesh_vertices?: number | null;
+  mesh_faces?: number | null;
+  mesh_textured?: boolean;
+  /** Rendered poster PNG, base64 — the only raster a mesh print has. */
+  mesh_poster?: string | null;
+  /** Axis-aligned bounds `[x, y, z]`, carried so a viewer frames a camera. */
+  mesh_bounds_min?: [number, number, number] | null;
+  mesh_bounds_max?: [number, number, number] | null;
   gpu?: number | null;
   /** Gallery filename the server saved this payload under (additive; absent
    * on older servers). Mirrored saves keep it so the local copy and the
@@ -854,6 +885,9 @@ export interface OutputMetadata {
   distill_strength_low?: number | null;
   frames?: number | null;
   fps?: number | null;
+  /** The 3-D controls that shaped a mesh print, RESOLVED (request values or
+   * the engine defaults). Present only on a mesh print (additive). */
+  mesh?: MeshRequestOptions | null;
   /** mold version that produced the print. */
   version?: string | null;
   /** Legacy desktop-only aliases for `frames` / `fps`; never sent by current

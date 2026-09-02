@@ -425,7 +425,9 @@ function clearControl() {
       />
 
       <template v-if="hasSource">
-        <div class="smp__field">
+        <!-- A canvasless recipe (a 3-D mesh) has no canvas to fit onto, and
+             `toRequest` sends no `source_fit` for one. -->
+        <div v-if="!caps.canvasless" class="smp__field">
           <label class="smp__label">Fit to canvas</label>
           <SegmentedControl
             :model-value="fitMode"

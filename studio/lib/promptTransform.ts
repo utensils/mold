@@ -82,11 +82,57 @@ export function defaultRemixDimensions(
   return remixDimensionsForTask(task, styleLocked);
 }
 
+/**
+ * Why Expand and Remix are unavailable for a recipe that IGNORES the prompt
+ * (`capabilities.prompt.mode: "ignored"`): the family has no text encoder,
+ * so a rewritten prompt changes nothing about the render, and the host
+ * answers a transform for such a family with exactly ONE result — the
+ * guide's image-preparation advice — rather than a batch of variants.
+ * Every surface renders this sentence beside the disabled control.
+ */
+export const PROMPT_IGNORED_TRANSFORM_REASON =
+  "This model reads no prompt; prepare the image instead.";
+
+/**
+ * The reason Expand and Remix are disabled for the recipe's prompt mode, or
+ * `null` when they are available. Absent and legacy modes answer `null`:
+ * only a host that advertises `ignored` has said the prompt is not read.
+ */
+export function promptTransformBlockedReason(
+  promptMode: "required" | "optional" | "ignored" | null | undefined,
+): string | null {
+  return promptMode === "ignored" ? PROMPT_IGNORED_TRANSFORM_REASON : null;
+}
+
+export interface TransformCountOptions {
+  /**
+   * The recipe ignores the prompt, so the host answers with ONE result (the
+   * guide's advice) whatever count was requested. A single result is then
+   * accepted instead of failing the batch; any other short answer still is.
+   */
+  promptIgnored?: boolean;
+}
+
+/**
+ * Whether a transform answered `received` results for `expected` requested
+ * ones is complete: exactly the requested count, or the single advisory
+ * answer a prompt-ignoring recipe gets.
+ */
+export function transformCountAccepted(
+  received: number,
+  expected: number,
+  options?: TransformCountOptions,
+): boolean {
+  if (received === expected) return true;
+  return options?.promptIgnored === true && received === 1;
+}
+
 export function validateRemixVariants(
   variants: readonly RemixVariant[],
   expected = DEFAULT_REMIX_VARIATIONS,
+  options?: TransformCountOptions,
 ): RemixVariant[] {
-  if (variants.length !== expected) {
+  if (!transformCountAccepted(variants.length, expected, options)) {
     throw new Error(
       `Expected exactly ${expected} remix variants, but the host returned ${variants.length}.`,
     );

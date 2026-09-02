@@ -34,6 +34,7 @@ import {
   type SequenceSharedParams,
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { cameraMotionMode } from "@studio/lib/cameraMotion";
 import { parseSourceImageCapability } from "@studio/lib/sourceImageCapability";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
@@ -182,8 +183,11 @@ const duration = computed(() => sequenceDuration(stages.value, props.fps, motion
 // The opening image conditions clip 1, and every later clip inherits the
 // previous clip's motion tail — the same handoff extend uses — so a
 // promptless-capable family can render the whole sequence undescribed.
+// The advertised recipe is the authority when the host sends one; the family
+// answers only for a host that predates the field.
 const clipPromptOptional = computed(() =>
   promptOptional({
+    recipe: effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
     family: props.selectedModel?.family ?? null,
     sourceImage: draft.openingImage,
   }),

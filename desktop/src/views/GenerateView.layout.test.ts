@@ -92,8 +92,11 @@ describe("GenerateView layout", () => {
     expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
 
     expect(viewSource).toContain('from "@studio/lib/promptRequirement"');
+    // The recipe rides along: `promptInputForForm` projects the form's
+    // snapshotted `promptMode` back onto the shared rule, so a recipe that
+    // IGNORES the prompt enables Generate with an empty one.
     expect(viewSource).toMatch(
-      /const promptMissing = computed\(\(\) => promptRequired\(form\) && !form\.prompt\.trim\(\)\);/,
+      /const promptMissing = computed\(\s*\(\) => promptRequired\(promptInputForForm\(form\)\) && !form\.prompt\.trim\(\),\s*\);/,
     );
     expect(viewSource).toContain("const generationInputBlockerReason = computed");
     expect(viewSource).toContain("if (generationInputBlockerReason.value ||");
@@ -101,9 +104,9 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain(':disabled-reason="composerBlockerReason"');
   });
 
-  it("softens the blank-canvas guidance when the prompt is optional", () => {
+  it("takes the blank-canvas guidance from the shared prompt rule", () => {
     expect(viewSource).toContain(':guidance="emptyCanvasGuidance"');
-    expect(viewSource).toContain("OPTIONAL_PROMPT_GUIDANCE");
+    expect(viewSource).toContain("promptGuidance(");
   });
 
   it("aspect-fits the settled sequence video inside the canvas instead of clipping it", () => {

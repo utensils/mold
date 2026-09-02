@@ -55,7 +55,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/gallery/source-media/:name/:member`        | key           | Download one exact retained source-media member without exposing a server path or queue-media identity                                                                                                                                                                                                       |
 | `POST`   | `/api/gallery/source-media/:name/reuse-sessions` | key           | Mint a one-time two-minute same-host hydration handle bound to the credential (one anonymous subject on a keyless host), server instance, exact gallery identity, selected members, and canonical target request; pass it only on the next singleton generation admission as `X-Mold-Retained-Media-Session` |
 | `GET`    | `/api/gallery/export-options`                    | key           | Animation and mesh export formats this build can transcode into                                                                                                                                                                                                                                              |
-| `POST`   | `/api/gallery/export/:name`                      | key           | Transcode one gallery MP4 into GIF/APNG/WebP, or one gallery GLB into GLB/OBJ/STL/PLY                                                                                                                                                                                                                        |
+| `POST`   | `/api/gallery/export/:name`                      | key           | Transcode one gallery MP4 into GIF/APNG/WebP, or one gallery GLB into GLB/OBJ/STL/PLY or a turntable GIF/APNG/WebP                                                                                                                                                                                           |
 | `PUT`    | `/api/gallery/import/:name`                      | key           | Stream an already-encoded print plus its metadata into this host's gallery                                                                                                                                                                                                                                   |
 | `POST`   | `/api/gallery/organize`                          | key           | Apply one organization edit (title, favorite, tags, collection) to many prints                                                                                                                                                                                                                               |
 | `POST`   | `/api/gallery/mutations`                         | key           | Replay-safe bulk organization mutation, deduped by operation ID                                                                                                                                                                                                                                              |
@@ -235,7 +235,10 @@ can differ: a client resolves it against the request it is building, so an
 picker; a mesh recipe advertises `resolution.domain: "none"` and zero
 default width and height, exactly as an audio-only recipe does.
 `capabilities.mesh.export_formats` on `GET /api/capabilities` says which
-containers `POST /api/gallery/export/:name` can transcode a stored mesh into.
+containers `POST /api/gallery/export/:name` can turn a stored mesh into: the
+geometry transcodes (`glb`, `obj`, `stl`, `ply`) and the turntable renders
+(`gif`, `apng`, and `webp` on a build with the `webp` feature). A client
+should skip a name it does not know rather than fail the read.
 
 An explicit `output_format` a recipe does not advertise is a `422` at
 admission, named as `requests[N]: output format 'x' is not available for this
@@ -1127,20 +1130,50 @@ advertised as `capabilities.gallery.trash` (`enabled`, `retention_days`).
 ### Export and import
 
 `GET /api/gallery/export-options` reports every format this build can transcode
-into: the animation containers a gallery MP4 re-encodes to (`gif`, `apng`, and
-`webp` when the `webp` feature is on) plus the GIF playback and repeat options,
-and the mesh containers a gallery GLB transcodes to (`glb`, `obj`, `stl`,
-`ply`, which need no encoder feature because they are conversions of geometry
-that already exists).
+into: the animation containers (`gif`, `apng`, and `webp` when the `webp`
+feature is on) plus the GIF playback and repeat options, and the geometry
+containers a gallery GLB transcodes to (`glb`, `obj`, `stl`, `ply`, which need
+no encoder feature because they are conversions of geometry that already
+exists). Each name appears once whatever the source kind.
 
-`POST /api/gallery/export/:name` performs one such transcode and answers with
+`POST /api/gallery/export/:name` performs one such export and answers with
 the bytes as a download (`Content-Disposition: attachment`), never writing
-anything back into the gallery. The SOURCE extension picks the group: a `.mp4`
-takes the animation formats and a `.glb` takes the mesh formats, and crossing
-them is a `422` naming the other side. Exporting a `.glb` as `glb` returns the
-stored bytes unchanged; `obj` is `model/obj`, `stl` is `model/stl`, and `ply`
-is `application/x-ply`. A `.glb` this build's reader does not cover — a foreign
-file dropped into the output directory — is a `422` naming what is
+anything back into the gallery. The SOURCE extension picks what a format
+means: a `.mp4` takes the animation formats only, and asking it for a
+geometry container is a `422` naming the other side. A `.glb` takes both
+groups. Exporting it as `glb` returns the stored bytes unchanged; `obj` is
+`model/obj`, `stl` is `model/stl`, and `ply` is `application/x-ply`. Asking a
+`.glb` for `gif`, `apng` or `webp` renders a **turntable**: the gallery
+poster's own camera, lighting and background swept a full turn around the
+mesh (the first frame is the poster) and encoded by the same encoders a video
+export uses, as `image/gif`, `image/apng` (downloaded as `.png`) or
+`image/webp`. The request body takes the video export's own fields plus two
+of its own:
+
+```json
+{
+  "format": "gif",
+  "playback": "loop",
+  "repeat": "forever",
+  "max_dimension": 512,
+  "frames": 36,
+  "fps": 10
+}
+```
+
+`playback` (`loop` | `bounce`) and `repeat` (`forever` | `once`) are GIF
+contracts exactly as for a video — bounce on `apng` or `webp` is the same
+`422`. `max_dimension` (240 to 2048, default 512) is the square frame edge.
+`frames` (8 to 180, default 36) is how many views are rendered around the
+mesh: a loop renders one full turn whose last frame stops one step short of
+the first, so the wrap is seamless, and a bounce renders half a turn that the
+GIF encoder plays back. `fps` (1 to 30, default 10) is the playback rate; the
+video export's 60 would spin the default sweep in half a second. Each bound
+is a `422` in the same sentence style as `max_dimension`, and a request
+whose frame buffer would exceed the 256 MiB budget the video export also
+holds to is refused before a frame renders, naming `frames` and
+`max_dimension` as the knobs. A `.glb` this build's reader does not cover — a
+foreign file dropped into the output directory — is a `422` naming what is
 unsupported rather than a corrupt download. One export runs at a time per
 server process. `PUT /api/gallery/import/:name` streams an
 already-encoded print into the gallery using a fixed binary envelope —

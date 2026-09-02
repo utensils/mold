@@ -60,6 +60,9 @@ ground and every other prop cropped away.
   (`crop: none` squashes to a square instead, distorting rather than
   cropping); a threshold tuned on one is a fair start on the other, a crop
   is not.
+- The web, desktop, and mobile apps' export menu offers the same OBJ, STL,
+  and PLY geometry exports and the GIF, APNG, and WebP turntables as
+  `mold library export` and the `export_mesh` MCP tool.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.
@@ -78,6 +81,10 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 
 # Export a saved mesh from the gallery as STL, OBJ, or PLY
 mold library export chair.glb --format stl -o chair.stl
+
+# Share a turntable: the poster spun a full turn as an animated GIF (or apng, webp)
+mold library export chair.glb --format gif
+mold library export chair.glb --format gif --playback bounce --repeat once --frames 24
 ```
 
 `--octree`, `--mesh-threshold`, and `--target-faces` are the three mesh

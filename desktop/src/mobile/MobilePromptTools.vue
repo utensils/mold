@@ -19,11 +19,19 @@ const props = withDefaults(
     remixSource?: RemixSourceKind;
     remixDimensions?: RemixDimension[];
     task?: ExpandTask;
+    /**
+     * Why both transforms are unavailable for the selected recipe, or `null`
+     * when they are available. Today the only reason is a recipe that IGNORES
+     * the prompt (no text encoder anywhere in the family), where a rewrite
+     * changes no pixel and the host answers with one advisory result.
+     */
+    blockedReason?: string | null;
   }>(),
   {
     remixSource: "original",
     remixDimensions: () => [],
     task: "text-to-image",
+    blockedReason: null,
   },
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, props.models ?? []);
@@ -116,7 +124,7 @@ watch([() => props.target.baseUrl, () => props.target.apiKey] as const, () => {
         type="button"
         class="secondary-button"
         data-test="mobile-prompt-expand"
-        :disabled="running || blocked || !form.prompt.trim()"
+        :disabled="running || blocked || !!blockedReason || !form.prompt.trim()"
         @click="$emit('expand')"
       >
         <template v-if="form.batchSize > 1">
@@ -132,7 +140,7 @@ watch([() => props.target.baseUrl, () => props.target.apiKey] as const, () => {
         type="button"
         class="secondary-button"
         data-test="mobile-prompt-remix"
-        :disabled="running || blocked || !form.prompt.trim()"
+        :disabled="running || blocked || !!blockedReason || !form.prompt.trim()"
         @click="$emit('remix')"
       >
         {{ running ? "Working…" : "Remix" }}
@@ -158,9 +166,13 @@ watch([() => props.target.baseUrl, () => props.target.apiKey] as const, () => {
       </button>
     </div>
 
+    <p v-if="blockedReason" class="mobile-helper-text" data-test="mobile-prompt-transform-blocked">
+      {{ blockedReason }}
+    </p>
+
     <details class="mobile-remix-options" data-test="mobile-remix-options">
       <summary>{{ sourceLabel }} · {{ remixDimensions.length }} dimensions</summary>
-      <fieldset v-if="hasOriginal" class="mobile-remix-source">
+      <fieldset v-if="hasOriginal" class="mobile-remix-source" :disabled="!!blockedReason">
         <legend>Remix source</legend>
         <label>
           <input
@@ -183,7 +195,7 @@ watch([() => props.target.baseUrl, () => props.target.apiKey] as const, () => {
           Current
         </label>
       </fieldset>
-      <fieldset class="mobile-remix-dimensions">
+      <fieldset class="mobile-remix-dimensions" :disabled="!!blockedReason">
         <legend>Creative dimensions</legend>
         <label v-for="dimension in availableDimensions" :key="dimension">
           <input

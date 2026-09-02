@@ -2,7 +2,12 @@ import type { HostRoute } from "../stores/hosts";
 import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
 import type { ExpandContext, ExpandTask } from "@studio/lib/expandTask";
-import type { RemixDimension, RemixSourceKind } from "@studio/lib/promptTransform";
+import {
+  transformCountAccepted,
+  type RemixDimension,
+  type RemixSourceKind,
+  type TransformCountOptions,
+} from "@studio/lib/promptTransform";
 import type { PromptTransformProvenance } from "./api/types";
 
 export type HostSelectionPolicy = string | null;
@@ -98,9 +103,18 @@ function modelLabel(name: string, labels?: ReadonlyMap<string, string>): string 
  * normalized only after the response has proven it contains exactly the
  * requested number of non-empty prompts. A malformed response never changes
  * the requested batch size on the user's behalf.
+ *
+ * The one exception is a recipe that IGNORES the prompt: the host answers
+ * such a transform with a single advisory result rather than N variations,
+ * so `{ promptIgnored: true }` accepts exactly one — the same rule
+ * `validateRemixVariants` applies, shared through `transformCountAccepted`.
  */
-export function validateExpandedPrompts(prompts: readonly string[], expected: number): string[] {
-  if (prompts.length !== expected) {
+export function validateExpandedPrompts(
+  prompts: readonly string[],
+  expected: number,
+  options?: TransformCountOptions,
+): string[] {
+  if (!transformCountAccepted(prompts.length, expected, options)) {
     throw new Error(
       `Expected exactly ${expected} non-empty prompts, but the host returned ${prompts.length}.`,
     );

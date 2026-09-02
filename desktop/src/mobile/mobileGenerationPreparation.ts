@@ -5,6 +5,7 @@ import {
 } from "@studio/lib/generationProfile";
 import { resolveSourceConditioningTarget } from "@studio/lib/sourceResolution";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import {
   applyMinimaxH3ReferenceCrops,
   emptyMinimaxH3AuthoringState,
@@ -72,6 +73,10 @@ export async function prepareMobileGenerationRequest(
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
   );
+  // The advertised recipe answers whether this render has a pixel canvas at
+  // all; the pre-profile mesh family rule is the fallback for a host that
+  // predates the field — exactly the pairing `buildRequest` uses.
+  const canvasless = draft.recipeCapabilities?.canvasless ?? isMeshFamily(draft.family);
   const preprocessing = {
     ops: services.ops,
     cache: services.cache,
@@ -111,7 +116,12 @@ export async function prepareMobileGenerationRequest(
   } else if (
     capabilities.supportsImg2img &&
     capabilities.sourceImageMode === "single" &&
-    draft.sourceImage
+    draft.sourceImage &&
+    // A canvasless recipe (a 3-D mesh) renders from the photo itself and
+    // advertises a 0×0 canvas, so there is no target to fit toward — running
+    // the ordinary fit would resize the conditioning image to nothing.
+    // `buildRequest` records no `source_fit` for such a request either.
+    !canvasless
   ) {
     const result = await applySourceFitPreprocess(
       {

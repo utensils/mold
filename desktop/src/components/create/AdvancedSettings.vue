@@ -797,36 +797,41 @@ function reset() {
           @update:model-value="form.outputFormat = $event"
         />
 
-        <label class="ms-label ms-label--mt">Exact size</label>
-        <div class="ms-size">
-          <input
-            v-model.number="form.width"
-            type="number"
-            :step="resolutionAlignment"
-            min="64"
-            aria-label="Width"
-            class="ms-input data-mono"
-            @change="snapWidth"
-          />
-          <button
-            type="button"
-            class="ms-size__swap"
-            title="Swap width and height"
-            aria-label="Swap width and height"
-            @click="swapSize"
-          >
-            ⇄
-          </button>
-          <input
-            v-model.number="form.height"
-            type="number"
-            :step="resolutionAlignment"
-            min="64"
-            aria-label="Height"
-            class="ms-input data-mono"
-            @change="snapHeight"
-          />
-        </div>
+        <!-- A canvasless recipe (a 3-D mesh) renders at no pixel size, so
+             there is nothing here to type over — and typing over the
+             recipe's zero canvas is what turns a valid request into a 422. -->
+        <template v-if="!caps.canvasless">
+          <label class="ms-label ms-label--mt">Exact size</label>
+          <div class="ms-size" data-test="advanced-exact-size">
+            <input
+              v-model.number="form.width"
+              type="number"
+              :step="resolutionAlignment"
+              min="64"
+              aria-label="Width"
+              class="ms-input data-mono"
+              @change="snapWidth"
+            />
+            <button
+              type="button"
+              class="ms-size__swap"
+              title="Swap width and height"
+              aria-label="Swap width and height"
+              @click="swapSize"
+            >
+              ⇄
+            </button>
+            <input
+              v-model.number="form.height"
+              type="number"
+              :step="resolutionAlignment"
+              min="64"
+              aria-label="Height"
+              class="ms-input data-mono"
+              @change="snapHeight"
+            />
+          </div>
+        </template>
 
         <template v-if="seedFixed">
           <label class="ms-label ms-label--mt">Fixed seed</label>

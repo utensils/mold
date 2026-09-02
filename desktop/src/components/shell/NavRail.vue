@@ -38,6 +38,7 @@ import { badgeCount } from "../../lib/notifications";
 import { shortcutLabel } from "../../lib/platform";
 import { modelDisplayNameForId } from "../../lib/models";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { isMeshCompletion } from "@studio/lib/meshCompletion";
 import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 import { thumbnailPath } from "../../lib/gallery/media";
 import type { FleetActiveWork } from "@studio/api/activity";
@@ -344,6 +345,14 @@ async function cancelSharedJob(row: FleetActiveWork) {
   }
 }
 
+/** The rendered PNG a finished mesh print carries — probed before every
+ * raster arm, since a mesh has neither frames nor samples to fall through. */
+function meshPosterSrc(job: Job): string {
+  return isMeshCompletion(job.result) && job.result?.mesh_poster
+    ? `data:image/png;base64,${job.result.mesh_poster}`
+    : "";
+}
+
 function selectPrint(job: Job) {
   generation.select(job.clientId);
   draft.stopEditing();
@@ -471,8 +480,18 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
             <span
               class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
             >
+              <!-- A mesh print's saved file is binary glTF: neither the
+                   thumbnail route nor the result URL can be drawn as a
+                   picture, so the rendered poster is its only still. -->
+              <img
+                v-if="meshPosterSrc(row.print)"
+                data-test="rail-mesh-poster"
+                :src="meshPosterSrc(row.print)"
+                alt=""
+                class="h-full w-full object-cover"
+              />
               <AuthedMedia
-                v-if="row.print.status === 'complete' && row.print.result?.filename"
+                v-else-if="row.print.status === 'complete' && row.print.result?.filename"
                 :path="thumbnailPath(row.print.result.filename)"
                 :target="generation.targetForJob(row.print.clientId)"
                 :cache-key="row.print.hostId ?? hosts.primaryHost?.id ?? 'primary'"

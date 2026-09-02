@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPreparedExpansionBatch } from "../lib/preparedExpansion";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 
 const route = {
   hostId: "studio",
@@ -180,5 +181,22 @@ describe("MobilePreparedExpansionBatch", () => {
     await wrapper.setProps({ batch: newer, staleReasons: [] });
     await flushPromises();
     expect(document.activeElement).toBe(outside);
+  });
+
+  it("refuses replacement work once the recipe ignores the prompt", async () => {
+    const wrapper = mountBatch({ blockedReason: PROMPT_IGNORED_TRANSFORM_REASON });
+    const regenerate = wrapper.get('[data-test="mobile-regenerate-prepared"]');
+    expect(regenerate.attributes("disabled")).toBe("");
+    await regenerate.trigger("click");
+    expect(wrapper.emitted("regenerate")).toBeUndefined();
+    expect(wrapper.get('[data-test="mobile-prepared-transform-blocked"]').text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+
+    await wrapper.setProps({ staleReasons: ["Model changed."] });
+    const refresh = wrapper.get('[data-test="mobile-refresh-prepared"]');
+    expect(refresh.attributes("disabled")).toBe("");
+    await refresh.trigger("click");
+    expect(wrapper.emitted("refresh")).toBeUndefined();
   });
 });

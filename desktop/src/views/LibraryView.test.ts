@@ -971,6 +971,43 @@ describe("LibraryView Reuse settings retained source media", () => {
     wrapper.unmount();
   });
 
+  // GLB is the only stored form: OBJ / STL / PLY and any turntable are
+  // transcodes the HOLDING host performs, so the lightbox's export menu is
+  // that host's advertised list and never a client constant.
+  it("hands the Lightbox the holding host's own mesh export formats", async () => {
+    const mesh: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-mesh.glb",
+      format: "glb",
+      timestamp: 4,
+    };
+    const { wrapper } = await mountView(
+      mesh,
+      () => {
+        useHostsStore().capabilities["plato-7680"] = {
+          mesh: { generation: true, formats: ["glb"], export_formats: ["obj", "stl", "gif"] },
+        } as never;
+      },
+      "/library?print=remote-mesh.glb",
+    );
+    const lightbox = wrapper.getComponent({ name: "Lightbox" });
+    expect(lightbox.props("mesh")).toBe(true);
+    expect(lightbox.props("meshExportFormats")).toEqual(["obj", "stl", "gif"]);
+    wrapper.unmount();
+  });
+
+  it("offers no mesh exports from a host that advertises none", async () => {
+    const mesh: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-mesh.glb",
+      format: "glb",
+      timestamp: 4,
+    };
+    const { wrapper } = await mountView(mesh, undefined, "/library?print=remote-mesh.glb");
+    expect(wrapper.getComponent({ name: "Lightbox" }).props("meshExportFormats")).toEqual([]);
+    wrapper.unmount();
+  });
+
   it("gives the Lightbox's primary button the same retained authority as the menu", async () => {
     // It used to prefill through `composer.set`, which invalidates retained
     // authority — the most visible reuse control silently dropped the

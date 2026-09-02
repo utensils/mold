@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchHistoryFrom } from "../lib/api/history";
 import { newGenerateForm } from "../lib/generateForm";
 import MobilePromptTools from "./MobilePromptTools.vue";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 
 vi.mock("../lib/api/history", () => ({ fetchHistoryFrom: vi.fn() }));
 
@@ -137,5 +138,37 @@ describe("MobilePromptTools", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='mobile-prompt-tools-error']").exists()).toBe(false);
+  });
+
+  it("disables both transforms with the reason a prompt-ignoring recipe gives", async () => {
+    const form = reactive(newGenerateForm());
+    form.prompt = "an armchair shaped like an avocado";
+    const wrapper = mount(MobilePromptTools, {
+      props: {
+        form,
+        target,
+        running: false,
+        canUndo: false,
+        blocked: false,
+        blockedReason: PROMPT_IGNORED_TRANSFORM_REASON,
+      },
+    });
+
+    const expand = wrapper.get("[data-test='mobile-prompt-expand']");
+    const remix = wrapper.get("[data-test='mobile-prompt-remix']");
+    expect(expand.attributes("disabled")).toBe("");
+    expect(remix.attributes("disabled")).toBe("");
+    expect(wrapper.get("[data-test='mobile-prompt-transform-blocked']").text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    await expand.trigger("click");
+    await remix.trigger("click");
+    expect(wrapper.emitted("expand")).toBeUndefined();
+    expect(wrapper.emitted("remix")).toBeUndefined();
+
+    // Recent prompts and Undo are not transforms and stay usable.
+    expect(
+      wrapper.get("[data-test='mobile-prompt-recent']").attributes("disabled"),
+    ).toBeUndefined();
   });
 });

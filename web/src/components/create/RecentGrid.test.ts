@@ -69,6 +69,20 @@ describe("RecentGrid", () => {
     expect(badges).toHaveLength(1);
   });
 
+  // The gallery grid already badges a `.glb` tile 3D; Create's strip is the
+  // same print list and must not leave a mesh looking like a still.
+  it("marks a 3-D print with the same 3D badge the gallery grid uses", () => {
+    const w = mountGrid([
+      entry("chair.glb", "glb"),
+      entry("clip.mp4", "mp4"),
+      entry("still.png"),
+    ]);
+    const mesh = w.findAll("[data-test='recent-mesh-badge']");
+    expect(mesh).toHaveLength(1);
+    expect(mesh[0].text()).toContain("3D");
+    expect(w.findAll("[data-test='recent-video-badge']")).toHaveLength(1);
+  });
+
   it("emits open with the clicked entry", async () => {
     const item = entry("a.png");
     const w = mountGrid([item]);

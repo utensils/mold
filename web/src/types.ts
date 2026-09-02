@@ -15,6 +15,12 @@ import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { WanRecipeState } from "@studio/lib/wanRecipe";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 import type {
+  MeshFormState,
+  MeshRequestOptions,
+} from "@studio/lib/meshControls";
+
+export type { MeshRequestOptions } from "@studio/lib/meshControls";
+import type {
   GalleryOrganizationFields,
   GalleryTrashCapabilities,
 } from "@studio/lib/api/galleryOrganization";
@@ -174,6 +180,9 @@ export interface OutputMetadata {
   distill_strength_low?: number | null;
   frames?: number | null;
   fps?: number | null;
+  /** The 3-D controls that shaped a mesh print, RESOLVED (request values or
+   * the engine defaults). Present only on a mesh print (additive). */
+  mesh?: MeshRequestOptions | null;
   version: string;
 }
 
@@ -235,8 +244,24 @@ export interface GalleryCapabilities {
 }
 
 // Mirror of `mold_core::ServerCapabilities`.
+
+/** `/api/capabilities.mesh` — mirrors `mold_core::types::MeshCapabilities`. */
+export interface MeshServerCapabilities {
+  generation: boolean;
+  formats: string[];
+  /** The export menu is built from THIS list, never a client constant: a
+   * host that adds an animated turntable container advertises it here. */
+  export_formats: string[];
+  textures: boolean;
+}
+
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
+  /** 3-D mesh support (additive; absent on servers that predate it):
+   * whether a mesh family has a runnable engine here, the containers this
+   * host stores (GLB only), the containers `POST /api/gallery/export/:filename`
+   * can transcode a stored mesh into, and whether textures are available. */
+  mesh?: MeshServerCapabilities | null;
   /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
   durable_media?: DurableMediaCapabilities | null;
   video_upscale?: {
@@ -393,6 +418,8 @@ export interface GenerateRequestWire {
   seed?: number | null;
   batch_size?: number;
   output_format?: OutputFormat;
+  /** 3-D controls; refused at admission on a recipe with no `mesh` block. */
+  mesh?: MeshRequestOptions | null;
   cfg_plus?: boolean | null;
   scheduler?: Scheduler | null;
   source_image?: string | null; // base64 (no data-URI prefix)
@@ -735,6 +762,17 @@ export interface SseCompleteEvent {
   audio_duration_ms?: number | null;
   /** Rendered waveform PNG, base64. The only image an audio print has. */
   audio_thumbnail?: string | null;
+  /** Mesh completion. `image` then carries the binary glTF and `format` is
+   * `glb`; probe `mesh_vertices` BEFORE the audio and video fields, since a
+   * mesh has neither samples nor frames. `width`/`height` describe the poster. */
+  mesh_vertices?: number | null;
+  mesh_faces?: number | null;
+  mesh_textured?: boolean;
+  /** Rendered poster PNG, base64 — the only raster a mesh print has. */
+  mesh_poster?: string | null;
+  /** Axis-aligned bounds `[x, y, z]`, carried so a viewer frames a camera. */
+  mesh_bounds_min?: [number, number, number] | null;
+  mesh_bounds_max?: [number, number, number] | null;
   gpu?: number | null;
 }
 
@@ -1219,6 +1257,11 @@ export interface GenerateFormState {
    * Kept separate from legacy edit/source fields so no surface can flatten
    * Ref2VA into image-only editing. */
   h3Authoring?: MinimaxH3AuthoringState;
+  /** 3-D geometry controls for a mesh recipe. `null` on every field means
+   * "use the profile default", which is what keeps an untouched control off
+   * the wire; cleared whenever the selected recipe has no `mesh` block.
+   * Optional so persisted pre-mesh drafts keep loading. */
+  mesh?: MeshFormState;
 }
 
 export interface Ltx2ControlAdapterInfo {

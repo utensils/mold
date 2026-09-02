@@ -54,6 +54,65 @@ describe("RemixModal", () => {
     });
   });
 
+  // A prompt-ignoring recipe gets ONE result back — the guide's
+  // image-preparation advice — so the modal must render it instead of
+  // throwing "Expected exactly 3 remix variants", and one selection is a
+  // complete batch. (Create disables Remix for such a recipe; this only
+  // guarantees the modal cannot throw if it is ever reached.)
+  it("accepts the single advisory answer when the recipe ignores the prompt", async () => {
+    remixPromptMock.mockResolvedValue({
+      source_prompt: "a carved armchair",
+      source_kind: "direct",
+      variants: [
+        {
+          prompt: "This model reads no prompt; prepare the image instead.",
+          dimensions: [],
+        },
+      ],
+    });
+    const wrapper = mount(RemixModal, {
+      props: {
+        open: true,
+        prompt: "a carved armchair",
+        family: "hunyuan3d",
+        task: "text-to-image",
+        promptIgnored: true,
+      },
+    });
+    await wrapper.get('[data-test="remix-generate"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(wrapper.findAll('[data-test^="apply-remix-"]')).toHaveLength(1);
+    await wrapper.get('[data-test="prepare-remix-batch"]').trigger("click");
+    expect(wrapper.emitted("prepare")?.[0]?.[0]).toMatchObject({
+      variants: [
+        { prompt: "This model reads no prompt; prepare the image instead." },
+      ],
+    });
+  });
+
+  it("still refuses a short answer when the recipe reads the prompt", async () => {
+    remixPromptMock.mockResolvedValue({
+      source_prompt: "a lighthouse",
+      source_kind: "direct",
+      variants: [{ prompt: "one", dimensions: ["camera"] }],
+    });
+    const wrapper = mount(RemixModal, {
+      props: {
+        open: true,
+        prompt: "a lighthouse",
+        family: "flux",
+        task: "text-to-image",
+      },
+    });
+    await wrapper.get('[data-test="remix-generate"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "Expected exactly 3 remix variants",
+    );
+  });
+
   it("offers only backend-safe dimensions for conditioned video and locked styles", async () => {
     const wrapper = mount(RemixModal, {
       props: {

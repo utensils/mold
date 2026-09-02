@@ -7,11 +7,19 @@ import { apiFetchTo, type ApiTarget } from "./api/client";
 import { inTauri, ipc, type SavedMedia } from "./ipc";
 import { useToastStore } from "../stores/toasts";
 
+/**
+ * The body `POST /api/gallery/export/:filename` accepts. A video export
+ * carries the playback options; a mesh transcode carries only the container
+ * it wants (`MeshExportFormat` on the server), because geometry has no
+ * playback to configure.
+ */
+export type GalleryExportOptions = VideoExportOptions | { format: string };
+
 export async function saveGalleryMedia(
   target: ApiTarget | null,
   filename: string,
   outputFilename = filename,
-  exportOptions: VideoExportOptions | null = null,
+  exportOptions: GalleryExportOptions | null = null,
   fromTrash = false,
 ): Promise<SavedMedia> {
   if (inTauri()) {

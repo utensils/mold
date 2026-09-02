@@ -45,6 +45,11 @@ const overflow = computed(() =>
 function isVideo(item: GalleryImage): boolean {
   return mediaKind(item.format, item.filename) === "video";
 }
+/** A mesh has no motion and no waveform — the gallery grid's own 3D badge is
+ * the only thing that tells its square thumbnail apart from a still. */
+function isMesh(item: GalleryImage): boolean {
+  return mediaKind(item.format, item.filename) === "mesh";
+}
 function tileAlt(item: GalleryImage): string {
   return item.metadata.prompt || item.filename;
 }
@@ -81,6 +86,26 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
           <span class="recent__badge" data-test="recent-video-badge">
             <Icon name="play" :size="11" />
             video
+          </span>
+        </template>
+        <!-- Same mark as GalleryGrid's mesh tile so one print reads the same
+             on both surfaces. -->
+        <template v-else-if="isMesh(item)" #overlay>
+          <span class="recent__badge" data-test="recent-mesh-badge">
+            <svg
+              class="recent__badge-glyph"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 2.6 20 7v10l-8 4.4L4 17V7z" />
+              <path d="M4 7l8 4.4L20 7" />
+              <path d="M12 11.4V21.4" />
+            </svg>
+            3D
           </span>
         </template>
       </MediaTile>
@@ -133,6 +158,11 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   backdrop-filter: blur(4px);
+}
+
+.recent__badge-glyph {
+  width: 11px;
+  height: 11px;
 }
 
 .recent__empty {

@@ -173,6 +173,36 @@ export const IGNORED_PROMPT_PLACEHOLDER =
   "Optional note — this model has no text encoder and renders from the source image";
 
 /**
+ * The one shared explanation for a recipe that IGNORES the prompt, shown
+ * where the empty canvas tells a first-time user what to do. It must not
+ * borrow the optional-prompt wording: nothing here "animates what it sees",
+ * and there is no prompt to describe motion with. The source image is the
+ * whole input, so the advice is about preparing it.
+ */
+export const IGNORED_PROMPT_GUIDANCE =
+  "This model reads no prompt — it renders from the source image alone. Attach a clean cutout on a plain background and press Generate; anything typed is saved as a note.";
+
+/**
+ * The empty-canvas guidance for the request this input describes: the
+ * surface's own wording while the prompt is required, the shared optional
+ * wording once it is not, and the image-preparation wording for a recipe
+ * that never reads it.
+ */
+export function promptGuidance(
+  input: PromptConditioningInput | null | undefined,
+  requiredGuidance: string,
+): string {
+  switch (promptRequirementFor(input)) {
+    case "required":
+      return requiredGuidance;
+    case "optional":
+      return OPTIONAL_PROMPT_GUIDANCE;
+    case "ignored":
+      return IGNORED_PROMPT_GUIDANCE;
+  }
+}
+
+/**
  * The prompt bed's placeholder: the surface's own wording while the prompt is
  * required, the shared optional wording once it is not, and the note wording
  * for a recipe that never reads it.

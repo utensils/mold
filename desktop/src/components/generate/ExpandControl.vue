@@ -9,6 +9,14 @@ const props = defineProps<{
   hostLabel: string | null;
   canUndo: boolean;
   blocked?: boolean;
+  /**
+   * Why the recipe itself refuses a prompt rewrite (`capabilities.prompt.mode:
+   * "ignored"` — the family has no text encoder). Both transforms render
+   * disabled with this sentence as their tooltip and a visible hint beside
+   * them, and the exposed keyboard action stays silent: the view answers the
+   * shortcut with the same reason.
+   */
+  transformBlockedReason?: string | null;
   originalAvailable?: boolean;
   remixSource?: "original" | "current";
 }>();
@@ -32,6 +40,7 @@ const progressLabel = computed(() => {
 });
 
 function expand() {
+  if (props.transformBlockedReason) return;
   if (!props.blocked && !props.running && props.prompt.trim()) emit("expand");
 }
 
@@ -44,13 +53,15 @@ defineExpose({ expand });
       type="button"
       data-test="expand-action"
       class="border-edge min-h-7 rounded-control border px-2 text-body text-ink-2 transition-colors duration-100 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
-      :disabled="blocked || running || !prompt.trim()"
+      :disabled="!!transformBlockedReason || blocked || running || !prompt.trim()"
       :title="
-        blocked
-          ? 'Refresh or discard the preserved prepared batch first'
-          : isPreparedBatch
-            ? `Prepare ${batchSize} prompt variations`
-            : 'Expand prompt'
+        transformBlockedReason
+          ? transformBlockedReason
+          : blocked
+            ? 'Refresh or discard the preserved prepared batch first'
+            : isPreparedBatch
+              ? `Prepare ${batchSize} prompt variations`
+              : 'Expand prompt'
       "
       @click="expand"
     >
@@ -62,11 +73,13 @@ defineExpose({ expand });
       type="button"
       data-test="remix-action"
       class="border-edge min-h-7 rounded-control border px-2 text-body text-ink-2 transition-colors duration-100 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
-      :disabled="blocked || running || !prompt.trim()"
+      :disabled="!!transformBlockedReason || blocked || running || !prompt.trim()"
       :title="
-        isPreparedBatch
-          ? `Prepare ${batchSize} subject-preserving prompt remixes`
-          : 'Remix this prompt in place'
+        transformBlockedReason
+          ? transformBlockedReason
+          : isPreparedBatch
+            ? `Prepare ${batchSize} subject-preserving prompt remixes`
+            : 'Remix this prompt in place'
       "
       @click="emit('remix')"
     >
@@ -76,7 +89,8 @@ defineExpose({ expand });
       Source
       <select
         data-test="remix-source-select"
-        class="border-edge min-h-7 rounded-control border bg-bath px-1.5 text-caption text-ink-2"
+        class="border-edge min-h-7 rounded-control border bg-bath px-1.5 text-caption text-ink-2 disabled:opacity-50"
+        :disabled="!!transformBlockedReason"
         :value="remixSource ?? 'original'"
         @change="
           emit(
@@ -101,7 +115,19 @@ defineExpose({ expand });
       ↩
     </button>
 
-    <span v-if="running" role="status" aria-live="polite" class="min-w-0 text-caption text-halide">
+    <span
+      v-if="transformBlockedReason"
+      data-test="transform-blocked-hint"
+      class="min-w-0 text-caption text-ink-3"
+      >{{ transformBlockedReason }}</span
+    >
+
+    <span
+      v-else-if="running"
+      role="status"
+      aria-live="polite"
+      class="min-w-0 text-caption text-halide"
+    >
       {{ progressLabel }}
     </span>
   </div>

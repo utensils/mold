@@ -168,6 +168,21 @@ pushed screen opened from the header.
   the same rule to clip rails through `SequenceLimits.promptOptional`. A blank
   prompt saves no VRAM and usually renders near-static motion — never imply
   otherwise in native copy.
+  A Hunyuan3D model reshapes the whole form instead of just the prompt rule:
+  the recipe's generation profile is canvasless, strengthless, maskless, and
+  reads no prompt at all (`prompt.mode: ignored`, not merely optional), so
+  Shape/Resolution/exact-size/Fit-to-canvas/Strength/Mask/Negative disappear
+  and a **Mesh** control group takes their place — Octree over the advertised
+  allowlist (default 256), an Iso threshold slider, and an optional Target
+  faces field within the advertised bounds that keeps the raw surface when
+  left blank. The prompt field becomes an optional note with placeholder copy
+  explaining the model renders from the source image alone, and Develop
+  enables with an empty prompt as long as a source image is attached — a
+  source image is still required. The request is pinned to GLB and carries
+  only the mesh controls that differ from the advertised defaults; **Use as
+  prompt** restores the recorded octree/threshold/face target from the
+  print's `metadata.mesh`. A finished mesh mounts the same orbitable
+  `MeshViewer` the Library uses directly in the Create result area.
   **Continue a video** appears only when the selected model advertises additive
   `supports_extend`, so a host that predates continuation shows nothing rather
   than offering a request it would reject. The attached clip counts toward the
@@ -191,11 +206,24 @@ pushed screen opened from the header.
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
   transport, renders Hunyuan3D meshes in an orbitable WebGL viewer over the
   saved poster (`@studio/components/MeshViewer.vue`, shared with desktop and
-  web), swipes
+  web — auto-rotate until touched, `prefers-reduced-motion` honoured,
+  fullscreen and wireframe toggles, captioned `tris · verts · bounds`), swipes
   horizontally between prints, explicitly copies or saves full-resolution
   stills through UIKit, saves original videos to Photos through a streaming
   native download, restores recorded prompt settings, and can use a still
-  as the next source or Qwen edit target. On a print a sequence produced, **Use
+  as the next source or Qwen edit target — **Use as source** is refused for a
+  mesh, since there is no raster to stage as conditioning. The mesh viewer
+  offers **Export as…** OBJ, STL, PLY, or GLB from the host's advertised
+  `capabilities.mesh.export_formats` (the same transcodes `mold library
+export` and the `export_mesh` MCP tool perform). Geometry takes the same
+  native route a turntable does: the shell runs the export itself, checks the
+  bytes against the container the filename claims, and opens the system share
+  sheet, so the file reaches Files, AirDrop, or any app that accepts it —
+  a WebView `navigator.share` has no media type for geometry and would fall
+  back to an in-app download. Only the mobile UI opened in a plain browser
+  downloads. A `.glb` tile carries the
+  same ◈ mesh badge as video and audio prints, and the Library's kind filter
+  gets a 3D entry alongside Images, Video, and Audio. On a print a sequence produced, **Use
   as prompt** reloads that sequence's recorded clips onto the Create clip rail
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays

@@ -44,7 +44,7 @@ pub fn run() {
             #[cfg(any(target_os = "ios", target_os = "android"))]
             {
                 #[cfg(target_os = "ios")]
-                media::cleanup_stale_animation_exports();
+                media::cleanup_stale_media_exports();
                 _app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
             }
             Ok(())

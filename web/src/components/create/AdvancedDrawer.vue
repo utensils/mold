@@ -935,7 +935,10 @@ function setSequenceCameraMode(mode: string) {
               "
             />
           </div>
-          <div class="adv__field">
+          <!-- A canvasless recipe (a 3-D mesh) renders at no pixel size, so
+               there is nothing to type here — the same reason the rail hides
+               Shape and Resolution. -->
+          <div v-if="!caps.canvasless" class="adv__field">
             <label class="adv__label">Exact size</label>
             <div class="adv__size">
               <input

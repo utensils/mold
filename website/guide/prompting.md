@@ -53,9 +53,9 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 494 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 575 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
-| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 569 |
-| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 569 |
-| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 569 |
+| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
+| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
+| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
@@ -721,6 +721,9 @@ ground and every other prop cropped away.
   (`crop: none` squashes to a square instead, distorting rather than
   cropping); a threshold tuned on one is a fair start on the other, a crop
   is not.
+- The web, desktop, and mobile apps' export menu offers the same OBJ, STL,
+  and PLY geometry exports and the GIF, APNG, and WebP turntables as
+  `mold library export` and the `export_mesh` MCP tool.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.
@@ -739,6 +742,10 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 
 # Export a saved mesh from the gallery as STL, OBJ, or PLY
 mold library export chair.glb --format stl -o chair.stl
+
+# Share a turntable: the poster spun a full turn as an animated GIF (or apng, webp)
+mold library export chair.glb --format gif
+mold library export chair.glb --format gif --playback bounce --repeat once --frames 24
 ```
 
 `--octree`, `--mesh-threshold`, and `--target-faces` are the three mesh

@@ -16080,27 +16080,334 @@ mod tests {
         assert_eq!(bytes.as_ref(), stored.as_slice());
     }
 
-    /// The two format groups are disjoint, and a request that crosses them is
-    /// refused with a sentence naming the other side rather than a generic
-    /// "unsupported".
+    async fn export_gallery_file_with(
+        app: &axum::Router,
+        filename: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/gallery/export/{filename}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn gif_frames(bytes: &[u8]) -> Vec<image::RgbaImage> {
+        use image::AnimationDecoder;
+        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+            .expect("decode GIF")
+            .into_frames()
+            .map(|frame| frame.expect("decode frame").into_buffer())
+            .collect()
+    }
+
+    /// An animation of a mesh is its TURNTABLE: the gallery poster's view
+    /// rendered around the mesh, encoded by the same encoders a video export
+    /// uses, delivered as a download named like every other export. Every
+    /// format the build advertises for a mesh answers with its own media
+    /// type and a real animation body.
+    #[tokio::test]
+    async fn exports_a_gallery_glb_as_a_turntable_gif_apng_and_webp() {
+        let (app, _output_dir) =
+            gallery_export_app(&[("armchair mesh.glb", gallery_glb_fixture())]);
+
+        let advertised = crate::routes::mesh_export_formats();
+        for format in [
+            mold_core::MeshExportFormat::Gif,
+            mold_core::MeshExportFormat::Apng,
+        ] {
+            assert!(advertised.contains(&format), "{advertised:?}");
+        }
+        assert_eq!(
+            advertised.contains(&mold_core::MeshExportFormat::Webp),
+            cfg!(feature = "webp"),
+            "WebP is advertised exactly when this build can encode it"
+        );
+        let options = json_body(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/gallery/export-options")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let options: Vec<&str> = options["formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        for format in ["gif", "apng", "glb", "obj", "stl", "ply"] {
+            assert!(options.contains(&format), "{options:?}");
+        }
+        assert_eq!(options.contains(&"webp"), cfg!(feature = "webp"));
+        assert_eq!(
+            options.iter().filter(|value| **value == "gif").count(),
+            1,
+            "one entry per format, whatever the source kind: {options:?}"
+        );
+
+        let mut formats = vec![
+            ("gif", "image/gif", "armchair_mesh.gif"),
+            ("apng", "image/apng", "armchair_mesh.png"),
+        ];
+        if cfg!(feature = "webp") {
+            formats.push(("webp", "image/webp", "armchair_mesh.webp"));
+        }
+        for (format, content_type, filename) in formats {
+            let response = export_gallery_file_with(
+                &app,
+                "armchair%20mesh.glb",
+                serde_json::json!({ "format": format, "frames": 8, "max_dimension": 240 }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                content_type,
+                "{format}"
+            );
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_DISPOSITION],
+                format!("attachment; filename=\"{filename}\""),
+                "{format}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(!bytes.is_empty(), "{format}");
+            match format {
+                "gif" => {
+                    assert_eq!(&bytes[..6], b"GIF89a");
+                    let frames = gif_frames(&bytes);
+                    assert_eq!(frames.len(), 8);
+                    assert_eq!((frames[0].width(), frames[0].height()), (240, 240));
+                }
+                "apng" => {
+                    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+                    assert!(bytes.windows(4).any(|chunk| chunk == b"acTL"));
+                }
+                _ => {
+                    assert_eq!(&bytes[..4], b"RIFF");
+                    assert_eq!(&bytes[8..12], b"WEBP");
+                }
+            }
+        }
+    }
+
+    /// Playback and repeat mean for a turntable exactly what they mean for a
+    /// video GIF: a loop is one seamless turn (its last frame is NOT its
+    /// first), a bounce that repeats is the sweep plus the interior frames
+    /// reversed, and a bounce played once also rests on the first frame.
+    /// Bounce outside GIF is the video export's refusal, word for word.
+    #[tokio::test]
+    async fn turntable_playback_and_repeat_follow_the_video_gif_contract() {
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);
+
+        let looped = export_gallery_file_with(
+            &app,
+            "mesh.glb",
+            serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 240 }),
+        )
+        .await;
+        assert_eq!(looped.status(), StatusCode::OK);
+        let frames = gif_frames(
+            &axum::body::to_bytes(looped.into_body(), 64 * 1024 * 1024)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(frames.len(), 8);
+        assert_ne!(
+            frames[0], frames[7],
+            "a loop stops one step short of the first frame"
+        );
+        assert_ne!(frames[0], frames[4], "the mesh must actually turn");
+
+        for (repeat, expected) in [("forever", 14), ("once", 15)] {
+            let response = export_gallery_file_with(
+                &app,
+                "mesh.glb",
+                serde_json::json!({
+                    "format": "gif",
+                    "playback": "bounce",
+                    "repeat": repeat,
+                    "frames": 8,
+                    "max_dimension": 240
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{repeat}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(gif_frames(&bytes).len(), expected, "bounce + {repeat}");
+        }
+
+        let refused = export_gallery_file_with(
+            &app,
+            "mesh.glb",
+            serde_json::json!({ "format": "apng", "playback": "bounce", "frames": 8, "max_dimension": 240 }),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(refused).await;
+        assert_eq!(
+            body["error"].as_str().unwrap(),
+            "bounce playback is only supported for GIF exports"
+        );
+    }
+
+    /// Every turntable bound is a 422 at the door, in the `max_dimension`
+    /// message style, and the frame budget is refused before a frame renders.
+    #[tokio::test]
+    async fn turntable_bounds_are_refused_with_the_bound_named() {
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);
+        for (body, message) in [
+            (
+                serde_json::json!({ "format": "gif", "frames": 7 }),
+                "frames must be between 8 and 180",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "frames": 181 }),
+                "frames must be between 8 and 180",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "fps": 0 }),
+                "fps must be between 1 and 30 for a mesh turntable",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "fps": 31 }),
+                "fps must be between 1 and 30 for a mesh turntable",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "max_dimension": 239 }),
+                "max_dimension must be between 240 and 2048 pixels for a mesh turntable",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "max_dimension": 2049 }),
+                "max_dimension must be between 240 and 2048 pixels for a mesh turntable",
+            ),
+        ] {
+            let refused = export_gallery_file_with(&app, "mesh.glb", body.clone()).await;
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            let error = json_body(refused).await;
+            assert_eq!(error["error"].as_str().unwrap(), message, "{body}");
+        }
+
+        // The advertised ceiling IS the rasterizer's ceiling: the largest
+        // frame a client is told it may ask for resolves to that size, rather
+        // than being clamped to something smaller without a word. (Resolved
+        // through the route's own option builder rather than rendered: eight
+        // 2048 px frames through the GIF quantizer are most of a minute in a
+        // debug build, and the rasterizer's acceptance of MAX_POSTER_SIZE is
+        // the poster module's own test.)
+        assert_eq!(
+            mold_inference::hunyuan3d::poster::MAX_POSTER_SIZE,
+            2048,
+            "the turntable bound and every surface that documents it say 2048"
+        );
+        let at_ceiling: crate::routes::GalleryExportRequest = serde_json::from_value(
+            serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 2048 }),
+        )
+        .unwrap();
+        let options =
+            crate::routes::turntable_options_for(&at_ceiling, mold_core::MeshExportFormat::Gif)
+                .expect("2048 is inside the advertised bound");
+        assert_eq!(options.size, 2048, "not clamped below what was accepted");
+        assert_eq!(options.frames, 8);
+        let past_ceiling: crate::routes::GalleryExportRequest = serde_json::from_value(
+            serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 2049 }),
+        )
+        .unwrap();
+        let refused =
+            crate::routes::turntable_options_for(&past_ceiling, mold_core::MeshExportFormat::Gif)
+                .expect_err("2049 is past the rasterizer's ceiling");
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            refused.error,
+            "max_dimension must be between 240 and 2048 pixels for a mesh turntable"
+        );
+
+        let over_budget = export_gallery_file_with(
+            &app,
+            "mesh.glb",
+            serde_json::json!({ "format": "gif", "frames": 180, "max_dimension": 2048 }),
+        )
+        .await;
+        assert_eq!(over_budget.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let error = json_body(over_budget).await;
+        let message = error["error"].as_str().unwrap();
+        assert!(
+            message.contains("export budget") && message.contains("max_dimension"),
+            "{message}"
+        );
+    }
+
+    /// The video export keeps its OWN bounds — `fps` up to 60 and
+    /// `max_dimension` up to 2160 — untouched by the tighter mesh turntable
+    /// arm beside it, and refuses past them in the same message style.
+    #[tokio::test]
+    async fn video_export_bounds_are_the_video_s_own() {
+        let mp4 = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap();
+        let (app, _output_dir) = gallery_export_app(&[("clip.mp4", mp4)]);
+
+        for body in [
+            serde_json::json!({ "format": "gif", "fps": 60 }),
+            serde_json::json!({ "format": "gif", "max_dimension": 2160 }),
+        ] {
+            let accepted = export_gallery_file_with(&app, "clip.mp4", body.clone()).await;
+            assert_eq!(accepted.status(), StatusCode::OK, "{body}");
+            assert_eq!(
+                accepted.headers()[axum::http::header::CONTENT_TYPE],
+                "image/gif",
+                "{body}"
+            );
+        }
+
+        for (body, message) in [
+            (
+                serde_json::json!({ "format": "gif", "fps": 61 }),
+                "fps must be between 1 and 60",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "fps": 0 }),
+                "fps must be between 1 and 60",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "max_dimension": 2161 }),
+                "max_dimension must be between 240 and 2160 pixels",
+            ),
+        ] {
+            let refused = export_gallery_file_with(&app, "clip.mp4", body.clone()).await;
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            let error = json_body(refused).await;
+            assert_eq!(error["error"].as_str().unwrap(), message, "{body}");
+        }
+    }
+
+    /// A video takes the animation group only, and a geometry container asked
+    /// of it is refused with a sentence naming the other side rather than a
+    /// generic "unsupported". (A mesh takes both groups: an animation of a
+    /// mesh is its turntable, covered above.)
     #[tokio::test]
     async fn a_mesh_and_a_video_refuse_each_other_s_export_formats() {
         let mp4 = base64::engine::general_purpose::STANDARD
             .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
             .unwrap();
-        let (app, _output_dir) = gallery_export_app(&[
-            ("mesh.glb", gallery_glb_fixture()),
-            ("clip.mp4", mp4),
-            ("still.png", b"not a mesh".to_vec()),
-        ]);
-
-        let refused = export_gallery_file(&app, "mesh.glb", "gif").await;
-        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = json_body(refused).await;
-        assert!(
-            body["error"].as_str().unwrap().contains("animation format"),
-            "{body}"
-        );
+        let (app, _output_dir) =
+            gallery_export_app(&[("clip.mp4", mp4), ("still.png", b"not a mesh".to_vec())]);
 
         let refused = export_gallery_file(&app, "clip.mp4", "stl").await;
         assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);

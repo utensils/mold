@@ -19,6 +19,7 @@ import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
 import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { createUuid } from "@studio/lib/id";
+import { parseGlb } from "@studio/lib/glb";
 import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
@@ -1270,7 +1271,42 @@ async function durableCompletionResult(
           ...(thumbnail ? { audio_thumbnail: thumbnail } : {}),
         }
       : {}),
+    ...(kind === "mesh"
+      ? {
+          // `isMeshCompletion` keys on the vertex count, matching the live
+          // SSE contract; the counts and bounds come from the stored glTF and
+          // the poster is the gallery thumbnail the server rendered.
+          ...(await meshFacts(artifact, format)),
+          ...(thumbnail ? { mesh_poster: thumbnail } : {}),
+        }
+      : {}),
   };
+}
+
+/** The mesh fields of a rehydrated completion, read from the artifact. */
+async function meshFacts(
+  artifact: Blob,
+  format: string,
+): Promise<
+  Pick<
+    SseCompleteEvent,
+    "mesh_vertices" | "mesh_faces" | "mesh_bounds_min" | "mesh_bounds_max"
+  >
+> {
+  if (format !== "glb") return { mesh_vertices: 0, mesh_faces: 0 };
+  try {
+    const parsed = parseGlb(await artifact.arrayBuffer());
+    return {
+      mesh_vertices: parsed.vertexCount,
+      mesh_faces: parsed.triangleCount,
+      mesh_bounds_min: parsed.bounds.min,
+      mesh_bounds_max: parsed.bounds.max,
+    };
+  } catch {
+    // A file the viewer cannot parse is still a mesh completion; the viewer
+    // itself reports the failure on the poster.
+    return { mesh_vertices: 0, mesh_faces: 0 };
+  }
 }
 
 /** The `complete` arm is the one presentation the composable maps itself:

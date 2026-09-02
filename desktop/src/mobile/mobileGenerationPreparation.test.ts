@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../lib/api/types";
-import { newGenerateForm } from "../lib/generateForm";
+import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
 
 const { applyH3BoundaryFit, applySourceFitPreprocess } = vi.hoisted(() => ({
   applyH3BoundaryFit: vi.fn(),
@@ -228,6 +229,50 @@ describe("mobile generation request preparation", () => {
     expect(request.references?.[0]?.provenance?.sha256).not.toBe("a".repeat(64));
     expect(applyH3BoundaryFit).not.toHaveBeenCalled();
     expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A canvasless recipe renders a mesh from the source photo itself: its
+   * advertised canvas is 0×0, so running the ordinary fit would resize the
+   * conditioning image to nothing before it ever reached the engine.
+   */
+  it("never fits the source toward a canvasless recipe's zero canvas", async () => {
+    const selected = model({
+      name: "hunyuan3d-mini-turbo:fp16",
+      family: "hunyuan3d",
+      source_image: "required",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "hunyuan3d.mini",
+        profile_hash: "hunyuan3d-mini-hash",
+        default_recipe_id: "default",
+        recipes: [hunyuan3dRecipe()],
+      },
+    });
+    const draft = newGenerateForm();
+    applyModelDefaults(draft, selected);
+    Object.assign(draft, {
+      sourceImage: "original-source",
+      sourceImageName: "armchair.png",
+    });
+    expect(draft.width).toBe(0);
+    expect(draft.height).toBe(0);
+
+    const request = await prepareMobileGenerationRequest(
+      {
+        target: { baseUrl: "http://studio.test:7680", apiKey: "secret" },
+        draft,
+        selectedModel: selected,
+      },
+      services(),
+    );
+
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+    expect(request.source_image).toBe("original-source");
+    expect(request.width).toBe(0);
+    expect(request.height).toBe(0);
+    expect(request.source_fit).toBeUndefined();
+    expect(request.output_format).toBe("glb");
   });
 
   it("suppresses late preprocessing status after the caller becomes stale", async () => {

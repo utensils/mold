@@ -34,6 +34,12 @@ import {
 import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
+import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
+import {
+  hunyuan3dRecipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type {
   GalleryImage,
@@ -4980,6 +4986,338 @@ describe("CreatePage host routing", () => {
   });
 });
 
+// ── 3-D mesh prints ──────────────────────────────────────────────────────
+// Hunyuan3D has no text encoder, renders on no canvas, and finishes as binary
+// glTF — so the page must not gate Generate on a prompt or a size, and the
+// canvas must hand the viewer a GLB rather than a `data:image/glb` still.
+describe("CreatePage 3-D mesh prints", () => {
+  const meshModel = {
+    name: "hunyuan3d-mini-turbo:fp16",
+    family: "hunyuan3d",
+    size_gb: 3,
+    is_loaded: false,
+    last_used: null,
+    hf_repo: "tencent/Hunyuan3D-2mini",
+    downloaded: true,
+    default_steps: 5,
+    default_guidance: 5,
+    default_width: 1024,
+    default_height: 1024,
+    description: "",
+    source_image: "required",
+    generation_profile: {
+      schema_version: 1,
+      profile_id: "hunyuan3d",
+      profile_hash: "h3d",
+      default_recipe_id: "default",
+      recipes: [hunyuan3dRecipe()],
+    },
+  } as unknown as ModelInfoExtended;
+
+  function meshJob(): Job {
+    return {
+      id: "mesh-1",
+      request: {
+        prompt: "",
+        model: meshModel.name,
+        width: 0,
+        height: 0,
+        steps: 5,
+        guidance: 5,
+      },
+      startedAt: 1,
+      controller: new AbortController(),
+      progress: {
+        stage: "Done",
+        step: null,
+        totalSteps: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: {
+        // "GLB" as base64 — the canvas must never inline these bytes.
+        image: "R0xC",
+        format: "glb",
+        width: 512,
+        height: 512,
+        seed_used: 7,
+        generation_time_ms: 12_000,
+        model: meshModel.name,
+        mesh_vertices: 24_576,
+        mesh_faces: 49_152,
+        mesh_textured: false,
+        mesh_poster: "UE9TVEVS",
+        mesh_bounds_min: [0, 0, 0],
+        mesh_bounds_max: [1, 0.8, 0.6],
+      },
+      error: null,
+      state: "done",
+      settledAt: 2,
+      chain: null,
+      lastProgressAt: 2,
+      workStarted: true,
+      serverId: null,
+    } as unknown as Job;
+  }
+
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    chainJobsTesting.reset();
+    takeSequenceHandoff();
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    streamJobsRef.value = [];
+    streamSelectedJobRef.value = null;
+    streamCanvasErrorJobIdRef.value = null;
+    promptHistoryApiMock.mockReset();
+    promptHistoryApiMock.mockResolvedValue({ entries: [] });
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostModelsMock.mockReset().mockResolvedValue([meshModel]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({
+      queue: { heterogeneous_batch_max_outputs: 64 },
+    });
+    submitMock.mockClear();
+    routeQuery.value = {};
+  });
+
+  it("tells the composer the prompt is a note, not a requirement", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = meshModel.name;
+    form.state.value.modelFamily = meshModel.family;
+    form.state.value.prompt = "";
+    await nextTick();
+
+    const composer = wrapper.getComponent({ name: "ComposerCard" });
+    expect(composer.props("placeholder")).toBe(IGNORED_PROMPT_PLACEHOLDER);
+    expect(composer.props("promptOptional")).toBe(true);
+    expect(wrapper.find("[data-test='page-generation-blocker']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("sends the resolved recipe's prompt mode in the expansion context", async () => {
+    const rasterModel = {
+      ...meshModel,
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      source_image: "optional",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "sdxl",
+        default_recipe_id: "default",
+        recipes: [sdxlRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([rasterModel]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = rasterModel.name;
+    form.state.value.modelFamily = rasterModel.family;
+    form.state.value.prompt = "a lighthouse";
+    // The expansion context rides the prepared-batch path only.
+    form.state.value.batchSize = 3;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+    expect(expandPromptMock).toHaveBeenCalledTimes(1);
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      { context?: { prompt_mode?: string } },
+    ];
+    // The profile is the one authority on whether the model reads its
+    // prompt; the server derives the mode only when a client sends none.
+    expect(payload.context?.prompt_mode).toBe("required");
+  });
+
+  it("tells the empty canvas the recipe ignores the prompt", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = meshModel.name;
+    form.state.value.modelFamily = meshModel.family;
+    await nextTick();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("promptIgnored")).toBe(true);
+    expect(canvas.props("promptOptional")).toBe(true);
+  });
+
+  it("keeps the zero canvas when a source image is attached", async () => {
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = meshModel.name;
+    form.state.value.modelFamily = meshModel.family;
+    form.state.value.width = 0;
+    form.state.value.height = 0;
+    await nextTick();
+
+    // The source watcher steers a raster canvas toward the attached image;
+    // a canvasless recipe has nothing for it to steer, and the recipe's own
+    // zero default must stay on the wire.
+    form.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "armchair.png",
+        base64: "Q0hBSVI=",
+        width: 1024,
+        height: 1024,
+      },
+    ];
+    await nextTick();
+    await flushPromises();
+
+    expect(form.state.value.width).toBe(0);
+    expect(form.state.value.height).toBe(0);
+  });
+
+  it("keeps the required wording for a raster model", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    await nextTick();
+    expect(
+      wrapper.getComponent({ name: "ComposerCard" }).props("placeholder"),
+    ).toBe("Describe the image you want to create…");
+  });
+
+  it("hands the canvas a GLB object URL and the poster as its still", async () => {
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:mesh-1");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    streamJobsRef.value = [meshJob()];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("resultMeshSrc")).toBe("blob:mesh-1");
+    expect(canvas.props("resultSrc")).toBe("data:image/png;base64,UE9TVEVS");
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(createObjectURL.mock.calls[0]?.[0]?.type).toBe("model/gltf-binary");
+
+    wrapper.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:mesh-1");
+    vi.unstubAllGlobals();
+  });
+
+  it("writes the shared mesh caption under the print", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: () => "blob:mesh-1",
+      revokeObjectURL: () => undefined,
+    });
+    streamJobsRef.value = [meshJob()];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(
+      wrapper.getComponent({ name: "ResultCanvas" }).props("resultCaption"),
+    ).toContain("49,152 tris · 24,576 verts · 1.00×0.80×0.60");
+    vi.unstubAllGlobals();
+  });
+
+  // The family has no text encoder anywhere, so a rewritten prompt changes
+  // nothing about the render. Both transforms are refused with the one shared
+  // reason, and nothing about the expansion model is ever offered.
+  it("blocks Expand and Remix for a recipe that reads no prompt", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "a carved oak armchair";
+    await nextTick();
+
+    expect(
+      wrapper
+        .getComponent({ name: "ComposerCard" })
+        .props("transformBlockedReason"),
+    ).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(wrapper.get("[data-test='page-transform-blocked']").text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+  });
+
+  it("no-ops Expand with the reason and never offers the expander pull", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "a carved oak armchair";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(useNotifications().toasts.map((item) => item.text)).toContain(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
+      false,
+    );
+    // The host has no expander at all in this fixture, so the pre-fix path
+    // would have raised the pull offer before ever looking at the recipe.
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
+      false,
+    );
+    expect(submitMock).not.toHaveBeenCalled();
+  });
+
+  it("no-ops Remix with the reason instead of opening the modal", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "a carved oak armchair";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-remix']").trigger("click");
+    await flushPromises();
+
+    expect(useNotifications().toasts.map((item) => item.text)).toContain(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    expect(wrapper.find("[data-test='remix-generate']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("submits a canvasless request instead of blocking on 0×0", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "chair.png", base64: "AAA" },
+    ];
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(useNotifications().toasts).toEqual([]);
+    expect(submitMock).toHaveBeenCalled();
+    const request = submitMock.mock.calls.at(-1)![0] as GenerateRequestWire;
+    expect(request.output_format).toBe("glb");
+    expect(request.width).toBe(0);
+    expect(request.source_fit).toBeUndefined();
+  });
+});
+
 function pageStubs() {
   return {
     ColdStartGuide: {
@@ -4988,16 +5326,34 @@ function pageStubs() {
     },
     ComposerCard: {
       name: "ComposerCard",
-      props: ["busy", "cancellable", "busyLabel", "disabledReason"],
+      props: [
+        "busy",
+        "cancellable",
+        "busyLabel",
+        "disabledReason",
+        "placeholder",
+        "promptOptional",
+        "transformBlockedReason",
+      ],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
     },
     ResultCanvas: {
       name: "ResultCanvas",
-      props: ["mode", "variations", "resultCaption", "previewSrc", "stage"],
+      props: [
+        "mode",
+        "variations",
+        "resultCaption",
+        "previewSrc",
+        "stage",
+        "resultSrc",
+        "resultMeshSrc",
+        "promptOptional",
+        "promptIgnored",
+      ],
       template:
         '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption" :data-preview-src="previewSrc" :data-stage="stage"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
     },

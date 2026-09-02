@@ -11,6 +11,7 @@ import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 import { validateChain } from "@studio/api/chains";
 import { newGenerateForm } from "../lib/generateForm";
+import { sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
 
 vi.mock("@studio/api/chains", () => ({
   validateChain: vi.fn(),
@@ -703,6 +704,55 @@ describe("MobileSequenceComposer opening image placement", () => {
     // The sheet's own controls still reset.
     expect(draft.clips[0]?.negativePrompt).toBe("");
     expect(draft.clips[0]?.cameraControl).toBeNull();
+  });
+
+  /**
+   * The advertised recipe is the authority on the prompt rule, exactly as it
+   * is for a one shot. The composer used to ask the FAMILY, which cannot see
+   * a checkpoint whose host says a conditioned render needs no prompt, so a
+   * clip rail on such a model stayed blocked on copy the engine ignores.
+   */
+  it("takes the clip prompt rule from the advertised recipe, not the family", async () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    const recipe = sdxlRecipe();
+    recipe.capabilities.prompt = {
+      mode: "optional",
+      reason: "This checkpoint renders from the source image alone.",
+    };
+    recipe.capabilities.source_image = "required";
+    // `sdxl` is `required` under the pre-profile family rule.
+    const advertised = {
+      ...ltx2,
+      name: "sdxl-motion:fp16",
+      family: "sdxl",
+      source_image: "required",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl.motion",
+        profile_hash: "sdxl-motion-hash",
+        default_recipe_id: recipe.id,
+        recipes: [recipe],
+      },
+    } as unknown as ModelEntry;
+
+    expect(draft.clips[0]?.prompt ?? "").toBe("");
+
+    // The same checkpoint WITHOUT the recipe falls back to the family rule,
+    // which demands a prompt for sdxl.
+    const { generation_profile: _profile, ...legacy } = advertised as ModelEntry & {
+      generation_profile: unknown;
+    };
+    mountComposer({ selectedModel: legacy as ModelEntry });
+    await wrapper!.vm.$nextTick();
+    expect(wrapper!.get("[data-test='mobile-sequence-error']").text()).toBe(
+      "Describe clip 1 before generating.",
+    );
+    wrapper!.unmount();
+
+    mountComposer({ selectedModel: advertised });
+    await wrapper!.vm.$nextTick();
+    expect(wrapper!.find("[data-test='mobile-sequence-error']").exists()).toBe(false);
   });
 
   it("omits the opening image from the Advanced count", async () => {

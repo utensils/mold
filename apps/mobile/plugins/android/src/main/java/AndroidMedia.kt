@@ -19,6 +19,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 
 internal class AndroidMedia(context: Context) {
@@ -80,31 +82,39 @@ internal class AndroidMedia(context: Context) {
         }
     }
 
-    fun prepareAnimationShare(
+    /**
+     * One gallery export handed to the Android chooser: a turntable or clip
+     * animation, or a geometry transcode of a stored mesh. The media type is
+     * the app's answer, resolved once from the Rust share allowlist, so the
+     * chooser and the byte check below can never disagree about a container.
+     */
+    fun prepareExportShare(
         url: String,
         apiKey: String?,
         requestJson: String,
         filename: String,
+        mimeType: String,
         reuseKey: String,
     ): Intent {
         val safeName = File(filename).name
-        require(safeName == filename && safeName.isNotBlank()) { "invalid animation filename" }
-        val cached = animationCache[reuseKey]?.takeIf { it.isFile }
-        val file = cached ?: downloadAnimation(url, apiKey, requestJson, safeName).also {
-            animationCache[reuseKey] = it
+        require(safeName == filename && safeName.isNotBlank()) { "invalid export filename" }
+        require(mimeType.isNotBlank()) { "the export does not name a media type" }
+        val cached = exportCache[reuseKey]?.takeIf { it.isFile }
+        val file = cached ?: downloadExport(url, apiKey, requestJson, safeName).also {
+            exportCache[reuseKey] = it
         }
-        val mimeType = animationMimeType(file)
+        requireMatchingExport(file)
         val uri = shareUri(file)
         val send = Intent(Intent.ACTION_SEND).apply {
             type = mimeType
             putExtra(Intent.EXTRA_STREAM, uri)
-            clipData = ClipData.newRawUri("Mold animation", uri)
+            clipData = ClipData.newRawUri("Mold export", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        return Intent.createChooser(send, "Share Mold animation")
+        return Intent.createChooser(send, "Share Mold export")
     }
 
-    private fun downloadAnimation(
+    private fun downloadExport(
         url: String,
         apiKey: String?,
         requestJson: String,
@@ -120,7 +130,7 @@ internal class AndroidMedia(context: Context) {
             outputStream.use { it.write(requestJson.toByteArray(Charsets.UTF_8)) }
         }
         try {
-            requireSuccessful(connection, "export the animation")
+            requireSuccessful(connection, "export this print")
             BufferedInputStream(connection.inputStream).use { input ->
                 FileOutputStream(file).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -129,13 +139,13 @@ internal class AndroidMedia(context: Context) {
                         val read = input.read(buffer)
                         if (read < 0) break
                         total += read
-                        require(total <= MAX_EXPORT_BYTES) { "the animation export exceeds the 2 GB Android limit" }
+                        require(total <= MAX_EXPORT_BYTES) { "the export exceeds the 2 GB Android limit" }
                         output.write(buffer, 0, read)
                     }
                     output.fd.sync()
                 }
             }
-            animationMimeType(file)
+            requireMatchingExport(file)
             return file
         } catch (error: Exception) {
             file.delete()
@@ -215,26 +225,50 @@ internal class AndroidMedia(context: Context) {
         }
     }
 
-    private fun animationMimeType(file: File): String {
-        val header = ByteArray(12)
-        val count = file.inputStream().use { it.read(header) }
-        val extension = file.extension.lowercase()
-        val valid = when (extension) {
-            "gif" -> count >= 6 && (header.copyOfRange(0, 6).contentEquals("GIF87a".toByteArray()) ||
-                header.copyOfRange(0, 6).contentEquals("GIF89a".toByteArray()))
-            "png" -> count >= PNG_SIGNATURE.size &&
-                header.copyOfRange(0, PNG_SIGNATURE.size).contentEquals(PNG_SIGNATURE)
-            "webp" -> count >= 12 && header.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) &&
-                header.copyOfRange(8, 12).contentEquals("WEBP".toByteArray())
+    /**
+     * Whether a download really is the container its filename claims. Binary
+     * STL carries no signature at all — its 84-byte header states the facet
+     * count, and the file length is the only check — so the probe reads the
+     * whole header rather than the 12 bytes an animation needs.
+     */
+    private fun requireMatchingExport(file: File) {
+        val probe = ByteArray(EXPORT_HEADER_PROBE_BYTES)
+        val count = file.inputStream().use { it.read(probe) }.coerceAtLeast(0)
+        val head = probe.copyOfRange(0, count)
+        val valid = when (file.extension.lowercase()) {
+            "gif" -> head.startsWith("GIF87a".toByteArray()) || head.startsWith("GIF89a".toByteArray())
+            // APNG carries the ordinary PNG signature.
+            "png" -> head.startsWith(PNG_SIGNATURE)
+            "webp" -> count >= 12 && head.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) &&
+                head.copyOfRange(8, 12).contentEquals("WEBP".toByteArray())
+            "glb" -> head.startsWith("glTF".toByteArray())
+            "obj" -> firstContentLine(head)?.let { line ->
+                OBJ_LINE_PREFIXES.any { prefix -> line.startsWith(prefix) }
+            } ?: false
+            "stl" -> head.startsWith("solid".toByteArray()) || binaryStlCovers(head, file.length())
+            "ply" -> head.startsWith("ply\n".toByteArray()) || head.startsWith("ply\r\n".toByteArray())
             else -> false
         }
-        require(valid) { "the exported animation format does not match its filename" }
-        return when (extension) {
-            "gif" -> "image/gif"
-            "webp" -> "image/webp"
-            else -> "image/png"
-        }
+        require(valid) { "the exported file does not match the format its filename claims" }
     }
+
+    /**
+     * The first line of a text export that carries content. Latin-1 keeps
+     * every byte addressable, and a probe that stops mid-line still answers:
+     * every prefix that identifies an OBJ is far shorter than the probe.
+     */
+    private fun firstContentLine(head: ByteArray): String? =
+        String(head, Charsets.ISO_8859_1).split('\n').map { it.trim() }.firstOrNull { it.isNotEmpty() }
+
+    /** Binary STL: 80-byte comment, little-endian facet count, 50 bytes each. */
+    private fun binaryStlCovers(head: ByteArray, totalBytes: Long): Boolean {
+        if (head.size < 84) return false
+        val facets = ByteBuffer.wrap(head, 80, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
+        return 84L + 50L * facets == totalBytes
+    }
+
+    private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
+        size >= prefix.size && copyOfRange(0, prefix.size).contentEquals(prefix)
 
     private fun openConnection(url: String, method: String): HttpURLConnection =
         (URL(url).openConnection() as HttpURLConnection).apply {
@@ -258,7 +292,7 @@ internal class AndroidMedia(context: Context) {
     private fun prune(directory: File) {
         val cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS
         directory.listFiles()?.filter { it.isFile && it.lastModified() < cutoff }?.forEach { stale ->
-            animationCache.entries.removeIf { it.value == stale }
+            exportCache.entries.removeIf { it.value == stale }
             stale.delete()
         }
     }
@@ -273,6 +307,10 @@ internal class AndroidMedia(context: Context) {
         )
         private const val MAX_EXPORT_BYTES = 2L * 1024 * 1024 * 1024
         private const val CACHE_MAX_AGE_MS = 24L * 60 * 60 * 1000
-        private val animationCache = ConcurrentHashMap<String, File>()
+        /** Enough to reach a binary STL's facet count at offset 80. */
+        private const val EXPORT_HEADER_PROBE_BYTES = 84
+        /** The statements a Wavefront OBJ may legally open with. */
+        private val OBJ_LINE_PREFIXES = listOf("#", "v ", "vn ", "vt ", "f ", "o ", "g ", "mtllib")
+        private val exportCache = ConcurrentHashMap<String, File>()
     }
 }

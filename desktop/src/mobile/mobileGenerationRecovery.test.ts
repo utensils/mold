@@ -314,4 +314,40 @@ describe("mobile durable generation recovery", () => {
     expect(resolveMobileDurableHost(record, [{ ...exact, instanceId: "replacement" }])).toBeNull();
     expect(JSON.stringify(record)).not.toContain("native-secret");
   });
+
+  /**
+   * A 3-D print is admitted as `glb` — the only container a mesh recipe
+   * stores. The parser's format allowlist is what a relaunch replays through,
+   * and a format it does not recognize drops the WHOLE record, so an
+   * in-flight mesh batch would come back from a restart as if it had never
+   * been queued.
+   */
+  it("replays a glb print's byte-free presentation across a restart", () => {
+    const storage = new Map<string, string>();
+    const io = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    };
+    const mesh: GenerateRequest = {
+      ...request(),
+      model: "hunyuan3d-mini-turbo:fp16",
+      // A canvasless recipe renders with no pixel canvas.
+      width: 0,
+      height: 0,
+      output_format: "glb",
+    };
+    const record = recovery("client-mesh", [mesh]);
+    expect(record.presentations[0]).toMatchObject({ format: "glb", width: 0, height: 0 });
+
+    saveMobileDurableGenerationRecoveries(io, [record]);
+    const replayed = loadMobileDurableGenerationRecoveries(io);
+
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0]!.presentations[0]).toMatchObject({
+      format: "glb",
+      model: "hunyuan3d-mini-turbo:fp16",
+      width: 0,
+      height: 0,
+    });
+  });
 });

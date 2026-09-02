@@ -19,6 +19,7 @@
  */
 import {
   effectiveGenerationRecipe,
+  recipeIsCanvasless,
   resolutionProfileFinding,
   type GenerationProfileModel,
   type GenerationRecipeProfile,
@@ -115,6 +116,12 @@ export interface OutputShape {
   status: string;
   sourceTreatment: SourceTreatment | null;
   warnings: ResolutionFinding[];
+  /**
+   * The recipe renders with no pixel canvas at all (a 3-D mesh): there are
+   * no families, no sizes, and every surface hides the Shape and Resolution
+   * controls instead of rendering a canvas the request ignores.
+   */
+  canvasless: boolean;
 }
 
 export interface OutputShapeInput {
@@ -392,6 +399,7 @@ export function resolveOutputShape(input: OutputShapeInput): OutputShape {
   const { model, pipeline, width, height, intent } = input;
   const contract: OutputShapeModel | string = model ?? input.family ?? "";
   const recipe = model ? effectiveGenerationRecipe(model, pipeline) : null;
+  if (recipeIsCanvasless(recipe)) return canvaslessShape(width, height);
   const source = input.source ?? null;
   const sourceExact = source
     ? resolveSourceResolution(source, contract, pipeline)
@@ -507,6 +515,29 @@ export function resolveOutputShape(input: OutputShapeInput): OutputShape {
     status: statusFor(state, width, height, source, sourceExact, treatment),
     sourceTreatment: treatment,
     warnings: finding ? [finding] : [],
+    canvasless: false,
+  };
+}
+
+const CANVASLESS_FAMILY: OutputShapeFamily = { id: "", label: "3-D", ratio: 1 };
+
+/** The shape of a recipe that has no canvas: nothing to pick, one sentence. */
+function canvaslessShape(width: number, height: number): OutputShape {
+  return {
+    width,
+    height,
+    family: CANVASLESS_FAMILY,
+    families: [],
+    selectedFamilyId: "",
+    approximate: false,
+    sizes: [],
+    selectedSizeId: "",
+    state: "model-default",
+    badge: "",
+    status: "3-D mesh · no canvas",
+    sourceTreatment: null,
+    warnings: [],
+    canvasless: true,
   };
 }
 

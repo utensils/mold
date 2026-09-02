@@ -21,12 +21,10 @@ acceptance. See [Licence](/models/hunyuan3d#licence).
 ## What makes a good input
 
 There is **no text encoder in this family**. The image is the entire
-conditioning, and nothing typed in the prompt field reaches the model. **You
-do not need to write one** on the CLI, the API, the TUI, Discord or MCP: each
-reads the prompt requirement off the model's own generation profile, so an
-empty prompt is admitted here and refused everywhere it still means something.
-The web, desktop and mobile apps still apply the legacy prompt rule until the
-GUI release wires the profile in.
+conditioning, and the prompt — if you pass one — is recorded as provenance and
+never read. **You do not need to write one**: every surface reads the prompt
+requirement off the model's own generation profile, so an empty prompt is
+admitted here and refused everywhere it still means something.
 
 ```bash
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb   # no prompt
@@ -119,13 +117,61 @@ mold library export chair.glb --format ply --output -    # to stdout
 | `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
 
 The gallery file is never renamed or replaced — an export writes a copy where
-you asked for it. The same conversions are available from the API
-(`POST /api/gallery/export/:filename`), the TUI's export picker, and the
-`export_mesh` MCP tool. A host
+you asked for it. The same conversions are available on every surface: the API
+(`POST /api/gallery/export/:filename`), the TUI's export picker, the
+`export_mesh` MCP tool, and the apps' **Export as…** menu. A host
 advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 
 USDZ is tracked separately; it is the format Apple's AR Quick Look wants and it
 carries textures, so it belongs with the texturing work rather than here.
+
+## Share a turntable
+
+Nothing outside a 3-D tool opens a `.glb`, and the gallery poster shows one
+view. A **turntable** is that poster set spinning: the same camera, lighting
+and slate background, swept a full turn around the mesh and written as an
+animated GIF, APNG or WebP you can drop into a chat, a README or a browser.
+The first frame is the poster itself.
+
+```bash
+mold library export chair.glb --format gif                       # chair.gif: 36 frames, 10 fps, 512 px, loops
+mold library export chair.glb --format gif --playback bounce --repeat once
+mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768
+mold library export chair.glb --format apng -o chair-turntable.png
+```
+
+| Flag              | Values            | Default   | Meaning                                                                                    |
+| ----------------- | ----------------- | --------- | ------------------------------------------------------------------------------------------ |
+| `--playback`      | `loop`, `bounce`  | `loop`    | GIF only. `loop` is one seamless full turn; `bounce` sweeps half a turn and plays it back. |
+| `--repeat`        | `forever`, `once` | `forever` | GIF only. `once` plays through and rests on the final frame.                               |
+| `--max-dimension` | 240 to 2048       | 512       | Frame edge in pixels; frames are square like the poster.                                   |
+| `--frames`        | 8 to 180          | 36        | Views rendered around the mesh. 36 is a 10° step; 72 is smoother and twice the size.       |
+| `--fps`           | 1 to 30           | 10        | Playback rate. 36 frames at 10 fps is a 3.6 s turn.                                        |
+
+The two sweeps are shaped for how the encoders play them back. A **loop**
+renders one full turn whose last frame stops one step short of the first, so
+the wrap from last to first is a step like any other rather than the poster
+held twice. A **bounce** renders half a turn, first frame to last inclusive;
+the GIF encoder appends the interior frames in reverse, so the animation
+swings out to the far side and back, and the reversal reads as deliberate
+instead of a full turn snapping into reverse the moment it comes round.
+Bounce and `--repeat once` are GIF contracts — APNG and WebP always loop —
+exactly as they are for a video export. A turntable is a **render**, not the
+mesh: it carries no geometry, and the flags are refused on a geometry format
+rather than ignored.
+
+The same options are on `POST /api/gallery/export/:filename` (`playback`,
+`repeat`, `max_dimension`, `frames`, `fps`, the video export's own field
+names), the `export_mesh` MCP tool, and the apps: the web, desktop and iPhone
+export menu shows an **Export turntable…** entry whenever the host advertises
+an animated container, and it opens the same options sheet a video export
+uses. A host lists `gif`, `apng` and — on a build with the `webp` feature —
+`webp` in `capabilities.mesh.export_formats` beside the geometry containers,
+so a client learns what it can ask for without trying. Rendering is pure CPU
+on the serving host; 36 frames at 512 px take well under a second, and the
+frame buffer is capped at the same 256 MiB the video export allows, so 180
+frames at the largest size is a `422` naming the two flags that bring it
+under.
 
 ## Piping
 
@@ -135,6 +181,43 @@ carries textures, so it belongs with the texturing work rather than here.
 mold run hunyuan3d-mini-turbo --image chair.png --output - > chair.glb
 cat chair.png | mold run hunyuan3d-mini-turbo --image - -o chair.glb
 ```
+
+## From the apps
+
+The web SPA, the desktop app, and the iPhone app all generate and view meshes
+now — not only the CLI, TUI, and Discord.
+
+1. **Pick a Hunyuan3D model** in Create. The form reshapes itself from the
+   model's own generation profile: Shape, Resolution, exact-size, Fit to
+   canvas, Strength, Mask, and Negative all disappear, because the profile is
+   canvasless, strengthless, maskless, and reads none of them.
+2. **Attach a source image.** It is still the only conditioning, so Generate
+   stays disabled without one. The prompt field becomes an optional note —
+   its placeholder explains the model has no text encoder and renders from
+   the image alone — and Generate is enabled with an empty prompt.
+3. **Set the Mesh controls** that took the raster controls' place: Octree
+   detail over the advertised allowlist (128/192/256/320/384, 256 default),
+   an Iso threshold slider, and an optional Target faces field within the
+   advertised bounds — leave it blank to keep the raw surface. The request
+   sent to the server carries only the values that differ from the
+   advertised defaults.
+4. **Generate.** The result renders in the same WebGL2 viewer the Library
+   uses, right in the Create result area: it auto-rotates until you touch
+   it, honours `prefers-reduced-motion`, and has fullscreen and wireframe
+   toggles, captioned `tris · verts · bounds`.
+5. **Find it again in the Library** through the 3D chip in the kind filter
+   (alongside Images, Video, and Audio) or the 3D badge on the tile itself.
+   Reuse settings restores the octree, threshold, and target faces recorded
+   on the print rather than a form's leftovers, and **Use as source** is
+   refused for a mesh — there is no raster to stage as conditioning.
+6. **Export** from the lightbox (web/desktop) or the viewer sheet (iPhone).
+   An **Export as…** entry offers whatever the host advertises on
+   `capabilities.mesh.export_formats`: OBJ, STL and PLY are the one-click
+   transcodes described in [Export as OBJ, STL or PLY](#export-as-obj-stl-or-ply)
+   above, and **Export turntable…** opens the video export's options sheet
+   for the animated GIF, APNG or WebP described in
+   [Share a turntable](#share-a-turntable). Desktop saves through its normal
+   download path; iPhone hands the converted file to the native share sheet.
 
 ## In the TUI
 
@@ -163,12 +246,16 @@ poster in the Preview panel, and captions it with
 
 In the **Library**, a `.glb` tile shows its poster (fetched from the owning
 machine's thumbnail route; never the geometry through a raster decoder), and
-`x` opens an export picker offering OBJ, STL and PLY — the list the owning
-machine advertises on `capabilities.mesh.export_formats`, or OBJ, STL and
-PLY from the in-process writer for a print that lives only on this machine.
-The converted copy is written
-beside your other saves as `<print>.<ext>` and its path is shown when it
-lands; the gallery file is untouched.
+`x` opens an export picker offering OBJ, STL, PLY and the turntable formats
+(GIF, APNG, and WebP on a build that encodes it) — the list the owning
+machine advertises on `capabilities.mesh.export_formats`, or the same set
+from the in-process writer for a print that lives only on this machine,
+rendered through the same code the server uses. The picker has no turntable
+knobs: it renders at the defaults (one full turn, 36 frames, 512 px, 10 fps,
+looping) and its hint says so, pointing at `mold library export` for bounce,
+once, or other sizes. The converted copy is written beside your other saves
+as `<print>.<ext>` (an APNG as `.png`) and its path is shown when it lands;
+the gallery file is untouched.
 
 ## In Discord
 

@@ -48,11 +48,12 @@ class VideoUrlArgs {
 }
 
 @InvokeArg
-class ShareAnimationArgs {
+class ShareExportArgs {
     lateinit var url: String
     var apiKey: String? = null
     lateinit var requestJson: String
     lateinit var filename: String
+    lateinit var mimeType: String
     lateinit var reuseKey: String
 }
 
@@ -169,16 +170,20 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
         saveMedia(invoke, pending)
     }
 
+    // Named for animations because the plugin's permission contract is
+    // generated from this method, but it shares every gallery export the
+    // phone can produce — turntables and mesh geometry alike.
     @Command
     fun shareExportedAnimation(invoke: Invoke) {
-        val args = invoke.parseArgs(ShareAnimationArgs::class.java)
+        val args = invoke.parseArgs(ShareExportArgs::class.java)
         Thread {
             try {
-                val chooser = media.prepareAnimationShare(
+                val chooser = media.prepareExportShare(
                     args.url,
                     args.apiKey,
                     args.requestJson,
                     args.filename,
+                    args.mimeType,
                     args.reuseKey,
                 )
                 hostActivity.runOnUiThread {
@@ -190,7 +195,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
                 }
             } catch (error: Exception) {
                 invoke.reject(
-                    "could not share animation: ${error.message ?: error.javaClass.simpleName}",
+                    "could not share this export: ${error.message ?: error.javaClass.simpleName}",
                 )
             }
         }.start()

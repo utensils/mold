@@ -47,6 +47,15 @@ export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
 }
 
+/**
+ * The pre-profile mesh rule: Hunyuan3D is the only family that stores a
+ * mesh. A host that advertises a recipe answers through its `mesh` block and
+ * `output.formats`; this is the fallback for one that predates the profile.
+ */
+export function isMeshFamily(family: string | null | undefined): boolean {
+  return (family ?? "").trim().toLowerCase() === "hunyuan3d";
+}
+
 export function isFlux2DevModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   return normalized.includes("flux2-dev") || normalized.includes("flux.2-dev");

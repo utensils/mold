@@ -5,6 +5,10 @@ import ComposerCard from "./ComposerCard.vue";
 import StyleChips from "./StyleChips.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { recipeCapabilitiesSnapshot } from "../../lib/capabilities";
+import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 
 vi.mock("../../lib/platform", () => ({
   primaryModifierPressed: (e: KeyboardEvent) => e.metaKey || e.ctrlKey,
@@ -182,5 +186,73 @@ describe("ComposerCard", () => {
     expect(typeof (wrapper.vm as unknown as { record: (p: string) => void }).record).toBe(
       "function",
     );
+  });
+});
+
+// The prompt rule's authority is the selected recipe, projected onto the form
+// by `applyModelDefaults` — a recipe that IGNORES the prompt (no text encoder
+// anywhere in the family) says so in the prompt bed rather than asking for a
+// description the engine will never read.
+describe("ComposerCard — prompt requirement", () => {
+  it("names the note placeholder for a recipe that ignores the prompt", () => {
+    const form = baseForm();
+    form.family = "hunyuan3d";
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(hunyuan3dRecipe(), "hunyuan3d");
+    const wrapper = mountComposer(form);
+    expect(wrapper.get("textarea[aria-label='Prompt']").attributes("placeholder")).toBe(
+      IGNORED_PROMPT_PLACEHOLDER,
+    );
+  });
+
+  it("keeps this surface's own wording for a raster recipe", () => {
+    const form = baseForm();
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(sdxlRecipe(), "sdxl");
+    const wrapper = mountComposer(form);
+    expect(wrapper.get("textarea[aria-label='Prompt']").attributes("placeholder")).toBe(
+      "Describe the image you want to create…",
+    );
+  });
+});
+
+// Expand and Remix rewrite the prompt. A recipe that IGNORES it reads nothing
+// they could produce, so the composer refuses both here and the ⌘E shortcut
+// hands the intent to the view, which answers with the same sentence.
+describe("ComposerCard — prompt transforms a recipe ignores", () => {
+  function ignoredForm(): GenerateForm {
+    const form = baseForm();
+    form.family = "hunyuan3d";
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(hunyuan3dRecipe(), "hunyuan3d");
+    return form;
+  }
+
+  it("disables Expand and Remix with the reason, even with a prompt typed", () => {
+    const wrapper = mountComposer(ignoredForm());
+    const control = wrapper.findComponent(ExpandControl);
+    expect(control.props("transformBlockedReason")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(wrapper.get('[data-test="expand-action"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-test="remix-action"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-test="expand-action"]').attributes("title")).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    expect(wrapper.get('[data-test="transform-blocked-hint"]').text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+  });
+
+  it("still hands the ⌘E shortcut to the view so it can answer with the reason", async () => {
+    const wrapper = mountComposer(ignoredForm());
+    await wrapper
+      .get("textarea[aria-label='Prompt']")
+      .trigger("keydown", { key: "e", metaKey: true });
+    expect(wrapper.emitted("expand")).toHaveLength(1);
+  });
+
+  it("leaves both transforms available for a recipe that reads the prompt", () => {
+    const form = baseForm();
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(sdxlRecipe(), "sdxl");
+    const wrapper = mountComposer(form);
+    expect(wrapper.findComponent(ExpandControl).props("transformBlockedReason")).toBeNull();
+    expect(wrapper.get('[data-test="expand-action"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.find('[data-test="transform-blocked-hint"]').exists()).toBe(false);
   });
 });

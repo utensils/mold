@@ -533,3 +533,41 @@ describe("profile contract", () => {
     }
   });
 });
+
+describe("a canvasless mesh recipe", () => {
+  it("offers no shapes or sizes and says so", () => {
+    const model = modelFor("hunyuan3d-mini-turbo:fp16");
+    const result = resolveOutputShape({
+      model,
+      pipeline: null,
+      width: 0,
+      height: 0,
+      intent: "model-default",
+    });
+    expect(result.canvasless).toBe(true);
+    expect(result.families).toEqual([]);
+    expect(result.sizes).toEqual([]);
+    expect(result.selectedFamilyId).toBe("");
+    expect(result.warnings).toEqual([]);
+    expect(result.status).toContain("3-D");
+  });
+
+  it("stays canvasless even when a source is attached", () => {
+    const model = modelFor("hunyuan3d-mini-turbo:fp16");
+    const result = resolveOutputShape({
+      model,
+      pipeline: null,
+      width: 0,
+      height: 0,
+      intent: "source",
+      source: { width: 1024, height: 768 },
+    });
+    expect(result.canvasless).toBe(true);
+    expect(result.families).toEqual([]);
+    expect(result.sizes).toEqual([]);
+  });
+
+  it("is false for every raster recipe", () => {
+    expect(shape().result.canvasless).toBe(false);
+  });
+});
