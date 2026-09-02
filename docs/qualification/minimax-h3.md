@@ -1183,7 +1183,7 @@ no GPU or host memory measured, as expected for work that was never
 scheduled. This is expected model behavior, not a defect in the new tags,
 the harness, or this campaign: FL2VA has always required a source image, and
 PR 1 does not change that contract. Lifting it so an FL2VA tier can run
-text-only is tracked as a follow-up issue.
+text-only is tracked in #1552.
 
 **Adapters pulled ahead of the release are unowned by the running service.**
 Both adapters land in the shared model store at

@@ -326,8 +326,8 @@ from request to MP4 bytes on a cold-to-warm process, VRAM peak from a 1 Hz
 
 | Canvas     | Aspect | `-turbo-4step-768p-v1.1` (5 steps) | `-turbo-8step-768p` (9 steps) |
 | ---------- | ------ | ---------------------------------- | ----------------------------- |
-| `1344x768` | 7:4    | 269.9 s, 12.6 GB VRAM              | 453.3 s, 12.7 GB VRAM         |
-| `768x768`  | 1:1    | 206.4 s, 9.3 GB VRAM               | 344.9 s, 9.2 GB VRAM          |
+| `1344x768` | 7:4    | 269.9 s, 12.6 GiB VRAM             | 453.3 s, 12.7 GiB VRAM        |
+| `768x768`  | 1:1    | 206.4 s, 9.3 GiB VRAM              | 344.9 s, 9.2 GiB VRAM         |
 
 Full per-render evidence — host/driver/binary provenance, adapter pull facts,
 `scheduler_estimates` rows, and visual verification for these two tiers plus
