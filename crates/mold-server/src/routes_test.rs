@@ -18023,7 +18023,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_ne!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = json_body(response).await;
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("prompt expansion failed"), "{body}");
     }
 
     #[tokio::test]

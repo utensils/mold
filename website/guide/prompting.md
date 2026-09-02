@@ -53,9 +53,9 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 494 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 575 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
-| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 551 |
-| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 551 |
-| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 551 |
+| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 569 |
+| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 569 |
+| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 569 |
 | `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
@@ -715,10 +715,12 @@ ground and every other prop cropped away.
 - The same picture gives a different mesh here than in ComfyUI. mold prepares
   the image the way Tencent's `ImageProcessorV2` does: crop to the alpha
   bounding box, then letterbox on a white square, so nothing is cut away.
-  ComfyUI's `clip_preprocess` drops the alpha channel and centre-crops the
-  shorter side to a square, so an off-centre or wide subject loses its edges
-  there and keeps them here; a threshold tuned on one is a fair start on the
-  other, a crop is not.
+  ComfyUI's `clip_preprocess` drops the alpha channel and, with CLIP Vision
+  Encode's default `crop: center`, centre-crops the shorter side to a square,
+  so an off-centre or wide subject loses its edges there and keeps them here
+  (`crop: none` squashes to a square instead, distorting rather than
+  cropping); a threshold tuned on one is a fair start on the other, a crop
+  is not.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.

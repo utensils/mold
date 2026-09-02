@@ -54,10 +54,12 @@ ground and every other prop cropped away.
 - The same picture gives a different mesh here than in ComfyUI. mold prepares
   the image the way Tencent's `ImageProcessorV2` does: crop to the alpha
   bounding box, then letterbox on a white square, so nothing is cut away.
-  ComfyUI's `clip_preprocess` drops the alpha channel and centre-crops the
-  shorter side to a square, so an off-centre or wide subject loses its edges
-  there and keeps them here; a threshold tuned on one is a fair start on the
-  other, a crop is not.
+  ComfyUI's `clip_preprocess` drops the alpha channel and, with CLIP Vision
+  Encode's default `crop: center`, centre-crops the shorter side to a square,
+  so an off-centre or wide subject loses its edges there and keeps them here
+  (`crop: none` squashes to a square instead, distorting rather than
+  cropping); a threshold tuned on one is a fair start on the other, a crop
+  is not.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.

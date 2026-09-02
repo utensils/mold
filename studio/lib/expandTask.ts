@@ -16,6 +16,8 @@ export type ExpandTask =
   | "reference-to-audio-video"
   | "text-to-audio";
 
+import { promptRequirementFor, type PromptRecipe } from "./promptRequirement";
+
 export interface ExpansionTaskRequest {
   model?: string | null;
   width?: number | null;
@@ -179,10 +181,16 @@ function loraStem(lora: unknown): string | null {
  * send the same facts without shell-specific glue. Reference order follows
  * the request: MiniMax H3 ordered references first, then the source frame,
  * edit images, identity images, source video, and conditioning audio.
+ *
+ * `prompt_mode` is filled only when the resolved `recipe` is known: the
+ * profile is the one authority on whether a model reads its prompt, and the
+ * legacy family rule can never say `ignored`, so without a recipe the field
+ * is left absent and the server derives it.
  */
 export function expansionContextForRequest(
   family: string | null | undefined,
   request: ExpansionTaskRequest,
+  recipe?: PromptRecipe | null,
 ): ExpandContext {
   const normalized = (family ?? "").trim().toLowerCase();
   const videoFamily = [
@@ -264,5 +272,18 @@ export function expansionContextForRequest(
   }
   if (references.length > 0) context.references = references;
   if (loras.length > 0) context.loras = loras;
+  if (recipe) {
+    context.prompt_mode = promptRequirementFor({
+      recipe,
+      family,
+      model: request.model,
+      sourceImage: request.source_image,
+      keyframes: request.keyframes,
+      sourceVideo: request.source_video,
+      sourceVideoPath: request.source_video_path,
+      extendVideo: request.extend_video,
+      extendVideoPath: request.extend_video_path,
+    });
+  }
   return context;
 }

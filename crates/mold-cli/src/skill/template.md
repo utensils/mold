@@ -18,9 +18,8 @@ mold server status
   selected H3, Wan, or LTX-2 task requires it.
 - For a 3-D mesh (`hunyuan3d`), the input is one image and the output is a
   GLB: there is no prompt to write, and `mold expand` / `mold remix` answer
-  with image advice instead of a rewrite. OBJ, STL, PLY and turntable GIF,
-  APNG or WebP are gallery-side exports of the stored GLB, never generation
-  targets.
+  with image advice instead of a rewrite. OBJ, STL and PLY are gallery-side
+  exports of the stored GLB, never generation targets.
 - For model selection and current capabilities, use `mold list`, `mold info
 <model>`, or the selected server's `/api/models` data. These live surfaces are
   authoritative; this skill intentionally does not duplicate changing model
