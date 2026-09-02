@@ -20,6 +20,7 @@ import {
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
+import { promptRecipeFromForm } from "../lib/promptRecipe";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
@@ -5678,7 +5679,9 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     task: expansionTaskForRequest(form.family, request),
-    context: expansionContextForRequest(form.family, request),
+    // The resolved recipe is the one authority on whether the model reads
+    // its prompt; the server derives the mode itself when it is absent.
+    context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,

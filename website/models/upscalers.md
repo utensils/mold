@@ -118,6 +118,14 @@ it does not interpolate frames or perform temporal/generative restoration.
 Frame count, constant FPS, duration, and a codec-compatible primary audio track
 are verified before publication. Temporal flicker may remain.
 
+The output is H.264 within level 5.2 so every phone, browser, and the Library
+thumbnailer can decode it. When the ×2 or ×4 frame would exceed that level
+(more than 36 864 macroblocks, more than 2 073 600 macroblocks per second at
+the source frame rate, or an edge over 4096 px), the encoder resamples
+it to the largest same-aspect frame that fits — a 960×960 clip ×4 publishes at
+3072×3072 — and publication refuses anything larger. The Library marks the
+result **Upscaled** exactly as it marks an upscaled still.
+
 The first contract accepts MP4, MOV, and WebM Library sources, but deliberately
 rejects VFR, HDR/high-bit-depth sources, subtitles, chapters, multiple audio
 tracks, and primary audio that cannot be copied safely into MP4. Use

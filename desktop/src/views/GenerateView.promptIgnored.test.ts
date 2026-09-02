@@ -243,6 +243,20 @@ describe("GenerateView — a recipe that ignores the prompt", () => {
     expect(expandPrompt).toHaveBeenCalledTimes(1);
   });
 
+  it("sends the resolved recipe's prompt mode in the expansion context", async () => {
+    primeHost([rasterModel]);
+    selectModel(rasterModel, "a chair");
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ComposerCard).vm.$emit("expand");
+    await flushPromises();
+    // The profile is the one authority on whether the model reads its
+    // prompt; the server derives the mode only when a client sends none.
+    const options = expandPrompt.mock.calls[0]?.[1] as { context?: { prompt_mode?: string } };
+    expect(options.context?.prompt_mode).toBe("required");
+  });
+
   it("explains the source image on the empty canvas instead of the optional-prompt wording", async () => {
     primeHost([meshModel]);
     selectModel(meshModel, "");

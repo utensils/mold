@@ -19,7 +19,7 @@ import {
   storeCachedHostPresentation,
 } from "./galleryCache";
 import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
-import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import { thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 
@@ -485,6 +485,30 @@ const meshModel: ModelEntry = {
     recipes: [hunyuan3dRecipe()],
   },
 };
+
+/** A raster checkpoint with a full profile: prompt required, so the
+ *  expansion context must say so from the recipe, never from the family. */
+const profiledRasterModel: ModelEntry = {
+  ...model,
+  name: "sdxl-base:fp16",
+  family: "sdxl",
+  description: "Raster model",
+  generation_profile: {
+    schema_version: 1,
+    profile_id: "sdxl.base",
+    profile_hash: "sdxl-base-hash",
+    default_recipe_id: "default",
+    recipes: [sdxlRecipe()],
+  },
+};
+
+function serveProfiledRasterModel(): void {
+  const base = apiJsonTo.getMockImplementation()!;
+  apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+    if (path === "/api/models") return Promise.resolve([profiledRasterModel]);
+    return base(callTarget, path, init);
+  });
+}
 
 function serveMeshModel(): void {
   const base = apiJsonTo.getMockImplementation()!;
@@ -6423,6 +6447,20 @@ describe("MobileApp generation queue", () => {
    * instead of variants. The phone says so beside the controls rather than
    * letting the user spend a round trip finding out.
    */
+  it("sends the resolved recipe's prompt mode in the expansion context", async () => {
+    serveProfiledRasterModel();
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    // The profile is the one authority on whether the model reads its
+    // prompt; the server derives the mode only when a client sends none.
+    const options = expandPrompt.mock.calls[0]?.[1] as { context?: { prompt_mode?: string } };
+    expect(options?.context?.prompt_mode).toBe("required");
+  });
+
   it("refuses Expand and Remix on a recipe that ignores the prompt", async () => {
     serveMeshModel();
     wrapper = mountMobileApp();

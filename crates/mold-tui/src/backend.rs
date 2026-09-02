@@ -27,7 +27,23 @@ pub async fn run_prompt_transform(
     token: u64,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    let result = if let Some(url) = server_url {
+    // A family whose profile ignores the prompt (no text encoder) is answered
+    // from the guide on every host, without a round trip or a model: the
+    // same one-variant answer `/api/expand`, `/api/remix`, and the CLI give.
+    let result = if let Some(advice) = mold_core::ignored_prompt_advice(&request.model_family) {
+        Ok(RemixResponse {
+            source_prompt: request.source_prompt.clone(),
+            root_prompt: request.root_prompt.clone(),
+            source_kind: request.source_kind,
+            task: request
+                .task
+                .unwrap_or_else(|| mold_core::ExpandTask::for_family(&request.model_family)),
+            variants: vec![RemixVariant {
+                prompt: advice.text(),
+                dimensions: Vec::new(),
+            }],
+        })
+    } else if let Some(url) = server_url {
         let client = crate::hosts::client_for(&url, api_key.as_deref());
         match operation {
             PromptTransformOperation::Remix => client.remix_prompt(&request).await,
@@ -967,6 +983,7 @@ fn child_outcome(
         seed: result.seed,
         generation_time_ms: result.generation_time_ms,
         preview_bytes: None,
+        mesh: None,
     }
 }
 
@@ -994,11 +1011,21 @@ async fn hydrate_last_completed(
     // decode after a multi-megabyte download, so the poster the server
     // rendered at save time (served by the thumbnail route) is fetched
     // instead — the same picture the grid shows.
-    last.preview_bytes = if crate::gallery_scan::is_mesh_filename(filename) {
-        client.get_gallery_thumbnail(filename).await.ok()
+    if crate::gallery_scan::is_mesh_filename(filename) {
+        last.preview_bytes = client.get_gallery_thumbnail(filename).await.ok();
+        // The caption's tris · verts · extent: a singleton reads them off
+        // `MeshData`, but neither the durable child result nor the gallery
+        // record carries them, so the stored GLB is read back and counted
+        // — one download for the print the pane is about to show, the same
+        // round trip a raster batch makes for its preview bytes.
+        last.mesh = client
+            .get_gallery_image(filename)
+            .await
+            .ok()
+            .and_then(|glb| crate::app::DurableMeshFacts::from_glb(&glb));
     } else {
-        client.get_gallery_image(filename).await.ok()
-    };
+        last.preview_bytes = client.get_gallery_image(filename).await.ok();
+    }
 }
 
 /// What the batch was submitted with. The Create form may have moved on
@@ -1508,7 +1535,7 @@ fn canonicalize_generation_authority(
 /// file accepted at entry can still be deleted, truncated, or swapped for a
 /// symlink before Generate is pressed, so the load is re-checked here and a
 /// failure aborts dispatch with `mold_core::identity`'s own wording.
-fn build_request(
+pub(crate) fn build_request(
     params: &GenerateParams,
     prompt: &str,
     negative_prompt: &Option<String>,
@@ -1839,6 +1866,57 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn prompt_transform_answers_a_prompt_ignored_family_without_a_host_or_a_model() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let request = RemixRequest {
+            source_prompt: "a dining chair".to_string(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+            model_family: "hunyuan3d".to_string(),
+            variations: 3,
+            style: None,
+            task: None,
+            dimensions: Vec::new(),
+            context: None,
+        };
+        let snapshot = PromptTransformSnapshot {
+            operation: PromptTransformOperation::Expand,
+            model: "hunyuan3d-mini-turbo:fp16".to_string(),
+            target: crate::hosts::GenTarget::Host("nothing-listens".to_string()),
+            task: mold_core::ExpandTask::TextToImage,
+            reference_fingerprint: String::new(),
+            source_prompt: "a dining chair".to_string(),
+            current_prompt: "a dining chair".to_string(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+        };
+        // An unreachable host: a round trip would fail, so a completed
+        // transform proves none was made.
+        run_prompt_transform(
+            Some("http://127.0.0.1:9".to_string()),
+            None,
+            PromptTransformOperation::Expand,
+            request,
+            snapshot,
+            7,
+            tx,
+        )
+        .await;
+        let advice = mold_core::ignored_prompt_advice("hunyuan3d").unwrap();
+        match rx.recv().await.unwrap() {
+            BackgroundEvent::PromptTransformComplete {
+                token, response, ..
+            } => {
+                assert_eq!(token, 7);
+                assert_eq!(response.variants.len(), 1);
+                assert_eq!(response.variants[0].prompt, advice.text());
+                assert!(response.variants[0].dimensions.is_empty());
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
     fn canonical_batch_capabilities(limit: u32) -> ServerCapabilities {
         let mut capabilities = ServerCapabilities::default();
         capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
@@ -1849,6 +1927,33 @@ mod tests {
     fn ordinary_request() -> GenerateRequest {
         let config = mold_core::Config::default();
         build_request(&GenerateParams::from_config(&config), "print", &None).unwrap()
+    }
+
+    /// The Source row's path is read at dispatch and rides the request as
+    /// `source_image` bytes with its file name — on a mesh recipe exactly as
+    /// on a raster one, with the GLB pin untouched.
+    #[test]
+    fn the_source_row_path_rides_the_request_as_bytes() {
+        let config = mold_core::Config::default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("armchair.png");
+        std::fs::write(&cat, b"\x89PNG\r\n\x1a\nnot really a png").unwrap();
+        params.source_image_path = Some(cat.to_string_lossy().to_string());
+
+        let request = build_request(&params, "", &None).unwrap();
+        assert_eq!(
+            request.source_image.as_deref(),
+            Some(&b"\x89PNG\r\n\x1a\nnot really a png"[..])
+        );
+        assert_eq!(request.source_image_name.as_deref(), Some("armchair.png"));
+        assert_eq!(request.output_format, Some(mold_core::OutputFormat::Glb));
+
+        params.source_image_path = None;
+        let request = build_request(&params, "", &None).unwrap();
+        assert_eq!(request.source_image, None);
+        assert_eq!(request.source_image_name, None);
     }
 
     /// The mesh block is absent-until-touched: an untouched form ships no

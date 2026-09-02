@@ -36,7 +36,10 @@ import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
-import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  hunyuan3dRecipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type {
   GalleryImage,
@@ -5099,6 +5102,39 @@ describe("CreatePage 3-D mesh prints", () => {
     expect(wrapper.find("[data-test='page-generation-blocker']").exists()).toBe(
       false,
     );
+  });
+
+  it("sends the resolved recipe's prompt mode in the expansion context", async () => {
+    const rasterModel = {
+      ...meshModel,
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      source_image: "optional",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "sdxl",
+        default_recipe_id: "default",
+        recipes: [sdxlRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([rasterModel]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = rasterModel.name;
+    form.state.value.modelFamily = rasterModel.family;
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      { context?: { prompt_mode?: string } },
+    ];
+    // The profile is the one authority on whether the model reads its
+    // prompt; the server derives the mode only when a client sends none.
+    expect(payload.context?.prompt_mode).toBe("required");
   });
 
   it("tells the empty canvas the recipe ignores the prompt", async () => {

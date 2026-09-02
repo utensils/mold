@@ -13,9 +13,9 @@ use crate::types::{
     GenerationBatchStatus, GenerationBatchStatusRequest, GenerationBatchStatusResponse,
     GenerationRetryRequest, ImageData, LoraInfo, MeshData, ModelInfo, ModelInfoExtended,
     OutputFormat, QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
-    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest, TrashSweepResult,
-    VideoData,
+    ReferenceUploadSessionResponse, RetainedSourceMediaAvailability, RetainedSourceMediaInventory,
+    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest,
+    TrashFilenamesRequest, TrashSweepResult, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -1857,6 +1857,62 @@ impl MoldClient {
         Ok(resp.into_iter().find(|item| item.filename == filename))
     }
 
+    /// What the host retained of a print's conditioning media
+    /// (`GET /api/gallery/source-media/:filename`).
+    ///
+    /// The host is the only authority on what it kept, so every client asks
+    /// and reads the answer's `availability` rather than guessing from the
+    /// metadata. A `401` — a keyed host reached without its key — is
+    /// reported as `unavailable_auth` exactly as the studio client maps it,
+    /// so the caller can show the API-key disclosure instead of an error.
+    pub async fn gallery_source_media(
+        &self,
+        filename: &str,
+    ) -> Result<RetainedSourceMediaInventory> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/gallery/source-media/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(RetainedSourceMediaInventory {
+                availability: RetainedSourceMediaAvailability::UnavailableAuth,
+                members: Vec::new(),
+            });
+        }
+        let resp = error_for_status_with_body(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// The original bytes of one retained member
+    /// (`GET /api/gallery/source-media/:filename/:member_id`).
+    ///
+    /// `member_id` is the opaque id from [`Self::gallery_source_media`];
+    /// a `401` (key required) or `404` (member gone) is returned as the
+    /// error carrying that status, never as empty bytes.
+    pub async fn download_gallery_source_media_member(
+        &self,
+        filename: &str,
+        member_id: &str,
+    ) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/gallery/source-media/{}/{}",
+                self.base_url,
+                encode_path_segment(filename),
+                encode_path_segment(member_id)
+            ))
+            .send()
+            .await?;
+        let resp = error_for_status_with_body(resp).await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// Download a gallery image by filename.
     pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self
@@ -1905,9 +1961,6 @@ impl MoldClient {
             .await?)
     }
 
-    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
-    /// without `permanent`). On older servers without a trash this deletes
-    /// outright — check `capabilities.gallery.trash` first when that matters.
     /// Transcode one stored gallery mesh into an export container
     /// (`POST /api/gallery/export/:filename`) and return the bytes.
     ///
@@ -1934,6 +1987,9 @@ impl MoldClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
+    /// without `permanent`). On older servers without a trash this deletes
+    /// outright — check `capabilities.gallery.trash` first when that matters.
     pub async fn trash_gallery_image(&self, filename: &str) -> Result<()> {
         let resp = self
             .client
@@ -3323,6 +3379,134 @@ mod tests {
     fn test_is_connection_error_via_mold_error() {
         let err: anyhow::Error = MoldError::Client("connection refused".to_string()).into();
         assert!(MoldClient::is_connection_error(&err));
+    }
+
+    /// The inventory route answers with what the host retained; the member
+    /// route with the original bytes. Filenames and member ids are path
+    /// segments, so both are percent-encoded.
+    #[tokio::test]
+    async fn gallery_source_media_resolves_and_downloads_a_member() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/mold%20chair.glb"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "available",
+                "members": [{
+                    "member_id": "m/1",
+                    "role": "source_image",
+                    "display_name": "armchair.png",
+                    "size_bytes": 5
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/mold%20chair.glb/m%2F1"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bytes".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
+        let inventory = client.gallery_source_media("mold chair.glb").await.unwrap();
+        assert_eq!(
+            inventory,
+            RetainedSourceMediaInventory {
+                availability: RetainedSourceMediaAvailability::Available,
+                members: vec![crate::RetainedSourceMediaMember {
+                    member_id: "m/1".into(),
+                    role: "source_image".into(),
+                    display_name: "armchair.png".into(),
+                    size_bytes: 5,
+                }],
+            }
+        );
+        let bytes = client
+            .download_gallery_source_media_member("mold chair.glb", "m/1")
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"bytes");
+    }
+
+    /// A keyed host reached without its key answers `401`; the inventory
+    /// reports that as `unavailable_auth` (the studio mapping), while a
+    /// member download surfaces the status so nothing is mistaken for bytes.
+    #[tokio::test]
+    async fn gallery_source_media_maps_401_to_unavailable_auth_and_404_to_an_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "API key required"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb/m1"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "retained source media requires API-key authentication",
+                "code": "RETAINED_SOURCE_MEDIA_AUTH_REQUIRED"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb/gone"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "retained source-media member was not found"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/legacy.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "unavailable_legacy"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let inventory = client.gallery_source_media("chair.glb").await.unwrap();
+        assert_eq!(
+            inventory.availability,
+            RetainedSourceMediaAvailability::UnavailableAuth
+        );
+        assert!(inventory.members.is_empty());
+
+        let auth = client
+            .download_gallery_source_media_member("chair.glb", "m1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(auth.contains("401"), "{auth}");
+        assert!(
+            auth.contains("RETAINED_SOURCE_MEDIA_AUTH_REQUIRED"),
+            "{auth}"
+        );
+        let gone = client
+            .download_gallery_source_media_member("chair.glb", "gone")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(gone.contains("404"), "{gone}");
+
+        // An absent `members` list deserializes as empty.
+        let legacy = client.gallery_source_media("legacy.png").await.unwrap();
+        assert_eq!(
+            legacy,
+            RetainedSourceMediaInventory {
+                availability: RetainedSourceMediaAvailability::UnavailableLegacy,
+                members: Vec::new(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -4825,6 +5009,65 @@ mod tests {
         assert_eq!(row.trashed_at, Some(1_700_000_100));
         assert_eq!(row.purge_at, Some(1_702_592_100));
         assert_eq!(row.size_bytes, Some(123_456));
+    }
+
+    /// The export client posts the container to the stored print's own
+    /// route, percent-encoding the filename like every other gallery helper,
+    /// and hands the bytes back untouched. A refusal is the server's own
+    /// sentence, because a foreign `.glb` is something only that message can
+    /// explain.
+    #[tokio::test]
+    async fn export_gallery_mesh_posts_the_format_and_returns_the_bytes() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/mold-hunyuan3d-1%201.glb"))
+            .and(body_json(serde_json::json!({ "format": "stl" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "model/stl")
+                    .set_body_bytes(b"solid bytes".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/missing.glb"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "gallery image not found: missing.glb"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/cat.png"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "only stored .glb prints can be exported"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let bytes = client
+            .export_gallery_mesh("mold-hunyuan3d-1 1.glb", crate::MeshExportFormat::Stl)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"solid bytes");
+
+        let missing = client
+            .export_gallery_mesh("missing.glb", crate::MeshExportFormat::Obj)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("not found"), "{missing}");
+
+        let refused = client
+            .export_gallery_mesh("cat.png", crate::MeshExportFormat::Ply)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("only stored .glb prints"), "{refused}");
     }
 
     #[tokio::test]

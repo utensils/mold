@@ -4371,7 +4371,11 @@ async function onExpand() {
           ...(sequenceMode.value
             ? {}
             : {
-                context: expansionContextForRequest(family, baseRequest),
+                context: expansionContextForRequest(
+                  family,
+                  baseRequest,
+                  activeRecipe.value,
+                ),
               }),
         },
         undefined,
@@ -4420,7 +4424,11 @@ async function onExpand() {
   expandTask.value = expansionTaskForCurrentOutput(expandRequest);
   expandContext.value = sequenceMode.value
     ? null
-    : expansionContextForRequest(currentFamily.value, expandRequest);
+    : expansionContextForRequest(
+        currentFamily.value,
+        expandRequest,
+        activeRecipe.value,
+      );
   showExpand.value = true;
 }
 
@@ -4453,6 +4461,7 @@ async function onRemix() {
   remixContext.value = expansionContextForRequest(
     currentFamily.value,
     baseRequest,
+    activeRecipe.value,
   );
   showRemix.value = true;
 }
@@ -5915,8 +5924,8 @@ onBeforeUnmount(() => {
           >
             Will render as
             <span class="font-semibold">{{ chainDecision.stageCount }}</span>
-            chained clips of {{ chainDecision.clipFrames }} frames — expect this
-            to take substantially longer than a single clip.
+            chained clips of up to {{ chainDecision.clipFrames }} frames —
+            expect this to take substantially longer than a single clip.
           </div>
           <div
             v-else-if="singleShotPreservationNote"

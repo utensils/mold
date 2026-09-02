@@ -7,7 +7,6 @@ import {
   OPTIONAL_PROMPT_GUIDANCE,
   promptGuidance,
   OPTIONAL_PROMPT_PLACEHOLDER,
-  familyAllowsEmptyPrompt,
   hasVisualConditioning,
   promptOptional,
   promptPlaceholder,
@@ -50,22 +49,6 @@ describe("promptRequirementForRecipe", () => {
     expect(promptRequirementForRecipe(recipe, true)).toBe("required");
     expect(promptRequirementForRecipe(null, true)).toBe("required");
     expect(promptRequirementForRecipe(undefined, true)).toBe("required");
-  });
-});
-
-describe("familyAllowsEmptyPrompt (deprecated)", () => {
-  it("answers through the recipe when one is passed", () => {
-    expect(familyAllowsEmptyPrompt("flux", ltxRecipe())).toBe(true);
-    expect(familyAllowsEmptyPrompt("flux", hunyuan3dRecipe())).toBe(true);
-    expect(familyAllowsEmptyPrompt("ltx2", sdxlRecipe())).toBe(false);
-  });
-
-  it("falls back to the legacy family rule without a recipe", () => {
-    expect(familyAllowsEmptyPrompt("ltx2")).toBe(true);
-    expect(familyAllowsEmptyPrompt("  LTX-Video ")).toBe(true);
-    expect(familyAllowsEmptyPrompt("flux")).toBe(false);
-    expect(familyAllowsEmptyPrompt(null)).toBe(false);
-    expect(familyAllowsEmptyPrompt("hunyuan3d", null)).toBe(false);
   });
 });
 

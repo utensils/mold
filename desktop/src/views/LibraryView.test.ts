@@ -1119,6 +1119,29 @@ describe("LibraryView header + NEW badges", () => {
     expect(wrapper.get('[data-test="upscaled-badge"]').text()).toBe("Upscaled");
     wrapper.unmount();
   });
+
+  it("badges a Framewise-upscaled video tile beside its play marker", async () => {
+    const { wrapper } = await mountView(undefined, (gallery) => {
+      const first = gallery.buckets.local?.items[0];
+      if (first) {
+        first.filename = "clip-framewise-upscaled-268a8049.mp4";
+        first.format = "mp4";
+        first.metadata = {
+          ...first.metadata,
+          width: 3072,
+          height: 3072,
+          generation_width: 960,
+          generation_height: 960,
+          upscale_model: "real-esrgan-x4plus:fp16",
+          source_video_path: "clip.mp4",
+        };
+      }
+    });
+
+    expect(wrapper.get('[data-test="upscaled-badge"]').text()).toBe("Upscaled");
+    expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("▶");
+    wrapper.unmount();
+  });
 });
 
 describe("LibraryView history drawer", () => {

@@ -86,17 +86,9 @@ pub(crate) fn preview_caption(model: &str, seed: u64, time_ms: u64, host_label: 
 
 /// `49152` → `49,152`. Counts of triangles and vertices run to six or seven
 /// digits, where an unseparated number stops being readable at a glance.
-pub(crate) fn format_thousands(value: u32) -> String {
-    let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
+/// The grouping is the shared `mold_core::format::group_thousands`, so the
+/// caption reads exactly as the CLI and Discord print the same counts.
+pub(crate) use mold_core::format::group_thousands as format_thousands;
 
 /// The one-line statistics of a finished 3-D print:
 /// `49,152 tris · 24,576 verts · 1.00×0.80×0.60`.
@@ -210,6 +202,40 @@ fn render_live_preview(frame: &mut Frame, app: &mut App, inner: Rect) {
     }
 }
 
+/// Where the finished print and its caption rows go inside the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DoneAreas {
+    image: Rect,
+    /// The `tris · verts · extent` row of a 3-D print, above the caption.
+    summary: Option<Rect>,
+    /// The `model · seed · time · host` row on the last line.
+    caption: Option<Rect>,
+}
+
+/// Split `inner` into the image and up to two one-line caption rows at the
+/// bottom. The caption needs a second line to exist at all (a one-row panel
+/// is all image); the mesh summary needs a third, and only ever sits above
+/// a caption. The image keeps every remaining row, so the rows rendered
+/// never exceed the panel and never overlap the picture.
+fn done_areas(inner: Rect, has_caption: bool, has_summary: bool) -> DoneAreas {
+    let caption = has_caption && inner.height > 1;
+    let summary = caption && has_summary && inner.height > 2;
+    let rows = u16::from(caption) + u16::from(summary);
+    let row_from_bottom = |offset: u16| Rect {
+        y: inner.y + inner.height - offset,
+        height: 1,
+        ..inner
+    };
+    DoneAreas {
+        image: Rect {
+            height: inner.height - rows,
+            ..inner
+        },
+        summary: summary.then(|| row_from_bottom(2)),
+        caption: caption.then(|| row_from_bottom(1)),
+    }
+}
+
 fn render_done(frame: &mut Frame, app: &mut App, inner: Rect) {
     // Caption row (only when we actually finished a run — an image can
     // also be present from an animation preview mid-session).
@@ -223,29 +249,16 @@ fn render_done(frame: &mut Frame, app: &mut App, inner: Rect) {
     });
     // A finished 3-D print gets a second caption row with its statistics
     // (`tris · verts · bounds`) above the usual one, when there is room.
-    let mesh_summary = caption
-        .as_ref()
-        .and(app.generate.last_mesh_summary.clone())
-        .filter(|_| inner.height > 2);
-    let caption_rows = u16::from(caption.is_some()) + u16::from(mesh_summary.is_some());
-    let image_area = if caption_rows > 0 && inner.height > caption_rows {
-        Rect {
-            height: inner.height - caption_rows,
-            ..inner
-        }
-    } else {
-        inner
-    };
+    let areas = done_areas(
+        inner,
+        caption.is_some(),
+        app.generate.last_mesh_summary.is_some(),
+    );
     if let Some(ref mut image_state) = app.generate.image_state {
         let widget = StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
-        frame.render_stateful_widget(widget, image_area, image_state);
+        frame.render_stateful_widget(widget, areas.image, image_state);
     }
-    if let Some(summary) = mesh_summary {
-        let row = Rect {
-            y: inner.y + inner.height - 2,
-            height: 1,
-            ..inner
-        };
+    if let (Some(row), Some(summary)) = (areas.summary, app.generate.last_mesh_summary.as_deref()) {
         frame.render_widget(
             Paragraph::new(summary)
                 .style(app.theme.dim())
@@ -253,20 +266,13 @@ fn render_done(frame: &mut Frame, app: &mut App, inner: Rect) {
             row,
         );
     }
-    if let Some(caption) = caption {
-        if inner.height > 1 {
-            let row = Rect {
-                y: inner.y + inner.height - 1,
-                height: 1,
-                ..inner
-            };
-            frame.render_widget(
-                Paragraph::new(caption)
-                    .style(app.theme.dim())
-                    .alignment(Alignment::Center),
-                row,
-            );
-        }
+    if let (Some(row), Some(caption)) = (areas.caption, caption) {
+        frame.render_widget(
+            Paragraph::new(caption)
+                .style(app.theme.dim())
+                .alignment(Alignment::Center),
+            row,
+        );
     }
 }
 
@@ -354,6 +360,56 @@ mod tests {
         assert_eq!(status, Rect::new(4, 14, 48, 1));
     }
 
+    /// The finished-print layout: the caption rows are carved off the
+    /// bottom of the panel, never exceed it, and never overlap the image.
+    #[test]
+    fn done_areas_fit_the_caption_rows_inside_the_panel() {
+        let inner = Rect::new(4, 7, 48, 8);
+        let both = done_areas(inner, true, true);
+        assert_eq!(both.image, Rect::new(4, 7, 48, 6));
+        assert_eq!(both.summary, Some(Rect::new(4, 13, 48, 1)));
+        assert_eq!(both.caption, Some(Rect::new(4, 14, 48, 1)));
+        let rows = u16::from(both.summary.is_some()) + u16::from(both.caption.is_some());
+        assert_eq!(both.image.height + rows, inner.height);
+        assert_eq!(both.image.bottom(), both.summary.unwrap().y);
+        assert_eq!(both.summary.unwrap().bottom(), both.caption.unwrap().y);
+        assert_eq!(both.caption.unwrap().bottom(), inner.bottom());
+
+        let caption_only = done_areas(inner, true, false);
+        assert_eq!(caption_only.image, Rect::new(4, 7, 48, 7));
+        assert_eq!(caption_only.summary, None);
+        assert_eq!(caption_only.caption, Some(Rect::new(4, 14, 48, 1)));
+
+        // No caption, no rows: an in-flight animation preview is all image.
+        let none = done_areas(inner, false, true);
+        assert_eq!(none.image, inner);
+        assert_eq!(none.summary, None);
+        assert_eq!(none.caption, None);
+    }
+
+    /// Short panels drop the summary first, then the caption, so a row is
+    /// never drawn over the picture and never outside the panel.
+    #[test]
+    fn done_areas_drop_rows_before_squeezing_the_image_to_nothing() {
+        let three = done_areas(Rect::new(0, 0, 40, 3), true, true);
+        assert_eq!(three.image.height, 1);
+        assert!(three.summary.is_some() && three.caption.is_some());
+
+        let two = done_areas(Rect::new(0, 0, 40, 2), true, true);
+        assert_eq!(two.image.height, 1);
+        assert_eq!(two.summary, None, "no room for a second caption row");
+        assert_eq!(two.caption, Some(Rect::new(0, 1, 40, 1)));
+
+        let one = done_areas(Rect::new(0, 0, 40, 1), true, true);
+        assert_eq!(one.image, Rect::new(0, 0, 40, 1));
+        assert_eq!(one.summary, None);
+        assert_eq!(one.caption, None);
+
+        let zero = done_areas(Rect::new(0, 0, 40, 0), true, true);
+        assert_eq!(zero.image.height, 0);
+        assert!(zero.summary.is_none() && zero.caption.is_none());
+    }
+
     #[test]
     fn preview_progress_formats_percent_rate_eta() {
         // 12/28 after 6.6s → ~1.8 it/s, eta (16 * 6600 / 12) ms ≈ 8s.
@@ -396,6 +452,7 @@ mod tests {
         );
     }
 
+    /// Pinned on the shared formatter the caption now uses.
     #[test]
     fn format_thousands_groups_every_three_digits() {
         assert_eq!(format_thousands(0), "0");

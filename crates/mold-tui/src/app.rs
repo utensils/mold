@@ -45,7 +45,7 @@ pub struct LicenseDownloadRequirement {
     pub licenses: Vec<mold_core::LicenseRefusal>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DurableGenerationChildOutcome {
     pub index: u32,
     pub job_id: String,
@@ -67,6 +67,61 @@ pub struct DurableGenerationChildOutcome {
     /// carries them — the pane displays one image, so hydrating every
     /// sibling would download a batch to throw it away.
     pub preview_bytes: Option<Vec<u8>>,
+    /// Geometry statistics of a 3-D child, read off the stored `.glb` the
+    /// host serves, because neither the durable child result nor the
+    /// gallery record carries them. Carried with the preview so the pane
+    /// can caption a batched mesh exactly as it captions a singleton's
+    /// `MeshData`.
+    pub mesh: Option<DurableMeshFacts>,
+}
+
+/// What the Preview caption says about a finished mesh: the same four
+/// facts `MeshData` carries, recovered from the stored GLB itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableMeshFacts {
+    pub vertices: u32,
+    pub faces: u32,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+}
+
+impl DurableMeshFacts {
+    /// Count the stored geometry with the same reader the export path
+    /// uses. Bytes that are not a readable GLB caption nothing rather than
+    /// a caption with invented zeros; an empty mesh has a degenerate box.
+    pub fn from_glb(glb: &[u8]) -> Option<Self> {
+        let mesh = mold_inference::hunyuan3d::glb::read_glb(glb).ok()?;
+        let (bounds_min, bounds_max) = mesh.vertices.iter().fold(
+            ([f32::MAX; 3], [f32::MIN; 3]),
+            |(mut lo, mut hi), vertex| {
+                for axis in 0..3 {
+                    lo[axis] = lo[axis].min(vertex[axis]);
+                    hi[axis] = hi[axis].max(vertex[axis]);
+                }
+                (lo, hi)
+            },
+        );
+        let (bounds_min, bounds_max) = if mesh.vertices.is_empty() {
+            ([0.0; 3], [0.0; 3])
+        } else {
+            (bounds_min, bounds_max)
+        };
+        Some(Self {
+            vertices: u32::try_from(mesh.vertices.len()).ok()?,
+            faces: u32::try_from(mesh.faces.len()).ok()?,
+            bounds_min,
+            bounds_max,
+        })
+    }
+
+    pub fn summary(&self) -> String {
+        crate::ui::preview::mesh_summary(
+            self.vertices,
+            self.faces,
+            self.bounds_min,
+            self.bounds_max,
+        )
+    }
 }
 
 /// Events sent from background tasks to the main TUI loop.
@@ -180,6 +235,12 @@ pub enum BackgroundEvent {
     /// A Library mesh export failed, with the host's or the writer's own
     /// sentence.
     MeshExportFailed(String),
+    /// Reuse settings asked the print's host for its retained source image;
+    /// this is the answer, keyed by the print so a stale one is ignored.
+    SourceImageRestored {
+        filename: String,
+        outcome: crate::source_media::SourceRestore,
+    },
     /// Periodic server status update (remote resource info).
     /// `None` means the server became unreachable — clear stale status.
     ServerStatusUpdate(Option<Box<ServerStatus>>),
@@ -756,6 +817,12 @@ pub struct GenerateParams {
     pub upscale_model: Option<String>,
     // img2img
     pub source_image_path: Option<String>,
+    /// The source image name a recalled print was conditioned on when the
+    /// TUI could not bring the file back (a remote print, or a local one
+    /// whose input is gone). Shown on the Source row as "attach again" so a
+    /// reuse does not read as "this print had no source"; cleared as soon
+    /// as a source is attached or the row is cleared. Never sent.
+    pub source_image_recall: Option<String>,
     /// Ordered H3 reference paths. This transient state is deliberately not
     /// serialized; only basename + digest provenance crosses the wire.
     pub reference_paths: Vec<crate::h3_references::ReferencePath>,
@@ -927,6 +994,7 @@ impl GenerateParams {
             offload: false,
             upscale_model: None,
             source_image_path: None,
+            source_image_recall: None,
             reference_paths: Vec::new(),
             strength: 0.75,
             mask_image_path: None,
@@ -1017,7 +1085,12 @@ impl GenerateParams {
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_else(|| p.to_string())
                 })
-                .unwrap_or_else(|| "\u{27e8}none\u{27e9}".to_string()),
+                .unwrap_or_else(|| match self.source_image_recall.as_deref() {
+                    Some(name) => {
+                        format!("\u{27e8}none\u{27e9} \u{00b7} attach again ({name})")
+                    }
+                    None => "\u{27e8}none\u{27e9}".to_string(),
+                }),
             ParamField::IdentityImage => self
                 .identity_image_path
                 .as_deref()
@@ -1397,6 +1470,10 @@ pub(crate) const LOCAL_MESH_EXPORT_FORMATS: [mold_core::MeshExportFormat; 3] = [
 /// The containers the export picker lists: the owning host's advertised
 /// `capabilities.mesh.export_formats` minus GLB, or the local writer's set
 /// when there is no host (a local print) or the host has not been polled.
+/// What Library `u` says on a 3-D print. Names the action that does apply.
+pub(crate) const MESH_UPSCALE_REFUSAL: &str =
+    "Upscale reads rasters only; press x to export this 3-D print as OBJ, STL, or PLY";
+
 pub(crate) fn mesh_export_formats_for(
     advertised: Option<&[mold_core::MeshExportFormat]>,
 ) -> Vec<mold_core::MeshExportFormat> {
@@ -1432,15 +1509,13 @@ pub(crate) fn export_local_mesh(
     format: mold_core::MeshExportFormat,
 ) -> Result<Vec<u8>, String> {
     use mold_inference::hunyuan3d::glb;
-    if format == mold_core::MeshExportFormat::Glb {
-        return Ok(glb.to_vec());
-    }
-    let mesh = glb::read_glb(glb).map_err(|e| e.to_string())?;
+    let read = || glb::read_glb(glb).map_err(|e| e.to_string());
     Ok(match format {
-        mold_core::MeshExportFormat::Glb => unreachable!("returned above"),
-        mold_core::MeshExportFormat::Obj => glb::write_obj(&mesh).into_bytes(),
-        mold_core::MeshExportFormat::Stl => glb::write_stl(&mesh),
-        mold_core::MeshExportFormat::Ply => glb::write_ply(&mesh),
+        // The stored form: handed back as-is, not re-encoded.
+        mold_core::MeshExportFormat::Glb => glb.to_vec(),
+        mold_core::MeshExportFormat::Obj => glb::write_obj(&read()?).into_bytes(),
+        mold_core::MeshExportFormat::Stl => glb::write_stl(&read()?),
+        mold_core::MeshExportFormat::Ply => glb::write_ply(&read()?),
     })
 }
 
@@ -1563,6 +1638,10 @@ pub struct GenerateState {
     /// the Preview caption. `None` after a raster or video completion, so a
     /// mesh summary never captions a picture.
     pub last_mesh_summary: Option<String>,
+    /// The gallery filename whose retained source image is being fetched
+    /// for the Source row after a reuse. An answer for any other print, or
+    /// one that lands after the row was cleared, is dropped.
+    pub source_restore_pending: Option<String>,
 }
 
 /// One held child this client can retry.
@@ -1667,6 +1746,13 @@ pub struct GalleryState {
     pub thumbnail_states: Vec<Option<StatefulProtocol>>,
     /// Source paths currently queued for off-thread thumbnail decode.
     pub thumbnail_loading: std::collections::HashSet<std::path::PathBuf>,
+    /// 3-D prints whose poster could not be found (a `.glb` saved without
+    /// one, or a host that answers its thumbnail route with the SVG
+    /// placeholder). A mesh has no raster to fall back to, so the grid
+    /// paints a marker in the cell instead of re-queueing the lookup on
+    /// every scroll. Cleared with the rest of the thumbnail state on every
+    /// rescan, so a poster written later is still picked up.
+    pub thumbnail_missing: std::collections::HashSet<std::path::PathBuf>,
     /// Most-recently decoded grid entries. Keeps image protocols bounded.
     pub thumbnail_lru: std::collections::VecDeque<usize>,
     /// Selected print's predecoded thumbnail protocol for the details panel.
@@ -1716,6 +1802,7 @@ impl Default for GalleryState {
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
             thumbnail_loading: std::collections::HashSet::new(),
+            thumbnail_missing: std::collections::HashSet::new(),
             thumbnail_lru: std::collections::VecDeque::new(),
             details_thumbnail_state: None,
             thumb_dimensions: Vec::new(),
@@ -2195,6 +2282,14 @@ pub enum Popup {
     /// rejected photo never leaves the picker; the refusal stays visible here
     /// and on the row rather than arriving as a late server error.
     IdentityImageInput {
+        input: String,
+        error: Option<String>,
+    },
+    /// Local path to the conditioning image for the Source row. Checked by
+    /// `source_image::validate_source_image_path` before it is accepted, so
+    /// the form never carries a path the request cannot read; the refusal
+    /// stays in the picker.
+    SourceImageInput {
         input: String,
         error: Option<String>,
     },
@@ -2775,6 +2870,7 @@ impl App {
                 held_batch: None,
                 prompt_transform_token: 0,
                 last_mesh_summary: None,
+                source_restore_pending: None,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -3144,6 +3240,17 @@ impl App {
         // outright rather than ignoring it.
         if self.generate.capabilities.mesh.is_none() {
             self.generate.params.mesh = mold_core::MeshRequestOptions::default();
+            // The GLB pin travels with the mesh rows: `output_format: "glb"`
+            // against a raster recipe is the same 422 at admission as a
+            // stale octree, and the Format row cannot show a value the
+            // family normalizer no longer holds. It goes back to the
+            // recipe's own default, PNG when no profile is loaded.
+            if self.generate.params.format.is_mesh() {
+                self.generate.params.format = recipe
+                    .as_ref()
+                    .map(|recipe| recipe.capabilities.output.default_format)
+                    .unwrap_or(OutputFormat::Png);
+            }
         }
         if !self.generate.params.duration_prediction_supported {
             self.generate.params.predict_duration = false;
@@ -4486,6 +4593,39 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::SourceImageInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        // An emptied field clears the source: the way back
+                        // out of an attached image, with no file check.
+                        if input.trim().is_empty() {
+                            self.generate.params.source_image_path = None;
+                            self.generate.params.source_image_recall = None;
+                            self.close_popup();
+                        } else {
+                            match crate::source_image::validate_source_image_path(input) {
+                                Ok(path) => {
+                                    self.generate.params.source_image_path = Some(path);
+                                    self.generate.params.source_image_recall = None;
+                                    self.close_popup();
+                                }
+                                Err(message) => *error = Some(message),
+                            }
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if input.len() + c.len_utf8()
+                            <= crate::source_image::SOURCE_PATH_MAX_BYTES =>
+                    {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
                 Some(Popup::FilingInput {
                     field,
                     input,
@@ -5503,6 +5643,9 @@ impl App {
             Action::EditAndGenerate if self.active_view == View::Library => {
                 self.load_gallery_into_generate();
             }
+            Action::ClearField if self.active_view == View::Create => {
+                self.clear_current_param();
+            }
             Action::Regenerate if self.active_view == View::Library => {
                 self.load_gallery_into_generate();
                 if !self.generate.generating {
@@ -5545,8 +5688,18 @@ impl App {
                     .get(self.gallery.selected)
                     .is_some_and(|entry| self.can_upscale_entry(entry));
                 if !can_upscale {
-                    self.generate.error_message =
-                        Some("Framewise video upscale is unavailable on this Mold host".into());
+                    let is_mesh =
+                        self.gallery
+                            .entries
+                            .get(self.gallery.selected)
+                            .is_some_and(|entry| {
+                                crate::gallery_scan::is_mesh_filename(&entry.filename())
+                            });
+                    self.generate.error_message = Some(if is_mesh {
+                        MESH_UPSCALE_REFUSAL.into()
+                    } else {
+                        "Framewise video upscale is unavailable on this Mold host".into()
+                    });
                     return;
                 }
                 let models = self.available_upscaler_models();
@@ -6486,6 +6639,16 @@ impl App {
         // leaves the rows at the recipe's defaults rather than carrying the
         // previous form's values into a print they never shaped.
         self.generate.params.mesh = meta.mesh.clone().unwrap_or_default();
+        // The print's own source image, never the previous form's file: the
+        // row starts as "attach again" with the recorded name, and the
+        // restore below replaces that with the file when the host (or the
+        // directory beside a local print) still has it.
+        self.generate.params.source_image_path = None;
+        self.generate.params.source_image_recall = meta.source_image_name.clone();
+        self.generate.source_restore_pending = None;
+        if let Some(name) = meta.source_image_name.clone() {
+            self.restore_source_image_for(&entry, &name);
+        }
         if let Some(ref lora) = meta.lora {
             self.generate.params.lora_path = Some(lora.clone());
             self.generate.params.lora_scale = meta.lora_scale.unwrap_or(1.0);
@@ -6497,6 +6660,43 @@ impl App {
         // Switch to Generate view
         self.active_view = View::Create;
         self.generate.focus = GenerateFocus::Prompt;
+    }
+
+    /// Bring a recalled print's source image back onto the Source row.
+    ///
+    /// A remote print's host is the only authority on what it retained, so
+    /// it is ASKED — off the UI thread, the answer arriving as
+    /// [`BackgroundEvent::SourceImageRestored`] — and an `available` source
+    /// member is downloaded into the TUI cache. An in-process print recorded
+    /// only the file's name, so the one place it can still be is beside the
+    /// print; if it is, that path is the row's, else "attach again" stands.
+    fn restore_source_image_for(&mut self, entry: &GalleryEntry, name: &str) {
+        let origin = entry.primary_origin();
+        match origin.url {
+            None => {
+                let beside_print = entry
+                    .path
+                    .parent()
+                    .map(|dir| dir.join(name))
+                    .filter(|path| path.is_file());
+                if let Some(path) = beside_print {
+                    self.generate.params.source_image_path =
+                        Some(path.to_string_lossy().into_owned());
+                    self.generate.params.source_image_recall = None;
+                }
+            }
+            Some(url) => {
+                let filename = entry.filename();
+                self.generate.source_restore_pending = Some(filename.clone());
+                let host_id = origin.host_id.clone();
+                let tx = self.bg_tx.clone();
+                self.tokio_handle.spawn(async move {
+                    let outcome =
+                        crate::source_media::restore_source_image(&url, &host_id, &filename).await;
+                    let _ = tx.send(BackgroundEvent::SourceImageRestored { filename, outcome });
+                });
+            }
+        }
     }
 
     /// Replace the gallery with a fresh scan result, preserving the user's
@@ -6518,6 +6718,7 @@ impl App {
         self.gallery.thumb_dimensions = vec![None; entries.len()];
         self.gallery.thumb_fixed_cache = vec![None; entries.len()];
         self.gallery.thumbnail_loading.clear();
+        self.gallery.thumbnail_missing.clear();
         self.gallery.thumbnail_lru.clear();
         self.gallery.details_thumbnail_state = None;
         self.gallery.details_thumb = None;
@@ -6575,9 +6776,16 @@ impl App {
 
     /// Whether Library may offer its immediate upscale action for `entry`.
     /// Images retain the local/legacy fallback. Videos require the durable
-    /// server pipeline and its explicit codec-backed capability.
+    /// server pipeline and its explicit codec-backed capability. A 3-D
+    /// print is never upscalable: a raster upscaler has nothing to read in
+    /// a `.glb`, and posting one as `UpscaleRequest.image` only earns a
+    /// decode error after the upload. Export (`x`) is its action.
     pub(crate) fn can_upscale_entry(&self, entry: &GalleryEntry) -> bool {
-        if !crate::gallery_scan::is_video_filename(&entry.filename()) {
+        let filename = entry.filename();
+        if crate::gallery_scan::is_mesh_filename(&filename) {
+            return false;
+        }
+        if !crate::gallery_scan::is_video_filename(&filename) {
             return true;
         }
         let origin = entry.primary_origin();
@@ -6623,17 +6831,47 @@ impl App {
             .unwrap_or(RemovalKind::Delete)
     }
 
-    /// Remove the currently selected gallery print on every machine that
-    /// holds it: the trash where available (local DB-backed `.trash/`
-    /// move, server `DELETE` which current servers treat as trash), a
-    /// hard delete otherwise — plus the TUI's own thumbnail/preview cache
-    /// entries either way.
+    /// The export containers on offer for a 3-D print, or the refusal.
+    ///
+    /// A LOCAL print is transcoded in-process, so it offers every container
+    /// the writer has. A REMOTE print is converted by its owning host, so
+    /// it offers exactly what that host advertises
+    /// (`capabilities.mesh.export_formats`, the stored GLB excluded) — and
+    /// nothing at all while the host's capabilities have not been read, or
+    /// when it advertises no `mesh` block: such a host has no export route,
+    /// and guessing the local list would only fail against a 404 after the
+    /// user picked a format.
+    pub(crate) fn mesh_export_formats_for_entry(
+        &self,
+        entry: &GalleryEntry,
+    ) -> Result<Vec<mold_core::MeshExportFormat>, String> {
+        let origin = entry.primary_origin();
+        if origin.url.is_none() {
+            return Ok(mesh_export_formats_for(None));
+        }
+        let Some(caps) = self.capabilities_for_origin(&origin) else {
+            return Err(format!(
+                "{} has not reported its capabilities yet; try again in a moment",
+                origin.name
+            ));
+        };
+        let Some(mesh) = caps.mesh.as_ref() else {
+            return Err(format!(
+                "{} does not export meshes (no mesh capability advertised)",
+                origin.name
+            ));
+        };
+        let formats = mesh_export_formats_for(Some(&mesh.export_formats));
+        if formats.is_empty() {
+            return Err(format!("{} advertises no mesh export formats", origin.name));
+        }
+        Ok(formats)
+    }
+
     /// Library `x`: offer the export containers for the selected 3-D print.
     ///
-    /// A remote print offers what its OWNING host advertises
-    /// (`capabilities.mesh.export_formats`, the stored GLB excluded); a local
-    /// print offers every transcode the in-process writer has. Anything but
-    /// a `.glb` is refused by name rather than silently ignored.
+    /// The list comes from [`Self::mesh_export_formats_for_entry`]. Anything
+    /// but a `.glb` is refused by name rather than silently ignored.
     fn open_mesh_export_picker(&mut self) {
         let Some(entry) = self.gallery.entries.get(self.gallery.selected) else {
             return;
@@ -6644,20 +6882,13 @@ impl App {
                 Some("Export converts 3-D prints (.glb) only; press o to open this file".into());
             return;
         }
-        let origin = entry.primary_origin();
-        let advertised = if origin.url.is_some() {
-            self.capabilities_for_origin(&origin)
-                .and_then(|caps| caps.mesh.as_ref())
-                .map(|mesh| mesh.export_formats.as_slice())
-        } else {
-            None
+        let formats = match self.mesh_export_formats_for_entry(entry) {
+            Ok(formats) => formats,
+            Err(message) => {
+                self.generate.error_message = Some(message);
+                return;
+            }
         };
-        let formats = mesh_export_formats_for(advertised);
-        if formats.is_empty() {
-            self.generate.error_message =
-                Some("This machine advertises no mesh export formats".into());
-            return;
-        }
         self.popup = Some(Popup::MeshExportPicker {
             filename,
             formats,
@@ -6726,6 +6957,11 @@ impl App {
         });
     }
 
+    /// Remove the currently selected gallery print on every machine that
+    /// holds it: the trash where available (local DB-backed `.trash/`
+    /// move, server `DELETE` which current servers treat as trash), a
+    /// hard delete otherwise — plus the TUI's own thumbnail/preview cache
+    /// entries either way.
     fn delete_selected_gallery_image(&mut self) {
         if self.gallery.entries.is_empty() {
             return;
@@ -7006,6 +7242,28 @@ impl App {
         });
     }
 
+    /// `x` / Backspace on a Create-form row: drop the attached file on the
+    /// two path rows. Every other row keeps its value — a typed number is
+    /// not something to lose to a stray key.
+    fn clear_current_param(&mut self) {
+        use crate::ui::create_form::CreateRow;
+        let field = match self.generate.rows.get(self.generate.param_index) {
+            Some(CreateRow::Field(field)) | Some(CreateRow::SectionField(_, field)) => *field,
+            _ => return,
+        };
+        match field {
+            ParamField::SourceImage => {
+                self.generate.params.source_image_path = None;
+                self.generate.params.source_image_recall = None;
+            }
+            ParamField::IdentityImage => {
+                self.generate.params.identity_image_path = None;
+                self.generate.identity_error = None;
+            }
+            _ => {}
+        }
+    }
+
     /// Handle Enter on the currently selected Create-form row.
     fn activate_current_param(&mut self) {
         use crate::ui::create_form::CreateRow;
@@ -7140,6 +7398,15 @@ impl App {
                     input,
                     error: self.generate.identity_error.clone(),
                 });
+            }
+            ParamField::SourceImage => {
+                let input = self
+                    .generate
+                    .params
+                    .source_image_path
+                    .clone()
+                    .unwrap_or_default();
+                self.popup = Some(Popup::SourceImageInput { input, error: None });
             }
             // File under — three validated one-line editors.
             ParamField::Title | ParamField::Tags | ParamField::Collection => {
@@ -8266,6 +8533,7 @@ impl App {
         if let Some(message) = crate::model_info::source_image_contract_error(
             self.source_image_contract(&self.generate.params.model),
             self.generate.params.source_image_path.is_some(),
+            &family_for_model(&self.generate.params.model, &self.config),
         ) {
             self.generate.error_message = Some(message.to_string());
             return;
@@ -8579,6 +8847,10 @@ impl App {
                 })
                 .into_iter()
                 .collect(),
+            prompt_mode: Some(mold_core::prompt_requirement_for_family(
+                Some(family),
+                params.source_image_path.is_some(),
+            )),
         }
     }
 
@@ -9443,6 +9715,9 @@ impl App {
                     self.generate.clear_live_preview();
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
+                    // The caption describes THIS batch's print: a raster
+                    // batch after a mesh must not keep the old tris·verts.
+                    self.generate.last_mesh_summary = None;
 
                     let mut failures = Vec::new();
                     let mut completed = 0_usize;
@@ -9474,6 +9749,9 @@ impl App {
                                 self.generate.image_state = Some(protocol);
                                 self.generate.animation = None;
                             }
+                        }
+                        if let Some(facts) = outcome.mesh.as_ref() {
+                            self.generate.last_mesh_summary = Some(facts.summary());
                         }
                         let mut filenames = [outcome.filename, outcome.original_filename]
                             .into_iter()
@@ -9629,6 +9907,7 @@ impl App {
                     self.gallery.thumb_dimensions = vec![None; len];
                     self.gallery.thumb_fixed_cache = vec![None; len];
                     self.gallery.thumbnail_loading.clear();
+                    self.gallery.thumbnail_missing.clear();
                     self.gallery.thumbnail_lru.clear();
                     self.gallery.details_thumbnail_state = None;
                     self.gallery.details_thumb = None;
@@ -9636,6 +9915,15 @@ impl App {
                 BackgroundEvent::GalleryThumbnailReady { path, image } => {
                     self.gallery.thumbnail_loading.remove(&path);
                     let Some(image) = image else {
+                        // A mesh with no poster has nothing else to show:
+                        // remember that, so the grid paints its marker
+                        // instead of asking again on every scroll.
+                        let is_mesh = path.file_name().is_some_and(|name| {
+                            crate::gallery_scan::is_mesh_filename(&name.to_string_lossy())
+                        });
+                        if is_mesh {
+                            self.gallery.thumbnail_missing.insert(path);
+                        }
                         continue;
                     };
                     let Some(index) = self
@@ -10128,20 +10416,75 @@ impl App {
                     // The Library has no timeline strip, so the path is
                     // shown where the user is looking: a dismiss-on-any-key
                     // popup, the TUI's toast. The Create timeline gets the
-                    // same line so the export is in the session record.
+                    // same line so the export is in the session record —
+                    // and it is the only notice when a dialog is already
+                    // open, because a background event must not replace
+                    // whatever the user is in the middle of.
                     self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Exported {}", path.display()),
                         style: ProgressStyle::Done,
                     });
-                    self.popup = Some(Popup::Info {
-                        message: format!("Exported to\n{}", path.display()),
-                    });
+                    if self.popup.is_none() {
+                        self.popup = Some(Popup::Info {
+                            message: format!("Exported to\n{}", path.display()),
+                        });
+                    }
+                }
+                BackgroundEvent::SourceImageRestored { filename, outcome } => {
+                    use crate::source_media::SourceRestore;
+                    if self.generate.source_restore_pending.as_deref() != Some(filename.as_str()) {
+                        continue;
+                    }
+                    self.generate.source_restore_pending = None;
+                    // The row was cleared (x) while the host was answering:
+                    // the user's clear wins over the late file.
+                    let Some(name) = self.generate.params.source_image_recall.clone() else {
+                        continue;
+                    };
+                    let (message, style) = match outcome {
+                        SourceRestore::Restored(path) => {
+                            if self.generate.params.source_image_path.is_some() {
+                                continue;
+                            }
+                            self.generate.params.source_image_path =
+                                Some(path.to_string_lossy().into_owned());
+                            self.generate.params.source_image_recall = None;
+                            (
+                                format!("Restored source image {name} from the print's host"),
+                                ProgressStyle::Done,
+                            )
+                        }
+                        SourceRestore::Unavailable(word) => (
+                            format!("Source image {name}: {word}"),
+                            ProgressStyle::Warning,
+                        ),
+                        SourceRestore::NoSourceMember => (
+                            format!(
+                                "Source image {name}: the host retained no source image for \
+                                 this print; attach it again"
+                            ),
+                            ProgressStyle::Warning,
+                        ),
+                        SourceRestore::Failed(error) => (
+                            format!("Source image {name} could not be restored: {error}"),
+                            ProgressStyle::Warning,
+                        ),
+                    };
+                    self.generate
+                        .progress
+                        .push_log(ProgressLogEntry { message, style });
                 }
                 BackgroundEvent::MeshExportFailed(message) => {
                     self.generate.error_message = Some(format!("Export failed: {message}"));
-                    self.popup = Some(Popup::Info {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Export failed: {message}"),
+                        style: ProgressStyle::Error,
                     });
+                    if self.popup.is_none() {
+                        self.popup = Some(Popup::Info {
+                            message: format!("Export failed: {message}"),
+                        });
+                    }
                 }
                 BackgroundEvent::CatalogRefreshed(models) => {
                     self.models.catalog = models;
@@ -10491,6 +10834,7 @@ mod tests {
                 seed: None,
                 generation_time_ms: None,
                 preview_bytes: None,
+                mesh: None,
             }
         }
 
@@ -11757,6 +12101,7 @@ mod tests {
                 held_batch: None,
                 prompt_transform_token: 0,
                 last_mesh_summary: None,
+                source_restore_pending: None,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -14896,6 +15241,19 @@ mod tests {
             mold_core::MeshRequestOptions::default(),
             "a raster recipe refuses the block, so it is cleared"
         );
+        assert_eq!(
+            app.generate.params.format,
+            OutputFormat::Png,
+            "the GLB pin leaves with the mesh rows"
+        );
+        for _ in 0..3 {
+            app.adjust_field(ParamField::Format, 1);
+        }
+        assert_ne!(
+            app.generate.params.format,
+            OutputFormat::Glb,
+            "the Format row is adjustable again and never reaches GLB"
+        );
     }
 
     /// A recipe whose profile says `prompt.mode == ignored` admits an empty
@@ -15165,6 +15523,1000 @@ mod tests {
             .error_message
             .as_deref()
             .is_some_and(|m| m.contains(".glb")));
+    }
+
+    /// Leaving the mesh recipe un-pins the Format row. `build_request`
+    /// always sends `output_format`, so a GLB left behind against a raster
+    /// recipe would be the 422 the profile contract itself introduced.
+    #[tokio::test]
+    async fn leaving_the_mesh_recipe_resets_the_pinned_format() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.format, OutputFormat::Glb);
+
+        // With the raster recipe's profile loaded, its own default wins.
+        app.generate.params.model = "flux2-klein:q8".to_string();
+        app.sync_generate_capabilities();
+        assert!(app.generate.capabilities.mesh.is_none());
+        let recipe_default = app
+            .active_generation_recipe()
+            .expect("flux2-klein carries a profile")
+            .capabilities
+            .output
+            .default_format;
+        assert!(!recipe_default.is_mesh());
+        assert_eq!(app.generate.params.format, recipe_default);
+
+        // A raster format the user picked is not touched by a raster switch.
+        app.generate.params.format = OutputFormat::Jpeg;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.format, OutputFormat::Jpeg);
+
+        // Without any profile (family-only catalog) a stale GLB lands on PNG.
+        app.models.catalog.clear();
+        app.generate.params.format = OutputFormat::Glb;
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.params.format, OutputFormat::Png);
+    }
+
+    /// Library `u` on a `.glb`: no upscaler picker, and a refusal that names
+    /// the action which does apply. `can_upscale_entry` is what the details
+    /// panel's key hints read, so it answers the same.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn library_u_refuses_a_mesh_and_points_at_export() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Library;
+        let mut mesh = make_test_entry_with_name("chair.glb");
+        mesh.origins = vec![GalleryOrigin::local()];
+        assert!(!app.can_upscale_entry(&mesh));
+        let mut remote_mesh = make_test_entry_with_name("remote-chair.glb");
+        remote_mesh.origins = vec![GalleryOrigin::remote_from_url("http://bender:7680")];
+        assert!(!app.can_upscale_entry(&remote_mesh));
+
+        app.gallery.entries = vec![mesh];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.gallery.selected = 0;
+        app.dispatch_action(Action::UpscaleImage);
+        assert!(app.popup.is_none(), "no upscaler picker for a mesh");
+        assert!(!app.upscale_in_progress);
+        assert_eq!(
+            app.generate.error_message.as_deref(),
+            Some(MESH_UPSCALE_REFUSAL)
+        );
+        assert!(MESH_UPSCALE_REFUSAL.contains("press x"));
+    }
+
+    /// Untouched mesh rows render the profile's default and say so; a
+    /// touched row shows the chosen value alone.
+    #[tokio::test]
+    async fn untouched_mesh_rows_show_the_profile_default_marked_as_such() {
+        use crate::ui::param_form::field_value;
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        let mesh = app
+            .generate
+            .capabilities
+            .mesh
+            .clone()
+            .expect("the built-in profile carries the mesh block");
+        assert_eq!(
+            mesh.octree_default,
+            mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION
+        );
+        assert_eq!(
+            field_value(&app.generate, ParamField::Octree),
+            format!("{} \u{00b7} default", mesh.octree_default)
+        );
+        assert_eq!(
+            field_value(&app.generate, ParamField::Octree),
+            "256 \u{00b7} default"
+        );
+        assert_eq!(
+            field_value(&app.generate, ParamField::MeshThreshold),
+            format!("{:.2} \u{00b7} default", mesh.threshold.default)
+        );
+
+        app.adjust_field(ParamField::Octree, 1);
+        assert_eq!(field_value(&app.generate, ParamField::Octree), "320");
+        app.adjust_field(ParamField::MeshThreshold, -1);
+        let threshold = field_value(&app.generate, ParamField::MeshThreshold);
+        assert!(
+            !threshold.contains("default"),
+            "a touched row shows only its value: {threshold}"
+        );
+    }
+
+    /// A remote print exports only what its OWNING host advertises. A host
+    /// whose capabilities have not been read, or that advertises no `mesh`
+    /// block, has no export route to call, so it is refused by name instead
+    /// of being offered the local list and failing after the pick.
+    #[tokio::test]
+    async fn remote_mesh_export_offers_only_what_the_owning_host_advertises() {
+        use mold_core::MeshExportFormat::{Glb, Obj, Stl};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Library;
+        app.server_url = Some("http://bender:7680".into());
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.origins = vec![GalleryOrigin::remote_from_url("http://bender:7680")];
+
+        let not_polled = app.mesh_export_formats_for_entry(&entry).unwrap_err();
+        assert!(not_polled.contains("capabilities"), "{not_polled}");
+
+        app.machines.apply_capabilities(
+            crate::hosts::LOCAL_HOST_ID.into(),
+            Some(mold_core::ServerCapabilities::default()),
+        );
+        let no_mesh = app.mesh_export_formats_for_entry(&entry).unwrap_err();
+        assert!(no_mesh.contains("does not export meshes"), "{no_mesh}");
+        assert!(no_mesh.contains(&entry.primary_origin().name), "{no_mesh}");
+
+        // The refusal reaches the user through `x`, with no picker.
+        app.gallery.entries = vec![entry.clone()];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.gallery.selected = 0;
+        app.dispatch_action(Action::ExportMesh);
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.generate.error_message.as_deref(),
+            Some(no_mesh.as_str())
+        );
+
+        let caps = mold_core::ServerCapabilities {
+            mesh: Some(mold_core::MeshCapabilities {
+                generation: true,
+                formats: vec![OutputFormat::Glb],
+                export_formats: vec![Glb, Obj, Stl],
+                textures: false,
+            }),
+            ..Default::default()
+        };
+        app.machines
+            .apply_capabilities(crate::hosts::LOCAL_HOST_ID.into(), Some(caps));
+        assert_eq!(
+            app.mesh_export_formats_for_entry(&entry),
+            Ok(vec![Obj, Stl]),
+            "the stored GLB is never an export; PLY is not advertised"
+        );
+        app.generate.error_message = None;
+        app.dispatch_action(Action::ExportMesh);
+        match &app.popup {
+            Some(Popup::MeshExportPicker { formats, .. }) => assert_eq!(formats, &vec![Obj, Stl]),
+            other => panic!("expected the export picker, got {}", other.is_some()),
+        }
+
+        // A local print never consults a host.
+        let local = make_test_entry_with_name("local-chair.glb");
+        assert_eq!(
+            app.mesh_export_formats_for_entry(&local),
+            Ok(LOCAL_MESH_EXPORT_FORMATS.to_vec())
+        );
+    }
+
+    /// A remote export is transcoded by the owning host over
+    /// `POST /api/gallery/export/:filename` and lands beside the TUI's other
+    /// saves; the print's (absent) local path is never read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(mold_env)]
+    async fn remote_mesh_export_is_transcoded_by_the_owning_host() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        crate::test_env::disable_db_for_non_isolated_tests();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/chair.glb"))
+            .and(body_json(serde_json::json!({ "format": "stl" })))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"solid stl".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = tempfile::tempdir().unwrap();
+        let mut app = make_settings_test_app();
+        app.config.output_dir = Some(out.path().to_string_lossy().to_string());
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.path = std::path::PathBuf::from("/nonexistent/chair.glb");
+        entry.origins = vec![GalleryOrigin::remote_from_url(&server.uri())];
+        app.gallery.entries = vec![entry];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+
+        app.spawn_mesh_export("chair.glb", mold_core::MeshExportFormat::Stl);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), app.bg_rx.recv())
+            .await
+            .expect("the export settles")
+            .expect("the channel is open");
+        match event {
+            BackgroundEvent::MeshExportComplete(path) => {
+                assert_eq!(path, out.path().join("chair.stl"));
+                assert_eq!(std::fs::read(&path).unwrap(), b"solid stl");
+            }
+            BackgroundEvent::MeshExportFailed(message) => panic!("export failed: {message}"),
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    /// An export finishing in the background never replaces a dialog the
+    /// user has open; the timeline line is the notice then. With nothing
+    /// open, the path is toasted.
+    #[tokio::test]
+    async fn export_completion_does_not_clobber_an_open_dialog() {
+        let mut app = make_settings_test_app();
+        app.popup = Some(Popup::Info {
+            message: "busy".into(),
+        });
+        app.bg_tx
+            .send(BackgroundEvent::MeshExportComplete("/out/chair.stl".into()))
+            .unwrap();
+        app.process_background_events();
+        assert!(matches!(&app.popup, Some(Popup::Info { message }) if message == "busy"));
+        assert!(app
+            .generate
+            .progress
+            .log
+            .iter()
+            .any(|entry| entry.message.contains("/out/chair.stl")));
+
+        app.popup = None;
+        app.bg_tx
+            .send(BackgroundEvent::MeshExportComplete("/out/chair.ply".into()))
+            .unwrap();
+        app.process_background_events();
+        assert!(
+            matches!(&app.popup, Some(Popup::Info { message }) if message.contains("/out/chair.ply"))
+        );
+
+        app.popup = Some(Popup::Info {
+            message: "busy".into(),
+        });
+        app.bg_tx
+            .send(BackgroundEvent::MeshExportFailed("boom".into()))
+            .unwrap();
+        app.process_background_events();
+        assert!(matches!(&app.popup, Some(Popup::Info { message }) if message == "busy"));
+        assert_eq!(
+            app.generate.error_message.as_deref(),
+            Some("Export failed: boom")
+        );
+    }
+
+    /// A batched remote mesh captions its tris · verts · extent from the
+    /// facts the durable outcome carries, exactly as a singleton does from
+    /// `MeshData`; a raster batch afterwards clears the caption.
+    #[tokio::test]
+    async fn a_batched_remote_mesh_reports_its_summary_caption() {
+        let mut app = make_settings_test_app();
+        let outcome =
+            |filename: &str, mesh: Option<DurableMeshFacts>| DurableGenerationChildOutcome {
+                index: 1,
+                job_id: "job-1".into(),
+                authority: mold_core::GenerationBatchAuthority {
+                    batch_id: "batch".into(),
+                    client_batch_id: "client".into(),
+                    instance_id: "instance".into(),
+                },
+                filename: Some(filename.into()),
+                original_filename: None,
+                error: None,
+                retryable: false,
+                seed: Some(7),
+                generation_time_ms: Some(1_000),
+                preview_bytes: None,
+                mesh,
+            };
+        let batch = |outcome: DurableGenerationChildOutcome| {
+            BackgroundEvent::DurableGenerationBatchComplete {
+                outcomes: vec![outcome],
+                prompt: String::new(),
+                negative_prompt: None,
+                model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.into(),
+                host: HeldHost {
+                    url: "http://bender:7680".into(),
+                    api_key: None,
+                },
+            }
+        };
+
+        app.generate.generating = true;
+        app.bg_tx
+            .send(batch(outcome(
+                "chair.glb",
+                Some(DurableMeshFacts {
+                    vertices: 24_576,
+                    faces: 49_152,
+                    bounds_min: [-0.5, -0.4, -0.3],
+                    bounds_max: [0.5, 0.4, 0.3],
+                }),
+            )))
+            .unwrap();
+        app.process_background_events();
+        assert!(!app.generate.generating);
+        assert_eq!(
+            app.generate.last_mesh_summary.as_deref(),
+            Some("49,152 tris \u{00b7} 24,576 verts \u{00b7} 1.00\u{00d7}0.80\u{00d7}0.60")
+        );
+
+        app.generate.generating = true;
+        app.bg_tx.send(batch(outcome("still.png", None))).unwrap();
+        app.process_background_events();
+        assert_eq!(app.generate.last_mesh_summary, None);
+
+        // The facts are counted off the stored GLB the host serves.
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.5, -1.0]],
+            faces: vec![[0, 1, 2]],
+            normals: None,
+            uvs: None,
+            vertex_colors: None,
+        };
+        let glb = mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap();
+        let facts = DurableMeshFacts::from_glb(&glb).expect("a readable GLB");
+        assert_eq!(
+            facts,
+            DurableMeshFacts {
+                vertices: 3,
+                faces: 1,
+                bounds_min: [0.0, 0.0, -1.0],
+                bounds_max: [2.0, 0.5, 0.0],
+            }
+        );
+        assert_eq!(
+            facts.summary(),
+            "1 tris \u{00b7} 3 verts \u{00b7} 2.00\u{00d7}0.50\u{00d7}1.00"
+        );
+        assert_eq!(
+            DurableMeshFacts::from_glb(b"not a glb"),
+            None,
+            "unreadable bytes caption nothing rather than zeros"
+        );
+    }
+
+    /// A mesh whose poster could not be found is remembered as such, so the
+    /// grid paints its marker instead of re-queueing the lookup on every
+    /// scroll; a raster's failed decode is not remembered (it may still be
+    /// being written), and a rescan forgets everything.
+    #[tokio::test]
+    async fn a_posterless_mesh_is_marked_missing_and_not_requeued() {
+        let mut app = make_settings_test_app();
+        let mesh = make_test_entry_with_name("chair.glb");
+        let still = make_test_entry_with_name("still.png");
+        app.gallery.entries = vec![mesh.clone(), still.clone()];
+        app.gallery.thumbnail_states = vec![None, None];
+        app.gallery.thumb_dimensions = vec![None, None];
+        app.gallery.thumb_fixed_cache = vec![None, None];
+        app.gallery.refresh_filter();
+
+        app.bg_tx
+            .send(BackgroundEvent::GalleryThumbnailReady {
+                path: mesh.path.clone(),
+                image: None,
+            })
+            .unwrap();
+        app.bg_tx
+            .send(BackgroundEvent::GalleryThumbnailReady {
+                path: still.path.clone(),
+                image: None,
+            })
+            .unwrap();
+        app.process_background_events();
+        assert!(app.gallery.thumbnail_missing.contains(&mesh.path));
+        assert!(!app.gallery.thumbnail_missing.contains(&still.path));
+
+        crate::ui::gallery::queue_thumbnail(&mut app, 0);
+        assert!(
+            !app.gallery.thumbnail_loading.contains(&mesh.path),
+            "a missing poster is not asked for again"
+        );
+        crate::ui::gallery::queue_thumbnail(&mut app, 1);
+        assert!(app.gallery.thumbnail_loading.contains(&still.path));
+
+        app.apply_gallery_scan(vec![mesh.clone()]);
+        assert!(app.gallery.thumbnail_missing.is_empty());
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_crossterm_event(key(crossterm::event::KeyCode::Char(c)));
+        }
+    }
+
+    /// Put the Create form on the Source row with the section expanded.
+    fn select_source_row(app: &mut App) {
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.generate.advanced.open = true;
+        app.set_advanced_expanded(Some(crate::ui::create_form::AdvSection::Source));
+        app.refresh_create_rows();
+        app.generate.param_index = app
+            .generate
+            .rows
+            .iter()
+            .position(|row| {
+                *row == crate::ui::create_form::CreateRow::SectionField(
+                    crate::ui::create_form::AdvSection::Source,
+                    ParamField::SourceImage,
+                )
+            })
+            .expect("the Source row is visible");
+    }
+
+    /// Enter on the Source row opens the path picker; an accepted path lands
+    /// on the row, a bad one keeps the old value with the reason in the
+    /// picker, an emptied one clears, and `x` on the row clears too.
+    #[tokio::test]
+    async fn source_row_takes_a_checked_path_and_clears_again() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        assert!(app.generate.capabilities.supports_source_image);
+        select_source_row(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("cat.png");
+        std::fs::write(&cat, IDENTITY_TEST_PNG).unwrap();
+
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(
+            matches!(&app.popup, Some(Popup::SourceImageInput { input, error: None }) if input.is_empty()),
+            "Enter on the Source row opens the picker, got {}",
+            app.popup.is_some()
+        );
+        type_text(&mut app, &cat.to_string_lossy());
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(app.popup.is_none(), "an accepted path closes the picker");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(cat.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "cat.png"
+        );
+
+        // A path that does not exist is refused in place; the row keeps cat.png.
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        match &app.popup {
+            Some(Popup::SourceImageInput { input, .. }) => {
+                assert_eq!(
+                    input,
+                    &cat.to_string_lossy().to_string(),
+                    "reopens on the current path"
+                )
+            }
+            _ => panic!("the picker reopens"),
+        }
+        for _ in 0..cat.to_string_lossy().len() {
+            app.handle_crossterm_event(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "/nowhere/dog.png");
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        match &app.popup {
+            Some(Popup::SourceImageInput {
+                error: Some(error), ..
+            }) => {
+                assert!(error.starts_with("Source image not found"), "{error}")
+            }
+            _ => panic!("a bad path stays in the picker with its reason"),
+        }
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(cat.to_string_lossy().as_ref()),
+            "the old value survives a refused entry"
+        );
+        // Typing again clears the error; Esc abandons the edit.
+        app.handle_crossterm_event(key(KeyCode::Backspace));
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::SourceImageInput { error: None, .. })
+        ));
+        app.handle_crossterm_event(key(KeyCode::Esc));
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(cat.to_string_lossy().as_ref())
+        );
+
+        // A directory and a non-raster are refused by name.
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        for _ in 0..cat.to_string_lossy().len() {
+            app.handle_crossterm_event(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, &dir.path().to_string_lossy());
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(
+            matches!(&app.popup, Some(Popup::SourceImageInput { error: Some(e), .. }) if e.contains("not a file"))
+        );
+        app.handle_crossterm_event(key(KeyCode::Esc));
+
+        // An emptied picker clears the source.
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        for _ in 0..cat.to_string_lossy().len() {
+            app.handle_crossterm_event(key(KeyCode::Backspace));
+        }
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(app.popup.is_none());
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "\u{27e8}none\u{27e9}"
+        );
+
+        // `x` on the row clears without opening anything.
+        app.generate.params.source_image_path = Some(cat.to_string_lossy().to_string());
+        app.handle_crossterm_event(key(KeyCode::Char('x')));
+        assert!(app.popup.is_none());
+        assert_eq!(app.generate.params.source_image_path, None);
+        app.generate.params.source_image_path = Some(cat.to_string_lossy().to_string());
+        app.handle_crossterm_event(key(KeyCode::Backspace));
+        assert_eq!(app.generate.params.source_image_path, None);
+
+        // `x` on a numeric row is not a clear.
+        app.generate.param_index = app
+            .generate
+            .rows
+            .iter()
+            .position(|row| *row == crate::ui::create_form::CreateRow::Field(ParamField::Steps))
+            .unwrap();
+        let steps = app.generate.params.steps;
+        app.handle_crossterm_event(key(KeyCode::Char('x')));
+        assert_eq!(app.generate.params.steps, steps);
+    }
+
+    /// The dispatch gate names the mesh family's own remedy, and clears once
+    /// a source is attached through the row.
+    #[tokio::test]
+    async fn mesh_dispatch_gate_points_at_the_source_row() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        let family = family_for_model(&app.generate.params.model, &app.config);
+        assert_eq!(family, mold_core::manifest::HUNYUAN3D_FAMILY);
+        let message = crate::model_info::source_image_contract_error(
+            app.source_image_contract(&app.generate.params.model),
+            false,
+            &family,
+        )
+        .expect("a mesh recipe requires its source image");
+        assert!(
+            message.contains("3-D model reconstructs a source image"),
+            "{message}"
+        );
+        assert!(message.contains("Source row"), "{message}");
+        assert_eq!(
+            crate::model_info::source_image_contract_error(
+                app.source_image_contract(&app.generate.params.model),
+                true,
+                &family,
+            ),
+            None
+        );
+    }
+
+    /// Reuse settings cannot bring a print's source image back (the TUI has
+    /// no client for the host's retained source media), so the row says
+    /// "attach again" with the recorded name instead of `off`, and attaching
+    /// or clearing drops the reminder.
+    #[tokio::test]
+    async fn reuse_marks_a_lost_source_image_as_attach_again() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.metadata.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        entry.metadata.source_image_name = Some("armchair.png".into());
+        let mut plain = make_test_entry_with_name("still.png");
+        plain.metadata.model = "flux2-klein:q8".into();
+        app.gallery.entries = vec![entry, plain];
+        app.gallery.thumbnail_states = vec![None, None];
+        app.gallery.thumb_dimensions = vec![None, None];
+        app.gallery.thumb_fixed_cache = vec![None, None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.generate.params.source_image_path = Some("/previous/form.png".into());
+
+        app.gallery.selected = 0;
+        app.load_gallery_into_generate();
+        assert_eq!(app.active_view, View::Create);
+        assert_eq!(
+            app.generate.params.source_image_path, None,
+            "the previous form's file is not passed off as this print's"
+        );
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "\u{27e8}none\u{27e9} \u{00b7} attach again (armchair.png)"
+        );
+        assert_eq!(
+            crate::ui::create_form::section_summary(
+                crate::ui::create_form::AdvSection::Source,
+                &app.generate.params,
+                true
+            ),
+            "attach again"
+        );
+
+        // Clearing the row drops the reminder; so does attaching a file.
+        select_source_row(&mut app);
+        app.handle_crossterm_event(key(crossterm::event::KeyCode::Char('x')));
+        assert_eq!(app.generate.params.source_image_recall, None);
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "\u{27e8}none\u{27e9}"
+        );
+
+        // A print that never had a source shows nothing to attach again.
+        app.active_view = View::Library;
+        app.gallery.selected = 1;
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.params.source_image_recall, None);
+        assert_eq!(
+            crate::ui::create_form::section_summary(
+                crate::ui::create_form::AdvSection::Source,
+                &app.generate.params,
+                true
+            ),
+            "off"
+        );
+    }
+
+    /// A Library filter never leaks into Create: `e` on a print with a
+    /// filter typed (still editing, or applied) recalls it with no popup and
+    /// no filter text in the prompt, and `/` in the Library never opens the
+    /// Prompt History picker (that is Create's `/`).
+    #[tokio::test]
+    async fn library_filter_text_never_reaches_create_on_recall() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        let mut entry = make_test_entry_with_name("mold-1788307390610.png");
+        entry.metadata.prompt = "an armchair".into();
+        app.gallery.entries = vec![entry];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.generate.focus = GenerateFocus::Navigation;
+
+        // Filter typed and applied with Enter, then `e`.
+        app.handle_crossterm_event(key(KeyCode::Char('/')));
+        assert!(app.gallery.filtering);
+        assert!(
+            app.popup.is_none(),
+            "`/` in the Library is the filter, not history"
+        );
+        type_text(&mut app, "1788307390610");
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(!app.gallery.filtering);
+        assert_eq!(app.gallery.filter, "1788307390610");
+        app.handle_crossterm_event(key(KeyCode::Char('e')));
+        assert_eq!(app.active_view, View::Create);
+        assert!(app.popup.is_none(), "recall opens no popup");
+        assert_eq!(app.generate.prompt.lines().join("\n"), "an armchair");
+
+        // Filter still being edited: `e` is a filter character, nothing else.
+        let mut app = make_settings_test_app();
+        let mut entry = make_test_entry_with_name("mold-1788307390610.png");
+        entry.metadata.prompt = "an armchair".into();
+        app.gallery.entries = vec![entry];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.handle_crossterm_event(key(KeyCode::Char('/')));
+        type_text(&mut app, "1788307390610e");
+        assert_eq!(app.active_view, View::Library);
+        assert!(app.popup.is_none());
+        assert_eq!(app.gallery.filter, "1788307390610e");
+        assert!(!app
+            .generate
+            .prompt
+            .lines()
+            .join("\n")
+            .contains("1788307390610"));
+    }
+
+    /// Drive the background restore to a conclusion: pump events until the
+    /// pending marker clears (or give up after a few seconds).
+    async fn settle_source_restore(app: &mut App) {
+        for _ in 0..200 {
+            app.process_background_events();
+            if app.generate.source_restore_pending.is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the source restore never settled");
+    }
+
+    fn remote_print_with_source(url: &str) -> GalleryEntry {
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.metadata.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        entry.metadata.source_image_name = Some("armchair.png".into());
+        entry.origins = vec![GalleryOrigin::remote_from_url(url)];
+        entry
+    }
+
+    fn app_with_remote_print(url: &str) -> App {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.gallery.entries = vec![remote_print_with_source(url)];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.gallery.selected = 0;
+        app
+    }
+
+    fn timeline_has(app: &App, needle: &str) -> bool {
+        app.generate
+            .progress
+            .log
+            .iter()
+            .any(|entry| entry.message.contains(needle))
+    }
+
+    /// Reuse on a remote print asks the host what it retained, downloads the
+    /// source-image member into the TUI cache, and puts that file on the
+    /// Source row — a keyless host needs no header for it.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reuse_restores_the_retained_source_image_from_the_host() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let home = crate::ui::gallery::tests::ScopedHome::enter();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "available",
+                "members": [
+                    {"member_id": "mask-1", "role": "mask_image", "display_name": "mask.png", "size_bytes": 3},
+                    {"member_id": "src-1", "role": "source_image", "display_name": "armchair.png", "size_bytes": 8}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb/src-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"png-bytes".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        assert_eq!(app.active_view, View::Create);
+        assert_eq!(
+            app.generate.source_restore_pending.as_deref(),
+            Some("chair.glb"),
+            "the restore is in flight right after reuse"
+        );
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png"),
+            "until the host answers, the row says attach again"
+        );
+        settle_source_restore(&mut app).await;
+
+        let expected = crate::source_media::cache_path("chair.glb", "armchair.png");
+        assert!(expected.starts_with(home.dir.path()), "{expected:?}");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), b"png-bytes");
+        assert_eq!(app.generate.params.source_image_recall, None);
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "armchair.png"
+        );
+        assert!(timeline_has(&app, "Restored source image armchair.png"));
+        // The restored file rides the request as bytes like any picked path.
+        let request = crate::backend::build_request(&app.generate.params, "", &None).unwrap();
+        assert_eq!(request.source_image.as_deref(), Some(&b"png-bytes"[..]));
+        assert_eq!(request.source_image_name.as_deref(), Some("armchair.png"));
+    }
+
+    /// An older print the host never retained keeps the attach-again marker
+    /// and says why on the timeline.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reuse_on_a_legacy_print_keeps_attach_again_and_names_the_reason() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _home = crate::ui::gallery::tests::ScopedHome::enter();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "unavailable_legacy"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        settle_source_restore(&mut app).await;
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "\u{27e8}none\u{27e9} \u{00b7} attach again (armchair.png)"
+        );
+        assert!(timeline_has(&app, "source not retained on this host"));
+        assert!(
+            !crate::source_media::cache_path("chair.glb", "armchair.png").exists(),
+            "nothing is written when nothing was retained"
+        );
+    }
+
+    /// A keyed host releases private media only with its key: with the key
+    /// remembered for the host the member downloads; without it the row
+    /// keeps attach-again and the timeline names the API key.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reuse_on_a_keyed_host_restores_with_the_key_and_discloses_without() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _home = crate::ui::gallery::tests::ScopedHome::enter();
+        let server = MockServer::start().await;
+        // Keyed answers.
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "available",
+                "members": [
+                    {"member_id": "src-1", "role": "source_image", "display_name": "armchair.png", "size_bytes": 8}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb/src-1"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"keyed".to_vec()))
+            .mount(&server)
+            .await;
+        // Keyless answers: the middleware's 401.
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "API key required"
+            })))
+            .mount(&server)
+            .await;
+
+        let host_id = crate::hosts::host_id_from_url(&server.uri());
+        crate::hosts::set_session_api_key(&host_id, "sekrit");
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        settle_source_restore(&mut app).await;
+        crate::hosts::clear_session_api_key(&host_id);
+        let expected = crate::source_media::cache_path("chair.glb", "armchair.png");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), b"keyed");
+        std::fs::remove_file(&expected).unwrap();
+
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        settle_source_restore(&mut app).await;
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
+        assert!(timeline_has(&app, "API key"));
+        assert!(!expected.exists());
+    }
+
+    /// A restore that lands after the user already cleared the row (x) does
+    /// not put a file back on it; an in-process print restores from beside
+    /// the print when the recorded name still exists there.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn late_restores_and_local_prints_respect_the_row() {
+        let _home = crate::ui::gallery::tests::ScopedHome::enter();
+        let mut app = make_settings_test_app();
+        app.generate.source_restore_pending = Some("chair.glb".into());
+        app.generate.params.source_image_recall = None;
+        app.bg_tx
+            .send(BackgroundEvent::SourceImageRestored {
+                filename: "chair.glb".into(),
+                outcome: crate::source_media::SourceRestore::Restored("/late/armchair.png".into()),
+            })
+            .unwrap();
+        app.process_background_events();
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(app.generate.source_restore_pending, None);
+
+        // An answer for a different print is not this reuse's answer.
+        app.generate.source_restore_pending = Some("chair.glb".into());
+        app.generate.params.source_image_recall = Some("armchair.png".into());
+        app.bg_tx
+            .send(BackgroundEvent::SourceImageRestored {
+                filename: "other.glb".into(),
+                outcome: crate::source_media::SourceRestore::Restored("/late/other.png".into()),
+            })
+            .unwrap();
+        app.process_background_events();
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.source_restore_pending.as_deref(),
+            Some("chair.glb")
+        );
+
+        // Local print: the recorded name beside the print is the file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("armchair.png"), b"local").unwrap();
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.path = dir.path().join("chair.glb");
+        entry.metadata.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        entry.metadata.source_image_name = Some("armchair.png".into());
+        entry.origins = vec![GalleryOrigin::local()];
+        app.gallery.entries = vec![entry];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.source_restore_pending, None, "no host to ask");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(dir.path().join("armchair.png").to_string_lossy().as_ref())
+        );
+        assert_eq!(app.generate.params.source_image_recall, None);
+
+        // Gone from beside the print: attach again.
+        std::fs::remove_file(dir.path().join("armchair.png")).unwrap();
+        app.active_view = View::Library;
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
     }
 
     #[tokio::test]
@@ -16561,6 +17913,7 @@ mod tests {
             held_batch: None,
             prompt_transform_token: 0,
             last_mesh_summary: None,
+            source_restore_pending: None,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -16629,6 +17982,7 @@ mod tests {
             held_batch: None,
             prompt_transform_token: 0,
             last_mesh_summary: None,
+            source_restore_pending: None,
         };
 
         // Simulate error mid-batch
@@ -16678,6 +18032,7 @@ mod tests {
             held_batch: None,
             prompt_transform_token: 0,
             last_mesh_summary: None,
+            source_restore_pending: None,
         };
 
         // Simulate setting batch to 4 and starting generation
@@ -20026,6 +21381,7 @@ mod tests {
             crate::model_info::source_image_contract_error(
                 app.source_image_contract(&app.generate.params.model),
                 app.generate.params.source_image_path.is_some(),
+                "wan",
             ),
             None
         );
@@ -20072,6 +21428,7 @@ mod tests {
             crate::model_info::source_image_contract_error(
                 app.source_image_contract(&app.generate.params.model),
                 false,
+                "wan",
             ),
             None,
             "an unknown contract must not start rejecting requests"

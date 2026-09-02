@@ -71,7 +71,7 @@ import {
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
-import { promptInputForForm } from "../lib/promptRecipe";
+import { promptInputForForm, promptRecipeFromForm } from "../lib/promptRecipe";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
 import { meshStatsLabel } from "@studio/lib/meshControls";
@@ -2598,7 +2598,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     task: expansionTaskForRequest(form.family, request),
-    context: expansionContextForRequest(form.family, request),
+    context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
@@ -2641,7 +2641,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         model_family: form.family,
         variations: requestedCount,
         task,
-        context: expansionContextForRequest(form.family, request),
+        context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
         ...(style ? { style } : {}),
         dimensions,
       },

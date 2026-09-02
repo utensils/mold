@@ -274,12 +274,18 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
 /// gating moved here intact; the `InferenceMode` parameter is gone because
 /// routing now comes from the Machines generation target.
 pub fn visible_rows(caps: &ModelCapabilities, adv: &AdvancedState) -> Vec<CreateRow> {
-    let mut rows = vec![
-        CreateRow::Field(ParamField::Model),
-        CreateRow::Field(ParamField::Size),
+    let mut rows = vec![CreateRow::Field(ParamField::Model)];
+    // A mesh recipe has no canvas (its profile's resolution domain is
+    // `None`, and the request's width/height are ignored), so a Size row
+    // would offer a knob that changes nothing. The mesh block is the one
+    // capability signal the form carries for that recipe.
+    if caps.mesh.is_none() {
+        rows.push(CreateRow::Field(ParamField::Size));
+    }
+    rows.extend([
         CreateRow::Field(ParamField::Steps),
         CreateRow::Field(ParamField::Guidance),
-    ];
+    ]);
     if caps.supports_video {
         if caps.supports_duration_prediction {
             rows.push(CreateRow::Field(ParamField::PredictDuration));
@@ -352,6 +358,15 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             .as_deref()
             .or(params.control_image_path.as_deref())
             .map(file_name_of)
+            .or_else(|| {
+                // A recalled print conditioned on an image the TUI cannot
+                // fetch back: say so, instead of an `off` that reads as
+                // "this print had none".
+                params
+                    .source_image_recall
+                    .as_deref()
+                    .map(|_| "attach again".to_string())
+            })
             .unwrap_or_else(|| "off".into()),
         AdvSection::Mesh => {
             let mut parts: Vec<String> = Vec::new();
@@ -1183,6 +1198,49 @@ mod tests {
         assert_eq!(advanced_active_count(&params, true), 3);
         assert_eq!(AdvSection::from_slug("mesh"), Some(AdvSection::Mesh));
         assert_eq!(AdvSection::Mesh.slug(), "mesh");
+    }
+
+    /// A mesh recipe has no canvas, so the essentials carry no Size row;
+    /// every other recipe keeps it in second place.
+    #[test]
+    fn size_row_is_absent_on_a_canvasless_mesh_recipe() {
+        let raster = capabilities_for_family("flux");
+        let rows = visible_rows(&raster, &AdvancedState::default());
+        assert_eq!(rows[1], CreateRow::Field(ParamField::Size));
+
+        let family_only = capabilities_for_family("hunyuan3d");
+        assert!(family_only.mesh.is_none());
+        assert!(visible_rows(&family_only, &AdvancedState::default())
+            .contains(&CreateRow::Field(ParamField::Size)));
+
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        let recipe = catalog
+            .iter()
+            .find(|entry| entry.name == mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
+            .and_then(|entry| entry.generation_profile.as_ref())
+            .and_then(|profile| profile.default_recipe())
+            .cloned()
+            .expect("built-in Hunyuan3D profile");
+        assert_eq!(
+            recipe.resolution.domain,
+            mold_core::ResolutionDomain::None,
+            "the recipe is canvasless"
+        );
+        let mut caps = capabilities_for_family("hunyuan3d");
+        crate::model_info::apply_recipe_capabilities(&mut caps, Some(&recipe.capabilities));
+        let rows = visible_rows(&caps, &AdvancedState::default());
+        assert!(
+            !rows.contains(&CreateRow::Field(ParamField::Size)),
+            "no Size row on a mesh recipe: {rows:?}"
+        );
+        assert_eq!(
+            &rows[..3],
+            &[
+                CreateRow::Field(ParamField::Model),
+                CreateRow::Field(ParamField::Steps),
+                CreateRow::Field(ParamField::Guidance),
+            ]
+        );
     }
 
     #[test]
