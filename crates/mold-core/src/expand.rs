@@ -236,6 +236,16 @@ where
 {
     validate_expansion_variation_count(config.variations)?;
 
+    // A family that reads no prompt has nothing to expand: answer with the
+    // guide's image advice and request no completion at all. Every surface
+    // answers earlier, before a backend is even created; this is the last
+    // door, so a backend can never be handed a guide that says "write no
+    // prompt" and asked to write one. The answer is one text whatever
+    // `variations` says, because there is exactly one thing to say.
+    if let Some(advice) = crate::expand_prompts::ignored_prompt_advice(&config.model_family) {
+        return Ok(vec![advice.text()]);
+    }
+
     // Never reserve the caller-controlled logical count up front. Only the
     // active completion chunk has bounded allocation.
     let mut expanded = Vec::new();
@@ -881,6 +891,29 @@ impl ExpandSettings {
 mod tests {
     use super::*;
     use crate::expand_prompts::build_batch_messages_with_context;
+
+    // ── prompt-Ignored families ──────────────────────────────────────────
+
+    #[test]
+    fn a_prompt_ignored_family_never_reaches_the_expansion_backend() {
+        let config = ExpandConfig {
+            model_family: "hunyuan3d".to_string(),
+            variations: 3,
+            ..ExpandConfig::default()
+        };
+        let expanded = expand_exact_with(&config, |_, _| {
+            unreachable!("a family with no text encoder must not request a completion")
+        })
+        .unwrap();
+        let advice = crate::expand_prompts::ignored_prompt_advice("hunyuan3d").unwrap();
+        assert_eq!(expanded, vec![advice.text()]);
+        // The count guard still runs first: a bad count is a bad count.
+        let zero = ExpandConfig {
+            variations: 0,
+            ..config
+        };
+        assert!(expand_exact_with(&zero, |_, _| unreachable!()).is_err());
+    }
 
     // ── clean_expanded_prompt ────────────────────────────────────────────
 

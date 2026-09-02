@@ -458,6 +458,13 @@ pub struct ExpandContext {
     /// LoRA adapter names (file stems), so trigger words can be honoured.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<String>,
+    /// Whether the target reads the prompt at all, from the ONE profile rule
+    /// (`generation_profile::prompt_requirement_for_family`) resolved against
+    /// this request's conditioning. `Ignored` means the text conditions
+    /// nothing and the expander is never called. Additive: absent from old
+    /// clients, and then the family alone decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_mode: Option<crate::generation_profile::PromptRequirement>,
 }
 
 impl ExpandContext {
@@ -576,6 +583,10 @@ impl ExpandContext {
                 loras.push(lora_display_name(&lora.path));
             }
         }
+        let prompt_mode = Some(crate::generation_profile::prompt_requirement_for_family(
+            Some(family),
+            crate::validation::has_visual_conditioning(req),
+        ));
         Self {
             model: Some(req.model.clone()),
             width: (req.width > 0).then_some(req.width),
@@ -587,6 +598,7 @@ impl ExpandContext {
             audio: req.enable_audio,
             references,
             loras,
+            prompt_mode,
         }
     }
 
@@ -5813,6 +5825,53 @@ mod tests {
         );
         assert_eq!(derived.negative_prompt_supported, None);
         assert_eq!(derived.loras, vec!["paper-boat".to_string()]);
+    }
+
+    #[test]
+    fn expand_context_reads_the_prompt_mode_from_the_profile_rule() {
+        use crate::generation_profile::PromptRequirement;
+        let request = |model: &str, source_image: bool| -> GenerateRequest {
+            let mut value = serde_json::json!({
+                "model": model,
+                "prompt": "a chair",
+                "width": 1024,
+                "height": 1024,
+                "steps": 4
+            });
+            if source_image {
+                value["source_image"] = serde_json::Value::String("AQID".into());
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let mesh = ExpandContext::for_generation(
+            "hunyuan3d",
+            &request("hunyuan3d-mini-turbo", true),
+            None,
+        );
+        assert_eq!(mesh.prompt_mode, Some(PromptRequirement::Ignored));
+        let conditioned = ExpandContext::for_generation(
+            "ltx2",
+            &request("ltx-2.3-22b-distilled:fp8", true),
+            None,
+        );
+        assert_eq!(conditioned.prompt_mode, Some(PromptRequirement::Optional));
+        let bare = ExpandContext::for_generation(
+            "ltx2",
+            &request("ltx-2.3-22b-distilled:fp8", false),
+            None,
+        );
+        assert_eq!(bare.prompt_mode, Some(PromptRequirement::Required));
+        let image = ExpandContext::for_generation("flux", &request("flux-schnell", false), None);
+        assert_eq!(image.prompt_mode, Some(PromptRequirement::Required));
+        // Additive on the wire: absent for old clients, lowercase when sent.
+        let old_wire: ExpandContext = serde_json::from_str(r#"{"model":"flux-schnell"}"#).unwrap();
+        assert_eq!(old_wire.prompt_mode, None);
+        assert!(!serde_json::to_string(&old_wire)
+            .unwrap()
+            .contains("prompt_mode"));
+        assert!(serde_json::to_string(&mesh)
+            .unwrap()
+            .contains(r#""prompt_mode":"ignored""#));
     }
 
     #[test]

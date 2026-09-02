@@ -111,6 +111,12 @@ returns the stored bytes unchanged); the CLI equivalent is
 geometry that already exists — the gallery file is never renamed or replaced —
 and `-o` on a 3-D render must still name a `.glb`.
 
+`expand_prompt` and `remix_prompt` on a Hunyuan3D model (or `mold expand` /
+`mold remix --model hunyuan3d-mini-turbo`) do not call a language model: the
+one result is the family guide's advice on preparing the source image,
+because the profile advertises `prompt.mode: ignored`. Do not retry it with a
+different backend; improve the image instead.
+
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support
 is simulated until hardware-qualified.

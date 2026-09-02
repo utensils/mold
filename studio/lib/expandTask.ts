@@ -16,6 +16,8 @@ export type ExpandTask =
   | "reference-to-audio-video"
   | "text-to-audio";
 
+import { promptRequirementFor, type PromptRecipe } from "./promptRequirement";
+
 export interface ExpansionTaskRequest {
   model?: string | null;
   width?: number | null;
@@ -154,6 +156,9 @@ export interface ExpandContext {
   audio?: boolean;
   references?: ExpandReference[];
   loras?: string[];
+  /** The target's prompt contract from its generation profile; `ignored`
+   * means the expander answers from the guide without a rewrite. */
+  prompt_mode?: "required" | "optional" | "ignored";
 }
 
 function loraStem(lora: unknown): string | null {
@@ -176,10 +181,16 @@ function loraStem(lora: unknown): string | null {
  * send the same facts without shell-specific glue. Reference order follows
  * the request: MiniMax H3 ordered references first, then the source frame,
  * edit images, identity images, source video, and conditioning audio.
+ *
+ * `prompt_mode` is filled only when the resolved `recipe` is known: the
+ * profile is the one authority on whether a model reads its prompt, and the
+ * legacy family rule can never say `ignored`, so without a recipe the field
+ * is left absent and the server derives it.
  */
 export function expansionContextForRequest(
   family: string | null | undefined,
   request: ExpansionTaskRequest,
+  recipe?: PromptRecipe | null,
 ): ExpandContext {
   const normalized = (family ?? "").trim().toLowerCase();
   const videoFamily = [
@@ -261,5 +272,20 @@ export function expansionContextForRequest(
   }
   if (references.length > 0) context.references = references;
   if (loras.length > 0) context.loras = loras;
+  if (recipe) {
+    // Desktop and mobile compile with `exactOptionalPropertyTypes`, so an
+    // absent field is `null`, never `undefined`.
+    context.prompt_mode = promptRequirementFor({
+      recipe,
+      family: family ?? null,
+      model: request.model ?? null,
+      sourceImage: request.source_image ?? null,
+      keyframes: request.keyframes ?? null,
+      sourceVideo: request.source_video ?? null,
+      sourceVideoPath: request.source_video_path ?? null,
+      extendVideo: request.extend_video ?? null,
+      extendVideoPath: request.extend_video_path ?? null,
+    });
+  }
   return context;
 }

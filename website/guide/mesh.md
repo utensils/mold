@@ -21,12 +21,12 @@ acceptance. See [Licence](/models/hunyuan3d#licence).
 ## What makes a good input
 
 There is **no text encoder in this family**. The image is the entire
-conditioning, and the prompt — if you pass one — is recorded as provenance and
-never read. **You do not need to write one** on the CLI, the API, the TUI,
-Discord or MCP: each reads the prompt requirement off the model's own
-generation profile, so an empty prompt is admitted here and refused everywhere
-it still means something. The web, desktop and mobile apps still apply the
-legacy prompt rule until the GUI release wires the profile in.
+conditioning, and nothing typed in the prompt field reaches the model. **You
+do not need to write one** on the CLI, the API, the TUI, Discord or MCP: each
+reads the prompt requirement off the model's own generation profile, so an
+empty prompt is admitted here and refused everywhere it still means something.
+The web, desktop and mobile apps still apply the legacy prompt rule until the
+GUI release wires the profile in.
 
 ```bash
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb   # no prompt
@@ -41,6 +41,21 @@ matters more than usual:
 - A three-quarter view, not a straight-on one.
 
 A request without a source image is refused rather than answered from nothing.
+
+Prompt expansion follows the same rule. `mold expand`, `mold remix`, the
+Expand and Remix controls on every surface, and the MCP `expand_prompt` /
+`remix_prompt` tools do not call a language model for this family: the one
+answer is the guide's advice above on preparing the image, and `--expand` on
+a mesh run is skipped rather than rewriting the recorded prompt.
+
+The same picture also meshes differently here than in ComfyUI. mold prepares
+the image the way Tencent's `ImageProcessorV2` does — crop to the alpha
+bounding box, then letterbox on a white square, so nothing is cut away —
+while ComfyUI's `clip_preprocess` drops the alpha channel and, with CLIP
+Vision Encode's default `crop: center`, centre-crops the shorter side to a
+square (`crop: none` squashes to a square instead, distorting rather than
+cropping). An off-centre or wide subject loses its edges there and keeps them
+here.
 
 ## Controls
 

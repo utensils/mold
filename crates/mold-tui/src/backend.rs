@@ -27,7 +27,23 @@ pub async fn run_prompt_transform(
     token: u64,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    let result = if let Some(url) = server_url {
+    // A family whose profile ignores the prompt (no text encoder) is answered
+    // from the guide on every host, without a round trip or a model: the
+    // same one-variant answer `/api/expand`, `/api/remix`, and the CLI give.
+    let result = if let Some(advice) = mold_core::ignored_prompt_advice(&request.model_family) {
+        Ok(RemixResponse {
+            source_prompt: request.source_prompt.clone(),
+            root_prompt: request.root_prompt.clone(),
+            source_kind: request.source_kind,
+            task: request
+                .task
+                .unwrap_or_else(|| mold_core::ExpandTask::for_family(&request.model_family)),
+            variants: vec![RemixVariant {
+                prompt: advice.text(),
+                dimensions: Vec::new(),
+            }],
+        })
+    } else if let Some(url) = server_url {
         let client = crate::hosts::client_for(&url, api_key.as_deref());
         match operation {
             PromptTransformOperation::Remix => client.remix_prompt(&request).await,
@@ -1849,6 +1865,57 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn prompt_transform_answers_a_prompt_ignored_family_without_a_host_or_a_model() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let request = RemixRequest {
+            source_prompt: "a dining chair".to_string(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+            model_family: "hunyuan3d".to_string(),
+            variations: 3,
+            style: None,
+            task: None,
+            dimensions: Vec::new(),
+            context: None,
+        };
+        let snapshot = PromptTransformSnapshot {
+            operation: PromptTransformOperation::Expand,
+            model: "hunyuan3d-mini-turbo:fp16".to_string(),
+            target: crate::hosts::GenTarget::Host("nothing-listens".to_string()),
+            task: mold_core::ExpandTask::TextToImage,
+            reference_fingerprint: String::new(),
+            source_prompt: "a dining chair".to_string(),
+            current_prompt: "a dining chair".to_string(),
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+        };
+        // An unreachable host: a round trip would fail, so a completed
+        // transform proves none was made.
+        run_prompt_transform(
+            Some("http://127.0.0.1:9".to_string()),
+            None,
+            PromptTransformOperation::Expand,
+            request,
+            snapshot,
+            7,
+            tx,
+        )
+        .await;
+        let advice = mold_core::ignored_prompt_advice("hunyuan3d").unwrap();
+        match rx.recv().await.unwrap() {
+            BackgroundEvent::PromptTransformComplete {
+                token, response, ..
+            } => {
+                assert_eq!(token, 7);
+                assert_eq!(response.variants.len(), 1);
+                assert_eq!(response.variants[0].prompt, advice.text());
+                assert!(response.variants[0].dimensions.is_empty());
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
 
     fn canonical_batch_capabilities(limit: u32) -> ServerCapabilities {
         let mut capabilities = ServerCapabilities::default();

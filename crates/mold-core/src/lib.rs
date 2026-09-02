@@ -135,4 +135,7 @@ pub use video_upscale::*;
 pub use expand::{
     ApiExpander, ExpandConfig, ExpandResult, ExpandSettings, FamilyOverride, PromptExpander,
 };
-pub use expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
+pub use expand_prompts::{
+    build_batch_messages, build_single_messages, format_chatml, ignored_prompt_advice,
+    IgnoredPromptAdvice,
+};
