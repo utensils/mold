@@ -1078,12 +1078,25 @@ cache (`crates/mold-inference/src/minimax_h3/conditioner_cache.rs`, default
 512 MiB, `MOLD_H3_CONDITIONER_CACHE=off|<MiB>`) instead of reloading and
 re-encoding the 15.7 GB checkpoint that rows `a′`/`a″` above measured. The key
 spans the prompt, the endpoint or reference bytes (crop included), the Ref2VA
-frame count, the conditioner placement and device id, and every artifact and
-support identity that produced the bytes, so a hit restores the exact BF16
-tensor a miss would have produced rather than an approximation; it withholds
-the runtime-bound observation and the `PromptEncode` scheduler-estimate
-sample for that render instead of fabricating either, and is disclosed as
-`prompt conditioning [cache hit]`.
+frame count, the conditioner placement and device id, and the conditioner
+component's own CONTENT digest and support identity, so a hit restores the
+exact BF16 tensor a miss would have produced rather than an approximation; it
+withholds the runtime-bound observation and the `PromptEncode`
+scheduler-estimate sample for that render instead of fabricating either, and
+is disclosed as `prompt conditioning [cache hit]`.
+
+The key deliberately excludes the frozen component's VALIDATION digest.
+`private_h3_component_digests` folds the attempt's runtime qualification
+identity into that digest, and `runtime_qualification_identity` hashes the
+request envelope (`public_runtime_envelope_for_shape(canvas, frames, steps)`),
+so the same conditioner file presents a different validation digest at every
+clip length, step count and canvas. Measured on plato on 2026-09-02 while it
+was still in the key: an FL2VA render at `--frames 141` stored key
+`ccbfa21f…` (594 text rows, 2,304 vision patches, 6,083,154 entry bytes,
+route `assigned-cuda-then-drop`), an otherwise identical `--frames 124` render
+MISSED while that entry was still resident and no reclaim had run, and a
+second `--frames 141` render hit `ccbfa21f…` again — the row counts, the
+placement and the device id were byte-identical across all three.
 
 What a hit is worth is TWO numbers, and only one of them generalizes. The
 conditioner LOAD is shape-independent: 53.6 s in row `a″`. The ENCODE scales

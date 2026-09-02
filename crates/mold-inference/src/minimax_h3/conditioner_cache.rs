@@ -13,9 +13,15 @@
 //! * The key (see [`derive_key`]) carries the code identity, the model, task
 //!   and mode, the prompt, every conditioning and reference byte, the row
 //!   counts, the conditioner ROUTE (placement plus the exact device id — CUDA
-//!   and CPU conditioner outputs are not bit-identical), and the artifact
-//!   pins. Seed, guidance and step count are excluded on purpose: none of them
-//!   reaches the conditioner.
+//!   and CPU conditioner outputs are not bit-identical), and the conditioner's
+//!   own artifact pins. Seed, guidance and step count are excluded on purpose:
+//!   none of them reaches the conditioner. Nothing minted PER ATTEMPT may join
+//!   it either — a per-attempt identity cannot produce a stale hit, but it
+//!   produces a cache that never hits, which is what the frozen component's
+//!   `validation_sha256` did: it carries the attempt's runtime qualification
+//!   identity, and that identity hashes the request envelope, so every clip
+//!   length, step count and canvas presented a different key for one
+//!   conditioner file.
 //! * The cache is byte-bounded, not entry-bounded (a nine-image Ref2VA
 //!   presentation is ~380 MB while FL2VA tops out near 20 MiB), and its CPU
 //!   tensors are anonymous pages the host ledger already subtracts from
@@ -96,8 +102,20 @@ pub(crate) struct H3ConditionerCacheKeyInput<'a> {
     pub(crate) qwen_vision_rows: u64,
     pub(crate) placement: H3FactoryConditionerPlacement,
     pub(crate) conditioner_device_id: &'a str,
+    /// The frozen conditioner component's CONTENT digest, and deliberately not
+    /// its validation digest.
+    ///
+    /// The content digest is the artifact identity: it hashes every member's
+    /// relative path, source revision, `sha256`, structural contract, header
+    /// identity, policy identity, size and tensor count, so it answers
+    /// "which conditioner file ran" completely. The validation digest answers
+    /// a different question — `private_h3_component_digests` folds the
+    /// attempt's RUNTIME QUALIFICATION identity into it, and
+    /// `runtime_qualification_identity` hashes the request envelope
+    /// (`public_runtime_envelope_for_shape(canvas, frames, steps)`), so it
+    /// moves with the clip length, the step count, the canvas and the row
+    /// counts. Hashing it here silently made every shape change a miss.
     pub(crate) conditioner_component_content_sha256: &'a str,
-    pub(crate) conditioner_component_validation_sha256: &'a str,
     pub(crate) support_identity_sha256: &'a str,
 }
 
@@ -154,7 +172,6 @@ pub(crate) fn derive_key(input: H3ConditionerCacheKeyInput<'_>) -> String {
     field(H3_QWEN_NVFP4_AWQ_SHA256.as_bytes());
     field(H3_QWEN_NVFP4_AWQ_POLICY_SHA256.as_bytes());
     field(input.conditioner_component_content_sha256.as_bytes());
-    field(input.conditioner_component_validation_sha256.as_bytes());
     field(input.support_identity_sha256.as_bytes());
     format!("{:x}", digest.finalize())
 }
@@ -166,7 +183,9 @@ pub(crate) fn key_for(
     support_identity_sha256: &str,
     conditioner_device_id: &str,
 ) -> (String, H3ConditionerRouteIdentity) {
-    let (content_sha256, validation_sha256) = authority.conditioner_component_authority();
+    // Only the content half: the validation half carries the attempt's own
+    // runtime qualification identity, which hashes the request envelope.
+    let (content_sha256, _validation_sha256) = authority.conditioner_component_authority();
     let placement = authority.conditioner_placement();
     let key = derive_key(H3ConditionerCacheKeyInput {
         runtime_code_identity_sha256: super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256,
@@ -182,7 +201,6 @@ pub(crate) fn key_for(
         placement,
         conditioner_device_id,
         conditioner_component_content_sha256: content_sha256,
-        conditioner_component_validation_sha256: validation_sha256,
         support_identity_sha256,
     });
     (
@@ -492,6 +510,12 @@ pub(crate) fn install_process_global_budget_for_test(budget_bytes: u64) {
 mod tests {
     use super::*;
 
+    use crate::h3_factory::{
+        H3FactoryAuthorityInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
+        H3FactoryEndpointAnchor, H3FactoryEndpointInput, H3FactoryEndpointPreprocess,
+        H3FactoryPreparedRowsInput, H3FactoryQuantizationAuthority,
+    };
+
     fn sha(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
     }
@@ -505,7 +529,6 @@ mod tests {
         reference: String,
         device: String,
         content: String,
-        validation: String,
         support: String,
     }
 
@@ -519,7 +542,6 @@ mod tests {
                 reference: sha('3'),
                 device: "cuda:0".into(),
                 content: sha('4'),
-                validation: sha('5'),
                 support: sha('6'),
             }
         }
@@ -539,7 +561,6 @@ mod tests {
                 placement: H3FactoryConditionerPlacement::AssignedCudaThenDrop,
                 conditioner_device_id: &self.device,
                 conditioner_component_content_sha256: &self.content,
-                conditioner_component_validation_sha256: &self.validation,
                 support_identity_sha256: &self.support,
             }
         }
@@ -647,13 +668,6 @@ mod tests {
             },
         );
         mutate(
-            "component validation",
-            H3ConditionerCacheKeyInput {
-                conditioner_component_validation_sha256: &other,
-                ..base
-            },
-        );
-        mutate(
             "support identity",
             H3ConditionerCacheKeyInput {
                 support_identity_sha256: &other,
@@ -699,6 +713,195 @@ mod tests {
                 ..ref2va
             }),
             "Ref2VA reference shapes and second stamps are derived from the frame count"
+        );
+    }
+
+    /// One frozen authority, with the CONDITIONER component pair moved.
+    ///
+    /// Every other field is what a second render of the same shot keeps: this
+    /// is the contract-only authority `key_for` reads.
+    fn frozen_authority(
+        conditioner_content_sha256: &str,
+        conditioner_validation_sha256: &str,
+    ) -> FrozenH3FactoryAuthority {
+        let components = [
+            (
+                H3FactoryComponentRole::Conditioner,
+                conditioner_content_sha256.to_owned(),
+                conditioner_validation_sha256.to_owned(),
+            ),
+            (H3FactoryComponentRole::Transformer, sha('b'), sha('c')),
+            (H3FactoryComponentRole::VisualVae, sha('d'), sha('e')),
+            (H3FactoryComponentRole::AudioVae, sha('f'), sha('0')),
+        ]
+        .into_iter()
+        .map(|(role, content, validation)| {
+            H3FactoryComponentAuthority::new(role, content, validation).unwrap()
+        })
+        .collect();
+        FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
+            model: mold_core::minimax_h3::FL2VA_COMFY.into(),
+            device_id: "cuda:0".into(),
+            device_ordinal: 0,
+            compute_capability: Some((8, 9)),
+            execution_fingerprint: sha('8'),
+            conditioner_placement: H3FactoryConditionerPlacement::AssignedCudaThenDrop,
+            qwen_parameter_bytes: 2_048,
+            qwen_host_resident_parameter_bytes: 1_024,
+            qwen_device_resident_parameter_bytes: 1_024,
+            qwen_activation_workspace_bytes: 1_024,
+            qwen_maximum_tensor_staging_bytes: 512,
+            qwen_retained_raw_header_bytes: 64,
+            qwen_output_text_rows: 594,
+            qwen_vision_rows: 2_304,
+            condition_visual_rows: 576,
+            resident_block_count: 0,
+            prefetch_depth: 0,
+            attention_backend: crate::attention::AttentionBackend::Flash,
+            attention_chunk: crate::attention::AttentionChunkPolicy::Off,
+            attention_kernel_identity: "synthetic-qualified-kernel".into(),
+            attention_qualification_sha256: sha('9'),
+            attention_full_noncausal: true,
+            attention_lossless: true,
+            attention_head_count: 56,
+            attention_head_dim: 128,
+            attention_runtime: None,
+            block_offload: true,
+            quantization: H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                transformer_policy_sha256: sha('c'),
+                qwen_policy_sha256: sha('d'),
+                pruned_adaln_table_sha256: sha('e'),
+                turbo_adapter: None,
+            },
+            prepared_attempt: None,
+            execution_budget_echo: None,
+            components,
+        })
+        .unwrap()
+    }
+
+    /// The frozen FL2VA request for one clip length. The conditioner's own
+    /// inputs — prompt, endpoint pixels, and both Qwen row counts — are the
+    /// SAME at every length, exactly as plato measured them (594 text rows and
+    /// 2,304 vision patches at 768x768, at both 124 and 141 frames).
+    fn frozen_fl2va_request(frames: u32) -> H3FactoryPreparedRequestInput {
+        let video_latent_frames = u64::from(frames).div_ceil(4);
+        let target_video_rows = video_latent_frames * 576;
+        H3FactoryPreparedRequestInput {
+            identity_sha256: sha('1'),
+            canonical_model: mold_core::minimax_h3::FL2VA_COMFY.into(),
+            task: Task::Fl2va,
+            mode: Mode::FirstFrameToAudioVideo,
+            prompt_sha256: sha('2'),
+            seed: 770_021,
+            grid_points: 5,
+            denoise_forward_count: 4,
+            guidance_f64_bits: 0.0f64.to_bits(),
+            strength_f64_bits: 1.0f64.to_bits(),
+            batch_size: 1,
+            width: 768,
+            height: 768,
+            frames,
+            fps: 24,
+            synchronized_audio: true,
+            mp4_output: true,
+            video_latent_frames,
+            audio_latents_per_channel: u64::from(frames),
+            audio_samples_per_channel: u64::from(frames) * 800,
+            conditioning_fingerprint: sha('3'),
+            reference_fingerprint: sha('4'),
+            endpoints: vec![H3FactoryEndpointInput {
+                anchor: H3FactoryEndpointAnchor::First,
+                encoded_bytes: 128,
+                encoded_content_sha256: sha('5'),
+                preprocess: H3FactoryEndpointPreprocess::PillowLanczosRgbU8CpuV1,
+                normalized_shape: [1, 3, 1, 768, 768],
+                normalized_cpu_bytes: 768 * 768 * 3,
+                normalized_cpu_content_sha256: sha('6'),
+            }],
+            references: Vec::new(),
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: 594,
+                qwen_vision_rows: 2_304,
+                condition_visual_rows: 576,
+                condition_audio_rows: 0,
+                target_video_rows,
+                target_audio_rows: u64::from(frames) * 10 / 3,
+                total_packed_rows: 594 + 576 + target_video_rows,
+            },
+        }
+    }
+
+    /// A second render that changes only the clip length must reuse the answer.
+    ///
+    /// The frozen component's `validation_sha256` is not an artifact identity:
+    /// `private_h3_component_digests` folds the attempt's runtime
+    /// qualification identity into it, and `runtime_qualification_identity`
+    /// hashes the request ENVELOPE — the shipping profile is
+    /// `public_runtime_envelope_for_shape(canvas, frames, steps)` — so the
+    /// same conditioner file presents a different validation digest at every
+    /// frame count, fps, step count and canvas. Hashing it made every such
+    /// change a miss: on plato (2026-09-02, `mold-pr2-45e67af2`) a 141-frame
+    /// FL2VA render stored key `ccbfa21f…`, an otherwise identical 124-frame
+    /// render then MISSED while that entry was still resident and nothing had
+    /// cleared it, and a second 141-frame render hit `ccbfa21f…` again.
+    #[test]
+    fn fl2va_key_ignores_the_per_attempt_component_validation_identity() {
+        let content = sha('a');
+        let (frames_124, _) = key_for(
+            &frozen_fl2va_request(124),
+            &frozen_authority(&content, &sha('1')),
+            &sha('7'),
+            "cuda:0",
+        );
+        let (frames_141, route) = key_for(
+            &frozen_fl2va_request(141),
+            &frozen_authority(&content, &sha('2')),
+            &sha('7'),
+            "cuda:0",
+        );
+        assert_eq!(
+            frames_124, frames_141,
+            "one conditioner file, one prompt and one first frame is one key at every clip length"
+        );
+        assert_eq!(
+            route.placement,
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        );
+
+        // The conditioner's own artifact identity still moves the key: the
+        // content digest hashes every member's path, sha256, header identity
+        // and policy identity, so nothing about WHICH conditioner ran is lost
+        // by refusing the per-attempt validation digest.
+        let (other_conditioner, _) = key_for(
+            &frozen_fl2va_request(124),
+            &frozen_authority(&sha('b'), &sha('1')),
+            &sha('7'),
+            "cuda:0",
+        );
+        assert_ne!(
+            frames_124, other_conditioner,
+            "a different conditioner component content digest is a different key"
+        );
+    }
+
+    /// The key is the conditioner's inputs, weights and route — and nothing
+    /// that is minted per attempt. A per-attempt identity in here does not
+    /// produce a stale hit; it produces a cache that never hits, which is how
+    /// #814's reuse was lost for every shape change.
+    #[test]
+    fn the_key_carries_no_per_attempt_authority_identity() {
+        let source = include_str!("conditioner_cache.rs");
+        // Assembled at runtime so this test's own text does not match.
+        let banned = format!("valid{}", "ation_sha256");
+        let start = source
+            .find("pub(crate) fn derive_key(")
+            .expect("the key derivation");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("derive_key body end");
+        assert!(
+            !body[..end].contains(&banned),
+            "derive_key must not hash a per-attempt authority identity"
         );
     }
 

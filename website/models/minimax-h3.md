@@ -292,7 +292,10 @@ reuses the prior render's Qwen conditioning output instead of recomputing it.
 The reuse rule is keyed on the prompt, the endpoint or reference bytes (crop
 included), the Ref2VA frame count, the conditioner route and device, and the
 checkpoint/support artifact pins; any other change — or a different host,
-GPU, or artifact revision — is a miss, not a stale hit. The cache is
+GPU, or artifact revision — is a miss, not a stale hit. For FL2VA, changing
+only the clip length (`--frames`) or the step count still hits: neither
+reaches the conditioner, whose input is the prompt and the endpoint pixels.
+The cache is
 process-local and is never persisted to disk, so it does not survive a server
 restart. A hit removes the conditioner load and the encode entirely. The load
 is the shape-independent half — 53.6 s in the measured CUDA row. The encode
