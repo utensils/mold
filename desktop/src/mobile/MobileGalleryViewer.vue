@@ -414,7 +414,15 @@ function isMediaControl(target: EventTarget | null): boolean {
 function isSwipeBlockingControl(target: EventTarget | null): boolean {
   return (
     target instanceof Element &&
-    !!target.closest("button, input, textarea, select, a, [contenteditable='true']")
+    !!target.closest(
+      // `[data-gesture='own']` is the generic opt-out for a surface that
+      // interprets drags itself. The stage arms its swipe on
+      // `pointerdown.capture`, so it runs BEFORE any child handler and a
+      // child cannot stop it — dragging a mesh to rotate it navigated the
+      // gallery instead of turning the model. Any future canvas that owns
+      // its own drag (a pannable map, a curve editor) opts out the same way.
+      "button, input, textarea, select, a, [contenteditable='true'], [data-gesture='own']",
+    )
   );
 }
 

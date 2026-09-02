@@ -718,10 +718,15 @@ function onKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
+  <!-- `data-gesture="own"`: this surface reads drags as camera orbit, so an
+       ancestor must not also read them as a swipe. It pairs with
+       `touch-action: none` below, which only stops the BROWSER's own panning
+       and never a JavaScript pointer handler on a parent. -->
   <div
     ref="root"
     class="mesh-viewer"
     data-test="mesh-viewer"
+    data-gesture="own"
     :data-status="status"
   >
     <img

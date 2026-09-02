@@ -824,6 +824,43 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("next")).toHaveLength(1);
   });
 
+  /// Dragging a mesh is how you ROTATE it. The stage arms its swipe on
+  /// `pointerdown.capture`, so it fires before the mesh viewer's own handler
+  /// and a child cannot stop it — orbiting a model sideways navigated the
+  /// gallery out from under the user instead of turning the model.
+  it("rotates a mesh without navigating the gallery", async () => {
+    const meshItem: GalleryImage = {
+      ...image,
+      filename: "chair.glb",
+      format: "glb",
+    };
+    const view = mountViewer(meshItem, { position: 2, total: 4 });
+    await flushPromises();
+    const mesh = view.get("[data-test='gallery-viewer-mesh']");
+
+    // A long horizontal drag that starts on the mesh: far past SWIPE_DISTANCE
+    // and unambiguously horizontal, so nothing but the origin can save it.
+    // Dispatch ON the mesh, as a finger on the model does: the stage still
+    // sees it, because its listener is registered for the capture phase.
+    await mesh.trigger("pointerdown", {
+      pointerId: 21,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 300,
+      clientY: 200,
+    });
+    await mesh.trigger("pointerup", {
+      pointerId: 21,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 90,
+      clientY: 204,
+    });
+
+    expect(view.emitted("next")).toBeUndefined();
+    expect(view.emitted("previous")).toBeUndefined();
+  });
+
   it("navigates horizontally with swipe gestures and ignores vertical drags", async () => {
     const view = mountViewer(image, { position: 2, total: 4 });
     await flushPromises();
