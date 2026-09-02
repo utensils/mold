@@ -5591,21 +5591,82 @@ mod tests {
     /// wire spellings the old `Vec<OutputFormat>` field used.
     #[test]
     fn mesh_export_formats_round_trip_on_the_wire() {
-        for (format, wire, extension) in [
-            (MeshExportFormat::Glb, "\"glb\"", "glb"),
-            (MeshExportFormat::Obj, "\"obj\"", "obj"),
-            (MeshExportFormat::Stl, "\"stl\"", "stl"),
-            (MeshExportFormat::Ply, "\"ply\"", "ply"),
+        for (format, wire, name, extension, content_type, animation) in [
+            (
+                MeshExportFormat::Glb,
+                "\"glb\"",
+                "glb",
+                "glb",
+                "model/gltf-binary",
+                false,
+            ),
+            (
+                MeshExportFormat::Obj,
+                "\"obj\"",
+                "obj",
+                "obj",
+                "model/obj",
+                false,
+            ),
+            (
+                MeshExportFormat::Stl,
+                "\"stl\"",
+                "stl",
+                "stl",
+                "model/stl",
+                false,
+            ),
+            (
+                MeshExportFormat::Ply,
+                "\"ply\"",
+                "ply",
+                "ply",
+                "application/x-ply",
+                false,
+            ),
+            (
+                MeshExportFormat::Gif,
+                "\"gif\"",
+                "gif",
+                "gif",
+                "image/gif",
+                true,
+            ),
+            // An APNG file IS a PNG and every viewer opens `.png`, so the
+            // download extension differs from the format's name — the same
+            // rule the video export applies.
+            (
+                MeshExportFormat::Apng,
+                "\"apng\"",
+                "apng",
+                "png",
+                "image/apng",
+                true,
+            ),
+            (
+                MeshExportFormat::Webp,
+                "\"webp\"",
+                "webp",
+                "webp",
+                "image/webp",
+                true,
+            ),
         ] {
             assert_eq!(serde_json::to_string(&format).unwrap(), wire);
             assert_eq!(
                 serde_json::from_str::<MeshExportFormat>(wire).unwrap(),
                 format
             );
+            assert_eq!(format.as_str(), name);
+            assert_eq!(format.to_string(), name);
             assert_eq!(format.extension(), extension);
-            assert_eq!(extension.parse::<MeshExportFormat>().unwrap(), format);
+            assert_eq!(format.content_type(), content_type);
+            assert_eq!(format.is_animation(), animation);
+            assert_eq!(name.parse::<MeshExportFormat>().unwrap(), format);
         }
         assert!("fbx".parse::<MeshExportFormat>().is_err());
+        // A raster PNG is not a turntable; only the animated spelling parses.
+        assert!("png".parse::<MeshExportFormat>().is_err());
     }
 
     #[test]
@@ -10641,12 +10702,14 @@ pub struct MeshCapabilities {
     /// Formats `POST /api/gallery/export/:filename` can transcode a stored
     /// mesh into. Separate from `formats` because OBJ, STL and PLY are
     /// exportable but never storable — none of them carries materials and
-    /// textures the way the stored GLB does.
+    /// textures the way the stored GLB does — and because a turntable GIF,
+    /// APNG or WebP is a RENDER of the mesh, not the mesh at all.
     ///
     /// Typed as [`MeshExportFormat`] rather than [`OutputFormat`] so an
     /// export-only container can never be named as a generation target. The
     /// wire spellings of `glb` and `obj` are unchanged, so an older client
-    /// reading this list keeps working.
+    /// reading this list keeps working; a client built before the animated
+    /// entries existed sees names it does not know and should skip them.
     pub export_formats: Vec<MeshExportFormat>,
     /// Whether generated PBR textures are available. False means geometry
     /// only, which is a materially different product and must not be
@@ -10678,16 +10741,40 @@ pub enum MeshExportFormat {
     /// Binary little-endian PLY: positions plus per-vertex normals when the
     /// mesh has them. Vertices stay shared, unlike STL.
     Ply,
+    /// A 360° turntable of the mesh as an animated GIF — a RENDER, rendered
+    /// from the gallery poster's own view, not the geometry. The one
+    /// animated container with playback (loop or bounce) and repeat
+    /// (forever or once) controls.
+    Gif,
+    /// The turntable as an animated PNG: lossless, always loops.
+    Apng,
+    /// The turntable as an animated WebP: always loops. Advertised only by a
+    /// build with the `webp` feature.
+    Webp,
 }
 
 impl MeshExportFormat {
-    /// The file extension an exported download is named with.
-    pub fn extension(self) -> &'static str {
+    /// The format's own name: what the wire, the CLI `--format` flag and the
+    /// export-options list call it.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Glb => "glb",
             Self::Obj => "obj",
             Self::Stl => "stl",
             Self::Ply => "ply",
+            Self::Gif => "gif",
+            Self::Apng => "apng",
+            Self::Webp => "webp",
+        }
+    }
+
+    /// The file extension an exported download is named with.
+    pub fn extension(self) -> &'static str {
+        match self {
+            // An APNG file IS a PNG, and every viewer opens `.png` natively —
+            // the same naming the video export uses.
+            Self::Apng => "png",
+            other => other.as_str(),
         }
     }
 
@@ -10700,13 +10787,32 @@ impl MeshExportFormat {
             // PLY has no registered media type; this is the spelling every
             // viewer and toolchain uses.
             Self::Ply => "application/x-ply",
+            Self::Gif => "image/gif",
+            Self::Apng => "image/apng",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    /// A turntable render rather than a geometry container.
+    pub fn is_animation(self) -> bool {
+        matches!(self, Self::Gif | Self::Apng | Self::Webp)
+    }
+
+    /// The generation-side [`OutputFormat`] an animated export encodes as,
+    /// or `None` for a geometry container.
+    pub fn animation_output_format(self) -> Option<OutputFormat> {
+        match self {
+            Self::Gif => Some(OutputFormat::Gif),
+            Self::Apng => Some(OutputFormat::Apng),
+            Self::Webp => Some(OutputFormat::Webp),
+            Self::Glb | Self::Obj | Self::Stl | Self::Ply => None,
         }
     }
 }
 
 impl std::fmt::Display for MeshExportFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.extension())
+        f.write_str(self.as_str())
     }
 }
 
@@ -10719,8 +10825,11 @@ impl std::str::FromStr for MeshExportFormat {
             "obj" => Ok(Self::Obj),
             "stl" => Ok(Self::Stl),
             "ply" => Ok(Self::Ply),
+            "gif" => Ok(Self::Gif),
+            "apng" => Ok(Self::Apng),
+            "webp" => Ok(Self::Webp),
             other => Err(format!(
-                "unknown mesh export format '{other}' (expected glb, obj, stl, or ply)"
+                "unknown mesh export format '{other}' (expected glb, obj, stl, ply, gif, apng, or webp)"
             )),
         }
     }

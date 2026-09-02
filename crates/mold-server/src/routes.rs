@@ -7797,7 +7797,7 @@ fn mesh_capabilities() -> mold_core::MeshCapabilities {
     mold_core::MeshCapabilities {
         generation,
         formats: vec![mold_core::OutputFormat::Glb],
-        export_formats: MESH_EXPORT_FORMATS.to_vec(),
+        export_formats: mesh_export_formats(),
         // Geometry only. Flipped by the PBR paint stage, not before — a user
         // must not discover that a render is untextured after waiting for it.
         textures: false,
@@ -8871,10 +8871,12 @@ pub(crate) struct GalleryMediaTokenResponse {
 
 /// A container `POST /api/gallery/export/:filename` can transcode into.
 ///
-/// Two disjoint groups sharing one endpoint: the animation containers a stored
-/// MP4 re-encodes to, and the geometry containers a stored GLB transcodes to.
-/// The source extension picks the group, so asking for a GIF of a mesh (or an
-/// STL of a video) is a refusal that names both sides rather than a surprise.
+/// Two groups sharing one endpoint: the animation containers, and the
+/// geometry containers a stored GLB transcodes to. A stored MP4 re-encodes to
+/// the animation group only; a stored GLB takes BOTH — geometry as a
+/// transcode, animation as a rendered turntable — so the one refusal left is
+/// a geometry container asked of a video, which names the other side rather
+/// than surprising.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum GalleryExportFormat {
@@ -8888,7 +8890,7 @@ pub(crate) enum GalleryExportFormat {
 }
 
 impl GalleryExportFormat {
-    /// The animation container this names, or `None` for a mesh format.
+    /// The animation container this names, or `None` for a geometry format.
     fn animation_format(self) -> Option<mold_core::OutputFormat> {
         match self {
             Self::Gif => Some(mold_core::OutputFormat::Gif),
@@ -8898,39 +8900,57 @@ impl GalleryExportFormat {
         }
     }
 
-    /// The mesh container this names, or `None` for an animation format.
-    fn mesh_format(self) -> Option<mold_core::MeshExportFormat> {
+    /// What this names for a stored mesh. Total: every container here is
+    /// something a `.glb` can become, geometry or turntable.
+    fn mesh_format(self) -> mold_core::MeshExportFormat {
         match self {
-            Self::Glb => Some(mold_core::MeshExportFormat::Glb),
-            Self::Obj => Some(mold_core::MeshExportFormat::Obj),
-            Self::Stl => Some(mold_core::MeshExportFormat::Stl),
-            Self::Ply => Some(mold_core::MeshExportFormat::Ply),
-            Self::Gif | Self::Apng | Self::Webp => None,
+            Self::Glb => mold_core::MeshExportFormat::Glb,
+            Self::Obj => mold_core::MeshExportFormat::Obj,
+            Self::Stl => mold_core::MeshExportFormat::Stl,
+            Self::Ply => mold_core::MeshExportFormat::Ply,
+            Self::Gif => mold_core::MeshExportFormat::Gif,
+            Self::Apng => mold_core::MeshExportFormat::Apng,
+            Self::Webp => mold_core::MeshExportFormat::Webp,
         }
     }
 
     fn extension(self) -> &'static str {
-        match self {
-            Self::Gif => "gif",
-            // An APNG file IS a PNG, and every viewer opens `.png` natively.
-            Self::Apng => "png",
-            Self::Webp => "webp",
-            Self::Glb => "glb",
-            Self::Obj => "obj",
-            Self::Stl => "stl",
-            Self::Ply => "ply",
-        }
+        self.mesh_format().extension()
     }
 }
 
-/// Every mesh container a stored `.glb` can be exported as, in the order
-/// clients show them. GLB first because it is the stored form.
-pub(crate) const MESH_EXPORT_FORMATS: [mold_core::MeshExportFormat; 4] = [
+/// Every GEOMETRY container a stored `.glb` can be exported as, in the order
+/// clients show them. GLB first because it is the stored form. These need no
+/// encoder feature: any build that can serve the file can transcode it.
+pub(crate) const MESH_GEOMETRY_EXPORT_FORMATS: [mold_core::MeshExportFormat; 4] = [
     mold_core::MeshExportFormat::Glb,
     mold_core::MeshExportFormat::Obj,
     mold_core::MeshExportFormat::Stl,
     mold_core::MeshExportFormat::Ply,
 ];
+
+/// The animation containers this build encodes, in the order clients show
+/// them. WebP needs the `webp` feature (the statically linked libwebp), and a
+/// build without it must not advertise a format its export route would
+/// refuse; GIF and APNG are pure-Rust encoders every build carries.
+pub(crate) fn animation_export_formats() -> Vec<mold_core::MeshExportFormat> {
+    let mut formats = vec![
+        mold_core::MeshExportFormat::Gif,
+        mold_core::MeshExportFormat::Apng,
+    ];
+    if cfg!(feature = "webp") {
+        formats.push(mold_core::MeshExportFormat::Webp);
+    }
+    formats
+}
+
+/// Everything `capabilities.mesh.export_formats` advertises: the geometry
+/// containers, then the turntable containers this build can encode.
+pub(crate) fn mesh_export_formats() -> Vec<mold_core::MeshExportFormat> {
+    let mut formats = MESH_GEOMETRY_EXPORT_FORMATS.to_vec();
+    formats.extend(animation_export_formats());
+    formats
+}
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -8956,11 +8976,17 @@ pub(crate) struct GalleryExportRequest {
     #[serde(default)]
     pub(crate) repeat: GalleryGifRepeat,
     /// Optional decoded-frame cap. The longest side is resized to this many
-    /// pixels while decoding, before frames enter the animation buffer.
+    /// pixels while decoding, before frames enter the animation buffer. For
+    /// a mesh turntable it is the rendered frame edge (default 512).
     pub(crate) max_dimension: Option<u32>,
     /// Optional target frame rate. The decoder samples without retaining
-    /// skipped full-resolution frames.
+    /// skipped full-resolution frames. For a mesh turntable it is the
+    /// playback rate (default 10, at most 30).
     pub(crate) fps: Option<u32>,
+    /// Mesh turntables only: how many views are rendered around the mesh
+    /// (default 36, between 8 and 180). Meaningless for a video, whose frames
+    /// already exist, and ignored there.
+    pub(crate) frames: Option<u32>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -9296,14 +9322,19 @@ async fn create_gallery_media_token(
     responses((status = 200, description = "Available gallery video export formats", body = GalleryExportOptionsResponse))
 )]
 async fn gallery_export_options() -> Json<GalleryExportOptionsResponse> {
-    let mut formats = if cfg!(feature = "webp") {
-        vec!["gif", "apng", "webp"]
-    } else {
-        vec!["gif", "apng"]
-    };
-    // The mesh containers need no encoder feature: they are transcodes of a
-    // stored glTF, so any build that can serve the file can export it.
-    formats.extend(MESH_EXPORT_FORMATS.iter().map(|format| format.extension()));
+    // Animation containers first (what a video exports as, and what a mesh
+    // turntable renders to), then the geometry containers, which need no
+    // encoder feature: they are transcodes of a stored glTF, so any build that
+    // can serve the file can export it.
+    let mut formats: Vec<&'static str> = animation_export_formats()
+        .into_iter()
+        .map(|format| format.as_str())
+        .collect();
+    formats.extend(
+        MESH_GEOMETRY_EXPORT_FORMATS
+            .iter()
+            .map(|format| format.as_str()),
+    );
     Json(GalleryExportOptionsResponse {
         formats,
         gif_playback: ["loop", "bounce"],
@@ -9314,10 +9345,11 @@ async fn gallery_export_options() -> Json<GalleryExportOptionsResponse> {
 /// Transcode one stored gallery artifact into a delivery container.
 ///
 /// Two source kinds, one route: an MP4 re-encodes to GIF/APNG/WebP, and a GLB
-/// transcodes to GLB/OBJ/STL/PLY. Both are DOWNLOADS — nothing is written back
-/// into the gallery, because the stored form stays authoritative and an export
-/// always loses something (frame timing for an animation, materials or vertex
-/// identity for a mesh).
+/// transcodes to GLB/OBJ/STL/PLY or renders a turntable GIF/APNG/WebP. All
+/// are DOWNLOADS — nothing is written back into the gallery, because the
+/// stored form stays authoritative and an export always loses something
+/// (frame timing for an animation, materials or vertex identity for a mesh,
+/// the geometry itself for a turntable).
 #[utoipa::path(
     post,
     path = "/api/gallery/export/{filename}",
@@ -9382,27 +9414,32 @@ async fn export_gallery_media(
         }));
     }
 
-    // A mesh export is a pure transcode of geometry that already exists: read
-    // the stored glTF back, write the requested container, hand it over as a
-    // download. No re-encode, no frame buffer, and none of the animation
-    // options below mean anything here.
+    // A mesh has two kinds of export. A geometry container is a pure
+    // transcode of geometry that already exists: read the stored glTF back,
+    // write the requested container, hand it over as a download — no
+    // re-encode, no frame buffer, and none of the animation options mean
+    // anything. An animation container is a TURNTABLE: the poster's own
+    // view rendered around the mesh and encoded by the same encoders the
+    // video export uses, with the same playback and repeat contract.
     if source_is_mesh {
-        let Some(mesh_format) = request.format.mesh_format() else {
-            return Err(ApiError::validation(format!(
-                "'{}' is an animation format; a mesh exports as {}",
-                request.format.extension(),
-                MESH_EXPORT_FORMATS
-                    .iter()
-                    .map(|format| format.extension())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        };
-        let bytes =
+        let mesh_format = request.format.mesh_format();
+        let bytes = if mesh_format.is_animation() {
+            let options = turntable_options_for(&request, mesh_format)?;
+            let output_format = mesh_format
+                .animation_output_format()
+                .expect("is_animation() and animation_output_format() agree");
+            tokio::task::spawn_blocking(move || {
+                render_gallery_turntable(&source, output_format, &options)
+            })
+            .await
+            .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
+            .map_err(ApiError::validation)?
+        } else {
             tokio::task::spawn_blocking(move || transcode_gallery_mesh(&source, mesh_format))
                 .await
                 .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
-                .map_err(ApiError::validation)?;
+                .map_err(ApiError::validation)?
+        };
         return Ok(mesh_export_response(
             &clean_name,
             mesh_format,
@@ -9491,7 +9528,88 @@ fn transcode_gallery_mesh(
         }
         mold_core::MeshExportFormat::Stl => mold_inference::hunyuan3d::glb::write_stl(&mesh),
         mold_core::MeshExportFormat::Ply => mold_inference::hunyuan3d::glb::write_ply(&mesh),
+        mold_core::MeshExportFormat::Gif
+        | mold_core::MeshExportFormat::Apng
+        | mold_core::MeshExportFormat::Webp => {
+            unreachable!("animation exports render a turntable instead")
+        }
     })
+}
+
+/// Resolve a turntable request's options against the same bounds the video
+/// export applies to `playback`, `repeat` and `max_dimension`, plus the
+/// turntable's own `frames` and `fps`. Every refusal is a 422 in the
+/// `max_dimension` message style, so a client learns the bound at once.
+fn turntable_options_for(
+    request: &GalleryExportRequest,
+    format: mold_core::MeshExportFormat,
+) -> Result<mold_inference::hunyuan3d::turntable::TurntableOptions, ApiError> {
+    use mold_inference::hunyuan3d::turntable::{
+        TurntableOptions, DEFAULT_FPS, DEFAULT_FRAMES, DEFAULT_SIZE, FPS_RANGE, FRAMES_RANGE,
+    };
+    let bounce = matches!(request.playback, GalleryGifPlayback::Bounce);
+    if bounce && format != mold_core::MeshExportFormat::Gif {
+        return Err(ApiError::validation(
+            "bounce playback is only supported for GIF exports",
+        ));
+    }
+    if request
+        .max_dimension
+        .is_some_and(|dimension| !(240..=2160).contains(&dimension))
+    {
+        return Err(ApiError::validation(
+            "max_dimension must be between 240 and 2160 pixels",
+        ));
+    }
+    if request.fps.is_some_and(|fps| !FPS_RANGE.contains(&fps)) {
+        return Err(ApiError::validation(format!(
+            "fps must be between {} and {} for a mesh turntable",
+            FPS_RANGE.start(),
+            FPS_RANGE.end()
+        )));
+    }
+    let frames = request.frames.map(|frames| frames as usize);
+    if frames.is_some_and(|frames| !FRAMES_RANGE.contains(&frames)) {
+        return Err(ApiError::validation(format!(
+            "frames must be between {} and {}",
+            FRAMES_RANGE.start(),
+            FRAMES_RANGE.end()
+        )));
+    }
+    let options = TurntableOptions {
+        frames: frames.unwrap_or(DEFAULT_FRAMES),
+        fps: request.fps.unwrap_or(DEFAULT_FPS),
+        // The poster rasterizer has its own ceiling, below the video cap.
+        size: request
+            .max_dimension
+            .unwrap_or(DEFAULT_SIZE)
+            .min(mold_inference::hunyuan3d::poster::MAX_POSTER_SIZE),
+        bounce,
+        repeat_forever: matches!(request.repeat, GalleryGifRepeat::Forever),
+    };
+    // Refused here, before the file is even read, so the budget is a
+    // request error and not a render failure half-way through.
+    mold_inference::hunyuan3d::turntable::check_frame_budget(&options)
+        .map_err(ApiError::validation)?;
+    Ok(options)
+}
+
+/// Read a stored `.glb` and render its turntable as `format`.
+///
+/// Blocking on purpose — it is called from `spawn_blocking`, and a 36-frame
+/// 512 px turntable is a few hundred milliseconds of CPU rasterization plus
+/// the GIF quantizer. The reader's refusals are passed through by sentence
+/// for the same reason as [`transcode_gallery_mesh`].
+fn render_gallery_turntable(
+    source: &std::path::Path,
+    format: mold_core::OutputFormat,
+    options: &mold_inference::hunyuan3d::turntable::TurntableOptions,
+) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(source).map_err(|error| format!("cannot read the mesh: {error}"))?;
+    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
+        .map_err(|error| format!("cannot export this mesh: {error}"))?;
+    mold_inference::hunyuan3d::turntable::export_turntable(&mesh, format, options)
+        .map_err(|error| format!("cannot render a turntable of this mesh: {error:#}"))
 }
 
 /// The download response for a transcoded mesh.
