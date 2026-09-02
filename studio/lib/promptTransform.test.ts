@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
+  PROMPT_IGNORED_TRANSFORM_REASON,
   promptSource,
+  promptTransformBlockedReason,
+  transformCountAccepted,
   validateRemixVariants,
 } from "./promptTransform";
 
@@ -72,6 +75,37 @@ describe("prompt remix contract", () => {
     expect(() => validateRemixVariants(variants.slice(0, 2))).toThrow(
       "exactly 3",
     );
+  });
+
+  it("accepts the single advisory answer when the recipe ignores the prompt", () => {
+    // A prompt-ignoring family (no text encoder) is answered with ONE result,
+    // the guide's image-preparation advice, whatever count was requested.
+    const advice = [
+      { prompt: "Use a clean cutout on a plain background.", dimensions: [] },
+    ];
+    expect(
+      validateRemixVariants(advice, 3, { promptIgnored: true }),
+    ).toHaveLength(1);
+    expect(() => validateRemixVariants(advice, 3)).toThrow("exactly 3");
+    // Any other short answer is still a malformed batch.
+    const two = advice.concat({ prompt: "Crop tightly.", dimensions: [] });
+    expect(() =>
+      validateRemixVariants(two, 3, { promptIgnored: true }),
+    ).toThrow("exactly 3");
+    expect(transformCountAccepted(3, 3)).toBe(true);
+    expect(transformCountAccepted(1, 3)).toBe(false);
+    expect(transformCountAccepted(1, 3, { promptIgnored: true })).toBe(true);
+    expect(transformCountAccepted(2, 3, { promptIgnored: true })).toBe(false);
+  });
+
+  it("blocks Expand and Remix only for a recipe that ignores the prompt", () => {
+    expect(promptTransformBlockedReason("ignored")).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    expect(promptTransformBlockedReason("optional")).toBeNull();
+    expect(promptTransformBlockedReason("required")).toBeNull();
+    expect(promptTransformBlockedReason(null)).toBeNull();
+    expect(promptTransformBlockedReason(undefined)).toBeNull();
   });
 
   it("changes the client-only fingerprint when conditioned media changes", () => {

@@ -25,6 +25,15 @@ const props = defineProps<{
   /** Generation facts frozen with the request (identity, canvas, frames). */
   context?: ExpandContextWire | null;
   style?: string | null;
+  /**
+   * The resolved recipe IGNORES the prompt (no text encoder in the family),
+   * so the host answers a transform with exactly ONE result — the guide's
+   * image-preparation advice — rather than three variants. Create disables
+   * Remix outright for such a recipe; this keeps the modal from throwing on
+   * the short answer if it is ever reached, and makes one selection a
+   * complete batch.
+   */
+  promptIgnored?: boolean;
   target?: StreamTarget;
 }>();
 const emit = defineEmits<{
@@ -87,11 +96,11 @@ async function remix() {
       undefined,
       props.target,
     );
-    response.value = {
-      ...result,
-      variants: validateRemixVariants(result.variants, 3),
-    };
-    selected.value = [0, 1, 2];
+    const variants = validateRemixVariants(result.variants, 3, {
+      promptIgnored: props.promptIgnored === true,
+    });
+    response.value = { ...result, variants };
+    selected.value = variants.map((_, index) => index);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
@@ -105,8 +114,15 @@ function toggleSelected(index: number) {
     : [...selected.value, index].sort((left, right) => left - right);
 }
 
+/** Two selections make a batch, except where the host only ever answered
+ * with one — then that single result is the whole batch. */
+const minimumBatchSelections = computed(() =>
+  props.promptIgnored === true ? 1 : 2,
+);
+
 function prepareSelected() {
-  if (!response.value || selected.value.length < 2) return;
+  if (!response.value || selected.value.length < minimumBatchSelections.value)
+    return;
   emit("prepare", {
     ...response.value,
     variants: selected.value.map((index) => response.value!.variants[index]!),
@@ -234,7 +250,7 @@ function prepareSelected() {
           type="button"
           data-test="prepare-remix-batch"
           class="rounded-control bg-safelight px-4 py-2 font-semibold text-on-accent"
-          :disabled="selected.length < 2"
+          :disabled="selected.length < minimumBatchSelections"
           @click="prepareSelected"
         >
           Use {{ selected.length }} as Batch

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { promptPlaceholder } from "@studio/lib/promptRequirement";
+import { promptTransformBlockedReason } from "@studio/lib/promptTransform";
 import Keycap from "@ui/components/Keycap.vue";
 import Icon from "@ui/components/Icon.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
@@ -65,6 +66,13 @@ const generateDisabled = computed(() => props.disabled && !props.submitting);
 const placeholder = computed(() =>
   promptPlaceholder(promptInputForForm(props.form), "Describe the image you want to create…"),
 );
+// Expand and Remix rewrite the prompt, so the same recipe snapshot answers
+// for them: a family with no text encoder reads nothing a rewrite could say.
+// The view derives this from the same form, so the disabled control and its
+// refusal necessarily carry one sentence.
+const transformBlockedReason = computed(() =>
+  promptTransformBlockedReason(props.form.recipeCapabilities?.promptMode),
+);
 
 const promptEl = ref<HTMLTextAreaElement | null>(null);
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
@@ -113,7 +121,10 @@ function onKeydown(e: KeyboardEvent) {
     if (!generateDisabled.value) submitOrCancel();
   } else if ((e.key === "e" || e.key === "E") && primaryModifierPressed(e)) {
     e.preventDefault();
-    expandControl.value?.expand();
+    // Blocked by the recipe: the view owns the refusal, so the shortcut still
+    // reaches it and answers with the reason rather than dying silently here.
+    if (transformBlockedReason.value) emit("expand");
+    else expandControl.value?.expand();
   } else if (e.key === "ArrowUp" && promptEl.value && caretOnFirstLine(promptEl.value)) {
     if (cycleHistory("prev")) e.preventDefault();
   } else if (e.key === "ArrowDown" && promptEl.value && caretOnLastLine(promptEl.value)) {
@@ -164,6 +175,7 @@ defineExpose({ focus, expand, record });
         :host-label="expansionHostLabel"
         :can-undo="canUndo"
         :blocked="preparedBlocked"
+        :transform-blocked-reason="transformBlockedReason"
         :original-available="!!form.originalPrompt"
         :remix-source="remixSource"
         @expand="emit('expand')"

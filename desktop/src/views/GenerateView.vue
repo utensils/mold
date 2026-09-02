@@ -184,6 +184,7 @@ import {
   conditioningFingerprint,
   defaultRemixDimensions,
   promptSource,
+  promptTransformBlockedReason,
   validateRemixVariants,
 } from "@studio/lib/promptTransform";
 import type {
@@ -2569,6 +2570,27 @@ async function exportGeneratedVideo(options: VideoExportOptions): Promise<void> 
   }
 }
 
+/**
+ * Why the selected recipe refuses a prompt rewrite, or `null` when it reads
+ * one. `capabilities.prompt.mode: "ignored"` (Hunyuan3D has no text encoder
+ * anywhere in the family) means a rewrite changes nothing about the render,
+ * and the host answers such a transform with ONE advisory result rather than
+ * the requested variations — so no request is worth sending and the
+ * missing-expander pull is never worth offering. The composer derives the
+ * same answer from the same form, so the disabled control and this refusal
+ * necessarily carry one sentence.
+ */
+const promptTransformBlocked = computed(() =>
+  promptTransformBlockedReason(form.recipeCapabilities?.promptMode),
+);
+/** True when the intent was refused; the caller returns. */
+function refusePromptTransform(): boolean {
+  const reason = promptTransformBlocked.value;
+  if (!reason) return false;
+  toasts.push(reason);
+  return true;
+}
+
 function expansionInputs(count: number): PreparedExpansionInputs {
   const request = buildRequest(form);
   return {
@@ -2584,6 +2606,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
 }
 
 async function remixForCurrentPrompt(replacePrepared = false) {
+  if (refusePromptTransform()) return;
   if (!form.prompt.trim() || !form.model || expansionRunning.value) return;
   submissionGuard.invalidate();
   sequenceSubmissionGuard.invalidate();
@@ -2625,7 +2648,9 @@ async function remixForCurrentPrompt(replacePrepared = false) {
       route.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
-    const variants = validateRemixVariants(response.variants, requestedCount);
+    const variants = validateRemixVariants(response.variants, requestedCount, {
+      promptIgnored: !!promptTransformBlocked.value,
+    });
     const currentRequest = buildRequest(form);
     if (
       form.model !== request.model ||
@@ -2778,6 +2803,7 @@ async function expandForCurrentBatch(
   replacePrepared = false,
   routeOverride: HostRoute | null = null,
 ) {
+  if (refusePromptTransform()) return;
   const count = effectiveBatchSize.value;
   const inputs = expansionInputs(count);
   if (
@@ -2850,7 +2876,9 @@ async function expandForCurrentBatch(
       route.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
-    const prompts = validateExpandedPrompts(response.expanded, count);
+    const prompts = validateExpandedPrompts(response.expanded, count, {
+      promptIgnored: !!promptTransformBlocked.value,
+    });
     if (count === 1) {
       // Quick expansion has no review workspace. Never overwrite edits or a
       // target change that happened while its request was in flight.
@@ -4447,7 +4475,10 @@ watch(
 );
 watch(
   () => ui.expandTick,
-  () => composerRef.value?.expand?.(),
+  () => {
+    if (refusePromptTransform()) return;
+    composerRef.value?.expand?.();
+  },
 );
 
 onMounted(() => {

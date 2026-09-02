@@ -38,6 +38,7 @@ import {
   conditioningFingerprint,
   defaultRemixDimensions,
   promptSource,
+  promptTransformBlockedReason,
   remixDimensionsForTask,
   validateRemixVariants,
   DEFAULT_REMIX_VARIATIONS,
@@ -1691,9 +1692,29 @@ watch(
     if (automatic) void refreshRoutingModels();
   },
 );
+/**
+ * Why Expand and Remix are unavailable for the selected recipe, or `null`
+ * when they are available.
+ *
+ * The ADVERTISED recipe answers: a family with no text encoder anywhere
+ * (Hunyuan3D) reports `capabilities.prompt.mode: "ignored"`, and a rewritten
+ * prompt cannot change a render nothing encodes. The host answers a transform
+ * for such a recipe with exactly ONE result — the guide's image-preparation
+ * advice — rather than N variants, so every control here is disabled with the
+ * reason instead of spending a round trip to learn it. `caps.promptMode` is
+ * the shared projection of that mode (`generationCapabilitiesForFamily`), so
+ * the composer, the programmatic entry points, and the pull offer below
+ * cannot drift apart or carry a family allowlist of their own.
+ */
+const promptTransformBlocked = computed(() => promptTransformBlockedReason(caps.value.promptMode));
+/** The host will answer a transform for this recipe with one advisory result. */
+const promptIgnored = computed(() => promptTransformBlocked.value !== null);
 const expansionMissingModel = computed(() => {
   const recovery = expansionRecovery.value;
-  return recovery ? { model: recovery.model, route: recovery.route, host: recovery.host } : null;
+  // Never offer to install an expander for a recipe that reads no prompt:
+  // the rewrite it would unlock changes nothing about the render.
+  if (!recovery || promptTransformBlocked.value) return null;
+  return { model: recovery.model, route: recovery.route, host: recovery.host };
 });
 const preparedStaleReasons = computed(() => {
   const batch = preparedBatch.value;
@@ -5891,7 +5912,10 @@ function commitExpandedPrompts(
   replacePrepared: boolean,
   focus: ReplacementFocusOwnership,
 ): void {
-  if (inputs.requestedCount === 1) {
+  // One result answers a Batch-1 request and is also what a prompt-ignoring
+  // recipe returns for any requested count, so the count actually received
+  // decides the shape — a reviewed batch of one is not a thing.
+  if (inputs.requestedCount === 1 || prompts.length === 1) {
     remixUndo.value = null;
     appliedRemix.value = null;
     quickExpansionOriginal.value = inputs.sourcePrompt;
@@ -5929,10 +5953,39 @@ function commitExpandedPrompts(
   if (replacePrepared) restoreReplacementFocus(focus, "prepared");
 }
 
+/**
+ * Refuse a prompt transform the selected recipe cannot use, naming the reason
+ * where the user is already looking. Returns `true` when the caller must stop
+ * — no request is built, so nothing reaches the host.
+ */
+function refusePromptTransform(): boolean {
+  const reason = promptTransformBlocked.value;
+  if (!reason) return false;
+  expansionError.value = reason;
+  setGenerationStatus(reason, true);
+  return true;
+}
+
+/**
+ * `validateExpandedPrompts` with the recipe's prompt-ignored allowance: a
+ * recipe that ignores the prompt is answered with exactly ONE result (the
+ * guide's image-preparation advice) whatever count was requested, and the
+ * shared validator accepts that single answer while every other short answer
+ * still fails naming the count that was requested.
+ */
+function validateExpandedPromptsForRecipe(
+  prompts: readonly string[],
+  expected: number,
+  promptIgnoredAnswer: boolean,
+): string[] {
+  return validateExpandedPrompts(prompts, expected, { promptIgnored: promptIgnoredAnswer });
+}
+
 async function expandForCurrentBatch(
   replacePrepared = false,
   routeOverride: HostRoute | null = null,
 ): Promise<void> {
+  if (refusePromptTransform()) return;
   const count = effectiveBatchSize.value;
   const inputs = expansionInputs(count);
   const host = routeOverride
@@ -5982,7 +6035,7 @@ async function expandForCurrentBatch(
       expandOn.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
-    const prompts = validateExpandedPrompts(response.expanded, count);
+    const prompts = validateExpandedPromptsForRecipe(response.expanded, count, promptIgnored.value);
     const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
     const current = expansionInputs(count);
     if (
@@ -6044,6 +6097,7 @@ async function remixCurrent(
   routeOverride: HostRoute | null = null,
   replacePrepared = false,
 ): Promise<void> {
+  if (refusePromptTransform()) return;
   const { prepared, remix, visiblePrompt } = remixInputs();
   const route = routeOverride ?? selectedRoute.value;
   const host = route ? hosts.value.find((candidate) => candidate.id === route.hostId) : undefined;
@@ -6097,7 +6151,9 @@ async function remixCurrent(
     ) {
       throw new Error("The host returned Remix provenance for a different source prompt.");
     }
-    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
+    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS, {
+      promptIgnored: promptIgnored.value,
+    });
     const current = remixInputs(remix.sourceKind);
     const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
     if (
@@ -6318,7 +6374,7 @@ function restoreQuickExpansion(): void {
 }
 
 async function developExpandedAnyway(): Promise<void> {
-  if (!quickExpansionSnapshot.value) return;
+  if (!quickExpansionSnapshot.value || refusePromptTransform()) return;
   submissionAttempts.invalidate();
   quickExpansionSnapshot.value = null;
   expansionError.value = "";
@@ -6326,7 +6382,13 @@ async function developExpandedAnyway(): Promise<void> {
 }
 
 async function reexpandAndDevelop(): Promise<void> {
-  if (!quickExpansionSnapshot.value || quickExpansionOriginal.value === null) return;
+  if (
+    !quickExpansionSnapshot.value ||
+    quickExpansionOriginal.value === null ||
+    refusePromptTransform()
+  ) {
+    return;
+  }
   restoreQuickExpansion();
   await nextTick();
   await expandForCurrentBatch();
@@ -6441,7 +6503,7 @@ function discardPreparedBatch(): void {
 
 async function pullExpansionModel(): Promise<void> {
   const recovery = expansionRecovery.value;
-  if (!recovery || expansionRunning.value) return;
+  if (!recovery || expansionRunning.value || refusePromptTransform()) return;
   releaseExpansionPullLease(recovery);
   const stale = recoveryStaleReason(recovery);
   if (stale) {
@@ -6518,7 +6580,15 @@ async function pullExpansionModel(): Promise<void> {
 async function retryExpansionAfterPull(): Promise<void> {
   const recovery = expansionRecovery.value;
   const attempt = expansionPullAttempt.value;
-  if (!recovery || !attempt || attempt.recoveryId !== recovery.id || expansionRunning.value) return;
+  if (
+    !recovery ||
+    !attempt ||
+    attempt.recoveryId !== recovery.id ||
+    expansionRunning.value ||
+    refusePromptTransform()
+  ) {
+    return;
+  }
   const stale = recoveryStaleReason(recovery);
   if (stale) {
     markExpansionRecoveryStale(recovery, stale);
@@ -6574,7 +6644,9 @@ async function retryExpansionAfterPull(): Promise<void> {
     if (recovery.remix) {
       if (!("variants" in response))
         throw new Error("The host returned an invalid Remix response.");
-      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
+      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS, {
+        promptIgnored: promptIgnored.value,
+      });
       commitRemixReview(
         { ...recovery.inputs },
         {
@@ -6590,7 +6662,11 @@ async function retryExpansionAfterPull(): Promise<void> {
     } else {
       if (!("expanded" in response))
         throw new Error("The host returned an invalid expansion response.");
-      const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
+      const prompts = validateExpandedPromptsForRecipe(
+        response.expanded,
+        recovery.inputs.requestedCount,
+        promptIgnored.value,
+      );
       commitExpandedPrompts(
         { ...recovery.inputs },
         { ...recovery.route, target: { ...recovery.route.target } },
@@ -11996,6 +12072,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :remix-source="remixSource"
               :remix-dimensions="remixDimensions"
               :task="currentExpansionTask"
+              :blocked-reason="promptTransformBlocked"
               @expand="expandForCurrentBatch()"
               @remix="remixCurrent()"
               @undo="undoPromptPreparation"
@@ -12010,6 +12087,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             >
               <div class="mobile-generate-validation-copy">
                 <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
+                <p v-if="promptTransformBlocked" data-test="mobile-quick-transform-blocked">
+                  {{ promptTransformBlocked }}
+                </p>
                 <button
                   class="mobile-error-copy"
                   type="button"
@@ -12038,7 +12118,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   class="primary-button mobile-touch-action"
                   type="button"
                   data-test="mobile-reexpand-and-develop"
-                  :disabled="expansionRunning || preparedSubmitting"
+                  :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
                   @click="recoverQuickPromptTransform"
                 >
                   {{ appliedRemix ? "Re-remix" : "Re-expand and Develop" }}
@@ -12047,7 +12127,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   class="secondary-button mobile-touch-action"
                   type="button"
                   data-test="mobile-develop-expanded-anyway"
-                  :disabled="expansionRunning || preparedSubmitting"
+                  :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
                   @click="developExpandedAnyway"
                 >
                   Develop anyway
@@ -12113,6 +12193,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :stale-reasons="remixStaleReasons"
               :running="expansionRunning"
               :error="expansionMissingModel ? '' : expansionError"
+              :blocked-reason="promptTransformBlocked"
               @toggle="toggleRemixVariant"
               @edit="editRemixVariant"
               @reremix="remixCurrent()"
@@ -12127,6 +12208,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               :preparing="expansionRunning"
               :error="expansionMissingModel ? '' : expansionError"
               :submitting="preparedSubmitting"
+              :blocked-reason="promptTransformBlocked"
               @edit="editPreparedPrompt"
               @remove="removePreparedPrompt"
               @collapse="collapsePreparedBatch"

@@ -35,6 +35,7 @@ import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type {
@@ -5178,6 +5179,72 @@ describe("CreatePage 3-D mesh prints", () => {
     vi.unstubAllGlobals();
   });
 
+  // The family has no text encoder anywhere, so a rewritten prompt changes
+  // nothing about the render. Both transforms are refused with the one shared
+  // reason, and nothing about the expansion model is ever offered.
+  it("blocks Expand and Remix for a recipe that reads no prompt", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "a carved oak armchair";
+    await nextTick();
+
+    expect(
+      wrapper
+        .getComponent({ name: "ComposerCard" })
+        .props("transformBlockedReason"),
+    ).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(wrapper.get("[data-test='page-transform-blocked']").text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+  });
+
+  it("no-ops Expand with the reason and never offers the expander pull", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "a carved oak armchair";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(useNotifications().toasts.map((item) => item.text)).toContain(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
+      false,
+    );
+    // The host has no expander at all in this fixture, so the pre-fix path
+    // would have raised the pull offer before ever looking at the recipe.
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
+      false,
+    );
+    expect(submitMock).not.toHaveBeenCalled();
+  });
+
+  it("no-ops Remix with the reason instead of opening the modal", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.applyModelDefaults(meshModel);
+    form.state.value.prompt = "a carved oak armchair";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-remix']").trigger("click");
+    await flushPromises();
+
+    expect(useNotifications().toasts.map((item) => item.text)).toContain(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    expect(wrapper.find("[data-test='remix-generate']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
+      false,
+    );
+  });
+
   it("submits a canvasless request instead of blocking on 0×0", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -5215,9 +5282,10 @@ function pageStubs() {
         "disabledReason",
         "placeholder",
         "promptOptional",
+        "transformBlockedReason",
       ],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },

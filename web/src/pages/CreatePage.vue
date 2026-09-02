@@ -68,7 +68,9 @@ import {
 import {
   conditioningFingerprint,
   promptSource,
+  promptTransformBlockedReason,
 } from "@studio/lib/promptTransform";
+import { validateExpandedPrompts } from "../lib/expandedPrompts";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -466,6 +468,14 @@ function rankExpansionHosts(hostIds: readonly string[]): string | null {
  * its choice instead of opening it — the same rule the ⌘K palette follows.
  */
 function offerExpansionPull(model: string, hostId: string | null): void {
+  // A recipe that reads no prompt has nothing to expand, so pulling the
+  // expander could not unblock anything. Every caller is already gated, but
+  // the offer is the user-visible artefact — refuse it here too so no path
+  // can leave the banner standing for such a recipe.
+  if (promptTransformBlocked.value) {
+    expansionPull.value = null;
+    return;
+  }
   const capabilities = routing.capabilitiesByHost.value;
   const reachable = routing.hosts.value.filter(
     (host) => host.status === "ready",
@@ -1758,6 +1768,19 @@ const promptConditioning = computed(() => ({
 // so the composer says so instead of implying a prompt is mandatory. Nothing
 // here gates submit: `validateSubmit` never required a prompt.
 const canSkipPrompt = computed(() => promptOptional(promptConditioning.value));
+/**
+ * Why Expand and Remix are unavailable, or `null` when they are.
+ *
+ * The advertised mode is the whole answer: a family with no text encoder
+ * anywhere (Hunyuan3D) cannot act on a rewritten prompt, and the host answers
+ * such a transform with exactly ONE result — the guide's image-preparation
+ * advice — instead of a batch of variants. Reading the recipe's own
+ * `promptMode` keeps this off a client family list, and the conditioning does
+ * not enter into it (unlike `optional`, `ignored` holds either way).
+ */
+const promptTransformBlocked = computed(() =>
+  promptTransformBlockedReason(capabilities.value.promptMode),
+);
 const requiredPromptPlaceholder = computed(() =>
   isMinimaxH3Identity(currentFamily.value, form.state.value.model)
     ? MINIMAX_H3_PROMPT_PLACEHOLDER
@@ -4275,18 +4298,22 @@ async function onSubmitInner(
 }
 
 // ── Expand (spec §03/§06) ─────────────────────────────────────────────
-function validateExpandedPrompts(
-  prompts: readonly string[],
-  expected: number,
-): string[] {
-  const normalized = prompts.map((prompt) => prompt.trim());
-  if (normalized.length !== expected || normalized.some((prompt) => !prompt)) {
-    throw new Error(`Expected exactly ${expected} non-empty expanded prompts.`);
-  }
-  return normalized;
+
+/**
+ * The one gate every programmatic path into a prompt transform passes.
+ * Returns `true` when the transform was refused, having said why — a
+ * keyboard shortcut, the re-expand recovery action, and the composer's own
+ * buttons all funnel through here so none of them can reach the host.
+ */
+function promptTransformRefused(): boolean {
+  const reason = promptTransformBlocked.value;
+  if (!reason) return false;
+  toast("error", reason);
+  return true;
 }
 
 async function onExpand() {
+  if (promptTransformRefused()) return;
   // Desktop parity (`ExpandControl.expand`): expansion rewrites the prompt,
   // so there has to be one. This stays true even where a blank prompt is a
   // legitimate render — there is nothing to enrich.
@@ -4345,7 +4372,13 @@ async function onExpand() {
         undefined,
         submitRoute?.target,
       );
-      variations.value = validateExpandedPrompts(response.expanded, count);
+      // A prompt-ignoring recipe never reaches here (the transform is refused
+      // above), but the host's ONE-result answer is the shared rule, so the
+      // validator is told the same thing the gate reads rather than carrying
+      // a second opinion about what a complete batch is.
+      variations.value = validateExpandedPrompts(response.expanded, count, {
+        promptIgnored: promptTransformBlocked.value !== null,
+      });
       preparedBatch.value = {
         batchId: createUuid(),
         sourcePrompt,
@@ -4387,6 +4420,7 @@ async function onExpand() {
 }
 
 async function onRemix() {
+  if (promptTransformRefused()) return;
   if (!form.state.value.prompt.trim()) return;
   if (!validateSubmit()) return;
   const baseRequest = form.toRequest(currentModel.value);
@@ -4469,8 +4503,12 @@ async function prepareRemixBatch(response: RemixResponseWire) {
     return;
   }
   const variants = response.variants.map((variant) => variant.prompt.trim());
+  // Two selections make a batch, except where the host only ever answered with
+  // one — a recipe that reads no prompt gets the guide's single advisory
+  // result, so refusing it here would throw away work the modal accepted.
+  const minimumVariants = promptTransformBlocked.value !== null ? 1 : 2;
   if (
-    variants.length < 2 ||
+    variants.length < minimumVariants ||
     variants.length > 3 ||
     variants.some((prompt) => !prompt)
   ) {
@@ -4500,6 +4538,7 @@ async function prepareRemixBatch(response: RemixResponseWire) {
 }
 
 function onExpandClip(clipId: string, prompt: string) {
+  if (promptTransformRefused()) return;
   const route = resolveSubmitRoute();
   if (route === false) return;
   const expansion = expansionTargetFor(route);
@@ -5682,6 +5721,7 @@ onBeforeUnmount(() => {
             :prompt-optional="canSkipPrompt"
             :required-placeholder="requiredPromptPlaceholder"
             :placeholder="composerPromptPlaceholder"
+            :transform-blocked-reason="promptTransformBlocked"
             :history="promptHistory"
             @update:prompt="onPromptAuthored"
             @submit="onSubmit"
@@ -5816,7 +5856,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div
-            v-else-if="expansionPull"
+            v-else-if="expansionPull && !promptTransformBlocked"
             class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
             role="alert"
             data-test="web-expansion-pull"
@@ -6107,6 +6147,7 @@ onBeforeUnmount(() => {
       :task="remixTask"
       :context="remixContext"
       :style="styleHint(form.state.value.stylePreset ?? '')"
+      :prompt-ignored="promptTransformBlocked !== null"
       :target="normalizeSubmitRoute(remixRoute)?.target"
       @close="showRemix = false"
       @apply="applyRemix"

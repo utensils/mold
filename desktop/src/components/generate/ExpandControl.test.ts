@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ExpandControl from "./ExpandControl.vue";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 
 const wrappers: ReturnType<typeof mount>[] = [];
 
@@ -11,6 +12,7 @@ function mountControl(
     running: boolean;
     hostLabel: string | null;
     canUndo: boolean;
+    transformBlockedReason: string | null;
   }> = {},
 ) {
   const wrapper = mount(ExpandControl, {
@@ -60,5 +62,39 @@ describe("ExpandControl", () => {
     const wrapper = mountControl({ batchSize: 3 });
     (wrapper.vm as unknown as { expand: () => void }).expand();
     expect(wrapper.emitted("expand")).toHaveLength(1);
+  });
+});
+
+// A recipe that IGNORES the prompt has no text encoder to read a rewrite, so
+// both transforms are refused here rather than sending a request the host
+// answers with advice.
+describe("ExpandControl — a recipe that ignores the prompt", () => {
+  it("disables both transforms, naming the reason in the tooltip and a visible hint", () => {
+    const wrapper = mountControl({
+      batchSize: 3,
+      transformBlockedReason: PROMPT_IGNORED_TRANSFORM_REASON,
+    });
+    const expand = wrapper.get('[data-test="expand-action"]');
+    const remix = wrapper.get('[data-test="remix-action"]');
+    expect(expand.attributes("disabled")).toBeDefined();
+    expect(remix.attributes("disabled")).toBeDefined();
+    expect(expand.attributes("title")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(remix.attributes("title")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(wrapper.get('[data-test="transform-blocked-hint"]').text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+  });
+
+  it("no-ops the exposed keyboard action instead of asking for a rewrite", () => {
+    const wrapper = mountControl({ transformBlockedReason: PROMPT_IGNORED_TRANSFORM_REASON });
+    (wrapper.vm as unknown as { expand: () => void }).expand();
+    expect(wrapper.emitted("expand")).toBeUndefined();
+  });
+
+  it("keeps both transforms available when nothing blocks them", () => {
+    const wrapper = mountControl({ transformBlockedReason: null });
+    expect(wrapper.get('[data-test="expand-action"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-test="remix-action"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.find('[data-test="transform-blocked-hint"]').exists()).toBe(false);
   });
 });

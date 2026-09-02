@@ -32,3 +32,12 @@
   hands it to the native share sheet. A host that advertises an animated
   turntable poster container opens the existing GIF-export options sheet
   (playback direction, repeat, max dimension) for that entry instead.
+- **Expand and Remix are refused for a model that reads no prompt.** On a
+  recipe whose profile advertises `prompt.mode: ignored`, both controls render
+  disabled on web, desktop, and iPhone with the one sentence "This model reads
+  no prompt; prepare the image instead.", the keyboard, menu, and recovery
+  paths answer with the same sentence instead of sending a request, and the
+  missing-expander pull is never offered. The host answers such a transform
+  with a single image-preparation note rather than a batch of variants, so
+  every client validator now accepts that one result for a prompt-ignoring
+  recipe instead of failing the batch.

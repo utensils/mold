@@ -20,6 +20,7 @@ import {
 } from "./galleryCache";
 import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
 import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import { thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 
 const {
@@ -161,6 +162,7 @@ import MobileApp from "./MobileApp.vue";
 import IdentityPhotoWell from "@studio/components/IdentityPhotoWell.vue";
 import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
+import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
@@ -6413,6 +6415,43 @@ describe("MobileApp generation queue", () => {
     expect(admittedRequests()[0]!.source_fit).toBeUndefined();
     // Nothing was fitted toward the zero canvas on the way out.
     expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A rewritten prompt cannot change a render the family never encodes, and
+   * the host answers a transform for such a recipe with ONE advisory result
+   * instead of variants. The phone says so beside the controls rather than
+   * letting the user spend a round trip finding out.
+   */
+  it("refuses Expand and Remix on a recipe that ignores the prompt", async () => {
+    serveMeshModel();
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("an armchair shaped like an avocado");
+    await flushPromises();
+
+    const tools = wrapper.getComponent(MobilePromptTools);
+    expect(tools.props("blockedReason")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(wrapper.get("[data-test='mobile-prompt-expand']").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-test='mobile-prompt-remix']").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-test='mobile-prompt-transform-blocked']").text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+
+    // The programmatic entry points refuse the same way: no request goes out.
+    tools.vm.$emit("expand");
+    await flushPromises();
+    tools.vm.$emit("remix");
+    await flushPromises();
+
+    expect(expandPrompt).not.toHaveBeenCalled();
+    expect(remixPrompt).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-test='mobile-expansion-error']").text()).toContain(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    // Nothing to pull: the expander it would install changes no pixel here.
+    expect(wrapper.find("[data-test='mobile-pull-expansion']").exists()).toBe(false);
+    expect(startCatalogDownload).not.toHaveBeenCalled();
   });
 
   it("fails a completion that published no file instead of showing a stub", async () => {

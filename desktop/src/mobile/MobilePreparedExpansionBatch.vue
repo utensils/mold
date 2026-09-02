@@ -8,6 +8,13 @@ const props = defineProps<{
   preparing: boolean;
   error: string;
   submitting: boolean;
+  /**
+   * Why replacing these variations is unavailable for the CURRENTLY selected
+   * recipe (a recipe that ignores the prompt), or `null`/absent when it is
+   * available. The reviewed prompts stay editable and submittable; only
+   * asking the host for new ones is refused.
+   */
+  blockedReason?: string | null;
 }>();
 const emit = defineEmits<{
   edit: [payload: { id: string; text: string }];
@@ -62,7 +69,7 @@ async function remove(id: string): Promise<void> {
 }
 
 function requestReplacement(kind: "refresh" | "regenerate"): void {
-  if (confirming.value) return;
+  if (confirming.value || props.blockedReason) return;
   if (kind === "refresh") emit("refresh");
   else emit("regenerate");
 }
@@ -131,7 +138,7 @@ watch(
         type="button"
         class="secondary-button mobile-touch-action"
         data-test="mobile-regenerate-prepared"
-        :disabled="preparing || submitting || !!confirming"
+        :disabled="preparing || submitting || !!confirming || !!blockedReason"
         @click="requestReplacement('regenerate')"
       >
         {{ preparing ? "Regenerating…" : "Regenerate all" }}
@@ -150,13 +157,20 @@ watch(
         type="button"
         class="secondary-button mobile-touch-action"
         data-test="mobile-refresh-prepared"
-        :disabled="preparing || submitting || !!confirming"
+        :disabled="preparing || submitting || !!confirming || !!blockedReason"
         @click="requestReplacement('refresh')"
       >
         Refresh variations
       </button>
     </div>
     <p v-if="error" class="error-text" role="alert">{{ error }}</p>
+    <p
+      v-if="blockedReason"
+      class="mobile-prepared-blocked"
+      data-test="mobile-prepared-transform-blocked"
+    >
+      {{ blockedReason }}
+    </p>
 
     <ol>
       <li v-for="{ prompt, index } in visiblePrompts" :key="prompt.id">
@@ -356,6 +370,11 @@ watch(
   border: 1px solid var(--control-edge);
   border-radius: var(--radius-control);
   background: var(--bench);
+}
+.mobile-prepared-blocked {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
 }
 .mobile-prepared-more {
   display: flex;

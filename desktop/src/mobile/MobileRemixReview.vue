@@ -17,6 +17,12 @@ const props = defineProps<{
   staleReasons: string[];
   running: boolean;
   error: string;
+  /**
+   * Why Re-remix is unavailable for the CURRENTLY selected recipe (a recipe
+   * that ignores the prompt), or `null`/absent when it is available. Reviewed
+   * variants stay applicable; only re-requesting them is refused.
+   */
+  blockedReason?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -55,12 +61,16 @@ function edit(id: string, event: Event): void {
         type="button"
         class="secondary-button mobile-touch-action"
         data-test="mobile-reremix"
-        :disabled="running"
+        :disabled="running || !!blockedReason"
         @click="emit('reremix')"
       >
         {{ running ? "Re-remixing…" : "Re-remix" }}
       </button>
     </header>
+
+    <p v-if="blockedReason" class="mobile-remix-blocked" data-test="mobile-remix-transform-blocked">
+      {{ blockedReason }}
+    </p>
 
     <details class="mobile-remix-source-preview">
       <summary>{{ sourceLabel }}</summary>
@@ -173,6 +183,11 @@ function edit(id: string, event: Event): void {
 }
 .mobile-remix-review h2 {
   font-size: var(--text-body-lg);
+}
+.mobile-remix-blocked {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
 }
 .mobile-remix-review header p,
 .mobile-remix-source-preview {

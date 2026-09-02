@@ -49,6 +49,24 @@ describe("prepared expansion validation", () => {
     );
     expect(() => validateExpandedPrompts(["one", "  ", "three"], 3)).toThrow("Prompt 2 was empty");
   });
+
+  // A recipe that IGNORES the prompt gets ONE advisory answer from the host
+  // (the guide's image-preparation advice) whatever count was requested. Any
+  // other short answer is still a malformed response.
+  it("accepts the single advisory answer when the recipe ignores the prompt", () => {
+    expect(validateExpandedPrompts([" prepare the image "], 3, { promptIgnored: true })).toEqual([
+      "prepare the image",
+    ]);
+    expect(() => validateExpandedPrompts(["one", "two"], 3, { promptIgnored: true })).toThrow(
+      "Expected exactly 3 non-empty prompts, but the host returned 2.",
+    );
+    expect(() => validateExpandedPrompts(["one"], 3)).toThrow(
+      "Expected exactly 3 non-empty prompts, but the host returned 1.",
+    );
+    expect(() => validateExpandedPrompts(["  "], 3, { promptIgnored: true })).toThrow(
+      "Prompt 1 was empty",
+    );
+  });
 });
 
 describe("prepared expansion lifecycle", () => {

@@ -1,6 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import ComposerCard from "./ComposerCard.vue";
+import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 
 function factory(
   props: Partial<InstanceType<typeof ComposerCard>["$props"]> = {},
@@ -167,6 +168,42 @@ describe("ComposerCard", () => {
     expect(
       wrapper.get("[data-test='composer-submit']").attributes("disabled"),
     ).toBeUndefined();
+  });
+
+  // A recipe that IGNORES the prompt (Hunyuan3D has no text encoder anywhere)
+  // gives a rewrite nothing to act on, so both transforms are refused with the
+  // one shared reason instead of sending a request the host answers with advice.
+  it("disables Expand and Remix with the reason when the recipe ignores the prompt", () => {
+    const wrapper = factory({
+      transformBlockedReason: PROMPT_IGNORED_TRANSFORM_REASON,
+    });
+    const expand = wrapper.get("[data-test='composer-expand']");
+    const remix = wrapper.get("[data-test='composer-remix']");
+    expect(expand.attributes("disabled")).toBeDefined();
+    expect(remix.attributes("disabled")).toBeDefined();
+    expect(expand.attributes("title")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(remix.attributes("title")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    expect(wrapper.get("[data-test='composer-transform-blocked']").text()).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
+    // Generating is still the whole point of the surface — only the prompt
+    // transforms are unavailable.
+    expect(
+      wrapper.get("[data-test='composer-submit']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("keeps Expand and Remix live when nothing blocks the transforms", () => {
+    const wrapper = factory();
+    expect(
+      wrapper.get("[data-test='composer-expand']").attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      wrapper.get("[data-test='composer-remix']").attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      wrapper.find("[data-test='composer-transform-blocked']").exists(),
+    ).toBe(false);
   });
 
   it("softens the placeholder once conditioning makes the prompt optional", async () => {
