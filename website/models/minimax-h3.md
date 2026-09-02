@@ -317,6 +317,23 @@ clock from request to MP4 bytes on a cold process:
 | `1344x768` | 7:4    | 1216 s, 10.8 GB VRAM | 759.5 s, 13.5-14.6 GB    |
 | `768x768`  | 1:1    | 937 s, 7.4 GB VRAM   | 664 s, 9.2 GB VRAM       |
 
+The two 768p-native Turbo tiers added after that campaign,
+`-turbo-4step-768p-v1.1` and `-turbo-8step-768p`, were measured separately on
+plato (NVIDIA L40S 46 GB, not the hal9000 RTX 4090 above) during the lightx2v
+Turbo tier UAT campaign (2026-09-02), same 124 frames / 24 fps, wall clock
+from request to MP4 bytes on a cold-to-warm process, VRAM peak from a 1 Hz
+`nvidia-smi` sampler, both tiers at their default shift 6:
+
+| Canvas     | Aspect | `-turbo-4step-768p-v1.1` (5 steps) | `-turbo-8step-768p` (9 steps) |
+| ---------- | ------ | ---------------------------------- | ----------------------------- |
+| `1344x768` | 7:4    | 269.9 s, 12.6 GB VRAM              | 453.3 s, 12.7 GB VRAM         |
+| `768x768`  | 1:1    | 206.4 s, 9.3 GB VRAM               | 344.9 s, 9.2 GB VRAM          |
+
+Full per-render evidence — host/driver/binary provenance, adapter pull facts,
+`scheduler_estimates` rows, and visual verification for these two tiers plus
+the shift-6-vs-shift-12 A/B on the v1.1 tier — is recorded in the
+[qualification record](https://github.com/utensils/mold/blob/main/docs/qualification/minimax-h3.md#the-lightx2v-turbo-tiers-campaign-2026-09-02).
+
 Every other shape is priced by scaling those measurements: the denoise
 workspaces with the packed sequence, the audio decode with the clip length, and
 the video decode with the canvas area. A long clip therefore costs real VRAM:
