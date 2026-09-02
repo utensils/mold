@@ -101,6 +101,19 @@ block_end() {
   printf '%s\n' "$line"
 }
 
+method_end() {
+  # Absolute line of the four-space `}` closing the METHOD that starts at $2.
+  # `block_end` finds a top-level `}` and therefore closes the whole `impl`;
+  # a per-method body range needs the indented close instead.
+  local file=$1
+  local start=$2
+  local line
+  line=$(awk -v s="$start" 'NR > s && $0 == "    }" { print NR; exit }' "$file")
+  [[ -n "$line" ]] \
+    || fail "release-contract could not find the end of the method starting at ${file}:${start}"
+  printf '%s\n' "$line"
+}
+
 require_text crates/mold-candle/Cargo.toml \
   'h3-private-uat = []' \
   "mold-candle does not keep the private H3 runtime behind its own feature"
@@ -577,14 +590,71 @@ fi
 runtime_source=crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs
 # The Ref2VA backend and its attempt are verbatim twins of the FL2VA phase
 # markers, so each anchor is resolved inside the block that identifies the
-# FL2VA occurrence rather than by a whole-file grep. `H3PrivatePhaseBackend`'s
-# `H3Fl2VaBackend` owns the encode/park/denoise/decode phases;
-# `run_private_comfy_fl2va_attempt` owns the terminal identity echo and mux.
+# FL2VA occurrence rather than by a whole-file grep. The conditioner phase
+# order lives ONCE, in `serve_or_encode_conditioning` on the inherent
+# `H3PrivatePhaseBackend` impl, which is the only path from either task to a
+# conditioner output and which both `encode_text` faces delegate to;
+# `H3PrivatePhaseBackend`'s `H3Fl2VaBackend` owns the visual encode, park,
+# denoise, and decode phases; `run_private_comfy_fl2va_attempt` owns the
+# terminal identity echo and mux.
+phase_backend_impl_line=$(sole_file_line 'phase backend inherent impl' "$runtime_source" \
+  'impl<C, E, A> H3PrivatePhaseBackend<C, E, A>')
+phase_backend_impl_end=$(block_end "$runtime_source" "$phase_backend_impl_line")
+conditioning_helper_line=$(sole_file_line 'shared conditioning helper' "$runtime_source" \
+  'fn serve_or_encode_conditioning(' "$phase_backend_impl_line" "$phase_backend_impl_end")
+conditioning_helper_end=$(method_end "$runtime_source" "$conditioning_helper_line")
+# Exactly one conditioner load exists in the helper, and it divides the two
+# arms: everything above it is the cache HIT, everything from it down is the
+# MISS. Anchoring each arm's VAE construction inside its own half is what keeps
+# "exactly one" meaningful now that both arms end in the same tail.
+qwen_load_line=$(sole_file_line 'shared Qwen load' "$runtime_source" \
+  'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' \
+  "$conditioning_helper_line" "$conditioning_helper_end")
+qwen_release_line=$(sole_file_line 'shared Qwen release' "$runtime_source" \
+  'unsafe { ManuallyDrop::drop(&mut qwen) };' \
+  "$qwen_load_line" "$conditioning_helper_end")
+qwen_drop_line=$(sole_file_line 'shared Qwen ledger drop' "$runtime_source" \
+  'self.ledger.qwen_dropped()?;' "$qwen_load_line" "$conditioning_helper_end")
+vae_load_line=$(sole_file_line 'VAE construction' "$runtime_source" \
+  'self.construct_vaes(opened_vae, checkpoint)?;' \
+  "$qwen_load_line" "$conditioning_helper_end")
+if ((qwen_load_line >= qwen_release_line || qwen_release_line >= qwen_drop_line \
+  || qwen_drop_line >= vae_load_line)); then
+  fail "private H3 conditioning helper no longer releases the loaded Qwen and records the drop before VAE construction"
+fi
+cached_conditioning_line=$(sole_file_line 'cached conditioning ledger transition' "$runtime_source" \
+  'self.ledger.qwen_served_from_cache()?;' \
+  "$conditioning_helper_line" "$((qwen_load_line - 1))")
+cached_vae_load_line=$(sole_file_line 'cached-arm VAE construction' "$runtime_source" \
+  'self.construct_vaes(opened_vae, checkpoint)?;' \
+  "$conditioning_helper_line" "$((qwen_load_line - 1))")
+if ((cached_conditioning_line >= cached_vae_load_line)); then
+  fail "private H3 served-from-cache conditioning constructs the VAEs before the ledger records the served conditioner"
+fi
+require_conditioning_delegation() {
+  # An `encode_text` face may only DELEGATE: exactly one call into the shared
+  # helper, and no conditioner load or VAE construction of its own, so the
+  # phase order proved above cannot be forked back into a second copy.
+  local label=$1
+  local lo=$2
+  local hi=$3
+  local body
+  body=$(sed -n "${lo},${hi}p" "$runtime_source")
+  if [[ $(grep -Fc 'self.serve_or_encode_conditioning(' <<<"$body") -ne 1 ]]; then
+    fail "private H3 ${label} encode_text does not delegate to the shared conditioning helper exactly once"
+  fi
+  if grep -Fq 'load_authorized_from_opened(' <<<"$body" \
+    || grep -Fq 'construct_vaes(' <<<"$body"; then
+    fail "private H3 ${label} encode_text carries its own conditioner load or VAE construction"
+  fi
+}
 fl2va_impl_line=$(sole_file_line 'FL2VA backend impl' "$runtime_source" \
   'impl<C, E, A> H3Fl2VaBackend for H3PrivatePhaseBackend<C, E, A>')
 fl2va_impl_end=$(block_end "$runtime_source" "$fl2va_impl_line")
 fl2va_encode_text_line=$(sole_file_line 'FL2VA text encode' "$runtime_source" \
   'fn encode_text(' "$fl2va_impl_line" "$fl2va_impl_end")
+fl2va_encode_text_end=$(method_end "$runtime_source" "$fl2va_encode_text_line")
+require_conditioning_delegation FL2VA "$fl2va_encode_text_line" "$fl2va_encode_text_end"
 fl2va_encode_visual_line=$(sole_file_line 'FL2VA visual condition encode' "$runtime_source" \
   'fn encode_visual_condition(' "$fl2va_impl_line" "$fl2va_impl_end")
 fl2va_attempt_line=$(sole_file_line 'FL2VA attempt' "$runtime_source" \
@@ -592,12 +662,6 @@ fl2va_attempt_line=$(sole_file_line 'FL2VA attempt' "$runtime_source" \
 fl2va_attempt_end=$(block_end "$runtime_source" "$fl2va_attempt_line")
 fl2va_decode_audio_line=$(sole_file_line 'FL2VA audio decode' "$runtime_source" \
   'fn decode_audio(' "$fl2va_impl_line" "$fl2va_impl_end")
-vae_load_line=$(sole_file_line 'VAE construction' "$runtime_source" \
-  'self.construct_vaes(opened_vae, checkpoint)?;' \
-  "$fl2va_encode_text_line" "$((fl2va_encode_visual_line - 1))")
-qwen_load_line=$(sole_file_line 'FL2VA Qwen load' "$runtime_source" \
-  'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' \
-  "$fl2va_impl_line" "$fl2va_impl_end")
 vae_park_line=$(sole_file_line 'FL2VA VAE park' "$runtime_source" \
   'drop(self.vae.take());' "$fl2va_impl_line" "$((fl2va_decode_audio_line - 1))")
 transformer_load_line=$(sole_file_line 'FL2VA transformer load' "$runtime_source" \
@@ -613,17 +677,30 @@ terminal_line=$(sole_file_line 'FL2VA terminal identity echo' "$runtime_source" 
   "$fl2va_attempt_line" "$fl2va_attempt_end")
 mux_line=$(sole_file_line 'FL2VA AV mux' "$runtime_source" \
   'let output = super::pipeline::finalize_av(' "$fl2va_attempt_line" "$fl2va_attempt_end")
-if ((qwen_load_line >= vae_load_line || vae_load_line >= vae_park_line \
+if ((fl2va_encode_text_line >= fl2va_encode_visual_line \
+  || fl2va_encode_visual_line >= vae_park_line \
   || vae_park_line >= transformer_load_line \
   || transformer_load_line >= transformer_drop_line \
   || transformer_drop_line >= vae_reload_line || vae_reload_line >= vae_drop_line \
   || vae_drop_line >= terminal_line || terminal_line >= mux_line)); then
-  fail "private H3 phase runtime no longer drops Qwen before VAE construction or parks, reloads, and drops components before terminal-only mux"
+  fail "private H3 phase runtime no longer encodes text before the visual condition or parks, reloads, and drops components before terminal-only mux"
 fi
-# The developer-only Ref2VA attempt owns the same terminal-before-mux rule.
+# The developer-only Ref2VA face delegates to the same helper, and its attempt
+# owns the same terminal-before-mux rule.
 ref2va_attempt_line=$(sole_file_line 'Ref2VA attempt' "$runtime_source" \
   'pub(crate) fn run_private_comfy_ref2va_attempt<C, E, A>(')
 ref2va_attempt_end=$(block_end "$runtime_source" "$ref2va_attempt_line")
+# This module's own structural test quotes the Ref2VA impl header verbatim, so
+# the anchor is resolved between the FL2VA impl and the attempt — above the
+# test module — rather than by a whole-file grep.
+ref2va_impl_line=$(sole_file_line 'Ref2VA backend impl' "$runtime_source" \
+  'impl<C, E, A> H3Ref2VaBackend for H3PrivatePhaseBackend<C, E, A>' \
+  "$fl2va_impl_end" "$((ref2va_attempt_line - 1))")
+ref2va_impl_end=$(block_end "$runtime_source" "$ref2va_impl_line")
+ref2va_encode_text_line=$(sole_file_line 'Ref2VA text encode' "$runtime_source" \
+  'fn encode_text(' "$ref2va_impl_line" "$ref2va_impl_end")
+ref2va_encode_text_end=$(method_end "$runtime_source" "$ref2va_encode_text_line")
+require_conditioning_delegation Ref2VA "$ref2va_encode_text_line" "$ref2va_encode_text_end"
 ref2va_terminal_line=$(sole_file_line 'Ref2VA terminal identity echo' "$runtime_source" \
   'let identity_echo = backend.terminal_identity_echo()?;' \
   "$ref2va_attempt_line" "$ref2va_attempt_end")

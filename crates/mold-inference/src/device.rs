@@ -2798,6 +2798,24 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// How many probes this thread currently holds open.
+///
+/// The floor stack is the only durable trace a `PhaseVramProbe` leaves, so it
+/// is the one signal that says whether a phase probe was actually closed. A
+/// caller that returns without finishing its probes leaves this above where it
+/// started, and the next phase on the same worker thread inherits the frame.
+#[cfg(test)]
+// Its only caller is the runtime-bound observer's withheld-observation test,
+// which compiles under the H3 features without `cuda`; every other test build
+// must still see a used function under `-D warnings`.
+#[cfg_attr(
+    not(all(any(feature = "h3", feature = "h3-private-uat"), not(feature = "cuda"))),
+    allow(dead_code)
+)]
+pub(crate) fn open_probe_depth() -> usize {
+    PROBE_PEAK_FLOORS.with(|floors| floors.borrow().len())
+}
+
 fn raise_open_probe_floor(used: Option<u64>, reserved: Option<u64>) {
     let (Some(used), reserved) = (used, reserved.unwrap_or(0)) else {
         return;

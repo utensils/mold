@@ -5231,6 +5231,20 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
     if unloaded {
         worker.set_resident_model(None);
     }
+    // The release is credited to THIS attempt, not merely the next one. The
+    // cache's CPU tensors are anonymous pages the ledger's `MemAvailable`
+    // sample had already subtracted, so handing them back before the refusal
+    // is the same sample corrected for a release that happened after it —
+    // otherwise the cache could refuse the very job whose charge it was
+    // holding the bytes against.
+    let available_host_headroom_bytes = host_headroom_after_conditioner_cache_release(
+        available_host_headroom_bytes,
+        release_h3_conditioner_cache_when_host_headroom_is_short(
+            model_name,
+            predicted_host_increment_bytes,
+            available_host_headroom_bytes,
+        ),
+    );
     let sampled_available_device_bytes = device::post_drop_free_vram_bytes(worker.gpu.ordinal)
         .map_err(|error| private_h3_memory_sample_error(worker, error))?;
     let available_device_bytes = if worker.gpu.backend == mold_core::GpuBackend::Metal {
@@ -5246,6 +5260,52 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
         available_host_headroom_bytes,
     )?;
     Ok((available_device_bytes, available_host_headroom_bytes))
+}
+
+/// The other half of the MiniMax H3 conditioner cache's reclaim contract.
+///
+/// On an H3-only host nothing is ever evictable from `ModelCache` — H3 never
+/// enters it — so `host_reclaim::reclaim_headroom` never reaches
+/// `routes::release_host_memory_after_unload` and that hook alone would leave
+/// the cache resident forever. This is the reclaim that always runs, so it
+/// gives the cached conditioner outputs back before an attempt is refused for
+/// want of host headroom. It reports the bytes released so
+/// [`host_headroom_after_conditioner_cache_release`] can credit them to the
+/// attempt that triggered the release.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn release_h3_conditioner_cache_when_host_headroom_is_short(
+    model_name: &str,
+    predicted_host_increment_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> u64 {
+    if available_host_headroom_bytes >= predicted_host_increment_bytes {
+        return 0;
+    }
+    let released = mold_inference::h3_conditioner_cache_clear();
+    if released > 0 {
+        tracing::info!(
+            model = model_name,
+            h3_conditioner_cache_released_mb = released / 1_000_000,
+            available_host_headroom_mb = available_host_headroom_bytes / 1_000_000,
+            predicted_host_increment_mb = predicted_host_increment_bytes / 1_000_000,
+            "released the MiniMax H3 conditioner cache to make host headroom"
+        );
+    }
+    released
+}
+
+/// Host headroom after the conditioner cache handed its pages back.
+///
+/// Crediting the released bytes is not double counting: the ledger sample was
+/// taken while the cache still held them, so this is the one correction that
+/// makes the refusal describe the host as it is at the allocation boundary
+/// rather than as it was a moment earlier.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn host_headroom_after_conditioner_cache_release(
+    available_host_headroom_bytes: u64,
+    released_bytes: u64,
+) -> u64 {
+    available_host_headroom_bytes.saturating_add(released_bytes)
 }
 
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
@@ -12869,6 +12929,93 @@ mod tests {
         assert!(
             !is_admitted_plan_memory_rejection(&anyhow::anyhow!("safetensors file not found")),
             "a genuine load fault still counts against the worker"
+        );
+    }
+
+    /// Both halves of the MiniMax H3 conditioner cache's reclaim contract.
+    ///
+    /// H3 never enters `ModelCache`, so `host_reclaim` reaches
+    /// `release_host_memory_after_unload` only on a host that also runs
+    /// another family. The H3 allocation boundary is the reclaim that always
+    /// runs, and it must clear the cache before an attempt is refused for want
+    /// of host headroom. Structural because the h3-gated server graph needs
+    /// CUDA and is only compiled in the GPU lane.
+    #[test]
+    fn the_conditioner_cache_is_cleared_by_both_host_reclaim_paths() {
+        // Composed at run time so this test's own text is not a match.
+        let clear = ["mold_inference::h3_conditioner_cache", "_clear()"].concat();
+        let whole = include_str!("gpu_worker.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let start = source
+            .find("pub(crate) fn prepare_private_h3_allocation_boundary(")
+            .expect("the H3 allocation boundary");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .expect("boundary end");
+        let boundary = &source[start..end];
+        let release = boundary
+            .find("release_h3_conditioner_cache_when_host_headroom_is_short(")
+            .expect("the boundary must offer the cache back");
+        let credit = boundary
+            .find("host_headroom_after_conditioner_cache_release(")
+            .expect("the released bytes must be credited to this attempt");
+        let refusal = boundary
+            .find("validate_private_h3_physical_capacity(")
+            .expect("the capacity refusal");
+        assert!(
+            release < refusal && credit < refusal,
+            "the release and its credit must both precede the refusal, or the \
+             cache can refuse the very attempt whose bytes it was holding"
+        );
+        assert!(
+            boundary.contains(
+                "let available_host_headroom_bytes = host_headroom_after_conditioner_cache_release("
+            ),
+            "the credit must REBIND the headroom the refusal below reads"
+        );
+        assert_eq!(
+            source.matches(clear.as_str()).count(),
+            1,
+            "one reclaim call in this module"
+        );
+
+        let routes = include_str!("routes.rs");
+        let start = routes
+            .find("pub(crate) fn release_host_memory_after_unload(")
+            .expect("the unload reclaim");
+        let end = routes[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .expect("reclaim end");
+        assert!(
+            routes[start..end].contains(clear.as_str()),
+            "DELETE /api/models/unload and host_reclaim must release it too"
+        );
+    }
+
+    /// The released bytes belong to the attempt that triggered the release.
+    ///
+    /// `request_lease_host_headroom` samples `MemAvailable` while the cache is
+    /// still resident, so without this credit a host 512 MiB short refuses the
+    /// job BECAUSE the cache held those bytes, clears them, and only the next
+    /// job benefits.
+    #[test]
+    fn a_conditioner_cache_release_is_credited_to_the_refusing_attempt() {
+        let charge = 32 << 30;
+        let sampled = charge - (512 << 20);
+        assert!(
+            host_headroom_after_conditioner_cache_release(sampled, 0) < charge,
+            "an empty cache changes nothing and the attempt is still refused"
+        );
+        assert!(
+            host_headroom_after_conditioner_cache_release(sampled, 512 << 20) >= charge,
+            "releasing exactly the shortfall must admit the attempt that paid for it"
+        );
+        assert_eq!(
+            host_headroom_after_conditioner_cache_release(u64::MAX, 1),
+            u64::MAX,
+            "the credit saturates rather than wrapping to a refusal"
         );
     }
 

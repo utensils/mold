@@ -23,6 +23,7 @@ use mold_core::minimax_h3::{self as contract, Task};
 use sha2::{Digest, Sha256};
 
 use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackendDevice};
+use super::conditioner_cache::{self, H3CachedConditioning, H3ConditionerRouteIdentity};
 use super::engine::{H3BlockStreamedDenoiser, H3StreamedDenoiser};
 use super::offload::H3BlockLease;
 use super::pipeline::ref2va::{
@@ -40,7 +41,8 @@ use super::private_opened_evidence::{
     H3PrivatePreparedFl2VaRetention, H3PrivatePreparedTaskRequest,
 };
 use super::private_qwen::{
-    H3PrivateQwenAdapter, H3PrivateQwenArtifactLease, H3PrivateQwenConditionerLease,
+    validate_cached_conditioning_authority, H3PrivateQwenAdapter, H3PrivateQwenArtifactLease,
+    H3PrivateQwenConditionerLease,
 };
 use super::private_qwen_support::H3PrivateQwenSupport;
 use super::private_runtime::{
@@ -1729,6 +1731,10 @@ enum H3PrivatePhaseState {
     VaesLoaded,
     QwenLoaded,
     QwenDropped,
+    /// The conditioner output came from the in-process cache: no 15.7 GB
+    /// residency happened at all, so there is no load to record and no drop to
+    /// record either. It feeds `vaes_loaded` exactly as `QwenDropped` does.
+    QwenServedFromCache,
     ConditionsEncoded,
     /// Ref2VA only. Both reference encoders share one state: the orchestrator
     /// runs every visual reference and then every audio reference, and the
@@ -1811,7 +1817,10 @@ impl H3PrivatePhaseLedger {
 
     fn vaes_loaded(&mut self) -> Result<()> {
         self.transition(
-            &[H3PrivatePhaseState::QwenDropped],
+            &[
+                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::QwenServedFromCache,
+            ],
             H3PrivatePhaseState::VaesLoaded,
             "VAE load",
         )
@@ -1825,6 +1834,19 @@ impl H3PrivatePhaseLedger {
             ],
             H3PrivatePhaseState::QwenLoaded,
             "Qwen load",
+        )
+    }
+
+    /// Same sources as `qwen_loaded`: FL2VA consults the cache from `Bound`,
+    /// Ref2VA from `ReferencesPreprocessed`.
+    fn qwen_served_from_cache(&mut self) -> Result<()> {
+        self.transition(
+            &[
+                H3PrivatePhaseState::Bound,
+                H3PrivatePhaseState::ReferencesPreprocessed,
+            ],
+            H3PrivatePhaseState::QwenServedFromCache,
+            "Qwen cache service",
         )
     }
 
@@ -1909,6 +1931,19 @@ impl H3PrivatePhaseLedger {
         self.state == H3PrivatePhaseState::Empty
             && self.completed_denoise_forwards == self.expected_denoise_forwards
     }
+}
+
+/// The two task-shaped conditioner inputs, so one helper can serve or encode
+/// either. Nothing else differs between the two `encode_text` bodies.
+enum H3ConditionerRequest<'a> {
+    Fl2va {
+        prompt: &'a str,
+        endpoints: &'a [H3PreparedEndpoint],
+    },
+    Ref2va {
+        prompt: &'a str,
+        references: &'a [H3ReferencePresentation],
+    },
 }
 
 type H3PrivatePhaseDenoiser<E, A> = H3BlockStreamedDenoiser<
@@ -2065,6 +2100,27 @@ where
             || self.admitted.canonical_model != contract::REF2VA_COMFY
         {
             bail!("private H3 Ref2VA phase reached a backend admitted for another task")
+        }
+        Ok(())
+    }
+
+    /// The fence the MISS path keeps inside the adapter.
+    ///
+    /// On a miss `encode_fl2va`/`encode_ref2va` call `require_task`, which
+    /// compares the support's task AND the authority's. A hit never opens the
+    /// adapter, so this is where the same question gets asked: the request
+    /// variant must be the task this backend was admitted for, and the frozen
+    /// canonical model must be that task's base compact identity (it is the
+    /// base for every Turbo tier — the adapter never reaches the conditioner).
+    fn require_conditioner_task(&self, request: &H3ConditionerRequest<'_>) -> Result<()> {
+        let requested = match request {
+            H3ConditionerRequest::Fl2va { .. } => Task::Fl2va,
+            H3ConditionerRequest::Ref2va { .. } => Task::Ref2va,
+        };
+        if self.admitted.task != requested
+            || self.admitted.canonical_model != contract::base_compact_model_for_task(requested)
+        {
+            bail!("private H3 conditioner phase reached a backend admitted for another task")
         }
         Ok(())
     }
@@ -2246,6 +2302,197 @@ where
         Ok(())
     }
 
+    /// Key and route for this attempt's conditioner output, or `None` when
+    /// the cache is disabled or a one-shot slot is already consumed.
+    ///
+    /// Read BEFORE the hit arm takes anything: the support identity and the
+    /// lease's device id are both key material and both are one-shot.
+    fn conditioner_cache_identity(&self) -> Option<(String, H3ConditionerRouteIdentity)> {
+        if !conditioner_cache::enabled() {
+            return None;
+        }
+        let support = self.qwen_support.as_ref()?;
+        let lease = self.conditioner_lease.as_ref()?;
+        Some(conditioner_cache::key_for(
+            self.retention.prepared_request_input(),
+            &self.authority,
+            support.support_identity_sha256(),
+            lease.device_id(),
+        ))
+    }
+
+    /// The one path from either task to a conditioner output.
+    ///
+    /// A hit consumes exactly the same five one-shot slots the miss path
+    /// consumes — the mux precondition and `validate_empty_terminal` demand an
+    /// empty component state either way — releases the conditioner lease
+    /// explicitly, records `QwenServedFromCache` rather than a synthetic
+    /// load/drop pair, and emits `QwenConditioningCached` instead of
+    /// `QwenLoad`/`QwenEncode`. Both arms end in the same tail: revalidate,
+    /// `vaes_loaded`, construct the VAEs.
+    fn serve_or_encode_conditioning(
+        &mut self,
+        request: H3ConditionerRequest<'_>,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TextConditioning> {
+        self.require_conditioner_task(&request)?;
+        self.validate_continuing_authority()?;
+        let identity = self.conditioner_cache_identity();
+        let served = identity
+            .as_ref()
+            .and_then(|(key, _)| conditioner_cache::lookup(key));
+        if let Some(entry) = served {
+            // Fence 1: the cached rows are the rows admission froze, and the
+            // restored states fit the frozen activation grant.
+            validate_cached_conditioning_authority(
+                &self.authority,
+                entry.text_rows(),
+                entry.vision_rows(),
+            )?;
+            self.ledger.qwen_served_from_cache()?;
+            drop(self.opened_qwen.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 Qwen authority was already consumed")
+            })?);
+            drop(
+                self.qwen_support.take().ok_or_else(|| {
+                    anyhow::anyhow!("private H3 Qwen support was already consumed")
+                })?,
+            );
+            let mut lease = self.conditioner_lease.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 conditioner lease was already consumed")
+            })?;
+            // The reservation is released by the adapter on the miss path; on
+            // a hit nobody else will, and the scheduler must see it returned.
+            lease.release();
+            drop(lease);
+            drop(self.qwen_execution.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 Qwen execution was already consumed")
+            })?);
+            drop(self.qwen_artifacts.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 Qwen artifacts were already consumed")
+            })?);
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenConditioningCached,
+                completed: 1,
+                total: 1,
+            })?;
+            let text = entry.restore(self.continuing_execution.device())?;
+            if let Some((key, _)) = identity.as_ref() {
+                tracing::info!(
+                    target: "mold::minimax_h3::conditioner_cache",
+                    key = %&key[..16],
+                    text_rows = entry.text_rows(),
+                    vision_rows = entry.vision_rows(),
+                    entry_bytes = entry.bytes(),
+                    route = %entry.route().describe(),
+                    "MiniMax H3 conditioner output served from the in-process cache"
+                );
+            }
+            self.validate_continuing_authority()?;
+            self.ledger.vaes_loaded()?;
+            let opened_vae = self
+                .opened_vae
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+            self.construct_vaes(opened_vae, checkpoint)?;
+            return Ok(text);
+        }
+
+        self.ledger.qwen_loaded()?;
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenLoad,
+            completed: 0,
+            total: 1,
+        })?;
+        let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
+            self.opened_qwen
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen authority was already consumed"))?,
+            self.qwen_support
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen support was already consumed"))?,
+            self.conditioner_lease.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 conditioner lease was already consumed")
+            })?,
+            self.qwen_execution
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen execution was already consumed"))?,
+            self.qwen_artifacts.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 Qwen artifacts were already consumed")
+            })?,
+            &self.authority,
+            checkpoint,
+        )?;
+        let mut qwen = ManuallyDrop::new(qwen);
+        // The conditioner borrows the retained media call-scoped; it never
+        // takes ownership of a decoded reference.
+        let media = &self.reference_media;
+        let text = (|| {
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenLoad,
+                completed: 1,
+                total: 1,
+            })?;
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenEncode,
+                completed: 0,
+                total: 1,
+            })?;
+            let text = match request {
+                H3ConditionerRequest::Fl2va { prompt, endpoints } => {
+                    qwen.encode_fl2va(prompt, endpoints, checkpoint)
+                }
+                H3ConditionerRequest::Ref2va { prompt, references } => {
+                    qwen.encode_ref2va(prompt, references, media, checkpoint)
+                }
+            };
+            let text = text.and_then(|text| {
+                checkpoint.checkpoint(H3PipelineEvent {
+                    phase: H3PipelinePhase::QwenEncode,
+                    completed: 1,
+                    total: 1,
+                })?;
+                Ok(text)
+            });
+            let continuing = qwen.validate_continuing_authorities();
+            text.and_then(|text| continuing.map(|()| text))
+        })();
+        if text.as_ref().is_err_and(is_fatal_private_cuda_error) {
+            return text;
+        }
+        // SAFETY: the fatal path above intentionally retains the concrete
+        // conditioner. Every ordinary result releases it exactly once.
+        unsafe { ManuallyDrop::drop(&mut qwen) };
+        self.ledger.qwen_dropped()?;
+        let text = text?;
+        // `validate_prepared_authority` already proved these rows against the
+        // frozen admission inside the adapter, so the authority's counts are
+        // the encode's counts.
+        if let Some((key, route)) = identity {
+            match H3CachedConditioning::capture(
+                &text,
+                self.authority.qwen_output_text_rows(),
+                self.authority.qwen_vision_rows(),
+                route,
+            ) {
+                Ok(entry) => conditioner_cache::insert(key, entry),
+                Err(error) => tracing::debug!(
+                    target: "mold::minimax_h3::conditioner_cache",
+                    %error,
+                    "MiniMax H3 conditioner output was not retained for reuse"
+                ),
+            }
+        }
+        self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        self.construct_vaes(opened_vae, checkpoint)?;
+        Ok(text)
+    }
+
     fn terminal_identity_echo(&self) -> Result<H3PrivatePhaseIdentityEcho> {
         self.validate_empty_terminal()?;
         let live = validate_private_continuing_authority(
@@ -2309,72 +2556,10 @@ where
         endpoints: &[H3PreparedEndpoint],
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<H3TextConditioning> {
-        self.validate_continuing_authority()?;
-        self.ledger.qwen_loaded()?;
-        checkpoint.checkpoint(H3PipelineEvent {
-            phase: H3PipelinePhase::QwenLoad,
-            completed: 0,
-            total: 1,
-        })?;
-        let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
-            self.opened_qwen
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen authority was already consumed"))?,
-            self.qwen_support
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen support was already consumed"))?,
-            self.conditioner_lease.take().ok_or_else(|| {
-                anyhow::anyhow!("private H3 conditioner lease was already consumed")
-            })?,
-            self.qwen_execution
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen execution was already consumed"))?,
-            self.qwen_artifacts.take().ok_or_else(|| {
-                anyhow::anyhow!("private H3 Qwen artifacts were already consumed")
-            })?,
-            &self.authority,
+        self.serve_or_encode_conditioning(
+            H3ConditionerRequest::Fl2va { prompt, endpoints },
             checkpoint,
-        )?;
-        let mut qwen = ManuallyDrop::new(qwen);
-        let text = (|| {
-            checkpoint.checkpoint(H3PipelineEvent {
-                phase: H3PipelinePhase::QwenLoad,
-                completed: 1,
-                total: 1,
-            })?;
-            checkpoint.checkpoint(H3PipelineEvent {
-                phase: H3PipelinePhase::QwenEncode,
-                completed: 0,
-                total: 1,
-            })?;
-            let text = qwen.encode_fl2va(prompt, endpoints, checkpoint);
-            let text = text.and_then(|text| {
-                checkpoint.checkpoint(H3PipelineEvent {
-                    phase: H3PipelinePhase::QwenEncode,
-                    completed: 1,
-                    total: 1,
-                })?;
-                Ok(text)
-            });
-            let continuing = qwen.validate_continuing_authorities();
-            text.and_then(|text| continuing.map(|()| text))
-        })();
-        if text.as_ref().is_err_and(is_fatal_private_cuda_error) {
-            return text;
-        }
-        // SAFETY: the fatal path above intentionally retains the concrete
-        // conditioner. Every ordinary result releases it exactly once.
-        unsafe { ManuallyDrop::drop(&mut qwen) };
-        self.ledger.qwen_dropped()?;
-        let text = text?;
-        self.validate_continuing_authority()?;
-        self.ledger.vaes_loaded()?;
-        let opened_vae = self
-            .opened_vae
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        self.construct_vaes(opened_vae, checkpoint)?;
-        Ok(text)
+        )
     }
 
     fn encode_visual_condition(
@@ -2611,75 +2796,10 @@ where
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<H3TextConditioning> {
         self.require_ref2va()?;
-        self.validate_continuing_authority()?;
-        self.ledger.qwen_loaded()?;
-        checkpoint.checkpoint(H3PipelineEvent {
-            phase: H3PipelinePhase::QwenLoad,
-            completed: 0,
-            total: 1,
-        })?;
-        let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
-            self.opened_qwen
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen authority was already consumed"))?,
-            self.qwen_support
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen support was already consumed"))?,
-            self.conditioner_lease.take().ok_or_else(|| {
-                anyhow::anyhow!("private H3 conditioner lease was already consumed")
-            })?,
-            self.qwen_execution
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen execution was already consumed"))?,
-            self.qwen_artifacts.take().ok_or_else(|| {
-                anyhow::anyhow!("private H3 Qwen artifacts were already consumed")
-            })?,
-            &self.authority,
+        self.serve_or_encode_conditioning(
+            H3ConditionerRequest::Ref2va { prompt, references },
             checkpoint,
-        )?;
-        let mut qwen = ManuallyDrop::new(qwen);
-        let media = &self.reference_media;
-        let text = (|| {
-            checkpoint.checkpoint(H3PipelineEvent {
-                phase: H3PipelinePhase::QwenLoad,
-                completed: 1,
-                total: 1,
-            })?;
-            checkpoint.checkpoint(H3PipelineEvent {
-                phase: H3PipelinePhase::QwenEncode,
-                completed: 0,
-                total: 1,
-            })?;
-            // The conditioner borrows the retained media call-scoped; it
-            // never takes ownership of a decoded reference.
-            let text = qwen.encode_ref2va(prompt, references, media, checkpoint);
-            let text = text.and_then(|text| {
-                checkpoint.checkpoint(H3PipelineEvent {
-                    phase: H3PipelinePhase::QwenEncode,
-                    completed: 1,
-                    total: 1,
-                })?;
-                Ok(text)
-            });
-            let continuing = qwen.validate_continuing_authorities();
-            text.and_then(|text| continuing.map(|()| text))
-        })();
-        if text.as_ref().is_err_and(is_fatal_private_cuda_error) {
-            return text;
-        }
-        // SAFETY: identical to the FL2VA path — the fatal branch above retains
-        // the concrete conditioner, and every ordinary result releases it once.
-        unsafe { ManuallyDrop::drop(&mut qwen) };
-        self.ledger.qwen_dropped()?;
-        let text = text?;
-        self.validate_continuing_authority()?;
-        self.ledger.vaes_loaded()?;
-        let opened_vae = self
-            .opened_vae
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        self.construct_vaes(opened_vae, checkpoint)?;
-        Ok(text)
+        )
     }
 
     fn encode_visual_reference(
@@ -3319,6 +3439,79 @@ mod tests {
         );
     }
 
+    /// One conditioner load in the whole module, and it sits AFTER the cache
+    /// lookup. A second load path would silently reintroduce the 15.7 GB
+    /// residency on a hit, and a lookup after the load would save nothing.
+    #[test]
+    fn the_conditioner_is_loaded_only_after_the_cache_lookup_misses() {
+        // Assembled at runtime so this test's own text does not count.
+        let load = format!("load_authorized_from{}", "_opened(");
+        let lookup = format!("conditioner_cache::look{}", "up(");
+        let helper = format!("fn serve_or_encode{}", "_conditioning");
+        let source = include_str!("private_fl2va_runtime.rs");
+        assert_eq!(
+            source.matches(load.as_str()).count(),
+            1,
+            "exactly one conditioner load path may exist"
+        );
+        let start = source.find(helper.as_str()).expect("the shared helper");
+        let body = &source[start..];
+        let end = body.find("\n    }\n").expect("helper body end");
+        let body = &body[..end];
+        let lookup_at = body.find(lookup.as_str()).expect("the cache lookup");
+        let load_at = body.find(load.as_str()).expect("the conditioner load");
+        assert!(
+            lookup_at < load_at,
+            "the cache must be consulted before the conditioner is loaded"
+        );
+        assert_eq!(body.matches(load.as_str()).count(), 1);
+        let call = format!("self.serve_or_encode{}", "_conditioning(");
+        assert_eq!(
+            source.matches(call.as_str()).count(),
+            2,
+            "both encode_text faces delegate to the shared helper and nothing else does"
+        );
+        for request in [
+            "H3ConditionerRequest::Fl2va {",
+            "H3ConditionerRequest::Ref2va {",
+        ] {
+            assert!(
+                source.contains(request),
+                "{request} must be constructed at a delegation site"
+            );
+        }
+        // The miss path's task fence lives inside the adapter
+        // (`require_task`), which a hit never opens. The helper must therefore
+        // ask the same question itself, and BEFORE it derives a key or takes a
+        // slot.
+        let fence = format!("self.require_conditioner{}", "_task(&request)?");
+        let fence_at = body.find(fence.as_str()).expect("the task fence");
+        assert!(
+            fence_at < lookup_at && fence_at < load_at,
+            "the task fence must run before either conditioner path"
+        );
+    }
+
+    /// Both faces of the fence, on the frozen values the runtime compares.
+    #[test]
+    fn the_conditioner_task_fence_pairs_each_request_with_its_base_compact_model() {
+        for (task, model) in [
+            (Task::Fl2va, contract::FL2VA_COMFY),
+            (Task::Ref2va, contract::REF2VA_COMFY),
+        ] {
+            assert_eq!(
+                contract::base_compact_model_for_task(task),
+                model,
+                "the fence compares against the base compact model for the task"
+            );
+        }
+        assert_ne!(
+            contract::base_compact_model_for_task(Task::Fl2va),
+            contract::base_compact_model_for_task(Task::Ref2va),
+            "a crossed request and admission can never satisfy the fence"
+        );
+    }
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -3423,6 +3616,50 @@ mod tests {
             },
             attention_device: admitted.attention.device,
         }
+    }
+
+    /// A served conditioner never loaded 15.7 GB and never dropped it. The
+    /// ledger says exactly that instead of faking a load/drop pair, so a test
+    /// asserting "the ledger saw a Qwen load" cannot pass on a render that
+    /// loaded nothing.
+    #[test]
+    fn served_from_cache_ledger_skips_qwen_residency() {
+        let mut ledger = H3PrivatePhaseLedger::new(2).unwrap();
+        assert_eq!(ledger.state, H3PrivatePhaseState::Bound);
+        ledger.qwen_served_from_cache().unwrap();
+        assert_eq!(ledger.state, H3PrivatePhaseState::QwenServedFromCache);
+        assert!(!ledger.is_terminal());
+        ledger.vaes_loaded().unwrap();
+        assert_eq!(ledger.state, H3PrivatePhaseState::VaesLoaded);
+
+        let mut ledger = H3PrivatePhaseLedger::new(2).unwrap();
+        ledger.references_decoded().unwrap();
+        ledger.references_preprocessed().unwrap();
+        ledger.qwen_served_from_cache().unwrap();
+        ledger.vaes_loaded().unwrap();
+
+        let mut ledger = H3PrivatePhaseLedger::new(2).unwrap();
+        ledger.qwen_served_from_cache().unwrap();
+        assert!(
+            ledger.qwen_dropped().is_err(),
+            "nothing was resident, so nothing can be dropped"
+        );
+
+        let mut ledger = H3PrivatePhaseLedger::new(2).unwrap();
+        ledger.qwen_loaded().unwrap();
+        assert!(
+            ledger.qwen_served_from_cache().is_err(),
+            "a loaded conditioner cannot then be served from the cache"
+        );
+
+        let mut ledger = H3PrivatePhaseLedger::new(2).unwrap();
+        ledger.qwen_loaded().unwrap();
+        ledger.qwen_dropped().unwrap();
+        ledger.vaes_loaded().unwrap();
+        assert!(
+            ledger.qwen_served_from_cache().is_err(),
+            "the cache is consulted once, before the VAEs load"
+        );
     }
 
     #[test]

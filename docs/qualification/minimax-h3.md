@@ -1200,6 +1200,48 @@ shared store, and the host's 0.26.0 production service, a build that predates
 the tags, has no row for either one — invisible and unowned until it
 upgrades.
 
+### The conditioner cache
+
+A repeated prompt against the same first-frame (FL2VA) or reference set and
+frame count (Ref2VA), on the same conditioner route and device, now serves
+the prior render's Qwen3-VL conditioning from a process-local, byte-bounded
+cache (`crates/mold-inference/src/minimax_h3/conditioner_cache.rs`, default
+512 MiB, `MOLD_H3_CONDITIONER_CACHE=off|<MiB>`) instead of reloading and
+re-encoding the 15.7 GB checkpoint that rows `a′`/`a″` above measured. The key
+spans the prompt, the endpoint or reference bytes (crop included), the Ref2VA
+frame count, the conditioner placement and device id, and the conditioner
+component's own CONTENT digest and support identity, so a hit restores the
+exact BF16 tensor a miss would have produced rather than an approximation; it
+withholds the runtime-bound observation and the `PromptEncode`
+scheduler-estimate sample for that render instead of fabricating either, and
+is disclosed as `prompt conditioning [cache hit]`.
+
+The key deliberately excludes the frozen component's VALIDATION digest.
+`private_h3_component_digests` folds the attempt's runtime qualification
+identity into that digest, and `runtime_qualification_identity` hashes the
+request envelope (`public_runtime_envelope_for_shape(canvas, frames, steps)`),
+so the same conditioner file presents a different validation digest at every
+clip length, step count and canvas. Measured on plato on 2026-09-02 while it
+was still in the key: an FL2VA render at `--frames 141` stored key
+`ccbfa21f…` (594 text rows, 2,304 vision patches, 6,083,154 entry bytes,
+route `assigned-cuda-then-drop`), an otherwise identical `--frames 124` render
+MISSED while that entry was still resident and no reclaim had run, and a
+second `--frames 141` render hit `ccbfa21f…` again — the row counts, the
+placement and the device id were byte-identical across all three.
+
+What a hit is worth is TWO numbers, and only one of them generalizes. The
+conditioner LOAD is shape-independent: 53.6 s in row `a″`. The ENCODE scales
+with the conditioned patch count — row `a″`'s single 2048-square reference is
+16,384 vision patches and encoded in 24.6 s on the CUDA route (2,405.6 s for
+the same reference on row `a′`'s host route), while an FL2VA endpoint is 4,032
+patches and encodes proportionally faster. Quote the row, never row `a″`'s
+total as if it were every render's saving.
+
+**The measured hit/miss rows for this cache — back-to-back renders on plato,
+`scheduler_estimates` before and after, and the paired MP4 SHA-256 check —
+are pending the plato UAT run and are not recorded here yet. The planned run
+is FL2VA-only, so its encode half will be far below row `a″`'s.**
+
 ### What is derived, and how
 
 Since the canvas and the clip length became rules, the envelope and the memory

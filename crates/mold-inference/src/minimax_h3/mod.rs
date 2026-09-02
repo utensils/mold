@@ -5,6 +5,8 @@
 //! frozen placement and issued component lease.
 
 pub(crate) mod backend;
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) mod conditioner_cache;
 pub(crate) mod dtype;
 pub(crate) mod engine;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]

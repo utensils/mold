@@ -286,6 +286,27 @@ The current compact implementation supports this request profile:
   take 1,014, and a longer prompt is refused immediately with its exact budget
   named rather than after artifact verification
 
+A repeated prompt against the same first-frame (or, for Ref2VA, the same
+reference set and frame count) on the same conditioner route and device
+reuses the prior render's Qwen conditioning output instead of recomputing it.
+The reuse rule is keyed on the prompt, the endpoint or reference bytes (crop
+included), the Ref2VA frame count, the conditioner route and device, and the
+checkpoint/support artifact pins; any other change — or a different host,
+GPU, or artifact revision — is a miss, not a stale hit. For FL2VA, changing
+only the clip length (`--frames`) or the step count still hits: neither
+reaches the conditioner, whose input is the prompt and the endpoint pixels.
+The cache is
+process-local and is never persisted to disk, so it does not survive a server
+restart. A hit removes the conditioner load and the encode entirely. The load
+is the shape-independent half — 53.6 s in the measured CUDA row. The encode
+scales with how many patches were conditioned: that same row's single
+2048-square Ref2VA reference (16,384 vision patches) encoded in 24.6 s on the
+CUDA route and 2,405.6 s on the host fallback route used when the conditioner
+cannot fit on the device, while a smaller conditioning set — an FL2VA endpoint
+is 4,032 patches — encodes proportionally faster. The output is bit-identical
+to a fresh encode, and `mold run` and the TUI disclose the hit as
+`prompt conditioning [cache hit]`.
+
 ```bash
 mold run minimax-h3-fl2va:comfy-pruned-int8 \
   "the camera drifts toward the illuminated pavilion" \
