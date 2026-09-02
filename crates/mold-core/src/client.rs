@@ -1961,8 +1961,12 @@ impl MoldClient {
             .await?)
     }
 
-    /// Transcode one stored gallery mesh into an export container
-    /// (`POST /api/gallery/export/:filename`) and return the bytes.
+    /// Export one stored gallery mesh (`POST /api/gallery/export/:filename`)
+    /// and return the bytes: a transcode for a geometry container, a rendered
+    /// turntable for an animated one, with `options` carrying the turntable's
+    /// playback, repeat, frame size, frame count and rate (all optional; a
+    /// geometry export ignores them, and an untouched value adds nothing to
+    /// the request).
     ///
     /// Downloads only: the gallery keeps its `.glb`, and the caller decides
     /// where the converted file lands. Every refusal comes back as the
@@ -1972,7 +1976,10 @@ impl MoldClient {
         &self,
         filename: &str,
         format: crate::MeshExportFormat,
+        options: &crate::MeshTurntableOptions,
     ) -> Result<Vec<u8>> {
+        let mut body = serde_json::to_value(options)?;
+        body["format"] = serde_json::Value::String(format.as_str().to_string());
         let resp = self
             .client
             .post(format!(
@@ -1980,7 +1987,7 @@ impl MoldClient {
                 self.base_url,
                 encode_path_segment(filename)
             ))
-            .json(&serde_json::json!({ "format": format.extension() }))
+            .json(&body)
             .send()
             .await?;
         let resp = error_for_status_with_body(resp).await?;
@@ -5050,20 +5057,32 @@ mod tests {
 
         let client = MoldClient::new(&server.uri());
         let bytes = client
-            .export_gallery_mesh("mold-hunyuan3d-1 1.glb", crate::MeshExportFormat::Stl)
+            .export_gallery_mesh(
+                "mold-hunyuan3d-1 1.glb",
+                crate::MeshExportFormat::Stl,
+                &crate::MeshTurntableOptions::default(),
+            )
             .await
             .unwrap();
         assert_eq!(bytes, b"solid bytes");
 
         let missing = client
-            .export_gallery_mesh("missing.glb", crate::MeshExportFormat::Obj)
+            .export_gallery_mesh(
+                "missing.glb",
+                crate::MeshExportFormat::Obj,
+                &crate::MeshTurntableOptions::default(),
+            )
             .await
             .unwrap_err()
             .to_string();
         assert!(missing.contains("not found"), "{missing}");
 
         let refused = client
-            .export_gallery_mesh("cat.png", crate::MeshExportFormat::Ply)
+            .export_gallery_mesh(
+                "cat.png",
+                crate::MeshExportFormat::Ply,
+                &crate::MeshTurntableOptions::default(),
+            )
             .await
             .unwrap_err()
             .to_string();

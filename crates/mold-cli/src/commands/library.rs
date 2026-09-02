@@ -75,7 +75,17 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
             filename,
             format,
             output,
-        } => library_export(client, &filename, format, output.as_deref()).await,
+            turntable,
+        } => {
+            library_export(
+                client,
+                &filename,
+                format,
+                &turntable.into(),
+                output.as_deref(),
+            )
+            .await
+        }
         LibraryAction::Grid { .. } => unreachable!("grid handled before creating a client"),
     }
 }
@@ -445,9 +455,9 @@ async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> 
     Ok(())
 }
 
-/// `mold library export <file> --format glb|obj|stl|ply` — transcode one
-/// stored mesh (or download the stored `.glb` unchanged) and write the result
-/// locally.
+/// `mold library export <file> --format glb|obj|stl|ply|gif|apng|webp` —
+/// transcode one stored mesh (or download the stored `.glb` unchanged, or
+/// render its turntable) and write the result locally.
 ///
 /// HTTP to `$MOLD_HOST` with no local fallback, like every other non-grid
 /// `mold library` command: the print lives on the serving host, and reading
@@ -458,9 +468,17 @@ async fn library_export(
     client: &MoldClient,
     filename: &str,
     format: mold_core::MeshExportFormat,
+    turntable: &mold_core::MeshTurntableOptions,
     output: Option<&str>,
 ) -> Result<()> {
     let stem = export_stem(filename)?;
+    // The server would ignore them, and a flag that silently does nothing is
+    // worse than one that is refused with the formats it applies to.
+    if !format.is_animation() && *turntable != mold_core::MeshTurntableOptions::default() {
+        bail!(
+            "--playback, --repeat, --max-dimension, --frames and --fps shape a turntable; they apply to --format gif, apng, or webp, not {format}"
+        );
+    }
     let capabilities = client
         .capabilities()
         .await
@@ -492,7 +510,7 @@ async fn library_export(
     }
 
     let bytes = client
-        .export_gallery_mesh(filename, format)
+        .export_gallery_mesh(filename, format, turntable)
         .await
         .with_context(|| format!("could not export {filename} as {format}"))?;
 
@@ -876,19 +894,31 @@ mod tests {
     async fn library_export_refuses_a_container_the_host_does_not_advertise() {
         let server = export_host(vec![mold_core::MeshExportFormat::Obj]).await;
         let client = MoldClient::new(&server.uri());
-        let error = library_export(&client, "chair.glb", mold_core::MeshExportFormat::Stl, None)
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("does not export meshes as stl"), "{error}");
         assert!(error.contains("this host offers obj"), "{error}");
 
         let bare = export_host(Vec::new()).await;
         let client = MoldClient::new(&bare.uri());
-        let error = library_export(&client, "chair.glb", mold_core::MeshExportFormat::Stl, None)
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("does not export meshes as stl"), "{error}");
         assert!(!error.contains("this host offers"), "{error}");
 
@@ -898,6 +928,7 @@ mod tests {
             &unreachable,
             "cat.png",
             mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
             None,
         )
         .await
@@ -908,6 +939,7 @@ mod tests {
             &unreachable,
             "./chair.glb",
             mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
             None,
         )
         .await
@@ -929,6 +961,7 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
             Some(explicit.to_str().unwrap()),
         )
         .await
@@ -950,6 +983,7 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
             Some("-"),
         )
         .await
