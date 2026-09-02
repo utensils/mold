@@ -3681,6 +3681,21 @@ async fn maybe_expand_prompt(
         req.expand = Some(false);
         return Ok(());
     }
+    // A family whose profile ignores the prompt has nothing to expand either:
+    // the text conditions nothing, so an expansion would only rewrite the
+    // recorded prompt. Cleared for the same scheduler reason as above.
+    let ignoring_family = resolved_family
+        .map(str::to_owned)
+        .or_else(|| mold_core::manifest::find_manifest(&req.model).map(|m| m.family.clone()));
+    if mold_core::prompt_requirement_for_family(
+        ignoring_family.as_deref(),
+        mold_core::validation::has_visual_conditioning(req),
+    )
+    .is_ignored()
+    {
+        req.expand = Some(false);
+        return Ok(());
+    }
 
     let config = state.config.read().await;
     let config_snapshot = config.clone();
@@ -3814,6 +3829,15 @@ async fn expand_prompt(
     Json(req): Json<mold_core::ExpandRequest>,
 ) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
     validate_expand_variations(req.variations)?;
+    // A family that reads no prompt is answered from the guide, before an
+    // expansion model is required, activated, or scheduled: one text
+    // whatever `variations` says, because there is exactly one thing to say.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&req.model_family) {
+        return Ok(Json(mold_core::ExpandResponse {
+            original: req.prompt,
+            expanded: vec![advice.text()],
+        }));
+    }
 
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
@@ -3879,6 +3903,20 @@ async fn remix_prompt(
     let task = req
         .task
         .unwrap_or_else(|| mold_core::ExpandTask::for_family(&req.model_family));
+    // Same door as `/api/expand`: a family that reads no prompt gets the
+    // guide's image advice as its one alternative, varying nothing.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&req.model_family) {
+        return Ok(Json(mold_core::RemixResponse {
+            source_prompt: req.source_prompt,
+            root_prompt: req.root_prompt,
+            source_kind: req.source_kind,
+            task,
+            variants: vec![mold_core::RemixVariant {
+                prompt: advice.text(),
+                dimensions: Vec::new(),
+            }],
+        }));
+    }
     let dimensions = mold_core::expand::resolve_remix_dimensions(
         &req.dimensions,
         task,

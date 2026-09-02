@@ -946,9 +946,22 @@ impl McpServer {
             return Err("prompt must not be empty".to_string());
         }
         let (family, context) = prompt_transform_target(args.model.as_deref(), args.context);
+        let model_family = args.model_family.unwrap_or(family);
+        // A family that reads no prompt is answered here, from the same
+        // guide the host would quote, without a round trip or a model.
+        if let Some(advice) = mold_core::ignored_prompt_advice(&model_family) {
+            let response = mold_core::ExpandResponse {
+                original: args.prompt,
+                expanded: vec![advice.text()],
+            };
+            return Ok(json!({
+                "content": [{ "type": "text", "text": advice.text() }],
+                "structuredContent": response
+            }));
+        }
         let request = mold_core::ExpandRequest {
             prompt: args.prompt,
-            model_family: args.model_family.unwrap_or(family),
+            model_family,
             variations: args.variations.unwrap_or(1).max(1),
             style: args.style.filter(|style| !style.trim().is_empty()),
             task: args.task,
@@ -983,11 +996,30 @@ impl McpServer {
             return Err("prompt must not be empty".to_string());
         }
         let (family, context) = prompt_transform_target(args.model.as_deref(), args.context);
+        let model_family = args.model_family.unwrap_or(family);
+        if let Some(advice) = mold_core::ignored_prompt_advice(&model_family) {
+            let response = mold_core::RemixResponse {
+                source_prompt: args.prompt,
+                root_prompt: None,
+                source_kind: mold_core::RemixSourceKind::Direct,
+                task: args
+                    .task
+                    .unwrap_or_else(|| mold_core::ExpandTask::for_family(&model_family)),
+                variants: vec![mold_core::RemixVariant {
+                    prompt: advice.text(),
+                    dimensions: Vec::new(),
+                }],
+            };
+            return Ok(json!({
+                "content": [{ "type": "text", "text": advice.text() }],
+                "structuredContent": response
+            }));
+        }
         let request = mold_core::RemixRequest {
             source_prompt: args.prompt,
             root_prompt: None,
             source_kind: mold_core::RemixSourceKind::Direct,
-            model_family: args.model_family.unwrap_or(family),
+            model_family,
             variations: args.variations.unwrap_or(3).max(1),
             style: args.style.filter(|style| !style.trim().is_empty()),
             task: args.task,
@@ -2858,7 +2890,7 @@ fn tool_definitions() -> Value {
 fn expand_context_schema() -> Value {
     json!({
         "type": "object",
-        "description": "Generation facts rendered after the model's prompting guide: exact model identity, width, height, frames, fps, clip_frames, audio, negative_prompt_supported, ordered references [{kind: image|video|audio, has_audio, role: first-frame|last-frame|keyframe|source|identity|edit|reference}], and lora names. Duration is never sent; it is frames / fps.",
+        "description": "Generation facts rendered after the model's prompting guide: exact model identity, width, height, frames, fps, clip_frames, audio, negative_prompt_supported, ordered references [{kind: image|video|audio, has_audio, role: first-frame|last-frame|keyframe|source|identity|edit|reference}], lora names, and prompt_mode. Duration is never sent; it is frames / fps.",
         "properties": {
             "model": { "type": "string" },
             "width": { "type": "integer", "minimum": 1 },
@@ -2881,7 +2913,8 @@ fn expand_context_schema() -> Value {
                     "additionalProperties": false
                 }
             },
-            "loras": { "type": "array", "items": { "type": "string" } }
+            "loras": { "type": "array", "items": { "type": "string" } },
+            "prompt_mode": { "type": "string", "enum": ["required", "optional", "ignored"], "description": "The target's prompt contract from its generation profile. Omit and the family decides; a model whose profile says ignored is answered from its guide without a rewrite." }
         },
         "additionalProperties": false
     })
@@ -2891,7 +2924,7 @@ fn expand_prompt_tool() -> Value {
     json!(
         {
             "name": "expand_prompt",
-            "description": "Rewrite a short prompt into a complete one for a specific mold model. The server applies that model's prompting guide (the same guide published as the mold://prompting/ resources) plus the generation facts in context, so the result already uses the model's reference-label syntax, length, and structure. Use before generate_image when the user's prompt is brief.",
+            "description": "Rewrite a short prompt into a complete one for a specific mold model. The server applies that model's prompting guide (the same guide published as the mold://prompting/ resources) plus the generation facts in context, so the result already uses the model's reference-label syntax, length, and structure. Use before generate_image when the user's prompt is brief. On a model whose profile ignores the prompt (the Hunyuan3D mesh family has no text encoder) no language model runs: the one result is the guide's advice on preparing the source image.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2914,7 +2947,7 @@ fn remix_prompt_tool() -> Value {
     json!(
         {
             "name": "remix_prompt",
-            "description": "Produce subject-preserving alternatives of an existing prompt, each varying one creative dimension (composition, camera, lighting, setting, mood, movement, style) while keeping the subject, constraints, and the target model's prompting guide.",
+            "description": "Produce subject-preserving alternatives of an existing prompt, each varying one creative dimension (composition, camera, lighting, setting, mood, movement, style) while keeping the subject, constraints, and the target model's prompting guide. On a model whose profile ignores the prompt (the Hunyuan3D mesh family) the one alternative is the guide's image-preparation advice, and no language model runs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4791,6 +4824,49 @@ mod tests {
             context.and_then(|context| context.model),
             Some(mold_core::manifest::resolve_model_name("wan22-i2v-a14b"))
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_transform_tools_answer_a_prompt_ignored_family_without_the_host() {
+        // Nothing listens here: a round trip would fail, so a passing
+        // answer proves the tools never made one.
+        let mcp = McpServer {
+            client: MoldClient::new("http://127.0.0.1:9"),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let advice = mold_core::ignored_prompt_advice("hunyuan3d").unwrap();
+        let expanded = mcp
+            .tool_expand_prompt(
+                json!({ "prompt": "a dining chair", "model": "hunyuan3d-mini-turbo" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(expanded["content"][0]["text"], json!(advice.text()));
+        assert_eq!(expanded["structuredContent"]["original"], "a dining chair");
+        assert_eq!(
+            expanded["structuredContent"]["expanded"],
+            json!([advice.text()])
+        );
+        let remixed = mcp
+            .tool_remix_prompt(json!({
+                "prompt": "a dining chair",
+                "model_family": "hunyuan3d",
+                "variations": 3
+            }))
+            .await
+            .unwrap();
+        assert_eq!(remixed["content"][0]["text"], json!(advice.text()));
+        assert_eq!(
+            remixed["structuredContent"]["variants"],
+            json!([{ "prompt": advice.text(), "dimensions": [] }])
+        );
+        assert_eq!(remixed["structuredContent"]["task"], "text-to-image");
+        // A family that reads its prompt still goes to the host.
+        let error = mcp
+            .tool_expand_prompt(json!({ "prompt": "a dining chair", "model": "flux-schnell" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("prompt expansion failed"), "{error}");
     }
 
     #[test]

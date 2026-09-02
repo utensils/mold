@@ -154,6 +154,9 @@ export interface ExpandContext {
   audio?: boolean;
   references?: ExpandReference[];
   loras?: string[];
+  /** The target's prompt contract from its generation profile; `ignored`
+   * means the expander answers from the guide without a rewrite. */
+  prompt_mode?: "required" | "optional" | "ignored";
 }
 
 function loraStem(lora: unknown): string | null {

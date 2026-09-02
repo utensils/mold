@@ -8579,6 +8579,10 @@ impl App {
                 })
                 .into_iter()
                 .collect(),
+            prompt_mode: Some(mold_core::prompt_requirement_for_family(
+                Some(family),
+                params.source_image_path.is_some(),
+            )),
         }
     }
 

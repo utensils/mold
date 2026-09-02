@@ -1300,7 +1300,20 @@ pub async fn run(
     // `maybe_expand_prompt` guard). `expand.enabled` must not turn that on
     // behind the user's back either, so the check covers both switches.
     let expand_settings = config.expand.clone().with_env_overrides();
-    let should_expand = if no_expand || prompt.trim().is_empty() {
+    // A family whose profile ignores the prompt (no text encoder) has nothing
+    // to expand: the text conditions nothing, so an expansion would only
+    // rewrite provenance. Same rule as the server's `maybe_expand_prompt`.
+    let prompt_ignored =
+        mold_core::prompt_requirement_for_family(Some(&family), has_visual_conditioning)
+            .is_ignored();
+    let should_expand = if no_expand || prompt.trim().is_empty() || prompt_ignored {
+        if expand && prompt_ignored {
+            crate::output::status!(
+                "{} {} reads no prompt; expansion skipped",
+                crate::theme::icon_info(),
+                family
+            );
+        }
         false
     } else {
         expand || expand_settings.enabled
@@ -1424,6 +1437,10 @@ pub async fn run(
                         .to_string()
                 })
                 .collect(),
+            prompt_mode: Some(mold_core::prompt_requirement_for_family(
+                Some(&family),
+                has_visual_conditioning,
+            )),
         })
     };
 

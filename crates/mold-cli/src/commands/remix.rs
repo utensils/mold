@@ -55,6 +55,26 @@ pub async fn run(
         "direct" => RemixSourceKind::Direct,
         value => anyhow::bail!("unknown remix source '{value}'. Valid: original, current, direct"),
     };
+    // A family that reads no prompt has nothing to remix either: the same
+    // answer `mold expand` gives, as one variant with no varied dimension.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&family) {
+        if json_output {
+            let response = RemixResponse {
+                source_prompt: source_prompt.to_string(),
+                root_prompt: root_prompt.map(str::to_string),
+                source_kind,
+                task,
+                variants: vec![RemixVariant {
+                    prompt: advice.text(),
+                    dimensions: Vec::new(),
+                }],
+            };
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        } else {
+            super::expand::print_ignored_prompt_advice(&advice);
+        }
+        return Ok(());
+    }
     let requested_dimensions = dimension_values
         .iter()
         .flat_map(|value| value.split(','))
