@@ -29,6 +29,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
 }));
 vi.mock("./platform", () => ({ isNativeAndroidRuntime, isNativeIOSRuntime }));
 
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 
 const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
@@ -939,6 +940,174 @@ describe("MobileGalleryViewer", () => {
   });
 });
 
+describe("MobileGalleryViewer bottom sheet", () => {
+  const clip: GalleryImage = {
+    ...image,
+    filename: "developed clip.mp4",
+    format: "mp4",
+    metadata: { ...image.metadata, frames: 97, fps: 24 },
+  };
+
+  async function dragSheet(view: VueWrapper, deltaY: number, deltaX = 0): Promise<void> {
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    await sheet.trigger("pointerdown", {
+      pointerId: 31,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointermove", {
+      pointerId: 31,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180 + deltaX / 2,
+      clientY: 600 + deltaY / 2,
+    });
+    await sheet.trigger("pointerup", {
+      pointerId: 31,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180 + deltaX,
+      clientY: 600 + deltaY,
+    });
+  }
+
+  /** The whole point: the media owns the screen and nothing covers it. */
+  it("stages the media full screen with the details sheet collapsed", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+    expect(view.get("[data-test='gallery-viewer-sheet-handle']").attributes("aria-expanded")).toBe(
+      "false",
+    );
+    // Nothing is laid over the stage until the sheet is opened.
+    expect(view.find("[data-test='gallery-viewer-sheet-scrim']").exists()).toBe(false);
+    expect(view.find("[data-test='gallery-viewer-image']").exists()).toBe(true);
+  });
+
+  it("says what the print is in one peek line, whatever its kind", async () => {
+    const still = mountViewer();
+    await flushPromises();
+    const stillPeek = still.get("[data-test='gallery-viewer-sheet-peek']").text();
+    expect(stillPeek).toContain("Image");
+    expect(stillPeek).toContain("1024×1024");
+    expect(stillPeek).toContain("Studio");
+    still.unmount();
+
+    const video = mountViewer(clip);
+    await flushPromises();
+    const videoPeek = video.get("[data-test='gallery-viewer-sheet-peek']").text();
+    expect(videoPeek).toContain("Video");
+    expect(videoPeek).toContain("0:04");
+    video.unmount();
+
+    const view = mountViewer({ ...image, filename: "armchair 01.glb", format: "glb" });
+    await flushPromises();
+    // Before the model loads there is nothing to count: the container stands in.
+    expect(view.get("[data-test='gallery-viewer-sheet-peek']").text()).toContain("GLB");
+
+    // The loaded mesh reports its own size, and the peek takes it from there.
+    view.findComponent(MeshViewer).vm.$emit("ready", {
+      vertexCount: 24_576,
+      triangleCount: 49_152,
+      bounds: null,
+    });
+    await flushPromises();
+    const meshPeek = view.get("[data-test='gallery-viewer-sheet-peek']").text();
+    expect(meshPeek).toContain("3-D");
+    expect(meshPeek).toContain("49.2k tris");
+  });
+
+  it("expands on a handle tap and collapses on the next one", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const handle = view.get("[data-test='gallery-viewer-sheet-handle']");
+
+    await handle.trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+    expect(handle.attributes("aria-expanded")).toBe("true");
+    expect(view.find("[data-test='gallery-viewer-sheet-scrim']").exists()).toBe(true);
+
+    await handle.trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  it("expands on a swipe up and collapses on a swipe down", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    await dragSheet(view, -120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+
+    await dragSheet(view, 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  it("ignores a short or sideways drag on the sheet", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    await dragSheet(view, -14);
+    await dragSheet(view, -60, -200);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  it("collapses when the scrim over the media is tapped", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-sheet-handle']").trigger("click");
+    await view.get("[data-test='gallery-viewer-sheet-scrim']").trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  /**
+   * The stage arms the paging swipe; the sheet is its sibling, not its child.
+   * A finger that starts on the sheet moves the sheet and nothing else.
+   */
+  it("never pages the gallery from a drag on the sheet", async () => {
+    const view = mountViewer(image, { position: 2, total: 4 });
+    await flushPromises();
+
+    await dragSheet(view, -8, -220);
+    expect(view.emitted("next")).toBeUndefined();
+    expect(view.emitted("previous")).toBeUndefined();
+  });
+
+  /** A new print is a new subject: the sheet gets out of the way again. */
+  it("collapses the sheet when the viewer moves to another print", async () => {
+    const view = mountViewer(image, { position: 2, total: 4 });
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-sheet-handle']").trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+
+    await view.setProps({ item: { ...image, filename: "print two.png" } });
+    await flushPromises();
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  /** Every action, and the status line the tap watches, live in the sheet. */
+  it("keeps the actions and their status line inside the sheet", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+
+    expect(sheet.find("[data-test='gallery-viewer-reuse']").exists()).toBe(true);
+    expect(sheet.find("[data-test='gallery-viewer-info']").exists()).toBe(true);
+    expect(sheet.find("[data-test='gallery-viewer-copy']").exists()).toBe(true);
+    expect(sheet.find("[data-test='gallery-viewer-save']").exists()).toBe(true);
+
+    invoke.mockRejectedValueOnce(new Error("Photos denied the save."));
+    await view.get("[data-test='gallery-viewer-save']").trigger("click");
+    await flushPromises();
+    expect(sheet.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Photos denied the save.",
+    );
+  });
+});
+
 describe("MobileGalleryViewer info sheet", () => {
   const organization = {
     title: "Storm study",
@@ -1213,23 +1382,35 @@ describe("MobileGalleryViewer mesh export", () => {
     return wrapper;
   }
 
+  function formatOptions(view: VueWrapper): string[] {
+    return view
+      .findAll("[data-test='gallery-viewer-mesh-format'] [role='radio']")
+      .map((option) => option.text());
+  }
+
+  /** The picker is the format choice; the two buttons are the only verbs. */
+  async function pickFormat(view: VueWrapper, label: string): Promise<void> {
+    const option = view
+      .findAll("[data-test='gallery-viewer-mesh-format'] [role='radio']")
+      .find((candidate) => candidate.text() === label);
+    if (!option) throw new Error(`the export picker offers no ${label}`);
+    await option.trigger("click");
+  }
+
   it("offers exactly what the host advertises, and nothing when it advertises none", async () => {
     const none = mountMesh([]);
     await flushPromises();
-    expect(none.find("[data-test='gallery-viewer-mesh-export-obj']").exists()).toBe(false);
-    expect(none.find("[data-test='gallery-viewer-mesh-export-animation']").exists()).toBe(false);
+    expect(none.find("[data-test='gallery-viewer-mesh-format']").exists()).toBe(false);
+    expect(none.find("[data-test='gallery-viewer-mesh-export']").exists()).toBe(false);
+    expect(none.find("[data-test='gallery-viewer-mesh-save']").exists()).toBe(false);
     none.unmount();
 
     const view = mountMesh(["obj", "stl", "ply"]);
     await flushPromises();
-    // On a native shell every export is a PAIR: the system share sheet, and
-    // the on-device Mold folder the Files app (or Downloads) can browse.
-    expect(
-      view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
-    ).toEqual(["Share OBJ…", "Share STL…", "Share PLY…"]);
-    expect(
-      view.findAll("[data-test^='gallery-viewer-mesh-save-']").map((button) => button.text()),
-    ).toEqual(["Save OBJ to Mold folder", "Save STL to Mold folder", "Save PLY to Mold folder"]);
+    // One picker and two verbs, not a button per container per destination.
+    expect(formatOptions(view)).toEqual(["OBJ", "STL", "PLY"]);
+    expect(view.get("[data-test='gallery-viewer-mesh-export']").text()).toBe("Share…");
+    expect(view.get("[data-test='gallery-viewer-mesh-save']").text()).toBe("Save to Mold folder");
     // A stored mesh is not a raster: Photos and the clipboard take neither.
     expect(view.find("[data-test='gallery-viewer-copy']").exists()).toBe(false);
     expect(view.find("[data-test='gallery-viewer-save']").exists()).toBe(false);
@@ -1241,7 +1422,7 @@ describe("MobileGalleryViewer mesh export", () => {
    * system share sheet. The filename it carries is what the native side reads
    * the media type off — `armchair 01.stl` is `model/stl` there.
    */
-  it("posts the bare format and shares the returned geometry file natively", async () => {
+  it("posts the picked format and shares the returned geometry file natively", async () => {
     const share = vi.fn(async (_data: { files: File[] }) => undefined);
     Object.defineProperty(navigator, "share", { value: share, configurable: true });
     Object.defineProperty(navigator, "canShare", {
@@ -1252,7 +1433,8 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["obj", "stl", "ply"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-stl']").trigger("click");
+    await pickFormat(view, "STL");
+    await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
     await flushPromises();
 
     expect(invoke).toHaveBeenCalledWith("share_exported_animation", {
@@ -1277,25 +1459,21 @@ describe("MobileGalleryViewer mesh export", () => {
 
   /**
    * The server lists the stored container first (`glb`) so a CLI can name
-   * it. A phone has no Download, so the stored GLB leaves the app the same
-   * two ways a transcode does — Share GLB… and Save GLB to Mold folder —
-   * and only when the host advertises it. The fixture is the list a current
+   * it. A phone has no Download, so the stored GLB is an export like any
+   * transcode, and the animated containers stand behind one Turntable entry
+   * because they carry playback options. The fixture is the list a current
    * host actually sends.
    */
-  it("offers the stored GLB the same two ways as a transcode, then the turntable", async () => {
+  it("lists the stored GLB, every transcode, then one turntable entry", async () => {
     const view = mountMesh(["glb", "obj", "stl", "ply", "gif", "apng", "webp"]);
     await flushPromises();
+    expect(formatOptions(view)).toEqual(["GLB", "OBJ", "STL", "PLY", "Turntable"]);
+    // The first container is the one already picked, so a tap on Share is enough.
     expect(
-      view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
-    ).toEqual(["Share GLB…", "Share OBJ…", "Share STL…", "Share PLY…", "Export turntable…"]);
-    expect(
-      view.findAll("[data-test^='gallery-viewer-mesh-save-']").map((button) => button.text()),
-    ).toEqual([
-      "Save GLB to Mold folder",
-      "Save OBJ to Mold folder",
-      "Save STL to Mold folder",
-      "Save PLY to Mold folder",
-    ]);
+      view
+        .get("[data-test='gallery-viewer-mesh-format'] [role='radio']")
+        .attributes("aria-checked"),
+    ).toBe("true");
   });
 
   /**
@@ -1312,7 +1490,8 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["obj", "stl", "ply"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-save-stl']").trigger("click");
+    await pickFormat(view, "STL");
+    await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
     await flushPromises();
 
     expect(invoke).toHaveBeenCalledWith("save_export_to_mold_folder", {
@@ -1341,7 +1520,8 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["glb", "obj"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-save-glb']").trigger("click");
+    await pickFormat(view, "GLB");
+    await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
     await flushPromises();
 
     expect(invoke).toHaveBeenCalledWith(
@@ -1359,7 +1539,8 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["glb", "obj"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-glb']").trigger("click");
+    await pickFormat(view, "GLB");
+    await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
     await flushPromises();
 
     expect(invoke).toHaveBeenCalledWith(
@@ -1382,7 +1563,7 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["ply"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-save-ply']").trigger("click");
+    await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
     await flushPromises();
 
     expect(invoke).toHaveBeenCalledWith(
@@ -1394,20 +1575,20 @@ describe("MobileGalleryViewer mesh export", () => {
     );
   });
 
-  /** A failed save lands in the footer status the tap is watching, and the button comes back. */
-  it("reports a failed Mold folder save in the footer status", async () => {
+  /** A failed save lands in the sheet's status line, and the button comes back. */
+  it("reports a failed Mold folder save in the sheet status", async () => {
     invoke.mockRejectedValueOnce(new Error("could not create the Mold folder: read-only"));
     const view = mountMesh(["obj"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-save-obj']").trigger("click");
+    await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
     await flushPromises();
 
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
       "could not create the Mold folder: read-only",
     );
     expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
-    expect(view.get("[data-test='gallery-viewer-mesh-save-obj']").attributes()).not.toHaveProperty(
+    expect(view.get("[data-test='gallery-viewer-mesh-save']").attributes()).not.toHaveProperty(
       "disabled",
     );
   });
@@ -1422,10 +1603,13 @@ describe("MobileGalleryViewer mesh export", () => {
     isNativeAndroidRuntime.mockReturnValue(false);
     const view = mountMesh(["glb", "obj", "stl", "gif"]);
     await flushPromises();
-    expect(
-      view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
-    ).toEqual(["Export as OBJ", "Export as STL", "Export turntable…"]);
-    expect(view.findAll("[data-test^='gallery-viewer-mesh-save-']")).toHaveLength(0);
+
+    expect(formatOptions(view)).toEqual(["OBJ", "STL", "Turntable"]);
+    expect(view.get("[data-test='gallery-viewer-mesh-export']").text()).toBe("Export as OBJ");
+    expect(view.find("[data-test='gallery-viewer-mesh-save']").exists()).toBe(false);
+
+    await pickFormat(view, "Turntable");
+    expect(view.get("[data-test='gallery-viewer-mesh-export']").text()).toBe("Export turntable…");
   });
 
   /** A mesh has no raster to stage as conditioning, whatever the owner allows. */
@@ -1438,15 +1622,16 @@ describe("MobileGalleryViewer mesh export", () => {
 
   /**
    * A geometry export never opens the options sheet, so an error parked on
-   * that sheet's slot is invisible. The failure has to land in the footer
-   * status line the tap is already watching.
+   * that sheet's slot is invisible. The failure has to land in the status
+   * line the tap is already watching.
    */
-  it("reports a failed geometry export in the footer status, not the hidden sheet", async () => {
+  it("reports a failed geometry export in the sheet status, not the hidden dialog", async () => {
     invoke.mockRejectedValueOnce(new Error("Export failed: this host cannot write STL."));
     const view = mountMesh(["obj", "stl"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-stl']").trigger("click");
+    await pickFormat(view, "STL");
+    await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
     await flushPromises();
 
     expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
@@ -1454,9 +1639,9 @@ describe("MobileGalleryViewer mesh export", () => {
     );
     expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
     // The button is live again for a retry.
-    expect(
-      view.get("[data-test='gallery-viewer-mesh-export-stl']").attributes(),
-    ).not.toHaveProperty("disabled");
+    expect(view.get("[data-test='gallery-viewer-mesh-export']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
   });
 
   it("keeps a cancelled native geometry share silent and retryable", async () => {
@@ -1464,13 +1649,13 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["obj"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-obj']").trigger("click");
+    await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
     await flushPromises();
 
     expect(view.find("[data-test='gallery-viewer-action-status']").exists()).toBe(false);
-    expect(
-      view.get("[data-test='gallery-viewer-mesh-export-obj']").attributes(),
-    ).not.toHaveProperty("disabled");
+    expect(view.get("[data-test='gallery-viewer-mesh-export']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
   });
 
   /** Outside a native shell there is no share sheet: the browser downloads. */
@@ -1489,7 +1674,8 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["obj", "stl", "ply"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-stl']").trigger("click");
+    await pickFormat(view, "STL");
+    await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
     await flushPromises();
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/export/armchair%2001.glb", {
@@ -1507,12 +1693,13 @@ describe("MobileGalleryViewer mesh export", () => {
    * through the export sheet the phone already has for clips — and posts the
    * identical body to the identical route.
    */
-  it("routes an advertised turntable through the existing options sheet", async () => {
+  it("routes the Turntable pick through the existing options sheet", async () => {
     invoke.mockResolvedValueOnce("shared");
     const view = mountMesh(["obj", "gif", "webp"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-animation']").trigger("click");
+    await pickFormat(view, "Turntable");
+    await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
     await flushPromises();
     // The formats offered are the host's advertised ANIMATED ones only; the
     // video-only `/api/gallery/export-options` probe never runs for a mesh.
@@ -1542,11 +1729,11 @@ describe("MobileGalleryViewer mesh export", () => {
   });
 
   /**
-   * The turntable's options sheet is where its destination is chosen: the
-   * same two places a geometry export offers, defaulting to the share sheet
-   * so the existing flow is unchanged until the user picks the folder.
+   * The destination is chosen before the options sheet opens, by the button
+   * that opened it — so a turntable saved to the Mold folder needs no second
+   * decision inside the sheet, which still shows and can change the choice.
    */
-  it("saves a turntable into the Mold folder from the options sheet", async () => {
+  it("saves a turntable into the Mold folder from the button that opened the sheet", async () => {
     invoke.mockResolvedValueOnce({
       filename: "armchair 01.gif",
       label: "Files ▸ Mold ▸ armchair 01.gif",
@@ -1554,16 +1741,15 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["obj", "gif", "apng"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-animation']").trigger("click");
+    await pickFormat(view, "Turntable");
+    await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
     await flushPromises();
+    // Opened through Save, the sheet comes up with the Mold folder selected.
     expect(
       view
         .findAll("[data-test='video-export-dialog'] input[name='export-destination']")
         .map((radio) => (radio.element as HTMLInputElement).value),
-    ).toEqual(["share", "folder"]);
-    await view
-      .get("[data-test='video-export-dialog'] input[name='export-destination'][value='folder']")
-      .setValue(true);
+    ).toEqual(["folder", "share"]);
     await view.get("[data-test='video-export-dialog'] form").trigger("submit");
     await flushPromises();
 
@@ -1588,11 +1774,8 @@ describe("MobileGalleryViewer mesh export", () => {
     const view = mountMesh(["gif"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-animation']").trigger("click");
+    await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
     await flushPromises();
-    await view
-      .get("[data-test='video-export-dialog'] input[name='export-destination'][value='folder']")
-      .setValue(true);
     await view.get("[data-test='video-export-dialog'] form").trigger("submit");
     await flushPromises();
 
@@ -1615,6 +1798,223 @@ describe("MobileGalleryViewer mesh export", () => {
     expect(
       view.find("[data-test='video-export-dialog'] input[name='export-destination']").exists(),
     ).toBe(false);
-    expect(view.findAll("[data-test^='gallery-viewer-mesh-save-']")).toHaveLength(0);
+    expect(view.find("[data-test='gallery-viewer-mesh-save']").exists()).toBe(false);
+  });
+});
+
+describe("MobileGalleryViewer sheet review fixes", () => {
+  async function dragFrom(
+    view: VueWrapper,
+    selector: string,
+    deltaY: number,
+    deltaX = 0,
+  ): Promise<void> {
+    const surface = view.get(selector);
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    await surface.trigger("pointerdown", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointerup", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180 + deltaX,
+      clientY: 600 + deltaY,
+    });
+  }
+
+  async function expand(view: VueWrapper): Promise<void> {
+    await view.get("[data-test='gallery-viewer-sheet-handle']").trigger("click");
+  }
+
+  /**
+   * A scrolled list owns its own downward drag — but only the list. The
+   * handle is the sheet's own grip, and a pull on it always closes the sheet,
+   * whatever the body underneath happens to be showing.
+   */
+  it("collapses a scrolled sheet when the drag starts on the handle", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+    view.get("[data-test='gallery-viewer-sheet-body']").element.scrollTop = 120;
+
+    await dragFrom(view, "[data-test='gallery-viewer-sheet-handle']", 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  it("leaves a scrolled body's own downward drag to the list", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+    view.get("[data-test='gallery-viewer-sheet-body']").element.scrollTop = 120;
+
+    await dragFrom(view, "[data-test='gallery-viewer-sheet-body']", 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+  });
+
+  /** A body at its top has nothing to scroll, so the drag is the sheet's. */
+  it("collapses from the body once it is scrolled back to the top", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+
+    await dragFrom(view, "[data-test='gallery-viewer-sheet-body']", 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  /** A new print must not open onto the previous print's scroll offset. */
+  it("returns the sheet body to its top when the print changes", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const body = view.get("[data-test='gallery-viewer-sheet-body']").element;
+    await expand(view);
+    body.scrollTop = 140;
+
+    await view.setProps({ item: { ...image, filename: "print two.png" } });
+    await flushPromises();
+    expect(body.scrollTop).toBe(0);
+  });
+
+  /**
+   * Escape is the phone's Back: it undoes the last thing that opened. With
+   * the sheet up that is the sheet, and only then the viewer itself.
+   */
+  it("collapses the sheet on the first Escape and closes on the second", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+
+    await view.get("dialog").trigger("cancel");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+    expect(view.emitted("close")).toBeUndefined();
+
+    await view.get("dialog").trigger("cancel");
+    expect(view.emitted("close")).toHaveLength(1);
+  });
+
+  /** Focus was inside the sheet; collapsing must not strand it on nothing. */
+  it("returns focus to the handle when the sheet collapses", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+    (view.get("[data-test='gallery-viewer-reuse']").element as HTMLElement).focus();
+
+    await view.get("[data-test='gallery-viewer-sheet-scrim']").trigger("click");
+    expect(document.activeElement).toBe(
+      view.get("[data-test='gallery-viewer-sheet-handle']").element,
+    );
+  });
+});
+
+describe("MobileGalleryViewer sheet mechanics", () => {
+  /** A cancelled gesture must not leave the sheet holding the pointer. */
+  it("releases the pointer capture when a drag is cancelled", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    const element = sheet.element as HTMLElement;
+    const capture = vi.fn();
+    const release = vi.fn();
+    element.setPointerCapture = capture;
+    element.releasePointerCapture = release;
+
+    await sheet.trigger("pointerdown", {
+      pointerId: 51,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointermove", {
+      pointerId: 51,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 540,
+    });
+    await sheet.trigger("pointercancel", { pointerId: 51 });
+
+    expect(capture).toHaveBeenCalledWith(51);
+    expect(release).toHaveBeenCalledWith(51);
+    // A cancelled drag decides nothing.
+    expect(sheet.classes()).not.toContain("is-expanded");
+    expect(sheet.classes()).not.toContain("is-dragging");
+  });
+
+  /**
+   * A drag that turns out to be horizontal is not the sheet's. Dropping the
+   * dragging flag hands the transition back, so the sheet slides home instead
+   * of snapping.
+   */
+  it("animates the sheet home when a drag turns horizontal", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+
+    await sheet.trigger("pointerdown", {
+      pointerId: 52,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointermove", {
+      pointerId: 52,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 560,
+    });
+    expect(sheet.classes()).toContain("is-dragging");
+
+    await sheet.trigger("pointermove", {
+      pointerId: 52,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 590,
+    });
+    expect(sheet.classes()).not.toContain("is-dragging");
+  });
+
+  /** Reduced motion drops the animation, never the control. */
+  it("keeps the sheet toggling when the viewer prefers reduced motion", async () => {
+    const matchMedia = vi.fn((query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    }));
+    Object.defineProperty(window, "matchMedia", { value: matchMedia, configurable: true });
+    const view = mountViewer();
+    await flushPromises();
+    const handle = view.get("[data-test='gallery-viewer-sheet-handle']");
+
+    await handle.trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+    await handle.trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  /** The sheet is a landmark of its own, and the handle says what it opens. */
+  it("names the details sheet and points the handle at its body", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    const handle = view.get("[data-test='gallery-viewer-sheet-handle']");
+    const bodyId = view.get("[data-test='gallery-viewer-sheet-body']").attributes("id");
+
+    expect(sheet.attributes("role")).toBe("region");
+    expect(sheet.attributes("aria-label")).toBe("Print details");
+    expect(bodyId).toBeTruthy();
+    expect(handle.attributes("aria-controls")).toBe(bodyId);
   });
 });

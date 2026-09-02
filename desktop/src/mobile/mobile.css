@@ -3073,28 +3073,37 @@ button:disabled {
   height: auto;
   max-width: none;
   max-height: none;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* The media is the page. The header floats over its top edge and the
+     details sheet peeks over its bottom one, so both insets are named here
+     and the stage keeps its whole picture clear of them. */
+  --viewer-header-inset: calc(56px + env(safe-area-inset-top));
+  --viewer-peek: calc(68px + env(safe-area-inset-bottom));
   box-sizing: border-box;
   overflow: hidden;
   margin: 0;
   border: 0;
-  padding-right: 0;
-  padding-left: 0;
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
+  padding: 0;
   background: #08070c;
   color: #f5efff;
 }
 
 .gallery-viewer[open] {
-  display: grid;
+  display: block;
 }
 
 .gallery-viewer::backdrop {
   background: #08070c;
 }
 
+/* A thin translucent overlay, not a row that costs the media its height.
+   It sits ABOVE the sheet and its scrim: the scrim swallows taps on the
+   media, but Close is chrome, and chrome stays reachable. */
 .gallery-viewer-header {
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  right: 0;
+  left: 0;
   display: flex;
   width: 100%;
   min-width: 0;
@@ -3103,9 +3112,9 @@ button:disabled {
   justify-content: space-between;
   gap: 16px;
   box-sizing: border-box;
-  padding: 6px max(16px, env(safe-area-inset-right)) 6px max(16px, env(safe-area-inset-left));
-  border-bottom: 1px solid rgba(245, 239, 255, 0.12);
-  background: rgba(8, 7, 12, 0.92);
+  padding: calc(6px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 6px
+    max(16px, env(safe-area-inset-left));
+  background: linear-gradient(rgba(8, 7, 12, 0.82), rgba(8, 7, 12, 0));
 }
 
 .gallery-viewer-close {
@@ -3156,12 +3165,17 @@ button:disabled {
   font-size: var(--text-edge-code);
 }
 
+/* The stage IS the viewport. Its padding keeps the whole picture clear of
+   the floating header and the collapsed sheet without shrinking the screen. */
 .gallery-viewer-stage {
-  position: relative;
+  position: absolute;
+  inset: 0;
   width: 100%;
   min-width: 0;
   min-height: 0;
+  box-sizing: border-box;
   overflow: hidden;
+  padding: var(--viewer-header-inset) 0 var(--viewer-peek);
   background: #000;
 }
 
@@ -3207,16 +3221,142 @@ button:disabled {
   color: #f5efff;
 }
 
+/* Tapping the media's dimmed half puts the sheet away again. */
+.gallery-viewer-sheet-scrim {
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgba(8, 7, 12, 0.52);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The sheet is always mounted: collapsed, it is translated down until only
+   its peek row shows, so an action keeps its identity across the toggle. */
+.gallery-viewer-sheet {
+  position: absolute;
+  z-index: 7;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  max-height: 68%;
+  flex-direction: column;
+  box-sizing: border-box;
+  border-top: 1px solid rgba(245, 239, 255, 0.12);
+  border-radius: 18px 18px 0 0;
+  background: #12101d;
+  transform: translateY(calc(100% - var(--viewer-peek) + var(--viewer-sheet-drag, 0px)));
+  transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.gallery-viewer-sheet.is-expanded {
+  transform: translateY(var(--viewer-sheet-drag, 0px));
+}
+
+.gallery-viewer-sheet.is-dragging {
+  transition: none;
+}
+
+/* Collapsed, the body is out of view AND out of the focus order. */
+.gallery-viewer-sheet:not(.is-expanded) .gallery-viewer-details {
+  visibility: hidden;
+}
+
+/* A reveal drag has to reveal something: the body shows the moment it moves. */
+.gallery-viewer-sheet.is-dragging .gallery-viewer-details {
+  visibility: visible;
+}
+
+.gallery-viewer-sheet-handle {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 68px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  border: 0;
+  padding: 9px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
+  background: transparent;
+  color: #f5efff;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.gallery-viewer-sheet-grabber {
+  display: block;
+  width: 38px;
+  height: 4px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(245, 239, 255, 0.34);
+}
+
+.gallery-viewer-sheet-peek {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
+.gallery-viewer-kind {
+  flex: 0 0 auto;
+  border-radius: 5px;
+  background: rgba(245, 239, 255, 0.14);
+  padding: 3px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.gallery-viewer-peek-fact,
+.gallery-viewer-peek-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gallery-viewer-peek-fact {
+  flex: 0 1 auto;
+  color: rgba(245, 239, 255, 0.86);
+}
+
+.gallery-viewer-peek-host {
+  flex: 1 1 auto;
+  color: rgba(245, 239, 255, 0.6);
+  text-align: right;
+}
+
 .gallery-viewer-details {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
   min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
   box-sizing: border-box;
   gap: 14px;
-  padding: 14px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
-  border-top: 1px solid rgba(245, 239, 255, 0.12);
-  background: #12101d;
+  overflow-y: auto;
+  padding: 2px max(16px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
+/* No spring — but the sheet still opens and closes. */
+@media (prefers-reduced-motion: reduce) {
+  .gallery-viewer-sheet {
+    transition: none;
+  }
 }
 
 .gallery-viewer-prompt {

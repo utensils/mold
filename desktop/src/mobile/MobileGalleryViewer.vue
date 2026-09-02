@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import MeshViewer from "@studio/components/MeshViewer.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import VideoExportDialog, { type ExportDestination } from "@ui/components/VideoExportDialog.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
@@ -27,6 +28,13 @@ import {
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
 import { isAnimatedMeshExportFormat, meshExportFilename } from "./meshResult";
+import {
+  meshExportChoices,
+  resolveSheetGesture,
+  viewerKindLabel,
+  viewerPeekSummary,
+  type ViewerMediaKind,
+} from "./galleryViewerSheet";
 import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
   collectionSlug,
@@ -169,13 +177,52 @@ const meshAnimationExports = computed(
   () => meshExports.value.filter(isAnimatedMeshExportFormat) as VideoExportFormat[],
 );
 /** The two places a turntable can go on a phone; none elsewhere. */
-const MESH_EXPORT_DESTINATIONS: ExportDestination[] = [
-  { value: "share", label: "Share…" },
-  { value: "folder", label: "Save to Mold folder" },
-];
-const exportDestinations = computed(() =>
-  mesh.value && nativeShell.value ? MESH_EXPORT_DESTINATIONS : [],
+const MESH_SHARE_DESTINATION: ExportDestination = { value: "share", label: "Share…" };
+const MESH_FOLDER_DESTINATION: ExportDestination = {
+  value: "folder",
+  label: "Save to Mold folder",
+};
+/**
+ * Which button opened the turntable's options sheet. The destination is
+ * already decided by then — Share… or Save to Mold folder — so the sheet
+ * opens with that choice selected and the user can still change it there.
+ */
+const pendingMeshDestination = ref<"share" | "folder">("share");
+const exportDestinations = computed<ExportDestination[]>(() => {
+  if (!mesh.value || !nativeShell.value) return [];
+  return pendingMeshDestination.value === "folder"
+    ? [MESH_FOLDER_DESTINATION, MESH_SHARE_DESTINATION]
+    : [MESH_SHARE_DESTINATION, MESH_FOLDER_DESTINATION];
+});
+/**
+ * The export picker: every container the host advertises, and ONE Turntable
+ * entry standing for the animated ones. Two verbs follow it — Share… and
+ * Save to Mold folder — instead of a button per container per destination,
+ * which is what pushed the media off a phone screen.
+ */
+const meshChoices = computed(() =>
+  meshExportChoices(meshGeometryExports.value, meshAnimationExports.value),
 );
+const meshFormat = ref("");
+watch(
+  meshChoices,
+  (choices) => {
+    if (!choices.some((choice) => choice.value === meshFormat.value)) {
+      meshFormat.value = choices[0]?.value ?? "";
+    }
+  },
+  { immediate: true },
+);
+/**
+ * The primary verb. A native shell shares (the shell runs the export and
+ * opens the system share sheet); a browser downloads, and says which file.
+ */
+const meshPrimaryLabel = computed(() => {
+  if (nativeShell.value) return "Share…";
+  return meshFormat.value === "turntable"
+    ? "Export turntable…"
+    : `Export as ${meshFormat.value.toUpperCase()}`;
+});
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(() => !props.item.metadata_synthetic);
 // A mesh has no raster to stage as conditioning, whatever the owner allows.
@@ -214,6 +261,166 @@ const exportOpen = ref(false);
 const exportBusy = ref(false);
 const exportError = ref("");
 const exportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
+
+// ── Details sheet ──────────────────────────────────────────────────────────
+/*
+ * The media owns the whole screen; every detail and action lives in a sheet
+ * that peeks one line above the bottom edge and swipes up. The body stays
+ * mounted while collapsed — it is translated out of view, not removed — so
+ * an action keeps its identity across the toggle and nothing has to remount.
+ */
+const mediaKind = computed<ViewerMediaKind>(() =>
+  mesh.value ? "mesh" : audio.value ? "audio" : video.value ? "video" : "image",
+);
+const kindLabel = computed(() => viewerKindLabel(mediaKind.value));
+/** What the staged media reported about itself, cleared with every print. */
+const meshStats = ref<{ vertexCount: number; triangleCount: number } | null>(null);
+const mediaDurationMs = ref<number | null>(null);
+const peekSummary = computed(() =>
+  viewerPeekSummary(mediaKind.value, props.item, {
+    mesh: meshStats.value,
+    durationMs: mediaDurationMs.value,
+  }),
+);
+/** The handle points at the body it opens; two viewers must not collide. */
+const sheetBodyId = `gallery-viewer-sheet-body-${useId()}`;
+const sheetExpanded = ref(false);
+const sheetDragging = ref(false);
+const sheetDrag = ref(0);
+const sheetRoot = ref<HTMLElement | null>(null);
+const sheetHandle = ref<HTMLElement | null>(null);
+const sheetBody = ref<HTMLElement | null>(null);
+let sheetPointerId: number | null = null;
+let sheetStartX = 0;
+let sheetStartY = 0;
+let sheetTravel = 0;
+let sheetSuppressClick = false;
+let sheetDragStartedInBody = false;
+/** The collapsed peek in px, measured once the sheet has been laid out. */
+let sheetPeek = 0;
+
+function collapseSheet(): void {
+  if (!sheetExpanded.value) return;
+  sheetExpanded.value = false;
+  // Focus was inside the body that just went out of view. The handle is what
+  // replaces it on screen, so it is what replaces it in the focus order.
+  sheetHandle.value?.focus?.();
+}
+
+function toggleSheet(): void {
+  if (sheetExpanded.value) collapseSheet();
+  else sheetExpanded.value = true;
+}
+
+/**
+ * Whether the LIST should keep this drag. Only a drag that began inside the
+ * scrolling body can be the list scrolling back to its top; a pull on the
+ * handle is the sheet's own grip and always closes it.
+ */
+function sheetDragBelongsToBody(): boolean {
+  return sheetDragStartedInBody && (sheetBody.value?.scrollTop ?? 0) > 0;
+}
+
+/**
+ * How far the sheet can travel: its own height, less the whole collapsed
+ * peek. Measuring the peek from the collapsed geometry rather than from the
+ * handle alone keeps the safe-area band below it in the sum, so a drag ends
+ * exactly where the sheet rests instead of a home-indicator's worth short.
+ */
+function measureSheetTravel(): number {
+  const sheet = sheetRoot.value;
+  if (!sheet) return 0;
+  if (!sheetExpanded.value) {
+    const showing = Math.round(window.innerHeight - sheet.getBoundingClientRect().top);
+    if (showing > 0) sheetPeek = showing;
+  }
+  const peek = sheetPeek || (sheetHandle.value?.offsetHeight ?? 0);
+  return Math.max(0, sheet.offsetHeight - peek);
+}
+
+function beginSheetDrag(event: PointerEvent): void {
+  sheetSuppressClick = false;
+  if (
+    event.isPrimary === false ||
+    (event.pointerType === "mouse" && event.button !== 0) ||
+    // A text field owns its own caret drag; nothing else here does.
+    (event.target instanceof Element &&
+      !!event.target.closest("input, textarea, select, [contenteditable='true']"))
+  ) {
+    return;
+  }
+  sheetPointerId = event.pointerId;
+  sheetStartX = event.clientX;
+  sheetStartY = event.clientY;
+  sheetDragStartedInBody =
+    event.target instanceof Node && !!sheetBody.value?.contains(event.target);
+  sheetTravel = measureSheetTravel();
+  // Capture, so a finger that lifts over the media still finishes the drag
+  // here instead of stranding the sheet halfway open.
+  try {
+    sheetRoot.value?.setPointerCapture?.(event.pointerId);
+  } catch {
+    // A shell without pointer capture just keeps the default targeting.
+  }
+}
+
+function trackSheetDrag(event: PointerEvent): void {
+  if (sheetPointerId !== event.pointerId) return;
+  const deltaX = event.clientX - sheetStartX;
+  const deltaY = event.clientY - sheetStartY;
+  if (Math.abs(deltaY) <= Math.abs(deltaX)) {
+    // Not the sheet's drag after all: hand the transition back so it slides
+    // home rather than snapping there.
+    sheetDrag.value = 0;
+    sheetDragging.value = false;
+    return;
+  }
+  if (sheetExpanded.value && sheetDragBelongsToBody()) return;
+  sheetDragging.value = true;
+  sheetDrag.value = sheetExpanded.value
+    ? Math.max(0, Math.min(sheetTravel, deltaY))
+    : Math.min(0, Math.max(-sheetTravel, deltaY));
+  if (event.cancelable) event.preventDefault();
+}
+
+function finishSheetDrag(event: PointerEvent): void {
+  if (sheetPointerId !== event.pointerId) return;
+  const deltaX = event.clientX - sheetStartX;
+  const deltaY = event.clientY - sheetStartY;
+  resetSheetDrag();
+  const gesture = resolveSheetGesture({
+    deltaX,
+    deltaY,
+    expanded: sheetExpanded.value,
+    scrolled: sheetDragBelongsToBody(),
+  });
+  if (gesture === "none") return;
+  // A drag that ends on a control must not also fire that control.
+  sheetSuppressClick = true;
+  sheetExpanded.value = gesture === "expand";
+}
+
+function resetSheetDrag(event?: PointerEvent): void {
+  if (event && sheetPointerId !== event.pointerId) return;
+  if (sheetPointerId !== null) {
+    try {
+      sheetRoot.value?.releasePointerCapture?.(sheetPointerId);
+    } catch {
+      // Already released with the pointer; nothing to undo.
+    }
+  }
+  sheetPointerId = null;
+  sheetDrag.value = 0;
+  sheetDragging.value = false;
+}
+
+/** Swallow the click a resolved drag would otherwise deliver to a button. */
+function guardSheetClick(event: MouseEvent): void {
+  if (!sheetSuppressClick) return;
+  sheetSuppressClick = false;
+  event.preventDefault();
+  event.stopPropagation();
+}
 
 // ── Print info sheet (title / favorite / tags / collections / trash) ────────
 const infoOpen = ref(false);
@@ -432,8 +639,28 @@ function retry(): void {
   void loadMedia(currentMediaLoad());
 }
 
-function mediaReady(): void {
+/**
+ * Every staged medium reports itself here. A gallery row records neither a
+ * mesh's triangle count nor a clip's running time, so the peek takes them
+ * from the viewer that just loaded the file: `MeshViewer` hands over its
+ * stats, a media element carries its duration.
+ */
+function mediaReady(detail?: unknown): void {
   loading.value = false;
+  if (detail instanceof Event) {
+    const element = detail.target;
+    if (element instanceof HTMLMediaElement && Number.isFinite(element.duration)) {
+      mediaDurationMs.value = element.duration * 1000;
+    }
+    return;
+  }
+  if (detail && typeof detail === "object" && "triangleCount" in detail) {
+    const stats = detail as { vertexCount?: number; triangleCount?: number };
+    meshStats.value = {
+      vertexCount: stats.vertexCount ?? 0,
+      triangleCount: stats.triangleCount ?? 0,
+    };
+  }
 }
 
 function mediaFailed(): void {
@@ -443,7 +670,16 @@ function mediaFailed(): void {
     : "Couldn’t load the full print from this host.";
 }
 
+/**
+ * Escape is the phone's Back: it undoes the last thing that opened. With
+ * the details sheet up that is the sheet; the viewer itself goes on the next
+ * one.
+ */
 function cancelViewer(): void {
+  if (sheetExpanded.value) {
+    collapseSheet();
+    return;
+  }
   emit("close");
 }
 
@@ -551,6 +787,20 @@ watch(
   () => {
     if (mounted) reloadMedia();
     promptCopyStatus.value = "";
+  },
+);
+
+// A new print is a new subject: the sheet gets out of its way again.
+watch(
+  () => props.item.filename,
+  () => {
+    collapseSheet();
+    resetSheetDrag();
+    // The next print's details start at the top, not at this one's offset.
+    if (sheetBody.value) sheetBody.value.scrollTop = 0;
+    actionStatus.value = "";
+    meshStats.value = null;
+    mediaDurationMs.value = null;
   },
 );
 
@@ -695,6 +945,23 @@ async function performMeshSave(format: string): Promise<void> {
   } finally {
     exportBusy.value = false;
   }
+}
+
+/**
+ * The picked format decides the route, the tapped button decides where the
+ * file goes. A turntable carries playback options, so it stops at the export
+ * sheet the phone already has — with the destination already chosen.
+ */
+async function runMeshExport(destination: "share" | "folder"): Promise<void> {
+  const format = meshFormat.value;
+  if (!format) return;
+  if (format === "turntable") {
+    pendingMeshDestination.value = destination;
+    await openVideoExport();
+    return;
+  }
+  if (destination === "folder") await performMeshSave(format);
+  else await performMeshExport(format);
 }
 
 async function openVideoExport(): Promise<void> {
@@ -844,7 +1111,6 @@ onBeforeUnmount(() => {
       </button>
       <div class="gallery-viewer-origin">
         <h1 id="gallery-viewer-title" data-test="gallery-viewer-title">{{ viewerTitle }}</h1>
-        <span>{{ hostName }}</span>
         <span
           v-if="showNavigation"
           class="gallery-viewer-position"
@@ -963,168 +1229,218 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <footer class="gallery-viewer-details">
-      <div class="gallery-viewer-prompt">
-        <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{ preparedPosition }}</span>
-        <div class="gallery-viewer-prompt-heading">
-          <span>Prompt</span>
-          <button
-            v-if="item.metadata.prompt"
-            class="gallery-viewer-copy-prompt"
-            type="button"
-            data-test="gallery-viewer-copy-prompt"
-            aria-label="Copy prompt"
-            @click="copyPrompt"
+    <button
+      v-if="sheetExpanded"
+      class="gallery-viewer-sheet-scrim"
+      type="button"
+      aria-label="Collapse print details"
+      data-test="gallery-viewer-sheet-scrim"
+      @click="collapseSheet"
+    />
+
+    <!-- Every detail and action lives here; the media keeps the screen. The
+         body is translated out of view when collapsed, never unmounted. -->
+    <section
+      ref="sheetRoot"
+      class="gallery-viewer-sheet"
+      :class="{ 'is-expanded': sheetExpanded, 'is-dragging': sheetDragging }"
+      role="region"
+      aria-label="Print details"
+      :style="{ '--viewer-sheet-drag': `${sheetDrag}px` }"
+      data-test="gallery-viewer-sheet"
+      @pointerdown="beginSheetDrag"
+      @pointermove="trackSheetDrag"
+      @pointerup="finishSheetDrag"
+      @pointercancel="resetSheetDrag"
+      @click.capture="guardSheetClick"
+    >
+      <button
+        ref="sheetHandle"
+        class="gallery-viewer-sheet-handle"
+        type="button"
+        :aria-expanded="sheetExpanded"
+        :aria-controls="sheetBodyId"
+        :aria-label="sheetExpanded ? 'Hide print details' : 'Show print details'"
+        data-test="gallery-viewer-sheet-handle"
+        @click="toggleSheet"
+      >
+        <span class="gallery-viewer-sheet-grabber" aria-hidden="true" />
+        <span class="gallery-viewer-sheet-peek" data-test="gallery-viewer-sheet-peek">
+          <span class="gallery-viewer-kind">{{ kindLabel }}</span>
+          <span v-if="peekSummary" class="gallery-viewer-peek-fact">{{ peekSummary }}</span>
+          <span class="gallery-viewer-peek-host">{{ hostName }}</span>
+        </span>
+      </button>
+
+      <div
+        :id="sheetBodyId"
+        ref="sheetBody"
+        class="gallery-viewer-details"
+        data-test="gallery-viewer-sheet-body"
+      >
+        <div class="gallery-viewer-prompt">
+          <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{
+            preparedPosition
+          }}</span>
+          <div class="gallery-viewer-prompt-heading">
+            <span>Prompt</span>
+            <button
+              v-if="item.metadata.prompt"
+              class="gallery-viewer-copy-prompt"
+              type="button"
+              data-test="gallery-viewer-copy-prompt"
+              aria-label="Copy prompt"
+              @click="copyPrompt"
+            >
+              Copy
+            </button>
+          </div>
+          <p data-selectable>{{ item.metadata.prompt || "No prompt was used for this print." }}</p>
+          <p
+            v-if="promptCopyStatus && !infoOpen"
+            class="gallery-viewer-copy-status"
+            role="status"
+            data-test="gallery-viewer-copy-status"
           >
-            Copy
-          </button>
+            {{ promptCopyStatus }}
+          </p>
+          <p v-if="pipeline" data-test="gallery-viewer-pipeline" data-selectable>
+            <span>Pipeline</span> {{ pipeline }}
+          </p>
+          <template v-if="originalPrompt">
+            <span>Source prompt</span>
+            <p data-test="gallery-viewer-original-prompt" data-selectable>{{ originalPrompt }}</p>
+          </template>
+          <p v-if="reuseError" class="gallery-viewer-reuse-error" role="alert">
+            {{ reuseError }}
+          </p>
         </div>
-        <p data-selectable>{{ item.metadata.prompt || "No prompt was used for this print." }}</p>
-        <p
-          v-if="promptCopyStatus && !infoOpen"
-          class="gallery-viewer-copy-status"
-          role="status"
-          data-test="gallery-viewer-copy-status"
-        >
-          {{ promptCopyStatus }}
-        </p>
-        <p v-if="pipeline" data-test="gallery-viewer-pipeline" data-selectable>
-          <span>Pipeline</span> {{ pipeline }}
-        </p>
-        <template v-if="originalPrompt">
-          <span>Source prompt</span>
-          <p data-test="gallery-viewer-original-prompt" data-selectable>{{ originalPrompt }}</p>
-        </template>
-        <p v-if="reuseError" class="gallery-viewer-reuse-error" role="alert">
-          {{ reuseError }}
-        </p>
-      </div>
-      <div class="gallery-viewer-actions">
-        <button
-          v-if="upscaleEnabled && !audio && !mesh && !trashed"
-          class="secondary-button gallery-viewer-upscale"
-          type="button"
-          data-test="gallery-viewer-upscale"
-          @click="emit('upscale')"
-        >
-          {{ video ? "Framewise upscale…" : "Upscale…" }}
-        </button>
-        <button
-          v-if="canSaveVideo"
-          class="secondary-button gallery-viewer-save"
-          type="button"
-          data-test="gallery-viewer-save-video"
-          :disabled="!!actionBusy || exportBusy"
-          @click="performVideoSave"
-        >
-          {{ actionBusy === "save-video" ? "Saving…" : "Save video" }}
-        </button>
-        <button
-          v-if="canExportVideo"
-          class="secondary-button gallery-viewer-export"
-          type="button"
-          data-test="gallery-viewer-export"
-          @click="openVideoExport"
-        >
-          Export format…
-        </button>
-        <!-- 3-D: GLB is the only stored container; these are transcodes of
-             it (and, on a phone, the stored file itself), built from what
-             THIS host advertises. A native shell offers each one twice:
-             the system share sheet, and the on-device Mold folder. -->
-        <template v-for="format in meshGeometryExports" :key="format">
+        <div class="gallery-viewer-actions">
           <button
-            class="secondary-button gallery-viewer-export"
+            v-if="upscaleEnabled && !audio && !mesh && !trashed"
+            class="secondary-button gallery-viewer-upscale"
             type="button"
-            :data-test="`gallery-viewer-mesh-export-${format}`"
-            :disabled="!!actionBusy || exportBusy"
-            @click="performMeshExport(format)"
+            data-test="gallery-viewer-upscale"
+            @click="emit('upscale')"
           >
-            {{
-              nativeShell ? `Share ${format.toUpperCase()}…` : `Export as ${format.toUpperCase()}`
-            }}
+            {{ video ? "Framewise upscale…" : "Upscale…" }}
           </button>
           <button
-            v-if="nativeShell"
-            class="secondary-button gallery-viewer-export"
-            type="button"
-            :data-test="`gallery-viewer-mesh-save-${format}`"
-            :disabled="!!actionBusy || exportBusy"
-            @click="performMeshSave(format)"
-          >
-            Save {{ format.toUpperCase() }} to Mold folder
-          </button>
-        </template>
-        <button
-          v-if="meshAnimationExports.length"
-          class="secondary-button gallery-viewer-export"
-          type="button"
-          data-test="gallery-viewer-mesh-export-animation"
-          :disabled="!!actionBusy || exportBusy"
-          @click="openVideoExport"
-        >
-          Export turntable…
-        </button>
-        <template v-if="!video && !audio && !mesh">
-          <button
-            class="secondary-button gallery-viewer-copy"
-            type="button"
-            data-test="gallery-viewer-copy"
-            :disabled="!!actionBusy"
-            @click="performImageAction('copy')"
-          >
-            {{ actionBusy === "copy" ? "Copying…" : "Copy image" }}
-          </button>
-          <button
+            v-if="canSaveVideo"
             class="secondary-button gallery-viewer-save"
             type="button"
-            data-test="gallery-viewer-save"
-            :disabled="!!actionBusy"
-            @click="performImageAction('save')"
+            data-test="gallery-viewer-save-video"
+            :disabled="!!actionBusy || exportBusy"
+            @click="performVideoSave"
           >
-            {{ actionBusy === "save" ? "Saving…" : "Save photo" }}
+            {{ actionBusy === "save-video" ? "Saving…" : "Save video" }}
           </button>
-        </template>
-        <button
-          v-if="infoAvailable"
-          class="secondary-button gallery-viewer-info"
-          type="button"
-          data-test="gallery-viewer-info"
-          @click="openInfo"
+          <button
+            v-if="canExportVideo"
+            class="secondary-button gallery-viewer-export"
+            type="button"
+            data-test="gallery-viewer-export"
+            @click="openVideoExport"
+          >
+            Export format…
+          </button>
+          <!-- 3-D: GLB is the only stored container; the rest are transcodes of
+             it, built from what THIS host advertises. One picker names the
+             container — Turntable stands for the animated ones, which carry
+             playback options — and the two verbs below it are where it goes. -->
+          <div v-if="meshChoices.length" class="gallery-viewer-mesh-export">
+            <span class="gallery-viewer-mesh-label">Export</span>
+            <div data-test="gallery-viewer-mesh-format">
+              <SegmentedControl
+                v-model="meshFormat"
+                :options="meshChoices"
+                label="Export format"
+                wrap
+              />
+            </div>
+            <div class="gallery-viewer-mesh-verbs">
+              <button
+                class="secondary-button gallery-viewer-export"
+                type="button"
+                data-test="gallery-viewer-mesh-export"
+                :disabled="!!actionBusy || exportBusy"
+                @click="runMeshExport('share')"
+              >
+                {{ meshPrimaryLabel }}
+              </button>
+              <button
+                v-if="nativeShell"
+                class="secondary-button gallery-viewer-export"
+                type="button"
+                data-test="gallery-viewer-mesh-save"
+                :disabled="!!actionBusy || exportBusy"
+                @click="runMeshExport('folder')"
+              >
+                Save to Mold folder
+              </button>
+            </div>
+          </div>
+          <template v-if="!video && !audio && !mesh">
+            <button
+              class="secondary-button gallery-viewer-copy"
+              type="button"
+              data-test="gallery-viewer-copy"
+              :disabled="!!actionBusy"
+              @click="performImageAction('copy')"
+            >
+              {{ actionBusy === "copy" ? "Copying…" : "Copy image" }}
+            </button>
+            <button
+              class="secondary-button gallery-viewer-save"
+              type="button"
+              data-test="gallery-viewer-save"
+              :disabled="!!actionBusy"
+              @click="performImageAction('save')"
+            >
+              {{ actionBusy === "save" ? "Saving…" : "Save photo" }}
+            </button>
+          </template>
+          <button
+            v-if="infoAvailable"
+            class="secondary-button gallery-viewer-info"
+            type="button"
+            data-test="gallery-viewer-info"
+            @click="openInfo"
+          >
+            Info
+          </button>
+          <button
+            v-if="canUseSource"
+            class="secondary-button gallery-viewer-source"
+            type="button"
+            data-test="gallery-viewer-use-source"
+            :disabled="usingSource || reusing"
+            :aria-busy="usingSource"
+            @click="emit('use-source')"
+          >
+            {{ usingSource ? "Loading source…" : "Use as source" }}
+          </button>
+          <button
+            class="primary-button gallery-viewer-reuse"
+            type="button"
+            data-test="gallery-viewer-reuse"
+            :disabled="!canReuse || reusing || usingSource"
+            :aria-busy="reusing"
+            @click="emit('reuse')"
+          >
+            {{ actionLabel }}
+          </button>
+        </div>
+        <p
+          v-if="actionStatus"
+          class="gallery-viewer-action-status"
+          role="status"
+          data-test="gallery-viewer-action-status"
         >
-          Info
-        </button>
-        <button
-          v-if="canUseSource"
-          class="secondary-button gallery-viewer-source"
-          type="button"
-          data-test="gallery-viewer-use-source"
-          :disabled="usingSource || reusing"
-          :aria-busy="usingSource"
-          @click="emit('use-source')"
-        >
-          {{ usingSource ? "Loading source…" : "Use as source" }}
-        </button>
-        <button
-          class="primary-button gallery-viewer-reuse"
-          type="button"
-          data-test="gallery-viewer-reuse"
-          :disabled="!canReuse || reusing || usingSource"
-          :aria-busy="reusing"
-          @click="emit('reuse')"
-        >
-          {{ actionLabel }}
-        </button>
+          {{ actionStatus }}
+        </p>
       </div>
-      <p
-        v-if="actionStatus"
-        class="gallery-viewer-action-status"
-        role="status"
-        data-test="gallery-viewer-action-status"
-      >
-        {{ actionStatus }}
-      </p>
-    </footer>
+    </section>
     <VideoExportDialog
       :open="exportOpen"
       :filename="item.filename"
@@ -1449,6 +1765,27 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* One picker and two verbs, in the width of a single stacked button. */
+.gallery-viewer-mesh-export {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.gallery-viewer-mesh-label {
+  color: rgba(245, 239, 255, 0.62);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gallery-viewer-mesh-verbs {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
 .gallery-viewer-identity {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1586,14 +1923,18 @@ onBeforeUnmount(() => {
   -webkit-touch-callout: default;
 }
 
-/* Audio has no raster to fill the stage: waveform above, transport below. */
+/* Audio has no raster to fill the stage: waveform above, transport below.
+   The stage is the whole viewport now, so this has to claim its height the
+   way an image does, or the transport floats against the header. */
 .gallery-viewer-audio {
   display: flex;
+  width: 100%;
+  height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  width: 100%;
+  box-sizing: border-box;
   padding: 1rem;
 }
 
@@ -1623,10 +1964,12 @@ onBeforeUnmount(() => {
   color: rgba(245, 239, 255, 0.84) !important;
 }
 
+/* Centred on the MEDIA, not on the padded stage: the header inset above and
+   the sheet's peek below are not part of the picture the arrows page. */
 .gallery-viewer-nav {
   position: absolute;
   z-index: 2;
-  top: 50%;
+  top: calc(50% + (var(--viewer-header-inset) - var(--viewer-peek)) / 2);
   display: grid;
   width: 48px;
   height: 56px;

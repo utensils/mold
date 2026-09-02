@@ -204,8 +204,25 @@ pushed screen opened from the header.
   develops in a bed above the status line — the preview sharpens with denoise
   progress under the shared thinning Develop grain, matching the print's
   aspect ratio; without previews the plain status line remains.
-- **Library** merges saved media from every configured host. Its full-screen
-  viewer shows uncropped images, streams videos with native controls, plays
+- **Library** merges saved media from every configured host. Its viewer gives
+  the whole screen to the print: the media fills the viewport behind a thin
+  translucent header (Close, the title, the position), and every detail and
+  action lives in a bottom sheet that peeks one line — the kind badge, what
+  the print is measured in (a mesh's triangles and vertices once it loads, a
+  clip's running time, a still's pixels), and the owning host. Tap the handle
+  or swipe up to expand it to about two-thirds of the screen and scroll it;
+  swipe down, tap the dimmed media, or press Escape to put it away, and a
+  second Escape closes the viewer. It collapses on its own when the gallery
+  moves to another print, which also returns its scroll to the top, and
+  `prefers-reduced-motion` drops the spring rather than the sheet. One
+  exception to the downward swipe: a body scrolled away from its top owns
+  that drag, so the list scrolls back first — a pull on the grab handle
+  always closes, whatever the body is showing. The sheet is the same for
+  every kind and only its actions differ, so a 3-D print's export controls
+  can no longer push its own model off the screen. A drag that starts on the
+  sheet moves the sheet and never pages the gallery; a drag on the media
+  still pages it, and a drag on a mesh still orbits the model. The viewer
+  shows uncropped images, streams videos with native controls, plays
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
   transport, renders Hunyuan3D meshes in an orbitable WebGL viewer over the
   saved poster (`@studio/components/MeshViewer.vue`, shared with desktop and
@@ -215,16 +232,18 @@ pushed screen opened from the header.
   stills through UIKit, saves original videos to Photos through a streaming
   native download, restores recorded prompt settings, and can use a still
   as the next source or Qwen edit target — **Use as source** is refused for a
-  mesh, since there is no raster to stage as conditioning. The mesh viewer
-  offers every container the host advertises on
-  `capabilities.mesh.export_formats` — the stored GLB itself, the OBJ, STL,
-  and PLY transcodes (`mold library export` and the `export_mesh` MCP tool
-  perform the same ones), and an **Export turntable…** entry for the animated
-  GIF / APNG / WebP — and each one goes out two ways: **Share GLB…** /
-  **Share OBJ…** / … opens the system share sheet, and **Save GLB to Mold
-  folder** / **Save OBJ to Mold folder** / … writes the file into an
-  on-device folder the user can browse. The turntable's options sheet carries
-  the same Share / Save to Mold folder choice as a Destination row. Both
+  mesh, since there is no raster to stage as conditioning. A mesh print's
+  sheet carries one **Export** control: a segmented picker of every container
+  the host advertises on `capabilities.mesh.export_formats` — the stored GLB
+  itself, the OBJ, STL, and PLY transcodes (`mold library export` and the
+  `export_mesh` MCP tool perform the same ones), and one **Turntable** entry
+  standing for the animated GIF / APNG / WebP — followed by the two verbs
+  **Share…**, which opens the system share sheet, and **Save to Mold
+  folder**, which writes the file into an on-device folder the user can
+  browse. Turntable is the one pick that stops at the existing options sheet,
+  because it carries playback, repeat, size and frame rate; the button that
+  opened that sheet has already chosen the destination, and its Destination
+  row shows the choice and can still change it. Both
   doors run the same native export: the shell performs the
   `POST /api/gallery/export/:filename` itself, checks the bytes against the
   container the filename claims, and only then shares or files them — a
@@ -244,11 +263,12 @@ pushed screen opened from the header.
   fallback, an unavailable volume is an error. A second export of the same
   print is numbered before the extension on both platforms (`chair (2).stl`;
   the phone does its own numbering because MediaStore knows none of the
-  geometry media types and would answer `chair.stl (1)`), and the footer
-  status names the saved path (`Saved to Files ▸ Mold ▸ chair.stl` /
+  geometry media types and would answer `chair.stl (1)`), and the sheet's
+  status line names the saved path (`Saved to Files ▸ Mold ▸ chair.stl` /
   `Saved to Downloads/Mold/chair.stl`); a failure lands in the same line.
-  Only the mobile UI opened in a plain browser downloads, and it never lists
-  the stored GLB, which a browser fetches directly. A `.glb` tile carries the
+  Only the mobile UI opened in a plain browser downloads — there the picker is
+  followed by a single **Export as STL** (or **Export turntable…**) button —
+  and it never lists the stored GLB, which a browser fetches directly. A `.glb` tile carries the
   same ◈ mesh badge as video and audio prints; the iPhone Library has no kind
   filter, so the badge is how a mesh is told apart. On a print a sequence produced, **Use
   as prompt** reloads that sequence's recorded clips onto the Create clip rail
