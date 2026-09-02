@@ -118,8 +118,8 @@ internal class AndroidMedia(context: Context) {
      * The other half of the export pair: the same download, cache and byte
      * check as [prepareExportShare], but the file is filed under the public
      * `Downloads/Mold` folder instead of handed to a chooser. API 29+ goes
-     * through MediaStore's Downloads collection (no storage permission, and
-     * the system numbers a collision itself); earlier releases write the
+     * through MediaStore's Downloads collection (no storage permission);
+     * earlier releases write the
      * public Downloads directory directly, with the app's own external files
      * directory as the fallback when that volume is unavailable.
      */
@@ -147,18 +147,23 @@ internal class AndroidMedia(context: Context) {
     }
 
     private fun saveExportThroughMediaStore(file: File, name: String, mimeType: String): SavedExport {
+        val resolver = context.contentResolver
+        // Number a collision ourselves, before the extension, the way the
+        // iPhone does. Left to MediaStore the geometry types it does not know
+        // come back as `chair.stl (1)` — the extension lost behind the number.
+        val chosenName = uniqueName(name) { candidate -> moldFolderHasDownload(candidate) }
         val uri = file.inputStream().use { input ->
             writeMediaStream(
                 input,
-                name,
+                chosenName,
                 mimeType,
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 Environment.DIRECTORY_DOWNLOADS,
             )
         }
-        // MediaStore numbers a collision itself (`chair (1).stl`), so the
-        // name the toast shows is read back rather than assumed.
-        val displayName = context.contentResolver.query(
+        // A file this app cannot see (another app's) can still collide, and
+        // MediaStore then renames; the name the toast shows is read back.
+        val displayName = resolver.query(
             uri,
             arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
             null,
@@ -166,8 +171,21 @@ internal class AndroidMedia(context: Context) {
             null,
         )?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
-        } ?: name
+        } ?: chosenName
         return SavedExport(displayName, uri.toString(), "$MOLD_FOLDER_LABEL/$displayName")
+    }
+
+    /** Whether this app already filed [name] under Downloads/Mold through MediaStore. */
+    private fun moldFolderHasDownload(name: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val relative = "${Environment.DIRECTORY_DOWNLOADS}/$MOLD_FOLDER_NAME"
+        return context.contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} IN (?, ?)",
+            arrayOf(name, "$relative/", relative),
+            null,
+        )?.use { cursor -> cursor.count > 0 } ?: false
     }
 
     @Suppress("DEPRECATION")
@@ -409,19 +427,21 @@ internal class AndroidMedia(context: Context) {
          * The first free name for [filename] inside [directory]: the name
          * itself, then `name (2).ext`, `name (3).ext`, … so a second export
          * of the same print never overwrites the first. Mirrors the iPhone
-         * shell's numbering; only the pre-29 path needs it, because
-         * MediaStore numbers collisions itself.
+         * shell's numbering. The MediaStore path applies the same rule through
+         * [uniqueName], because MediaStore's own numbering does not know the
+         * geometry media types and would answer `chair.stl (1)`.
          */
-        internal fun uniqueDestination(directory: File, filename: String): File {
-            val candidate = File(directory, filename)
-            if (!candidate.exists()) return candidate
+        internal fun uniqueDestination(directory: File, filename: String): File =
+            File(directory, uniqueName(filename) { File(directory, it).exists() })
+
+        /** [uniqueDestination] over any notion of "taken": a directory, or MediaStore. */
+        internal fun uniqueName(filename: String, taken: (String) -> Boolean): String {
+            if (!taken(filename)) return filename
             val stem = filename.substringBeforeLast('.', filename)
             val extension = if (filename.contains('.')) filename.substringAfterLast('.') else ""
             return generateSequence(2) { it + 1 }
-                .map { number ->
-                    File(directory, if (extension.isEmpty()) "$stem ($number)" else "$stem ($number).$extension")
-                }
-                .first { !it.exists() }
+                .map { number -> if (extension.isEmpty()) "$stem ($number)" else "$stem ($number).$extension" }
+                .first { !taken(it) }
         }
     }
 }
