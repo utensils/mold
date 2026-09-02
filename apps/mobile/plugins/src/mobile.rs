@@ -70,12 +70,12 @@ impl<R: Runtime> MoldMobileNative<R> {
             .map_err(Into::into)
     }
 
-    pub async fn share_exported_animation(
-        &self,
-        request: ShareAnimationRequest,
-    ) -> crate::Result<String> {
+    /// Share one gallery export — a turntable animation or a mesh geometry
+    /// transcode. The Kotlin entry point keeps its `shareExportedAnimation`
+    /// name because the plugin's permission contract is generated from it.
+    pub async fn share_exported_media(&self, request: ShareExportRequest) -> crate::Result<String> {
         self.0
-            .run_mobile_plugin_async::<ShareAnimationResponse>("shareExportedAnimation", request)
+            .run_mobile_plugin_async::<ShareExportResponse>("shareExportedAnimation", request)
             .await
             .map(|response| response.outcome)
             .map_err(Into::into)

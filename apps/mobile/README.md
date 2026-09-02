@@ -212,10 +212,15 @@ pushed screen opened from the header.
   native download, restores recorded prompt settings, and can use a still
   as the next source or Qwen edit target — **Use as source** is refused for a
   mesh, since there is no raster to stage as conditioning. The mesh viewer
-  offers **Export as…** OBJ, STL, or PLY from the host's advertised
+  offers **Export as…** OBJ, STL, PLY, or GLB from the host's advertised
   `capabilities.mesh.export_formats` (the same transcodes `mold library
-export` and the `export_mesh` MCP tool perform); the converted file goes to
-  the native share sheet rather than a download. A `.glb` tile carries the
+export` and the `export_mesh` MCP tool perform). Geometry takes the same
+  native route a turntable does: the shell runs the export itself, checks the
+  bytes against the container the filename claims, and opens the system share
+  sheet, so the file reaches Files, AirDrop, or any app that accepts it —
+  a WebView `navigator.share` has no media type for geometry and would fall
+  back to an in-app download. Only the mobile UI opened in a plain browser
+  downloads. A `.glb` tile carries the
   same ◈ mesh badge as video and audio prints, and the Library's kind filter
   gets a 3D entry alongside Images, Video, and Audio. On a print a sequence produced, **Use
   as prompt** reloads that sequence's recorded clips onto the Create clip rail

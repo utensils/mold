@@ -1182,13 +1182,86 @@ describe("MobileGalleryViewer mesh export", () => {
     expect(view.find("[data-test='gallery-viewer-save']").exists()).toBe(false);
   });
 
-  it("posts the bare format and shares the returned geometry file", async () => {
+  /**
+   * Geometry takes the same native route a turntable does: the phone hands
+   * the bare format to the shell, which exports, validates and opens the
+   * system share sheet. The filename it carries is what the native side reads
+   * the media type off — `armchair 01.stl` is `model/stl` there.
+   */
+  it("posts the bare format and shares the returned geometry file natively", async () => {
     const share = vi.fn(async (_data: { files: File[] }) => undefined);
     Object.defineProperty(navigator, "share", { value: share, configurable: true });
     Object.defineProperty(navigator, "canShare", {
       value: vi.fn(() => true),
       configurable: true,
     });
+    invoke.mockResolvedValueOnce("shared");
+    const view = mountMesh(["obj", "stl", "ply"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-stl']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("share_exported_animation", {
+      url: "http://studio.tailnet.ts.net:7680/api/gallery/export/armchair%2001.glb",
+      apiKey: "secret",
+      request: { format: "stl" },
+      filename: "armchair 01.stl",
+      reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl"}',
+    });
+    // The shell owns the export request, so the WebView never fetches the
+    // bytes and the browser share sheet never opens.
+    expect(apiFetchTo).not.toHaveBeenCalledWith(
+      target,
+      "/api/gallery/export/armchair%2001.glb",
+      expect.anything(),
+    );
+    expect(share).not.toHaveBeenCalled();
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
+    );
+  });
+
+  it("shares GLB itself natively, under the stored container's own name", async () => {
+    isNativeIOSRuntime.mockReturnValue(false);
+    isNativeAndroidRuntime.mockReturnValue(true);
+    invoke.mockResolvedValueOnce("shared");
+    const view = mountMesh(["glb", "obj"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-glb']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "share_exported_animation",
+      expect.objectContaining({ filename: "armchair 01.glb", request: { format: "glb" } }),
+    );
+  });
+
+  it("keeps a cancelled native geometry share silent and retryable", async () => {
+    invoke.mockResolvedValueOnce("cancelled");
+    const view = mountMesh(["obj"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-obj']").trigger("click");
+    await flushPromises();
+
+    expect(view.find("[data-test='gallery-viewer-action-status']").exists()).toBe(false);
+    expect(
+      view.get("[data-test='gallery-viewer-mesh-export-obj']").attributes(),
+    ).not.toHaveProperty("disabled");
+  });
+
+  /** Outside a native shell there is no share sheet: the browser downloads. */
+  it("downloads the geometry file when the mobile UI runs in a browser", async () => {
+    isNativeIOSRuntime.mockReturnValue(false);
+    isNativeAndroidRuntime.mockReturnValue(false);
+    Object.defineProperty(URL, "createObjectURL", {
+      value: vi.fn(() => "blob:mesh-export"),
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), configurable: true });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     apiFetchTo.mockResolvedValue({
       blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])], { type: "model/obj" })),
     } as Response);
@@ -1203,11 +1276,9 @@ describe("MobileGalleryViewer mesh export", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ format: "stl" }),
     });
-    expect(share).toHaveBeenCalledTimes(1);
-    expect(share.mock.calls[0]![0].files[0]!.name).toBe("armchair 01.stl");
-    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
-      "Export ready to share",
-    );
+    expect(invoke).not.toHaveBeenCalledWith("share_exported_animation", expect.anything());
+    expect(click).toHaveBeenCalledOnce();
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Mesh exported");
   });
 
   /**

@@ -52,18 +52,22 @@ pub struct VideoUrlRequest {
     pub url: String,
 }
 
+/// One export handed to the Android chooser: a turntable or clip animation,
+/// or a geometry transcode of a stored mesh. `mime_type` is resolved from the
+/// app's own share allowlist so the chooser and the validation agree.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShareAnimationRequest {
+pub struct ShareExportRequest {
     pub url: String,
     pub api_key: Option<String>,
     pub request_json: String,
     pub filename: String,
+    pub mime_type: String,
     pub reuse_key: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ShareAnimationResponse {
+pub struct ShareExportResponse {
     pub outcome: String,
 }
 

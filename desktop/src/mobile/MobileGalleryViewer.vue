@@ -20,7 +20,6 @@ import { isUpscaledImage } from "../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   downloadVideoExport,
-  shareVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
@@ -569,8 +568,15 @@ async function performVideoSave(): Promise<void> {
 
 /**
  * One geometry transcode of the stored GLB. The body is the bare format — a
- * mesh export has no playback options — and the file comes back as bytes the
- * phone shares (or, outside the native shells, downloads).
+ * mesh export has no playback options.
+ *
+ * On the native shells this is the SAME command a turntable takes: the shell
+ * runs the export itself, checks the bytes against the container the filename
+ * claims, and opens the system share sheet, so OBJ, STL, PLY and GLB land in
+ * Files, AirDrop or any app that accepts them. A WebView `navigator.share`
+ * cannot do that — it has no media type for geometry and falls back to a
+ * browser download inside the app. The browser path stays exactly that, for
+ * the mobile UI opened outside a shell.
  */
 async function performMeshExport(format: string): Promise<void> {
   if (exportBusy.value) return;
@@ -578,20 +584,27 @@ async function performMeshExport(format: string): Promise<void> {
   exportError.value = "";
   actionStatus.value = "";
   try {
-    const response = await apiFetchTo(props.target, videoExportPath(props.item.filename), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ format }),
-    });
+    const path = videoExportPath(props.item.filename);
     const filename = meshExportFilename(props.item.filename, format);
-    const blob = await response.blob();
+    const request = { format };
     if (isNativeIOSRuntime() || isNativeAndroidRuntime()) {
-      const outcome = await shareVideoExport(blob, filename);
+      const outcome = await invoke<"shared" | "cancelled">("share_exported_animation", {
+        url: `${props.target.baseUrl}${path}`,
+        apiKey: props.target.apiKey,
+        request,
+        filename,
+        reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${JSON.stringify(request)}`,
+      });
       if (outcome === "cancelled") return;
-      actionStatus.value = outcome === "shared" ? "Export ready to share" : "Mesh exported";
+      actionStatus.value = "Export ready to share";
       return;
     }
-    downloadVideoExport(blob, filename);
+    const response = await apiFetchTo(props.target, path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    downloadVideoExport(await response.blob(), filename);
     actionStatus.value = "Mesh exported";
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
