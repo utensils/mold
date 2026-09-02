@@ -230,16 +230,23 @@ pushed screen opened from the header.
   container the filename claims, and only then shares or files them — a
   WebView `navigator.share` has no media type for geometry and would fall
   back to an in-app download. A download staged for a share the user backed
-  out of is saved without a second fetch (same `reuse_key`). The Mold folder
-  is `<Documents>/Mold` on iPhone, which `UIFileSharingEnabled` +
-  `LSSupportsOpeningDocumentsInPlace` expose as **Files ▸ On My iPhone ▸
-  Mold**; on Android it is **Downloads/Mold** through MediaStore's Downloads
-  collection (API 29+, no storage permission), or the public Downloads
-  directory (with the app's external files directory as the fallback) behind
-  the legacy `WRITE_EXTERNAL_STORAGE` prompt before that. A second export of
-  the same print is numbered (`chair (2).stl`) rather than overwritten, and
-  the footer status names the saved path (`Saved to Files ▸ Mold ▸ chair.stl`
-  / `Saved to Downloads/Mold/chair.stl`); a failure lands in the same line.
+  out of is saved without a second fetch (same `reuse_key`), and every
+  export is staged under its real name in a per-export temp directory, so the
+  share sheet (and a "Save to Files" from it) shows `chair.stl`, not a temp
+  name. On iPhone the Mold folder is the app's own Documents directory —
+  `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace` expose it as
+  **Files ▸ On My iPhone ▸ Mold**, an entry that appears once the first save
+  has created it. On Android it is the **`Download/Mold`** directory on
+  external storage (the Files app titles the parent "Downloads"), written
+  through MediaStore's Downloads collection on API 29+ (no storage
+  permission) or directly, then handed to the media scanner, behind the
+  legacy `WRITE_EXTERNAL_STORAGE` prompt before that; there is no app-private
+  fallback, an unavailable volume is an error. A second export of the same
+  print is numbered before the extension on both platforms (`chair (2).stl`;
+  the phone does its own numbering because MediaStore knows none of the
+  geometry media types and would answer `chair.stl (1)`), and the footer
+  status names the saved path (`Saved to Files ▸ Mold ▸ chair.stl` /
+  `Saved to Downloads/Mold/chair.stl`); a failure lands in the same line.
   Only the mobile UI opened in a plain browser downloads, and it never lists
   the stored GLB, which a browser fetches directly. A `.glb` tile carries the
   same ◈ mesh badge as video and audio prints; the iPhone Library has no kind
@@ -753,7 +760,7 @@ Keep `apps/mobile/src-tauri/Info.ios.plist`, the generated Apple plist, and
 `UIFileSharingEnabled` / `LSSupportsOpeningDocumentsInPlace` pair that exposes
 the Mold folder in Files lives in all three). Simulator builds must retain
 Xcode's ad-hoc signature so Keychain access works. On the simulator the Mold
-folder is `$(xcrun simctl get_app_container booted com.utensils.mold data)/Documents/Mold/`.
+folder is `$(xcrun simctl get_app_container booted com.utensils.mold data)/Documents/`.
 
 ## CI and distribution
 

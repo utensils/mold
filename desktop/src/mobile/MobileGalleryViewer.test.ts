@@ -1307,7 +1307,6 @@ describe("MobileGalleryViewer mesh export", () => {
   it("saves a geometry transcode into the Mold folder and names where it went", async () => {
     invoke.mockResolvedValueOnce({
       filename: "armchair 01.stl",
-      location: "/private/var/mobile/Containers/Data/Application/X/Documents/Mold/armchair 01.stl",
       label: "Files ▸ Mold ▸ armchair 01.stl",
     });
     const view = mountMesh(["obj", "stl", "ply"]);
@@ -1337,7 +1336,6 @@ describe("MobileGalleryViewer mesh export", () => {
   it("saves the stored GLB itself into the Mold folder", async () => {
     invoke.mockResolvedValueOnce({
       filename: "armchair 01 (2).glb",
-      location: "/Documents/Mold/armchair 01 (2).glb",
       label: "Files ▸ Mold ▸ armchair 01 (2).glb",
     });
     const view = mountMesh(["glb", "obj"]);
@@ -1379,7 +1377,6 @@ describe("MobileGalleryViewer mesh export", () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     invoke.mockResolvedValueOnce({
       filename: "armchair 01.ply",
-      location: "content://media/external/downloads/42",
       label: "Downloads/Mold/armchair 01.ply",
     });
     const view = mountMesh(["ply"]);
@@ -1552,7 +1549,6 @@ describe("MobileGalleryViewer mesh export", () => {
   it("saves a turntable into the Mold folder from the options sheet", async () => {
     invoke.mockResolvedValueOnce({
       filename: "armchair 01.gif",
-      location: "/Documents/Mold/armchair 01.gif",
       label: "Files ▸ Mold ▸ armchair 01.gif",
     });
     const view = mountMesh(["obj", "gif", "apng"]);

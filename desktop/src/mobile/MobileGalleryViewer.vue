@@ -152,7 +152,7 @@ const meshExports = computed(() =>
 /**
  * On a native shell every 3-D export is a PAIR: the system share sheet, and
  * "Save to Mold folder", which writes the file into an on-device folder the
- * user can browse (Files ▸ On My iPhone ▸ Mold; Downloads/Mold on Android).
+ * user can browse (Files ▸ On My iPhone ▸ Mold; Download/Mold on Android).
  * The browser build has neither, so it keeps its single download.
  */
 const nativeShell = computed(() => isNativeIOSRuntime() || isNativeAndroidRuntime());
@@ -598,12 +598,13 @@ async function performVideoSave(): Promise<void> {
   }
 }
 
-/** Where a "Save to Mold folder" export landed, as the shell reports it. */
+/**
+ * Where a "Save to Mold folder" export landed, as the shell reports it. Only
+ * what the status shows crosses the bridge; the path stays native.
+ */
 interface MoldFolderSave {
   /** The final name, numbered past a collision. */
   filename: string;
-  /** Absolute path (iOS) or `content://` URI (Android). */
-  location: string;
   /** `Files ▸ Mold ▸ chair.stl` or `Downloads/Mold/chair.stl`. */
   label: string;
 }

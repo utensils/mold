@@ -66,6 +66,8 @@ class AndroidMediaInstrumentedTest {
             assertEquals("image/gif", send.type)
             assertTrue(send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
             val uri = send.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)!!
+            // The chooser shows the file's own name, so it is staged under it.
+            assertEquals("clip.gif", uri.lastPathSegment)
             val shared = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             assertArrayEquals("GIF89a uat".toByteArray(), shared)
             assertTrue(host.requestText.get().contains("x-api-key: uat-secret", ignoreCase = true))
@@ -98,6 +100,7 @@ class AndroidMediaInstrumentedTest {
             val send = chooser.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)!!
             assertEquals("model/gltf-binary", send.type)
             val uri = send.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)!!
+            assertEquals("armchair.glb", uri.lastPathSegment)
             val shared = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             assertArrayEquals(glb, shared)
             assertTrue(host.requestText.get().endsWith("{\"format\":\"glb\"}"))
@@ -166,6 +169,7 @@ class AndroidMediaInstrumentedTest {
                     host.responder.join(5_000)
                     locations += Uri.parse(saved.location)
                     val expected = if (attempt == 0) "$stem.stl" else "$stem (2).stl"
+                    assertTrue(saved.filename.endsWith(".stl"))
                     assertEquals(expected, saved.filename)
                     assertEquals("Downloads/Mold/$expected", saved.label)
                 } finally {

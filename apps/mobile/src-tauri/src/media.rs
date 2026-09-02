@@ -158,6 +158,9 @@ fn exported_media_kind(filename: &str) -> Option<ExportedMediaKind> {
 /// The bare filename an export may be staged under, with the container it
 /// claims. A path is never accepted as one.
 fn sanitize_export_filename(filename: &str) -> Result<(String, ExportedMediaKind), String> {
+    if filename.contains('\0') {
+        return Err("the export filename contains an invalid character".to_string());
+    }
     let filename = std::path::Path::new(filename)
         .file_name()
         .and_then(|name| name.to_str())
@@ -188,7 +191,7 @@ fn take_cached_export(reuse_key: &str) -> Option<std::path::PathBuf> {
     if cached.reuse_key == reuse_key && cached.path.is_file() {
         Some(cached.path)
     } else {
-        let _ = std::fs::remove_file(cached.path);
+        discard_staged_export(&cached.path);
         None
     }
 }
@@ -198,10 +201,44 @@ fn cache_export(reuse_key: String, path: std::path::PathBuf) {
     if let Ok(mut cache) = media_export_cache().lock()
         && let Some(replaced) = cache.replace(CachedMediaExport { reuse_key, path })
     {
-        let _ = std::fs::remove_file(replaced.path);
+        discard_staged_export(&replaced.path);
     }
 }
 
+/// The prefix every staging directory (and, before the per-export
+/// directories, every staged file) carries, so the startup sweep can tell
+/// them from anything else in the temp dir.
+#[cfg(any(target_os = "ios", test))]
+const STAGED_EXPORT_PREFIX: &str = "mold-export-";
+
+/// Where one export is staged: its OWN directory under `base`, named
+/// `mold-export-<unique>`, holding the file under its REAL name. The share
+/// sheet (and a "Save to Files" from it) shows the file's name, so staging
+/// under a mangled name would present `mold-export-123-chair.stl`; the unique
+/// part goes on the directory instead.
+#[cfg(any(target_os = "ios", test))]
+fn staged_export_path(base: &std::path::Path, unique: u128, filename: &str) -> std::path::PathBuf {
+    base.join(format!("{STAGED_EXPORT_PREFIX}{unique}"))
+        .join(filename)
+}
+
+/// Drop a staged export and the directory that held only it. A directory
+/// that still holds something else is left alone.
+#[cfg(any(target_os = "ios", test))]
+fn discard_staged_export(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(parent) = path.parent()
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(STAGED_EXPORT_PREFIX))
+    {
+        let _ = std::fs::remove_dir(parent);
+    }
+}
+
+/// Sweep staged exports a previous run left behind: the per-export
+/// directories, and the flat `mold-export-*` files older builds staged.
 #[cfg(any(target_os = "ios", test))]
 fn cleanup_media_exports_in(directory: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -211,10 +248,18 @@ fn cleanup_media_exports_in(directory: &std::path::Path) {
         let is_export = entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with("mold-export-"));
-        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
-        if is_export && is_file {
-            let _ = std::fs::remove_file(entry.path());
+            .is_some_and(|name| name.starts_with(STAGED_EXPORT_PREFIX));
+        if !is_export {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+            Ok(kind) if kind.is_file() => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            _ => {}
         }
     }
 }
@@ -224,22 +269,23 @@ pub(crate) fn cleanup_stale_media_exports() {
     cleanup_media_exports_in(&std::env::temp_dir());
 }
 
-/// The on-device folder "Save to Mold folder" writes into. On iOS it is
-/// `<Documents>/Mold`, which `UIFileSharingEnabled` and
-/// `LSSupportsOpeningDocumentsInPlace` in the app's Info.plist expose as
-/// Files ▸ On My iPhone ▸ Mold; on Android the plugin writes the same name
-/// under the public Downloads collection.
+/// How the Files app names the folder "Save to Mold folder" writes into. On
+/// iOS the app's Documents directory IS that folder: nothing else writes
+/// Documents, and `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`
+/// in the Info.plist expose it as Files ▸ On My iPhone ▸ Mold (the entry
+/// appears once the first save has created the directory). Android files the
+/// same name under the public `Download` directory.
 #[cfg(any(target_os = "ios", test))]
 const MOLD_FOLDER_NAME: &str = "Mold";
 
-/// Where a "Save to Mold folder" export landed, as the phone's toast names it.
+/// Where a "Save to Mold folder" export landed, as the phone's status names
+/// it. Only what the WebView shows crosses the bridge: the path or content
+/// URI stays on the native side.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoldFolderSave {
     /// The final filename, after collision-safe renaming.
     pub filename: String,
-    /// The absolute path (iOS) or `content://` URI (Android) of the file.
-    pub location: String,
     /// The place in the words the OS file browser uses:
     /// `Files ▸ Mold ▸ chair.stl` or `Downloads/Mold/chair.stl`.
     pub label: String,
@@ -254,7 +300,6 @@ impl MoldFolderSave {
             .unwrap_or_default();
         Self {
             label: format!("Files ▸ {MOLD_FOLDER_NAME} ▸ {filename}"),
-            location: path.to_string_lossy().into_owned(),
             filename,
         }
     }
@@ -288,7 +333,8 @@ fn unique_destination(folder: &std::path::Path, filename: &str) -> std::path::Pa
 
 /// Move a validated staged download into the Mold folder under a
 /// collision-safe name, creating the folder on first use. The staged file is
-/// left in place on failure so the caller can keep it for a retry.
+/// left in place on failure so the caller can keep it for a retry, and a
+/// failed copy never leaves a partial destination behind.
 #[cfg(any(target_os = "ios", test))]
 fn place_in_mold_folder(
     staged: &std::path::Path,
@@ -301,10 +347,13 @@ fn place_in_mold_folder(
     if std::fs::rename(staged, &destination).is_err() {
         // A staging directory on another volume cannot be renamed across;
         // copy, then drop the original only once the copy is complete.
-        std::fs::copy(staged, &destination)
-            .map_err(|error| format!("could not write into the Mold folder: {error}"))?;
-        let _ = std::fs::remove_file(staged);
+        if let Err(error) = std::fs::copy(staged, &destination) {
+            let _ = std::fs::remove_file(&destination);
+            return Err(format!("could not write into the Mold folder: {error}"));
+        }
     }
+    // The file is in place (moved or copied); its staging directory is done.
+    discard_staged_export(staged);
     Ok(destination)
 }
 
@@ -325,7 +374,11 @@ async fn download_export(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_nanos();
-    let staged = std::env::temp_dir().join(format!("mold-export-{unique}-{filename}"));
+    let staged = staged_export_path(&std::env::temp_dir(), unique, filename);
+    if let Some(directory) = staged.parent() {
+        std::fs::create_dir_all(directory)
+            .map_err(|error| format!("could not stage the export: {error}"))?;
+    }
     let download_result = async {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder()
@@ -378,10 +431,28 @@ async fn download_export(
     }
     .await;
     if let Err(error) = download_result {
-        let _ = std::fs::remove_file(&staged);
+        discard_staged_export(&staged);
         return Err(error);
     }
     Ok(staged)
+}
+
+/// The staged file for one export: the download a share the user backed out
+/// of left under this `reuse_key`, or a fresh one. Both doors — the share
+/// sheet and the Mold folder — start here.
+#[cfg(target_os = "ios")]
+async fn staged_export(
+    url: &str,
+    api_key: Option<String>,
+    request: &serde_json::Value,
+    filename: &str,
+    media_kind: ExportedMediaKind,
+    reuse_key: &str,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(cached) = take_cached_export(reuse_key) {
+        return Ok(cached);
+    }
+    download_export(url, api_key, request, filename, media_kind).await
 }
 
 #[cfg(any(target_os = "ios", test))]
@@ -689,11 +760,8 @@ pub async fn share_exported_animation(
         use objc2_foundation::{NSArray, NSError, NSURL};
         use objc2_ui_kit::{UIActivityType, UIActivityViewController, UIViewController};
 
-        let staged = if let Some(cached) = take_cached_export(&reuse_key) {
-            cached
-        } else {
-            download_export(&url, api_key, &request, &filename, media_kind).await?
-        };
+        let staged =
+            staged_export(&url, api_key, &request, &filename, media_kind, &reuse_key).await?;
         let staged_for_sheet = staged.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let setup_sender = sender.clone();
@@ -776,7 +844,7 @@ pub async fn share_exported_animation(
             Err(error) => Err(error.to_string()),
         };
         if result.as_deref() == Ok("shared") {
-            let _ = std::fs::remove_file(staged);
+            discard_staged_export(&staged);
         } else {
             cache_export(reuse_key, staged);
         }
@@ -823,10 +891,11 @@ pub async fn share_exported_animation(
 /// The other half of the export pair: the same allowlist, the same staged
 /// download and byte check as [`share_exported_animation`], and the same
 /// `reuse_key`, so a file staged for a share the user backed out of is
-/// saved without a second download. iOS writes `<Documents>/Mold/<name>`,
-/// which the app's Info.plist exposes in the Files app; Android hands the
-/// staged file to the plugin, which files it under `Downloads/Mold` through
-/// MediaStore. Both answer with the final name and a label for the toast.
+/// saved without a second download. iOS writes `<Documents>/<name>` — the
+/// app's Documents directory is the "Mold" folder the Files app shows;
+/// Android hands the staged file to the plugin, which files it under the
+/// public `Download/Mold` through MediaStore. Both answer with the final name
+/// and a label for the status line.
 #[tauri::command]
 pub async fn save_export_to_mold_folder(
     window: tauri::WebviewWindow,
@@ -843,17 +912,14 @@ pub async fn save_export_to_mold_folder(
     {
         use tauri::Manager;
 
-        let staged = if let Some(cached) = take_cached_export(&reuse_key) {
-            cached
-        } else {
-            download_export(&url, api_key, &request, &filename, media_kind).await?
-        };
-        let folder = window
-            .app_handle()
-            .path()
-            .document_dir()
-            .map_err(|error| format!("could not find this iPhone's Documents folder: {error}"))?
-            .join(MOLD_FOLDER_NAME);
+        let staged =
+            staged_export(&url, api_key, &request, &filename, media_kind, &reuse_key).await?;
+        // The app's Documents directory IS the Mold folder the Files app
+        // shows; nesting another "Mold" inside it would read Mold ▸ Mold.
+        let folder =
+            window.app_handle().path().document_dir().map_err(|error| {
+                format!("could not find this iPhone's Documents folder: {error}")
+            })?;
         let staged_for_move = staged.clone();
         let placed = tauri::async_runtime::spawn_blocking(move || {
             place_in_mold_folder(&staged_for_move, &folder, &filename)
@@ -893,7 +959,6 @@ pub async fn save_export_to_mold_folder(
                 .await
                 .map(|saved| MoldFolderSave {
                     filename: saved.filename,
-                    location: saved.location,
                     label: saved.label,
                 })
                 .map_err(|error| error.to_string());
@@ -1066,15 +1131,17 @@ mod tests {
         std::fs::remove_dir_all(folder).unwrap();
     }
 
-    /// Placing an export creates the Mold folder on first use, moves the
-    /// staged download in under a collision-safe name, and answers with the
-    /// final path so the toast can name it.
+    /// Placing an export creates the folder on first use (on iOS that is the
+    /// Documents directory itself), moves the staged download in under a
+    /// collision-safe name, drops the staging directory it came from, and
+    /// answers with the final path so the status can name it.
     #[test]
     fn placing_an_export_creates_the_mold_folder_and_moves_the_staged_file() {
         let root = scratch_dir("place");
-        let staged = root.join("mold-export-1-chair.obj");
+        let staged = super::staged_export_path(&root, 1, "chair.obj");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"# Exported by mold\nv 0 0 0\n").unwrap();
-        let folder = root.join("Documents").join(super::MOLD_FOLDER_NAME);
+        let folder = root.join("Documents");
 
         let placed = super::place_in_mold_folder(&staged, &folder, "chair.obj").unwrap();
 
@@ -1084,8 +1151,13 @@ mod tests {
             b"# Exported by mold\nv 0 0 0\n"
         );
         assert!(!staged.exists(), "the staged download is moved, not copied");
+        assert!(
+            !staged.parent().unwrap().exists(),
+            "the per-export staging directory goes with it"
+        );
 
-        let again = root.join("mold-export-2-chair.obj");
+        let again = super::staged_export_path(&root, 2, "chair.obj");
+        std::fs::create_dir_all(again.parent().unwrap()).unwrap();
         std::fs::write(&again, b"v 1 1 1\n").unwrap();
         let placed_again = super::place_in_mold_folder(&again, &folder, "chair.obj").unwrap();
         assert_eq!(placed_again, folder.join("chair (2).obj"));
@@ -1096,7 +1168,33 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// The toast names where the file went in the words the Files app uses.
+    /// A folder that cannot be written into fails cleanly: the error names
+    /// it, no partial destination is left behind, and the staged file stays
+    /// for a retry.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_placement_leaves_no_partial_destination_and_keeps_the_staged_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch_dir("readonly");
+        let staged = super::staged_export_path(&root, 3, "chair.stl");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, b"solid chair\nendsolid chair\n").unwrap();
+        let folder = root.join("Documents");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = super::place_in_mold_folder(&staged, &folder, "chair.stl");
+
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err(), "a read-only folder must be reported");
+        assert!(!folder.join("chair.stl").exists(), "no partial destination");
+        assert!(staged.is_file(), "the staged download stays for a retry");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The status names where the file went in the words the Files app uses;
+    /// the path itself never crosses the bridge.
     #[test]
     fn the_ios_save_label_names_the_files_app_path() {
         let folder = scratch_dir("label");
@@ -1104,10 +1202,70 @@ mod tests {
         assert_eq!(save.filename, "chair (2).stl");
         assert_eq!(save.label, "Files ▸ Mold ▸ chair (2).stl");
         assert_eq!(
-            save.location,
-            folder.join("chair (2).stl").to_string_lossy()
+            serde_json::to_value(&save).unwrap(),
+            serde_json::json!({ "filename": "chair (2).stl", "label": "Files ▸ Mold ▸ chair (2).stl" })
         );
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// An export is staged under its REAL name inside a directory of its own,
+    /// so the share sheet (and a "Save to Files" from it) shows `chair.stl`,
+    /// not a mangled temp name; the unique part lives on the directory.
+    #[test]
+    fn an_export_is_staged_under_its_real_name_in_its_own_directory() {
+        let base = std::path::Path::new("/tmp/base");
+        let staged = super::staged_export_path(base, 42, "chair (2).stl");
+        assert_eq!(staged.file_name().unwrap(), "chair (2).stl");
+        assert_eq!(
+            staged.parent().unwrap().file_name().unwrap(),
+            "mold-export-42"
+        );
+        assert_eq!(staged.parent().unwrap().parent().unwrap(), base);
+    }
+
+    /// Discarding a staged export removes the file and the directory that
+    /// held only it — and leaves a directory that still holds something.
+    #[test]
+    fn discarding_a_staged_export_removes_its_directory_only_when_empty() {
+        let root = scratch_dir("discard");
+        let staged = super::staged_export_path(&root, 5, "clip.gif");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, b"GIF89a").unwrap();
+        super::discard_staged_export(&staged);
+        assert!(!staged.parent().unwrap().exists());
+
+        let shared = super::staged_export_path(&root, 6, "clip.gif");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, b"GIF89a").unwrap();
+        std::fs::write(shared.parent().unwrap().join("other.txt"), b"x").unwrap();
+        super::discard_staged_export(&shared);
+        assert!(!shared.exists());
+        assert!(shared.parent().unwrap().join("other.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The sanitiser answers a bare name for anything path-like, keeps the
+    /// container check case-insensitive, and refuses what has no name at all.
+    #[test]
+    fn the_export_filename_sanitiser_keeps_only_a_bare_shareable_name() {
+        assert!(super::sanitize_export_filename("..").is_err());
+        assert!(super::sanitize_export_filename(".").is_err());
+        assert!(super::sanitize_export_filename("").is_err());
+        assert!(super::sanitize_export_filename("/").is_err());
+        // A dotfile has no extension, so it names no container.
+        assert!(super::sanitize_export_filename(".stl").is_err());
+        assert_eq!(
+            super::sanitize_export_filename("a/b/c.obj").unwrap(),
+            ("c.obj".to_string(), super::ExportedMediaKind::Obj)
+        );
+        assert_eq!(
+            super::sanitize_export_filename("chair.STL").unwrap(),
+            ("chair.STL".to_string(), super::ExportedMediaKind::Stl)
+        );
+        assert_eq!(
+            super::sanitize_export_filename("chair\0.stl").unwrap_err(),
+            "the export filename contains an invalid character"
+        );
     }
 
     /// The Mold folder takes exactly what the share sheet takes: the same
@@ -1138,20 +1296,28 @@ mod tests {
         );
     }
 
+    /// The sweep removes the per-export staging directories and the flat
+    /// files older builds staged, and nothing else in the temp dir.
     #[test]
     fn startup_cleanup_removes_only_staged_media_exports() {
-        let directory =
-            std::env::temp_dir().join(format!("mold-media-cleanup-test-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let staged = directory.join("mold-export-123-clip.gif");
+        let directory = scratch_dir("cleanup");
+        let legacy = directory.join("mold-export-123-clip.gif");
+        let staged = super::staged_export_path(&directory, 456, "clip.gif");
         let unrelated = directory.join("keep-me.gif");
+        let unrelated_dir = directory.join("keep-me");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        std::fs::write(&legacy, b"GIF89a").unwrap();
         std::fs::write(&staged, b"GIF89a").unwrap();
         std::fs::write(&unrelated, b"GIF89a").unwrap();
+        std::fs::write(unrelated_dir.join("note.txt"), b"x").unwrap();
 
         super::cleanup_media_exports_in(&directory);
 
-        assert!(!staged.exists());
+        assert!(!legacy.exists());
+        assert!(!staged.parent().unwrap().exists());
         assert!(unrelated.exists());
+        assert!(unrelated_dir.join("note.txt").exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

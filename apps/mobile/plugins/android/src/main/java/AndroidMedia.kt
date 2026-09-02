@@ -7,6 +7,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -17,6 +18,7 @@ import androidx.core.content.FileProvider
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
@@ -96,14 +98,7 @@ internal class AndroidMedia(context: Context) {
         mimeType: String,
         reuseKey: String,
     ): Intent {
-        val safeName = File(filename).name
-        require(safeName == filename && safeName.isNotBlank()) { "invalid export filename" }
-        require(mimeType.isNotBlank()) { "the export does not name a media type" }
-        val cached = exportCache[reuseKey]?.takeIf { it.isFile }
-        val file = cached ?: downloadExport(url, apiKey, requestJson, safeName).also {
-            exportCache[reuseKey] = it
-        }
-        requireMatchingExport(file)
+        val file = stagedExport(url, apiKey, requestJson, filename, mimeType, reuseKey)
         val uri = shareUri(file)
         val send = Intent(Intent.ACTION_SEND).apply {
             type = mimeType
@@ -131,6 +126,28 @@ internal class AndroidMedia(context: Context) {
         mimeType: String,
         reuseKey: String,
     ): SavedExport {
+        val file = stagedExport(url, apiKey, requestJson, filename, mimeType, reuseKey)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveExportThroughMediaStore(file, file.name, mimeType)
+        } else {
+            saveExportToPublicDownloads(file, file.name, mimeType)
+        }
+    }
+
+    /**
+     * The staged, validated file for one export: what a share the user
+     * backed out of left under [reuseKey], or a fresh download. Both doors —
+     * the chooser and the Mold folder — start here, so they validate
+     * identically.
+     */
+    private fun stagedExport(
+        url: String,
+        apiKey: String?,
+        requestJson: String,
+        filename: String,
+        mimeType: String,
+        reuseKey: String,
+    ): File {
         val safeName = File(filename).name
         require(safeName == filename && safeName.isNotBlank()) { "invalid export filename" }
         require(mimeType.isNotBlank()) { "the export does not name a media type" }
@@ -139,11 +156,7 @@ internal class AndroidMedia(context: Context) {
             exportCache[reuseKey] = it
         }
         requireMatchingExport(file)
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveExportThroughMediaStore(file, safeName, mimeType)
-        } else {
-            saveExportToPublicDownloads(file, safeName)
-        }
+        return file
     }
 
     private fun saveExportThroughMediaStore(file: File, name: String, mimeType: String): SavedExport {
@@ -188,36 +201,49 @@ internal class AndroidMedia(context: Context) {
         )?.use { cursor -> cursor.count > 0 } ?: false
     }
 
+    /**
+     * Before scoped storage: the public `Download/Mold` directory itself,
+     * behind the legacy storage permission. There is no app-private fallback
+     * — a file the Downloads app cannot list is not "saved to the Mold
+     * folder" — so an unavailable volume is an error, and a successful write
+     * is handed to the media scanner so the Downloads app lists it at once.
+     */
     @Suppress("DEPRECATION")
-    private fun saveExportToPublicDownloads(file: File, name: String): SavedExport {
+    private fun saveExportToPublicDownloads(file: File, name: String, mimeType: String): SavedExport {
         requireLegacyStoragePermission("Storage access is required to save into the Mold folder")
-        val public = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), MOLD_FOLDER_NAME)
-        val directory = if (public.isDirectory || public.mkdirs()) {
-            public
-        } else {
-            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), MOLD_FOLDER_NAME).also {
-                check(it.isDirectory || it.mkdirs()) { "could not create the Mold folder" }
-            }
+        val directory = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), MOLD_FOLDER_NAME)
+        check(directory.isDirectory || directory.mkdirs()) {
+            "could not create the Download/Mold folder on this phone's storage"
         }
         val destination = uniqueDestination(directory, name)
-        file.inputStream().use { input -> FileOutputStream(destination).use { output -> input.copyTo(output) } }
-        val label = if (directory == public) {
-            "$MOLD_FOLDER_LABEL/${destination.name}"
-        } else {
-            "${destination.parentFile?.name ?: MOLD_FOLDER_NAME}/${destination.name}"
+        try {
+            file.inputStream().use { input -> FileOutputStream(destination).use { output -> input.copyTo(output) } }
+        } catch (error: IOException) {
+            // Never leave a partial file where the user will look for it.
+            destination.delete()
+            throw error
         }
-        return SavedExport(destination.name, Uri.fromFile(destination).toString(), label)
+        MediaScannerConnection.scanFile(context, arrayOf(destination.absolutePath), arrayOf(mimeType), null)
+        return SavedExport(destination.name, Uri.fromFile(destination).toString(), "$MOLD_FOLDER_LABEL/${destination.name}")
     }
 
+    /**
+     * Download one export into a directory of its own under the shared
+     * cache, holding the file under its REAL name: the chooser and any
+     * "save" from it show the file's name, so staging as
+     * `mold-export-123-chair.stl` would present that mangled name. The
+     * unique part lives on the directory instead.
+     */
     private fun downloadExport(
         url: String,
         apiKey: String?,
         requestJson: String,
         filename: String,
     ): File {
-        val directory = File(context.cacheDir, "shared").apply { mkdirs() }
-        prune(directory)
-        val file = File(directory, "mold-export-${System.currentTimeMillis()}-$filename")
+        val shared = File(context.cacheDir, "shared").apply { mkdirs() }
+        prune(shared)
+        val directory = File(shared, "$STAGED_EXPORT_PREFIX${System.nanoTime()}").apply { mkdirs() }
+        val file = File(directory, filename)
         val connection = openConnection(url, "POST").apply {
             setRequestProperty("Content-Type", "application/json")
             if (!apiKey.isNullOrBlank()) setRequestProperty("x-api-key", apiKey)
@@ -244,6 +270,7 @@ internal class AndroidMedia(context: Context) {
             return file
         } catch (error: Exception) {
             file.delete()
+            directory.delete()
             throw error
         } finally {
             connection.disconnect()
@@ -388,11 +415,15 @@ internal class AndroidMedia(context: Context) {
         file,
     )
 
+    /**
+     * Drop shared-cache entries older than a day: the per-export staging
+     * directories, the flat files older builds staged, and copied images.
+     */
     private fun prune(directory: File) {
         val cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS
-        directory.listFiles()?.filter { it.isFile && it.lastModified() < cutoff }?.forEach { stale ->
-            exportCache.entries.removeIf { it.value == stale }
-            stale.delete()
+        directory.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { stale ->
+            exportCache.entries.removeIf { it.value == stale || it.value.parentFile == stale }
+            if (stale.isDirectory) stale.deleteRecursively() else stale.delete()
         }
     }
 
@@ -418,7 +449,13 @@ internal class AndroidMedia(context: Context) {
         /** The statements a Wavefront OBJ may legally open with. */
         private val OBJ_LINE_PREFIXES = listOf("#", "v ", "vn ", "vt ", "f ", "o ", "g ", "mtllib")
         private val exportCache = ConcurrentHashMap<String, File>()
-        /** The on-device folder every "Save to Mold folder" export lands in. */
+        /** The prefix of every per-export staging directory under the shared cache. */
+        private const val STAGED_EXPORT_PREFIX = "mold-export-"
+        /**
+         * The on-device folder every "Save to Mold folder" export lands in:
+         * `Download/Mold` on external storage (the Files app titles the
+         * parent "Downloads").
+         */
         internal const val MOLD_FOLDER_NAME = "Mold"
         /** How the toast names that folder: MediaStore's Downloads plus ours. */
         internal const val MOLD_FOLDER_LABEL = "Downloads/$MOLD_FOLDER_NAME"

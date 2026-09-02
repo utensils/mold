@@ -72,8 +72,9 @@ pub struct ShareExportResponse {
 }
 
 /// Where a "Save to Mold folder" export landed: the final display name
-/// (MediaStore may have numbered a collision), the `content://` URI or file
-/// path, and the `Downloads/Mold/<name>` label the toast shows.
+/// (`chair (2).stl` past a collision), the `content://` URI or `file://`
+/// location — kept on the native side, never forwarded to the WebView — and
+/// the `Downloads/Mold/<name>` label the status line shows.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SavedExportResponse {
     pub filename: String,
