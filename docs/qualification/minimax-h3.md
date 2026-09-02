@@ -1042,21 +1042,148 @@ alpha 128 / scale 1.0 header metadata) and says so on
 `H3_TURBO_768P_VIDEO_SHIFT` itself. Nobody should read 6.0 for that one tier as
 a value transcribed from upstream.
 
-**The A/B that would settle it has not run.** Planned matrix, to be recorded
-here with per-render evidence before the shift is treated as qualified: the
-fixed campaign request (prompt "a red fox in a snowy pine forest at dawn",
-seed 770021, 124 frames, 24 fps, guidance 0, one recorded source PNG) at both
-measured canvases, 768x768 and 1344x768, for v1.1 at shift 6 against v1.1 at
-shift 12 (a second binary carrying an uncommitted one-row edit, as the 768x768
-campaign above used a scratch patch), alongside the shipped 4-step v1.0 768p
-and 8-step 768p tiers. Per render: wall clock POST to MP4 bytes, the
-`scheduler_estimates` row (`shape_bucket`, `sample_count`, `ewma_*`,
-`vram_high_water_bytes`), a 1 Hz `nvidia-smi` peak, `VmHWM`, `ffprobe` facts
-with an output SHA-256 prefix, and a visual bullet after viewing frames 0, 40,
-80, and 123. A tie ships 6 and the tie is recorded. Until that section exists,
-these two tags carry pinned-identity evidence only — the same standing every
-other reviewed tier's structural pins have, and less than the two measured
-canvases above.
+**The A/B ran on plato (2026-09-02), and it settled as a tie.** Host: plato
+(NixOS 26.05.20260707.0ad6f47). GPU: NVIDIA L40S, ordinal 1, UUID
+`GPU-f80be5cf-9030-de14-6799-6b80bfde2e5f`, 46,068 MiB total — the idlest of
+the host's 4 GPUs at campaign start; ordinal 0 was avoided per instructions.
+Driver 595.71.05 (NVML 595.71). A scratch server on port 7681 ran the entire
+campaign against `MOLD_HOME=/storage/mold` (shared with production);
+production on port 7680 ran undisturbed throughout and was never stopped,
+restarted, or reconfigured. Main binary
+`/storage/mold/uat-h3-fast/bin/mold-e527129f` — `mold 0.26.0 (e527129
+2026-09-02)`, sha256 `877a555a6db7826b38a08391a9064c2fb27c745a4c9a7e4a8e82f0ae2c615c5b`.
+The shift-12 leg of the A/B ran on a second binary carrying only an
+uncommitted one-row shift-constant edit (v1.1 tier: shift 12 instead of 6),
+`/storage/mold/uat-h3-fast/bin/mold-e527129f-v11shift12`, reporting the
+identical version string, sha256
+`4dc8ceef5648b1916099389fcd0a1d16f9a740d93bd980b764e5f0b0a05910ef`. Every
+case's server binary sha256 was independently recorded via `/proc/<pid>/exe`
+and confirmed to match the binary that was actually running — the main
+binary for every case except the two `-shift12` rows below.
+
+Both new tags' adapters were pulled through the scratch server
+(`MOLD_HOST=http://127.0.0.1:7681`), never through production:
+
+| Tag | File | Size (B) | sha256 | Marker |
+| --- | --- | --- | --- | --- |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | `minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors` | 1,956,192,992 | `449d80f301ac571622c72e28b8fd72a4b3681b7a8df8a92f17c8f6ec43f56558` | `.sha256-verified` present, content matches |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p` | `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` | 1,956,193,000 | `08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980` | `.sha256-verified` present, content matches |
+
+Both size + sha256 pairs match PLAN.md's pinned values exactly, and both
+landed at `/storage/mold/models/shared/minimax-h3/loras/` per the documented
+storage rule. `GET /api/models` on the scratch server showed both tags
+`downloaded: false` before the pull and `runtime_available: true` throughout;
+after pulling, `remaining_download_bytes` cleared and the files were on disk
+with verified markers.
+
+Fixed across every render: prompt "a red fox in a snowy pine forest at dawn",
+seed 770021, 124 frames, 24 fps, guidance 0, the same recorded 1344x768 fox
+source PNG (sha256
+`bac38ad8b09ab17a2ed724d12fef56acbe7a532a20b9ece38b3112b7a778120e`) used by
+the 1344x768 verification above. Each Turbo tier ran with no `--steps`
+override — its own reviewed grid applies, 5 points for the two 4-step tiers
+and 9 for the two 8-step tiers — and the base tier ran at `--steps 21`.
+
+768x768 I2V (6 configs; wall clock is POST to MP4 bytes, VRAM peak is the 1 Hz
+`nvidia-smi` sampler, `VmHWM` is the server process's before -> after
+resident-set high water, sha256 is a 12-hex prefix):
+
+| Case | Tag | Shift | Grid points | Wall (s) | VRAM peak (MiB) | VmHWM before -> after (kB) | MP4 (B) | sha256 | Visual |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| base21 | `comfy-pruned-int8` | n/a | 21 | 811.768 | 7565 | 591,460 -> 15,390,096 | 1,996,999 | `217944c6808c` | Frame-0 pinned to source; smooth head-turn to profile through f40/f80/f123; scene/subject fully persistent; no flicker/ghosting/cuts/banding; AAC 32 kHz audio present. |
+| turbo-4step-768p (v1.0) | `comfy-pruned-int8-turbo-4step-768p` | 6 (default) | 5 | 204.670 | 9463 | 15,390,096 -> 15,818,156 | 6,501,371 | `9d69e92114db` | Frame-0 pinned; same clean head-turn arc as base; minor edge softness at ear/tail vs base but no defects; audio present. |
+| turbo-4step-768p-v1.1 @6 | `...-v1.1` | 6 (default) | 5 | 206.414 | 9503 | 15,818,156 -> 15,870,836 | 6,385,205 | `79a3d5306c24` | Frame-0 pinned; near-indistinguishable from v1.0 at this canvas; no artifacts; audio present. |
+| turbo-4step-768p-v1.1 @12 | `...-v1.1` (shift-12 binary) | 12 | 5 | 316.966 (1) | 9357 | 447,536 -> 15,299,516 (2) | 6,386,441 | `5f7c7a6785d8` | Frame-0 pinned; same head-turn arc as @6; marginally crisper fur/rim-light contrast at f80/f123. |
+| turbo-8step-768p @6 | `comfy-pruned-int8-turbo-8step-768p` | 6 (default) | 9 | 344.863 | 9447 | 15,870,836 -> 15,970,400 | 6,416,097 | `33f02826f93b` | Frame-0 pinned; nose-down engagement toward branch at f40 then settles to profile; fully coherent; audio present. |
+| turbo-8step (existing, Comfy 544p) @12 | `comfy-pruned-int8-turbo-8step` | 12 (own default) | 9 | 348.113 | 9423 | 15,970,400 -> 15,973,420 | 6,525,224 | `aff021e00aca` | Frame-0 pinned; standard head-turn; slightly softer fine-fur detail (544p internal render upsampled to 768p) than native-768p tiers; no artifacts; audio present. |
+
+(1) Includes a ~107 s cold checkpoint-open on the freshly started shift-12
+server (its first render); not comparable 1:1 to the main-binary wall clocks,
+which benefited from an already-warm process for later cases. VRAM and
+quality are the meaningful comparison points for this row, not wall clock.
+(2) A separately started server process, so this row's `VmHWM` series is
+independent of the running total the other rows share.
+
+1344x768 I2V (6 configs, same columns):
+
+| Case | Tag | Shift | Grid points | Wall (s) | VRAM peak (MiB) | VmHWM before -> after (kB) | MP4 (B) | sha256 | Visual |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| base21 | `comfy-pruned-int8` | n/a | 21 | 1062.456 | 11213 | 385,452 -> 15,293,568 | 4,257,667 | `e2ae6e4717ae` | Frame-0 pinned at the wider canvas; excellent detail given the 1.75x pixel count; same smooth head-turn pattern as 768x768; no artifacts. |
+| turbo-4step-768p (v1.0) | `comfy-pruned-int8-turbo-4step-768p` | 6 (default) | 5 | 274.876 | 12919 | 15,293,568 -> 16,001,764 | 6,506,978 | `feba94524968` | Frame-0 pinned; fox transitions into a sitting pose by f80/f123 (different but coherent motion than base21's stand/turn); no artifacts. |
+| turbo-4step-768p-v1.1 @6 | `...-v1.1` | 6 (default) | 5 | 269.928 | 12927 | 16,001,764 -> 16,001,764 | 6,475,035 | `c37dd79daca6` | Frame-0 pinned; head-turn to profile with a natural mouth-open micro-expression at f80, settles by f123; no artifacts. |
+| turbo-4step-768p-v1.1 @12 | `...-v1.1` (shift-12 binary) | 12 | 5 | 271.229 | 12919 | 15,299,516 -> 15,789,696 | 6,471,461 | `639112c0e64e` | Frame-0 pinned; cleaner head-turn directly into a tucked-paws sitting pose by f123, no mid-sequence mouth-open transient. |
+| turbo-8step-768p @6 | `comfy-pruned-int8-turbo-8step-768p` | 6 (default) | 9 | 453.285 | 12967 | 16,001,764 -> 16,007,536 | 6,490,003 | `6e8b734195cd` | Frame-0 pinned; richest motion of the campaign — visible mid-stride walking gait by f80/f123; fully coherent; no artifacts. |
+| turbo-8step (existing, Comfy 544p) @12 | `comfy-pruned-int8-turbo-8step` | 12 (own default) | 9 | 456.868 | 12975 | 16,007,536 -> 16,010,360 | 6,534,723 | `af0d22508806` | Frame-0 pinned; calm head-turn to profile; softer fine detail (544p upsample) than native tiers; no artifacts. |
+
+All 12 renders completed with `exit_code=0`: 124 frames at 24/1 fps,
+h264/yuv420p, AAC stereo 32 kHz audio present and synchronized (`ffprobe` on
+every case). No server-side errors, connection resets, or production
+interference appeared in the scratch server's log for the campaign's
+duration.
+
+`scheduler_estimates` rows for both blocks (`sample_count=1`,
+`last_outcome='success'` on every row; each is this campaign's single
+observation for that `(model_fingerprint, shape_bucket)`, matched to its
+case by `last_observed_at` against that case's `finished_at`):
+
+768x768 block:
+
+| model_fingerprint | shape_bucket | ewma_total_ms | ewma_prompt_encode_ms | ewma_denoise_ms | ewma_vae_ms | vram_high_water_bytes | observed (UTC) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `comfy-pruned-int8` | `768x768:s21:f124:fps24:a1:src1:edit0:lora0:b1` | 705,450 | 34,387 | 642,655 | 810 | 7,923,040,256 | 07:57:20 |
+| `comfy-pruned-int8-turbo-4step-768p` | `768x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` | 200,729 | 31,218 | 141,701 | 734 | 9,913,237,504 | 08:00:47 |
+| `comfy-pruned-int8-turbo-4step-768p-v1.1` (@6) | `768x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` | 201,883 | 31,566 | 142,843 | 735 | 9,955,180,544 | 08:04:15 |
+| `comfy-pruned-int8-turbo-8step-768p` | `768x768:s9:f124:fps24:a1:src1:edit0:lora0:b1` | 340,476 | 31,451 | 280,928 | 733 | 9,896,460,288 | 08:10:03 |
+| `comfy-pruned-int8-turbo-8step` (existing) | `768x768:s9:f124:fps24:a1:src1:edit0:lora0:b1` | 343,942 | 33,620 | 282,104 | 733 | 9,871,294,464 | 08:15:53 |
+| `comfy-pruned-int8-turbo-4step-768p-v1.1` (@12) | `768x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` | 205,860 | 34,885 | 143,085 | 819 | 9,802,088,448 | 08:21:35 |
+
+1344x768 block:
+
+| model_fingerprint | shape_bucket | ewma_total_ms | ewma_prompt_encode_ms | ewma_denoise_ms | ewma_vae_ms | vram_high_water_bytes | observed (UTC) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `comfy-pruned-int8-turbo-4step-768p-v1.1` (@12) | `1344x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` | 266,979 | 32,699 | 189,799 | 1,277 | 13,537,116,160 | 08:26:53 |
+| `comfy-pruned-int8` | `1344x768:s21:f124:fps24:a1:src1:edit0:lora0:b1` | 954,219 | 44,996 | 864,018 | 1,399 | 11,748,245,504 | 08:44:55 |
+| `comfy-pruned-int8-turbo-4step-768p` | `1344x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` | 270,861 | 33,062 | 187,827 | 1,282 | 13,537,116,160 | 08:49:33 |
+| `comfy-pruned-int8-turbo-4step-768p-v1.1` (@6) | `1344x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` | 266,233 | 31,957 | 189,597 | 1,299 | 13,545,504,768 | 08:54:06 |
+| `comfy-pruned-int8-turbo-8step-768p` | `1344x768:s9:f124:fps24:a1:src1:edit0:lora0:b1` | 449,025 | 32,005 | 371,530 | 1,280 | 13,587,447,808 | 09:01:42 |
+| `comfy-pruned-int8-turbo-8step` (existing) | `1344x768:s9:f124:fps24:a1:src1:edit0:lora0:b1` | 452,870 | 33,500 | 374,137 | 1,283 | 13,595,836,416 | 09:09:22 |
+
+`host_high_water_bytes` is `NULL` on every row (not populated for MiniMax H3
+admissions by this build). VRAM confirms the documented Turbo-adapter-stays-
+resident fact: every Turbo tier runs ~1.9-2.5 GiB hotter in VRAM than the base
+tier at the same canvas (base 7.37 GiB / turbo ~9.15-9.9 GiB at 768x768; base
+10.94 GiB / turbo ~12.6-12.7 GiB at 1344x768).
+
+**The maintainer's own frame review calls this a tie, not a preference for
+12.** At 768x768 the two runs are a quality tie. At 1344x768, shift 6 shows a
+mouth-open transient at frame 80 that shift 12 does not — that is a content
+variation in the generated motion, not a defect — and frames 40 and 123 are
+equivalent between the two runs, so this canvas is also a tie in quality, not
+a shift-12 win. Per the campaign's pre-registered rule, a tie ships shift 6,
+which stays consistent with every other LightX2V 768p configuration. The
+harness's own per-case notes above lean toward 12 (marginally crisper fur/
+rim-light contrast, a cleaner motion arc at 1344x768); that lean is recorded
+as a lean, not a mandate. A future change to shift 12 is one
+`REVIEWED_TURBO_TIERS` row plus a qualification note, not a larger change,
+should the maintainer ever choose to trade the marginal quality bump for
+validating a non-standard shift value.
+
+**Text-only requests were refused at admission, by design.** The campaign's
+plan called for 768x768 T2V on the four shipping FL2VA configs (base,
+4-step-768p v1.0, v1.1 @6, 8-step-768p); all four attempts failed identically
+and instantly with `error: <tag> needs a source image; supply one`. Every
+FL2VA generation profile declares `capabilities.source_image == "required"`
+— the compact FL2VA recipe pins `SourceImageCapability::Required`
+(`crates/mold-server/src/h3_private_bridge.rs`) for every tier, so FL2VA is
+first-frame-only on every tier today even though the pipeline itself carries
+`Mode::TextToAudioVideo`. This is a client-side validation refusal —
+`mold run` never issued an HTTP request for any of the four attempts, so none
+of them produced a server log entry, and `wall_clock_seconds` was ~0.37s with
+no GPU or host memory measured, as expected for work that was never
+scheduled. This is expected model behavior, not a defect in the new tags,
+the harness, or this campaign: FL2VA has always required a source image, and
+PR 1 does not change that contract. Lifting it so an FL2VA tier can run
+text-only is tracked in #1552.
 
 **Adapters pulled ahead of the release are unowned by the running service.**
 Both adapters land in the shared model store at
@@ -1067,7 +1194,11 @@ repair will not touch them. So a scratch server used to pull them onto a host
 whose production service is an older release leaves bytes that older service can
 neither see nor clean up — invisible and unowned, not harmless-and-managed —
 until that service upgrades to a release carrying the tags, after which
-`mold rm` of the tags is the ordinary cleanup path.
+`mold rm` of the tags is the ordinary cleanup path. This campaign is the
+concrete case: both adapters were pulled through the scratch server into the
+shared store, and the host's 0.26.0 production service, a build that predates
+the tags, has no row for either one — invisible and unowned until it
+upgrades.
 
 ### What is derived, and how
 
