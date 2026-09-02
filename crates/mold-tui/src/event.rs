@@ -139,6 +139,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Down | KeyCode::Char('j') => return Action::Down,
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => return Action::Increment,
             KeyCode::Char('-') | KeyCode::Left => return Action::Decrement,
+            KeyCode::Char('x') | KeyCode::Backspace => return Action::ClearField,
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('a') | KeyCode::Char('A') => return Action::ToggleAdvanced,
             KeyCode::Char('1') => return Action::SwitchView(View::Create),

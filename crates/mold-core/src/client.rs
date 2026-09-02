@@ -1905,9 +1905,6 @@ impl MoldClient {
             .await?)
     }
 
-    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
-    /// without `permanent`). On older servers without a trash this deletes
-    /// outright — check `capabilities.gallery.trash` first when that matters.
     /// Transcode one stored gallery mesh into an export container
     /// (`POST /api/gallery/export/:filename`) and return the bytes.
     ///
@@ -1934,6 +1931,9 @@ impl MoldClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
+    /// without `permanent`). On older servers without a trash this deletes
+    /// outright — check `capabilities.gallery.trash` first when that matters.
     pub async fn trash_gallery_image(&self, filename: &str) -> Result<()> {
         let resp = self
             .client
@@ -4825,6 +4825,65 @@ mod tests {
         assert_eq!(row.trashed_at, Some(1_700_000_100));
         assert_eq!(row.purge_at, Some(1_702_592_100));
         assert_eq!(row.size_bytes, Some(123_456));
+    }
+
+    /// The export client posts the container to the stored print's own
+    /// route, percent-encoding the filename like every other gallery helper,
+    /// and hands the bytes back untouched. A refusal is the server's own
+    /// sentence, because a foreign `.glb` is something only that message can
+    /// explain.
+    #[tokio::test]
+    async fn export_gallery_mesh_posts_the_format_and_returns_the_bytes() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/mold-hunyuan3d-1%201.glb"))
+            .and(body_json(serde_json::json!({ "format": "stl" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "model/stl")
+                    .set_body_bytes(b"solid bytes".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/missing.glb"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "gallery image not found: missing.glb"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/cat.png"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "only stored .glb prints can be exported"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let bytes = client
+            .export_gallery_mesh("mold-hunyuan3d-1 1.glb", crate::MeshExportFormat::Stl)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"solid bytes");
+
+        let missing = client
+            .export_gallery_mesh("missing.glb", crate::MeshExportFormat::Obj)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("not found"), "{missing}");
+
+        let refused = client
+            .export_gallery_mesh("cat.png", crate::MeshExportFormat::Ply)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("only stored .glb prints"), "{refused}");
     }
 
     #[tokio::test]

@@ -638,8 +638,9 @@ fn accessor_bytes<'a>(
     let count = accessor
         .get("count")
         .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| GlbReadError::Malformed(format!("accessor {accessor_index} has no count")))?
-        as usize;
+        .ok_or_else(|| {
+            GlbReadError::Malformed(format!("accessor {accessor_index} has no count"))
+        })?;
     let view_index = accessor
         .get("bufferView")
         .and_then(serde_json::Value::as_u64)
@@ -665,21 +666,32 @@ fn accessor_bytes<'a>(
             "interleaved buffer views are not read (byteStride {stride})"
         )));
     }
-    let offset = view
+    // Every figure here is a JSON-supplied u64, so the arithmetic is checked
+    // end to end: a foreign file with an absurd count or offset is a
+    // Malformed error, never an overflow panic that `spawn_blocking` turns
+    // into an anonymous 500.
+    let view_offset = view
         .get("byteOffset")
         .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as usize
-        + accessor
-            .get("byteOffset")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as usize;
-    let end = offset
-        .checked_add(count * element)
-        .filter(|end| *end <= bin.len())
-        .ok_or(GlbReadError::Malformed(
-            "an accessor reads past the end of the binary chunk".to_string(),
-        ))?;
-    Ok((&bin[offset..end], count))
+        .unwrap_or(0);
+    let accessor_offset = accessor
+        .get("byteOffset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let out_of_range = || {
+        GlbReadError::Malformed("an accessor reads past the end of the binary chunk".to_string())
+    };
+    let offset = view_offset
+        .checked_add(accessor_offset)
+        .ok_or_else(out_of_range)?;
+    let end = count
+        .checked_mul(element as u64)
+        .and_then(|len| offset.checked_add(len))
+        .filter(|end| *end <= bin.len() as u64)
+        .ok_or_else(out_of_range)?;
+    // Both fit in usize now: `end` is bounded by `bin.len()`.
+    let (offset, end) = (offset as usize, end as usize);
+    Ok((&bin[offset..end], count as usize))
 }
 
 fn component_type(json: &serde_json::Value, accessor_index: u64) -> u32 {
@@ -1406,6 +1418,44 @@ mod tests {
             assert!(
                 matches!(read_glb(&rebuilt), Err(GlbReadError::Unsupported(_))),
                 "a foreign layout must be refused as unsupported"
+            );
+        }
+    }
+
+    /// A foreign file can name any count or offset a u64 holds. Each of
+    /// these used to be unchecked arithmetic — a debug overflow panic, or a
+    /// release wrap into an empty slice and a capacity-overflow panic in the
+    /// collect — which `spawn_blocking` surfaced as an anonymous 500. They
+    /// are all the named Malformed error now.
+    #[test]
+    fn read_glb_refuses_absurd_accessor_counts_and_offsets_without_panicking() {
+        let mesh = two_triangle_mesh();
+        let good = write_glb(&mesh, &GlbMaterial::default(), None).unwrap();
+        let parsed = parse_glb(&good);
+        for mutate in [
+            (|json: &mut serde_json::Value| {
+                json["accessors"][0]["count"] = serde_json::json!(u32::MAX);
+            }) as fn(&mut serde_json::Value),
+            |json: &mut serde_json::Value| {
+                json["accessors"][0]["count"] = serde_json::json!(u64::MAX);
+            },
+            |json: &mut serde_json::Value| {
+                json["bufferViews"][0]["byteOffset"] = serde_json::json!(u64::MAX - 4);
+                json["accessors"][0]["byteOffset"] = serde_json::json!(8);
+            },
+            |json: &mut serde_json::Value| {
+                json["bufferViews"][0]["byteOffset"] = serde_json::json!(u64::MAX);
+            },
+            |json: &mut serde_json::Value| {
+                json["accessors"][0]["byteOffset"] = serde_json::json!(u64::MAX);
+            },
+        ] {
+            let mut json = parsed.json.clone();
+            mutate(&mut json);
+            let rebuilt = rebuild_glb(&json, &parsed.bin);
+            assert!(
+                matches!(read_glb(&rebuilt), Err(GlbReadError::Malformed(_))),
+                "an out-of-range accessor must be refused as malformed"
             );
         }
     }

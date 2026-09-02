@@ -1074,6 +1074,8 @@ Examples:
     Export {
         #[arg(value_name = "FILENAME")]
         filename: String,
+        /// Container: glb, obj, stl, or ply. glb downloads the stored file
+        /// unchanged; the rest are transcodes.
         #[arg(long, value_name = "FORMAT", value_parser = mesh_export_format_parser)]
         format: mold_core::MeshExportFormat,
         /// Where to write the converted file. Defaults to the print's stem

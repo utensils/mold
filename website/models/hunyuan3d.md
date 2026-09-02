@@ -7,9 +7,11 @@ The source image is the only conditioning, so a prompt is recorded as
 provenance and never read, and a request without an image is refused rather
 than answered from an empty prompt.
 
-**No prompt is needed anywhere.** The model's generation profile says so, and
-every surface reads it, so `mold run hunyuan3d-mini-turbo --image chair.png` is
-a complete request from the CLI, the API, the TUI, Discord and the apps alike.
+**No prompt is needed.** The model's generation profile says so, and the CLI,
+the API, the TUI, Discord and the MCP tools read it, so
+`mold run hunyuan3d-mini-turbo --image chair.png` is a complete request on each
+of them. The web, desktop and mobile apps still apply the legacy prompt rule
+and follow in the GUI release.
 
 - **Developer**:
   [Tencent Hunyuan](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
