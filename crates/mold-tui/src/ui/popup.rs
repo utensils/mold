@@ -1491,7 +1491,8 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
     else {
         return;
     };
-    let area = centered_rect(frame.area(), 60, 45);
+    let text = mesh_export_picker_lines(formats, *selected, theme);
+    let area = mesh_export_picker_area(frame.area(), &text);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1501,6 +1502,21 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
         .title_style(theme.title_focused())
         .style(theme.popup_bg());
 
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// The picker's body: the intro, the turntable hint when an animated
+/// container is on offer, one row per container, and the key line. Built
+/// apart from the render so [`mesh_export_picker_area`] can size the popup
+/// to exactly these lines.
+fn mesh_export_picker_lines(
+    formats: &[mold_core::MeshExportFormat],
+    selected: usize,
+    theme: &crate::ui::theme::Theme,
+) -> Vec<Line<'static>> {
     let mut text: Vec<Line> = vec![
         Line::from(Span::styled(
             "The gallery keeps its GLB; a converted copy is written beside your other saves.",
@@ -1510,7 +1526,7 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
     ];
     if formats.iter().any(|format| format.is_animation()) {
         text.push(Line::from(Span::styled(
-            MESH_TURNTABLE_PICKER_HINT,
+            mesh_turntable_picker_hint(),
             theme.dim(),
         )));
         text.push(Line::from(""));
@@ -1518,16 +1534,12 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
     for (index, format) in formats.iter().enumerate() {
         let note = mesh_export_format_note(*format);
         let label = format!("{:<4} {note}", format.as_str().to_ascii_uppercase());
-        let style = if index == *selected {
+        let style = if index == selected {
             theme.param_selected()
         } else {
             Style::default().fg(theme.text)
         };
-        let marker = if index == *selected {
-            "\u{25b8} "
-        } else {
-            "  "
-        };
+        let marker = if index == selected { "\u{25b8} " } else { "  " };
         text.push(Line::from(vec![
             Span::styled(marker, style),
             Span::styled(label, style),
@@ -1542,17 +1554,76 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
         Span::styled("Esc", theme.status_key()),
         Span::styled(" Cancel", Style::default().fg(theme.text)),
     ]));
+    text
+}
 
-    frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
-        area,
-    );
+/// Where the export picker sits, given the lines it will draw.
+///
+/// Wide enough that every container's note is one row on an 80-column
+/// terminal (90 %), narrowing to the usual 60 % once that is at least as
+/// wide; and exactly as tall as the wrapped body plus its border. The
+/// percentage height [`centered_rect`] gives a list popup is eight inner
+/// rows on 80×24 — less than half of what this body needs — so the picker
+/// takes its height in rows like the File-under editors do.
+pub(crate) fn mesh_export_picker_area(frame_area: Rect, text: &[Line]) -> Rect {
+    let width_pct: u16 = if frame_area.width >= 120 { 60 } else { 90 };
+    let width = ((u32::from(frame_area.width) * u32::from(width_pct)) / 100) as u16;
+    let rows = wrapped_rows(text, width.saturating_sub(2));
+    centered_rect_rows(frame_area, width_pct, rows.saturating_add(2))
+}
+
+/// Rows `text` occupies at `width` under `Wrap { trim: false }`: greedy word
+/// wrap, whitespace kept with the word before it, and a word longer than the
+/// width broken across rows. A width of zero draws nothing and counts one
+/// row per line.
+pub(crate) fn wrapped_rows(text: &[Line], width: u16) -> u16 {
+    let width = usize::from(width);
+    let rows: usize = text
+        .iter()
+        .map(|line| {
+            if width == 0 {
+                return 1;
+            }
+            let plain: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            let mut rows = 1usize;
+            let mut used = 0usize;
+            for word in plain.split_inclusive(' ') {
+                let full = word.chars().count();
+                let trimmed = word.trim_end_matches(' ').chars().count();
+                if trimmed > width {
+                    if used > 0 {
+                        rows += 1;
+                    }
+                    rows += (trimmed - 1) / width;
+                    used = (trimmed - 1) % width + 1 + (full - trimmed);
+                } else {
+                    if used + trimmed > width {
+                        rows += 1;
+                        used = 0;
+                    }
+                    used += full;
+                }
+                used = used.min(width);
+            }
+            rows
+        })
+        .sum();
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 /// The picker offers no turntable knobs, and says so: the defaults are the
-/// server's (and the local writer's), and `mold library export` has the
-/// flags for anything else.
-pub(crate) const MESH_TURNTABLE_PICKER_HINT: &str = "GIF / APNG / WebP render a turntable at the defaults: one full turn, 36 frames, 512 px, 10 fps, looping. For bounce, once, or other sizes use mold library export --format gif --playback bounce ...";
+/// renderer's own — the server's and the local writer's alike — and
+/// `mold library export` has the flags for anything else.
+pub(crate) fn mesh_turntable_picker_hint() -> String {
+    use mold_inference::hunyuan3d::turntable::{DEFAULT_FPS, DEFAULT_FRAMES, DEFAULT_SIZE};
+    format!(
+        "GIF / APNG / WebP render a turntable at the defaults: one full turn, {DEFAULT_FRAMES} frames, {DEFAULT_SIZE} px, {DEFAULT_FPS} fps, looping. For bounce, once, or other sizes: mold library export --format gif ..."
+    )
+}
 
 /// What each export container carries, in the picker's own words — the
 /// same table `website/guide/mesh.md` documents.
@@ -1643,15 +1714,83 @@ mod tests {
                 "{format}"
             );
         }
-        let hint = super::MESH_TURNTABLE_PICKER_HINT;
+        // The hint quotes the renderer's OWN defaults, so it cannot drift
+        // from what a local or remote export actually does.
+        use mold_inference::hunyuan3d::turntable::{DEFAULT_FPS, DEFAULT_FRAMES, DEFAULT_SIZE};
+        let hint = super::mesh_turntable_picker_hint();
         for expected in [
-            "36 frames",
-            "512 px",
-            "10 fps",
-            "looping",
-            "mold library export",
+            format!("{DEFAULT_FRAMES} frames"),
+            format!("{DEFAULT_SIZE} px"),
+            format!("{DEFAULT_FPS} fps"),
+            "looping".to_string(),
+            "mold library export".to_string(),
         ] {
-            assert!(hint.contains(expected), "{expected} missing from {hint}");
+            assert!(hint.contains(&expected), "{expected} missing from {hint}");
+        }
+    }
+
+    /// The picker takes its height from its own wrapped rows, so the last
+    /// container and the key line are on screen at 80×24 as well as 120×40:
+    /// the inner area holds every rendered row, and the rendered frame shows
+    /// the last row to prove the row count and the wrap agree.
+    #[test]
+    fn mesh_export_picker_fits_its_rows_on_small_and_large_terminals() {
+        use crate::app::Popup;
+        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp};
+        use ratatui::layout::Rect;
+        use ratatui::widgets::{Block, Borders};
+
+        let formats = vec![Glb, Obj, Stl, Ply, Gif, Apng, Webp];
+        let theme = crate::ui::theme::Theme::default();
+        let text = super::mesh_export_picker_lines(&formats, 0, &theme);
+
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            let frame_area = Rect::new(0, 0, width, height);
+            let area = super::mesh_export_picker_area(frame_area, &text);
+            let inner = Block::default().borders(Borders::ALL).inner(area);
+            let rows = super::wrapped_rows(&text, inner.width);
+            assert!(
+                inner.height >= rows,
+                "{width}x{height}: inner {}x{} holds {rows} rows",
+                inner.width,
+                inner.height
+            );
+            assert!(
+                area.bottom() <= frame_area.bottom() && area.right() <= frame_area.right(),
+                "{width}x{height}: {area:?} leaves the terminal"
+            );
+
+            let rendered = render_popup_to_string_sized(
+                Popup::MeshExportPicker {
+                    filename: "chair.glb".to_string(),
+                    formats: formats.clone(),
+                    selected: 0,
+                },
+                width,
+                height,
+            );
+            for expected in [
+                "GLB", "OBJ", "STL", "PLY", "GIF", "APNG", "WEBP", "Esc", "Cancel",
+            ] {
+                assert!(
+                    rendered.contains(expected),
+                    "{width}x{height}: {expected} cut off:\n{rendered}"
+                );
+            }
+            // Every note is one row at this width: the labels stay aligned
+            // and the popup stays short.
+            let hint_rows = super::wrapped_rows(&text[2..3], inner.width);
+            assert!(
+                hint_rows <= 3,
+                "{width}x{height}: hint wraps to {hint_rows} rows"
+            );
+            for format in &formats {
+                let note = super::mesh_export_format_note(*format);
+                assert!(
+                    rendered.contains(note),
+                    "{width}x{height}: {note} is wrapped or cut off:\n{rendered}"
+                );
+            }
         }
     }
 
