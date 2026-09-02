@@ -228,19 +228,19 @@ const caps = computed(() =>
     props.form.family,
     props.form.model,
     props.form.pipeline,
-    selectedModel.value?.guidance_capabilities,
+    contractModel.value?.guidance_capabilities,
     // Per-model source-image contract (#772): the picked row when we have it,
     // otherwise the form's snapshot of it. Without this the Source image well
     // would render for a text-to-video wan checkpoint that rejects one.
-    selectedModel.value?.source_image ?? props.form.sourceImageCapability,
-    effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
+    contractModel.value?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(contractModel.value, props.form.pipeline),
   ),
 );
 /** The model's image-attachment shape — one shared policy, never a local
  * heuristic. Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
 const sequenceSourceImagesSupported = computed(
-  () => (selectedModel.value?.source_image ?? props.form.sourceImageCapability) !== "unsupported",
+  () => (contractModel.value?.source_image ?? props.form.sourceImageCapability) !== "unsupported",
 );
 const showSourceMedia = computed(() => !isSequence.value && sourcePlan.value.kind !== "none");
 /** Identity is capability-gated on positive knowledge only: an unread or
@@ -254,7 +254,7 @@ const showSourceMedia = computed(() => !isSequence.value && sourcePlan.value.kin
  * gets. Web applies the same rule. */
 const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
 const activeRecipe = computed(() =>
-  effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
+  effectiveGenerationRecipe(contractModel.value, props.form.pipeline),
 );
 /* A fixed control explains itself with the profile's own sentence, or with
  * nothing at all. The inspector never composes that copy: the old hard-coded
@@ -375,6 +375,29 @@ const selectedPickerModel = computed<ModelEntry | null>(
     pickerCandidates.value.find((model) => model.name === props.form.model) ??
     null,
 );
+
+/**
+ * The row that answers for the CHECKPOINT'S CONTRACT — the advertised recipe
+ * behind the canvas, the prompt mode, the source-image shape and the mesh
+ * block.
+ *
+ * That contract belongs to the checkpoint, not to the machine holding the
+ * file: `generation_profile::prompt_requirement_for_family` and the recipe's
+ * own `mesh` / `resolution` blocks are the same wherever it runs, and the
+ * target host will advertise exactly them once it has downloaded it. Reading
+ * only the target's inventory therefore lost the whole contract the moment
+ * Create was aimed at a machine that would have to pull the model: a
+ * Hunyuan3D form silently fell back to raster controls with a Resolution
+ * bound to the canvasless recipe's own 0 × 0, showing `NaN×NaN px` under an
+ * uncorrectable "Width and height must be whole numbers".
+ *
+ * The target's own row still WINS wherever it exists — two machines may
+ * advertise corrected or aliased metadata, and the one that will run the job
+ * is the authority on it. This only decides who answers when it has none.
+ * `selectedModel` remains the answer for questions that really are about the
+ * holding machine (its runtime readiness, its on-disk size, its LoRAs).
+ */
+const contractModel = computed<ModelEntry | null>(() => selectedPickerModel.value);
 
 /**
  * The form's model when no machine has it installed. Restoring a print whose
@@ -523,14 +546,14 @@ const sourceResolution = computed(() =>
   sourceDimensions.value
     ? resolveSourceResolution(
         sourceDimensions.value,
-        selectedModel.value ?? props.form.family,
+        contractModel.value ?? props.form.family,
         props.form.pipeline,
       )
     : null,
 );
 /** One resolver drives the chips, the pills, the badge and the sentence. */
 const shapeInput = computed<OutputShapeInput>(() => ({
-  model: selectedModel.value ?? null,
+  model: contractModel.value ?? null,
   family: props.form.family,
   pipeline: props.form.pipeline,
   width: props.form.width,
@@ -562,7 +585,7 @@ const resolutionWarning = computed(() =>
   resolutionValidationWarning(
     props.form.width,
     props.form.height,
-    selectedModel.value,
+    contractModel.value,
     props.form.pipeline,
   ),
 );
@@ -570,12 +593,12 @@ const resolutionError = computed(() =>
   resolutionValidationError(
     props.form.width,
     props.form.height,
-    selectedModel.value,
+    contractModel.value,
     props.form.pipeline,
   ),
 );
 const stepsError = computed(() =>
-  profileStepsValidationError(props.form.steps, selectedModel.value, props.form.pipeline),
+  profileStepsValidationError(props.form.steps, contractModel.value, props.form.pipeline),
 );
 
 function onShape(id: string) {

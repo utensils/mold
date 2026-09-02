@@ -19,6 +19,8 @@ import { applyModelDefaults, newGenerateForm, type GenerateForm } from "../../li
 import type { ModelEntry } from "../../lib/api/types";
 import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
+import { useHostsStore } from "../../stores/hosts";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("../../lib/api/client", () => ({
@@ -68,6 +70,43 @@ function mountFor(model: ModelEntry) {
   return { form, wrapper };
 }
 
+function readyHost(id: string, label: string): void {
+  const hosts = useHostsStore();
+  hosts.extras.push({
+    id,
+    label,
+    url: `http://${id}.test:7680`,
+    apiKey: null,
+    status: "ready",
+    error: null,
+    instanceId: `instance-${id}`,
+  } as never);
+  hosts.telemetry[id] = { instanceId: `instance-${id}` } as never;
+}
+
+/**
+ * The mesh model is installed on ONE machine, and Create is aimed at another
+ * that would have to download it first. The Model field still names it (the
+ * picker resolves it across every machine and the catalog), so the settings
+ * beneath must answer for the same checkpoint.
+ */
+function mountForTargetWithoutModel(model: ModelEntry) {
+  useModelStore().all = [];
+  readyHost("halcyon", "halcyon");
+  readyHost("plato", "plato");
+  const hostModels = useHostModelsStore();
+  hostModels.byHost.halcyon = { entries: [model], fetchedAt: Date.now(), error: null };
+  hostModels.byHost.plato = { entries: [], fetchedAt: Date.now(), error: null };
+  useAppPrefsStore().settings = { generateTargetHost: "plato" } as never;
+
+  const form = reactive(newGenerateForm()) as GenerateForm;
+  form.model = model.name;
+  form.family = model.family;
+  applyModelDefaults(form, model);
+  const wrapper = mount(InspectorPanel, { props: { form } });
+  return { form, wrapper };
+}
+
 beforeEach(() => setActivePinia(createPinia()));
 afterEach(() => (document.body.innerHTML = ""));
 
@@ -84,6 +123,54 @@ describe("InspectorPanel — canvasless recipes", () => {
     await flushPromises();
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
+  });
+});
+
+/**
+ * A checkpoint's contract is the checkpoint's, not the machine's. Reading the
+ * advertised recipe only from the TARGET host's inventory meant aiming Create
+ * at a machine that would download the model first silently replaced the mesh
+ * settings with raster ones — Denoise, Mask, Shape, and a Resolution control
+ * bound to the canvasless recipe's own 0 × 0, which rendered as `NaN×NaN px`
+ * under a "Width and height must be whole numbers" error nobody could clear.
+ */
+describe("InspectorPanel — a target host that does not have the model", () => {
+  it("keeps the canvas hidden for the mesh model it still names", async () => {
+    const { wrapper } = mountForTargetWithoutModel(meshModel());
+    await flushPromises();
+    expect(wrapper.findComponent(ShapePicker).exists()).toBe(false);
+    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(false);
+  });
+
+  it("never validates the zero canvas it was told to render", async () => {
+    const { wrapper } = mountForTargetWithoutModel(meshModel());
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Width and height must be whole numbers");
+    expect(wrapper.text()).not.toContain("NaN");
+  });
+
+  it("keeps the Mesh group the model's own recipe advertises", async () => {
+    const { wrapper } = mountForTargetWithoutModel(meshModel());
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-controls']").exists()).toBe(true);
+    const octree = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    expect(octree.props("options")).toEqual([
+      { value: 128, label: "128" },
+      { value: 192, label: "192" },
+      { value: 256, label: "256" },
+      { value: 320, label: "320" },
+      { value: 384, label: "384" },
+    ]);
+  });
+
+  it("leaves a raster model's canvas alone", async () => {
+    const { wrapper } = mountForTargetWithoutModel(rasterModel());
+    await flushPromises();
+    expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
+    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
+    expect(wrapper.find("[data-test='mesh-controls']").exists()).toBe(false);
   });
 });
 

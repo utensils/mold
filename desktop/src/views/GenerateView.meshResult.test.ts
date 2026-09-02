@@ -106,6 +106,27 @@ function meshCompletion(overrides: Partial<CompleteEvent> = {}): CompleteEvent {
   } as CompleteEvent;
 }
 
+/**
+ * The completion the DURABLE batch path synthesizes, exactly as
+ * `applyDurableCompletion` builds it: the batch child reports a filename and
+ * the requested container, so there are no inline bytes, no poster and no
+ * mesh facts — and the canvas is 0 × 0 because that is what a canvasless
+ * recipe requested. The media arrives separately as `job.resultUrl`.
+ */
+function durableMeshCompletion(): CompleteEvent {
+  return {
+    image: "",
+    format: "glb",
+    width: 0,
+    height: 0,
+    seed_used: 3_272_131_710,
+    generation_time_ms: 74_400,
+    model: meshModel.name,
+    filename: "mold-hunyuan3d-mini-turbo-fp16-1788329609977.glb",
+    metadata: null,
+  } as CompleteEvent;
+}
+
 function primeMeshJob(result: CompleteEvent = meshCompletion()) {
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
@@ -293,6 +314,84 @@ describe("GenerateView — mesh results", () => {
       source_image: PNG_1170x2532,
       width: 0,
       height: 0,
+    });
+  });
+
+  /**
+   * A durable batch is the ONLY way Create submits a print, so this is what
+   * every finished 3-D generation actually looks like on the canvas. The
+   * synthesized completion carries no vertex count, so a viewer keyed on the
+   * mesh FACTS fell through to the `<img>` arm and drew the `.glb` — the
+   * broken-resource icon on a black canvas the acceptance pass found, with no
+   * Wireframe / Reset view controls and no `tris · verts` caption, while the
+   * identical print opened correctly from the Library seconds later.
+   */
+  describe("a completion synthesized from a durable batch child", () => {
+    it("mounts the viewer on the print's own media URL", async () => {
+      const job = primeMeshJob(durableMeshCompletion());
+      job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb";
+      const wrapper = mountView();
+      await flushPromises();
+
+      const viewer = wrapper.findComponent(MeshViewer);
+      expect(viewer.exists()).toBe(true);
+      expect(viewer.props("src")).toBe(job.resultUrl);
+      expect(viewer.props("autoRotate")).toBe(true);
+      expect(viewer.props("expandable")).toBe(true);
+      // There are no inline bytes to wrap: the URL is already fetchable.
+      expect(createObjectURL).not.toHaveBeenCalled();
+      // No poster was published either; the viewer says so itself rather than
+      // showing a still that does not exist.
+      expect(viewer.props("poster")).toBe("");
+    });
+
+    it("never draws the glTF through the still arm", async () => {
+      const job = primeMeshJob(durableMeshCompletion());
+      job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb";
+      const wrapper = mountView();
+      await flushPromises();
+      const frame = wrapper.get("[data-test='preview-frame']");
+      expect(frame.find("img").exists()).toBe(false);
+      expect(frame.find("video").exists()).toBe(false);
+      expect(frame.find("[data-test='preview-audio']").exists()).toBe(false);
+    });
+
+    it("captions the print with the geometry the viewer loaded, never 0×0", async () => {
+      const job = primeMeshJob(durableMeshCompletion());
+      job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb";
+      const wrapper = mountView();
+      await flushPromises();
+
+      // Nothing has parsed the file yet, so the caption states no size at all
+      // rather than the canvasless recipe's zero canvas.
+      expect(wrapper.get("[data-test='generation-edge-code']").text()).not.toContain("0×0");
+
+      wrapper.findComponent(MeshViewer).vm.$emit("ready", {
+        vertexCount: 148_008,
+        triangleCount: 324_748,
+        bounds: { min: [-0.78, -0.98, -0.8], max: [0.78, 0.99, 0.81] },
+      });
+      await flushPromises();
+      expect(wrapper.get("[data-test='generation-edge-code']").text()).toContain(
+        "324,748 tris · 148,008 verts",
+      );
+    });
+
+    it("names the print a mesh in the canvas menu and refuses the raster actions", async () => {
+      const job = primeMeshJob(durableMeshCompletion());
+      job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb";
+      const wrapper = mountView();
+      await flushPromises();
+      await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
+      const entries = useContextMenuStore().entries.filter((entry) => !("separator" in entry));
+      const labelled = (label: string) =>
+        entries.find((entry) => !("separator" in entry) && entry.label === label);
+      // The save entry names what it would save; binary glTF is neither an
+      // image to copy nor conditioning to feed back in.
+      expect(labelled("Save mesh")).toBeDefined();
+      expect(labelled("Save image")).toBeUndefined();
+      expect(labelled("Copy image")).toMatchObject({ disabled: true });
+      expect(labelled("Use as source")).toMatchObject({ disabled: true });
     });
   });
 

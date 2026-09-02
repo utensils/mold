@@ -15,6 +15,7 @@ import {
 } from "./generationProfile";
 import {
   isFlux2DevModel,
+  isMeshFamily,
   isQwenImageEditFamily,
   isWanFamily,
   legacyPromptRequirementForFamily,
@@ -463,7 +464,14 @@ export function baseGenerationCapabilities(
         : legacySupportsStrength(normalized, model),
     promptMode:
       profileCaps?.prompt?.mode ?? legacyPromptRequirementForFamily(normalized),
-    canvasless: recipeIsCanvasless(advertisedRecipe),
+    // An advertised recipe answers; the pre-profile family rule answers for
+    // everything else. A 3-D family renders no pixel canvas whether or not a
+    // recipe is in hand, and reading absence as "has a canvas" is what let a
+    // Shape and Resolution pair bind to a mesh model's 0 × 0 — a `NaN×NaN px`
+    // control under a validation error no user could clear.
+    canvasless: advertisedRecipe
+      ? recipeIsCanvasless(advertisedRecipe)
+      : isMeshFamily(normalized),
     mesh: profileCaps?.mesh ?? undefined,
     forcesBatchSizeOne: h3 || qwenEdit,
   };

@@ -73,7 +73,7 @@ import {
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
 import { promptInputForForm, promptRecipeFromForm } from "../lib/promptRecipe";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
-import { isMeshCompletion } from "@studio/lib/meshCompletion";
+import { isMeshArtifact } from "@studio/lib/meshCompletion";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
@@ -2311,11 +2311,15 @@ const edgeCode = computed(() => {
   // A mesh has no pixels to describe — `width`/`height` are its poster's, not
   // the print's — so its geometry is the provenance: the one shared caption
   // every surface writes under a 3-D print.
-  const size = isMeshCompletion(j.result)
+  // A durable child reports no counts at all, so the viewer's own `ready`
+  // facts answer for it. Neither authority may fall back to `width × height`:
+  // a canvasless recipe requests 0 × 0 by contract, and printing that reads
+  // as a failed render rather than as "this print has no pixels".
+  const size = isMeshArtifact(j.result)
     ? meshStatsLabel(
-        j.result?.mesh_vertices,
-        j.result?.mesh_faces,
-        j.result?.mesh_bounds_min,
+        j.result?.mesh_vertices ?? viewerMeshStats.value?.vertexCount,
+        j.result?.mesh_faces ?? viewerMeshStats.value?.triangleCount,
+        j.result?.mesh_bounds_min ?? viewerMeshStats.value?.bounds,
         j.result?.mesh_bounds_max,
       )
     : j.result
@@ -2381,45 +2385,45 @@ function isAudioResult(job: { result: CompleteEvent | null } | null): boolean {
  * binary glTF through an `<img>`.
  */
 function isMeshResult(job: { result: CompleteEvent | null } | null): boolean {
-  return isMeshCompletion(job?.result);
+  return isMeshArtifact(job?.result);
 }
 
 /** The rendered PNG a mesh print carries — its only raster, and the viewer's
  * poster while the geometry loads (and forever, if it cannot). */
 const resultMeshPoster = computed(() => {
   const result = job.value?.result;
-  return isMeshCompletion(result) && result?.mesh_poster
+  return isMeshArtifact(result) && result?.mesh_poster
     ? `data:image/png;base64,${result.mesh_poster}`
     : "";
 });
 
 /**
- * The GLB the viewer loads, as an object URL.
+ * The GLB the viewer loads from INLINE bytes, as an object URL.
  *
  * A `data:model/gltf-binary` URL would re-encode tens of megabytes of
  * geometry into the DOM on every render; a Blob keeps the bytes out of the
  * document and is revoked the moment the canvas moves on, so a session of
  * meshes cannot leak them.
  */
-const resultMeshSrc = ref("");
+const inlineMeshSrc = ref("");
 let revokeResultMesh: (() => void) | null = null;
 watch(
   () => {
     const result = job.value?.result;
-    return isMeshCompletion(result) && result?.image ? result.image : "";
+    return isMeshArtifact(result) && result?.image ? result.image : "";
   },
   (base64) => {
     revokeResultMesh?.();
     revokeResultMesh = null;
     if (!base64) {
-      resultMeshSrc.value = "";
+      inlineMeshSrc.value = "";
       return;
     }
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
     const url = URL.createObjectURL(new Blob([bytes], { type: "model/gltf-binary" }));
-    resultMeshSrc.value = url;
+    inlineMeshSrc.value = url;
     revokeResultMesh = () => URL.revokeObjectURL(url);
   },
   { immediate: true },
@@ -2428,6 +2432,48 @@ onBeforeUnmount(() => {
   revokeResultMesh?.();
   revokeResultMesh = null;
 });
+
+/**
+ * What the viewer actually loads.
+ *
+ * A durable batch child names a FILE, not bytes: `applyDurableCompletion`
+ * synthesizes the completion from that name and the media arrives separately
+ * as `job.resultUrl`, already authorized for this host (a media ticket or a
+ * blob the app fetched). Since every Create submit goes through the durable
+ * route, that is the ordinary case, and keying the viewer on inline bytes
+ * alone left the canvas to the `<img>` arm — the broken-resource icon over
+ * black that the acceptance pass saw after every finished 3-D print. The
+ * Library's own mesh viewer has always been handed a URL exactly like this
+ * one, which is why the same file opened there correctly.
+ */
+const resultMeshSrc = computed(() => {
+  if (inlineMeshSrc.value) return inlineMeshSrc.value;
+  const j = job.value;
+  return isMeshArtifact(j?.result) && j?.resultUrl ? j.resultUrl : "";
+});
+
+/**
+ * The geometry the mounted viewer parsed, for a print whose completion
+ * reported none. The server publishes the counts only on the live SSE
+ * completion; the viewer has the file open either way, so its own `ready`
+ * facts are the caption's second authority rather than the canvasless
+ * recipe's zero canvas. Cleared whenever the canvas moves to another print.
+ */
+type ViewerMeshStats = {
+  vertexCount: number;
+  triangleCount: number;
+  bounds: { min: readonly number[]; max: readonly number[] };
+};
+const viewerMeshStats = ref<ViewerMeshStats | null>(null);
+watch(
+  () => resultMeshSrc.value,
+  () => {
+    viewerMeshStats.value = null;
+  },
+);
+function onResultMeshReady(stats: ViewerMeshStats): void {
+  viewerMeshStats.value = stats;
+}
 
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
@@ -4657,6 +4703,7 @@ onBeforeUnmount(() => {
                   :alt="job?.prompt || 'Generated 3-D mesh'"
                   auto-rotate
                   expandable
+                  @ready="onResultMeshReady"
                 />
                 <!-- Audio is checked next: an audio print has no frames, so
                      the video probe falls through and the <img> below renders
