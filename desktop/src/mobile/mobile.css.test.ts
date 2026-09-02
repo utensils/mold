@@ -13,6 +13,7 @@ const sharedParamsComponent = readFileSync("src/mobile/MobileSharedParams.vue", 
 const seamPillComponent = readFileSync("../ui/components/SeamPill.vue", "utf8");
 const liveActivityComponent = readFileSync("../ui/components/LiveActivityList.vue", "utf8");
 const swipeActionRowComponent = readFileSync("../studio/components/SwipeActionRow.vue", "utf8");
+const galleryViewerComponent = readFileSync("src/mobile/MobileGalleryViewer.vue", "utf8");
 
 describe("mobile theme bootstrap", () => {
   it("paints fresh installs as Safelight Dark before Vue mounts", () => {
@@ -603,6 +604,46 @@ describe("mobile gallery viewer", () => {
     expect(expanded?.[1]).toMatch(/transform:\s*translateY\(var\(--viewer-sheet-drag, 0px\)\)\s*;/);
     // The handle's own height is the peek the stage reserved, minus the inset.
     expect(handle?.[1]).toMatch(/min-height:\s*68px\s*;/);
+  });
+
+  /**
+   * The scrim dims the media and swallows its taps, but Close is chrome, not
+   * media: it has to stay reachable with the sheet open. Paint order is the
+   * whole answer — header over sheet over scrim over stage.
+   */
+  it("keeps Close reachable above the sheet and its scrim", () => {
+    const layer = (source: string, selector: string): number => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rule = source.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`, "s"));
+      return Number(rule?.[1]?.match(/z-index:\s*(\d+)\s*;/)?.[1]);
+    };
+
+    expect(layer(css, ".gallery-viewer-header")).toBeGreaterThan(
+      layer(css, ".gallery-viewer-sheet"),
+    );
+    expect(layer(css, ".gallery-viewer-sheet")).toBeGreaterThan(
+      layer(css, ".gallery-viewer-sheet-scrim"),
+    );
+    // The stage's own arrows stay under the scrim: they page the gallery the
+    // sheet is describing, so they are media, not chrome.
+    expect(layer(css, ".gallery-viewer-sheet-scrim")).toBeGreaterThan(
+      layer(galleryViewerComponent, ".gallery-viewer-nav"),
+    );
+  });
+
+  /** A reveal drag has to reveal something, so the body shows while dragging. */
+  it("shows the sheet body while the sheet is being dragged open", () => {
+    expect(css).toMatch(
+      /\.gallery-viewer-sheet\.is-dragging\s+\.gallery-viewer-details\s*\{\s*visibility:\s*visible;/,
+    );
+  });
+
+  /** The stage is the viewport now: a transport with no height floats at its top. */
+  it("gives the audio transport the whole stage, like every other medium", () => {
+    const audio = galleryViewerComponent.match(/\.gallery-viewer-audio\s*\{([^}]*)\}/s);
+
+    expect(audio?.[1]).toMatch(/height:\s*100%\s*;/);
+    expect(audio?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
   });
 
   it("drops the sheet's spring, not the sheet, under reduced motion", () => {

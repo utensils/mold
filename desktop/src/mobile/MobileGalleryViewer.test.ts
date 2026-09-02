@@ -1801,3 +1801,111 @@ describe("MobileGalleryViewer mesh export", () => {
     expect(view.find("[data-test='gallery-viewer-mesh-save']").exists()).toBe(false);
   });
 });
+
+describe("MobileGalleryViewer sheet review fixes", () => {
+  async function dragFrom(
+    view: VueWrapper,
+    selector: string,
+    deltaY: number,
+    deltaX = 0,
+  ): Promise<void> {
+    const surface = view.get(selector);
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    await surface.trigger("pointerdown", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointerup", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180 + deltaX,
+      clientY: 600 + deltaY,
+    });
+  }
+
+  async function expand(view: VueWrapper): Promise<void> {
+    await view.get("[data-test='gallery-viewer-sheet-handle']").trigger("click");
+  }
+
+  /**
+   * A scrolled list owns its own downward drag — but only the list. The
+   * handle is the sheet's own grip, and a pull on it always closes the sheet,
+   * whatever the body underneath happens to be showing.
+   */
+  it("collapses a scrolled sheet when the drag starts on the handle", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+    view.get("[data-test='gallery-viewer-sheet-body']").element.scrollTop = 120;
+
+    await dragFrom(view, "[data-test='gallery-viewer-sheet-handle']", 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  it("leaves a scrolled body's own downward drag to the list", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+    view.get("[data-test='gallery-viewer-sheet-body']").element.scrollTop = 120;
+
+    await dragFrom(view, "[data-test='gallery-viewer-sheet-body']", 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+  });
+
+  /** A body at its top has nothing to scroll, so the drag is the sheet's. */
+  it("collapses from the body once it is scrolled back to the top", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+
+    await dragFrom(view, "[data-test='gallery-viewer-sheet-body']", 120);
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  /** A new print must not open onto the previous print's scroll offset. */
+  it("returns the sheet body to its top when the print changes", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const body = view.get("[data-test='gallery-viewer-sheet-body']").element;
+    await expand(view);
+    body.scrollTop = 140;
+
+    await view.setProps({ item: { ...image, filename: "print two.png" } });
+    await flushPromises();
+    expect(body.scrollTop).toBe(0);
+  });
+
+  /**
+   * Escape is the phone's Back: it undoes the last thing that opened. With
+   * the sheet up that is the sheet, and only then the viewer itself.
+   */
+  it("collapses the sheet on the first Escape and closes on the second", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+
+    await view.get("dialog").trigger("cancel");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+    expect(view.emitted("close")).toBeUndefined();
+
+    await view.get("dialog").trigger("cancel");
+    expect(view.emitted("close")).toHaveLength(1);
+  });
+
+  /** Focus was inside the sheet; collapsing must not strand it on nothing. */
+  it("returns focus to the handle when the sheet collapses", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await expand(view);
+    (view.get("[data-test='gallery-viewer-reuse']").element as HTMLElement).focus();
+
+    await view.get("[data-test='gallery-viewer-sheet-scrim']").trigger("click");
+    expect(document.activeElement).toBe(
+      view.get("[data-test='gallery-viewer-sheet-handle']").element,
+    );
+  });
+});

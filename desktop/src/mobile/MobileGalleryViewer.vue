@@ -293,17 +293,28 @@ let sheetStartX = 0;
 let sheetStartY = 0;
 let sheetTravel = 0;
 let sheetSuppressClick = false;
+let sheetDragStartedInBody = false;
 
 function collapseSheet(): void {
+  if (!sheetExpanded.value) return;
   sheetExpanded.value = false;
+  // Focus was inside the body that just went out of view. The handle is what
+  // replaces it on screen, so it is what replaces it in the focus order.
+  sheetHandle.value?.focus?.();
 }
 
 function toggleSheet(): void {
-  sheetExpanded.value = !sheetExpanded.value;
+  if (sheetExpanded.value) collapseSheet();
+  else sheetExpanded.value = true;
 }
 
-function sheetBodyScrolled(): boolean {
-  return (sheetBody.value?.scrollTop ?? 0) > 0;
+/**
+ * Whether the LIST should keep this drag. Only a drag that began inside the
+ * scrolling body can be the list scrolling back to its top; a pull on the
+ * handle is the sheet's own grip and always closes it.
+ */
+function sheetDragBelongsToBody(): boolean {
+  return sheetDragStartedInBody && (sheetBody.value?.scrollTop ?? 0) > 0;
 }
 
 function beginSheetDrag(event: PointerEvent): void {
@@ -320,6 +331,8 @@ function beginSheetDrag(event: PointerEvent): void {
   sheetPointerId = event.pointerId;
   sheetStartX = event.clientX;
   sheetStartY = event.clientY;
+  sheetDragStartedInBody =
+    event.target instanceof Node && !!sheetBody.value?.contains(event.target);
   // How far the sheet can travel: its own height, less the peek that stays.
   sheetTravel = Math.max(
     0,
@@ -342,7 +355,7 @@ function trackSheetDrag(event: PointerEvent): void {
     sheetDrag.value = 0;
     return;
   }
-  if (sheetExpanded.value && sheetBodyScrolled()) return;
+  if (sheetExpanded.value && sheetDragBelongsToBody()) return;
   sheetDragging.value = true;
   sheetDrag.value = sheetExpanded.value
     ? Math.max(0, Math.min(sheetTravel, deltaY))
@@ -359,7 +372,7 @@ function finishSheetDrag(event: PointerEvent): void {
     deltaX,
     deltaY,
     expanded: sheetExpanded.value,
-    scrolled: sheetBodyScrolled(),
+    scrolled: sheetDragBelongsToBody(),
   });
   if (gesture === "none") return;
   // A drag that ends on a control must not also fire that control.
@@ -637,7 +650,16 @@ function mediaFailed(): void {
     : "Couldn’t load the full print from this host.";
 }
 
+/**
+ * Escape is the phone's Back: it undoes the last thing that opened. With
+ * the details sheet up that is the sheet; the viewer itself goes on the next
+ * one.
+ */
 function cancelViewer(): void {
+  if (sheetExpanded.value) {
+    collapseSheet();
+    return;
+  }
   emit("close");
 }
 
@@ -754,6 +776,8 @@ watch(
   () => {
     collapseSheet();
     resetSheetDrag();
+    // The next print's details start at the top, not at this one's offset.
+    if (sheetBody.value) sheetBody.value.scrollTop = 0;
     actionStatus.value = "";
     meshStats.value = null;
     mediaDurationMs.value = null;
@@ -1226,7 +1250,12 @@ onBeforeUnmount(() => {
         </span>
       </button>
 
-      <div id="gallery-viewer-sheet-body" ref="sheetBody" class="gallery-viewer-details">
+      <div
+        id="gallery-viewer-sheet-body"
+        ref="sheetBody"
+        class="gallery-viewer-details"
+        data-test="gallery-viewer-sheet-body"
+      >
         <div class="gallery-viewer-prompt">
           <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{
             preparedPosition
@@ -1872,14 +1901,18 @@ onBeforeUnmount(() => {
   -webkit-touch-callout: default;
 }
 
-/* Audio has no raster to fill the stage: waveform above, transport below. */
+/* Audio has no raster to fill the stage: waveform above, transport below.
+   The stage is the whole viewport now, so this has to claim its height the
+   way an image does, or the transport floats against the header. */
 .gallery-viewer-audio {
   display: flex;
+  width: 100%;
+  height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  width: 100%;
+  box-sizing: border-box;
   padding: 1rem;
 }
 

@@ -3095,10 +3095,12 @@ button:disabled {
   background: #08070c;
 }
 
-/* A thin translucent overlay, not a row that costs the media its height. */
+/* A thin translucent overlay, not a row that costs the media its height.
+   It sits ABOVE the sheet and its scrim: the scrim swallows taps on the
+   media, but Close is chrome, and chrome stays reachable. */
 .gallery-viewer-header {
   position: absolute;
-  z-index: 4;
+  z-index: 8;
   top: 0;
   right: 0;
   left: 0;
@@ -3260,6 +3262,11 @@ button:disabled {
 /* Collapsed, the body is out of view AND out of the focus order. */
 .gallery-viewer-sheet:not(.is-expanded) .gallery-viewer-details {
   visibility: hidden;
+}
+
+/* A reveal drag has to reveal something: the body shows the moment it moves. */
+.gallery-viewer-sheet.is-dragging .gallery-viewer-details {
+  visibility: visible;
 }
 
 .gallery-viewer-sheet-handle {
