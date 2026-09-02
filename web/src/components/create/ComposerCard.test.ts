@@ -39,6 +39,33 @@ describe("ComposerCard", () => {
     expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
+  it("tags a ↑/↓ history recall so the page can release a quick expansion", async () => {
+    const wrapper = factory({ prompt: "storm light", history: ["newest"] });
+    const ta = wrapper.get("[data-test='composer-prompt']");
+    const el = ta.element as HTMLTextAreaElement;
+    el.setSelectionRange(0, 0);
+    await ta.trigger("keydown", { key: "ArrowUp" });
+    expect(wrapper.emitted("update:prompt")?.at(-1)).toEqual([
+      "newest",
+      "recalled",
+    ]);
+    el.setSelectionRange(el.value.length, el.value.length);
+    await ta.trigger("keydown", { key: "ArrowDown" });
+    expect(wrapper.emitted("update:prompt")?.at(-1)).toEqual([
+      "storm light",
+      "recalled",
+    ]);
+  });
+
+  it("tags hand edits as typing so a quick expansion keeps its stale recovery", async () => {
+    const wrapper = factory();
+    await wrapper.get("[data-test='composer-prompt']").setValue("edited");
+    expect(wrapper.emitted("update:prompt")?.at(-1)).toEqual([
+      "edited",
+      "typed",
+    ]);
+  });
+
   it("recalls prompt history with ArrowUp/ArrowDown at the caret edges", async () => {
     const wrapper = factory({ prompt: "", history: ["newest", "older"] });
     const ta = wrapper.get("[data-test='composer-prompt']");
@@ -98,6 +125,7 @@ describe("ComposerCard", () => {
     await wrapper.get("[data-test='composer-prompt']").trigger("input");
     expect(wrapper.emitted("update:prompt")?.[0]).toEqual([
       "a lighthouse in a storm",
+      "typed",
     ]);
   });
 

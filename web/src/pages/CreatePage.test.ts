@@ -3104,6 +3104,108 @@ describe("CreatePage layout and behavior", () => {
     });
   });
 
+  it("releases a quick expansion when ↑ recalls a history prompt instead of raising the stale banner", async () => {
+    const fluxModel = {
+      name: "flux-dev:q4",
+      family: "flux",
+      description: "Flux Dev Q4",
+      size_gb: 4,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 20,
+      default_guidance: 3.5,
+      is_loaded: false,
+      hf_repo: "",
+      downloaded: true,
+      last_used: null,
+    };
+    hostModelsMock.mockResolvedValue([fluxModel]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = fluxModel.name;
+    form.state.value.modelFamily = fluxModel.family;
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.stylePreset = "cinematic";
+    form.state.value.negativePrompt = "text";
+    await nextTick();
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await nextTick();
+    expect(form.state.value.originalPrompt).toBe("a lighthouse");
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(true);
+
+    wrapper
+      .getComponent({ name: "ComposerCard" })
+      .vm.$emit("update:prompt", "yesterday's harbour", "recalled");
+    await nextTick();
+
+    // The recalled prompt is the user's own: no banner, no undo, no
+    // provenance, and the chip the bake cleared comes back with its negative.
+    expect(form.state.value.prompt).toBe("yesterday's harbour");
+    expect(form.state.value.originalPrompt).toBeNull();
+    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.negativePrompt).toBe("text");
+    expect(wrapper.find("[data-test='web-quick-expansion-stale']").exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    // The re-armed chip applies the look at submit, exactly as it would have
+    // before the expansion ever ran; nothing from the rewrite rides along.
+    const request = submitMock.mock.calls[0]?.[0];
+    expect(request.prompt).toContain("yesterday's harbour");
+    expect(request.prompt).toContain("cinematic");
+    expect(request.original_prompt).toBeUndefined();
+    expect(request.prompt_transform).toBeUndefined();
+  });
+
+  it("keeps the stale banner for hand edits so recovery stays available", async () => {
+    const fluxModel = {
+      name: "flux-dev:q4",
+      family: "flux",
+      description: "Flux Dev Q4",
+      size_gb: 4,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 20,
+      default_guidance: 3.5,
+      is_loaded: false,
+      hf_repo: "",
+      downloaded: true,
+      last_used: null,
+    };
+    hostModelsMock.mockResolvedValue([fluxModel]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = fluxModel.name;
+    form.state.value.modelFamily = fluxModel.family;
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await nextTick();
+
+    wrapper
+      .getComponent({ name: "ComposerCard" })
+      .vm.$emit("update:prompt", "storm light over the harbor, edited", "typed");
+    await nextTick();
+
+    expect(form.state.value.originalPrompt).toBe("a lighthouse");
+    expect(
+      wrapper.get("[data-test='web-quick-expansion-stale']").text(),
+    ).toContain("Expanded prompt changed after it was prepared.");
+  });
+
   it("freezes a quick expansion to its host and sends original-prompt provenance", async () => {
     const studio = addHost({
       url: "http://studio:7680",
@@ -5335,12 +5437,13 @@ function pageStubs() {
         "cancellable",
         "busyLabel",
         "disabledReason",
+        "expanded",
         "placeholder",
         "promptOptional",
         "transformBlockedReason",
       ],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },

@@ -76,7 +76,11 @@ import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isMeshArtifact } from "@studio/lib/meshCompletion";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import MeshViewer from "@studio/components/MeshViewer.vue";
-import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
+import {
+  applyAuthoredPrompt,
+  quickTransformSurvivesAuthoring,
+  type PromptAuthoringSource,
+} from "@studio/lib/promptProvenance";
 import {
   applyMinimaxH3ReferenceCrops,
   emptyMinimaxH3AuthoringState,
@@ -3045,13 +3049,23 @@ function bakeStyleNegative(presetId: string, family: string) {
   form.negativePrompt = merged;
 }
 
-function restoreQuickExpansion() {
-  const original = quickExpansionOriginal.value;
-  if (original === null) return;
+/** True while a quick expansion still owns the composer: its frozen route,
+ * its undo, or the style it baked into the prompt. */
+function quickExpansionActive(): boolean {
+  return quickExpansionSnapshot.value !== null || quickExpansionOriginal.value !== null;
+}
+
+/**
+ * Drop every trace of a quick expansion without touching the prompt text:
+ * the frozen route snapshot, the undo, the provenance, and the chip and
+ * negative fragments the bake-and-clear apply consumed — unless the user has
+ * edited the negative since, which is theirs to keep. Undo re-arms the
+ * pre-expansion state through here and then puts the original prompt back;
+ * a history recall goes through here and then installs the recalled prompt.
+ */
+function releaseQuickExpansion() {
+  if (!quickExpansionActive()) return;
   submissionGuard.invalidate();
-  // Undo re-arms the whole pre-expansion state, including the chip the
-  // bake-and-clear apply removed and the negative fragments it merged in —
-  // unless the user has edited the negative since, which is theirs to keep.
   const snapshot = quickExpansionSnapshot.value;
   if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
   const negative = quickExpansionNegative.value;
@@ -3059,11 +3073,17 @@ function restoreQuickExpansion() {
     form.negativePrompt = negative.before;
   }
   quickExpansionNegative.value = null;
-  form.prompt = original;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
   quickExpansionSnapshot.value = null;
   expansionError.value = null;
+}
+
+function restoreQuickExpansion() {
+  const original = quickExpansionOriginal.value;
+  if (original === null) return;
+  releaseQuickExpansion();
+  form.prompt = original;
 }
 
 async function generateExpandedAnyway() {
@@ -3348,8 +3368,12 @@ function appendPromptWord(word: string) {
   onPromptAuthored(form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed);
 }
 
-function onPromptAuthored(prompt: string) {
-  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null);
+function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed") {
+  // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
+  // nothing left to describe: release it instead of raising the stale banner
+  // whose recovery actions would re-expand a prompt no longer on screen.
+  if (!quickTransformSurvivesAuthoring(source)) releaseQuickExpansion();
+  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null, source);
 }
 
 /** Status line while the source is upscaled/refit ahead of the submit. */
@@ -3556,7 +3580,7 @@ const generationInputBlockerReason = computed<string | null>(() => {
   if (!form.model) return "Choose an installed model before generating.";
   if (chainValidationError.value) return chainValidationError.value;
   if (quickStaleReasons.value.length > 0) {
-    return "The prepared rewrite no longer matches this model or machine. Choose a recovery action above.";
+    return "The prepared rewrite no longer matches the prompt, model, or machine. Choose a recovery action above.";
   }
   if (expansionRunning.value) return "Wait for prompt preparation to finish.";
   return null;

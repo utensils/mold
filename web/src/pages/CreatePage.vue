@@ -59,7 +59,11 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
-import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
+import {
+  applyAuthoredPrompt,
+  quickTransformSurvivesAuthoring,
+  type PromptAuthoringSource,
+} from "@studio/lib/promptProvenance";
 import {
   expansionContextForRequest,
   expansionTaskForRequest,
@@ -2790,8 +2794,20 @@ function onShowSequenceHistory() {
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
-function onPromptAuthored(prompt: string) {
-  applyAuthoredPrompt(form.state.value, prompt, quickPrepared.value !== null);
+function onPromptAuthored(
+  prompt: string,
+  source: PromptAuthoringSource = "typed",
+) {
+  // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
+  // nothing left to describe: release it instead of raising the stale banner
+  // whose recovery actions would re-expand a prompt no longer on screen.
+  if (!quickTransformSurvivesAuthoring(source)) releaseQuickExpansion();
+  applyAuthoredPrompt(
+    form.state.value,
+    prompt,
+    quickPrepared.value !== null,
+    source,
+  );
 }
 
 function onAppendPromptPhrase(phrase: string) {
@@ -4619,13 +4635,16 @@ function applyExpandedPrompt(v: string) {
   bakeStyleAndClear();
 }
 
-function undoExpand() {
-  if (prevPrompt.value === null) return;
-  form.state.value.prompt = prevPrompt.value;
-  form.state.value.originalPrompt = prevOriginalPrompt.value;
-  // Undo re-arms the whole pre-expansion state: prompt, chip, and the negative
-  // fragments the bake merged in — unless the user has edited the negative
-  // since, which is theirs to keep.
+/**
+ * Drop every trace of a quick expansion without touching the prompt text:
+ * the frozen route snapshot, the undo, and the chip and negative fragments
+ * the bake merged in — unless the user has edited the negative since, which
+ * is theirs to keep. Undo goes through here and then puts the original prompt
+ * back; a history recall goes through here and then installs the recalled
+ * prompt, so no stale banner can point at a rewrite that is no longer shown.
+ */
+function releaseQuickExpansion() {
+  if (prevPrompt.value === null && quickPrepared.value === null) return;
   const style = prevStyle.value;
   if (style) {
     form.state.value.stylePreset = style.preset;
@@ -4637,6 +4656,16 @@ function undoExpand() {
   prevOriginalPrompt.value = null;
   prevStyle.value = null;
   quickPrepared.value = null;
+  composerError.value = null;
+}
+
+function undoExpand() {
+  const prompt = prevPrompt.value;
+  if (prompt === null) return;
+  const originalPrompt = prevOriginalPrompt.value;
+  releaseQuickExpansion();
+  form.state.value.prompt = prompt;
+  form.state.value.originalPrompt = originalPrompt;
 }
 
 // ── Variations review (batch > 1) ─────────────────────────────────────
