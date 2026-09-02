@@ -254,6 +254,12 @@ impl PromptRequirement {
     pub fn is_required(self) -> bool {
         self == Self::Required
     }
+
+    /// Whether the recipe reads the prompt at all. When it does not, there
+    /// is nothing for prompt expansion or remix to do either.
+    pub fn is_ignored(self) -> bool {
+        self == Self::Ignored
+    }
 }
 
 /// The prompt's complete admission contract for one recipe.

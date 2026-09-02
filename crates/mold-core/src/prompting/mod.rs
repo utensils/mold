@@ -636,6 +636,34 @@ pub fn excerpt(markdown: &str, word_limit: u32) -> String {
     substitute(collapsed.trim(), word_limit)
 }
 
+/// Render ONE H2 section of a corpus file the way [`excerpt`] renders a whole
+/// file: the section body without its heading, shell fences dropped, and the
+/// placeholders substituted. `None` when the file has no such section (title
+/// match is case-insensitive) or the body is empty.
+///
+/// This is how a surface quotes a single piece of a guide — a family that
+/// reads no prompt answers `mold expand` with its `Generation context`
+/// section — without a second copy of that prose living in Rust.
+pub fn section_excerpt(markdown: &str, title: &str, word_limit: u32) -> Option<String> {
+    let mut body = String::new();
+    let mut inside = false;
+    for line in markdown.lines() {
+        if let Some(heading) = line.trim_start().strip_prefix("## ") {
+            if inside {
+                break;
+            }
+            inside = heading.trim().eq_ignore_ascii_case(title.trim());
+            continue;
+        }
+        if inside {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    let rendered = excerpt(&body, word_limit);
+    (!rendered.is_empty()).then_some(rendered)
+}
+
 fn collapse_blank_lines(text: &str) -> String {
     let mut out = String::new();
     let mut blank = false;
@@ -796,6 +824,17 @@ pub fn render_generation_context(
             described.join("; ")
         ));
     }
+    match context.prompt_mode {
+        Some(crate::generation_profile::PromptRequirement::Ignored) => lines.push(
+            "Prompt: not read by this model; the attached image is the whole conditioning, so there is nothing for the text to change."
+                .to_string(),
+        ),
+        Some(crate::generation_profile::PromptRequirement::Optional) => lines.push(
+            "Prompt: optional; the attached media conditions the render and the text refines it."
+                .to_string(),
+        ),
+        Some(crate::generation_profile::PromptRequirement::Required) | None => {}
+    }
     match context.negative_prompt_supported {
         Some(true) => lines.push(
             "Negative prompt: supported; keep unwanted traits out of the positive prompt."
@@ -872,6 +911,31 @@ mod tests {
                 _ => assert_eq!(leaves, 0, "{}", manifest.name),
             }
         }
+    }
+
+    #[test]
+    fn section_excerpt_renders_exactly_one_titled_section() {
+        let guide = family_guide("hunyuan3d").unwrap();
+        let section =
+            section_excerpt(guide.contents, "Generation context", guide.word_limit).unwrap();
+        assert!(
+            section.starts_with("Three properties of the image"),
+            "{section}"
+        );
+        assert!(section.contains("three-quarter"), "{section}");
+        assert!(!section.contains("## "), "{section}");
+        assert!(!section.contains("Write no prompt"), "{section}");
+        assert_eq!(
+            section_excerpt(guide.contents, "generation CONTEXT", guide.word_limit).as_deref(),
+            Some(section.as_str()),
+            "title match is case-insensitive"
+        );
+        assert!(section_excerpt(guide.contents, "No such section", 40).is_none());
+        // An agent-only section asked for by name is rendered without its
+        // shell fences, the same way the excerpt treats every other file.
+        let cli = section_excerpt(guide.contents, "CLI", guide.word_limit).unwrap();
+        assert!(!cli.contains("```"), "{cli}");
+        assert!(cli.contains("--octree"), "{cli}");
     }
 
     #[test]
@@ -1139,6 +1203,7 @@ mod tests {
                 audio: Some(false),
                 references: vec![ExpandReference::image(ExpandReferenceRole::FirstFrame)],
                 loras: vec!["paper-boat".into()],
+                prompt_mode: None,
             },
         );
         assert!(
