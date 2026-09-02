@@ -1261,6 +1261,8 @@ TI2V identities or any source frame.
 ```bash
 # Wan 2.1 text-to-video (frames are 4k+1: 49, 81, 121, ...; MP4 default)
 mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
+# 3-step DMD distill of the same 1.3B (no CFG; steps/solver/shift are pinned)
+mold run wan21-t2v-1.3b:turbo "a red fox trotting through snow" --frames 81 --fps 16
 # Wan 2.1 14B, the dense 2.1 quality tier (a bare name resolves :q8)
 mold run wan21-t2v-14b "a red fox trotting through snow"
 # Wan 2.2 A14B, 4-step Lightning tier (two experts, one resident at a time)

@@ -50,7 +50,8 @@ use crate::wan::model::transformer::WanTransformer;
 use crate::wan::model::transformer::WanTransformerConfig;
 use crate::wan::model::vae::{WanVaeConfig, WanVideoVae};
 use crate::wan::sampler::{
-    apply_cfg, FlowDpmPp, FlowEuler, FlowUniPc, WanSchedule, WanScheduleConfig, WanSolver,
+    apply_cfg, FlowDmd, FlowDpmPp, FlowEuler, FlowUniPc, WanSchedule, WanScheduleConfig, WanSolver,
+    DMD_TABLE_SHIFT,
 };
 use crate::wan::text::umt5::WanTextEncoder;
 
@@ -65,6 +66,18 @@ const FLOW_SHIFT_ENV: &str = "MOLD_WAN_SHIFT";
 
 /// Temporal compression is 4x for both VAE generations.
 const VAE_TEMPORAL_COMPRESSION: usize = 4;
+
+/// Domain separator for a DMD rung's re-noise draw.
+///
+/// Chain stages derive their seeds by XOR — `base_seed ^ seed_offset`
+/// (`mold_core::chain_job::effective_stage_seed`) — so a re-noise seed of
+/// `seed + index + 1` collides with a neighbouring stage's INITIAL latent:
+/// for an even base seed, offset 1 gives clip 1 exactly the draw clip 0 used
+/// for its first re-noise. Two clips of one sequence would then share a
+/// noise tensor, which is a visible repeat rather than a subtle one. XORing
+/// this constant in first moves the whole re-noise family off the stage-seed
+/// lattice; the value is ASCII `DMD_reno` and carries no other meaning.
+const DMD_RENOISE_SEED_DOMAIN: u64 = 0x444d_445f_7265_6e6f;
 
 /// Which VAE generation a checkpoint pairs with. This decides latent channel
 /// count, spatial compression, and the frame/fps defaults.
@@ -594,6 +607,9 @@ pub(crate) enum WanSolverKind {
     UniPc,
     Euler,
     DpmPp,
+    /// The DMD rung ladder. Never requested and never defaulted to — it is
+    /// implied by the checkpoint, see [`resolve_wan_solver_for_model`].
+    Dmd,
 }
 
 impl WanSolverKind {
@@ -602,6 +618,7 @@ impl WanSolverKind {
             Self::UniPc => "unipc",
             Self::Euler => "euler",
             Self::DpmPp => "dpm++",
+            Self::Dmd => "dmd",
         }
     }
 }
@@ -638,6 +655,115 @@ fn resolve_wan_solver(
     }
 }
 
+/// Resolve the solver for a named checkpoint.
+///
+/// The ladder is asked FIRST, and it is not a preference that loses to a
+/// louder one. `mold_core::manifest::wan_dmd_ladder` is the single authority
+/// for "this checkpoint is a rung-ladder distill"; when it answers, the
+/// request's `scheduler` is **refused** rather than honored and
+/// `MOLD_WAN_SOLVER` is not consulted at all. A DMD student predicts a clean
+/// latent at each fixed rung and is re-noised into the next
+/// (`fastvideo/pipelines/stages/denoising.py:1250-1400`, commit `40b93784`);
+/// integrating that checkpoint with UniPC or euler is not a slower render, it
+/// is a different and worse one, so a silently-honored override would be a
+/// wrong image, not a slow one.
+///
+/// Returns the ladder alongside the kind because the caller needs the rungs
+/// to build the schedule — there is no step/shift config that produces them.
+fn resolve_wan_solver_for_model(
+    model_name: &str,
+    requested: Option<mold_core::Scheduler>,
+    two_expert: bool,
+) -> Result<(WanSolverKind, Option<&'static [u32]>)> {
+    // Normalized the way the neighbouring `find_manifest` normalizes: the
+    // engine is handed whatever name the caller resolved, and a legacy dash
+    // or bare form must not silently miss the ladder and render the distill
+    // on UniPC.
+    let canonical = mold_core::manifest::resolve_model_name(model_name);
+    if let Some(ladder) = mold_core::manifest::wan_dmd_ladder(&canonical) {
+        if let Some(scheduler) = requested {
+            bail!(
+                "{model_name} is a DMD-distilled tier: it predicts a clean latent at each of its \
+                 {} fixed rungs and is re-noised into the next, so walking it with \
+                 '{scheduler}' is not a slower render but a different, worse one — drop \
+                 --sample-solver (or --scheduler, which fills the same slot)",
+                ladder.len()
+            );
+        }
+        return Ok((WanSolverKind::Dmd, Some(ladder)));
+    }
+    resolve_wan_solver(requested, two_expert).map(|kind| (kind, None))
+}
+
+/// Engine-side backstop for a laddered tier.
+///
+/// The generation profile already pins steps to the ladder's length, guidance
+/// to 1.0, and empties the scheduler list, and admission refuses anything
+/// else — but forced-local callers and the TUI never run profile validation,
+/// and a distill quietly walked at 30 steps or CFG 6 renders garbage rather
+/// than failing. Refuse here too, naming the tier.
+fn enforce_dmd_ladder_request(
+    model_name: &str,
+    ladder: &[u32],
+    steps: u32,
+    guidance: f64,
+    sample_shift: Option<f64>,
+) -> Result<()> {
+    if steps as usize != ladder.len() {
+        bail!(
+            "{model_name} is a {}-step DMD distill and walks exactly the rungs {ladder:?}; \
+             {steps} steps is not a longer render, it is an untrained schedule",
+            ladder.len()
+        );
+    }
+    // Exactly 1.0, matching the generation profile's fixed control: the
+    // student runs one conditional forward per rung with no unconditional
+    // branch, so every other scale — 0.0 included — is a request this tier
+    // cannot express, and the two doors must not disagree about which.
+    if (guidance - 1.0).abs() > f64::EPSILON {
+        bail!(
+            "{model_name} is a DMD distill: guidance is baked into the student and it runs one \
+             conditional forward per rung, so guidance is fixed at 1.0 on this tier and \
+             {guidance} has nothing to scale"
+        );
+    }
+    if let Some(shift) = sample_shift {
+        bail!(
+            "{model_name} reads its sigmas from FastVideo's fixed shift-{DMD_TABLE_SHIFT} table, \
+             the one the student was distilled against; --sample-shift {shift} cannot apply"
+        );
+    }
+    Ok(())
+}
+
+/// The env knobs a laddered tier reads past, disclosed rather than dropped.
+///
+/// Same norm as [`crate::wan::step_cache::WanStepCacheRefusal`]: a setting
+/// that vanishes without a word reads as "the variable does not work". Both
+/// are refusals rather than errors because they are ambient process state —
+/// a `MOLD_WAN_SHIFT` exported for an A14B render must not make the next
+/// turbo clip fail — while the same values arriving on the REQUEST are hard
+/// errors in [`enforce_dmd_ladder_request`] and
+/// [`resolve_wan_solver_for_model`].
+fn dmd_ignored_env_disclosures(ladder: &[u32]) -> Vec<String> {
+    let is_set = |name: &str| std::env::var(name).is_ok_and(|raw| !raw.trim().is_empty());
+    let mut disclosures = Vec::new();
+    if is_set(SOLVER_ENV) {
+        disclosures.push(format!(
+            "{SOLVER_ENV} ignored: this DMD tier walks its {}-rung ladder, which is not a solver \
+             choice",
+            ladder.len()
+        ));
+    }
+    if is_set(FLOW_SHIFT_ENV) {
+        disclosures.push(format!(
+            "{FLOW_SHIFT_ENV} ignored: this DMD tier reads its sigmas from FastVideo's fixed \
+             shift-{DMD_TABLE_SHIFT} table, the one the student was distilled against"
+        ));
+    }
+    disclosures
+}
+
 /// Build the selected solver over its own grid: dpm++ uses upstream's
 /// `get_sampling_sigmas` layout, UniPC and euler share the diffusers/
 /// Lightning grid.
@@ -646,6 +772,11 @@ fn build_wan_solver(kind: WanSolverKind, config: WanScheduleConfig) -> Result<Wa
         WanSolverKind::UniPc => WanSolver::UniPc(FlowUniPc::new(WanSchedule::new(config)?)),
         WanSolverKind::Euler => WanSolver::Euler(FlowEuler::new(WanSchedule::new(config)?)),
         WanSolverKind::DpmPp => WanSolver::DpmPp(FlowDpmPp::new(WanSchedule::dpmpp(config)?)),
+        // A ladder has no step/shift form: its rungs come from the manifest,
+        // so it is built at the call site from `WanSchedule::from_rungs`.
+        WanSolverKind::Dmd => {
+            bail!("the DMD solver is built from its manifest rung ladder, not a step/shift config")
+        }
     })
 }
 
@@ -1062,6 +1193,14 @@ struct DenoiseInputs<'a> {
     /// step, which is the default and is bit-identical to the pre-cache
     /// engine.
     step_cache: crate::wan::step_cache::WanStepCachePolicy,
+    /// The run's seed. Only the DMD ladder reads it — it is re-noised between
+    /// rungs and so needs a fresh Gaussian mid-loop, where every ODE solver
+    /// only ever consumes the initial latent. Derived per rung as
+    /// `seed + index + 1`, mold's own idiom for a mid-loop draw
+    /// (`ltx2/runtime.rs:3683`) rather than FastVideo's `torch.Generator`
+    /// stream: a render is exactly reproducible from its seed, but its noise
+    /// is not bit-identical to upstream's.
+    seed: u64,
 }
 
 /// The sampling loop for all three conditioning modes.
@@ -1085,6 +1224,7 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         progress,
         previewer,
         step_cache,
+        seed,
     } = inputs;
 
     // Two caches, never one: the conditional and unconditional forwards are
@@ -1195,7 +1335,24 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             }
             _ => cond,
         };
-        latents = solver.step(&velocity, index, &latents)?;
+        // Only a rung ladder ever answers yes, and only on a rung with a
+        // successor: `x_next = (1 - sigma_next) * x0 + sigma_next * noise`
+        // (`fastvideo/models/schedulers/scheduling_flow_match_euler_discrete.py:634`).
+        // Drawn here rather than inside the solver because noise is the
+        // caller's business everywhere else in this engine too.
+        let noise = if solver.wants_fresh_noise(index) {
+            // `step_with_noise` casts to the sample's dtype, so the draw
+            // stays F32 — the dtype `seeded_randn` is deterministic in.
+            Some(seeded_randn(
+                (seed ^ DMD_RENOISE_SEED_DOMAIN).wrapping_add(index as u64 + 1),
+                latents.dims(),
+                device,
+                DType::F32,
+            )?)
+        } else {
+            None
+        };
+        latents = solver.step_with_noise(&velocity, index, &latents, noise.as_ref())?;
         crate::wan::model::transformer::step_profile::report(index + 1);
 
         // Re-impose the clean frame after the step (Wan-native
@@ -1792,8 +1949,30 @@ impl WanEngine {
         let latent_frames = (num_frames as usize - 1) / VAE_TEMPORAL_COMPRESSION + 1;
         let latent_h = height as usize / vae_config.spatial_compression();
         let latent_w = width as usize / vae_config.spatial_compression();
-        let shift = resolve_flow_shift(req.sample_shift, low_noise_expert.is_some())?;
-        let solver_kind = resolve_wan_solver(req.scheduler, low_noise_expert.is_some())?;
+        // The ladder decides everything the request would otherwise pick: a
+        // DMD tier reads its sigmas from FastVideo's own fixed table, so
+        // `resolve_flow_shift` is not consulted for it at all.
+        let (solver_kind, dmd_ladder) = resolve_wan_solver_for_model(
+            &self.base.model_name,
+            req.scheduler,
+            low_noise_expert.is_some(),
+        )?;
+        let shift = match dmd_ladder {
+            Some(ladder) => {
+                enforce_dmd_ladder_request(
+                    &self.base.model_name,
+                    ladder,
+                    steps,
+                    guidance,
+                    req.sample_shift,
+                )?;
+                for disclosure in dmd_ignored_env_disclosures(ladder) {
+                    progress.info(&disclosure);
+                }
+                DMD_TABLE_SHIFT
+            }
+            None => resolve_flow_shift(req.sample_shift, low_noise_expert.is_some())?,
+        };
         let channel_concat = shape == WanConditioningShape::ChannelConcat;
         // The model's own advertised default decides whether the request's
         // scale means "I did not choose" — a community pair without a
@@ -1828,6 +2007,13 @@ impl WanEngine {
                 "Using upstream per-expert guidance ({:.1} while the high-noise expert runs, \
                  {:.1} after the boundary); pass an explicit --guidance to pin one scale",
                 guidance.high_noise, guidance.low_noise
+            ));
+        }
+        if let Some(ladder) = dmd_ladder {
+            progress.info(&format!(
+                "DMD distill: walking the fixed rungs {ladder:?} on FastVideo's shift-{:.1} \
+                 sigma table (one conditional forward per rung, re-noised between them)",
+                DMD_TABLE_SHIFT
             ));
         }
         if !needs_cfg {
@@ -2005,8 +2191,13 @@ impl WanEngine {
         // The solver owns its grid: dpm++ lays sigmas out differently from
         // the diffusers/Lightning grid UniPC and euler share (#795), so the
         // schedule must come FROM the solver, never be built beside it.
-        let mut solver =
-            build_wan_solver(solver_kind, WanScheduleConfig::new(steps as usize, shift))?;
+        let mut solver = match dmd_ladder {
+            Some(ladder) => WanSolver::Dmd(FlowDmd::new(WanSchedule::from_rungs(
+                ladder,
+                DMD_TABLE_SHIFT,
+            )?)),
+            None => build_wan_solver(solver_kind, WanScheduleConfig::new(steps as usize, shift))?,
+        };
         let schedule = solver.schedule().clone();
         let mut experts = self.resolve_experts(
             req,
@@ -2088,6 +2279,7 @@ impl WanEngine {
             progress,
             previewer: previewer.as_ref(),
             step_cache,
+            seed,
         })?;
         progress.checkpoint()?;
         drop(experts);
@@ -4320,6 +4512,7 @@ mod tests {
                 progress: &quiet,
                 previewer: None,
                 step_cache: policy,
+                seed: 7,
             })
             .unwrap()
             .flatten_all()
@@ -4421,6 +4614,7 @@ mod tests {
             progress: &progress,
             previewer: Some(&previewer),
             step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
+            seed: 7,
         })
         .unwrap();
         let loop_pngs: Vec<(usize, Vec<u8>)> = {
@@ -4493,6 +4687,282 @@ mod tests {
         );
     }
 
+    /// A DMD tier's solver is decided by the manifest ladder and by nothing
+    /// else: the env fallback cannot reach it and an explicit `scheduler` is
+    /// refused rather than honored. Every other Wan tier keeps the old
+    /// request > env > UniPC precedence.
+    #[test]
+    fn wan_dmd_tier_pins_its_solver_and_refuses_a_scheduler_override() {
+        use mold_core::Scheduler;
+        let previous = std::env::var(SOLVER_ENV).ok();
+        unsafe { std::env::remove_var(SOLVER_ENV) };
+
+        let tier = "wan21-t2v-1.3b:turbo";
+        let ladder =
+            mold_core::manifest::wan_dmd_ladder(tier).expect("the turbo tier is the laddered one");
+        assert_eq!(ladder, &[1000u32, 757, 522]);
+
+        let (kind, resolved) = resolve_wan_solver_for_model(tier, None, false).unwrap();
+        assert_eq!(kind, WanSolverKind::Dmd);
+        assert_eq!(resolved, Some(ladder));
+        assert_eq!(kind.label(), "dmd");
+
+        // The env fallback is not consulted for a laddered tier.
+        unsafe { std::env::set_var(SOLVER_ENV, "euler") };
+        assert_eq!(
+            resolve_wan_solver_for_model(tier, None, false).unwrap().0,
+            WanSolverKind::Dmd
+        );
+        unsafe { std::env::remove_var(SOLVER_ENV) };
+
+        // An explicit request is refused by name — including uni-pc, which is
+        // what a client that never heard of this tier would send.
+        for scheduler in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
+            let error = resolve_wan_solver_for_model(tier, Some(scheduler), false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(tier), "{error}");
+            assert!(error.contains("DMD"), "{error}");
+            // The wan-facing flag is `--sample-solver`; `--scheduler` is the
+            // other spelling clap conflicts it with. Naming only the second
+            // sends the user looking for a flag they did not pass.
+            assert!(error.contains("--sample-solver"), "{error}");
+            assert!(error.contains("--scheduler"), "{error}");
+        }
+
+        // The legacy dash spelling normalizes into the same ladder — the
+        // engine is handed whatever name its caller resolved.
+        assert_eq!(
+            resolve_wan_solver_for_model("wan21-t2v-1.3b-turbo", None, false)
+                .unwrap()
+                .1,
+            Some(ladder)
+        );
+
+        // A tier with no ladder is untouched.
+        let (kind, ladder) = resolve_wan_solver_for_model("wan21-t2v-1.3b", None, false).unwrap();
+        assert_eq!(kind, WanSolverKind::UniPc);
+        assert!(ladder.is_none());
+        assert_eq!(
+            resolve_wan_solver_for_model("wan21-t2v-1.3b", Some(Scheduler::Euler), false)
+                .unwrap()
+                .0,
+            WanSolverKind::Euler
+        );
+
+        // And a ladder has no step/shift form to build from.
+        assert!(build_wan_solver(WanSolverKind::Dmd, WanScheduleConfig::new(3, 8.0)).is_err());
+
+        // Both env knobs are read past for a laddered tier, and both say so:
+        // a silently dropped override reads as a broken variable.
+        let shift_previous = std::env::var(FLOW_SHIFT_ENV).ok();
+        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
+        let rungs = mold_core::manifest::wan_dmd_ladder(tier).expect("laddered");
+        assert!(dmd_ignored_env_disclosures(rungs).is_empty());
+
+        unsafe { std::env::set_var(SOLVER_ENV, "euler") };
+        unsafe { std::env::set_var(FLOW_SHIFT_ENV, "5.0") };
+        let disclosures = dmd_ignored_env_disclosures(rungs);
+        assert_eq!(disclosures.len(), 2, "{disclosures:?}");
+        assert!(disclosures[0].contains(SOLVER_ENV), "{disclosures:?}");
+        assert!(disclosures[1].contains(FLOW_SHIFT_ENV), "{disclosures:?}");
+        unsafe { std::env::remove_var(SOLVER_ENV) };
+        unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
+
+        match shift_previous {
+            Some(value) => unsafe { std::env::set_var(FLOW_SHIFT_ENV, value) },
+            None => unsafe { std::env::remove_var(FLOW_SHIFT_ENV) },
+        }
+        match previous {
+            Some(value) => unsafe { std::env::set_var(SOLVER_ENV, value) },
+            None => unsafe { std::env::remove_var(SOLVER_ENV) },
+        }
+    }
+
+    /// The engine-side backstop behind admission: the step count, guidance,
+    /// and shift a laddered tier accepts are all fixed, and the TUI and
+    /// forced-local callers never run profile validation.
+    #[test]
+    fn wan_dmd_ladder_refuses_steps_guidance_and_shift_overrides() {
+        let tier = "wan21-t2v-1.3b:turbo";
+        let ladder = mold_core::manifest::wan_dmd_ladder(tier).unwrap();
+
+        enforce_dmd_ladder_request(tier, ladder, 3, 1.0, None).expect("the pinned request runs");
+
+        // The profile fixes guidance at exactly 1.0 and admission refuses
+        // every other value, so the backstop must agree: a 0.0 that slipped
+        // past a client would be a silently different render, not a refused
+        // one.
+        for (steps, guidance, shift, needle) in [
+            (30u32, 1.0f64, None, "untrained schedule"),
+            (2, 1.0, None, "untrained schedule"),
+            (3, 0.0, None, "guidance"),
+            (3, 0.5, None, "guidance"),
+            (3, 6.0, None, "guidance"),
+            (3, 1.0, Some(5.0), "sample-shift"),
+        ] {
+            let error = enforce_dmd_ladder_request(tier, ladder, steps, guidance, shift)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(tier), "{error}");
+            assert!(error.contains(needle), "expected {needle:?} in {error}");
+        }
+    }
+
+    /// The DMD ladder through the real denoise loop: three rungs, three
+    /// previews, the last of which is the returned latent (the terminal rung
+    /// returns its own x0 verbatim), and a result that is reproducible from
+    /// its seed and moves when the seed moves. The seed matters here in a way
+    /// it does not for any other Wan solver — the loop draws fresh noise
+    /// between rungs.
+    #[test]
+    fn tiny_dmd_ladder_run_previews_and_is_seed_deterministic() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let z = 16usize;
+        let config = WanTransformerConfig::tiny(z, 2, 2);
+        let map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&map, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        // Seed the weights: an all-zero DiT gives v = 0, and then the re-noise
+        // blend would be the only thing under test.
+        for (index, var) in map.all_vars().iter().enumerate() {
+            let noise = seeded_randn(2000 + index as u64, var.dims(), &device, dtype)
+                .unwrap()
+                .affine(0.2, 0.0)
+                .unwrap();
+            var.set(&noise).unwrap();
+        }
+
+        let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
+        let ladder = mold_core::manifest::wan_dmd_ladder("wan21-t2v-1.3b:turbo").unwrap();
+        let schedule = WanSchedule::from_rungs(ladder, DMD_TABLE_SHIFT).unwrap();
+        let total = schedule.steps();
+        assert_eq!(total, 3);
+        // The DiT is conditioned on the integer rungs, not on the shifted
+        // table values (`fastvideo/pipelines/stages/denoising.py:1318`).
+        assert_eq!(schedule.timesteps, vec![1000i64, 757, 522]);
+        let context = Tensor::zeros((1, 6, config.text_dim), dtype, &device).unwrap();
+
+        let run = |seed: u64| -> (Tensor, Vec<(usize, Vec<u8>)>) {
+            let mut progress = crate::progress::ProgressReporter::default();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let sink = events.clone();
+            progress.set_callback(Box::new(move |e| sink.lock().unwrap().push(e)));
+
+            let mut experts = WanExperts::single(transformer.clone());
+            let rope = experts
+                .transformer_for(schedule.timesteps[0], &progress)
+                .unwrap()
+                .rope_freqs_for(
+                    &Tensor::zeros((1, z, latent_frames, latent_h, latent_w), dtype, &device)
+                        .unwrap(),
+                )
+                .unwrap();
+            let previewer = crate::latent_preview::LatentPreviewer::wan(z)
+                .expect("16-channel Wan checkpoints have a preview table")
+                .force_enabled()
+                .with_min_interval(std::time::Duration::ZERO);
+            let latents = seeded_randn(
+                seed,
+                &[1, z, latent_frames, latent_h, latent_w],
+                &device,
+                dtype,
+            )
+            .unwrap();
+            let mut solver = WanSolver::Dmd(FlowDmd::new(schedule.clone()));
+            let final_latents = run_denoise_loop(DenoiseInputs {
+                experts: &mut experts,
+                conditioning: &WanImageConditioning::None,
+                schedule: &schedule,
+                solver: &mut solver,
+                latents,
+                cond_embeds: &context,
+                uncond_embeds: None,
+                // A DMD student runs one conditional forward per rung.
+                guidance: WanGuidancePlan::Uniform(1.0),
+                patch: config.patch_size.1,
+                rope: &rope,
+                device: &device,
+                progress: &progress,
+                previewer: Some(&previewer),
+                step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
+                seed,
+            })
+            .unwrap();
+            // The terminal rung returns its own x0, so the finished latent and
+            // the last preview are the same tensor.
+            let last_x0 = solver.last_x0().expect("every rung records an x0").clone();
+            assert_eq!(
+                flat(&final_latents),
+                flat(&last_x0),
+                "the terminal rung must return its clean prediction verbatim"
+            );
+
+            let events = events.lock().unwrap();
+            let previews: Vec<(usize, Vec<u8>)> = events
+                .iter()
+                .filter_map(|e| match e {
+                    ProgressEvent::Preview {
+                        image_png, step, ..
+                    } => Some((*step, image_png.as_ref().clone())),
+                    _ => None,
+                })
+                .collect();
+            (final_latents, previews)
+        };
+
+        let (latents_a, previews_a) = run(11);
+        assert_eq!(
+            previews_a.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "one preview per rung"
+        );
+        let values = flat(&latents_a);
+        assert_eq!(values.len(), z * latent_frames * latent_h * latent_w);
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "the ladder must produce a finite latent"
+        );
+
+        // The last preview renders the returned latent.
+        let rendered = {
+            let previewer = crate::latent_preview::LatentPreviewer::wan(z)
+                .unwrap()
+                .force_enabled();
+            let mut reporter = crate::progress::ProgressReporter::default();
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            reporter.set_callback(Box::new(move |e| sink.lock().unwrap().push(e)));
+            previewer.maybe_emit(&reporter, &latents_a, total, total);
+            let events = captured.lock().unwrap();
+            events
+                .iter()
+                .find_map(|e| match e {
+                    ProgressEvent::Preview { image_png, .. } => Some(image_png.as_ref().clone()),
+                    _ => None,
+                })
+                .expect("render emits")
+        };
+        assert_eq!(previews_a[2].1, rendered);
+
+        // Deterministic for one seed...
+        let (latents_again, previews_again) = run(11);
+        assert_eq!(values, flat(&latents_again));
+        assert_eq!(previews_a, previews_again);
+
+        // ...and the mid-loop draws really are seeded, so another seed moves it.
+        let (latents_b, _) = run(12);
+        let other = flat(&latents_b);
+        assert!(
+            values.iter().zip(&other).any(|(a, b)| (a - b).abs() > 1e-6),
+            "a different seed must produce a different render"
+        );
+    }
+
     /// The real denoise loop must emit `Preview` events when a previewer is
     /// attached: the final step is always rendered, at latent resolution.
     #[test]
@@ -4554,6 +5024,7 @@ mod tests {
             progress: &progress,
             previewer: Some(&previewer),
             step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
+            seed: 7,
         })
         .unwrap();
 
@@ -4725,6 +5196,7 @@ mod tests {
                 progress: &progress,
                 previewer: None,
                 step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
+                seed: 7,
             })
             .unwrap();
 

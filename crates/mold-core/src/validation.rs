@@ -2906,6 +2906,21 @@ fn validate_generate_request_after_activation_with(
         _ => {}
     }
 
+    // A DMD-distilled Wan tier has no solver to choose: the student predicts
+    // x0 at each pinned rung and is re-noised to the next, so a UniPC or
+    // Euler pass over it is a different, worse render rather than a slower
+    // one. The generation profile advertises an empty scheduler list; this is
+    // the same refusal at the family door, for a client that never read it.
+    if let Some(scheduler) = req.scheduler.filter(|_| family == Some("wan")) {
+        let canonical = crate::manifest::resolve_model_name(&req.model);
+        if crate::manifest::wan_dmd_ladder(&canonical).is_some() {
+            return Err(format!(
+                "{canonical} is a DMD distill that walks a fixed rung ladder, not a solver \
+                 schedule; scheduler '{scheduler}' cannot be applied to it"
+            ));
+        }
+    }
+
     // Wan flow shift (#782): rejected, not ignored, off-family — a silently
     // inert quality knob looks like the knob failing.
     if let Some(shift) = req.sample_shift {
@@ -2918,6 +2933,17 @@ fn validate_generate_request_after_activation_with(
         if !shift.is_finite() || shift <= 0.0 {
             return Err(format!(
                 "sample_shift must be finite and positive, got {shift}"
+            ));
+        }
+        // A DMD distill's shift is upstream's own constant: the ladder's rungs
+        // are timesteps on THAT table, so moving the shift moves the rungs off
+        // the schedule the student was trained on. Refuse it by name rather
+        // than accept a value the engine must ignore.
+        let canonical = crate::manifest::resolve_model_name(&req.model);
+        if crate::manifest::wan_dmd_ladder(&canonical).is_some() {
+            return Err(format!(
+                "{canonical} walks a fixed DMD rung ladder on upstream's own shift table; \
+                 sample_shift is part of that published schedule and cannot be set"
             ));
         }
     }
@@ -6233,6 +6259,46 @@ mod tests {
             ExpandTask::for_generation("wan", &still_req),
             ExpandTask::TextToImage
         );
+    }
+
+    /// A DMD-distilled Wan tier walks the rungs `manifest::wan_dmd_ladder`
+    /// pins, on the shift table upstream published with them. The solver and
+    /// the flow shift are therefore part of the schedule, not knobs: a
+    /// silently ignored one would look like the knob failing, so admission
+    /// names them instead. Every other Wan tier keeps both controls.
+    #[test]
+    fn wan_dmd_ladder_tiers_refuse_the_sampler_knobs() {
+        use crate::Scheduler;
+
+        let mut turbo = valid_req();
+        turbo.model = "wan21-t2v-1.3b:turbo".to_string();
+        turbo.width = 832;
+        turbo.height = 480;
+        turbo.frames = Some(81);
+        turbo.fps = Some(16);
+        turbo.output_format = Some(OutputFormat::Mp4);
+        assert!(validate_generate_request(&turbo).is_ok());
+
+        turbo.sample_shift = Some(8.0);
+        let err = validate_generate_request(&turbo).unwrap_err();
+        assert!(err.contains("sample_shift"), "got: {err}");
+        assert!(err.contains("wan21-t2v-1.3b:turbo"), "got: {err}");
+        turbo.sample_shift = None;
+
+        for solver in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
+            turbo.scheduler = Some(solver);
+            let err = validate_generate_request(&turbo).unwrap_err();
+            assert!(err.contains("wan21-t2v-1.3b:turbo"), "{solver}: {err}");
+            assert!(err.contains("DMD"), "{solver}: {err}");
+        }
+        turbo.scheduler = None;
+
+        // The base tier is untouched — both controls still admit.
+        let mut base = turbo.clone();
+        base.model = "wan21-t2v-1.3b:bf16".to_string();
+        base.sample_shift = Some(8.0);
+        base.scheduler = Some(Scheduler::UniPc);
+        assert!(validate_generate_request(&base).is_ok());
     }
 
     /// #782 / #795: the wan recipe knobs are admitted for wan and rejected —

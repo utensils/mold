@@ -327,7 +327,14 @@ export function baseGenerationCapabilities(
   const profileCaps = advertisedRecipe?.legacy_adapter
     ? undefined
     : advertisedRecipe?.capabilities;
-  const advertisedSchedulers = profileCaps?.schedulers;
+  // An absent `schedulers` on a recipe that IS in hand means "none": the
+  // server omits the field when the list is empty (`skip_serializing_if`), so
+  // a DMD tier that pins its sampler arrives with the key missing. Only the
+  // absence of a profile recipe altogether is "unknown" and falls to the
+  // legacy-host family heuristic below.
+  const advertisedSchedulers = profileCaps
+    ? (profileCaps.schedulers ?? [])
+    : undefined;
   const schedulerOptions = advertisedSchedulers
     ? advertisedSchedulers.length > 0
       ? (["default", ...advertisedSchedulers] as GenerationScheduler[])

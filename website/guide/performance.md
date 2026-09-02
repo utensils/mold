@@ -14,21 +14,22 @@ loaded.
 
 Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 
-| Model                               | Typical Steps | Ballpark Time | Notes                                           |
-| ----------------------------------- | ------------- | ------------- | ----------------------------------------------- |
-| `flux-schnell:q8`                   | 4             | ~8-12s        | Fastest high-quality default                    |
-| `flux-dev:q4`                       | 25            | ~20-40s       | Better quality, slower denoising                |
-| `z-image-turbo:q8`                  | 9             | ~10-20s       | Strong quality/speed trade-off                  |
-| `sdxl-turbo:fp16`                   | 4             | ~3-8s         | Very fast when you want 1024 output             |
-| `sd15:fp16`                         | 25            | ~5-15s        | Lightest full-featured family                   |
-| `ltx-video-0.9.6-distilled:bf16`    | 8             | ~30-90s       | Recommended current video default               |
-| `ltx-video-0.9.8-2b-distilled:bf16` | 7+3           | ~30-90s       | Newer checkpoint family, full multiscale refine |
-| `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path         |
-| `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path            |
-| `wan21-t2v-1.3b:bf16`               | 30            | ~3.5 min      | 480p16; measured 209 s at 33 frames             |
-| `wan21-t2v-14b:q8`                  | 30            | ~15 min       | 480p16; measured 877 s at 33 frames, 20.4 GB    |
-| `wan22-ti2v-5b:fp16`                | 20            | ~2-4 min      | Measured 246 s T2V 720p24 / 105 s I2V 480p, 49f |
-| `wan22-i2v-a14b:q5`                 | 4             | ~3.5 min      | Two-expert Lightning tier; 199 s at 53 frames   |
+| Model                               | Typical Steps | Ballpark Time | Notes                                                                     |
+| ----------------------------------- | ------------- | ------------- | ------------------------------------------------------------------------- |
+| `flux-schnell:q8`                   | 4             | ~8-12s        | Fastest high-quality default                                              |
+| `flux-dev:q4`                       | 25            | ~20-40s       | Better quality, slower denoising                                          |
+| `z-image-turbo:q8`                  | 9             | ~10-20s       | Strong quality/speed trade-off                                            |
+| `sdxl-turbo:fp16`                   | 4             | ~3-8s         | Very fast when you want 1024 output                                       |
+| `sd15:fp16`                         | 25            | ~5-15s        | Lightest full-featured family                                             |
+| `ltx-video-0.9.6-distilled:bf16`    | 8             | ~30-90s       | Recommended current video default                                         |
+| `ltx-video-0.9.8-2b-distilled:bf16` | 7+3           | ~30-90s       | Newer checkpoint family, full multiscale refine                           |
+| `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path                                   |
+| `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path                                      |
+| `wan21-t2v-1.3b:bf16`               | 30            | ~3.5 min      | 480p16; measured 209 s at 33 frames                                       |
+| `wan21-t2v-1.3b:turbo`              | 3             | ~40 s         | 480p16 DMD distill; measured 40.8 s at 81 frames on an L40S (base: 196 s) |
+| `wan21-t2v-14b:q8`                  | 30            | ~15 min       | 480p16; measured 877 s at 33 frames, 20.4 GB                              |
+| `wan22-ti2v-5b:fp16`                | 20            | ~2-4 min      | Measured 246 s T2V 720p24 / 105 s I2V 480p, 49f                           |
+| `wan22-i2v-a14b:q5`                 | 4             | ~3.5 min      | Two-expert Lightning tier; 199 s at 53 frames                             |
 
 ## What Slows Things Down
 
@@ -53,8 +54,15 @@ compatible `fp8-cast` path there rather than Hopper-only
 `fp8-scaled-mm`/TensorRT-LLM.
 
 Wan's fast tiers are the A14B 4-step Lightning pairs (`wan22-*-a14b:q5` and
-`:q4`) and the single-expert `wan22-ti2v-5b:turbo` (4-step Self-Forcing,
-guidance 1.0, 121-frame default measured at 160.7 s on an RTX 4090). On A14B,
+`:q4`), the single-expert `wan22-ti2v-5b:turbo` (4-step Self-Forcing,
+guidance 1.0, 121-frame default measured at 160.7 s on an RTX 4090), and
+`wan21-t2v-1.3b:turbo`, FastVideo's DMD distill of the 2.1 1.3B. The DMD tier
+is the strictest of the three: it walks exactly three published rungs
+(timesteps 1000 / 757 / 522), and steps, guidance, sample solver, and flow
+shift are all fixed — a request that sets any of them is refused rather than
+silently ignored, because a DMD student is re-noised between rungs and a
+UniPC or Euler pass over it is a different render, not a slower one. At
+`(30 x 2) / 3` that is 20x fewer transformer forwards than the base tier. On A14B,
 two 14B experts alternate with one resident at a time, so VRAM is the larger
 expert, and guidance 1.0 skips the unconditional pass so each of the four
 steps is one forward. The A14B GGUF tiers default to their measured RTX 4090
