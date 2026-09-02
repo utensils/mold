@@ -16,6 +16,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { GlbParseError, parseGlb, type ParsedMesh } from "../lib/glb";
+import { advanceAutoRotate, edgeIndices } from "../lib/meshViewerMath";
 
 const props = defineProps<{
   /** GLB URL the caller has already authorized (media-token URLs included). */
@@ -44,11 +45,18 @@ const note = ref("");
 const stats = ref<{ vertexCount: number; triangleCount: number } | null>(null);
 const canvas = ref<HTMLCanvasElement | null>(null);
 const root = ref<HTMLElement | null>(null);
+/** The edge overlay is a view option, not a property of the file. */
+const wireframe = ref(false);
+/** True only while the mesh is actually turning on its own. */
+const autoRotating = ref(false);
+const fullscreen = ref(false);
 
 const label = computed(() => {
   const subject = props.alt?.trim() || "Generated 3-D mesh";
   if (status.value !== "ready") return subject;
-  return `${subject}. Interactive 3-D view: drag or use the arrow keys to orbit, plus and minus to zoom.`;
+  const base = `${subject}. Interactive 3-D view: drag or use the arrow keys to orbit, plus and minus to zoom.`;
+  if (!autoRotating.value) return base;
+  return `${base} It is rotating on its own until you interact with it.`;
 });
 const summary = computed(() => {
   const value = stats.value;
@@ -174,11 +182,18 @@ const FRAGMENT_SHADER = `
 precision mediump float;
 uniform sampler2D uTexture;
 uniform float uHasTexture;
+uniform float uWireframe;
 varying vec3 vNormal;
 varying vec3 vView;
 varying vec3 vColor;
 varying vec2 vUv;
 void main() {
+  // The edge pass reuses this program: one flag is cheaper than a second
+  // compile, and the lines want a flat colour rather than the lighting.
+  if (uWireframe > 0.5) {
+    gl_FragColor = vec4(0.16, 0.85, 0.98, 1.0);
+    return;
+  }
   // Extracted surfaces are not reliably closed and the material is
   // doubleSided, so a back face is lit by its flipped normal, not left black.
   vec3 normal = normalize(vNormal);
@@ -205,8 +220,14 @@ interface Scene {
   program: WebGLProgram;
   buffers: WebGLBuffer[];
   texture: WebGLTexture | null;
+  indexBuffer: WebGLBuffer;
   indexCount: number;
   indexType: number;
+  /** The triangle list as parsed, kept so the edge list can be built later. */
+  sourceIndices: Uint32Array;
+  /** Built on the first wireframe toggle and never rebuilt. */
+  edgeBuffer: WebGLBuffer | null;
+  edgeCount: number;
   /** World-space centre and radius, for framing and near/far planes. */
   center: [number, number, number];
   radius: number;
@@ -216,6 +237,7 @@ interface Scene {
     normalMatrix: WebGLUniformLocation | null;
     texture: WebGLUniformLocation | null;
     hasTexture: WebGLUniformLocation | null;
+    wireframe: WebGLUniformLocation | null;
   };
 }
 
@@ -296,7 +318,57 @@ function draw(): void {
   gl.uniformMatrix3fv(uniforms.normalMatrix, false, upper3x3(modelView));
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  const overlay = wireframe.value && scene.edgeBuffer && scene.edgeCount > 0;
+  // Pushing the filled triangles away from the eye by one depth unit is what
+  // keeps the edges from z-fighting the very surface they outline.
+  if (overlay) {
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(1, 1);
+  }
+  gl.uniform1f(uniforms.wireframe, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, scene.indexBuffer);
   gl.drawElements(gl.TRIANGLES, scene.indexCount, scene.indexType, 0);
+  if (!overlay) return;
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.uniform1f(uniforms.wireframe, 1);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, scene.edgeBuffer);
+  gl.drawElements(gl.LINES, scene.edgeCount, scene.indexType, 0);
+}
+
+/**
+ * Uploads the edge list, once, the first time the overlay is switched on. A
+ * mesh nobody wireframes never pays for the deduplication or the buffer.
+ */
+function ensureEdges(): boolean {
+  const current = scene;
+  if (!current) return false;
+  if (current.edgeBuffer) return true;
+  const { gl } = current;
+  const edges = edgeIndices(current.sourceIndices);
+  if (edges.length === 0) return false;
+  const data =
+    current.indexType === gl.UNSIGNED_SHORT ? Uint16Array.from(edges) : edges;
+  const buffer = gl.createBuffer();
+  if (!buffer) return false;
+  current.buffers.push(buffer);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  current.edgeBuffer = buffer;
+  current.edgeCount = data.length;
+  return true;
+}
+
+function toggleWireframe(): void {
+  if (wireframe.value) {
+    wireframe.value = false;
+  } else {
+    // A GPU that refuses the edge buffer leaves the button where it was
+    // rather than promising an overlay that will never draw.
+    if (!ensureEdges()) return;
+    wireframe.value = true;
+  }
+  requestFrame();
 }
 
 // ── Upload ─────────────────────────────────────────────────────────────────
@@ -442,6 +514,7 @@ async function upload(mesh: ParsedMesh): Promise<void> {
     normalMatrix: gl.getUniformLocation(program, "uNormalMatrix"),
     texture: gl.getUniformLocation(program, "uTexture"),
     hasTexture: gl.getUniformLocation(program, "uHasTexture"),
+    wireframe: gl.getUniformLocation(program, "uWireframe"),
   };
 
   let texture: WebGLTexture | null = null;
@@ -506,8 +579,12 @@ async function upload(mesh: ParsedMesh): Promise<void> {
     program,
     buffers,
     texture,
+    indexBuffer,
     indexCount: indices.length,
     indexType,
+    sourceIndices: mesh.indices,
+    edgeBuffer: null,
+    edgeCount: 0,
     center,
     radius,
     uniforms,
@@ -519,6 +596,7 @@ async function upload(mesh: ParsedMesh): Promise<void> {
   status.value = "ready";
   note.value = "";
   draw();
+  startAutoRotate();
   emit("ready", stats.value);
 }
 
@@ -526,6 +604,107 @@ function errorNote(error: unknown): string {
   if (error instanceof GlbParseError) return "This mesh file couldn't be read.";
   if (error instanceof Error && error.name === "AbortError") return "";
   return "The 3-D view couldn't start, so here's the poster.";
+}
+
+// ── Auto-rotation ──────────────────────────────────────────────────────────
+
+let autoFrame = 0;
+let autoStamp = -1;
+/** Once a person has touched the viewer it is theirs for the rest of the mount. */
+let interacted = false;
+/** A stalled tab hands back a huge delta; a jump is worse than a dropped frame. */
+const MAX_AUTO_STEP_MS = 100;
+
+function prefersReducedMotion(): boolean {
+  // Absent in tests and in older WebViews: no query is not a preference.
+  const query = typeof window !== "undefined" ? window.matchMedia : undefined;
+  if (typeof query !== "function") return false;
+  try {
+    return query.call(window, "(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
+function stepAutoRotate(stamp: number): void {
+  autoFrame = 0;
+  if (!autoRotating.value || !scene) return;
+  // Scrolled away or in a background tab: park rather than burn a callback a
+  // frame. The observers below start the loop again when the viewer returns.
+  if (!onScreen || !pageVisible) {
+    autoStamp = -1;
+    return;
+  }
+  const elapsed = autoStamp < 0 ? 0 : stamp - autoStamp;
+  camera.yaw = advanceAutoRotate(
+    camera.yaw,
+    Math.min(elapsed, MAX_AUTO_STEP_MS),
+  );
+  draw();
+  autoStamp = stamp;
+  autoFrame = requestAnimationFrame(stepAutoRotate);
+}
+
+function scheduleAutoRotate(): void {
+  if (autoFrame !== 0 || !autoRotating.value || !onScreen || !pageVisible) {
+    return;
+  }
+  autoStamp = -1;
+  autoFrame = requestAnimationFrame(stepAutoRotate);
+}
+
+function startAutoRotate(): void {
+  if (autoRotating.value || interacted || !props.autoRotate || !scene) return;
+  if (prefersReducedMotion()) return;
+  autoRotating.value = true;
+  scheduleAutoRotate();
+}
+
+function stopAutoRotate(): void {
+  autoRotating.value = false;
+  autoStamp = -1;
+  if (autoFrame !== 0) {
+    cancelAnimationFrame(autoFrame);
+    autoFrame = 0;
+  }
+}
+
+/** The first drag, key or wheel ends the tour, permanently, for this mount. */
+function noteInteraction(): void {
+  if (interacted) return;
+  interacted = true;
+  stopAutoRotate();
+}
+
+// ── Fullscreen ─────────────────────────────────────────────────────────────
+
+const canFullscreen = computed(
+  () =>
+    props.expandable === true &&
+    typeof document !== "undefined" &&
+    document.fullscreenEnabled === true,
+);
+
+function toggleFullscreen(): void {
+  const element = root.value;
+  if (!element) return;
+  // Both calls reject when the browser refuses the gesture; the button simply
+  // stays where it was, and `fullscreenchange` remains the only truth.
+  if (document.fullscreenElement === element) {
+    void Promise.resolve(document.exitFullscreen?.()).catch(() => {});
+  } else {
+    void Promise.resolve(element.requestFullscreen?.()).catch(() => {});
+  }
+}
+
+function onFullscreenChange(): void {
+  fullscreen.value = !!root.value && document.fullscreenElement === root.value;
+  // The viewport just changed size; `draw` re-fits the backing store for it.
+  requestFrame();
+}
+
+function onWindowResize(): void {
+  requestFrame();
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -557,10 +736,12 @@ async function load(): Promise<void> {
 }
 
 function releaseGl(): void {
+  stopAutoRotate();
   if (frame !== 0) {
     cancelAnimationFrame(frame);
     frame = 0;
   }
+  wireframe.value = false;
   const current = scene;
   scene = null;
   if (!current) return;
@@ -576,6 +757,7 @@ function releaseGl(): void {
 function onPageVisibility(): void {
   pageVisible = !document.hidden;
   requestFrame();
+  scheduleAutoRotate();
 }
 
 onMounted(() => {
@@ -583,6 +765,7 @@ onMounted(() => {
     intersection = new IntersectionObserver((entries) => {
       onScreen = entries.some((entry) => entry.isIntersecting);
       requestFrame();
+      scheduleAutoRotate();
     });
     intersection.observe(root.value);
   }
@@ -591,6 +774,8 @@ onMounted(() => {
     resize.observe(root.value);
   }
   document.addEventListener("visibilitychange", onPageVisibility);
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+  window.addEventListener("resize", onWindowResize);
   pageVisible = !document.hidden;
   void load();
 });
@@ -603,6 +788,8 @@ onBeforeUnmount(() => {
   resize?.disconnect();
   resize = null;
   document.removeEventListener("visibilitychange", onPageVisibility);
+  document.removeEventListener("fullscreenchange", onFullscreenChange);
+  window.removeEventListener("resize", onWindowResize);
   releaseGl();
   pointers.clear();
 });
@@ -614,6 +801,16 @@ watch(
     releaseGl();
     resetView();
     void load();
+  },
+);
+
+// A caller that turns the tour on late still gets one, unless this viewer has
+// already been handled — an interaction is never taken back.
+watch(
+  () => props.autoRotate,
+  (wanted) => {
+    if (wanted) startAutoRotate();
+    else stopAutoRotate();
   },
 );
 
@@ -651,6 +848,7 @@ function spread(): number {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  noteInteraction();
   if (status.value !== "ready") return;
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   if (pointers.size === 2) pinchDistance = spread();
@@ -682,12 +880,14 @@ function onPointerUp(event: PointerEvent): void {
 }
 
 function onWheel(event: WheelEvent): void {
+  noteInteraction();
   if (status.value !== "ready") return;
   event.preventDefault();
   zoomBy(Math.exp(event.deltaY * 0.0015));
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  noteInteraction();
   if (status.value !== "ready") return;
   const step = event.shiftKey ? 0.3 : 0.12;
   switch (event.key) {
@@ -764,14 +964,35 @@ function onKeydown(event: KeyboardEvent): void {
       <span class="mesh-viewer__stats" data-test="mesh-viewer-stats">
         {{ summary }}
       </span>
-      <button
-        type="button"
-        class="mesh-viewer__reset"
-        data-test="mesh-viewer-reset"
-        @click="resetView"
-      >
-        Reset view
-      </button>
+      <span class="mesh-viewer__buttons">
+        <button
+          type="button"
+          class="mesh-viewer__button"
+          data-test="mesh-viewer-wireframe"
+          :aria-pressed="wireframe ? 'true' : 'false'"
+          @click="toggleWireframe"
+        >
+          Wireframe
+        </button>
+        <button
+          v-if="canFullscreen"
+          type="button"
+          class="mesh-viewer__button"
+          data-test="mesh-viewer-fullscreen"
+          :aria-label="fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'"
+          @click="toggleFullscreen"
+        >
+          {{ fullscreen ? "Exit fullscreen" : "Fullscreen" }}
+        </button>
+        <button
+          type="button"
+          class="mesh-viewer__button"
+          data-test="mesh-viewer-reset"
+          @click="resetView"
+        >
+          Reset view
+        </button>
+      </span>
     </div>
   </div>
 </template>
@@ -833,7 +1054,12 @@ function onKeydown(event: KeyboardEvent): void {
   font-variant-numeric: tabular-nums;
   opacity: 0.72;
 }
-.mesh-viewer__reset {
+.mesh-viewer__buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mesh-viewer__button {
   min-height: 32px;
   padding: 0 12px;
   border: 1px solid var(--edge, rgba(255, 255, 255, 0.2));
@@ -844,5 +1070,9 @@ function onKeydown(event: KeyboardEvent): void {
   font-size: 12px;
   cursor: pointer;
   pointer-events: auto;
+}
+.mesh-viewer__button[aria-pressed="true"] {
+  border-color: var(--accent, #29d9fa);
+  background: rgba(41, 217, 250, 0.24);
 }
 </style>
