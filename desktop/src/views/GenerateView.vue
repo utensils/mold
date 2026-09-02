@@ -50,7 +50,6 @@ import {
   resolveQueueWait,
 } from "@studio/lib/queuePosition";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import { attachPickedImage, attachPickedVideo } from "../lib/sourceAttachment";
 import {
   resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
@@ -249,12 +248,16 @@ import { usePullResumeStore } from "../stores/pullResume";
 import { modelDisplayNameForId } from "../lib/models";
 import {
   authedMediaUrl,
+  fetchGalleryMediaBytes,
   fullSizeMediaUrl,
   galleryMediaPath,
   localMediaPath,
+  mediaMimeType,
   mediaPath,
+  nativeBytes,
   thumbnailPath,
 } from "../lib/gallery/media";
+import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
 import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
@@ -263,7 +266,7 @@ import { ipc } from "../lib/ipc";
 import type { ApiTarget } from "../lib/api/client";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
-import { useGalleryStore } from "../stores/gallery";
+import { useGalleryStore, type MergedPrint } from "../stores/gallery";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import {
   expansionPullJobMatchesModel,
@@ -2573,10 +2576,86 @@ function onResultMeshReady(stats: ViewerMeshStats): void {
   viewerMeshStats.value = stats;
 }
 
+/** Inline completion bytes as a Blob, so both deliveries reach the one rule. */
+function base64Blob(base64: string, mime: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+/**
+ * The finished print on the canvas, shaped as the gallery row it already is
+ * on the host.
+ *
+ * Every ordinary desktop submission settles through `applyDurableCompletion`,
+ * which records the FILE the host saved and sets `image` to the empty string.
+ * So what the print IS — still, clip, mesh, audio — comes from its filename
+ * and format, exactly as the Library reads it, and the bytes are fetched from
+ * the host on demand. A completion that DID carry bytes inline (a legacy or
+ * non-durable stream) and has no filename gets the name the Save action would
+ * suggest, so it is still a print with a name.
+ */
+function canvasPrintEntry(j: Job): MergedPrint | null {
+  const r = j.result;
+  if (!r) return null;
+  const filename =
+    r.filename ??
+    (r.image ? suggestOutputFilename(r.model, r.seed_used, r.format, j.submittedAtUnixMs) : null);
+  if (!filename) return null;
+  return {
+    item: {
+      filename,
+      timestamp: Math.floor((j.settledAtMs ?? j.submittedAtUnixMs) / 1000),
+      format: r.format,
+      metadata: {
+        prompt: j.prompt,
+        model: r.model,
+        seed: r.seed_used,
+        steps: j.total,
+        guidance: j.guidance,
+        width: r.width,
+        height: r.height,
+      },
+    },
+    sourceKey: j.hostId ?? "local",
+    hostLabel: j.hostLabel ?? "",
+    availableOn: [],
+  };
+}
+
+/**
+ * "Use as source" on the canvas — the SAME rule the Library and the History
+ * drawer run, so a clip becomes source video and an H3 model gets a first
+ * frame or an ordered reference here too. Only the bytes reader differs: an
+ * inline completion already holds them, a durable one reads the file back
+ * from the machine that rendered it.
+ */
+async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promise<void> {
+  if (!entry) return;
+  const outcome = await applyGalleryEntryAsSource(entry, form, async (print) => {
+    const inline = j.result?.image;
+    if (inline) return base64Blob(inline, mediaMimeType(print.item.filename));
+    const target = resultHostTarget(j.clientId);
+    if (!target) throw new Error("This print's machine is no longer connected.");
+    const bytes = await fetchGalleryMediaBytes(
+      galleryMediaPath(print.item.filename, "host"),
+      target,
+    );
+    return new Blob([nativeBytes(bytes)], { type: mediaMimeType(print.item.filename) });
+  });
+  if (!outcome.ok) {
+    toasts.push(outcome.error, "error");
+    return;
+  }
+  toasts.push(outcome.message);
+}
+
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
   if (!j) return [];
   const live = j.status !== "complete" && j.status !== "error";
+  const sourceEntry = canvasPrintEntry(j);
   return [
     {
       label: "Cancel",
@@ -2638,33 +2717,14 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Use as source",
-      // Binary glTF is not conditioning: a mesh print cannot be fed back in
-      // as a source image, exactly as the Library lightbox already refuses.
-      // An audio print has no pixels either. A finished CLIP is a source,
-      // though — the Library takes one back in as LTX source video, and this
-      // print is no different for sitting on the canvas.
-      disabled: j.status !== "complete" || !j.result?.image || isAudioResult(j) || isMeshResult(j),
-      action: () => {
-        if (!j.result?.image) return;
-        const picked = {
-          filename:
-            j.result.filename ??
-            suggestOutputFilename(
-              j.result.model,
-              j.result.seed_used,
-              j.result.format,
-              j.submittedAtUnixMs,
-            ),
-          base64: j.result.image,
-        };
-        if (j.result.video_frames) {
-          attachPickedVideo(form, picked);
-          toasts.push("Loaded as source video");
-          return;
-        }
-        attachPickedImage(form, picked);
-        toasts.push("Loaded as source");
-      },
+      // Whether this print CAN be a source is a question about the print, not
+      // about which delivery the completion used: a mesh is geometry and an
+      // audio print has no pixels, both answered from the filename the host
+      // saved. Never gate on inline bytes — every ordinary submission settles
+      // through `applyDurableCompletion`, which carries none.
+      disabled:
+        j.status !== "complete" || !sourceEntry || !canUseGalleryEntryAsSource(sourceEntry.item),
+      action: () => void useCanvasResultAsSource(j, sourceEntry),
     },
     {
       label: "Export video format…",

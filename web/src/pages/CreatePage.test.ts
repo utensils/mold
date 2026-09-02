@@ -77,6 +77,9 @@ vi.mock("@microsoft/fetch-event-source", () => ({
   fetchEventSource: vi.fn(async () => undefined),
 }));
 
+/** What `listGallery` answers; a test that needs a second row replaces it. */
+const galleryListing = vi.hoisted(() => ({ value: [] as unknown[] }));
+
 const entry: GalleryImage = {
   filename: "generate-visible.png",
   timestamp: 1_700_000_000,
@@ -225,7 +228,7 @@ vi.mock("../api", async (importOriginal) => {
     expandPrompt: expandPromptMock,
     fetchModels: vi.fn(async () => []),
     fetchQueue: vi.fn(async () => ({ entries: [] })),
-    listGallery: vi.fn(async () => [entry]),
+    listGallery: vi.fn(async () => galleryListing.value),
     deleteGalleryImage: vi.fn(async () => undefined),
     upscaleStream: upscaleStreamMock,
     imageUrl: (name: string) => `/api/gallery/image/${name}`,
@@ -384,6 +387,7 @@ describe("CreatePage layout and behavior", () => {
     hostRoutingTesting.reset();
     await flushPromises();
     hostRoutingTesting.reset();
+    galleryListing.value = [entry];
     localStorage.clear();
     setActivePinia(createPinia());
     chainJobsTesting.reset();
@@ -1077,7 +1081,8 @@ describe("CreatePage layout and behavior", () => {
   // ── Finished render on the canvas (the print the user is looking at) ────
   // The Recent tiles, the Library grid, and the lightbox all answer a
   // right-click with the print's actions. The finished render on the Create
-  // canvas is the same print, so it opens the same menu. A web completion
+  // canvas is the same print, so it opens the same menu — resolved to its
+  // gallery row by the name the host saved it under. A web completion
   // carries no filename, so its gallery row is matched on the two facts that
   // identify a render: the model that made it and the seed it used.
   function finishedCanvasJob(result: Record<string, unknown> = {}): Job {
@@ -1107,6 +1112,7 @@ describe("CreatePage layout and behavior", () => {
         type: "complete",
         image: "image-bytes",
         format: "png",
+        filename: entry.filename,
         seed_used: entry.metadata.seed,
         model: entry.metadata.model,
         width: 1024,
@@ -1187,7 +1193,11 @@ describe("CreatePage layout and behavior", () => {
     });
     globalThis.fetch = fetchMock as never;
     streamJobsRef.value = [
-      finishedCanvasJob({ seed_used: 999, image: "fresh-bytes" }),
+      finishedCanvasJob({
+        filename: "not-listed-yet.png",
+        seed_used: 999,
+        image: "fresh-bytes",
+      }),
     ];
     const wrapper = mount(CreatePage, {
       attachTo: document.body,
@@ -1213,6 +1223,7 @@ describe("CreatePage layout and behavior", () => {
   it("routes a finished video render into the source-video field", async () => {
     streamJobsRef.value = [
       finishedCanvasJob({
+        filename: "canvas-clip.mp4",
         seed_used: 999,
         image: "clip-bytes",
         format: "mp4",
@@ -1236,11 +1247,142 @@ describe("CreatePage layout and behavior", () => {
     wrapper.unmount();
   });
 
+  // A fixed-seed re-render makes a SECOND row with the same model and seed.
+  // Delete acts on a real file, so the canvas must resolve the print it is
+  // actually showing, by the name the host saved it under.
+  it("resolves the canvas print by filename when a seed was reused", async () => {
+    const rerun: GalleryImage = {
+      ...entry,
+      filename: "rerun-of-visible.png",
+      timestamp: entry.timestamp + 60,
+    };
+    galleryListing.value = [rerun, entry];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"], { type: "image/png" }),
+    })) as never;
+    // The canvas shows the EARLIER print, which is not the newest match.
+    streamJobsRef.value = [finishedCanvasJob({ filename: entry.filename })];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.imageAttachments[0]).toMatchObject({
+      kind: "gallery",
+      filename: entry.filename,
+    });
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  // An older server names nothing. Model + seed is then the only evidence,
+  // and two rows carrying it are no evidence at all — the menu says it cannot
+  // address the print rather than guessing at one of them.
+  it("refuses to guess a row when two prints share the model and seed", async () => {
+    const rerun: GalleryImage = {
+      ...entry,
+      filename: "rerun-of-visible.png",
+      timestamp: entry.timestamp + 60,
+    };
+    galleryListing.value = [rerun, entry];
+    const job = finishedCanvasJob({ image: "fresh-bytes" });
+    delete (job.result as unknown as Record<string, unknown>).filename;
+    job.startedAt = (entry.timestamp - 60) * 1000;
+    streamJobsRef.value = [job];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    const remove = wrapper.get('[data-test="recent-context-delete"]');
+    expect(remove.attributes("disabled")).toBeDefined();
+    expect(
+      wrapper.get('[data-test="recent-context-open"]').attributes("disabled"),
+    ).toBeDefined();
+    // The bytes are still in hand, so the print can still become a source.
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.imageAttachments[0]).toMatchObject({
+      kind: "upload",
+      base64: "fresh-bytes",
+    });
+    wrapper.unmount();
+  });
+
+  // A print restored from a reload has neither its row nor its payload: the
+  // menu must not offer an action it cannot carry out.
+  it("refuses every print action when neither a row nor bytes exist", async () => {
+    // No name from the host, no row that could be this render, no payload.
+    const job = finishedCanvasJob({ image: "", seed_used: 999 });
+    delete (job.result as unknown as Record<string, unknown>).filename;
+    streamJobsRef.value = [job];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    const action = wrapper.get('[data-test="recent-context-source"]');
+    expect(action.attributes("disabled")).toBeDefined();
+    expect(action.attributes("title")).toContain("still being filed");
+    wrapper.unmount();
+  });
+
+  // The stub row an unfiled canvas print carries holds only what the menu
+  // needed to name the print. Reusing THAT would blank every setting it does
+  // not carry, so the reuse runs off the job's own submitted request.
+  it("reuses an unfiled canvas print from the request that made it", async () => {
+    const job = finishedCanvasJob({ image: "fresh-bytes", seed_used: 999 });
+    delete (job.result as unknown as Record<string, unknown>).filename;
+    job.request = {
+      ...(job.request as GenerateRequestWire),
+      negative_prompt: "blurry, low detail",
+      scheduler: "uni-pc",
+      output_format: "jpeg",
+      loras: [{ path: "film-grain.safetensors", scale: 0.6 }],
+    };
+    streamJobsRef.value = [job];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+    const form = useGenerateForm().state;
+    form.value.negativePrompt = "blurry, low detail";
+    form.value.loras = [
+      { path: "film-grain.safetensors", scale: 0.6, trainedWords: [] },
+    ];
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-reuse"]').trigger("click");
+    await flushPromises();
+
+    expect(form.value.negativePrompt).toBe("blurry, low detail");
+    expect(form.value.loras).toHaveLength(1);
+    expect(form.value.loras[0]).toMatchObject({
+      path: "film-grain.safetensors",
+      scale: 0.6,
+    });
+    expect(form.value.scheduler).toBe("uni-pc");
+    expect(form.value.outputFormat).toBe("jpeg");
+    wrapper.unmount();
+  });
+
   // Binary glTF is not conditioning — the lightbox already says so, and the
   // canvas menu says the same thing rather than attaching a broken source.
   it("refuses a finished mesh as a source and says why", async () => {
     streamJobsRef.value = [
       finishedCanvasJob({
+        filename: "canvas-bust.glb",
         seed_used: 999,
         // Valid base64: the mesh canvas decodes these bytes into a Blob URL.
         image: "Z2xiLWJ5dGVz",
@@ -4564,6 +4706,7 @@ describe("CreatePage host routing", () => {
     hostRoutingTesting.reset();
     await flushPromises();
     hostRoutingTesting.reset();
+    galleryListing.value = [entry];
     localStorage.clear();
     setActivePinia(createPinia());
     chainJobsTesting.reset();
@@ -5359,6 +5502,7 @@ describe("CreatePage 3-D mesh prints", () => {
     hostRoutingTesting.reset();
     await flushPromises();
     hostRoutingTesting.reset();
+    galleryListing.value = [entry];
     localStorage.clear();
     setActivePinia(createPinia());
     chainJobsTesting.reset();

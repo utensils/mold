@@ -287,6 +287,7 @@ describe("GenerateView — sequence output", () => {
     );
     expect(useAsSource).toMatchObject({ disabled: false });
     useContextMenuStore().activate(useAsSource!);
+    await flushPromises();
     expect(useGenerateFormStore().form.sourceImage).toBe("aW1hZ2U=");
     expect(useGenerateFormStore().form.sourceImageName).toBe("remote-print.png");
     expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "crop-fill" });
@@ -332,11 +333,120 @@ describe("GenerateView — sequence output", () => {
     );
     expect(useAsSource).toMatchObject({ disabled: false });
     useContextMenuStore().activate(useAsSource!);
+    await flushPromises();
     expect(useGenerateFormStore().form.sourceVideo).toMatchObject({
       filename: "remote-clip.mp4",
       base64: "dmlkZW8=",
     });
     expect(useGenerateFormStore().form.sourceImage).toBeNull();
+  });
+
+  // Every ordinary desktop submission settles through `applyDurableCompletion`,
+  // which records the FILE the host saved and NO inline bytes. A menu that
+  // asked `result.image` therefore refused the prints it exists for, and its
+  // handler returned early. The print's bytes come from its host instead.
+  it.each([
+    {
+      kind: "still",
+      filename: "durable-still.png",
+      format: "png" as const,
+      bytes: new Uint8Array([65, 66, 67]),
+      expected: { sourceImage: "QUJD", sourceImageName: "durable-still.png" },
+    },
+    {
+      kind: "clip",
+      filename: "durable-clip.mp4",
+      format: "mp4" as const,
+      bytes: new Uint8Array([65, 66, 67]),
+      expected: { sourceVideo: { filename: "durable-clip.mp4", base64: "QUJD" } },
+    },
+  ])("uses a durable $kind completion as source by reading its host bytes", async (row) => {
+    readyLocal();
+    const model = row.format === "mp4" ? videoModel : imageModel;
+    installedPayload = [model];
+    useModelStore().all = [model];
+    apiFetchTo.mockImplementation((_target: unknown, path: string) =>
+      String(path).includes(row.filename)
+        ? Promise.resolve(new Response(row.bytes))
+        : Promise.resolve(new Response("{}")),
+    );
+    const job = newJob({
+      prompt: "a durable print",
+      model: model.name,
+      width: 1024,
+      height: 576,
+      steps: 4,
+    });
+    job.clientId = 1;
+    job.status = "complete";
+    job.resultUrl = "blob:durable";
+    // Exactly what `applyDurableCompletion` writes: no bytes, a filename.
+    job.result = {
+      image: "",
+      format: row.format,
+      width: 1024,
+      height: 576,
+      seed_used: 5,
+      generation_time_ms: 10,
+      model: model.name,
+      filename: row.filename,
+      metadata: null,
+    };
+    const generation = useGenerationStore();
+    generation.jobs = [job];
+    generation.selectedClientId = 1;
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
+    const useAsSource = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(useAsSource).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(useAsSource!);
+    await flushPromises();
+    expect(useGenerateFormStore().form).toMatchObject(row.expected);
+  });
+
+  it.each([
+    { kind: "audio", filename: "durable-score.wav", format: "wav" as const },
+    { kind: "mesh", filename: "durable-bust.glb", format: "glb" as const },
+  ])("still refuses a durable $kind completion as a source", async (row) => {
+    readyLocal();
+    installedPayload = [imageModel];
+    useModelStore().all = [imageModel];
+    const job = newJob({
+      prompt: "a durable print",
+      model: imageModel.name,
+      width: 1024,
+      height: 1024,
+      steps: 4,
+    });
+    job.clientId = 1;
+    job.status = "complete";
+    job.resultUrl = "blob:durable";
+    job.result = {
+      image: "",
+      format: row.format,
+      width: 1024,
+      height: 1024,
+      seed_used: 5,
+      generation_time_ms: 10,
+      model: imageModel.name,
+      filename: row.filename,
+      metadata: null,
+    };
+    const generation = useGenerationStore();
+    generation.jobs = [job];
+    generation.selectedClientId = 1;
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
+    const useAsSource = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(useAsSource).toMatchObject({ disabled: true });
   });
 
   it.each([

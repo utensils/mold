@@ -68,6 +68,25 @@ describe("applyGalleryEntryAsSource", () => {
     expect(form.sourceImage).toBeNull();
   });
 
+  // Binary glTF is geometry, not pixels: without this the History drawer read
+  // a `.glb` off the host and handed it to `attachPickedImage`.
+  it("refuses a mesh print without reading it, in the lightbox's words", async () => {
+    const form = newGenerateForm();
+    const mesh = { ...image, filename: "bust.glb", format: "glb" } as GalleryImage;
+    const read = vi.fn();
+    const outcome = await applyGalleryEntryAsSource(entryFor(mesh), form, read);
+    expect(outcome).toEqual({
+      ok: false,
+      error: "A 3-D mesh cannot condition a render — source images are pixels.",
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(form.sourceImage).toBeNull();
+    expect(canUseGalleryEntryAsSource(mesh)).toBe(false);
+    expect(canUseGalleryEntryAsSource({ ...mesh, filename: "bust.obj", format: "obj" })).toBe(
+      false,
+    );
+  });
+
   // An audio print has no pixels and is not a source; the menus disable the
   // item, and the rule that says so lives here with the attach itself.
   it("refuses an audio print without reading it", async () => {

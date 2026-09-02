@@ -10377,6 +10377,62 @@ describe("MobileApp gallery", () => {
     );
   });
 
+  // Every failure of the attach is written into the same error state the
+  // Library viewer renders. The Create viewer shows the same print, so a
+  // refusal there must be visible instead of the button quietly doing nothing.
+  it("shows a failed source attach in the Create viewer", async () => {
+    serveStillModel();
+    admitCompletedPrints("refuse-this-result.png");
+    const baseJson = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            filename: "refuse-this-result.png",
+            timestamp: Math.floor(Date.now() / 1000) + 5,
+            format: "png",
+            metadata: { prompt: "refuse this result", model: stillModel.name },
+          },
+        ]);
+      }
+      return baseJson(callTarget, path, init);
+    });
+    const baseFetch = apiFetchTo.getMockImplementation()!;
+    // The host reports a payload past this phone's media budget, so the
+    // attach is refused rather than expanded into the request.
+    apiFetchTo.mockImplementation(
+      async (requestTarget: unknown, path: string, init?: RequestInit) =>
+        String(path).includes("/api/gallery/image/refuse-this-result.png")
+          ? ({
+              headers: new Headers({ "content-length": String(46 * 1024 * 1024) }),
+              blob: () => Promise.resolve(new Blob(["oversized"])),
+            } as unknown as Response)
+          : baseFetch(requestTarget, path, init),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("refuse this result");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generated-result']").exists()).toBe(true),
+    );
+    await wrapper.get("[data-test='mobile-generated-result']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
+      "Combined generation media must be 45 MiB or smaller on this phone",
+    );
+    // The viewer stays open on the print that was refused.
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+  });
+
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {
     localStorage.setItem(
       "mold.mobile.library-seen-at.v1",

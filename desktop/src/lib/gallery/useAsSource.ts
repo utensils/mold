@@ -7,7 +7,7 @@ import {
   setMinimaxH3GalleryImageFirstFrame,
 } from "@studio/lib/minimaxH3Authoring";
 import { attachPickedImage, attachPickedVideo } from "../sourceAttachment";
-import { isAudioItem, isVideoItem } from "./media";
+import { isAudioItem, isMeshItem, isVideoItem } from "./media";
 import type { GenerateForm } from "../generateForm";
 import type { GalleryImage } from "../api/types";
 import type { MergedPrint } from "../../stores/gallery";
@@ -27,10 +27,24 @@ import type { MergedPrint } from "../../stores/gallery";
  */
 export type UseAsSourceOutcome = { ok: true; message: string } | { ok: false; error: string };
 
-/** An audio print has no pixels and conditions nothing — the menus disable
- *  the item, and this is the rule they read. */
+/**
+ * Why this print cannot condition the next render, or `null` when it can.
+ *
+ * A mesh is geometry, not pixels — the Library lightbox refuses it in exactly
+ * these words, and handing binary glTF to `attachPickedImage` would stage a
+ * source no model can read. An audio print has no pixels either. Both are
+ * answered from the filename and format, so a durable completion that carries
+ * no bytes is classified the same way a gallery row is.
+ */
+export function galleryEntrySourceRefusal(item: GalleryImage): string | null {
+  if (isMeshItem(item)) return "A 3-D mesh cannot condition a render — source images are pixels.";
+  if (isAudioItem(item)) return "An audio print cannot be used as a source.";
+  return null;
+}
+
+/** The predicate every menu disables on; the reason above is the one rule. */
 export function canUseGalleryEntryAsSource(item: GalleryImage): boolean {
-  return !isAudioItem(item);
+  return galleryEntrySourceRefusal(item) === null;
 }
 
 /** The MIME type an H3 reference records, preferring what the read reported. */
@@ -49,9 +63,8 @@ export async function applyGalleryEntryAsSource(
   readBlob: (entry: MergedPrint) => Promise<Blob>,
 ): Promise<UseAsSourceOutcome> {
   const item = entry.item;
-  if (!canUseGalleryEntryAsSource(item)) {
-    return { ok: false, error: "An audio print cannot be used as a source." };
-  }
+  const refusal = galleryEntrySourceRefusal(item);
+  if (refusal) return { ok: false, error: refusal };
   try {
     const blob = await readBlob(entry);
     const base64 = await blobToBase64(blob);

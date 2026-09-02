@@ -13742,6 +13742,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       @cancel="transitionViewerUpscale('cancel')"
     />
 
+    <!-- The finished render, in the Library's own viewer. `reuse-error` is
+         not optional here: every refusal the source attach can produce (the
+         media budget, a transport failure, an H3 model that needs an explicit
+         task) lands in that one state, and without it this viewer's button
+         fails silently. -->
     <MobileGalleryViewer
       v-if="generatedViewerOpen && generatedPreviewItem && resultUrl"
       :item="generatedPreviewItem"
@@ -13755,6 +13760,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :upscale-enabled="generatedUpscalePrint !== null"
       :can-use-as-source="generatedSourcePrint !== null"
       :using-source="usingPrintAsSource"
+      :reuse-error="reusePrintError"
       :generation-announcement="generationAnnouncement"
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"

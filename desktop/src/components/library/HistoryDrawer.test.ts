@@ -271,6 +271,24 @@ describe("HistoryDrawer runs", () => {
     wrapper.unmount();
   });
 
+  // A mesh is geometry: reading it and handing it to the image attach would
+  // stage binary glTF as conditioning.
+  it("refuses a mesh run as a source", async () => {
+    const wrapper = await mountDrawer();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"]!.items = [
+      { ...run("bust.glb", "a marble bust", 1_700_000_300), format: "glb" },
+    ];
+    await flushPromises();
+    const menu = useContextMenuStore();
+
+    await wrapper.get("[data-test='run-row']").trigger("contextmenu");
+    const source = menu.entries.find((e) => !("separator" in e) && e.label === "Use as source")!;
+    expect(source).toMatchObject({ disabled: true });
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("loads the prompt log only when that tab is opened", async () => {
     const wrapper = await mountDrawer();
     expect(fetchHistoryAll).not.toHaveBeenCalled();
