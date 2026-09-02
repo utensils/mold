@@ -13,7 +13,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use mold_candle::minimax_h3::{validate_processor_assets, H3ConditionerConfig};
+use mold_candle::minimax_h3::{
+    register_extra_special_tokens, validate_processor_assets, H3ConditionerConfig,
+    H3_EXTRA_SPECIAL_TOKENS, H3_REGISTERED_MAX_TOKEN_ID, H3_REGISTERED_VOCABULARY_SIZE,
+};
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent};
 use mold_core::minimax_h3::{self as contract, ArtifactRole as ManifestArtifactRole, Layout, Task};
 use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
@@ -447,8 +450,14 @@ fn load_support_from_contracts_at_boundary(
         bytes(SupportRole::ImageProcessorConfig)?,
         bytes(SupportRole::VideoProcessorConfig)?,
     )?;
-    let tokenizer = Tokenizer::from_bytes(bytes(SupportRole::Tokenizer)?)
+    let mut tokenizer = Tokenizer::from_bytes(bytes(SupportRole::Tokenizer)?)
         .map_err(|error| anyhow!("invalid pinned H3 tokenizer: {error}"))?;
+    // Validate the file's own shape before registering, so a swapped
+    // tokenizer.json is still caught, then register the configured extras and
+    // validate the shape they produce.
+    validate_released_tokenizer_shape(&tokenizer)?;
+    register_extra_special_tokens(&mut tokenizer, bytes(SupportRole::TokenizerConfig)?)
+        .map_err(|error| anyhow!("pinned H3 tokenizer special tokens: {error}"))?;
     validate_tokenizer(&tokenizer, &conditioner_config)?;
 
     let support = H3PrivateQwenSupport {
@@ -656,7 +665,10 @@ fn validate_tokenizer_config(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_tokenizer(tokenizer: &Tokenizer, config: &H3ConditionerConfig) -> Result<()> {
+/// The shape of `tokenizer.json` as released, before the configured extra
+/// special tokens are registered. Checked first so a swapped file is still
+/// refused at its own fingerprint.
+fn validate_released_tokenizer_shape(tokenizer: &Tokenizer) -> Result<()> {
     let base_vocab_size = tokenizer.get_vocab_size(false);
     let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
     if base_vocab_size != RELEASED_TOKENIZER_BASE_VOCAB_SIZE
@@ -667,13 +679,42 @@ fn validate_tokenizer(tokenizer: &Tokenizer, config: &H3ConditionerConfig) -> Re
         )
     }
     let max_token_id = tokenizer.get_vocab(true).values().copied().max();
-    if max_token_id != Some(RELEASED_TOKENIZER_MAX_ID)
-        || usize::try_from(RELEASED_TOKENIZER_MAX_ID)? >= config.text_config.vocab_size
+    if max_token_id != Some(RELEASED_TOKENIZER_MAX_ID) {
+        bail!(
+            "pinned H3 tokenizer max ID {max_token_id:?} is not the released {RELEASED_TOKENIZER_MAX_ID}"
+        )
+    }
+    Ok(())
+}
+
+/// The shape after `register_extra_special_tokens`, which is what the runtime
+/// actually encodes with.
+fn validate_tokenizer(tokenizer: &Tokenizer, config: &H3ConditionerConfig) -> Result<()> {
+    let base_vocab_size = tokenizer.get_vocab_size(false);
+    let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
+    if base_vocab_size != RELEASED_TOKENIZER_BASE_VOCAB_SIZE
+        || tokenizer_vocab_size != H3_REGISTERED_VOCABULARY_SIZE
     {
         bail!(
-            "pinned H3 tokenizer max ID {max_token_id:?} does not fit the released {}-row embedding table",
+            "registered H3 tokenizer has {base_vocab_size} base and {tokenizer_vocab_size} total entries, expected {RELEASED_TOKENIZER_BASE_VOCAB_SIZE} base and {H3_REGISTERED_VOCABULARY_SIZE} total"
+        )
+    }
+    let max_token_id = tokenizer.get_vocab(true).values().copied().max();
+    if max_token_id != Some(H3_REGISTERED_MAX_TOKEN_ID)
+        || usize::try_from(H3_REGISTERED_MAX_TOKEN_ID)? >= config.text_config.vocab_size
+    {
+        bail!(
+            "registered H3 tokenizer max ID {max_token_id:?} does not fit the released {}-row embedding table",
             config.text_config.vocab_size
         )
+    }
+    for (token, expected) in H3_EXTRA_SPECIAL_TOKENS {
+        let found = tokenizer.token_to_id(token);
+        if found != Some(expected) {
+            bail!(
+                "registered H3 tokenizer token {token} resolves to {found:?}, expected {expected}"
+            )
+        }
     }
     for (token, expected) in [
         ("<|vision_start|>", config.vision_start_token_id),
@@ -947,7 +988,7 @@ mod tests {
         assert_eq!(support.conditioner_config().text_config.hidden_size, 5_120);
         assert_eq!(
             support.tokenizer().get_vocab_size(true),
-            RELEASED_TOKENIZER_VOCAB_SIZE
+            H3_REGISTERED_VOCABULARY_SIZE
         );
         assert_eq!(support.support_identity_sha256().len(), 64);
         support.revalidate().unwrap();

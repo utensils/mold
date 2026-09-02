@@ -125,7 +125,9 @@ pub fn register_extra_special_tokens(
         .get("additional_special_tokens")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
-            H3SpecialTokenError::Config("additional_special_tokens is absent or not an array".into())
+            H3SpecialTokenError::Config(
+                "additional_special_tokens is absent or not an array".into(),
+            )
         })?;
 
     let mut missing = Vec::new();
@@ -206,7 +208,10 @@ mod tests {
                 let content = PRESENT
                     .iter()
                     .find(|(_, present_id)| *present_id == id)
-                    .map_or_else(|| format!("<|added_{id}|>"), |(token, _)| (*token).to_owned());
+                    .map_or_else(
+                        || format!("<|added_{id}|>"),
+                        |(token, _)| (*token).to_owned(),
+                    );
                 serde_json::json!({
                     "id": id, "content": content, "single_word": false,
                     "lstrip": false, "rstrip": false, "normalized": false, "special": true
@@ -230,7 +235,10 @@ mod tests {
 
         register_extra_special_tokens(&mut tokenizer, &released_config()).unwrap();
 
-        assert_eq!(tokenizer.get_vocab_size(true), H3_REGISTERED_VOCABULARY_SIZE);
+        assert_eq!(
+            tokenizer.get_vocab_size(true),
+            H3_REGISTERED_VOCABULARY_SIZE
+        );
         assert_eq!(
             tokenizer.get_vocab(true).values().copied().max(),
             Some(H3_REGISTERED_MAX_TOKEN_ID)
@@ -262,7 +270,11 @@ mod tests {
             after.get_ids()
         );
         assert_eq!(
-            after.get_tokens().iter().filter(|token| *token == "<d>").count(),
+            after
+                .get_tokens()
+                .iter()
+                .filter(|token| *token == "<d>")
+                .count(),
             1,
             "the tag must be exactly one token, not a run of pieces"
         );
@@ -272,7 +284,8 @@ mod tests {
     fn a_config_missing_the_extras_is_refused() {
         let mut tokenizer = released_shape_tokenizer();
         let tokens = PRESENT.iter().map(|(t, _)| *t).collect::<Vec<_>>();
-        let error = register_extra_special_tokens(&mut tokenizer, &config_with(&tokens)).unwrap_err();
+        let error =
+            register_extra_special_tokens(&mut tokenizer, &config_with(&tokens)).unwrap_err();
         assert!(matches!(
             error,
             H3SpecialTokenError::UnexpectedSet { ref found } if found.is_empty()
@@ -285,7 +298,8 @@ mod tests {
         let mut tokens = PRESENT.iter().map(|(t, _)| *t).collect::<Vec<_>>();
         tokens.push("<|surprise|>");
         tokens.extend(H3_EXTRA_SPECIAL_TOKENS.iter().map(|(t, _)| *t));
-        let error = register_extra_special_tokens(&mut tokenizer, &config_with(&tokens)).unwrap_err();
+        let error =
+            register_extra_special_tokens(&mut tokenizer, &config_with(&tokens)).unwrap_err();
         assert!(matches!(error, H3SpecialTokenError::UnexpectedSet { .. }));
         assert_eq!(tokenizer.get_vocab_size(true), H3_RELEASED_VOCABULARY_SIZE);
     }
@@ -299,7 +313,10 @@ mod tests {
             error,
             H3SpecialTokenError::UnexpectedSet { ref found } if found.is_empty()
         ));
-        assert_eq!(tokenizer.get_vocab_size(true), H3_REGISTERED_VOCABULARY_SIZE);
+        assert_eq!(
+            tokenizer.get_vocab_size(true),
+            H3_REGISTERED_VOCABULARY_SIZE
+        );
     }
 
     #[test]
@@ -314,11 +331,8 @@ mod tests {
             H3SpecialTokenError::Config(_)
         ));
         assert!(matches!(
-            register_extra_special_tokens(
-                &mut tokenizer,
-                br#"{"additional_special_tokens":[7]}"#
-            )
-            .unwrap_err(),
+            register_extra_special_tokens(&mut tokenizer, br#"{"additional_special_tokens":[7]}"#)
+                .unwrap_err(),
             H3SpecialTokenError::Config(_)
         ));
     }
