@@ -433,9 +433,10 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     // future tier — shares one on-disk copy under the family `loras/` bucket
     // instead of duplicating ~1.96 GB per manifest name. The upstream
     // directory is deliberately dropped: Comfy-Org publishes under `loras/`
-    // and lightx2v at its repository root, and both belong in the one bucket
-    // the docs promise. For the Comfy-Org adapters the derivation is
-    // byte-identical to joining `hf_filename`, so installed files stay valid.
+    // while lightx2v and drbaph publish at their repository roots, and every
+    // one of them belongs in the single bucket the docs promise. For the
+    // Comfy-Org adapters the derivation is byte-identical to joining
+    // `hf_filename`, so installed files stay valid.
     // A tier-basename distinctness test in `minimax_h3` is what keeps two
     // adapters from colliding on one on-disk name.
     if manifest.family == crate::minimax_h3::FAMILY
@@ -8762,7 +8763,12 @@ mod tests {
         // and `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p` — two FL2VA
         // Turbo adapters from `lightx2v/Minimax-h3-Turbo` beside the same FL2VA
         // compact base stack, so each contributes exactly one manifest.
-        assert_eq!(known_manifests().len(), 197);
+        // Rank-21 Turbo bump: +3. `…-turbo-4step-768p-r21`, `…-turbo-8step-r21`
+        // and `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` — SVD-resized
+        // derivatives of three already-shipped adapters, published by
+        // `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`. Two ride the FL2VA compact
+        // base stack and one the Ref2VA one; each is one manifest.
+        assert_eq!(known_manifests().len(), 200);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

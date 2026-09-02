@@ -2967,12 +2967,19 @@ mod tests {
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
             ]),
-            "the FL2VA partition advertises exactly the FL2VA Turbo tags"
+            "the FL2VA partition advertises exactly the FL2VA Turbo tags, \
+             including the two SVD-resized rank-21 tiers"
         );
         assert!(
             !advertised.contains(mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP),
             "a Ref2VA Turbo tag must never ride the FL2VA partition"
+        );
+        assert!(
+            !advertised.contains(mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21),
+            "the Ref2VA rank-21 Turbo tag must never ride the FL2VA partition either"
         );
         for variant in turbo {
             assert!(!variant.installed);

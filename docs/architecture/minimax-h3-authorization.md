@@ -14,7 +14,7 @@ like other supported model families. It does not require a per-user
 authorization file, private runtime record, location check, license-acceptance
 dialog, or H3-specific downstream control. Ordinary builds may advertise every
 registered H3 manifest identity — the two compact Comfy FL2VA and Ref2VA
-graphs, the five reviewed Turbo LoRA tags built on them, and the
+graphs, the eight reviewed Turbo LoRA tags built on them, and the
 download-only `official-bf16` and `comfy-pruned-nvfp4` tags — download their
 exact revision-pinned files directly from Hugging Face, verify their recorded
 SHA-256 identities, retain them in the user's model store, and expose supported
@@ -84,26 +84,40 @@ configured models root and do not expose or copy that private evidence.
 The current decision permits:
 
 - public listing of every registered H3 manifest identity in Mold's Models
-  surfaces: the two compact Comfy FL2VA and Ref2VA graphs; the five reviewed
+  surfaces: the two compact Comfy FL2VA and Ref2VA graphs; the eight reviewed
   Turbo tags built on them (`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`,
   `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`,
   `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`,
-  `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, and
-  `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, each the compact stack of
-  its own task plus one pinned adapter, stored once under
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`,
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`,
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`,
+  `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, and
+  `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`, each the compact
+  stack of its own task plus one pinned adapter, stored once under
   `shared/minimax-h3/loras/` and shared, from the adapter's own source: three
-  from `Comfy-Org/MiniMax-H3` `loras/` at `COMFY_TURBO_LORA_REVISION`, and the
+  from `Comfy-Org/MiniMax-H3` `loras/` at `COMFY_TURBO_LORA_REVISION`, the
   v1.1 4-step 768p and 8-step 768p adapters from `lightx2v/Minimax-h3-Turbo`
-  at the repository root); and the pinned download-only tiers
+  at the repository root, and three lossy SVD-resized rank-21 adapters — a
+  per-module dynamic-rank derivative of the full-rank adapter each was
+  resized from; the A/B against each full-rank tier ran 2026-09-02 (the
+  8-step r21 tier cleared the acceptance thresholds at 768x768 and sits in
+  the 20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier sits in
+  the band at both canvases; the Ref2VA r21 tier measured 16-17 dB with
+  visual parity — below the rule's 20 dB drop clause), and all three shipped
+  on the maintainer's 2026-09-02 call on PR #1555 (see
+  `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign") —
+  from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` at the repository root); and the
+  pinned download-only tiers
   (`minimax-h3-{fl2va,ref2va}:official-bf16` and `:comfy-pruned-nvfp4`), which
   acquire, verify, inventory, and remove normally but are refused at
   generation as `MINIMAX_H3_RUNTIME_UNAVAILABLE`;
 - user-initiated, upstream-direct download of their revision-pinned files from
   `Comfy-Org/MiniMax-H3` and required support files from
   `MiniMaxAI/MiniMax-H3`, the pruned NVFP4 transformers from
-  `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`, and the two lightx2v Turbo LoRA
-  adapters from `lightx2v/Minimax-h3-Turbo`, with existing SHA-256
-  verification and repair flows;
+  `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`, the two lightx2v Turbo LoRA
+  adapters from `lightx2v/Minimax-h3-Turbo`, and the three SVD-resized
+  rank-21 Turbo LoRA adapters from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`,
+  with existing SHA-256 verification and repair flows;
 - no raw repository, arbitrary live-catalog recipe, configured alias, or
   caller-authored manifest may substitute for those registered graphs;
 - local storage, inventory, deletion, and repair of those downloaded artifacts;
@@ -147,6 +161,7 @@ The current decision does not permit Mold to:
 - [Authorization tracking issue](https://github.com/utensils/mold/issues/831)
 - [Third-party pruned NVFP4 transformers, pinned revision](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741)
 - [Third-party Turbo LoRA adapters, pinned revision](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)
+- [Third-party SVD-resized Turbo LoRA adapters, pinned revision](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac)
 
 ### The pruned NVFP4 third-party source
 
@@ -185,30 +200,42 @@ Because a personal namespace can be deleted or relicensed without notice —
 a risk that does not exist for MiniMaxAI or Comfy-Org — the release checklist
 below requires re-confirming this source before every release that ships it.
 
-### The SVD-resized adapter source: a contract pin, not yet a reviewed source
+### The SVD-resized adapter source
 
 `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` @
 `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` is pinned in
 `crates/mold-candle/src/minimax_h3/turbo_lora.rs`
-(`H3_TURBO_LORA_DRBAPH_REPOSITORY` / `_SOURCE_REVISION`) as the provenance of
-three SVD-resized rank-21 Turbo adapters and their checked-in golden headers.
-It is deliberately **absent** from the third-party row in the decision table
-below, from the reviewed-source links above, and from
-`scripts/minimax-h3-conformance.py`'s `EXPECTED_REVISIONS` and the conformance
-manifest's `sources[]`, because it is **not a download path**: no manifest row,
-no model identity, and no `REVIEWED_TURBO_MANIFEST_TIERS` entry resolves to it,
-so nothing mold ships can pull a byte from it. The pin exists so the rank-
-dynamic adapter contract can be tested against real published headers, and so
-an operator holding such a file locally can select it under the
-`h3-private-uat` capture scope (`MOLD_H3_TURBO_TIER`) ahead of the quality
-gate.
+(`H3_TURBO_LORA_DRBAPH_REPOSITORY` / `_SOURCE_REVISION`) as the source of
+three SVD-resized rank-21 Turbo adapters: lossy, per-module dynamic-rank
+derivatives of three of the full-rank adapters above.
 
-The license review of that repository, its third-party row here, its
-reviewed-source link, and its conformance-manifest and `EXPECTED_REVISIONS`
-entries land together with the manifest tags — not before. Until then the
-release checklist's "confirm every pinned third-party H3 source" item has
-nothing to confirm for it, because nothing acquires from it; the item applies
-from the release that first ships a tag naming it.
+These three tags carry PINNED-IDENTITY evidence — size, SHA-256, header
+identity, and the welded source tier — plus MEASURED A/B evidence against the
+exact full-rank tier each was resized from: the gate ran 2026-09-02 (the
+8-step r21 tier cleared the acceptance thresholds at 768x768 and sits in the
+20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier sits in the
+band at both canvases; the Ref2VA r21 tier measured 16-17 dB with visual
+parity — below the rule's 20 dB drop clause). All three tags shipped on the
+maintainer's 2026-09-02 call on PR #1555; the gate, its per-tier acceptance
+rule, the measured evidence, and the decision record are in
+`docs/qualification/minimax-h3.md` ("The rank-21 Turbo tiers campaign
+(2026-09-02)").
+
+The repository declares `license: apache-2.0` for these SVD-resized
+derivatives specifically, and `base_model: Comfy-Org/MiniMax-H3` with
+`base_model_relation: adapter` — a different declared base than the two rows
+above record, because these files were resized from the Comfy-Org re-hosts.
+It ships no LICENSE file (404 at the pinned revision), the same packaging gap
+already recorded for the pruned NVFP4 source and shared by
+`lightx2v/Minimax-h3-Turbo`. The `apache-2.0` declaration governs the resize
+transform the publisher applied, not the underlying weights: the MiniMax H3
+Community License still governs the base compact checkpoint every tag
+executes on and the full-rank Turbo adapter each `-r21` file was resized
+from, exactly as it does for the Comfy-Org and lightx2v adapters above.
+Reviewed 2026-09-02, against the same standard already applied to
+`Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` and `lightx2v/Minimax-h3-Turbo`:
+acceptable as a third-party derivative source, recorded in the reviewed-source
+links above and the decision table's Third-party sources row below.
 
 ## Decision record
 
@@ -222,14 +249,14 @@ not the private correspondence itself.
 | Decision               | All territories, users, Mold surfaces, local/remote/hosted execution, outputs, distribution, and redistribution are authorized; technical support remains capability-gated                               |
 | Decision owner         | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
 | Revocation owner       | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
-| Last review            | 2026-09-01                                                                                                                                                                                               |
+| Last review            | 2026-09-02                                                                                                                                                                                               |
 | License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                           |
 | Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
 | Scope approval         | Maintainer legal/compliance determination on 2026-08-14 that use is permitted everywhere and that the README plus H3 user guide satisfy the remaining obligations                                        |
 | Upstream review        | At upstream HEAD `42ed227ee7df40d41602854ae760620d6eb651fe`, LICENSE and Q&A hashes still match the pinned review; Q&A SHA-256 `c39dcfc5dc3e546918509b57709db826a9b1945311bffaa01e80501101b8abe4`        |
 | Qualification root     | Owner-only `/Volumes/ExternalStorage/mold/uat-h3`; validated external authorization record under its `compliance` directory; no evidence or model payload committed                                      |
 | Permitted artifacts    | Mold code/docs/manifests, upstream or transformed H3 artifacts, and generated outputs; private correspondence and owner-only qualification evidence remain confidential                                  |
-| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm. `lightx2v/Minimax-h3-Turbo` @ `05ef678438e84933c406131b59abbf86919b3aac`, Turbo LoRA adapters only (v1.1 4-step 768p, v1.0 8-step 768p). Declares `apache-2.0` for the adapters and `base_model: MiniMaxAI/MiniMax-H3`; its v1.0 files are byte-identical to Comfy-Org's re-host. Reviewed 2026-09-01; runnable on the FL2VA compact stack |
+| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm. `lightx2v/Minimax-h3-Turbo` @ `05ef678438e84933c406131b59abbf86919b3aac`, Turbo LoRA adapters only (v1.1 4-step 768p, v1.0 8-step 768p). Declares `apache-2.0` for the adapters and `base_model: MiniMaxAI/MiniMax-H3`; its v1.0 files are byte-identical to Comfy-Org's re-host; ships no LICENSE file (404 at the pinned revision), the same packaging gap as the NVFP4 source. Reviewed 2026-09-01; runnable on the FL2VA compact stack. `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` @ `be8eb3ea3466cbb7def202ffec0d2fdc054256ac`, SVD-resized rank-21 Turbo LoRA adapters only (three, lossy per-module dynamic-rank derivatives of the full-rank adapters above). Declares `apache-2.0` for these derivatives, `base_model: Comfy-Org/MiniMax-H3` and `base_model_relation: adapter`; ships no LICENSE file (404 at the pinned revision), the same packaging gap as the two sources above; the base MiniMax H3 Community License still governs the checkpoint and full-rank adapter each was resized from. Reviewed 2026-09-02; runnable on the compact stack of its own task, carrying pinned-identity evidence plus the measured A/B against each full-rank source, which ran 2026-09-02; all three tiers shipped on the maintainer's 2026-09-02 call on PR #1555 (see `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign (2026-09-02)") |
 | Permitted users        | Any person or organization in every territory, using local, remote-client, shared-server, hosted, or redistributed Mold/H3 paths                                                                         |
 | Prohibited scope       | Claiming technical support for an unimplemented runtime/task/device/envelope; publication of private correspondence or owner-only qualification evidence                                                 |
 | Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                  |

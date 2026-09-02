@@ -2773,6 +2773,9 @@ mod tests {
             (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
             (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11, 5),
             (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P, 9),
+            (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21, 5),
+            (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21, 9),
+            (crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21, 5),
         ] {
             let turbo = crate::minimax_h3::turbo_tier_for_model(model).is_some();
             let mut h3_input = input(model, "minimax-h3");
@@ -3031,6 +3034,9 @@ mod tests {
             crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
             crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
             crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
+            crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
+            crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21,
         ] {
             let profile = resolve_generation_profile(input(model, "minimax-h3"));
             let recipe = profile.default_recipe().unwrap();
@@ -3115,6 +3121,38 @@ mod tests {
             eight_768p_steps.note.as_deref(),
             eight.default_recipe().unwrap().steps.note.as_deref()
         );
+
+        // A resize changes weights, never the schedule, so a rank-21 tier
+        // carries its SOURCE tier's step count and therefore its sentence —
+        // including the Ref2VA one, whose partition has its own base recipe.
+        for (resized, source) in [
+            (
+                crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+                crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            ),
+            (
+                crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
+                crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            ),
+            (
+                crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP_R21,
+                crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP,
+            ),
+        ] {
+            let resized_steps = resolve_generation_profile(input(resized, "minimax-h3"))
+                .default_recipe()
+                .unwrap()
+                .steps
+                .clone();
+            let source_steps = resolve_generation_profile(input(source, "minimax-h3"))
+                .default_recipe()
+                .unwrap()
+                .steps
+                .clone();
+            assert_eq!(resized_steps.mode, ControlMode::Fixed, "{resized}");
+            assert_eq!(resized_steps.default, source_steps.default, "{resized}");
+            assert_eq!(resized_steps.note, source_steps.note, "{resized}");
+        }
     }
 
     /// The distilled FLUX/LTX case keeps the sentence clients used to

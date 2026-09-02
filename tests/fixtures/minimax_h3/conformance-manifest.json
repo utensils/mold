@@ -97,6 +97,13 @@
       "authority": "deployment"
     },
     {
+      "id": "drbaph-resized-loras",
+      "repository": "https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI",
+      "revision": "be8eb3ea3466cbb7def202ffec0d2fdc054256ac",
+      "role": "third-party SVD-resized Turbo LoRA adapters (avg rank 21; lossy); runnable on the compact stacks after the quality gate",
+      "authority": "deployment"
+    },
+    {
       "id": "sglang",
       "repository": "https://github.com/sgl-project/sglang",
       "revision": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",

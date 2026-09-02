@@ -60,6 +60,36 @@ pub const NVFP4_REVISION: &str = "908eccad7e68751190d04c171956f163bfeed741";
 /// checkpoint a tag executes on.
 pub const LIGHTX2V_REPO: &str = "lightx2v/Minimax-h3-Turbo";
 pub const LIGHTX2V_REVISION: &str = "05ef678438e84933c406131b59abbf86919b3aac";
+/// Third-party repository publishing the SVD-resized Turbo LoRA adapters.
+///
+/// The third non-MiniMaxAI/non-Comfy-Org source mold pins, and like
+/// [`LIGHTX2V_REPO`] only ADAPTERS come from it: the base stack every tag
+/// executes on still resolves to [`COMFY_REPO`] and [`OFFICIAL_REPO`]. Its
+/// files sit at the repository ROOT with no `loras/` directory, so a tier
+/// carries its own repository-relative path and its own revision.
+///
+/// Each file here is a DERIVATIVE of an adapter mold already ships: a compact
+/// SVD per module, `sqrt(S)`-balanced back into `lora_A`/`lora_B`, the `alpha`
+/// tensors dropped and the source `alpha / rank` multiplied into `lora_B`.
+/// That makes them a lossy low-rank approximation (average rank 21 against the
+/// source's 128) of an artifact whose full-rank original is pinned in this
+/// same table, which is the provenance corroboration for pinning them at all.
+/// The publisher declares `apache-2.0` on the derivatives of the
+/// Comfy-Org-re-hosted lightx2v adapters; the MiniMax H3 Community License
+/// still governs the base checkpoint a tag executes on.
+///
+/// Only the three `resized_avg_rank_21` files are reviewed. The repository's
+/// other rank-20/28/64 resizes at the same revision are deliberately excluded
+/// (their `baked_scale` metadata is free text rather than a number and they
+/// carry no `resized_from`, so nothing pins the scale that was folded in or
+/// the adapter it approximates), and so are the eight `*_pruned_comfyui`
+/// full checkpoints published beside them (whole transformers, not adapters —
+/// mold's compact transformer identity is pinned from [`COMFY_REPO`]) and the
+/// Kijai rank-21 files republished elsewhere (no declared license, and an
+/// internal-checkpoint source that cannot be corroborated against anything
+/// mold ships).
+pub const DRBAPH_TURBO_LORA_REPO: &str = "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI";
+pub const DRBAPH_TURBO_LORA_REVISION: &str = "be8eb3ea3466cbb7def202ffec0d2fdc054256ac";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
 
 pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
@@ -80,6 +110,19 @@ pub const FL2VA_COMFY_TURBO_4STEP_768P_V11: &str =
 /// other 8-step 768p tier to disambiguate it from.
 pub const FL2VA_COMFY_TURBO_8STEP_768P: &str =
     "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p";
+/// SVD-resized derivative of [`FL2VA_COMFY_TURBO_4STEP_768P`]. Same
+/// distillation, same 5-point grid at the 768p shift; roughly 1.66 GB less to
+/// download and about 1.6 GB less resident, at the cost of a lossy low-rank
+/// approximation of the adapter it is derived from.
+pub const FL2VA_COMFY_TURBO_4STEP_768P_R21: &str =
+    "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21";
+/// SVD-resized derivative of [`FL2VA_COMFY_TURBO_8STEP`]. The tag carries no
+/// `768p` because its source is the 544p-trained 8-step tier.
+pub const FL2VA_COMFY_TURBO_8STEP_R21: &str = "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21";
+/// SVD-resized derivative of [`REF2VA_COMFY_TURBO_4STEP`], the first resized
+/// tier of the Ref2VA partition.
+pub const REF2VA_COMFY_TURBO_4STEP_R21: &str =
+    "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
 /// Pruned NVFP4 compact transformers. Deliberately absent from
 /// [`REVIEWED_COMPACT_MODELS`]: they download, verify, inventory, and remove
 /// like any other pinned model, but mold has no engine arm for the weight
@@ -98,6 +141,9 @@ pub const REVIEWED_COMPACT_MODELS: &[&str] = &[
     REF2VA_COMFY_TURBO_4STEP,
     FL2VA_COMFY_TURBO_4STEP_768P_V11,
     FL2VA_COMFY_TURBO_8STEP_768P,
+    FL2VA_COMFY_TURBO_4STEP_768P_R21,
+    FL2VA_COMFY_TURBO_8STEP_R21,
+    REF2VA_COMFY_TURBO_4STEP_R21,
 ];
 
 /// Exact-identity membership test for [`REVIEWED_COMPACT_MODELS`]. This is
@@ -118,6 +164,16 @@ pub fn is_reviewed_compact_model(value: &str) -> bool {
 /// rather than through this constant.
 pub const COMFY_TURBO_LORA_REVISION: &str = "dc559027db79c174125df4d827db55cd11178860";
 
+/// Shape sentence for an adapter distilled at one uniform rank with an `alpha`
+/// tensor per module — every adapter Comfy-Org and lightx2v publish.
+const UNIFORM_TURBO_ADAPTER_SHAPE: &str = "Diffusers PEFT LoRA; rank 128; 208 modules";
+/// Shape sentence for an SVD-resized derivative: the per-module rank varies
+/// (21 on average against the source's 128), there is no `alpha` tensor, and
+/// the source `alpha / rank` is already multiplied into `lora_B`. The module
+/// set is the same 208 either way — a resize changes ranks, never targets.
+const RESIZED_TURBO_ADAPTER_SHAPE: &str =
+    "SVD-resized PEFT LoRA; dynamic per-module rank (avg 21); baked scale; 208 modules";
+
 /// The manifest-facing contract of one reviewed Turbo LoRA tier.
 ///
 /// This mirrors the runtime tier table owned by `mold-candle`
@@ -133,20 +189,27 @@ pub struct TurboManifestTier {
     pub tier_stable_id: &'static str,
     /// Human-facing tier label ("Turbo 8-step").
     pub display_label: &'static str,
-    /// Repository publishing this tier's adapter: [`COMFY_REPO`] or
-    /// [`LIGHTX2V_REPO`]. The base stack is unaffected — a Turbo tag is the
-    /// compact stack of its own task plus this one file.
+    /// Repository publishing this tier's adapter: [`COMFY_REPO`],
+    /// [`LIGHTX2V_REPO`], or [`DRBAPH_TURBO_LORA_REPO`]. The base stack is
+    /// unaffected — a Turbo tag is the compact stack of its own task plus
+    /// this one file.
     pub adapter_hf_repo: &'static str,
     /// Pinned revision of [`Self::adapter_hf_repo`] this adapter is published
     /// at. `file_revision` resolves the pair, so an adapter can never be
     /// fetched from an unpinned `main`.
     pub adapter_hf_revision: &'static str,
     /// Repository-relative adapter path at [`Self::adapter_hf_revision`].
-    /// Comfy-Org publishes under `loras/`; lightx2v publishes at the
-    /// repository root.
+    /// Comfy-Org publishes under `loras/`; lightx2v and drbaph publish at
+    /// their repository roots.
     pub adapter_hf_filename: &'static str,
     pub adapter_size_bytes: u64,
     pub adapter_sha256: &'static str,
+    /// What `artifact_contract` reports as this adapter's shape. It is a
+    /// per-tier fact rather than one sentence for the component, because an
+    /// SVD-resized derivative and the rank-128 adapter it approximates are
+    /// both `DistilledLora` files and a user reading a contract before a pull
+    /// must be able to tell them apart.
+    pub adapter_shape_label: &'static str,
     /// Terminal-inclusive mold steps: published transformer evaluations + 1.
     pub steps: u32,
 }
@@ -156,12 +219,13 @@ pub struct TurboManifestTier {
 /// landed; its adapter is the one `H3TurboLoraTier::Ref2v4StepV10` already
 /// pins, and selection stays by model identity.
 ///
-/// Adapters come from two reviewed repositories: Comfy-Org's `loras/`
-/// re-hosts and, for the two adapters Comfy-Org never re-hosted,
-/// [`LIGHTX2V_REPO`] at its repository root. (768p training is not the
-/// distinction — `FL2VA_COMFY_TURBO_4STEP_768P` is 768p-trained too and comes
-/// from Comfy-Org.) Each row names its own source and revision, so acquisition
-/// never has to infer provenance from the tag.
+/// Adapters come from three reviewed repositories: Comfy-Org's `loras/`
+/// re-hosts; for the two adapters Comfy-Org never re-hosted,
+/// [`LIGHTX2V_REPO`] at its repository root; and for the SVD-resized
+/// derivatives, [`DRBAPH_TURBO_LORA_REPO`], also at its root. (768p training
+/// is not the distinction — `FL2VA_COMFY_TURBO_4STEP_768P` is 768p-trained
+/// too and comes from Comfy-Org.) Each row names its own source, revision and
+/// adapter shape, so acquisition never has to infer provenance from the tag.
 pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
     TurboManifestTier {
         model: FL2VA_COMFY_TURBO_8STEP,
@@ -172,6 +236,7 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_193_000,
         adapter_sha256: "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e",
+        adapter_shape_label: UNIFORM_TURBO_ADAPTER_SHAPE,
         steps: 9,
     },
     TurboManifestTier {
@@ -183,6 +248,7 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_192_992,
         adapter_sha256: "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
+        adapter_shape_label: UNIFORM_TURBO_ADAPTER_SHAPE,
         steps: 5,
     },
     TurboManifestTier {
@@ -194,6 +260,7 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_hf_filename: "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_193_000,
         adapter_sha256: "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
+        adapter_shape_label: UNIFORM_TURBO_ADAPTER_SHAPE,
         steps: 5,
     },
     TurboManifestTier {
@@ -205,6 +272,7 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_hf_filename: "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_192_992,
         adapter_sha256: "449d80f301ac571622c72e28b8fd72a4b3681b7a8df8a92f17c8f6ec43f56558",
+        adapter_shape_label: UNIFORM_TURBO_ADAPTER_SHAPE,
         steps: 5,
     },
     TurboManifestTier {
@@ -216,7 +284,49 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_hf_filename: "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_193_000,
         adapter_sha256: "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980",
+        adapter_shape_label: UNIFORM_TURBO_ADAPTER_SHAPE,
         steps: 9,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_TURBO_4STEP_768P_R21,
+        tier_stable_id:
+            "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.resized-avg-rank-21.v1",
+        display_label: "Turbo 4-step 768p (rank 21)",
+        adapter_hf_repo: DRBAPH_TURBO_LORA_REPO,
+        adapter_hf_revision: DRBAPH_TURBO_LORA_REVISION,
+        adapter_hf_filename:
+            "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_resized_avg_rank_21_bf16.safetensors",
+        adapter_size_bytes: 298_177_224,
+        adapter_sha256: "1b85da614014024a0c9507f12558917dcc69b6adb564e716324594f401723115",
+        adapter_shape_label: RESIZED_TURBO_ADAPTER_SHAPE,
+        steps: 5,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_TURBO_8STEP_R21,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-8step-v1.0.comfyui-bf16.resized-avg-rank-21.v1",
+        display_label: "Turbo 8-step (rank 21)",
+        adapter_hf_repo: DRBAPH_TURBO_LORA_REPO,
+        adapter_hf_revision: DRBAPH_TURBO_LORA_REVISION,
+        adapter_hf_filename:
+            "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_resized_avg_rank_21_bf16.safetensors",
+        adapter_size_bytes: 327_035_608,
+        adapter_sha256: "a3208be61329c27a6754c53db9a21a3c86e2a285381700adf2d97e279c062840",
+        adapter_shape_label: RESIZED_TURBO_ADAPTER_SHAPE,
+        steps: 9,
+    },
+    TurboManifestTier {
+        model: REF2VA_COMFY_TURBO_4STEP_R21,
+        tier_stable_id:
+            "minimax-h3.turbo-lora.ref2v-4step-v0.1.comfyui-bf16.resized-avg-rank-21.v1",
+        display_label: "Turbo 4-step (rank 21)",
+        adapter_hf_repo: DRBAPH_TURBO_LORA_REPO,
+        adapter_hf_revision: DRBAPH_TURBO_LORA_REVISION,
+        adapter_hf_filename:
+            "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors",
+        adapter_size_bytes: 326_935_264,
+        adapter_sha256: "2c6abb194cff3e26c2295c87892913adf0c92d8f784f305238246759f9b333d0",
+        adapter_shape_label: RESIZED_TURBO_ADAPTER_SHAPE,
+        steps: 5,
     },
 ];
 
@@ -1062,6 +1172,7 @@ pub fn repo_revision(repo: &str) -> Option<&'static str> {
         COMFY_REPO => Some(COMFY_REVISION),
         NVFP4_REPO => Some(NVFP4_REVISION),
         LIGHTX2V_REPO => Some(LIGHTX2V_REVISION),
+        DRBAPH_TURBO_LORA_REPO => Some(DRBAPH_TURBO_LORA_REVISION),
         _ => None,
     }
 }
@@ -1147,6 +1258,11 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
             Some(FL2VA_COMFY_TURBO_4STEP_768P_V11)
         }
         value if value == FL2VA_COMFY_TURBO_8STEP_768P => Some(FL2VA_COMFY_TURBO_8STEP_768P),
+        value if value == FL2VA_COMFY_TURBO_4STEP_768P_R21 => {
+            Some(FL2VA_COMFY_TURBO_4STEP_768P_R21)
+        }
+        value if value == FL2VA_COMFY_TURBO_8STEP_R21 => Some(FL2VA_COMFY_TURBO_8STEP_R21),
+        value if value == REF2VA_COMFY_TURBO_4STEP_R21 => Some(REF2VA_COMFY_TURBO_4STEP_R21),
         _ => None,
     }
 }
@@ -2774,10 +2890,22 @@ pub fn artifact_contract<'a>(
             },
             "50 blocks; hidden=5376; 56 heads x 128",
         ),
+        // The shape is a per-tier fact looked up on the exact `(repo, path)`
+        // pair the tier declares — the same key `file_revision` uses — because
+        // an SVD-resized derivative and the rank-128 adapter it approximates
+        // are both `DistilledLora` files of the same 208 modules. A file no
+        // reviewed tier claims falls back to the uniform sentence, which is
+        // what every adapter mold pinned before the resized tiers existed.
         ModelComponent::DistilledLora => (
             ArtifactRole::TurboLoraAdapter,
             "bf16",
-            "Diffusers PEFT LoRA; rank 128; 208 modules",
+            REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .find(|tier| {
+                    tier.adapter_hf_repo == file.hf_repo
+                        && tier.adapter_hf_filename == file.hf_filename
+                })
+                .map_or(UNIFORM_TURBO_ADAPTER_SHAPE, |tier| tier.adapter_shape_label),
         ),
         ModelComponent::TextEncoder => (
             ArtifactRole::Qwen3VlConditioner,
@@ -3458,11 +3586,21 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: tier.model.to_string(),
             family: FAMILY.to_string(),
+            // This one sentence is the whole `/api/models` row, the
+            // Discover card, and the `mold list` line a user reads before a
+            // ~42.8 GB pull, so it discloses the adapter's SHAPE and not
+            // only its label: a lossy SVD resize is never described in the
+            // same words as the full-rank adapter it approximates.
             description: format!(
-                "MiniMax H3 {} Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; CUDA or Apple Metal)",
+                "MiniMax H3 {} Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed{} {} LoRA (downloadable; CUDA or Apple Metal)",
                 match task {
                     Task::Fl2va => "FL2VA",
                     Task::Ref2va => "Ref2VA",
+                },
+                if tier.adapter_shape_label == RESIZED_TURBO_ADAPTER_SHAPE {
+                    ", lossy SVD-resized"
+                } else {
+                    ""
                 },
                 tier.display_label
             ),
@@ -3672,6 +3810,9 @@ mod tests {
             REF2VA_COMFY_TURBO_4STEP,
             FL2VA_COMFY_TURBO_4STEP_768P_V11,
             FL2VA_COMFY_TURBO_8STEP_768P,
+            FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            FL2VA_COMFY_TURBO_8STEP_R21,
+            REF2VA_COMFY_TURBO_4STEP_R21,
         ] {
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
@@ -4693,6 +4834,9 @@ mod tests {
             REF2VA_COMFY_TURBO_4STEP,
             FL2VA_COMFY_TURBO_4STEP_768P_V11,
             FL2VA_COMFY_TURBO_8STEP_768P,
+            FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            FL2VA_COMFY_TURBO_8STEP_R21,
+            REF2VA_COMFY_TURBO_4STEP_R21,
         ] {
             for &(width, height) in REVIEWED_COMPACT_CANVASES {
                 assert!(
@@ -4994,6 +5138,24 @@ mod tests {
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
                 FL2VA_MODES,
             ),
+            (
+                FL2VA_COMFY_TURBO_4STEP_768P_R21,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                FL2VA_COMFY_TURBO_8STEP_R21,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                REF2VA_COMFY_TURBO_4STEP_R21,
+                Task::Ref2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                REF2VA_MODES,
+            ),
         ];
         let mut observed_modes = Vec::new();
         for (model, task, layout, modes) in cases {
@@ -5061,6 +5223,9 @@ mod tests {
                 REF2VA_COMFY_TURBO_4STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P_V11,
                 FL2VA_COMFY_TURBO_8STEP_768P,
+                FL2VA_COMFY_TURBO_4STEP_768P_R21,
+                FL2VA_COMFY_TURBO_8STEP_R21,
+                REF2VA_COMFY_TURBO_4STEP_R21,
             ])
         );
         assert!(advertised
@@ -5079,6 +5244,9 @@ mod tests {
         let fl_turbo_4 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P).unwrap();
         let fl_turbo_4_v11 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P_V11).unwrap();
         let fl_turbo_8_768p = find_manifest(FL2VA_COMFY_TURBO_8STEP_768P).unwrap();
+        let fl_turbo_4_768p_r21 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P_R21).unwrap();
+        let fl_turbo_8_r21 = find_manifest(FL2VA_COMFY_TURBO_8STEP_R21).unwrap();
+        let ref_turbo_4_r21 = find_manifest(REF2VA_COMFY_TURBO_4STEP_R21).unwrap();
         let fl_nvfp4 = find_manifest(FL2VA_COMFY_NVFP4).unwrap();
         let ref_nvfp4 = find_manifest(REF2VA_COMFY_NVFP4).unwrap();
         assert!(!fl_nvfp4.hidden);
@@ -5091,6 +5259,9 @@ mod tests {
         assert!(!fl_turbo_4.hidden);
         assert!(!fl_turbo_4_v11.hidden);
         assert!(!fl_turbo_8_768p.hidden);
+        assert!(!fl_turbo_4_768p_r21.hidden);
+        assert!(!fl_turbo_8_r21.hidden);
+        assert!(!ref_turbo_4_r21.hidden);
         for manifest in [
             fl_official,
             ref_official,
@@ -5100,6 +5271,9 @@ mod tests {
             fl_turbo_4,
             fl_turbo_4_v11,
             fl_turbo_8_768p,
+            fl_turbo_4_768p_r21,
+            fl_turbo_8_r21,
+            ref_turbo_4_r21,
             fl_nvfp4,
             ref_nvfp4,
         ] {
@@ -5192,6 +5366,9 @@ mod tests {
                 REF2VA_COMFY_TURBO_4STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P_V11,
                 FL2VA_COMFY_TURBO_8STEP_768P,
+                FL2VA_COMFY_TURBO_4STEP_768P_R21,
+                FL2VA_COMFY_TURBO_8STEP_R21,
+                REF2VA_COMFY_TURBO_4STEP_R21,
             ])
         );
 
@@ -5308,8 +5485,9 @@ mod tests {
             assert_eq!(manifest.files.len(), base.files.len() + 1);
 
             // The adapter downloads from its OWN pinned source revision —
-            // Comfy-Org's later `loras/` publication, or lightx2v's repository
-            // root — while the base stack stays on the reviewed pin.
+            // Comfy-Org's later `loras/` publication, or lightx2v's or
+            // drbaph's repository root — while the base stack stays on the
+            // reviewed pin.
             assert_eq!(
                 file_revision(&adapter.hf_repo, &adapter.hf_filename),
                 Some(tier.adapter_hf_revision)
@@ -5357,18 +5535,20 @@ mod tests {
         }
     }
 
-    /// Every reviewed adapter comes from one of exactly two reviewed
-    /// repositories, and the two publish at different depths: Comfy-Org under
-    /// `loras/`, lightx2v at the repository root. Nothing else may appear here
-    /// without a `repo_revision` arm, and no two tiers may collide on a
-    /// repository path, an on-disk basename, a digest, a stable id, or a tag.
+    /// Every reviewed adapter comes from one of exactly three reviewed
+    /// repositories, and they publish at different depths: Comfy-Org under
+    /// `loras/`, lightx2v and drbaph at their repository roots. Nothing else
+    /// may appear here without a `repo_revision` arm, and no two tiers may
+    /// collide on a repository path, an on-disk basename, a digest, a stable
+    /// id, or a tag.
     #[test]
-    fn turbo_adapter_sources_are_exactly_the_two_reviewed_repositories() {
+    fn turbo_adapter_sources_are_exactly_the_three_reviewed_repositories() {
         let mut repo_paths = std::collections::BTreeSet::new();
         let mut basenames = std::collections::BTreeSet::new();
         let mut digests = std::collections::BTreeSet::new();
         let mut stable_ids = std::collections::BTreeSet::new();
         let mut models = std::collections::BTreeSet::new();
+        let mut labels = std::collections::BTreeSet::new();
         for tier in REVIEWED_TURBO_MANIFEST_TIERS {
             match tier.adapter_hf_repo {
                 COMFY_REPO => {
@@ -5392,6 +5572,27 @@ mod tests {
                     assert!(
                         !tier.adapter_hf_filename.contains('/'),
                         "{} lightx2v adapter is not at the repository root",
+                        tier.model
+                    );
+                }
+                DRBAPH_TURBO_LORA_REPO => {
+                    assert_eq!(
+                        tier.adapter_hf_revision, DRBAPH_TURBO_LORA_REVISION,
+                        "{}",
+                        tier.model
+                    );
+                    assert!(
+                        !tier.adapter_hf_filename.contains('/'),
+                        "{} drbaph adapter is not at the repository root",
+                        tier.model
+                    );
+                    // Only the SVD-resized derivatives come from drbaph, and
+                    // the shape label is what the acquisition contract shows a
+                    // user before a pull: a lossy approximation is never
+                    // described as the rank-128 adapter it approximates.
+                    assert_eq!(
+                        tier.adapter_shape_label, RESIZED_TURBO_ADAPTER_SHAPE,
+                        "{}",
                         tier.model
                     );
                 }
@@ -5437,6 +5638,14 @@ mod tests {
                 "{} repeats a model tag",
                 tier.model
             );
+            // The label is the only thing a Discover row shows to tell two
+            // tiers apart, so a copy-pasted one would make a lossy tier
+            // indistinguishable from the adapter it approximates.
+            assert!(
+                labels.insert(tier.display_label),
+                "{} repeats a display label",
+                tier.model
+            );
         }
         assert_eq!(LIGHTX2V_REPO, "lightx2v/Minimax-h3-Turbo");
         assert_eq!(
@@ -5444,6 +5653,103 @@ mod tests {
             "05ef678438e84933c406131b59abbf86919b3aac"
         );
         assert_eq!(repo_revision(LIGHTX2V_REPO), Some(LIGHTX2V_REVISION));
+        assert_eq!(
+            DRBAPH_TURBO_LORA_REPO,
+            "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI"
+        );
+        assert_eq!(
+            DRBAPH_TURBO_LORA_REVISION,
+            "be8eb3ea3466cbb7def202ffec0d2fdc054256ac"
+        );
+        assert_eq!(
+            repo_revision(DRBAPH_TURBO_LORA_REPO),
+            Some(DRBAPH_TURBO_LORA_REVISION)
+        );
+        // All three repositories are actually exercised, so the match arms
+        // above cannot pass vacuously if a source is dropped from the table.
+        assert_eq!(
+            REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .map(|tier| tier.adapter_hf_repo)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([COMFY_REPO, LIGHTX2V_REPO, DRBAPH_TURBO_LORA_REPO])
+        );
+    }
+
+    /// A user reading an acquisition contract must be able to tell a lossy
+    /// SVD-resized adapter from the rank-128 adapter it approximates, so the
+    /// `DistilledLora` shape sentence — and the manifest description the
+    /// Discover row, `/api/models`, and `mold list` actually show — are both
+    /// derived from the tier row rather than written once for every adapter.
+    #[test]
+    fn the_distilled_lora_shape_names_the_tier_it_actually_describes() {
+        let mut seen_uniform = false;
+        let mut seen_resized = false;
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let manifest = find_manifest(tier.model).unwrap();
+            let adapter = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::DistilledLora)
+                .unwrap();
+            let contract = artifact_contract(manifest, adapter).unwrap();
+            assert_eq!(
+                contract.role,
+                ArtifactRole::TurboLoraAdapter,
+                "{}",
+                tier.model
+            );
+            assert_eq!(contract.dtype, "bf16", "{}", tier.model);
+            assert_eq!(contract.shape, tier.adapter_shape_label, "{}", tier.model);
+            // The description is the only sentence most clients ever render
+            // for this row, so it carries the same disclosure the contract
+            // shape does.
+            assert!(
+                manifest.description.contains(tier.display_label),
+                "{}",
+                tier.model
+            );
+            match tier.adapter_shape_label {
+                UNIFORM_TURBO_ADAPTER_SHAPE => {
+                    seen_uniform = true;
+                    assert_ne!(
+                        tier.adapter_hf_repo, DRBAPH_TURBO_LORA_REPO,
+                        "{}",
+                        tier.model
+                    );
+                    assert!(contract.shape.contains("rank 128"), "{}", tier.model);
+                    assert!(
+                        !manifest.description.contains("lossy"),
+                        "{} is full rank but its description calls it lossy",
+                        tier.model
+                    );
+                    assert!(
+                        manifest.description.contains("with the reviewed "),
+                        "{}",
+                        tier.model
+                    );
+                }
+                RESIZED_TURBO_ADAPTER_SHAPE => {
+                    seen_resized = true;
+                    assert!(contract.shape.contains("avg 21"), "{}", tier.model);
+                    assert!(contract.shape.contains("baked scale"), "{}", tier.model);
+                    assert!(!contract.shape.contains("rank 128"), "{}", tier.model);
+                    assert!(
+                        manifest
+                            .description
+                            .contains("with the reviewed, lossy SVD-resized "),
+                        "{} description does not disclose the resize: {}",
+                        tier.model,
+                        manifest.description
+                    );
+                }
+                other => panic!("{} declares an unreviewed shape {other}", tier.model),
+            }
+            // Both shapes describe the same 208-module target set; only the
+            // per-module rank and the baked scale differ.
+            assert!(contract.shape.contains("208 modules"), "{}", tier.model);
+        }
+        assert!(seen_uniform && seen_resized);
     }
 
     /// `file_revision` is the only thing standing between an adapter path and
@@ -5466,6 +5772,14 @@ mod tests {
         assert_eq!(
             file_revision(COMFY_REPO, comfy.adapter_hf_filename),
             Some(COMFY_TURBO_LORA_REVISION)
+        );
+        let drbaph = REVIEWED_TURBO_MANIFEST_TIERS
+            .iter()
+            .find(|tier| tier.model == REF2VA_COMFY_TURBO_4STEP_R21)
+            .unwrap();
+        assert_eq!(
+            file_revision(DRBAPH_TURBO_LORA_REPO, drbaph.adapter_hf_filename),
+            Some(DRBAPH_TURBO_LORA_REVISION)
         );
         // A Comfy-Org path that merely LOOKS like a lightx2v adapter is not
         // one: the tier lookup keys on the pair, so this falls back to the
@@ -6273,6 +6587,10 @@ mod tests {
         assert_eq!(
             source_revision("lightx2v-turbo-adapters"),
             LIGHTX2V_REVISION
+        );
+        assert_eq!(
+            source_revision("drbaph-resized-loras"),
+            DRBAPH_TURBO_LORA_REVISION
         );
         assert_eq!(
             conformance["numerical_authority"]["precision"],

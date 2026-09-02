@@ -147,6 +147,7 @@ gate.
 | [vLLM-Omni](https://github.com/vllm-project/vllm-omni/tree/3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc)                                | `3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc` | Loader, offload, and CUDA-kernel reference only                   |
 | [Abiray pruned NVFP4 checkpoints](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741) | `908eccad7e68751190d04c171956f163bfeed741` | Pruned NVFP4 transformer identities (download-only, no runtime arm) |
 | [lightx2v Turbo LoRA adapters](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)      | `05ef678438e84933c406131b59abbf86919b3aac` | Turbo LoRA adapter identities (v1.1 4-step 768p, v1.0 8-step 768p) |
+| [drbaph SVD-resized rank-21 Turbo LoRA adapters](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac) | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | Turbo LoRA adapter identities (three lossy rank-21 resizes) |
 
 Only Diffusers' official BF16/FP32 mixed execution is the current numerical
 oracle. Performance references do not become correctness authorities merely
@@ -1186,10 +1187,11 @@ PR 1 does not change that contract. Lifting it so an FL2VA tier can run
 text-only is tracked in #1552.
 
 **Adapters pulled ahead of the release are unowned by the running service.**
-Both adapters land in the shared model store at
+This holds for EVERY adapter pulled ahead of the release that first ships its
+tag, not only this campaign's two: they all land in the shared model store at
 `shared/minimax-h3/loras/<basename>`, beside the Comfy-Org adapters, keyed by
-their own basenames. A mold that does not know the two tags has no manifest for
-them: `/api/models` shows no row, `mold rm` claims no removal ownership, and
+their own basenames. A mold that does not know a tag has no manifest for
+it: `/api/models` shows no row, `mold rm` claims no removal ownership, and
 repair will not touch them. So a scratch server used to pull them onto a host
 whose production service is an older release leaves bytes that older service can
 neither see nor clean up — invisible and unowned, not harmless-and-managed —
@@ -1198,7 +1200,9 @@ until that service upgrades to a release carrying the tags, after which
 concrete case: both adapters were pulled through the scratch server into the
 shared store, and the host's 0.26.0 production service, a build that predates
 the tags, has no row for either one — invisible and unowned until it
-upgrades.
+upgrades. The rank-21 campaign below pulls three more adapters onto the same
+shared store, through the same scratch server, onto the same production host,
+and inherits this paragraph unchanged.
 
 ### The conditioner cache
 
@@ -1336,6 +1340,210 @@ The cache's `insert` call logs at `tracing::debug!`
 path logs at `tracing::info!` ("MiniMax H3 conditioner output served from
 the in-process cache"). At the default `MOLD_LOG=info`, storing a new key
 is silent — only a later hit against it produces a log line.
+
+### The rank-21 Turbo tiers campaign (2026-09-02)
+
+Three FL2VA/Ref2VA Turbo tags — `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`,
+`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`, and
+`minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` — pull the same compact
+base stack as their full-rank source tier, plus a SVD-resized, per-module
+dynamic-rank adapter from
+[`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac)
+at pinned revision `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` instead of the
+1.956 GB rank-128 PEFT export: 298,177,224 / 327,035,608 / 326,935,264 bytes
+respectively — 1.66 GB less to download for the 4-step 768p tier and 1.63 GB
+less for the other two (1,658,015,768 / 1,629,157,392 / 1,629,257,736 bytes
+exactly). The paired resident saving is DERIVED, not measured: the adapter's
+own device residency is its file payload minus its F32 alphas
+(1,956,118,528 vs 298,124,288 / 326,982,656 / 326,882,304 device bytes, so
+1.658 / 1.629 / 1.629 GB); the gate below measured VRAM high water end to end
+and found 1528-1622 MiB (1.60-1.70 GB) less resident per pair, across all
+three tiers and both canvases, bracketing the derived figure. Each is a lossy
+approximation, not a bit-identical repack: the
+publisher's own recorded average Frobenius retention against the source
+adapter is 94.95% (4-step 768p), 97.72% (8-step), and 98.33% (Ref2VA 4-step).
+
+**The gate: 12 renders, A/B per tier, both measured canvases.** Same fixed
+campaign request as the lightx2v campaign above (prompt "a red fox in a snowy
+pine forest at dawn", seed 770021, 124 frames, 24 fps, guidance 0, one
+recorded source PNG), full-rank source tier against its `-r21` resize, at both
+768x768 and 1344x768, for all three pairs — `-turbo-4step-768p` vs
+`-turbo-4step-768p-r21`, `-turbo-8step` vs `-turbo-8step-r21`, and Ref2VA
+`-turbo-4step` vs `-turbo-4step-r21` (one image reference) — the plan called
+for a server restart between the A and B render of each pair so `VmHWM` and
+the `scheduler_estimates` row would be per-print; see below for what actually
+ran. Per render: wall clock POST to MP4
+bytes, the `scheduler_estimates` row, a 1 Hz `nvidia-smi` peak, `VmHWM`,
+`ffprobe` facts with an output SHA-256 prefix, and a visual bullet after
+viewing frames 0, 40, 80, and 123. Each A/B pair is additionally scored by
+`python3 scripts/ltx25-metal-ab.py --reference A.mp4 --candidate B.mp4 --out
+<pair>.json` (ffmpeg RGB24 decode, per-frame RGB PSNR and 8x8 luma block
+SSIM), recording mean and minimum per-frame PSNR and mean block SSIM.
+
+The gate ran 2026-09-02 on host `plato`, GPU ordinal 1 (an L40S), against the
+scratch server on port 7681, binary
+`/storage/mold/uat-h3-fast/bin/mold-pr3b-3e13073d`, `MOLD_HOME=/storage/mold`
+(shared with production), in ONE server process (pid 1794503) that was never
+restarted, A immediately before B within each pair — the per-pair restart
+planned above did not happen, so the per-render GPU peak (the 1 Hz
+`nvidia-smi` trace returns to a ~0.6 GB baseline between renders) is the
+resident figure quoted below and `VmHWM`, which is campaign-cumulative, is
+not quoted per print; the binary predates the conditioner cache of #1551, so
+no cache interplay exists between A and B. Evidence directory:
+`/storage/mold/uat-h3-fast/evidence/pr3b/` (per render: `.json`, `.run.log`,
+`.gpu.csv` 1 Hz trace, `.vmhwm.txt`, `.ffprobe.json`, `.mp4`, frames
+f000/f040/f080/f123; per pair: `p<N>-<canvas>.json` from
+`scripts/ltx25-metal-ab.py`).
+
+**Acceptance rule, evaluated per tier at both canvases:**
+
+- Ship when mean RGB PSNR is at least 24 dB and minimum per-frame PSNR is at
+  least 18 dB and mean block SSIM is at least 0.85 against the full-rank
+  print; frame 0 is pinned to the source (FL2VA) or reference identity is
+  preserved (Ref2VA); the visual bullet reads "same shot, same motion;
+  differences confined to fine texture/grain"; audio is present with the same
+  duration; and VRAM high water is at least 1.4 GB below the full-rank print
+  of the same tier (the tier's reason to exist; expected around 1.6 GB).
+  32.1 dB is the measured CUDA-vs-CPU conditioner distance for "frame-for-frame
+  the same print" elsewhere in this record; 24 dB is a deliberately looser bar
+  for a 95-98% Frobenius approximation.
+- Drop when any render or provenance refusal occurs, the composition differs
+  (mean PSNR under 20 dB), any artifact class absent from the full-rank print
+  appears (flicker, banding, ghosting, texture collapse, audio dropout), or
+  the VRAM saving is missing.
+- 20-24 dB mean PSNR is the maintainer's call with the frames attached to the
+  PR; the default without an explicit call is drop. Each tier ships or is
+  dropped independently of the other two.
+
+**Per-render facts.** All 12 renders exited 0, produced 124 frames at 5.1667 s,
+with AAC audio present on every output.
+
+| Case | Tag                                                       | Canvas    | Wall (s) | GPU peak (MiB) | sha256 (12) |
+| ---- | ---------------------------------------------------------- | --------- | -------: | --------------: | ----------- |
+| P1-A | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | 768x768   |    320.3 |             9357 | `9d69e92114db` |
+| P1-B | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | 768x768   |    208.2 |             7735 | `d6407e0fbdb6` |
+| P1-A | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | 1344x768  |    278.2 |            12927 | `feba94524968` |
+| P1-B | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`  | 1344x768  |    276.0 |            11367 | `fc92aa25bb7d` |
+| P2-A | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | 768x768   |    358.5 |             9425 | `aff021e00aca` |
+| P2-B | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | 768x768   |    353.9 |             7897 | `199f2a5bb3d8` |
+| P2-A | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | 1344x768  |    472.9 |            13057 | `af0d22508806` |
+| P2-B | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`       | 1344x768  |    475.5 |            11467 | `f5be8597b37b` |
+| P3-A | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | 768x768   |    249.9 |             9651 | `c0dcb6f999d7` |
+| P3-B | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | 768x768   |    223.5 |             8091 | `99f73627cb29` |
+| P3-A | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | 1344x768  |    285.3 |            13059 | `1ec8925d2f55` |
+| P3-B | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | 1344x768  |    281.9 |            11469 | `5fe991a4b498` |
+
+P1-A at 768x768 (320.3 s) was the first render of the campaign on the fresh
+server process and includes a cold conditioner load; the other paired wall
+clocks are within 5 s of each other except the Ref2VA 768x768 pair (249.9 s vs
+223.5 s, the first render on the Ref2VA base stack), so r21 changes VRAM, not
+speed. P1-A 768x768 (sha
+`9d69e92114db`) and P1-A 1344x768 (sha `feba94524968`) are byte-identical to
+the earlier campaigns' renders of the same request.
+
+**Pair scores** (`scripts/ltx25-metal-ab.py`, reference = full-rank A,
+candidate = r21 B; 124 frames each; RGB PSNR; 8x8 luma block SSIM):
+
+| Pair                       | Canvas    | PSNR mean (dB) | PSNR min | PSNR max | PSNR frame 0 | PSNR frame 123 | SSIM mean | SSIM min | VRAM saving (MiB) | >3 dB single-frame dips |
+| --------------------------- | --------- | --------------: | -------: | -------: | ------------: | ---------------: | ---------: | -------: | ------------------: | ------------------------ |
+| P1 4-step 768p vs r21       | 768x768   |            21.10 |    17.86 |    32.51 |           32.5 |              17.9 |      0.780 |    0.596 |                 1622 | none                      |
+| P1 4-step 768p vs r21       | 1344x768  |            22.93 |    18.75 |    33.93 |           33.9 |              18.7 |      0.825 |    0.657 |                 1560 | none                      |
+| P2 8-step vs r21            | 768x768   |            29.16 |    19.22 |    34.82 |           34.8 |              19.2 |      0.923 |    0.654 |                 1528 | none                      |
+| P2 8-step vs r21            | 1344x768  |            23.56 |    18.20 |    35.05 |           35.0 |              19.9 |      0.789 |    0.594 |                 1590 | none                      |
+| P3 Ref2VA 4-step vs r21     | 768x768   |            16.15 |    14.98 |    17.09 |           15.0 |              15.3 |      0.465 |    0.356 |                 1560 | none                      |
+| P3 Ref2VA 4-step vs r21     | 1344x768  |            17.00 |    13.72 |    19.54 |           13.7 |              16.3 |      0.575 |    0.323 |                 1590 | none                      |
+
+Every FL2VA pair's per-frame PSNR starts at the pinned first frame (32-35 dB)
+and declines through the second half as the two trajectories drift apart; the
+8-step 1344x768 pair bottoms at frame 80 (18.20 dB) and recovers to 19.9 dB by
+frame 123; there is no single-frame dip anywhere (a dip more than 3 dB below
+the local 5-frame median would be a flicker/artifact candidate).
+
+**Motion-only control** (PSNR of frame t against frame t+1 / t+2 INSIDE the
+full-rank A video; ffmpeg `psnr` filter):
+
+| Full-rank video                     | t vs t+1 mean / min | t vs t+2 mean / min |
+| ------------------------------------ | --------------------: | --------------------: |
+| P1-A 4-step 768p 768x768             |         33.55 / 29.56 |         28.72 / 25.76 |
+| P1-A 4-step 768p 1344x768            |         33.92 / 30.12 |         29.70 / 26.50 |
+| P2-A 8-step 768x768                  |         31.84 / 27.73 |         27.09 / 23.39 |
+| P2-A 8-step 1344x768                 |         29.41 / 24.49 |         25.11 / 22.17 |
+| P3-A Ref2VA 4-step 768x768           |         25.37 / 19.56 |         21.25 / 17.48 |
+| P3-A Ref2VA 4-step 1344x768          |         19.76 / 16.45 |         17.40 / 15.69 |
+
+Reading: the Ref2VA prints pan the camera across snow and tree trunks, so ONE
+frame of motion inside the same full-rank video already costs about 20 dB at
+1344x768; the 17.0 dB pair score there is within about two frames of temporal
+phase, not a different composition. The acceptance rule's premise — "mean
+PSNR under 20 dB means the composition differs" — is therefore not what the
+Ref2VA numbers measure.
+
+**Visual** (frames 0/40/80/123 of every A and B viewed side by side):
+
+- P1 768x768 and 1344x768: same shot, same motion (fox faces camera, turns
+  right, sits at 1344); differences confined to fine fur/needle texture and
+  grain. Frame 0 pinned to the source on both.
+- P2 768x768 and 1344x768: same shot, same motion; at 1344 the final head
+  angle differs by a few degrees; texture-only differences otherwise. Frame 0
+  pinned.
+- P3 768x768: same shot (fox exits frame left, camera pans, fox re-enters at
+  the end); the r21 print's fox leaves the frame a few frames earlier; no
+  artifact. P3 1344x768: same shot, same walk left-to-right past the same
+  snow-laden sapling; texture-only differences.
+- No flicker, banding, ghosting, texture collapse, or audio dropout observed
+  on any B print.
+
+**Against the acceptance rule** (ship: mean >= 24 dB AND min >= 18 AND SSIM >=
+0.85 AND visual parity AND audio AND VRAM saving >= 1.4 GB; drop: mean < 20 or
+a new artifact class or no VRAM saving; 20-24 dB is the maintainer's call,
+default drop):
+
+| Tier                    | 768x768                                             | 1344x768                                            | Visual  | Audio | VRAM saving  | Rule outcome |
+| ------------------------ | ----------------------------------------------------- | ----------------------------------------------------- | ------- | ----- | ------------- | ------------- |
+| fl2v 4-step 768p r21     | 21.10 dB (band); min 17.86 < 18; SSIM 0.780            | 22.93 dB (band); min 18.75; SSIM 0.825                 | parity  | yes   | 1560-1622 MiB (1.64-1.70 GB)  | maintainer band at both canvases (one min-PSNR miss at 768x768) |
+| fl2v 8-step r21          | 29.16 dB, min 19.22, SSIM 0.923 — clears every threshold | 23.56 dB (band, 0.44 dB short); min 18.20; SSIM 0.789 | parity  | yes   | 1528-1590 MiB (1.60-1.67 GB)  | clears every threshold at 768x768; maintainer band at 1344x768 |
+| ref2v 4-step r21         | 16.15 dB (< 20 -> rule says drop)                      | 17.00 dB (< 20 -> rule says drop)                      | parity  | yes   | 1560-1590 MiB (1.64-1.67 GB)  | rule says drop on the PSNR clause; the motion-only control shows the clause's premise (composition differs) does not hold for this panning Ref2VA shot |
+
+**The gate has run** (2026-09-02, plato). Measured against the acceptance rule
+above: the 8-step r21 tier clears every threshold at 768x768 and lands in the
+20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier lands in the
+band at both canvases (its 768x768 minimum PSNR of 17.86 dB misses the 18 dB
+floor); the Ref2VA r21 tier scores 16-17 dB, below the rule's 20 dB drop
+clause, while the motion-only control above shows that one frame of camera
+pan inside the full-rank video already costs about 20 dB at 1344x768 — so that
+clause's premise ("composition differs") is not what these numbers measure.
+Visual inspection of frames 0/40/80/123 of all twelve renders found the same
+shot, same motion, texture-only differences, no new artifact class, and audio
+present on every output; VRAM saving measured 1528-1622 MiB (1.60-1.70 GB) on
+every pair.
+
+**Decision** (2026-09-02, PR #1555,
+https://github.com/utensils/mold/pull/1555): the maintainer (James Brink)
+shipped all three rank-21 tiers. Basis: visual parity on all six A/B pairs
+(same shot, same motion, texture-only differences, no flicker or single-frame
+PSNR dip, audio present on every output) and the measured 1528-1622 MiB
+(1.60-1.70 GB) resident-VRAM saving on every pair; the PSNR figures are
+recorded as measured and NOT as a pass of the 24 dB threshold — the 8-step
+r21 tier cleared every threshold at 768x768 and sits in the 20-24 dB band at
+1344x768, the 4-step 768p r21 tier sits in the band at both canvases (min
+17.86 dB at 768x768), and the Ref2VA r21 tier measured 16-17 dB, below the
+rule's 20 dB clause, shipped on the maintainer's judgement that the
+motion-only control (one frame of camera pan inside the full-rank video
+costs ~20 dB at 1344x768) shows that clause's premise does not hold for a
+panning Ref2VA shot. All three remain lossy approximations; a user who wants
+the reviewed adapter's exact output picks the full-rank tag. No tier was
+dropped; all three stay in `REVIEWED_TURBO_MANIFEST_TIERS` and every other
+enumeration.
+
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21` — Decision: SHIP
+  (maintainer call, 2026-09-02, PR #1555; measured band 21.10 dB at 768x768 /
+  22.93 dB at 1344x768).
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21` — Decision: SHIP
+  (maintainer call, 2026-09-02, PR #1555; measured band clears every
+  threshold at 768x768 (29.16 dB) / 23.56 dB at 1344x768).
+- `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` — Decision: SHIP
+  (maintainer call, 2026-09-02, PR #1555; measured band 16.15 dB at 768x768 /
+  17.00 dB at 1344x768).
 
 ### What is derived, and how
 

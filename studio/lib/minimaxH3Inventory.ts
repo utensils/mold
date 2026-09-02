@@ -223,8 +223,11 @@ export const MINIMAX_H3_REVIEWED_COMPACT_STEPS: Readonly<
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1": 5,
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p": 9,
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21": 5,
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21": 9,
   "minimax-h3-ref2va:comfy-pruned-int8": 21,
   "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step": 5,
+  "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21": 5,
 };
 
 /** Canvases the ADVERTISED reference request may name.

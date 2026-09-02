@@ -6846,10 +6846,18 @@ mod tests {
         FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap()
     }
 
-    /// Exact resident and staging cost of a published Turbo adapter, from the
-    /// mold-candle derivation: 1,956,118,528 BF16 matrix bytes (the published
-    /// payload minus its 208 F32 alphas), and twice the widest single matrix
-    /// (`lora_B` at `[21504, 384]`) staged on the host.
+    /// Exact resident and staging cost of a published FULL-RANK Turbo
+    /// adapter, from the mold-candle derivation: 1,956,118,528 BF16 matrix
+    /// bytes (the published payload minus its 208 F32 alphas), and twice the
+    /// widest single matrix (`lora_B` at `[21504, 384]`) staged on the host.
+    ///
+    /// It is an arbitrary well-formed charge for every tier these tests build
+    /// an authority for, NOT a pinned cost per tier: the authority takes its
+    /// byte counts as parameters, and the assertions below compare grid
+    /// points, shift, and sampler kind. The SVD-resized `-r21` tiers really
+    /// carry 298,124,288 / 326,982,656 / 326,882,304 device bytes; a test
+    /// that asserts a residency figure must read it from the tier under test
+    /// rather than from this constant.
     const TURBO_DEVICE_BYTES: u64 = 1_956_118_528;
     /// The widest module (fused `attn.qkv_proj`): its transposed copies live
     /// beside its originals during the upload.
@@ -6867,6 +6875,14 @@ mod tests {
     /// than the 544p 8-step tier's 12.
     const TURBO_8STEP_768P_TIER: &str =
         "minimax-h3.turbo-lora.fl2v-8step-768p-v1.0.comfyui-bf16.v1";
+    /// The SVD-resized derivatives. A resize changes weights, never the
+    /// schedule, so each repeats its source tier's grid and shift exactly.
+    const TURBO_4STEP_768P_R21_TIER: &str =
+        "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.resized-avg-rank-21.v1";
+    const TURBO_8STEP_R21_TIER: &str =
+        "minimax-h3.turbo-lora.fl2v-8step-v1.0.comfyui-bf16.resized-avg-rank-21.v1";
+    const TURBO_REF2V_4STEP_R21_TIER: &str =
+        "minimax-h3.turbo-lora.ref2v-4step-v0.1.comfyui-bf16.resized-avg-rank-21.v1";
 
     fn turbo_authority_for(tier_stable_id: &str) -> H3FactoryTurboAdapterAuthority {
         H3FactoryTurboAdapterAuthority::for_reviewed_tier(
@@ -7107,6 +7123,9 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_4STEP_768P,
             contract::FL2VA_COMFY_TURBO_4STEP_768P_V11,
             contract::FL2VA_COMFY_TURBO_8STEP_768P,
+            contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            contract::FL2VA_COMFY_TURBO_8STEP_R21,
+            contract::REF2VA_COMFY_TURBO_4STEP_R21,
             contract::REF2VA_COMFY,
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
         ] {
@@ -7139,6 +7158,15 @@ mod tests {
         assert!(frozen
             .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P_V11, 0, true)
             .is_err());
+        // A lossy resize of the very adapter this authority was frozen on is
+        // still a different artifact — the closest possible near-miss.
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P_R21, 0, true)
+            .is_err());
+        assert!(!media_model_matches_h3_authority(
+            contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            &frozen
+        ));
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_4STEP_768P_V11,
             &frozen
@@ -7344,6 +7372,26 @@ mod tests {
             eight_step_768p.sampler_kind(),
             H3FactorySamplerKind::ComfyEuler
         );
+        // Each resized tier repeats its SOURCE tier's whole triple, compared
+        // against the authority the source tier mints rather than against a
+        // second set of literals.
+        for (resized, source) in [
+            (TURBO_4STEP_768P_R21_TIER, TURBO_4STEP_TIER),
+            (TURBO_8STEP_R21_TIER, TURBO_8STEP_TIER),
+        ] {
+            let resized = turbo_authority_for(resized);
+            let source = turbo_authority_for(source);
+            assert_eq!(resized.grid_points(), source.grid_points());
+            assert_eq!(resized.video_shift(), source.video_shift());
+            assert_eq!(resized.sampler_kind(), source.sampler_kind());
+        }
+        // The Ref2VA resize has no full-rank authority in this test's FL2VA
+        // constants, so its triple is pinned outright: 5 points at the 544p
+        // shift its source was distilled for.
+        let ref2v_r21 = turbo_authority_for(TURBO_REF2V_4STEP_R21_TIER);
+        assert_eq!(ref2v_r21.grid_points(), 5);
+        assert_eq!(ref2v_r21.video_shift(), 12.0);
+        assert_eq!(ref2v_r21.sampler_kind(), H3FactorySamplerKind::ComfyEuler);
 
         let cases: [(&str, &str, &str, u64, u64, u64, &str); 6] = [
             (

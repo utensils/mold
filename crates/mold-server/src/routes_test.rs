@@ -12056,10 +12056,11 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         use mold_core::minimax_h3::{
             RuntimeUnavailableReason, COMFY_REPO, FL2VA_COMFY, FL2VA_COMFY_NVFP4,
-            FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_4STEP_768P_V11,
-            FL2VA_COMFY_TURBO_8STEP, FL2VA_COMFY_TURBO_8STEP_768P, FL2VA_OFFICIAL, NVFP4_REPO,
+            FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            FL2VA_COMFY_TURBO_4STEP_768P_V11, FL2VA_COMFY_TURBO_8STEP,
+            FL2VA_COMFY_TURBO_8STEP_768P, FL2VA_COMFY_TURBO_8STEP_R21, FL2VA_OFFICIAL, NVFP4_REPO,
             OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_COMFY_TURBO_4STEP,
-            REF2VA_OFFICIAL,
+            REF2VA_COMFY_TURBO_4STEP_R21, REF2VA_OFFICIAL,
         };
         // Both compact task partitions execute since #825, so their answer
         // depends only on how this binary was compiled; the pinned layouts
@@ -12079,11 +12080,13 @@ mod tests {
         );
         // Every H3 row's `hf_repo` is the BASE stack's repository, derived
         // from the manifest's Transformer file (`catalog::model_row`), which
-        // is why the two lightx2v Turbo tags below still read `COMFY_REPO`:
-        // the tag executes the Comfy-Org INT8 stack, and the third-party
-        // adapter's own repository and revision are provenance carried by the
-        // manifest FILE row (`TurboManifestTier::adapter_hf_repo` /
-        // `adapter_hf_revision`), not by this one-repository summary field.
+        // is why every Turbo tag below reads `COMFY_REPO` whatever its own
+        // adapter source is — the two lightx2v tags and the three drbaph
+        // `-r21` tags included: the tag executes the Comfy-Org INT8 stack,
+        // and the third-party adapter's own repository and revision are
+        // provenance carried by the manifest FILE row
+        // (`TurboManifestTier::adapter_hf_repo` / `adapter_hf_revision`), not
+        // by this one-repository summary field.
         // A Discover row therefore names where the 20.97 GB comes from; the
         // adapter source is documented on the model page and pinned in the
         // authorization record.
@@ -12116,6 +12119,27 @@ mod tests {
                 ),
                 (
                     REF2VA_COMFY_TURBO_4STEP,
+                    false,
+                    COMFY_REPO,
+                    ref2va.0,
+                    ref2va.1
+                ),
+                (
+                    FL2VA_COMFY_TURBO_4STEP_768P_R21,
+                    false,
+                    COMFY_REPO,
+                    fl2va.0,
+                    fl2va.1
+                ),
+                (
+                    FL2VA_COMFY_TURBO_8STEP_R21,
+                    false,
+                    COMFY_REPO,
+                    fl2va.0,
+                    fl2va.1
+                ),
+                (
+                    REF2VA_COMFY_TURBO_4STEP_R21,
                     false,
                     COMFY_REPO,
                     ref2va.0,
