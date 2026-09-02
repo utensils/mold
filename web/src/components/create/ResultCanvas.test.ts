@@ -226,6 +226,28 @@ describe("ResultCanvas", () => {
     expect(wrapper.find("[data-test='canvas-audio']").exists()).toBe(false);
   });
 
+  // Every other surface that shows a print answers a right-click with the
+  // print's actions. The finished render on the Create canvas is a print too,
+  // so the bed asks its parent for the same menu instead of leaving the
+  // browser's default one to answer.
+  it("asks for a print menu when the finished render is right-clicked", async () => {
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "result", resultSrc: "blob:x" },
+    });
+    await wrapper.get("[data-test='canvas-result']").trigger("contextmenu");
+    const emitted = wrapper.emitted("context-menu");
+    expect(emitted).toHaveLength(1);
+    expect(emitted?.[0]?.[0]).toBeInstanceOf(Event);
+  });
+
+  it("leaves the browser menu alone while nothing has finished", async () => {
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "generating", progress: 10, stage: "Developing 1 / 20" },
+    });
+    await wrapper.get("[data-test='result-canvas']").trigger("contextmenu");
+    expect(wrapper.emitted("context-menu")).toBeUndefined();
+  });
+
   it("renders a generation error instead of silently returning to empty", () => {
     const wrapper = mount(ResultCanvas, {
       props: { mode: "error", error: "CUDA out of memory" },

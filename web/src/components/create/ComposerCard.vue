@@ -19,6 +19,7 @@ import {
   caretOnLastLine,
 } from "@studio/lib/promptCycler";
 import { OPTIONAL_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
+import type { PromptAuthoringSource } from "@studio/lib/promptProvenance";
 
 const props = withDefaults(
   defineProps<{
@@ -72,7 +73,9 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  "update:prompt": [value: string];
+  /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
+   * prompt and releases any quick expansion, where typing keeps it. */
+  "update:prompt": [value: string, source: PromptAuthoringSource];
   "update:stylePreset": [value: string | null];
   submit: [];
   cancel: [];
@@ -134,7 +137,7 @@ watch(
 
 function onInput(event: Event) {
   cycler.reset(); // hand-editing abandons history navigation
-  emit("update:prompt", (event.target as HTMLTextAreaElement).value);
+  emit("update:prompt", (event.target as HTMLTextAreaElement).value, "typed");
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -148,7 +151,7 @@ function onKeydown(event: KeyboardEvent) {
     const recalled = cycler.prev(props.prompt);
     if (recalled !== null) {
       event.preventDefault();
-      emit("update:prompt", recalled);
+      emit("update:prompt", recalled, "recalled");
     }
   } else if (
     event.key === "ArrowDown" &&
@@ -158,7 +161,7 @@ function onKeydown(event: KeyboardEvent) {
     const recalled = cycler.next();
     if (recalled !== null) {
       event.preventDefault();
-      emit("update:prompt", recalled);
+      emit("update:prompt", recalled, "recalled");
     }
   }
 }

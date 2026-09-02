@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import GenerateView from "./GenerateView.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
+import ComposerCard from "../components/create/ComposerCard.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
@@ -422,6 +423,101 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(form.originalPrompt).toBe("a lighthouse at dusk");
     expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(true);
+  });
+
+  it("releases a quick expansion when ↑ recalls a history prompt instead of raising the stale banner", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    expect(form.prompt).toBe("storm light");
+    expect(form.originalPrompt).toBe("a lighthouse at dusk");
+
+    wrapper
+      .findComponent(ComposerCard)
+      .vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
+    await flushPromises();
+
+    expect(form.prompt).toBe("yesterday's harbour");
+    expect(form.originalPrompt).toBeNull();
+    expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(false);
+    expect(wrapper.findComponent(ComposerCard).props("canUndo")).toBe(false);
+    expect(wrapper.findComponent(ComposerCard).props("disabledReason")).toBeNull();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    const request = submit.mock.calls[0]![0];
+    expect(request.prompt).toBe("yesterday's harbour");
+    expect(request.original_prompt).toBeUndefined();
+    expect(request.prompt_transform).toBeUndefined();
+  });
+
+  it("submits the rewrite as the user's own prompt after ↓ walks back to it from history", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    const composer = wrapper.findComponent(ComposerCard);
+    composer.vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
+    await flushPromises();
+    composer.vm.$emit("prompt-authored", "storm light", "recalled");
+    await flushPromises();
+
+    // Same text as the rewrite, but the prepared authority is gone: no banner,
+    // no undo, and a plain submission without expansion provenance.
+    expect(form.prompt).toBe("storm light");
+    expect(form.originalPrompt).toBeNull();
+    expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(false);
+    expect(composer.props("canUndo")).toBe(false);
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]![0]).toMatchObject({ prompt: "storm light" });
+    expect(submit.mock.calls[0]![0].original_prompt).toBeUndefined();
+  });
+
+  it("keeps the stale banner for hand edits so recovery stays available", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    wrapper.findComponent(ComposerCard).vm.$emit("prompt-authored", "storm light, edited", "typed");
+    await flushPromises();
+
+    expect(form.originalPrompt).toBe("a lighthouse at dusk");
+    expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(true);
+    expect(wrapper.findComponent(ComposerCard).props("disabledReason")).toContain("prompt");
   });
 
   it("prepares and preserves exactly eight reviewed prompts", async () => {

@@ -1693,6 +1693,7 @@ fn valid_media_version(media_version: &str) -> bool {
 pub(crate) async fn resolve_thumbnail<F, Fut>(
     cache: &Arc<ThumbnailCache>,
     digest: &str,
+    filename: &str,
     fetch: F,
 ) -> Result<(), String>
 where
@@ -1710,7 +1711,8 @@ where
     let bytes = fetch().await?;
     let cache = cache.clone();
     let digest = digest.to_string();
-    tokio::task::spawn_blocking(move || cache.put(&digest, &bytes))
+    let filename = filename.to_string();
+    tokio::task::spawn_blocking(move || cache.put(&digest, &filename, &bytes))
         .await
         .map_err(|error| format!("The thumbnail cache write was cancelled: {error}"))?
 }
@@ -1753,6 +1755,23 @@ pub(crate) fn render_offline_thumbnail_in(
         let sidecar = thumb_dir.join(format!("{filename}.png"));
         return Ok(std::fs::read(&sidecar)
             .unwrap_or_else(|_| thumbs::AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()));
+    }
+    if thumbs::is_mesh_filename(filename) {
+        // Unlike audio, a mesh CARRIES its picture: the geometry is the
+        // poster. A print this Mac mirrored from another host has no sidecar
+        // — the import envelope never carried one — so render it here, cache
+        // it under both sidecar names the server and the TUI read, and keep
+        // the placeholder for a file that genuinely cannot be read. Never an
+        // `Err`: an unreadable mesh must still lay out a tile.
+        return Ok(
+            match thumbs::ensure_mesh_poster(&path, thumb_dir, filename) {
+                Ok(poster) => poster,
+                Err(error) => {
+                    tracing::warn!(file = %filename, error = %format!("{error:#}"), "offline mesh poster failed; placeholder");
+                    thumbs::MESH_PLACEHOLDER_SVG.as_bytes().to_vec()
+                }
+            },
+        );
     }
     if size == SizeTier::S256 {
         if let Ok(metadata) = std::fs::metadata(&path) {
@@ -1965,7 +1984,7 @@ pub async fn prepare_gallery_thumbnail(
     // An older host answers a 512 request with its 256 tile: record that,
     // file the bytes under the tier they really are, and answer that URL.
     let downgraded = AtomicBool::new(false);
-    resolve_thumbnail(cache_ref, &digest, || async {
+    resolve_thumbnail(cache_ref, &digest, &filename, || async {
         let bytes = match target.as_ref() {
             Some(target) => {
                 let _permit = tokio::select! {
@@ -2036,7 +2055,8 @@ pub async fn prepare_gallery_thumbnail(
             }
             .digest();
             let cache = cache_ref.clone();
-            tokio::task::spawn_blocking(move || cache.put(&real, &bytes))
+            let name = filename.clone();
+            tokio::task::spawn_blocking(move || cache.put(&real, &name, &bytes))
                 .await
                 .map_err(|error| format!("The thumbnail cache write was cancelled: {error}"))??;
             return Err("downgraded".to_string());
@@ -2242,7 +2262,9 @@ pub fn thumb_protocol_response(
                         let put = {
                             let cache = cache.clone();
                             let bytes = bytes.clone();
-                            tokio::task::spawn_blocking(move || cache.put(&digest, &bytes)).await
+                            let name = filename.clone();
+                            tokio::task::spawn_blocking(move || cache.put(&digest, &name, &bytes))
+                                .await
                         };
                         if let Ok(Err(error)) = put {
                             tracing::debug!(error = %error, "offline thumbnail not cached");
@@ -2908,7 +2930,7 @@ mod tests {
         for _ in 0..3 {
             let counter = fetches.clone();
             let bytes = png.clone();
-            resolve_thumbnail(&cache, &digest, || async move {
+            resolve_thumbnail(&cache, &digest, "a.png", || async move {
                 counter.fetch_add(1, Ordering::SeqCst);
                 Ok(bytes)
             })
@@ -2926,8 +2948,10 @@ mod tests {
             size: SizeTier::S256,
         }
         .digest();
-        let refused =
-            resolve_thumbnail(&cache, &other, || async { Err("offline".to_string()) }).await;
+        let refused = resolve_thumbnail(&cache, &other, "b.png", || async {
+            Err("offline".to_string())
+        })
+        .await;
         assert!(refused.is_err());
         assert!(!cache.contains(&other));
     }
@@ -2935,6 +2959,64 @@ mod tests {
     /// With the engine Off, this device's tiles come from the SERVER's own
     /// cache under `MOLD_HOME` when it already holds the tile (a free hit),
     /// render in-process otherwise, and never hand back the full-size file.
+    /// A mesh mirrored onto this Mac has no poster sidecar — the import
+    /// envelope never carried one — but the geometry IS the picture, so the
+    /// offline tile is rendered from the stored GLB and written back to both
+    /// sidecar names the server and the TUI read. Before this, every mirrored
+    /// mesh was an `Err` here and a wireframe cube in the grid.
+    #[test]
+    fn offline_mesh_renders_its_poster_and_caches_both_sidecars() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let name = "mold-hunyuan3d-fp16-1788357387469.glb";
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+            uvs: None,
+            vertex_colors: None,
+        };
+        let glb = mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap();
+        std::fs::write(output.path().join(name), &glb).unwrap();
+
+        let tile =
+            render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S256, false)
+                .expect("a mesh must never fail to produce a tile");
+        assert_eq!(&tile[..4], &[0x89, b'P', b'N', b'G']);
+        for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), name) {
+            assert!(sidecar.is_file(), "{} is missing", sidecar.display());
+            assert_eq!(std::fs::read(&sidecar).unwrap(), tile);
+        }
+    }
+
+    /// An unreadable mesh is a placeholder, never an error: the grid still
+    /// has to lay out a tile for a file it cannot draw.
+    #[test]
+    fn offline_unreadable_mesh_falls_back_to_the_placeholder() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let name = "broken.glb";
+        std::fs::write(output.path().join(name), b"not a glTF container").unwrap();
+        let tile =
+            render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S256, false)
+                .expect("a mesh must never fail to produce a tile");
+        assert_eq!(
+            crate::thumbnail_cache::sniff_content_type(&tile),
+            Some("image/svg+xml")
+        );
+        assert!(!cache.path().join(format!("{name}.png")).exists());
+    }
+
     #[test]
     fn offline_local_prefers_shared_server_cache_over_render() {
         use mold_server::thumbnails as thumbs;

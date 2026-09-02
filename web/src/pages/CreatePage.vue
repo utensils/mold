@@ -59,7 +59,11 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
-import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
+import {
+  applyAuthoredPrompt,
+  quickTransformSurvivesAuthoring,
+  type PromptAuthoringSource,
+} from "@studio/lib/promptProvenance";
 import {
   expansionContextForRequest,
   expansionTaskForRequest,
@@ -2790,8 +2794,20 @@ function onShowSequenceHistory() {
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
-function onPromptAuthored(prompt: string) {
-  applyAuthoredPrompt(form.state.value, prompt, quickPrepared.value !== null);
+function onPromptAuthored(
+  prompt: string,
+  source: PromptAuthoringSource = "typed",
+) {
+  // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
+  // nothing left to describe: release it instead of raising the stale banner
+  // whose recovery actions would re-expand a prompt no longer on screen.
+  if (!quickTransformSurvivesAuthoring(source)) releaseQuickExpansion();
+  applyAuthoredPrompt(
+    form.state.value,
+    prompt,
+    quickPrepared.value !== null,
+    source,
+  );
 }
 
 function onAppendPromptPhrase(phrase: string) {
@@ -3143,6 +3159,92 @@ const resultCaption = computed(() => {
 
 function openLatestResult() {
   if (latestDone.value) openJob(latestDone.value);
+}
+
+/**
+ * The finished render's gallery row, when the gallery holds it.
+ *
+ * The completion names the file the host saved, and that name is the print's
+ * identity. Model + seed is NOT one: a deliberate fixed-seed re-render makes
+ * a second row that is a different print, and picking the newest of those
+ * would point Open, Use as source, and Delete at the wrong one. So the
+ * fallback for a server that names nothing answers only when a single row can
+ * possibly be this render — one match, no older than the job itself — and
+ * otherwise says it does not know, which the menu then discloses.
+ */
+const canvasPrintRow = computed<GalleryImage | null>(() => {
+  const job = latestDone.value;
+  const r = job?.result;
+  if (!job || !r) return null;
+  if (r.filename) {
+    return (
+      galleryEntries.value.find((item) => item.filename === r.filename) ?? null
+    );
+  }
+  const startedAtSeconds = Math.floor(job.startedAt / 1000);
+  const candidates = galleryEntries.value.filter(
+    (item) =>
+      item.metadata.seed === r.seed_used &&
+      item.metadata.model === r.model &&
+      item.timestamp >= startedAtSeconds,
+  );
+  return candidates.length === 1 ? (candidates[0] ?? null) : null;
+});
+
+/** The MIME type a print's own bytes carry, for a print never fetched. */
+function galleryItemMimeType(item: GalleryImage): string {
+  const format = (item.format ?? item.filename.split(".").pop() ?? "")
+    .toLowerCase()
+    .replace("jpg", "jpeg");
+  const kind = mediaKind(item.format, item.filename);
+  if (kind === "video") return format ? `video/${format}` : "video/mp4";
+  if (kind === "audio") return format ? `audio/${format}` : "audio/wav";
+  if (kind === "mesh") return GLB_MIME_TYPE;
+  return format ? `image/${format}` : "application/octet-stream";
+}
+
+/**
+ * The finished render, as a print. Right-clicking the canvas opens the same
+ * menu a Recent tile does, on the same print — that is the whole point of it
+ * being one menu. Until the gallery lists the row, the job's own request and
+ * bytes stand in for it.
+ */
+function openCanvasContextMenu(event: MouseEvent) {
+  const job = latestDone.value;
+  const r = job?.result;
+  if (!job || !r) return;
+  const row = canvasPrintRow.value;
+  const item: GalleryImage = row ?? {
+    filename: r.filename ?? `print-${r.seed_used}.${r.format}`,
+    timestamp:
+      Math.floor(job.startedAt / 1000) || Math.floor(Date.now() / 1000),
+    format: r.format,
+    metadata: {
+      prompt: "prompt" in job.request ? (job.request.prompt ?? "") : "",
+      model: r.model,
+      seed: r.seed_used,
+      steps: "steps" in job.request ? (job.request.steps ?? 0) : 0,
+      guidance: "guidance" in job.request ? (job.request.guidance ?? 0) : 0,
+      width: r.width,
+      height: r.height,
+      // The print has no saved row yet, so there is no server version to
+      // quote — this stands in only until the gallery answers.
+      version: "",
+    },
+  };
+  void openRecentContextMenu({
+    item,
+    x: event.clientX,
+    y: event.clientY,
+    trigger: (event.currentTarget as HTMLElement | null) ?? null,
+    // Two separate facts: whether the gallery can address this print at all,
+    // and whether its bytes are in hand. A print restored from a reload has
+    // neither its row (yet) nor its payload, and must not offer an action
+    // that would act on a filename nobody has confirmed.
+    unfiled: !row,
+    inlineBase64: row ? null : (r.image ?? null),
+    job: row ? null : job,
+  });
 }
 
 // ── Source preprocessing / fitting (desktop/mobile parity) ────────────
@@ -4619,13 +4721,16 @@ function applyExpandedPrompt(v: string) {
   bakeStyleAndClear();
 }
 
-function undoExpand() {
-  if (prevPrompt.value === null) return;
-  form.state.value.prompt = prevPrompt.value;
-  form.state.value.originalPrompt = prevOriginalPrompt.value;
-  // Undo re-arms the whole pre-expansion state: prompt, chip, and the negative
-  // fragments the bake merged in — unless the user has edited the negative
-  // since, which is theirs to keep.
+/**
+ * Drop every trace of a quick expansion without touching the prompt text:
+ * the frozen route snapshot, the undo, and the chip and negative fragments
+ * the bake merged in — unless the user has edited the negative since, which
+ * is theirs to keep. Undo goes through here and then puts the original prompt
+ * back; a history recall goes through here and then installs the recalled
+ * prompt, so no stale banner can point at a rewrite that is no longer shown.
+ */
+function releaseQuickExpansion() {
+  if (prevPrompt.value === null && quickPrepared.value === null) return;
   const style = prevStyle.value;
   if (style) {
     form.state.value.stylePreset = style.preset;
@@ -4637,6 +4742,15 @@ function undoExpand() {
   prevOriginalPrompt.value = null;
   prevStyle.value = null;
   quickPrepared.value = null;
+}
+
+function undoExpand() {
+  const prompt = prevPrompt.value;
+  if (prompt === null) return;
+  const originalPrompt = prevOriginalPrompt.value;
+  releaseQuickExpansion();
+  form.state.value.prompt = prompt;
+  form.state.value.originalPrompt = originalPrompt;
 }
 
 // ── Variations review (batch > 1) ─────────────────────────────────────
@@ -4937,6 +5051,22 @@ const recentContextMenu = ref<{
   x: number;
   y: number;
   trigger: HTMLElement | null;
+  /**
+   * The print's own bytes, present only for the finished render on the canvas
+   * while its gallery row is still unknown. It is what lets "Use as source"
+   * work on a print nothing can address by filename yet.
+   */
+  inlineBase64?: string | null;
+  /** No gallery row resolved: the row-scoped actions (Open, Delete) stand
+   *  down, because the filename beside them is a stand-in. */
+  unfiled?: boolean;
+  /**
+   * The job behind an unfiled canvas print. Its submitted request is the
+   * complete authority on how that print was made, where the stub row above
+   * carries only the handful of fields the menu needed to name it — so Reuse
+   * restores from the request and cannot blank the settings the stub omits.
+   */
+  job?: Job | null;
 } | null>(null);
 const recentContextMenuElement = ref<HTMLElement | null>(null);
 const RECENT_CONTEXT_WIDTH = 182;
@@ -4962,18 +5092,45 @@ const recentContextPosition = computed(() => {
     )}px`,
   };
 });
-const recentSourceDisabled = computed(() => {
-  const item = recentContextMenu.value?.item;
-  if (!item || !sequenceMode.value) return false;
+const RECENT_CONTEXT_UNFILED_REASON =
+  "This print is still being filed — it isn't in the gallery yet.";
+/**
+ * Why this print cannot condition the next render, or `null` when it can.
+ * One rule for the Recent tiles and the finished render on the canvas: a mesh
+ * is geometry rather than pixels (the Library lightbox refuses it in the same
+ * words), and a sequence's opening media has to be an image.
+ */
+const recentSourceDisabledReason = computed<string | null>(() => {
+  const menu = recentContextMenu.value;
+  const item = menu?.item;
+  if (!menu || !item) return null;
   const kind = mediaKind(item.format, item.filename);
-  return kind === "video" || kind === "audio";
+  if (kind === "mesh")
+    return "A 3-D mesh cannot condition a render — source images are pixels.";
+  if (sequenceMode.value && (kind === "video" || kind === "audio"))
+    return "Sequence opening media must be an image.";
+  // Unfiled AND payload-free: a print restored from a reload before its row
+  // is listed. There is nothing to read and no name to read it by.
+  if (menu.unfiled && !menu.inlineBase64) return RECENT_CONTEXT_UNFILED_REASON;
+  return null;
 });
+const recentSourceDisabled = computed(
+  () => recentSourceDisabledReason.value !== null,
+);
+/** A canvas print whose gallery row is not known yet: nothing can open,
+ *  reuse-from-row, or delete it by filename until the gallery catches up. */
+const recentContextUnfiled = computed(
+  () => recentContextMenu.value?.unfiled === true,
+);
 
 async function openRecentContextMenu(payload: {
   item: GalleryImage;
   x: number;
   y: number;
   trigger?: HTMLElement | null;
+  inlineBase64?: string | null;
+  unfiled?: boolean;
+  job?: Job | null;
 }) {
   recentContextMenu.value = { ...payload, trigger: payload.trigger ?? null };
   await nextTick();
@@ -4990,7 +5147,12 @@ function closeRecentContextMenu(restoreFocus = false) {
 
 async function useRecentAsSource(item: GalleryImage) {
   if (recentSourceDisabled.value) return;
-  await onLightboxUseSource(item);
+  // Read the bytes off the menu BEFORE closing it — closing drops the entry
+  // that carries them.
+  const inline = recentContextMenu.value?.inlineBase64 ?? null;
+  closeRecentContextMenu();
+  if (!(await attachLightboxSource(item, inline))) return;
+  closeDrawer();
 }
 
 function openItem(item: GalleryImage) {
@@ -5223,19 +5385,59 @@ function onLightboxReuse(item: GalleryImage) {
   closeDrawer();
 }
 
-async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
+/**
+ * Reuse from the print menu. A filed print reuses its SAVED metadata, which
+ * is what the host recorded. An unfiled canvas print has no such row — only
+ * the stub the menu built — so it reuses the request that produced it, the
+ * same restore the activity rail performs, rather than blanking every setting
+ * the stub does not carry.
+ */
+function onRecentContextReuse() {
+  const menu = recentContextMenu.value;
+  if (!menu) return;
+  const job = menu.job;
+  if (!job) {
+    onLightboxReuse(menu.item);
+    return;
+  }
+  closeRecentContextMenu();
+  openJob(job);
+  closeDrawer();
+}
+
+/**
+ * Attach one print as this render's source.
+ *
+ * `inlineBase64` is the print's own bytes, handed in when the caller already
+ * holds them — the finished render on the canvas, whose gallery row may not
+ * have landed yet. Those bytes are an upload, not a gallery reference: a
+ * reference is restored later by filename, and a filename nobody has yet
+ * would restore nothing.
+ */
+async function attachLightboxSource(
+  item: GalleryImage,
+  inlineBase64?: string | null,
+): Promise<boolean> {
   try {
-    const res = await fetch(imageUrl(item.filename));
-    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-    const blob = await res.blob();
-    const base64 = await blobToBase64(blob);
+    let base64: string;
+    let mime: string;
+    if (inlineBase64) {
+      base64 = inlineBase64;
+      mime = galleryItemMimeType(item);
+    } else {
+      const res = await fetch(imageUrl(item.filename));
+      if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+      const blob = await res.blob();
+      base64 = await blobToBase64(blob);
+      mime = blob.type;
+    }
     const kind = mediaKind(item.format, item.filename);
     if (kind === "video") {
       form.state.value.sourceVideo = {
         kind: "upload",
         filename: item.filename,
         base64,
-        mime: blob.type || null,
+        mime: mime || null,
       };
       form.state.value.sourceVideoPath = "";
     } else if (kind === "audio") {
@@ -5243,7 +5445,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         kind: "upload",
         filename: item.filename,
         base64,
-        mime: blob.type || null,
+        mime: mime || null,
       };
       form.state.value.audioFilePath = "";
     } else {
@@ -5270,7 +5472,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         };
         const image = {
           filename: item.filename,
-          mimeType: blob.type || `image/${item.format}`,
+          mimeType: mime || `image/${item.format}`,
           width: dimensions.width,
           height: dimensions.height,
           data: base64,
@@ -5290,7 +5492,11 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         );
       } else {
         state.imageAttachments = [
-          { kind: "gallery", filename: item.filename, base64 },
+          {
+            kind: inlineBase64 ? "upload" : "gallery",
+            filename: item.filename,
+            base64,
+          },
         ];
         state.sourceFitPolicy = defaultSourceFitPolicy();
       }
@@ -5979,6 +6185,7 @@ onBeforeUnmount(() => {
             @use-variation="useVariation"
             @discard="discardVariations"
             @queue="queueVariations"
+            @context-menu="openCanvasContextMenu"
             @click="canvasMode === 'result' ? openLatestResult() : undefined"
           />
         </template>
@@ -6270,6 +6477,11 @@ onBeforeUnmount(() => {
       <button
         type="button"
         role="menuitem"
+        data-test="recent-context-open"
+        :disabled="recentContextUnfiled"
+        :title="
+          recentContextUnfiled ? RECENT_CONTEXT_UNFILED_REASON : undefined
+        "
         @click="openItem(recentContextMenu.item)"
       >
         Open
@@ -6278,7 +6490,7 @@ onBeforeUnmount(() => {
         type="button"
         role="menuitem"
         data-test="recent-context-reuse"
-        @click="onLightboxReuse(recentContextMenu.item)"
+        @click="onRecentContextReuse()"
       >
         Reuse settings
       </button>
@@ -6287,11 +6499,7 @@ onBeforeUnmount(() => {
         role="menuitem"
         data-test="recent-context-source"
         :disabled="recentSourceDisabled"
-        :title="
-          recentSourceDisabled
-            ? 'Sequence opening media must be an image.'
-            : undefined
-        "
+        :title="recentSourceDisabledReason ?? undefined"
         @click="useRecentAsSource(recentContextMenu.item)"
       >
         Use as source
@@ -6301,6 +6509,10 @@ onBeforeUnmount(() => {
         role="menuitem"
         class="recent-context__danger"
         data-test="recent-context-delete"
+        :disabled="recentContextUnfiled"
+        :title="
+          recentContextUnfiled ? RECENT_CONTEXT_UNFILED_REASON : undefined
+        "
         @click="handleDelete(recentContextMenu.item)"
       >
         Delete

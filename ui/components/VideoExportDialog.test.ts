@@ -100,4 +100,27 @@ describe("VideoExportDialog", () => {
       },
     ]);
   });
+
+  it("shows a failed export in the shared error notice so a long host URL wraps inside the card", () => {
+    const message =
+      "Couldn't reach the media host: error sending request for url (http://192.168.1.114:7680/api/gallery/export/mold%2Dhunyuan3d%2Dfp16%2D1788359192104.glb)";
+    const wrapper = mount(VideoExportDialog, {
+      props: {
+        open: true,
+        filename: "mold-hunyuan3d-fp16-1788359192104.glb",
+        formats: ["gif", "apng", "webp"],
+        error: message,
+      },
+    });
+
+    const notice = wrapper.get("[data-test='video-export-error']");
+    expect(notice.attributes("role")).toBe("alert");
+    expect(notice.get("[data-test='error-notice-message']").text()).toBe(
+      message,
+    );
+    expect(
+      notice.get("[data-test='error-notice-message']").classes(),
+    ).toContain("[overflow-wrap:anywhere]");
+    expect(notice.find("[data-test='copy-error-notice']").exists()).toBe(true);
+  });
 });

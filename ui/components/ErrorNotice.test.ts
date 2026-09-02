@@ -29,6 +29,18 @@ describe("ErrorNotice", () => {
     ).toBe("Error copied");
   });
 
+  it("wraps an unbroken URL inside the notice instead of overflowing its container", () => {
+    const wrapper = mount(ErrorNotice, {
+      props: {
+        message:
+          "Couldn't reach the media host: error sending request for url (http://192.168.1.114:7680/api/gallery/export/mold%2Dhunyuan3d%2Dfp16%2D1788359192104.glb)",
+      },
+    });
+    const message = wrapper.get("[data-test='error-notice-message']");
+    expect(message.classes()).toContain("[overflow-wrap:anywhere]");
+    expect(message.classes()).toContain("min-w-0");
+  });
+
   it("renders compact spacing and emits from an accessible dismiss button", async () => {
     const wrapper = mount(ErrorNotice, {
       props: { message: "Expansion failed.", compact: true, dismissible: true },

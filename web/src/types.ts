@@ -774,6 +774,13 @@ export interface SseCompleteEvent {
   mesh_bounds_min?: [number, number, number] | null;
   mesh_bounds_max?: [number, number, number] | null;
   gpu?: number | null;
+  /** The name the host saved this payload under (`SseCompleteEvent.filename`
+   * in `mold_core`). The print's EXACT identity, and the only one that stays
+   * right when a seed is deliberately reused; absent on older servers, which
+   * is why every reader treats it as a hint and not a guarantee. */
+  filename?: string | null;
+  /** Gallery filename of the pre-upscale original, when one was saved. */
+  original_filename?: string | null;
 }
 
 export interface UpscaleRequestWire {

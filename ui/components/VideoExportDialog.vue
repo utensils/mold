@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import ErrorNotice from "./ErrorNotice.vue";
 import type {
   GifPlayback,
   GifRepeat,
@@ -217,7 +218,16 @@ function submit(): void {
         </div>
       </fieldset>
 
-      <p v-if="error" class="video-export-error" role="alert">{{ error }}</p>
+      <!-- The same notice every other surface uses for a failed request: a
+           host URL in the message wraps inside the card instead of running
+           off its edge, and the copy button carries the full text away. -->
+      <ErrorNotice
+        v-if="error"
+        :message="error"
+        compact
+        class="video-export-error"
+        data-test="video-export-error"
+      />
       <div class="video-export-actions">
         <button type="button" :disabled="busy" @click="emit('close')">
           Cancel
@@ -345,7 +355,8 @@ fieldset > p {
 }
 .video-export-error {
   margin: 0 0 14px;
-  color: var(--stop, #b32222);
+  min-width: 0;
+  max-width: 100%;
   font-size: 13px;
 }
 .video-export-actions {

@@ -3265,6 +3265,27 @@ function canUpscalePrint(print: GalleryPrint | null): boolean {
   if (!print || isAudioItem(print) || isMeshItem(print)) return false;
   return !isVideoItem(print) || serverCapabilities[print.hostId]?.video_upscale?.available === true;
 }
+/**
+ * The finished render as a print the composer can take back in. Same rule as
+ * the Library viewer's `canUseSelectedPrintAsSource` — a still, on a model
+ * that conditions on one — resolved against the machine that rendered it, so
+ * the Create viewer offers "Use as source" exactly when the Library one does.
+ */
+const generatedSourcePrint = computed<GalleryPrint | null>(() => {
+  const item = generatedPreviewItem.value;
+  const host = generatedPreviewHost.value;
+  if (!item || !host || !isStillImageFile(item.filename) || !caps.value.supportsImg2img)
+    return null;
+  return {
+    ...item,
+    hostId: host.id,
+    cacheKey: host.id,
+    hostName: host.name,
+    target: mobileHostTarget(host),
+    thumbnailUrl: resultUrl.value,
+    thumbnailPending: false,
+  };
+});
 const generatedUpscalePrint = computed<GalleryPrint | null>(() => {
   const item = generatedPreviewItem.value;
   const host = generatedPreviewHost.value;
@@ -10349,6 +10370,16 @@ function openViewerUpscale(): Promise<void> {
   if (print) closePrint();
   return openUpscaleForPrint(print);
 }
+/**
+ * "Use as source" on the finished render — the same attach the Library viewer
+ * runs, on the print that just rendered. The viewer closes only once the
+ * bytes are actually attached, so a refusal stays visible where it happened.
+ */
+async function useGeneratedPrintAsSource(): Promise<void> {
+  const print = generatedSourcePrint.value;
+  if (!print) return;
+  if (await useSelectedPrintAsSource(print)) generatedViewerOpen.value = false;
+}
 function openGeneratedUpscale(): Promise<void> {
   const print = generatedUpscalePrint.value;
   generatedViewerOpen.value = false;
@@ -13711,6 +13742,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       @cancel="transitionViewerUpscale('cancel')"
     />
 
+    <!-- The finished render, in the Library's own viewer. `reuse-error` is
+         not optional here: every refusal the source attach can produce (the
+         media budget, a transport failure, an H3 model that needs an explicit
+         task) lands in that one state, and without it this viewer's button
+         fails silently. -->
     <MobileGalleryViewer
       v-if="generatedViewerOpen && generatedPreviewItem && resultUrl"
       :item="generatedPreviewItem"
@@ -13722,9 +13758,13 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :mesh-export-formats="generatedMeshExportFormats"
       :export-enabled="generatedPreviewHost !== null"
       :upscale-enabled="generatedUpscalePrint !== null"
+      :can-use-as-source="generatedSourcePrint !== null"
+      :using-source="usingPrintAsSource"
+      :reuse-error="reusePrintError"
       :generation-announcement="generationAnnouncement"
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"
+      @use-source="useGeneratedPrintAsSource"
       @upscale="openGeneratedUpscale"
     />
 

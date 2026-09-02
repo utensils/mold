@@ -8898,6 +8898,39 @@ async fn import_gallery_file(
                     "atomic gallery import commit failed before publication: {message}"
                 )));
             }
+            // A mirrored mesh arrives as bytes only: the poster its origin
+            // host rendered at save time never travels over the import
+            // envelope. Derive it here, BEFORE `GalleryAdded` goes out, so a
+            // client that fetches the tile the moment it sees the event finds
+            // a poster rather than racing the wireframe-cube placeholder.
+            // Best effort — a mesh that cannot be rendered still publishes,
+            // and the thumbnail route falls back to the placeholder.
+            if crate::thumbnails::is_mesh_filename(&filename) {
+                let source = output_dir.join(&filename);
+                let name = filename.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let thumb_dir = crate::thumbnails::server_thumbnail_dir();
+                    match crate::thumbnails::render_mesh_poster(&source) {
+                        Ok(poster) => {
+                            if let Err(error) = crate::thumbnails::write_mesh_poster_sidecars(
+                                &thumb_dir, &name, &poster,
+                            ) {
+                                tracing::warn!(
+                                    file = %name,
+                                    error = %format!("{error:#}"),
+                                    "imported mesh poster could not be cached"
+                                );
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            file = %name,
+                            error = %format!("{error:#}"),
+                            "imported mesh has no renderable poster"
+                        ),
+                    }
+                })
+                .await;
+            }
             let image = db
                 .as_ref()
                 .as_ref()
@@ -10178,6 +10211,14 @@ async fn render_gallery_thumbnail(
         .map_err(|error| ApiError::internal(format!("failed to stat gallery media: {error}")))?;
     let media_version = file_media_version(&source_metadata);
     let etag = format!("\"thumb-{media_version}{}\"", variant.etag_suffix());
+    // A placeholder is not the print's tile — it is what this server could
+    // answer right now. Tagging it apart from the real poster is what lets a
+    // client that cached one revalidate into the poster a later request (or a
+    // later mold) renders, instead of holding a wireframe cube forever.
+    let placeholder_etag = format!(
+        "\"thumb-{media_version}{}-placeholder\"",
+        variant.etag_suffix()
+    );
 
     // Thumbnail cache path: always `.png` regardless of the source extension,
     // so mp4 / gif / apng / webp / jpg all coexist cleanly in the same cache
@@ -10189,28 +10230,77 @@ async fn render_gallery_thumbnail(
     // save time — there is nothing in a WAV for a raster decoder to read, so
     // a missing cache entry goes straight to the placeholder.
     let is_audio = lower.ends_with(".wav");
-    // A mesh is the same shape of problem as audio: its poster PNG is
-    // rendered at save time because there is nothing in a glTF buffer for a
-    // raster decoder to read. Both therefore share the save-time sidecar name
-    // (`<file>.png`) rather than the versioned cache path.
+    // A mesh keeps audio's sidecar NAME (`<file>.png`, not the versioned
+    // cache path) because both are written at save time by whichever process
+    // generated the print. Where they part company is the fallback: a WAV
+    // holds no picture, but a glTF buffer holds the geometry, so a missing
+    // mesh sidecar is rendered here rather than answered with a cube.
     let is_mesh = crate::thumbnails::is_mesh_filename(&clean_name);
     let thumb_path = if is_audio || is_mesh {
         thumb_dir.join(format!("{clean_name}.png"))
     } else {
         variant.cache_path(&thumb_dir, &clean_name, &media_version)
     };
-    if (is_audio || is_mesh) && !thumb_path.is_file() {
+    if is_audio && !thumb_path.is_file() {
         return thumbnail_response(
             &headers,
             "image/svg+xml",
             "public, max-age=300",
             &etag,
-            if is_mesh {
-                MESH_PLACEHOLDER_SVG.as_bytes().to_vec()
-            } else {
-                AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()
-            },
+            AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec(),
         );
+    }
+    if is_mesh && !thumb_path.is_file() {
+        // The poster is DERIVABLE from the stored file, so a print that only
+        // ever reached this host by mirroring (`PUT /api/gallery/import`, a
+        // copied output directory) gets a real tile instead of the generic
+        // wireframe cube it used to keep forever. Rendered under the same
+        // singleflight every other on-demand tile takes, so a grid scrolling
+        // past twenty mesh prints rasterizes each one once.
+        let singleflight = thumbnail_singleflight(&thumb_path);
+        let _singleflight_guard = singleflight.lock().await;
+        if !thumb_path.is_file() {
+            let source = source_path.clone();
+            let cache_dir = thumb_dir.clone();
+            let name_for_render = clean_name.clone();
+            let rendered = tokio::task::spawn_blocking(move || {
+                crate::thumbnails::ensure_mesh_poster(&source, &cache_dir, &name_for_render)
+            })
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("mesh poster generation failed: {error}"))
+            })?;
+            return match rendered {
+                // The type comes from the bytes: the render is always PNG,
+                // but a hit on a sidecar some other writer left is whatever
+                // that writer encoded.
+                Ok(poster) => {
+                    let content_type =
+                        crate::thumbnails::sniff_content_type(&poster).unwrap_or("image/png");
+                    thumbnail_response(
+                        &headers,
+                        content_type,
+                        "public, max-age=31536000, immutable",
+                        &etag,
+                        poster,
+                    )
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        file = %clean_name,
+                        error = %format!("{error:#}"),
+                        "mesh poster render failed; serving the placeholder"
+                    );
+                    thumbnail_response(
+                        &headers,
+                        "image/svg+xml",
+                        "public, max-age=300",
+                        &placeholder_etag,
+                        MESH_PLACEHOLDER_SVG.as_bytes().to_vec(),
+                    )
+                }
+            };
+        }
     }
 
     if !thumb_path.is_file() {
@@ -10256,17 +10346,20 @@ async fn render_gallery_thumbnail(
                 error = %err,
                 "thumbnail decode failed; falling back to source bytes"
             );
-            // For videos and meshes, the browser can't render the raw bytes
-            // as an <img> either, so serving the source doesn't help — and
-            // for a mesh it is actively wrong, because it would hand a
-            // multi-megabyte glTF buffer to an <img> tag that can only
-            // discard it. Fall back to the SVG placeholder instead.
+            // For a video the browser can't render the raw bytes as an <img>
+            // either, so serving the source doesn't help. Fall back to the
+            // SVG placeholder, tagged apart from a real tile so a client
+            // revalidates into the poster once the decode succeeds. A mesh
+            // never reaches here — it returned above, rendered or placed —
+            // but it takes the same branch rather than the source bytes if
+            // it ever did, because handing a multi-megabyte glTF buffer to
+            // an <img> tag is actively wrong.
             if is_video || is_mesh {
                 return thumbnail_response(
                     &headers,
                     "image/svg+xml",
                     "public, max-age=300",
-                    &etag,
+                    &placeholder_etag,
                     if is_mesh {
                         MESH_PLACEHOLDER_SVG.as_bytes().to_vec()
                     } else {
@@ -10453,16 +10546,7 @@ fn write_thumbnail_atomically(
     dest: &std::path::Path,
     rendered: &crate::thumbnails::RenderedThumbnail,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, &rendered.bytes)?;
-    if let Err(error) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error.into());
-    }
-    Ok(())
+    crate::thumbnails::write_bytes_atomically(dest, &rendered.bytes)
 }
 
 /// Generate a 256x256 max thumbnail from source image. The result is always

@@ -1253,6 +1253,13 @@ async function durableCompletionResult(
     seed_used: metadata.seed,
     generation_time_ms: saved.generationTimeMs,
     model: metadata.model,
+    // The name the host saved it under: this print's exact identity, which
+    // survives persistence and is what the canvas resolves its gallery row
+    // by. Model + seed is not an identity — a fixed-seed re-render makes two.
+    filename,
+    ...(saved.originalFilename
+      ? { original_filename: saved.originalFilename }
+      : {}),
     ...(originalImage ? { original_image: originalImage } : {}),
     ...(kind === "video"
       ? {

@@ -14,6 +14,7 @@ import type { GenerateRequest } from "../../lib/api/types";
 import type { ApiTarget } from "../../lib/api/client";
 import { autoGrowRows } from "../../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "@studio/lib/promptCycler";
+import type { PromptAuthoringSource } from "@studio/lib/promptProvenance";
 import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 /**
@@ -53,7 +54,9 @@ const emit = defineEmits<{
   expand: [];
   remix: [];
   restore: [];
-  "prompt-authored": [value: string];
+  /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
+   * prompt and releases any quick expansion, where typing keeps it. */
+  "prompt-authored": [value: string, source: PromptAuthoringSource];
   "update:remixSource": [value: "original" | "current"];
 }>();
 
@@ -101,7 +104,7 @@ function cycleHistory(direction: "prev" | "next"): boolean {
   const replacement = direction === "prev" ? cycler.prev(props.form.prompt) : cycler.next();
   if (replacement === null) return false;
   props.form.prompt = replacement;
-  emit("prompt-authored", replacement);
+  emit("prompt-authored", replacement, "recalled");
   void nextTick(() => {
     const el = promptEl.value;
     el?.setSelectionRange(el.value.length, el.value.length);
@@ -112,7 +115,7 @@ function cycleHistory(direction: "prev" | "next"): boolean {
 function onPromptInput(event: Event) {
   cycler.reset();
   growPrompt();
-  emit("prompt-authored", (event.target as HTMLTextAreaElement).value);
+  emit("prompt-authored", (event.target as HTMLTextAreaElement).value, "typed");
 }
 
 function onKeydown(e: KeyboardEvent) {

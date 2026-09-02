@@ -67,6 +67,28 @@ describe("ComposerCard", () => {
     expect(form.prompt).toBe("draft");
   });
 
+  it("tags a ↑/↓ history recall so the view can release a quick expansion", async () => {
+    const form = baseForm();
+    form.prompt = "storm light";
+    const wrapper = mountComposer(form, { history: ["newest", "oldest"] });
+    const textarea = wrapper.get("textarea[aria-label='Prompt']");
+    const el = textarea.element as HTMLTextAreaElement;
+    el.setSelectionRange(0, 0);
+
+    await textarea.trigger("keydown", { key: "ArrowUp" });
+    expect(wrapper.emitted("prompt-authored")?.at(-1)).toEqual(["newest", "recalled"]);
+    await textarea.trigger("keydown", { key: "ArrowDown" });
+    // Walking back to the draft is still a recall: the draft text returns as
+    // the user's own prompt, not as the prepared rewrite it used to be.
+    expect(wrapper.emitted("prompt-authored")?.at(-1)).toEqual(["storm light", "recalled"]);
+  });
+
+  it("tags hand edits as typing so a quick expansion keeps its stale recovery", async () => {
+    const wrapper = mountComposer(baseForm());
+    await wrapper.get("textarea[aria-label='Prompt']").setValue("a lighthouse, edited");
+    expect(wrapper.emitted("prompt-authored")?.at(-1)).toEqual(["a lighthouse, edited", "typed"]);
+  });
+
   it("does not swallow ArrowUp when there is no cached or live history", () => {
     const wrapper = mountComposer(baseForm(), { history: [] });
     const el = wrapper.get("textarea[aria-label='Prompt']").element as HTMLTextAreaElement;

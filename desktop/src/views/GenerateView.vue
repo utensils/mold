@@ -50,7 +50,6 @@ import {
   resolveQueueWait,
 } from "@studio/lib/queuePosition";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import { attachPickedImage } from "../lib/sourceAttachment";
 import {
   resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
@@ -76,7 +75,11 @@ import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isMeshArtifact } from "@studio/lib/meshCompletion";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import MeshViewer from "@studio/components/MeshViewer.vue";
-import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
+import {
+  applyAuthoredPrompt,
+  quickTransformSurvivesAuthoring,
+  type PromptAuthoringSource,
+} from "@studio/lib/promptProvenance";
 import {
   applyMinimaxH3ReferenceCrops,
   emptyMinimaxH3AuthoringState,
@@ -243,15 +246,27 @@ import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
 import { modelDisplayNameForId } from "../lib/models";
-import { galleryMediaPath, localMediaPath, mediaPath } from "../lib/gallery/media";
+import {
+  authedMediaUrl,
+  fetchGalleryMediaBytes,
+  fullSizeMediaUrl,
+  galleryMediaPath,
+  localMediaPath,
+  mediaMimeType,
+  mediaPath,
+  nativeBytes,
+  thumbnailPath,
+} from "../lib/gallery/media";
+import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
 import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
+import type { ApiTarget } from "../lib/api/client";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
-import { useGalleryStore } from "../stores/gallery";
+import { useGalleryStore, type MergedPrint } from "../stores/gallery";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import {
   expansionPullJobMatchesModel,
@@ -2400,13 +2415,87 @@ function isMeshResult(job: { result: CompleteEvent | null } | null): boolean {
 }
 
 /** The rendered PNG a mesh print carries — its only raster, and the viewer's
- * poster while the geometry loads (and forever, if it cannot). */
+ * poster while the geometry loads (and forever, if it cannot). A completion
+ * synthesized from a durable batch child carries no poster inline, so the
+ * host's own thumbnail (the poster it rendered at save time) stands in. */
 const resultMeshPoster = computed(() => {
   const result = job.value?.result;
-  return isMeshArtifact(result) && result?.mesh_poster
-    ? `data:image/png;base64,${result.mesh_poster}`
-    : "";
+  if (!isMeshArtifact(result)) return "";
+  if (result?.mesh_poster) return `data:image/png;base64,${result.mesh_poster}`;
+  return durableMeshPoster.value;
 });
+
+/** The host the finished print lives on: the frozen generation target, or
+ * the primary connection for a job whose target the store no longer holds. */
+function resultHostTarget(clientId: number): ApiTarget | null {
+  const frozen = generation.targetForJob(clientId);
+  if (frozen) return frozen;
+  const info = conn.info;
+  return info?.baseUrl ? { baseUrl: info.baseUrl, apiKey: info.apiKey ?? null } : null;
+}
+
+/**
+ * A durable completion names a FILE on its host. The Library opens that same
+ * file through the native media bridge (bytes from the Tauri side, wrapped in
+ * a blob URL) and has always rendered it; the canvas used to hand the viewer
+ * the host's raw http URL and let the webview fetch it itself, which is the
+ * one place in the app that did so — and the one place a finished mesh came
+ * back as "the 3-D view couldn't start". Load it the Library's way, keep the
+ * ticketed/direct URL as the fallback, and fetch the poster beside it.
+ */
+const durableMeshSrc = ref("");
+const durableMeshPoster = ref("");
+const durableMeshAttempt = ref(0);
+let durableMeshEpoch = 0;
+watch(
+  () =>
+    [
+      job.value?.clientId ?? null,
+      job.value?.result?.filename ?? null,
+      isMeshArtifact(job.value?.result) && !job.value?.result?.image,
+      durableMeshAttempt.value,
+    ] as const,
+  async ([clientId, filename, durableMesh]) => {
+    const epoch = ++durableMeshEpoch;
+    durableMeshSrc.value = "";
+    durableMeshPoster.value = "";
+    if (!durableMesh || clientId === null || !filename) return;
+    const target = resultHostTarget(clientId);
+    if (!target) return;
+    const cacheKey = job.value?.hostId ?? `job-${clientId}`;
+    const options = { target, cacheKey };
+    const [src, poster] = await Promise.all([
+      fullSizeMediaUrl(galleryMediaPath(filename, "host"), {
+        ...options,
+        // A mesh is fetched whole by the viewer, exactly as the Library's
+        // AuthedMedia loads it: never the legacy image blob path.
+        allowLegacyBlob: false,
+      }).catch(() => ""),
+      authedMediaUrl(thumbnailPath(filename), options).catch(() => ""),
+    ]);
+    if (epoch !== durableMeshEpoch) return;
+    durableMeshSrc.value = src;
+    durableMeshPoster.value = poster;
+  },
+  { immediate: true },
+);
+
+/** One renewed attempt per print: a ticket that expired while the print sat
+ * in the rail is re-minted and the viewer remounted; a second failure stays
+ * on the poster with the viewer's own note. */
+const durableMeshRetried = new Set<number>();
+function onResultMeshFail(): void {
+  const j = job.value;
+  if (!j || !isMeshArtifact(j.result) || j.result?.image) return;
+  if (durableMeshRetried.has(j.clientId)) return;
+  durableMeshRetried.add(j.clientId);
+  void generation
+    .refreshRemoteResultUrl(j.clientId, true)
+    .catch(() => undefined)
+    .finally(() => {
+      if (job.value?.clientId === j.clientId) durableMeshAttempt.value += 1;
+    });
+}
 
 /**
  * The GLB the viewer loads from INLINE bytes, as an object URL.
@@ -2459,6 +2548,7 @@ onBeforeUnmount(() => {
  */
 const resultMeshSrc = computed(() => {
   if (inlineMeshSrc.value) return inlineMeshSrc.value;
+  if (durableMeshSrc.value) return durableMeshSrc.value;
   const j = job.value;
   return isMeshArtifact(j?.result) && j?.resultUrl ? j.resultUrl : "";
 });
@@ -2486,10 +2576,86 @@ function onResultMeshReady(stats: ViewerMeshStats): void {
   viewerMeshStats.value = stats;
 }
 
+/** Inline completion bytes as a Blob, so both deliveries reach the one rule. */
+function base64Blob(base64: string, mime: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+/**
+ * The finished print on the canvas, shaped as the gallery row it already is
+ * on the host.
+ *
+ * Every ordinary desktop submission settles through `applyDurableCompletion`,
+ * which records the FILE the host saved and sets `image` to the empty string.
+ * So what the print IS — still, clip, mesh, audio — comes from its filename
+ * and format, exactly as the Library reads it, and the bytes are fetched from
+ * the host on demand. A completion that DID carry bytes inline (a legacy or
+ * non-durable stream) and has no filename gets the name the Save action would
+ * suggest, so it is still a print with a name.
+ */
+function canvasPrintEntry(j: Job): MergedPrint | null {
+  const r = j.result;
+  if (!r) return null;
+  const filename =
+    r.filename ??
+    (r.image ? suggestOutputFilename(r.model, r.seed_used, r.format, j.submittedAtUnixMs) : null);
+  if (!filename) return null;
+  return {
+    item: {
+      filename,
+      timestamp: Math.floor((j.settledAtMs ?? j.submittedAtUnixMs) / 1000),
+      format: r.format,
+      metadata: {
+        prompt: j.prompt,
+        model: r.model,
+        seed: r.seed_used,
+        steps: j.total,
+        guidance: j.guidance,
+        width: r.width,
+        height: r.height,
+      },
+    },
+    sourceKey: j.hostId ?? "local",
+    hostLabel: j.hostLabel ?? "",
+    availableOn: [],
+  };
+}
+
+/**
+ * "Use as source" on the canvas — the SAME rule the Library and the History
+ * drawer run, so a clip becomes source video and an H3 model gets a first
+ * frame or an ordered reference here too. Only the bytes reader differs: an
+ * inline completion already holds them, a durable one reads the file back
+ * from the machine that rendered it.
+ */
+async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promise<void> {
+  if (!entry) return;
+  const outcome = await applyGalleryEntryAsSource(entry, form, async (print) => {
+    const inline = j.result?.image;
+    if (inline) return base64Blob(inline, mediaMimeType(print.item.filename));
+    const target = resultHostTarget(j.clientId);
+    if (!target) throw new Error("This print's machine is no longer connected.");
+    const bytes = await fetchGalleryMediaBytes(
+      galleryMediaPath(print.item.filename, "host"),
+      target,
+    );
+    return new Blob([nativeBytes(bytes)], { type: mediaMimeType(print.item.filename) });
+  });
+  if (!outcome.ok) {
+    toasts.push(outcome.error, "error");
+    return;
+  }
+  toasts.push(outcome.message);
+}
+
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
   if (!j) return [];
   const live = j.status !== "complete" && j.status !== "error";
+  const sourceEntry = canvasPrintEntry(j);
   return [
     {
       label: "Cancel",
@@ -2551,29 +2717,14 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Use as source",
-      // Binary glTF is not conditioning: a mesh print cannot be fed back in
-      // as a source image, exactly as the Library lightbox already refuses.
+      // Whether this print CAN be a source is a question about the print, not
+      // about which delivery the completion used: a mesh is geometry and an
+      // audio print has no pixels, both answered from the filename the host
+      // saved. Never gate on inline bytes — every ordinary submission settles
+      // through `applyDurableCompletion`, which carries none.
       disabled:
-        j.status !== "complete" ||
-        !j.result?.image ||
-        !!j.result.video_frames ||
-        isAudioResult(j) ||
-        isMeshResult(j),
-      action: () => {
-        if (!j.result?.image) return;
-        attachPickedImage(form, {
-          filename:
-            j.result.filename ??
-            suggestOutputFilename(
-              j.result.model,
-              j.result.seed_used,
-              j.result.format,
-              j.submittedAtUnixMs,
-            ),
-          base64: j.result.image,
-        });
-        toasts.push("Loaded as source");
-      },
+        j.status !== "complete" || !sourceEntry || !canUseGalleryEntryAsSource(sourceEntry.item),
+      action: () => void useCanvasResultAsSource(j, sourceEntry),
     },
     {
       label: "Export video format…",
@@ -3045,13 +3196,23 @@ function bakeStyleNegative(presetId: string, family: string) {
   form.negativePrompt = merged;
 }
 
-function restoreQuickExpansion() {
-  const original = quickExpansionOriginal.value;
-  if (original === null) return;
+/** True while a quick expansion still owns the composer: its frozen route,
+ * its undo, or the style it baked into the prompt. */
+function quickExpansionActive(): boolean {
+  return quickExpansionSnapshot.value !== null || quickExpansionOriginal.value !== null;
+}
+
+/**
+ * Drop every trace of a quick expansion without touching the prompt text:
+ * the frozen route snapshot, the undo, the provenance, and the chip and
+ * negative fragments the bake-and-clear apply consumed — unless the user has
+ * edited the negative since, which is theirs to keep. Undo re-arms the
+ * pre-expansion state through here and then puts the original prompt back;
+ * a history recall goes through here and then installs the recalled prompt.
+ */
+function releaseQuickExpansion() {
+  if (!quickExpansionActive()) return;
   submissionGuard.invalidate();
-  // Undo re-arms the whole pre-expansion state, including the chip the
-  // bake-and-clear apply removed and the negative fragments it merged in —
-  // unless the user has edited the negative since, which is theirs to keep.
   const snapshot = quickExpansionSnapshot.value;
   if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
   const negative = quickExpansionNegative.value;
@@ -3059,11 +3220,17 @@ function restoreQuickExpansion() {
     form.negativePrompt = negative.before;
   }
   quickExpansionNegative.value = null;
-  form.prompt = original;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
   quickExpansionSnapshot.value = null;
   expansionError.value = null;
+}
+
+function restoreQuickExpansion() {
+  const original = quickExpansionOriginal.value;
+  if (original === null) return;
+  releaseQuickExpansion();
+  form.prompt = original;
 }
 
 async function generateExpandedAnyway() {
@@ -3348,8 +3515,12 @@ function appendPromptWord(word: string) {
   onPromptAuthored(form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed);
 }
 
-function onPromptAuthored(prompt: string) {
-  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null);
+function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed") {
+  // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
+  // nothing left to describe: release it instead of raising the stale banner
+  // whose recovery actions would re-expand a prompt no longer on screen.
+  if (!quickTransformSurvivesAuthoring(source)) releaseQuickExpansion();
+  applyAuthoredPrompt(form, prompt, quickExpansionSnapshot.value !== null, source);
 }
 
 /** Status line while the source is upscaled/refit ahead of the submit. */
@@ -3556,7 +3727,7 @@ const generationInputBlockerReason = computed<string | null>(() => {
   if (!form.model) return "Choose an installed model before generating.";
   if (chainValidationError.value) return chainValidationError.value;
   if (quickStaleReasons.value.length > 0) {
-    return "The prepared rewrite no longer matches this model or machine. Choose a recovery action above.";
+    return "The prepared rewrite no longer matches the prompt, model, or machine. Choose a recovery action above.";
   }
   if (expansionRunning.value) return "Wait for prompt preparation to finish.";
   return null;
@@ -4707,6 +4878,7 @@ onBeforeUnmount(() => {
                      its binary glTF as a picture. The poster is its still. -->
                 <MeshViewer
                   v-if="resultMeshSrc"
+                  :key="`${resultMeshSrc}#${durableMeshAttempt}`"
                   class="absolute inset-0"
                   data-test="preview-mesh"
                   :src="resultMeshSrc"
@@ -4715,6 +4887,7 @@ onBeforeUnmount(() => {
                   auto-rotate
                   expandable
                   @ready="onResultMeshReady"
+                  @fail="onResultMeshFail"
                 />
                 <!-- Audio is checked next: an audio print has no frames, so
                      the video probe falls through and the <img> below renders

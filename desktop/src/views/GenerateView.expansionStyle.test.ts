@@ -11,6 +11,7 @@ import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import GenerateView from "./GenerateView.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
+import ComposerCard from "../components/create/ComposerCard.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerateFormStore } from "../stores/generateForm";
@@ -246,6 +247,35 @@ describe("GenerateView style-aware expansion", () => {
 
     expect(form.negativePrompt).toBe("text");
     expect(form.stylePreset).toBe("cinematic");
+  });
+
+  it("re-arms the preset chip and negative when ↑ recalls a history prompt over a quick apply", async () => {
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light over a cinematic coast"],
+    });
+    const form = useGenerateFormStore().form;
+    form.model = sdxlModel.name;
+    form.family = sdxlModel.family;
+    form.negativePrompt = "text";
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    expect(form.stylePreset).toBe("");
+    expect(form.negativePrompt).toBe("text, anime, cartoon, graphic, washed out");
+
+    wrapper
+      .findComponent(ComposerCard)
+      .vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
+    await flushPromises();
+
+    // The recalled prompt never absorbed the look, so the chip the bake
+    // cleared comes back — exactly what undo would have re-armed.
+    expect(form.prompt).toBe("yesterday's harbour");
+    expect(form.stylePreset).toBe("cinematic");
+    expect(form.negativePrompt).toBe("text");
+    expect(wrapper.find("[data-test='quick-expansion-stale']").exists()).toBe(false);
   });
 
   it("restoring the quick expansion restores the preset chip", async () => {

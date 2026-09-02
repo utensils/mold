@@ -48,7 +48,7 @@ async function copyError() {
     <p
       data-test="error-notice-message"
       data-selectable
-      class="min-w-0 flex-1 text-body"
+      class="min-w-0 flex-1 text-body [overflow-wrap:anywhere]"
       :class="compact ? 'leading-snug' : 'leading-relaxed'"
     >
       {{ message }}

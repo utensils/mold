@@ -138,7 +138,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
   matching saved prints, prefers the copy on **This device**, and labels every
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and
-  lightbox right-click menus. The Library header is segmented **Prints |
+  lightbox right-click menus. **Use as source** is offered wherever a print is
+  shown — a Library tile, the lightbox, a run in the History drawer, and the
+  finished render on the Create canvas — and loads that print back into the
+  composer: a still becomes the source image (or the H3 first frame or ordered
+  reference on those models), a clip becomes the source video, while audio and
+  3-D meshes are refused because neither is conditioning. The Library header is segmented **Prints |
   Collections | Trash**: Prints keeps the grid plus a filter-chip row
   (♥ Favorites · tag chips · host chips); Collections is a shelf of cards you
   can drill into and edit; Trash holds deleted prints with a retention banner,
