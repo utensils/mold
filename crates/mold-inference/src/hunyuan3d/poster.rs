@@ -77,8 +77,9 @@ pub fn render_poster_from(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Re
 ///
 /// This is the unit a turntable stacks — one call per camera from
 /// [`turntable_cameras`], handed to the animation encoders in
-/// `ltx_video::video_enc` — so the first frame of a looping GIF is
-/// pixel-identical to the gallery poster.
+/// `ltx_video::video_enc`. A turntable is framed ONCE for the whole sweep, so
+/// the mesh keeps one size as it turns; frame 0 is the poster's camera at
+/// that sweep's scale rather than the poster's exact pixels.
 pub fn render_frame_rgb(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Result<RgbImage> {
     render_frame(mesh, camera, size, false)
 }
@@ -126,8 +127,13 @@ fn render_frame(
 /// The cameras of a `frames`-long turntable, starting at [`poster_camera`].
 ///
 /// Every frame keeps the poster's elevation, margin and projection and only
-/// the azimuth moves, so frame 0 IS the gallery poster and the animation
-/// reads as that poster set spinning.
+/// the azimuth moves, so the animation reads as that poster set spinning. A
+/// turntable is framed ONCE for the whole sweep, so the mesh keeps one size
+/// as it turns; frame 0 is the poster's camera at that sweep's scale rather
+/// than the poster's exact pixels. The cameras returned here still carry
+/// [`crate::hunyuan3d::raster::FrameFit::Auto`] — stamping the shared fit is
+/// [`crate::hunyuan3d::turntable::turntable_frame_cameras`]'s job, so this
+/// function stays a pure statement about where the eye goes.
 ///
 /// Two sweeps, chosen to match how the animation encoders play them back:
 ///
@@ -491,9 +497,10 @@ mod tests {
         assert!(render_poster(&collinear, 64).is_err());
     }
 
-    /// The RGB frame is the poster before PNG encoding: the same pixels a
-    /// turntable stacks into an animation, so a GIF's first frame IS the
-    /// gallery poster.
+    /// The RGB frame is the poster before PNG encoding: the same renderer a
+    /// turntable stacks into an animation. A sweep is framed once for the
+    /// whole turn, so a GIF's first frame is this camera at the sweep's own
+    /// scale rather than these exact pixels.
     #[test]
     fn render_frame_rgb_is_the_decoded_poster() {
         let mesh = cube(0.5);

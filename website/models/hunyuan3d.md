@@ -143,6 +143,9 @@ mold library export chair.glb --format obj -o ~/chair.obj
 The gallery file is never renamed or replaced. The same conversions are on
 `POST /api/gallery/export/:filename` and the `export_mesh` MCP tool, and a host
 advertises what it can convert on `/api/capabilities.mesh.export_formats`.
+`--size-mm`, `--up-axis` and `--origin` make an STL or PLY print-ready for a
+slicer or DCC tool by default; see
+[Print-ready exports](/guide/mesh#print-ready-exports).
 
 ## Licence
 

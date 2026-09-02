@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
+import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
 import AuthedMedia from "./AuthedMedia.vue";
 import CollectionPicker from "../library/CollectionPicker.vue";
 import TagEditor from "../library/TagEditor.vue";
@@ -45,6 +46,13 @@ import {
   meshExportFilename,
   meshFileExportFormats,
 } from "../../lib/gallery/meshExport";
+import {
+  meshExportRequest,
+  meshGeometryDefaults,
+  takesGeometryOptions,
+  type MeshExportGeometryCapabilities,
+  type MeshGeometryOptions,
+} from "@studio/lib/meshExport";
 
 /** The print's organization across every copy (the Library's
  *  `organizationOf(entry)` union). Optional so callers that predate the
@@ -103,10 +111,17 @@ const props = withDefaults(
      *  GLB is the only stored form; every entry here is a transcode that host
      *  offers, so the menu is never a client constant. */
     meshExportFormats?: string[];
+    /** `capabilities.mesh.export_geometry` of the host that HOLDS this print
+     *  — its own bounds, axes, origins and per-container defaults. Absent or
+     *  null means that host predates the feature, which is the ONLY gate:
+     *  the export then posts the bare `{ format }` it always has, because an
+     *  older server drops unknown fields instead of refusing them. */
+    meshExportGeometry?: MeshExportGeometryCapabilities | null;
   }>(),
   {
     mesh: false,
     meshExportFormats: () => [],
+    meshExportGeometry: null,
     audio: false,
     upscaleEnabled: true,
     source: "host",
@@ -422,7 +437,35 @@ const meshAnimationExports = computed(() =>
   props.mesh && !fromTrash.value ? meshAnimationExportFormats(props.meshExportFormats) : [],
 );
 
-async function exportMesh(format: string) {
+// The geometry sheet, kept on its own pair of refs so the turntable's
+// `VideoExportDialog` is untouched: the two sheets answer different questions
+// and can never be open at once.
+const meshGeometryOpen = ref(false);
+const meshGeometryFormat = ref("");
+
+/**
+ * A geometry container the holding host advertises defaults for gets the
+ * options sheet; everything else — a turntable, the stored GLB, a container
+ * this host does not scale, and EVERY container on a host that predates the
+ * block — exports straight through with the body this client has always sent.
+ */
+function exportMesh(format: string) {
+  if (exportBusy.value) return;
+  if (takesGeometryOptions(format) && meshGeometryDefaults(props.meshExportGeometry, format)) {
+    exportError.value = "";
+    meshGeometryFormat.value = format;
+    meshGeometryOpen.value = true;
+    return;
+  }
+  void runMeshExport(format, null);
+}
+
+/** The dialog's answer, or the direct path's absence of one. */
+function performMeshGeometryExport(geometry: MeshGeometryOptions) {
+  void runMeshExport(meshGeometryFormat.value, geometry);
+}
+
+async function runMeshExport(format: string, geometry: MeshGeometryOptions | null) {
   if (exportBusy.value) return;
   exportBusy.value = true;
   exportError.value = "";
@@ -431,12 +474,17 @@ async function exportMesh(format: string) {
       props.target,
       props.item.filename,
       meshExportFilename(suggestedSaveName({ ...props.item, title: currentTitle.value }), format),
-      { format },
+      meshExportRequest(format, geometry),
       fromTrash.value,
     );
+    meshGeometryOpen.value = false;
     showSavedMediaToast(toasts, saved);
   } catch (error) {
-    toasts.push(error instanceof Error ? error.message : String(error), "error");
+    const message = error instanceof Error ? error.message : String(error);
+    // A failure inside the sheet is reported IN the sheet, beside the knobs
+    // that may need changing; the one-click path has nowhere but a toast.
+    if (meshGeometryOpen.value) exportError.value = message;
+    else toasts.push(message, "error");
   } finally {
     exportBusy.value = false;
   }
@@ -1009,6 +1057,22 @@ async function performVideoExport(options: VideoExportOptions) {
       :error="exportError"
       @close="exportOpen = false"
       @export="performVideoExport"
+    />
+    <!-- Geometry options, only where the holding host advertises them. The
+         Library lightbox shows the mesh through `AuthedMedia`, not a
+         `MeshViewer`, so there is no bounding box to name real extents with
+         and the sheet falls back to naming the knob itself. -->
+    <MeshExportDialog
+      v-if="meshExportGeometry"
+      :open="meshGeometryOpen"
+      :filename="item.filename"
+      :format="meshGeometryFormat"
+      :capabilities="meshExportGeometry"
+      :bounds="null"
+      :busy="exportBusy"
+      :error="exportError"
+      @close="meshGeometryOpen = false"
+      @export="performMeshGeometryExport"
     />
   </div>
 </template>

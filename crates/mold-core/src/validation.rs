@@ -2026,6 +2026,166 @@ pub const MESH_DEFAULT_THRESHOLD: f64 = 0.6;
 /// Granularity the iso-level control moves in on every client.
 pub const MESH_THRESHOLD_STEP: f64 = 0.01;
 
+/// Longest bounding-box axis, in millimetres, an omitted `size_mm` exports at
+/// for the formats that carry a physical size.
+///
+/// The stored GLB is normalized model space - roughly a unit cube - and every
+/// slicer reads those coordinates as millimetres, so an untransformed export
+/// arrives as a 2 mm blob and Bambu Studio offers to rescale it from metres
+/// or inches. 100 mm fits every consumer build plate and reads as a
+/// deliberate size rather than a unit guess.
+pub const MESH_EXPORT_DEFAULT_SIZE_MM: f64 = 100.0;
+
+/// Smallest `size_mm` a request may name. Below a millimetre the longest axis
+/// is narrower than a nozzle and nothing survives slicing.
+pub const MESH_EXPORT_MIN_SIZE_MM: f64 = 1.0;
+
+/// Largest `size_mm` a request may name.
+///
+/// Not a build-volume limit but a precision one: coordinates are `f32`, whose
+/// spacing at 1000 is about 6e-5 mm, so even at the ceiling every feature the
+/// extraction can resolve stays four orders of magnitude above the
+/// representation error. A metre is also past any consumer printer, so the
+/// bound refuses nothing anyone would print.
+pub const MESH_EXPORT_MAX_SIZE_MM: f64 = 1000.0;
+
+/// The geometry defaults for one export format, or `None` for a format that
+/// takes no geometry options.
+///
+/// THE table. The capabilities block, the server's export route, the CLI, the
+/// MCP tool and the TUI's local export all read it, so a default can never be
+/// spelled twice and drift.
+///
+/// * `obj` stays in MODEL UNITS and `y` up. Every DCC tool that reads OBJ
+///   treats one unit as one metre, so a 100 mm scale would arrive as a 100 m
+///   building; and Blender's OBJ importer already converts `y`-up itself, so
+///   rotating here as well would lay the model on its side.
+/// * `stl` and `ply` are read by slicers, CAD and Blender's own as-is
+///   importers, all of which take the coordinates verbatim with `z` up, so
+///   they carry the default size and the rotation.
+/// * All three rest on the floor, because that is where a build plate and a
+///   scene floor both expect an object to sit.
+///
+/// The formats with defaults are exactly the formats
+/// [`crate::MeshExportFormat::takes_geometry_options`] names, and a test pins
+/// the two together.
+pub fn mesh_export_geometry_defaults(
+    format: crate::MeshExportFormat,
+) -> Option<crate::MeshExportGeometry> {
+    use crate::{MeshExportFormat, MeshExportGeometry, MeshExportOrigin, MeshUpAxis};
+    match format {
+        MeshExportFormat::Obj => Some(MeshExportGeometry {
+            size_mm: None,
+            up_axis: MeshUpAxis::Y,
+            origin: MeshExportOrigin::Floor,
+        }),
+        MeshExportFormat::Stl | MeshExportFormat::Ply => Some(MeshExportGeometry {
+            size_mm: Some(MESH_EXPORT_DEFAULT_SIZE_MM),
+            up_axis: MeshUpAxis::Z,
+            origin: MeshExportOrigin::Floor,
+        }),
+        MeshExportFormat::Glb
+        | MeshExportFormat::Gif
+        | MeshExportFormat::Apng
+        | MeshExportFormat::Webp => None,
+    }
+}
+
+/// The one sentence every door uses to refuse geometry options on a format
+/// that has none.
+///
+/// Wire-neutral on purpose: it names the FIELDS rather than any surface's
+/// flags, so the server, the CLI and the MCP tool share one wording without
+/// any of them claiming the others' spelling.
+pub fn mesh_geometry_refusal(format: crate::MeshExportFormat) -> String {
+    format!(
+        "size_mm, up_axis and origin shape a geometry export; they apply to obj, stl, or ply, not {format}"
+    )
+}
+
+/// The one sentence every client uses to refuse geometry options a host does
+/// not advertise.
+///
+/// The presence of `capabilities.mesh.export_geometry` is the ONLY gate: a
+/// host built before the block existed parses the request, drops the three
+/// keys and answers 200 with an unscaled mesh, so there is nothing in the
+/// answer to catch. `spellings` is the caller's own naming of the three
+/// options — CLI flags, MCP tool arguments — because that is what the reader
+/// has to remove.
+pub fn mesh_geometry_unadvertised_refusal(host: &str, spellings: &str) -> String {
+    format!(
+        "{host} does not advertise geometry export options; it would ignore them and hand back an unscaled mesh — upgrade the server or drop {spellings}"
+    )
+}
+
+/// Resolve a request's geometry options against the per-format defaults.
+///
+/// `Ok(None)` means the format takes none and the request asked for none - a
+/// `glb` passthrough or a turntable. A field set on such a format is an
+/// `Err`, not a silent drop: a flag that does nothing is worse than one that
+/// is refused by name.
+pub fn resolve_mesh_export_geometry(
+    format: crate::MeshExportFormat,
+    options: &crate::MeshGeometryOptions,
+) -> Result<Option<crate::MeshExportGeometry>, String> {
+    let Some(defaults) = mesh_export_geometry_defaults(format) else {
+        if options != &crate::MeshGeometryOptions::default() {
+            return Err(mesh_geometry_refusal(format));
+        }
+        return Ok(None);
+    };
+    let size_mm = match options.size_mm {
+        Some(size) => {
+            if !size.is_finite()
+                || !(MESH_EXPORT_MIN_SIZE_MM..=MESH_EXPORT_MAX_SIZE_MM).contains(&size)
+            {
+                return Err(format!(
+                    "size_mm ({size}) must be between {MESH_EXPORT_MIN_SIZE_MM} and {MESH_EXPORT_MAX_SIZE_MM} millimetres"
+                ));
+            }
+            Some(size)
+        }
+        None => defaults.size_mm,
+    };
+    Ok(Some(crate::MeshExportGeometry {
+        size_mm,
+        up_axis: options.up_axis.unwrap_or(defaults.up_axis),
+        origin: options.origin.unwrap_or(defaults.origin),
+    }))
+}
+
+/// The advertised `capabilities.mesh.export_geometry` block.
+///
+/// Built here from the constants and [`mesh_export_geometry_defaults`] so the
+/// server never writes a literal that could disagree with what it enforces.
+pub fn mesh_export_geometry_capabilities() -> crate::MeshExportGeometryCapabilities {
+    use crate::MeshExportFormat;
+    let defaults = [
+        MeshExportFormat::Obj,
+        MeshExportFormat::Stl,
+        MeshExportFormat::Ply,
+    ]
+    .into_iter()
+    .filter_map(|format| {
+        mesh_export_geometry_defaults(format)
+            .map(|geometry| (format.as_str().to_string(), geometry))
+    })
+    .collect();
+    crate::MeshExportGeometryCapabilities {
+        size_mm: crate::MeshSizeControl {
+            min: MESH_EXPORT_MIN_SIZE_MM,
+            max: MESH_EXPORT_MAX_SIZE_MM,
+            default: MESH_EXPORT_DEFAULT_SIZE_MM,
+        },
+        up_axes: vec![crate::MeshUpAxis::Y, crate::MeshUpAxis::Z],
+        origins: vec![
+            crate::MeshExportOrigin::Center,
+            crate::MeshExportOrigin::Floor,
+        ],
+        defaults,
+    }
+}
+
 /// Family-shape rules for the 3-D families.
 ///
 /// Two directions, both deliberate:
@@ -8434,5 +8594,198 @@ mod tests {
         validate_generate_request(&req).expect("GGUF + LoRA is admitted");
         validate_generate_request_after_activation(&req, None)
             .expect("GGUF + LoRA passes family validation");
+    }
+
+    /// The formats that HAVE geometry defaults are exactly the formats that
+    /// advertise they take geometry options. Two lists, one truth.
+    #[test]
+    fn every_format_has_defaults_exactly_when_it_takes_geometry_options() {
+        use crate::MeshExportFormat as F;
+        for format in [F::Glb, F::Obj, F::Stl, F::Ply, F::Gif, F::Apng, F::Webp] {
+            assert_eq!(
+                super::mesh_export_geometry_defaults(format).is_some(),
+                format.takes_geometry_options(),
+                "{format} disagrees with its defaults"
+            );
+        }
+    }
+
+    /// The documented table, pinned value by value: OBJ ships in model units
+    /// and glTF's own `y` up, STL and PLY ship at 100 mm rotated to `z` up,
+    /// and all three rest on the floor.
+    #[test]
+    fn the_geometry_defaults_are_the_documented_table() {
+        use crate::{MeshExportFormat as F, MeshExportGeometry, MeshExportOrigin, MeshUpAxis};
+        assert_eq!(
+            super::mesh_export_geometry_defaults(F::Obj),
+            Some(MeshExportGeometry {
+                size_mm: None,
+                up_axis: MeshUpAxis::Y,
+                origin: MeshExportOrigin::Floor,
+            })
+        );
+        for format in [F::Stl, F::Ply] {
+            assert_eq!(
+                super::mesh_export_geometry_defaults(format),
+                Some(MeshExportGeometry {
+                    size_mm: Some(super::MESH_EXPORT_DEFAULT_SIZE_MM),
+                    up_axis: MeshUpAxis::Z,
+                    origin: MeshExportOrigin::Floor,
+                }),
+                "{format}"
+            );
+        }
+        assert_eq!(super::MESH_EXPORT_DEFAULT_SIZE_MM, 100.0);
+        assert_eq!(super::MESH_EXPORT_MIN_SIZE_MM, 1.0);
+        assert_eq!(super::MESH_EXPORT_MAX_SIZE_MM, 1000.0);
+    }
+
+    /// Resolution fills ONLY the fields the request left out, so an explicit
+    /// value is never overwritten by a default and an omitted one never has
+    /// to be guessed by the caller.
+    #[test]
+    fn resolving_geometry_fills_only_the_absent_fields() {
+        use crate::{
+            MeshExportFormat as F, MeshExportGeometry, MeshExportOrigin, MeshGeometryOptions,
+            MeshUpAxis,
+        };
+        assert_eq!(
+            super::resolve_mesh_export_geometry(F::Stl, &MeshGeometryOptions::default()).unwrap(),
+            super::mesh_export_geometry_defaults(F::Stl)
+        );
+        assert_eq!(
+            super::resolve_mesh_export_geometry(
+                F::Stl,
+                &MeshGeometryOptions {
+                    up_axis: Some(MeshUpAxis::Y),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            Some(MeshExportGeometry {
+                size_mm: Some(super::MESH_EXPORT_DEFAULT_SIZE_MM),
+                up_axis: MeshUpAxis::Y,
+                origin: MeshExportOrigin::Floor,
+            })
+        );
+        assert_eq!(
+            super::resolve_mesh_export_geometry(
+                F::Obj,
+                &MeshGeometryOptions {
+                    size_mm: Some(42.5),
+                    origin: Some(MeshExportOrigin::Center),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            Some(MeshExportGeometry {
+                size_mm: Some(42.5),
+                up_axis: MeshUpAxis::Y,
+                origin: MeshExportOrigin::Center,
+            })
+        );
+        // Both bounds are inclusive.
+        for size in [
+            super::MESH_EXPORT_MIN_SIZE_MM,
+            super::MESH_EXPORT_MAX_SIZE_MM,
+        ] {
+            assert!(super::resolve_mesh_export_geometry(
+                F::Ply,
+                &MeshGeometryOptions {
+                    size_mm: Some(size),
+                    ..Default::default()
+                }
+            )
+            .is_ok());
+        }
+    }
+
+    /// A geometry field on a format that has none is a refusal naming the
+    /// formats it applies to, not a silently dropped key. An untouched value
+    /// on those formats still resolves to nothing.
+    #[test]
+    fn geometry_options_are_refused_on_glb_and_the_animations() {
+        use crate::{MeshExportFormat as F, MeshGeometryOptions, MeshUpAxis};
+        for format in [F::Glb, F::Gif, F::Apng, F::Webp] {
+            assert_eq!(
+                super::resolve_mesh_export_geometry(format, &MeshGeometryOptions::default())
+                    .unwrap(),
+                None,
+                "{format} takes no geometry"
+            );
+            let error = super::resolve_mesh_export_geometry(
+                format,
+                &MeshGeometryOptions {
+                    up_axis: Some(MeshUpAxis::Z),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, super::mesh_geometry_refusal(format));
+            assert!(
+                error.contains("size_mm")
+                    && error.contains("up_axis")
+                    && error.contains("origin")
+                    && error.contains(format.as_str()),
+                "{error}"
+            );
+        }
+    }
+
+    /// A size outside the bounds, or not a number at all, is refused with a
+    /// message naming both bounds.
+    #[test]
+    fn an_out_of_range_or_non_finite_size_is_refused() {
+        use crate::{MeshExportFormat as F, MeshGeometryOptions};
+        for size in [
+            0.0,
+            -10.0,
+            0.999,
+            1000.001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let error = super::resolve_mesh_export_geometry(
+                F::Stl,
+                &MeshGeometryOptions {
+                    size_mm: Some(size),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("size_mm") && error.contains("1") && error.contains("1000"),
+                "{size}: {error}"
+            );
+            assert!(error.contains("millimetres"), "{size}: {error}");
+        }
+    }
+
+    /// The advertised block is BUILT from the constants and the table, so a
+    /// client reading it and a server enforcing it cannot disagree.
+    #[test]
+    fn the_capabilities_block_is_built_from_the_table() {
+        use crate::{MeshExportFormat as F, MeshExportOrigin, MeshUpAxis};
+        let block = super::mesh_export_geometry_capabilities();
+        assert_eq!(block.size_mm.min, super::MESH_EXPORT_MIN_SIZE_MM);
+        assert_eq!(block.size_mm.max, super::MESH_EXPORT_MAX_SIZE_MM);
+        assert_eq!(block.size_mm.default, super::MESH_EXPORT_DEFAULT_SIZE_MM);
+        assert_eq!(block.up_axes, vec![MeshUpAxis::Y, MeshUpAxis::Z]);
+        assert_eq!(
+            block.origins,
+            vec![MeshExportOrigin::Center, MeshExportOrigin::Floor]
+        );
+        assert_eq!(
+            block.defaults.keys().cloned().collect::<Vec<_>>(),
+            vec!["obj".to_string(), "ply".to_string(), "stl".to_string()]
+        );
+        for format in [F::Obj, F::Stl, F::Ply] {
+            assert_eq!(
+                block.defaults.get(format.as_str()).copied(),
+                super::mesh_export_geometry_defaults(format),
+                "{format}"
+            );
+        }
     }
 }

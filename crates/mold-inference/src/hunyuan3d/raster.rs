@@ -63,6 +63,38 @@ pub enum Culling {
     Front,
 }
 
+/// How a frame's projection scale is chosen.
+///
+/// [`FrameFit::Auto`] fits every render to the mesh's own projected extents,
+/// which is the right answer for a single still: the subject fills the frame.
+/// It is the wrong answer for a SEQUENCE, because those extents change as the
+/// mesh turns — a box's projected width swings by a factor of √2 between its
+/// face-on and its diagonal view — so an auto-fit turntable breathes in and
+/// out once per quarter turn and pops where the x and y fits cross over.
+///
+/// [`FrameFit::Extent`] pins the scale to a caller-chosen half-extent, so a
+/// set of cameras sharing one value renders one rigid orbit. This mirrors
+/// ComfyUI's splat turntable, which frames its default camera ONCE from a
+/// rotation-invariant extent
+/// (`comfy_extras/nodes_gaussian_splat.py:996-1006`) and then rotates that
+/// one camera rigidly per frame (`_orbit_camera_info_yaw`, `:640-655`).
+///
+/// See [`frame_fit_for`] for building the shared value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameFit {
+    /// Fit this frame to the mesh's own projected extents.
+    Auto,
+    /// Map this projected half-extent onto the half-frame:
+    /// `scale = min(half_w, half_h) / extent * (1 - margin)`.
+    ///
+    /// The value is in the camera's *projected* units — the same units
+    /// [`projected_half_extent`] reports — not pixels and not world units, so
+    /// one extent is meaningful at any resolution. A non-finite or
+    /// non-positive extent is not a framing, and a render using it draws
+    /// nothing rather than guessing.
+    Extent(f32),
+}
+
 /// A view of a mesh: an orbit position plus how the frame is fitted.
 ///
 /// The camera holds no absolute placement. It aims at the mesh's bounding-box
@@ -87,6 +119,9 @@ pub struct Camera {
     /// fits the *projected bounding box* and so touches the frame edge exactly.
     pub margin: f32,
     pub culling: Culling,
+    /// How the projection scale is chosen. [`FrameFit::Auto`] unless a caller
+    /// stamps a shared extent on a whole sequence.
+    pub fit: FrameFit,
 }
 
 /// Below this the bounding sphere would straddle the eye and a perspective
@@ -107,6 +142,7 @@ impl Camera {
             projection: Projection::Orthographic,
             margin: DEFAULT_MARGIN,
             culling: Culling::None,
+            fit: FrameFit::Auto,
         }
     }
 
@@ -127,6 +163,12 @@ impl Camera {
 
     pub fn with_culling(mut self, culling: Culling) -> Self {
         self.culling = culling;
+        self
+    }
+
+    /// Replace the framing rule. See [`FrameFit`].
+    pub fn with_fit(mut self, fit: FrameFit) -> Self {
+        self.fit = fit;
         self
     }
 
@@ -384,13 +426,27 @@ impl ScreenVertex {
     }
 }
 
-/// Project every vertex to pixel coordinates, auto-fitting the scale.
+/// Where the eye sits and which way the axes run for one view of one mesh.
 ///
-/// `None` means there is nothing renderable: no finite vertex, a zero-radius
-/// mesh, or a fit that came out non-finite. Non-finite *individual* vertices
-/// survive as NaN entries and are dropped later per triangle, so one bad vertex
-/// costs its incident faces and not the whole render.
-fn project(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -> Option<Vec<ScreenVertex>> {
+/// The mesh-dependent half of a projection: computed once per render and
+/// shared by every vertex, so [`projected_half_extent`] and [`project`] can
+/// never disagree about the framing they are measuring.
+#[derive(Debug, Clone, Copy)]
+struct ViewFrame {
+    center: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    dir: [f32; 3],
+    /// Eye distance from `center`, in world units.
+    eye_dist: f32,
+    projection: Projection,
+}
+
+/// The view frame for `camera` looking at `mesh`.
+///
+/// `None` means there is nothing to look at: non-finite bounds, or a mesh
+/// whose vertices are all coincident.
+fn view_frame(mesh: &Mesh, camera: &Camera) -> Option<ViewFrame> {
     let (min, max) = mesh.bounds();
     if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
         // `bounds` propagates a NaN coordinate into the extremes, and a NaN
@@ -417,48 +473,150 @@ fn project(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -> Option<Vec<
         Projection::Orthographic => camera.distance.max(1.0),
         Projection::Perspective => camera.distance.max(MIN_PERSPECTIVE_DISTANCE),
     };
-    let eye_dist = distance * radius;
+    Some(ViewFrame {
+        center,
+        right,
+        up,
+        dir,
+        eye_dist: distance * radius,
+        projection: camera.projection,
+    })
+}
+
+/// One vertex in the camera's *projected* units, before the fit scales it to
+/// pixels. Shared by [`project`] and [`projected_half_extent`].
+fn project_vertex(vertex: [f32; 3], frame: &ViewFrame) -> ScreenVertex {
+    let d = sub(vertex, frame.center);
+    let depth = frame.eye_dist - dot(d, frame.dir);
+    let (x, y, inv_w) = match frame.projection {
+        Projection::Orthographic => (dot(d, frame.right), dot(d, frame.up), 1.0),
+        Projection::Perspective => {
+            let inv = 1.0 / depth;
+            (
+                dot(d, frame.right) * frame.eye_dist * inv,
+                dot(d, frame.up) * frame.eye_dist * inv,
+                inv,
+            )
+        }
+    };
+    ScreenVertex { x, y, depth, inv_w }
+}
+
+/// The mesh's projected half-extents `(x, y)` from `camera`, in the camera's
+/// projected units and ignoring `camera.fit`.
+///
+/// This is the quantity an auto-fit divides the half-frame by, so it is also
+/// the quantity a caller compares across a sweep to see the breathing
+/// [`FrameFit::Extent`] exists to remove. `None` for a mesh with nothing to
+/// look at, exactly as [`render_gbuffers`] draws nothing for one.
+pub fn projected_half_extent(mesh: &Mesh, camera: &Camera) -> Option<(f32, f32)> {
+    let frame = view_frame(mesh, camera)?;
+    let (mut ext_x, mut ext_y) = (0.0f32, 0.0f32);
+    for v in &mesh.vertices {
+        let s = project_vertex(*v, &frame);
+        if s.x.is_finite() && s.y.is_finite() {
+            ext_x = ext_x.max(s.x.abs());
+            ext_y = ext_y.max(s.y.abs());
+        }
+    }
+    Some((ext_x, ext_y))
+}
+
+/// Projected units to pixels, given the extents an [`FrameFit::Auto`] fit
+/// would use. Under [`FrameFit::Extent`] the extents are ignored.
+fn fit_scale(camera: &Camera, width: u32, height: u32, ext_x: f32, ext_y: f32) -> Option<f32> {
+    let half_w = 0.5 * width as f32;
+    let half_h = 0.5 * height as f32;
+    let scale = match camera.fit {
+        FrameFit::Extent(extent) => {
+            if !extent.is_finite() || extent <= 0.0 {
+                return None;
+            }
+            half_w.min(half_h) / extent * (1.0 - camera.margin.clamp(0.0, 0.9))
+        }
+        FrameFit::Auto => {
+            let fit_x = if ext_x > 0.0 {
+                half_w / ext_x
+            } else {
+                f32::INFINITY
+            };
+            let fit_y = if ext_y > 0.0 {
+                half_h / ext_y
+            } else {
+                f32::INFINITY
+            };
+            fit_x.min(fit_y) * (1.0 - camera.margin.clamp(0.0, 0.9))
+        }
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    Some(scale)
+}
+
+/// Pixels per projected unit for this view at this resolution.
+///
+/// The number a sequence must hold constant: it IS the on-screen size of the
+/// mesh. `None` wherever [`render_gbuffers`] would draw nothing.
+pub fn projection_scale(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -> Option<f32> {
+    match camera.fit {
+        // A pinned extent needs no measurement of the mesh, but a mesh with
+        // nothing to look at still renders nothing, so the frame must exist.
+        FrameFit::Extent(_) => {
+            view_frame(mesh, camera)?;
+            fit_scale(camera, width, height, 0.0, 0.0)
+        }
+        FrameFit::Auto => {
+            let (ext_x, ext_y) = projected_half_extent(mesh, camera)?;
+            fit_scale(camera, width, height, ext_x, ext_y)
+        }
+    }
+}
+
+/// One [`FrameFit::Extent`] that frames `mesh` from EVERY camera in `cameras`.
+///
+/// The largest half-extent any of those views needs, on either axis — so
+/// stamping it on all of them gives a rigid orbit in which nothing is ever
+/// clipped and nothing changes size. `None` when there is nothing to frame
+/// (an empty camera list, or a mesh with no extent), and the caller keeps
+/// [`FrameFit::Auto`].
+///
+/// The pre-pass mirrors ComfyUI's splat turntable, which computes its default
+/// camera once from a rotation-invariant extent
+/// (`comfy_extras/nodes_gaussian_splat.py:996-1006`) and then orbits that one
+/// camera rigidly (`:640-655`).
+pub fn frame_fit_for(mesh: &Mesh, cameras: &[Camera]) -> Option<FrameFit> {
+    let mut extent = 0.0f32;
+    for camera in cameras {
+        let (ext_x, ext_y) = projected_half_extent(mesh, camera)?;
+        extent = extent.max(ext_x).max(ext_y);
+    }
+    (extent.is_finite() && extent > 0.0).then_some(FrameFit::Extent(extent))
+}
+
+/// Project every vertex to pixel coordinates under `camera.fit`.
+///
+/// `None` means there is nothing renderable: no finite vertex, a zero-radius
+/// mesh, or a fit that came out non-finite. Non-finite *individual* vertices
+/// survive as NaN entries and are dropped later per triangle, so one bad vertex
+/// costs its incident faces and not the whole render.
+fn project(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -> Option<Vec<ScreenVertex>> {
+    let frame = view_frame(mesh, camera)?;
 
     let mut out = Vec::with_capacity(mesh.vertices.len());
     let (mut ext_x, mut ext_y) = (0.0f32, 0.0f32);
     for v in &mesh.vertices {
-        let d = sub(*v, center);
-        let depth = eye_dist - dot(d, dir);
-        let (x, y, inv_w) = match camera.projection {
-            Projection::Orthographic => (dot(d, right), dot(d, up), 1.0),
-            Projection::Perspective => {
-                let inv = 1.0 / depth;
-                (
-                    dot(d, right) * eye_dist * inv,
-                    dot(d, up) * eye_dist * inv,
-                    inv,
-                )
-            }
-        };
-        if x.is_finite() && y.is_finite() {
-            ext_x = ext_x.max(x.abs());
-            ext_y = ext_y.max(y.abs());
+        let s = project_vertex(*v, &frame);
+        if s.x.is_finite() && s.y.is_finite() {
+            ext_x = ext_x.max(s.x.abs());
+            ext_y = ext_y.max(s.y.abs());
         }
-        out.push(ScreenVertex { x, y, depth, inv_w });
+        out.push(s);
     }
 
+    let scale = fit_scale(camera, width, height, ext_x, ext_y)?;
     let half_w = 0.5 * width as f32;
     let half_h = 0.5 * height as f32;
-    let fit_x = if ext_x > 0.0 {
-        half_w / ext_x
-    } else {
-        f32::INFINITY
-    };
-    let fit_y = if ext_y > 0.0 {
-        half_h / ext_y
-    } else {
-        f32::INFINITY
-    };
-    let scale = fit_x.min(fit_y) * (1.0 - camera.margin.clamp(0.0, 0.9));
-    if !scale.is_finite() || scale <= 0.0 {
-        return None;
-    }
-
     for s in &mut out {
         s.x = half_w + scale * s.x;
         // Screen rows run downward, so +Y in world becomes -Y on screen.
@@ -805,5 +963,142 @@ mod tests {
         let hi = depths.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!(hi > lo, "depth should vary across a slanted surface");
         assert!(lo > 0.0, "nothing may sit behind the eye");
+    }
+
+    /// A camera fits itself to the mesh unless a caller says otherwise, and
+    /// that is the framing the poster has always used.
+    #[test]
+    fn auto_is_the_default_fit_and_leaves_the_render_alone() {
+        let cam = Camera::orthographic(30.0, 20.0);
+        assert_eq!(cam.fit, FrameFit::Auto);
+        assert_eq!(Camera::perspective(30.0, 20.0, 2.0).fit, FrameFit::Auto);
+        assert_eq!(cam.with_margin(0.2).fit, FrameFit::Auto);
+        assert_eq!(cam.with_culling(Culling::Back).fit, FrameFit::Auto);
+        assert_eq!(
+            cam.with_fit(FrameFit::Extent(1.0)).fit,
+            FrameFit::Extent(1.0)
+        );
+
+        // Explicitly asking for the default changes nothing about the pixels.
+        let mesh = cube(0.5);
+        assert_eq!(
+            render_gbuffers(&mesh, &cam, 32, 32),
+            render_gbuffers(&mesh, &cam.with_fit(FrameFit::Auto), 32, 32)
+        );
+    }
+
+    /// `projected_half_extent` reports exactly the quantity the auto-fit
+    /// divides the half-frame by, so the two can never drift apart.
+    #[test]
+    fn projected_half_extent_agrees_with_the_auto_fit() {
+        let mesh = cube(0.5);
+        for camera in [
+            Camera::orthographic(0.0, 0.0).with_margin(0.0),
+            Camera::orthographic(30.0, 20.0),
+            Camera::perspective(45.0, -10.0, 3.0).with_margin(0.1),
+        ] {
+            let (ext_x, ext_y) = projected_half_extent(&mesh, &camera).expect("extents");
+            let scale = projection_scale(&mesh, &camera, 64, 48).expect("scale");
+            let expected = (32.0f32 / ext_x).min(24.0 / ext_y) * (1.0 - camera.margin);
+            assert!(
+                (scale - expected).abs() <= 1e-4 * expected,
+                "{scale} != {expected}"
+            );
+            // The fitted silhouette touches the frame edge exactly, less the
+            // margin, on whichever axis is tighter.
+            assert!(scale * ext_x <= 32.0 + 1e-3);
+            assert!(scale * ext_y <= 24.0 + 1e-3);
+        }
+        assert_eq!(
+            projected_half_extent(&Mesh::default(), &Camera::orthographic(0.0, 0.0)),
+            None
+        );
+    }
+
+    /// A pinned extent is the whole fit: two meshes of very different sizes
+    /// seen through cameras carrying the same [`FrameFit::Extent`] render at
+    /// the SAME pixels-per-unit, which is what makes a sweep rigid.
+    #[test]
+    fn a_pinned_extent_overrides_the_per_frame_autofit() {
+        let small = cube(0.25);
+        let large = cube(4.0);
+        let camera = Camera::orthographic(30.0, 20.0)
+            .with_margin(0.08)
+            .with_fit(FrameFit::Extent(2.5));
+
+        let expected = 32.0f32.min(24.0) / 2.5 * (1.0 - 0.08);
+        for mesh in [&small, &large] {
+            let scale = projection_scale(mesh, &camera, 64, 48).expect("scale");
+            assert!(
+                (scale - expected).abs() <= 1e-5 * expected,
+                "{scale} != {expected}"
+            );
+        }
+
+        // Under Auto the same two meshes disagree by their size ratio; the
+        // pin is doing real work.
+        let auto = camera.with_fit(FrameFit::Auto);
+        let a = projection_scale(&small, &auto, 64, 48).expect("scale");
+        let b = projection_scale(&large, &auto, 64, 48).expect("scale");
+        assert!(a > 10.0 * b, "auto fit did not track the mesh: {a} vs {b}");
+
+        // A frame-filling render is still a render: the pinned extent covers
+        // the small cube with room to spare and clips nothing.
+        let gb = render_gbuffers(&small, &camera, 64, 48);
+        assert!(gb.covered_pixels() > 0);
+    }
+
+    /// A degenerate pin is not a framing. Rather than guessing a scale, the
+    /// render comes back unset — the same answer a degenerate mesh gets.
+    #[test]
+    fn a_non_positive_or_non_finite_pinned_extent_renders_nothing() {
+        let mesh = cube(0.5);
+        for extent in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let camera = Camera::orthographic(30.0, 20.0).with_fit(FrameFit::Extent(extent));
+            assert_eq!(
+                projection_scale(&mesh, &camera, 32, 32),
+                None,
+                "extent {extent}"
+            );
+            let gb = render_gbuffers(&mesh, &camera, 32, 32);
+            assert_eq!(gb.covered_pixels(), 0, "extent {extent} drew something");
+            assert!(gb.depth.iter().all(|d| d.is_infinite()));
+            assert!(gb
+                .normal
+                .iter()
+                .chain(gb.position.iter())
+                .all(|v| v.iter().all(|c| c.is_finite())));
+        }
+        // And a pin on a mesh with nothing to look at is still nothing.
+        assert_eq!(
+            projection_scale(
+                &Mesh::default(),
+                &Camera::orthographic(0.0, 0.0).with_fit(FrameFit::Extent(1.0)),
+                32,
+                32
+            ),
+            None
+        );
+    }
+
+    /// The shared fit is the largest half-extent any camera in the set needs,
+    /// so no view is ever clipped and every view is the same size.
+    #[test]
+    fn frame_fit_for_covers_every_camera_in_the_set() {
+        let mesh = cube(0.5);
+        let cameras = camera_ring(12, 20.0);
+        let FrameFit::Extent(extent) = frame_fit_for(&mesh, &cameras).expect("a fit") else {
+            panic!("frame_fit_for must pin an extent");
+        };
+        let mut largest = 0.0f32;
+        for camera in &cameras {
+            let (ext_x, ext_y) = projected_half_extent(&mesh, camera).expect("extents");
+            assert!(ext_x <= extent + 1e-6 && ext_y <= extent + 1e-6);
+            largest = largest.max(ext_x).max(ext_y);
+        }
+        assert!((extent - largest).abs() < 1e-6);
+
+        assert_eq!(frame_fit_for(&mesh, &[]), None, "nothing to frame");
+        assert_eq!(frame_fit_for(&Mesh::default(), &cameras), None);
     }
 }

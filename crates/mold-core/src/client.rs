@@ -1963,10 +1963,15 @@ impl MoldClient {
 
     /// Export one stored gallery mesh (`POST /api/gallery/export/:filename`)
     /// and return the bytes: a transcode for a geometry container, a rendered
-    /// turntable for an animated one, with `options` carrying the turntable's
-    /// playback, repeat, frame size, frame count and rate (all optional; a
-    /// geometry export ignores them, and an untouched value adds nothing to
-    /// the request).
+    /// turntable for an animated one.
+    ///
+    /// `options` carries both halves of the request. The turntable's
+    /// playback, repeat, frame size, frame count and rate apply to an
+    /// animated container; `size_mm`, `up_axis` and `origin` shape a geometry
+    /// container. Both flatten into ONE flat body, and an untouched value
+    /// adds nothing at all — so a default `options` is byte for byte the
+    /// request an older client sends. A field set on a format that has none
+    /// is the server's 422, never a silent drop here.
     ///
     /// Downloads only: the gallery keeps its `.glb`, and the caller decides
     /// where the converted file lands. Every refusal comes back as the
@@ -1976,7 +1981,7 @@ impl MoldClient {
         &self,
         filename: &str,
         format: crate::MeshExportFormat,
-        options: &crate::MeshTurntableOptions,
+        options: &crate::MeshExportOptions,
     ) -> Result<Vec<u8>> {
         let mut body = serde_json::to_value(options)?;
         body["format"] = serde_json::Value::String(format.as_str().to_string());
@@ -5060,7 +5065,7 @@ mod tests {
             .export_gallery_mesh(
                 "mold-hunyuan3d-1 1.glb",
                 crate::MeshExportFormat::Stl,
-                &crate::MeshTurntableOptions::default(),
+                &crate::MeshExportOptions::default(),
             )
             .await
             .unwrap();
@@ -5070,7 +5075,7 @@ mod tests {
             .export_gallery_mesh(
                 "missing.glb",
                 crate::MeshExportFormat::Obj,
-                &crate::MeshTurntableOptions::default(),
+                &crate::MeshExportOptions::default(),
             )
             .await
             .unwrap_err()
@@ -5081,12 +5086,71 @@ mod tests {
             .export_gallery_mesh(
                 "cat.png",
                 crate::MeshExportFormat::Ply,
-                &crate::MeshTurntableOptions::default(),
+                &crate::MeshExportOptions::default(),
             )
             .await
             .unwrap_err()
             .to_string();
         assert!(refused.contains("only stored .glb prints"), "{refused}");
+    }
+
+    /// Both option groups flatten into ONE flat body, so the geometry keys
+    /// sit beside `format` exactly where the server reads them, and an
+    /// all-default value adds nothing — which is precisely the request an
+    /// older client sends, and the only shape a pre-geometry host can answer.
+    #[tokio::test]
+    async fn export_gallery_mesh_flattens_the_geometry_keys_beside_the_format() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/shaped.glb"))
+            .and(body_json(serde_json::json!({
+                "format": "stl",
+                "size_mm": 120.0,
+                "up_axis": "y",
+                "origin": "center"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"shaped".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/bare.glb"))
+            .and(body_json(serde_json::json!({ "format": "stl" })))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bare".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let shaped = client
+            .export_gallery_mesh(
+                "shaped.glb",
+                crate::MeshExportFormat::Stl,
+                &crate::MeshExportOptions {
+                    geometry: crate::MeshGeometryOptions {
+                        size_mm: Some(120.0),
+                        up_axis: Some(crate::MeshUpAxis::Y),
+                        origin: Some(crate::MeshExportOrigin::Center),
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(shaped, b"shaped");
+
+        let bare = client
+            .export_gallery_mesh(
+                "bare.glb",
+                crate::MeshExportFormat::Stl,
+                &crate::MeshExportOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bare, b"bare");
     }
 
     #[tokio::test]

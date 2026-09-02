@@ -915,9 +915,45 @@ impl McpServer {
                 "playback, repeat, max_dimension, frames and fps shape a turntable; they apply to format gif, apng, or webp, not {format}"
             ));
         }
+        let geometry = mold_core::MeshGeometryOptions {
+            size_mm: args.size_mm,
+            up_axis: args.up_axis.as_deref().map(str::parse).transpose()?,
+            origin: args.origin.as_deref().map(str::parse).transpose()?,
+        };
+        // Refused before any request: the server would answer the same way,
+        // but a tool call that names a key the format has no use for is a
+        // mistake the agent should hear about without a round trip.
+        if !format.takes_geometry_options() && geometry != mold_core::MeshGeometryOptions::default()
+        {
+            return Err(mold_core::validation::mesh_geometry_refusal(format));
+        }
+        // The block's presence is the ONLY gate. A host built before the
+        // geometry options existed parses the call, drops the three keys and
+        // answers 200 with an unscaled mesh — there is no error to catch and
+        // nothing in the answer that says so. Probed only when the caller set
+        // one of them, so an ordinary export still costs one request.
+        if geometry != mold_core::MeshGeometryOptions::default() {
+            let capabilities = self.client.capabilities().await.map_err(|e| {
+                format!("failed to read capabilities on {}: {e}", self.client.host())
+            })?;
+            if capabilities
+                .mesh
+                .as_ref()
+                .is_none_or(|mesh| mesh.export_geometry.is_none())
+            {
+                return Err(mold_core::validation::mesh_geometry_unadvertised_refusal(
+                    self.client.host(),
+                    "size_mm/up_axis/origin",
+                ));
+            }
+        }
+        let options = mold_core::MeshExportOptions {
+            turntable,
+            geometry,
+        };
         let bytes = self
             .client
-            .export_gallery_mesh(&args.filename, format, &turntable)
+            .export_gallery_mesh(&args.filename, format, &options)
             .await
             .map_err(|e| format!("failed to export mesh: {e}"))?;
         // The blob IS the export, so the resource is named for the exported
@@ -1371,6 +1407,9 @@ struct ExportMeshArgs {
     max_dimension: Option<u32>,
     frames: Option<u32>,
     fps: Option<u32>,
+    size_mm: Option<f64>,
+    up_axis: Option<String>,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -3250,7 +3289,7 @@ fn builtin_tool_definitions() -> Value {
         },
         {
             "name": "export_mesh",
-            "description": "Export one stored 3-D print as OBJ, STL, or PLY (or fetch the stored GLB unchanged), or as a 360° turntable animation (GIF, APNG, WebP). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Each geometry container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target. A turntable is a RENDER of the mesh from the gallery poster's own view (the first frame is the poster), spun through a full turn; it is the way to share what a mesh looks like where no viewer can open a GLB. Only the formats the host advertises on capabilities.mesh.export_formats succeed (WebP needs a build with the webp feature).",
+            "description": "Export one stored 3-D print as OBJ, STL, or PLY (or fetch the stored GLB unchanged), or as a 360° turntable animation (GIF, APNG, WebP). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Each geometry container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target. A turntable is a RENDER of the mesh from the gallery poster's own view, framed once for the whole sweep and spun through a full turn; it is the way to share what a mesh looks like where no viewer can open a GLB. On a host that advertises capabilities.mesh.export_geometry a geometry container is written print-ready — stl and ply are scaled to 100 mm on their longest axis, turned z up and rested on the floor, obj keeps its model units and y up — and size_mm, up_axis and origin override that; against a host without that block the three arguments are refused rather than silently ignored. Only the formats the host advertises on capabilities.mesh.export_formats succeed (WebP needs a build with the webp feature).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3290,6 +3329,25 @@ fn builtin_tool_definitions() -> Value {
                         "minimum": 1,
                         "maximum": 30,
                         "description": "Turntable playback rate. Default 10."
+                    },
+                    "size_mm": {
+                        "type": "number",
+                        "minimum": mold_core::validation::MESH_EXPORT_MIN_SIZE_MM,
+                        "maximum": mold_core::validation::MESH_EXPORT_MAX_SIZE_MM,
+                        "description": format!(
+                            "Geometry containers only (obj, stl, ply). Longest bounding-box axis in millimetres. Default {} for stl and ply; obj stays in model units.",
+                            mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM
+                        )
+                    },
+                    "up_axis": {
+                        "type": "string",
+                        "enum": ["y", "z"],
+                        "description": "Geometry containers only (obj, stl, ply). Which world axis points up. Default 'z' for stl and ply, 'y' for obj."
+                    },
+                    "origin": {
+                        "type": "string",
+                        "enum": ["center", "floor"],
+                        "description": "Geometry containers only (obj, stl, ply). 'floor' (default) rests the mesh on the ground plane; 'center' puts the bounding-box centre on the origin."
                     }
                 },
                 "required": ["filename", "format"],
@@ -3922,6 +3980,191 @@ mod tests {
                 "{arguments}: {refused}"
             );
         }
+    }
+
+    /// The geometry knobs are advertised with the SAME bounds and spellings
+    /// the server enforces, read from the core constants rather than typed
+    /// twice, so an agent never learns a limit from a 422.
+    #[test]
+    fn the_export_tool_schema_offers_the_geometry_knobs_with_the_core_bounds() {
+        let tools = tool_definitions();
+        let export = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("export_mesh"))
+            .expect("export_mesh must be registered");
+        let props = &export["inputSchema"]["properties"];
+        assert_eq!(
+            props["size_mm"]["minimum"].as_f64(),
+            Some(mold_core::validation::MESH_EXPORT_MIN_SIZE_MM)
+        );
+        assert_eq!(
+            props["size_mm"]["maximum"].as_f64(),
+            Some(mold_core::validation::MESH_EXPORT_MAX_SIZE_MM)
+        );
+        assert!(props["size_mm"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(&mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM.to_string()));
+        assert_eq!(props["up_axis"]["enum"], json!(["y", "z"]));
+        assert_eq!(props["origin"]["enum"], json!(["center", "floor"]));
+        assert_eq!(
+            export["inputSchema"]["required"],
+            json!(["filename", "format"]),
+            "every geometry knob is optional"
+        );
+
+        // The argument struct parses exactly what the schema offers, and
+        // nothing else.
+        let args: ExportMeshArgs = serde_json::from_value(json!({
+            "filename": "chair.glb",
+            "format": "stl",
+            "size_mm": 120.0,
+            "up_axis": "y",
+            "origin": "center",
+        }))
+        .expect("the schema's geometry knobs parse");
+        assert_eq!(args.size_mm, Some(120.0));
+        assert_eq!(args.up_axis.as_deref(), Some("y"));
+        assert_eq!(args.origin.as_deref(), Some("center"));
+        assert!(serde_json::from_value::<ExportMeshArgs>(json!({
+            "filename": "chair.glb",
+            "format": "stl",
+            "size_cm": 12,
+        }))
+        .is_err());
+    }
+
+    /// A geometry knob on a format that has no geometry is refused before any
+    /// HTTP, in core's own words, and an unparsable axis or origin names the
+    /// spellings it accepts.
+    #[tokio::test]
+    async fn export_mesh_refuses_geometry_knobs_on_a_render_before_any_request() {
+        let mcp = McpServer {
+            client: MoldClient::new("http://127.0.0.1:1"),
+            jobs: AsyncJobRegistry::default(),
+        };
+        for (arguments, format) in [
+            (
+                json!({ "filename": "chair.glb", "format": "gif", "size_mm": 120 }),
+                mold_core::MeshExportFormat::Gif,
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "webp", "up_axis": "z" }),
+                mold_core::MeshExportFormat::Webp,
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "glb", "origin": "center" }),
+                mold_core::MeshExportFormat::Glb,
+            ),
+        ] {
+            let refused = mcp.tool_export_mesh(arguments.clone()).await.unwrap_err();
+            assert_eq!(
+                refused,
+                mold_core::validation::mesh_geometry_refusal(format),
+                "{arguments}"
+            );
+        }
+
+        let bad_axis = mcp
+            .tool_export_mesh(json!({ "filename": "chair.glb", "format": "stl", "up_axis": "w" }))
+            .await
+            .unwrap_err();
+        assert!(bad_axis.contains("expected y or z"), "{bad_axis}");
+        let bad_origin = mcp
+            .tool_export_mesh(json!({ "filename": "chair.glb", "format": "stl", "origin": "bed" }))
+            .await
+            .unwrap_err();
+        assert!(
+            bad_origin.contains("expected center or floor"),
+            "{bad_origin}"
+        );
+    }
+
+    /// A host advertising mesh export, with or without the geometry block —
+    /// the one gate a client has for the three geometry keys.
+    async fn mount_mesh_capabilities(server: &MockServer, geometry: bool) {
+        let capabilities = mold_core::ServerCapabilities {
+            mesh: Some(mold_core::MeshCapabilities {
+                export_formats: vec![
+                    mold_core::MeshExportFormat::Glb,
+                    mold_core::MeshExportFormat::Stl,
+                ],
+                export_geometry: geometry
+                    .then(mold_core::validation::mesh_export_geometry_capabilities),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .mount(server)
+            .await;
+    }
+
+    /// A host that does not advertise `mesh.export_geometry` PARSES the three
+    /// keys, drops them and answers 200 with an unscaled mesh — nothing in
+    /// that answer says so, so the tool call is refused before any export
+    /// request. On a host that does advertise the block the keys go out on
+    /// the wire.
+    #[tokio::test]
+    async fn export_mesh_refuses_geometry_knobs_on_a_host_without_the_block() {
+        let shaped = json!({
+            "filename": "chair.glb",
+            "format": "stl",
+            "size_mm": 120.0,
+            "up_axis": "y",
+            "origin": "center",
+        });
+
+        let old = MockServer::start().await;
+        mount_mesh_capabilities(&old, false).await;
+        // Never reached: the gate answers before the export request.
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"solid".to_vec()))
+            .expect(0)
+            .mount(&old)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&old.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let refused = mcp.tool_export_mesh(shaped.clone()).await.unwrap_err();
+        assert!(
+            refused.contains("does not advertise geometry export options"),
+            "{refused}"
+        );
+        // The TOOL's spellings, not the CLI's flags.
+        assert!(
+            refused.contains("size_mm/up_axis/origin") && !refused.contains("--size-mm"),
+            "{refused}"
+        );
+        old.verify().await;
+
+        let server = MockServer::start().await;
+        mount_mesh_capabilities(&server, true).await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/chair.glb"))
+            .and(wiremock::matchers::body_json(json!({
+                "format": "stl",
+                "size_mm": 120.0,
+                "up_axis": "y",
+                "origin": "center"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"solid".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let result = mcp.tool_export_mesh(shaped).await.unwrap();
+        assert_eq!(result["structuredContent"]["export_filename"], "chair.stl");
+        server.verify().await;
     }
 
     /// The exported bytes come back as an embedded resource named for the
