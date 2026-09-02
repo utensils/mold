@@ -24,7 +24,7 @@ and speed when medium and normal. Give each vocal source a stable id such as
 `<d>[English] ...</d>` put only the language tag and the verbatim words. For
 voiceover use the exact phrase "says in an off-screen voiceover", then state
 that the character's lips remain closed. Use `<scenetrans>` where a line
-crosses a cut and `<|cutoff|>` where speech is truncated by the ending. Quote
+crosses a cut and `<cutoff>` where speech is truncated by the ending. Quote
 visible on-screen text verbatim. Reference labels `<Picture n>`, `<Video n>`,
 and `<Audio n>` keep one meaning across every section.
 

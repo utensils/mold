@@ -15,7 +15,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use mold_candle::minimax_h3::{
     register_extra_special_tokens, validate_processor_assets, H3ConditionerConfig,
-    H3_EXTRA_SPECIAL_TOKENS, H3_REGISTERED_MAX_TOKEN_ID, H3_REGISTERED_VOCABULARY_SIZE,
+    H3_BASE_VOCABULARY_SIZE, H3_EXTRA_SPECIAL_TOKENS, H3_REGISTERED_MAX_TOKEN_ID,
+    H3_REGISTERED_VOCABULARY_SIZE,
+    H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT as RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT,
+    H3_RELEASED_MAX_TOKEN_ID, H3_RELEASED_VOCABULARY_SIZE,
 };
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent};
 use mold_core::minimax_h3::{self as contract, ArtifactRole as ManifestArtifactRole, Layout, Task};
@@ -37,11 +40,6 @@ pub const H3_PRIVATE_QWEN_SUPPORT_CLAIM_MARKER: &str =
 pub const H3_PRIVATE_QWEN_SUPPORT_CLAIM_MARKER: &str = "mold.minimax-h3.qwen-support-loader.v1";
 
 const SUPPORT_IDENTITY_SCHEMA: &str = "mold.minimax-h3.private-qwen-support.v1";
-const RELEASED_TOKENIZER_BASE_VOCAB_SIZE: usize = 151_643;
-const RELEASED_TOKENIZER_ADDED_TOKEN_COUNT: usize = 26;
-const RELEASED_TOKENIZER_VOCAB_SIZE: usize =
-    RELEASED_TOKENIZER_BASE_VOCAB_SIZE + RELEASED_TOKENIZER_ADDED_TOKEN_COUNT;
-const RELEASED_TOKENIZER_MAX_ID: u32 = 151_668;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum SupportRole {
@@ -662,6 +660,18 @@ fn validate_tokenizer_config(bytes: &[u8]) -> Result<()> {
     if !exact {
         bail!("pinned H3 tokenizer config is not the released raw Qwen2 contract")
     }
+    // The extra special tokens are read from this field, so the released
+    // contract has to cover it too -- otherwise "this is the released config"
+    // and "this config has no additional_special_tokens" can both be true.
+    let declared = value
+        .get("additional_special_tokens")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len);
+    if declared != Some(RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT) {
+        bail!(
+            "pinned H3 tokenizer config declares {declared:?} additional special tokens, expected {RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT}"
+        )
+    }
     Ok(())
 }
 
@@ -671,17 +681,17 @@ fn validate_tokenizer_config(bytes: &[u8]) -> Result<()> {
 fn validate_released_tokenizer_shape(tokenizer: &Tokenizer) -> Result<()> {
     let base_vocab_size = tokenizer.get_vocab_size(false);
     let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
-    if base_vocab_size != RELEASED_TOKENIZER_BASE_VOCAB_SIZE
-        || tokenizer_vocab_size != RELEASED_TOKENIZER_VOCAB_SIZE
+    if base_vocab_size != H3_BASE_VOCABULARY_SIZE
+        || tokenizer_vocab_size != H3_RELEASED_VOCABULARY_SIZE
     {
         bail!(
-            "pinned H3 tokenizer has {base_vocab_size} base and {tokenizer_vocab_size} total entries, expected {RELEASED_TOKENIZER_BASE_VOCAB_SIZE} base and {RELEASED_TOKENIZER_VOCAB_SIZE} total"
+            "pinned H3 tokenizer has {base_vocab_size} base and {tokenizer_vocab_size} total entries, expected {H3_BASE_VOCABULARY_SIZE} base and {H3_RELEASED_VOCABULARY_SIZE} total"
         )
     }
     let max_token_id = tokenizer.get_vocab(true).values().copied().max();
-    if max_token_id != Some(RELEASED_TOKENIZER_MAX_ID) {
+    if max_token_id != Some(H3_RELEASED_MAX_TOKEN_ID) {
         bail!(
-            "pinned H3 tokenizer max ID {max_token_id:?} is not the released {RELEASED_TOKENIZER_MAX_ID}"
+            "pinned H3 tokenizer max ID {max_token_id:?} is not the released {H3_RELEASED_MAX_TOKEN_ID}"
         )
     }
     Ok(())
@@ -692,11 +702,11 @@ fn validate_released_tokenizer_shape(tokenizer: &Tokenizer) -> Result<()> {
 fn validate_tokenizer(tokenizer: &Tokenizer, config: &H3ConditionerConfig) -> Result<()> {
     let base_vocab_size = tokenizer.get_vocab_size(false);
     let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
-    if base_vocab_size != RELEASED_TOKENIZER_BASE_VOCAB_SIZE
+    if base_vocab_size != H3_BASE_VOCABULARY_SIZE
         || tokenizer_vocab_size != H3_REGISTERED_VOCABULARY_SIZE
     {
         bail!(
-            "registered H3 tokenizer has {base_vocab_size} base and {tokenizer_vocab_size} total entries, expected {RELEASED_TOKENIZER_BASE_VOCAB_SIZE} base and {H3_REGISTERED_VOCABULARY_SIZE} total"
+            "registered H3 tokenizer has {base_vocab_size} base and {tokenizer_vocab_size} total entries, expected {H3_BASE_VOCABULARY_SIZE} base and {H3_REGISTERED_VOCABULARY_SIZE} total"
         )
     }
     let max_token_id = tokenizer.get_vocab(true).values().copied().max();
@@ -824,12 +834,12 @@ mod tests {
     ];
 
     fn synthetic_tokenizer() -> Vec<u8> {
-        let mut vocab = serde_json::Map::with_capacity(RELEASED_TOKENIZER_BASE_VOCAB_SIZE);
-        for id in 0..u32::try_from(RELEASED_TOKENIZER_BASE_VOCAB_SIZE).unwrap() {
+        let mut vocab = serde_json::Map::with_capacity(H3_BASE_VOCABULARY_SIZE);
+        for id in 0..u32::try_from(H3_BASE_VOCABULARY_SIZE).unwrap() {
             vocab.insert(format!("token-{id}"), id.into());
         }
-        let added_tokens = (u32::try_from(RELEASED_TOKENIZER_BASE_VOCAB_SIZE).unwrap()
-            ..=RELEASED_TOKENIZER_MAX_ID)
+        let added_tokens = (u32::try_from(H3_BASE_VOCABULARY_SIZE).unwrap()
+            ..=H3_RELEASED_MAX_TOKEN_ID)
             .map(|id| {
                 let content = RELEASED_ADDED_TOKEN_CONTENTS
                     .iter()
@@ -1061,6 +1071,39 @@ mod tests {
         validate_tokenizer_config(TOKENIZER_CONFIG.as_bytes()).unwrap();
         let wrong = TOKENIZER_CONFIG.replace("false", "true");
         assert!(validate_tokenizer_config(wrong.as_bytes()).is_err());
+
+        // The extra special tokens are read from this field, so dropping or
+        // shortening it must fail the released-contract check rather than
+        // surfacing later as "additional_special_tokens is absent".
+        let dropped = TOKENIZER_CONFIG
+            .split(",\n      \"additional_special_tokens\"")
+            .next()
+            .unwrap()
+            .to_owned()
+            + "\n    }";
+        let error = validate_tokenizer_config(dropped.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("additional special tokens"));
+
+        let short = TOKENIZER_CONFIG.replace("\"<d>\",", "");
+        assert!(validate_tokenizer_config(short.as_bytes()).is_err());
+    }
+
+    /// The released shape is checked before registration so a swapped
+    /// tokenizer.json is refused at its own fingerprint, and a tokenizer that
+    /// already carries the extras is not the released file.
+    #[cfg(unix)]
+    #[test]
+    fn the_released_shape_is_checked_before_the_extras_are_registered() {
+        let tokenizer = Tokenizer::from_bytes(synthetic_tokenizer()).unwrap();
+        validate_released_tokenizer_shape(&tokenizer).unwrap();
+
+        let mut registered = tokenizer;
+        register_extra_special_tokens(&mut registered, TOKENIZER_CONFIG.as_bytes()).unwrap();
+        assert!(validate_released_tokenizer_shape(&registered).is_err());
+        assert_eq!(
+            registered.token_to_id("<d>"),
+            Some(H3_EXTRA_SPECIAL_TOKENS[0].1)
+        );
     }
 
     #[cfg(unix)]
@@ -1142,7 +1185,7 @@ mod tests {
             // The released file itself must still be the released file.
             assert_eq!(
                 support.tokenizer().get_vocab_size(false),
-                RELEASED_TOKENIZER_BASE_VOCAB_SIZE
+                H3_BASE_VOCABULARY_SIZE
             );
             for (token, expected) in H3_EXTRA_SPECIAL_TOKENS {
                 assert_eq!(

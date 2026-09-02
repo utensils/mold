@@ -51,6 +51,9 @@ pub const H3_RELEASED_VOCABULARY_SIZE: usize =
     H3_BASE_VOCABULARY_SIZE + H3_RELEASED_ADDED_TOKEN_COUNT;
 /// Highest id present in the released `tokenizer.json`.
 pub const H3_RELEASED_MAX_TOKEN_ID: u32 = 151_668;
+/// Entries in the released `tokenizer_config.json`'s `additional_special_tokens`:
+/// thirteen the vocabulary already carries plus the seven registered here.
+pub const H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT: usize = 20;
 
 /// Added tokens once the configured extras are registered.
 pub const H3_REGISTERED_ADDED_TOKEN_COUNT: usize =
@@ -164,13 +167,16 @@ pub fn register_extra_special_tokens(
     Ok(())
 }
 
+/// Fixtures shared with the loader tests: a stand-in for the released
+/// `tokenizer.json` and its matching config, so both crates' validators can be
+/// exercised against a real `Tokenizer` without the 60 GB checkpoint.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_fixtures {
     use super::*;
 
     /// The thirteen configured tokens that the released `tokenizer.json`
     /// already carries, plus the ids it assigns them.
-    const PRESENT: [(&str, u32); 13] = [
+    pub(crate) const PRESENT: [(&str, u32); 13] = [
         ("<|im_start|>", 151_644),
         ("<|im_end|>", 151_645),
         ("<|object_ref_start|>", 151_646),
@@ -186,11 +192,11 @@ mod tests {
         ("<|video_pad|>", 151_656),
     ];
 
-    fn config_with(tokens: &[&str]) -> Vec<u8> {
+    pub(crate) fn config_with(tokens: &[&str]) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({ "additional_special_tokens": tokens })).unwrap()
     }
 
-    fn released_config() -> Vec<u8> {
+    pub(crate) fn released_config() -> Vec<u8> {
         let mut tokens = PRESENT.iter().map(|(t, _)| *t).collect::<Vec<_>>();
         tokens.extend(H3_EXTRA_SPECIAL_TOKENS.iter().map(|(t, _)| *t));
         config_with(&tokens)
@@ -198,7 +204,7 @@ mod tests {
 
     /// A stand-in for the released `tokenizer.json`: a word-level vocabulary of
     /// the same size, carrying the same 26 added tokens up to 151668.
-    fn released_shape_tokenizer() -> Tokenizer {
+    pub(crate) fn released_shape_tokenizer() -> Tokenizer {
         let mut vocab = serde_json::Map::new();
         for id in 0..u32::try_from(H3_BASE_VOCABULARY_SIZE).unwrap() {
             vocab.insert(format!("token-{id}"), id.into());
@@ -227,6 +233,12 @@ mod tests {
         .unwrap();
         Tokenizer::from_bytes(bytes).unwrap()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::{config_with, released_config, released_shape_tokenizer, PRESENT};
+    use super::*;
 
     #[test]
     fn released_config_registers_the_seven_in_declaration_order() {
@@ -259,7 +271,10 @@ mod tests {
     fn registered_tags_collapse_to_one_id_when_encoding_without_special_tokens() {
         let mut tokenizer = released_shape_tokenizer();
         let before = tokenizer.encode("token-1 <d> token-2", false).unwrap();
-        assert!(!before.get_ids().contains(&H3_EXTRA_SPECIAL_TOKENS[0].1));
+        assert!(
+            !before.get_tokens().iter().any(|token| token == "<d>"),
+            "unregistered, the tag must not survive as its own token"
+        );
 
         register_extra_special_tokens(&mut tokenizer, &released_config()).unwrap();
 

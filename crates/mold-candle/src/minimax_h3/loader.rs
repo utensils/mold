@@ -26,7 +26,8 @@ use super::presentation::{
 };
 use super::special_tokens::{
     register_extra_special_tokens, H3_BASE_VOCABULARY_SIZE, H3_EXTRA_SPECIAL_TOKENS,
-    H3_REGISTERED_MAX_TOKEN_ID, H3_REGISTERED_VOCABULARY_SIZE, H3_RELEASED_MAX_TOKEN_ID,
+    H3_REGISTERED_MAX_TOKEN_ID, H3_REGISTERED_VOCABULARY_SIZE,
+    H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT, H3_RELEASED_MAX_TOKEN_ID,
     H3_RELEASED_VOCABULARY_SIZE,
 };
 
@@ -376,6 +377,18 @@ fn validate_tokenizer_config(bytes: &[u8]) -> Result<(), H3LoadError> {
         return Err(H3LoadError::Tokenizer(
             "config is not the released raw Qwen2 tokenizer contract".into(),
         ));
+    }
+    // The extra special tokens are read from this field, so the released
+    // contract has to cover it too -- otherwise "this is the released config"
+    // and "this config has no additional_special_tokens" can both be true.
+    let declared = value
+        .get("additional_special_tokens")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len);
+    if declared != Some(H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT) {
+        return Err(H3LoadError::Tokenizer(format!(
+            "config declares {declared:?} additional special tokens, expected {H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT}"
+        )));
     }
     Ok(())
 }
@@ -769,6 +782,53 @@ mod tests {
         let wrong = IMAGE.replace("\"patch_size\":16", "\"patch_size\":14");
         let error = validate_processor_assets(wrong.as_bytes(), VIDEO.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("patch-16"));
+    }
+
+    /// The public conditioner path had no registration coverage at all: its
+    /// only tokenizer test was a pure function over four integers. These drive
+    /// the real validators against a real `Tokenizer`.
+    #[test]
+    fn the_loader_validators_bracket_registration() {
+        use super::super::special_tokens::test_fixtures::{
+            released_config, released_shape_tokenizer,
+        };
+
+        let mut tokenizer = released_shape_tokenizer();
+
+        // As released: the pre-check accepts it, and the post-check must not --
+        // an unregistered tokenizer reaching the runtime is exactly #1430.
+        validate_released_tokenizer_shape(&tokenizer).unwrap();
+        let skipped = validate_tokenizer(&tokenizer, 151_936).unwrap_err();
+        assert!(
+            skipped.to_string().contains("151669"),
+            "a skipped registration must name the missing vocabulary, got {skipped}"
+        );
+
+        register_extra_special_tokens(&mut tokenizer, &released_config()).unwrap();
+
+        // Registered: the post-check accepts it, and the pre-check must not --
+        // a tokenizer.json that already carries the extras is not the released
+        // file, so the swap guard still has teeth.
+        validate_tokenizer(&tokenizer, 151_936).unwrap();
+        assert!(validate_released_tokenizer_shape(&tokenizer).is_err());
+        for (token, expected) in H3_EXTRA_SPECIAL_TOKENS {
+            assert_eq!(tokenizer.token_to_id(token), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_config_without_the_declared_special_tokens_is_not_the_released_contract() {
+        let released = br#"{"tokenizer_class":"Qwen2Tokenizer","add_bos_token":false,
+            "bos_token":null,"model_max_length":262144,"pad_token":"<|endoftext|>",
+            "eos_token":"<|im_end|>","additional_special_tokens":["a","b","c","d","e","f","g",
+            "h","i","j","k","l","m","n","o","p","q","r","s","t"]}"#;
+        validate_tokenizer_config(released).unwrap();
+
+        let stripped = br#"{"tokenizer_class":"Qwen2Tokenizer","add_bos_token":false,
+            "bos_token":null,"model_max_length":262144,"pad_token":"<|endoftext|>",
+            "eos_token":"<|im_end|>"}"#;
+        let error = validate_tokenizer_config(stripped).unwrap_err();
+        assert!(error.to_string().contains("additional special tokens"));
     }
 
     #[test]
