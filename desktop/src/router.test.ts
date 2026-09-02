@@ -1,10 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { router } from "./router";
 
-// Router behavior is the authority under test. Keep the large Create module's
-// transform cost outside the navigation timeout; its own suites cover the
-// view and its stores directly.
+// Router behavior is the authority under test: the mapping from a path to a
+// route's path, name, query and title. Loading a real view module would put
+// its whole transform graph — every store, primitive and studio contract it
+// pulls — inside a 5 s navigation timeout, which is why Create was already
+// stubbed here. Under the full desktop suite (454 files sharing the workers)
+// the same cost made `/jobs -> /machines` time out, so stub EVERY lazily
+// imported destination: each view has its own suite that mounts it for real.
 vi.mock("./views/GenerateView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/LibraryView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/ModelsView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/MachinesView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/RunPodView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/HostDetailView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/SettingsView.vue", () => ({ default: { template: "<div />" } }));
 
 describe("router — five-destination IA", () => {
   it("serves the five workspaces with their titlebar names", () => {

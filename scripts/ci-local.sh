@@ -360,6 +360,18 @@ if wants gpu; then
           --bin h3_runtime_qualification_record -- -D warnings
         step "gpu: CUDA private H3 server bridge" \
           cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
+        # The step above type-checks the bridge's test module but never RUNS
+        # it, and no CI job runs it either, so its assertions about the
+        # reviewed Turbo tier table drifted silently until a tier was added
+        # (#1361). Run them. The recipe names `h3-cuda`, never the bare family
+        # feature: the reviewed public build graph in
+        # `crates/mold-server/build_support/h3_server_features.rs` requires the
+        # CUDA device and the SM89 attention edge, so the bare feature fails at
+        # the build script before a single test compiles (and the attention
+        # release contract refuses that recipe here anyway).
+        step "gpu: CUDA public H3 server bridge tests" \
+          cargo test -p mold-ai-server --lib --features h3-cuda -- \
+          turbo_variants_ride h3_private_bridge
         # The capture adapters compile only under `cuda`, so the CPU rust suite
         # above never sees them.
         for bin in h3_qwen_layer50_capture h3_visual_vae_capture \
