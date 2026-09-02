@@ -582,7 +582,13 @@ describe("MobileGalleryViewer", () => {
     expect(view.get("[role='alert']").text()).toContain("Couldn’t open the iOS share sheet");
   });
 
-  it("keeps a cancelled native export staged for a retry", async () => {
+  /**
+   * The options sheet's job ends when the system share sheet has been shown:
+   * whether the user shared or backed out, the export itself succeeded and
+   * is staged for reuse, so the sheet closes either way and a dismissal
+   * leaves no status. Re-exporting reuses the staged file (same reuse key).
+   */
+  it("closes the options sheet once the share sheet has been shown, shared or not", async () => {
     invoke.mockResolvedValueOnce("cancelled").mockResolvedValueOnce("shared");
     const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
     await flushPromises();
@@ -592,9 +598,11 @@ describe("MobileGalleryViewer", () => {
     await view.get("[data-test='video-export-dialog'] form").trigger("submit");
     await flushPromises();
 
-    expect(view.get("[data-test='video-export-dialog']").isVisible()).toBe(true);
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
     expect(view.find("[data-test='gallery-viewer-action-status']").exists()).toBe(false);
 
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
     await view.get("[data-test='video-export-dialog'] form").trigger("submit");
     await flushPromises();
 
@@ -603,6 +611,9 @@ describe("MobileGalleryViewer", () => {
     expect(calls[1]?.[1]).toEqual(calls[0]?.[1]);
     expect(apiFetchTo).not.toHaveBeenCalled();
     expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
+    );
   });
 
   it("fails closed when the generated video's exact host is unavailable", async () => {
@@ -1525,6 +1536,11 @@ describe("MobileGalleryViewer mesh export", () => {
         filename: "armchair 01.gif",
         request: expect.objectContaining({ format: "gif" }),
       }),
+    );
+    // Shared: the options sheet has done its job and closes.
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
     );
   });
 

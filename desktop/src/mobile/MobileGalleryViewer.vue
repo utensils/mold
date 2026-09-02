@@ -750,7 +750,13 @@ async function performVideoExport(
         "share_exported_animation",
         nativeExportArguments(filename, { ...options }),
       );
-      if (outcome === "cancelled") return;
+      if (outcome === "cancelled") {
+        // The export itself succeeded and stays staged under its reuse key;
+        // the options sheet has done its job once the share sheet was shown,
+        // so a dismissal closes it too — silently, there is nothing to report.
+        exportOpen.value = false;
+        return;
+      }
     } else {
       const response = await apiFetchTo(props.target, path, {
         method: "POST",
