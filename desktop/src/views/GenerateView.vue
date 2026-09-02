@@ -945,7 +945,7 @@ const caps = computed(() =>
     form.pipeline,
     form.guidanceCapabilities,
     form.sourceImageCapability,
-    effectiveGenerationRecipe(selectedEntry.value, form.pipeline),
+    effectiveGenerationRecipe(contractEntry.value, form.pipeline),
   ),
 );
 const formValidationError = computed(
@@ -959,18 +959,18 @@ const formValidationError = computed(
       : resolutionValidationError(
           form.width,
           form.height,
-          selectedEntry.value ?? null,
+          contractEntry.value ?? null,
           form.pipeline,
         )) ??
-    profileStepsValidationError(form.steps, selectedEntry.value, form.pipeline) ??
+    profileStepsValidationError(form.steps, contractEntry.value, form.pipeline) ??
     profileGuidanceValidationError(
       caps.value.fixedGuidance ?? form.guidance,
-      selectedEntry.value,
+      contractEntry.value,
       form.pipeline,
     ) ??
     meshTargetFacesValidationError(form) ??
     (caps.value.supportsVideo
-      ? videoFramesError(form.frames, selectedEntry.value ?? { family: form.family })
+      ? videoFramesError(form.frames, contractEntry.value ?? { family: form.family })
       : null) ??
     (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
     cameraControlValidationError(form) ??
@@ -1211,6 +1211,17 @@ const isSequence = computed(() => draft.output === "sequence");
 const selectedEntry = computed(() =>
   hostModels.installedEntryForTarget(form.model, stickyTarget.value),
 );
+/**
+ * The row that answers for the CHECKPOINT'S CONTRACT, resolved from whichever
+ * machine has it — the same authority the inspector reads, so the canvas, the
+ * submit blocker and the settings panel cannot disagree about the checkpoint
+ * the moment Create is aimed at a machine that must download it first.
+ * `selectedEntry` stays the answer for ROUTING and for the memory estimate,
+ * which really are about the machine that will run the job.
+ */
+const contractEntry = computed(() =>
+  hostModels.contractEntryForTarget(form.model, stickyTarget.value),
+);
 
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
@@ -1259,12 +1270,12 @@ function applyDecodedSourceResolution(
   setDimensions(dimensions.width, dimensions.height);
   const resolution = resolveSourceResolution(
     dimensions,
-    selectedEntry.value ?? form.family,
+    contractEntry.value ?? form.family,
     form.pipeline,
   );
   const automaticResolution = resolveDefaultSourceResolution(
     dimensions,
-    selectedEntry.value ?? form.family,
+    contractEntry.value ?? form.family,
     form.pipeline,
   );
   const replaced = base64 !== previous.base64;
@@ -1301,14 +1312,14 @@ watch(
       caps.value.sourceImageMode !== "single"
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
-    () => selectedEntry.value?.name ?? form.model,
+    () => contractEntry.value?.name ?? form.model,
     () => form.pipeline ?? null,
-    () => selectedEntry.value?.generation_profile?.profile_hash ?? null,
-    () => selectedEntry.value?.max_pixels ?? null,
-    () => selectedEntry.value?.max_axis_pixels ?? null,
-    () => selectedEntry.value?.dimension_alignment ?? null,
+    () => contractEntry.value?.generation_profile?.profile_hash ?? null,
+    () => contractEntry.value?.max_pixels ?? null,
+    () => contractEntry.value?.max_axis_pixels ?? null,
+    () => contractEntry.value?.dimension_alignment ?? null,
     () =>
-      selectedEntry.value?.recommended_dimensions
+      contractEntry.value?.recommended_dimensions
         ?.map(({ width, height }) => `${width}x${height}`)
         .join("|") ?? "",
   ],
@@ -1339,14 +1350,14 @@ watch(
 watch(
   [
     () => draft.openingImage?.base64 ?? null,
-    () => selectedEntry.value?.name ?? form.model,
+    () => contractEntry.value?.name ?? form.model,
     () => form.pipeline ?? null,
-    () => selectedEntry.value?.generation_profile?.profile_hash ?? null,
-    () => selectedEntry.value?.max_pixels ?? null,
-    () => selectedEntry.value?.max_axis_pixels ?? null,
-    () => selectedEntry.value?.dimension_alignment ?? null,
+    () => contractEntry.value?.generation_profile?.profile_hash ?? null,
+    () => contractEntry.value?.max_pixels ?? null,
+    () => contractEntry.value?.max_axis_pixels ?? null,
+    () => contractEntry.value?.dimension_alignment ?? null,
     () =>
-      selectedEntry.value?.recommended_dimensions
+      contractEntry.value?.recommended_dimensions
         ?.map(({ width, height }) => `${width}x${height}`)
         .join("|") ?? "",
   ],

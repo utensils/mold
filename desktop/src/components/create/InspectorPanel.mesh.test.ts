@@ -103,8 +103,49 @@ function mountForTargetWithoutModel(model: ModelEntry) {
   form.model = model.name;
   form.family = model.family;
   applyModelDefaults(form, model);
+  // The strength slider and the mask well both render only once a source is
+  // attached, which is exactly the state a Hunyuan3D print is generated in.
+  form.sourceImage = "c291cmNl";
+  form.sourceImageName = "armchair-cutout.png";
   const wrapper = mount(InspectorPanel, { props: { form } });
   return { form, wrapper };
+}
+
+/** The same two machines, with Create aimed at the one that HAS the model. */
+function mountForTargetWithModel(model: ModelEntry) {
+  useModelStore().all = [];
+  readyHost("halcyon", "halcyon");
+  readyHost("plato", "plato");
+  const hostModels = useHostModelsStore();
+  hostModels.byHost.halcyon = { entries: [model], fetchedAt: Date.now(), error: null };
+  hostModels.byHost.plato = { entries: [], fetchedAt: Date.now(), error: null };
+  useAppPrefsStore().settings = { generateTargetHost: "halcyon" } as never;
+
+  const form = reactive(newGenerateForm()) as GenerateForm;
+  form.model = model.name;
+  form.family = model.family;
+  applyModelDefaults(form, model);
+  form.sourceImage = "c291cmNl";
+  form.sourceImageName = "armchair-cutout.png";
+  const wrapper = mount(InspectorPanel, { props: { form } });
+  return { form, wrapper };
+}
+
+/** What the panel offers for the print, as the four leaking controls show it. */
+async function panelContract(wrapper: ReturnType<typeof mount>) {
+  await wrapper.get("[data-test='open-advanced']").trigger("click");
+  await flushPromises();
+  const formatControl = wrapper
+    .findAllComponents({ name: "SegmentedControl" })
+    .find((row) => row.props("label") === "File format");
+  return {
+    strength: wrapper.text().includes("Denoise strength"),
+    mask: wrapper.find("[data-test='source-edit-mask']").exists(),
+    negative: wrapper.find("[data-test='section-negative']").exists(),
+    formats: (formatControl?.props("options") as { value: string }[] | undefined)?.map(
+      (option) => option.value,
+    ),
+  };
 }
 
 beforeEach(() => setActivePinia(createPinia()));
@@ -171,6 +212,84 @@ describe("InspectorPanel — a target host that does not have the model", () => 
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
     expect(wrapper.find("[data-test='mesh-controls']").exists()).toBe(false);
+  });
+
+  /**
+   * The canvas was only the first control that had to follow the fallback
+   * recipe. Strength, the repaint mask, the negative prompt and the stored
+   * container are asked by `SourceImageWell` and `AdvancedSettings`, which
+   * were still handed the TARGET host's row — so switching machines left a
+   * Denoise slider, an Edit-mask control, a Negative-prompt field and a
+   * png/jpeg/webp picker on a print that has none of them.
+   */
+  it("offers no strength, mask, negative prompt or raster container", async () => {
+    const { wrapper } = mountForTargetWithoutModel(meshModel());
+    await flushPromises();
+    expect(await panelContract(wrapper)).toEqual({
+      strength: false,
+      mask: false,
+      negative: false,
+      formats: ["glb"],
+    });
+  });
+
+  /** The whole point: the panel reads the same wherever Create is aimed. */
+  it("renders the identical contract to the machine that has the model", async () => {
+    const onHost = mountForTargetWithModel(meshModel());
+    await flushPromises();
+    const baseline = await panelContract(onHost.wrapper);
+    onHost.wrapper.unmount();
+    document.body.innerHTML = "";
+    setActivePinia(createPinia());
+
+    const offHost = mountForTargetWithoutModel(meshModel());
+    await flushPromises();
+    expect(await panelContract(offHost.wrapper)).toEqual(baseline);
+    expect(baseline).toEqual({
+      strength: false,
+      mask: false,
+      negative: false,
+      formats: ["glb"],
+    });
+  });
+
+  it("keeps a raster model's strength, mask, negative prompt and formats", async () => {
+    const { wrapper } = mountForTargetWithoutModel(rasterModel());
+    await flushPromises();
+    expect(await panelContract(wrapper)).toEqual({
+      strength: true,
+      mask: true,
+      negative: true,
+      formats: ["png", "jpeg", "webp"],
+    });
+  });
+
+  /**
+   * The family rule is only the answer of LAST resort. Where a machine does
+   * advertise the checkpoint, the panel must read THAT recipe — including
+   * every refusal a family rule would never guess. This checkpoint's own
+   * profile pins one container and refuses strength, the mask and the
+   * negative prompt, none of which follows from `sdxl`.
+   */
+  it("reads the advertised recipe's own refusals, not the family defaults", async () => {
+    const recipe = sdxlRecipe();
+    recipe.capabilities.supports_strength = false;
+    recipe.capabilities.mask = { mode: "hidden", required: false };
+    recipe.capabilities.negative_prompt = { mode: "hidden", required: false };
+    recipe.capabilities.output = {
+      default_format: "jpeg",
+      formats: ["jpeg"],
+      audio_requires_mp4: false,
+    };
+    const model = modelWith("strict-sdxl:fp16", "sdxl", recipe);
+    const { wrapper } = mountForTargetWithoutModel(model);
+    await flushPromises();
+    expect(await panelContract(wrapper)).toEqual({
+      strength: false,
+      mask: false,
+      negative: false,
+      formats: ["jpeg"],
+    });
   });
 });
 

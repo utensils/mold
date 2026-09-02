@@ -64,8 +64,9 @@ export function isFlux2DevModel(model: string): boolean {
 /**
  * The pre-profile strength rule. Wan pins its conditioning frames exactly,
  * Qwen-Image-Edit and Flux.2 Dev condition through references rather than a
- * denoised source, and H3 has no source-image path at all — none of them
- * read `strength`. Every other family denoises from the source image.
+ * denoised source, H3 has no source-image path at all, and a 3-D family
+ * reconstructs geometry rather than denoising pixels — none of them read
+ * `strength`. Every other family denoises from the source image.
  */
 export function legacySupportsStrength(family: string, model = ""): boolean {
   const normalized = family.trim().toLowerCase();
@@ -73,6 +74,15 @@ export function legacySupportsStrength(family: string, model = ""): boolean {
     !isMinimaxH3Identity(normalized, model) &&
     !isQwenImageEditFamily(normalized) &&
     !isFlux2DevModel(model) &&
-    !isWanFamily(normalized)
+    !isWanFamily(normalized) &&
+    !isMeshFamily(normalized)
   );
 }
+
+/**
+ * The pre-profile container rule for a 3-D family: binary glTF is the only
+ * thing a mesh engine stores, exactly as the advertised recipe's
+ * `output.formats` says. Without it the fallback offered `png`/`jpeg`/`webp`
+ * for a print that has no raster at all.
+ */
+export const LEGACY_MESH_OUTPUT_FORMATS: readonly string[] = ["glb"];

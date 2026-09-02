@@ -124,6 +124,42 @@ export const useHostModelsStore = defineStore("hostModels", {
         return this.installedOn(targetHostId).find((model) => model.name === name) ?? null;
       };
     },
+    /**
+     * Resolve the row that answers for the CHECKPOINT'S CONTRACT — the
+     * advertised recipe behind the canvas, the prompt mode, strength, the
+     * mask, the negative prompt, the output containers and the mesh block.
+     *
+     * A contract belongs to the checkpoint, not to the machine holding the
+     * file: the target will advertise exactly the same one once it has
+     * downloaded it. So the target's own row wins wherever it exists (two
+     * machines may advertise corrected or aliased metadata, and the one that
+     * will run the job is the authority on it), and any machine that has the
+     * checkpoint answers when it has none. `null` means no machine has it at
+     * all, and only then do the pre-profile family rules answer.
+     *
+     * Runtime questions — readiness, on-disk size, what is loaded — must keep
+     * using {@link installedEntryForTarget}: those really are about the
+     * machine.
+     */
+    contractEntryForTarget(): (name: string, targetHostId: string | null) => ModelEntry | null {
+      return (name, targetHostId) => {
+        if (!name) return null;
+        const onTarget = this.installedEntryForTarget(name, targetHostId);
+        if (onTarget) return onTarget;
+        const primaryEntry = filterRestrictedModels(
+          useModelStore().installed,
+          useHostsStore().capabilities.local,
+        ).find((model) => model.name === name);
+        return (
+          primaryEntry ??
+          this.unionInstalled.find((model) => model.name === name) ??
+          // A downloaded-but-unrunnable row still advertises the checkpoint's
+          // profile; the picker already shows it, so the panel may read it.
+          this.unionDownloaded.find((model) => model.name === name) ??
+          null
+        );
+      };
+    },
     allReadyHostsFetched(state): boolean {
       const hosts = useHostsStore();
       return hosts.all
