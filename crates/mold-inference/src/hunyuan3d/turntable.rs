@@ -10,6 +10,10 @@
 //!
 //! See [`super::poster::turntable_cameras`] for why a loop is a full turn
 //! stopping one step short and a bounce is a half turn played back.
+//!
+//! A turntable is framed ONCE for the whole sweep ([`turntable_frame_cameras`]),
+//! so the mesh keeps one size as it turns; frame 0 is the poster's camera at
+//! that sweep's scale rather than the poster's exact pixels.
 
 use std::ops::RangeInclusive;
 
@@ -18,6 +22,7 @@ use image::RgbImage;
 
 use crate::hunyuan3d::mesh::Mesh;
 use crate::hunyuan3d::poster::{render_sequence_frame_rgb, turntable_cameras, MAX_POSTER_SIZE};
+use crate::hunyuan3d::raster::{frame_fit_for, Camera};
 use crate::ltx_video::video_enc;
 
 /// Frames in a turntable unless the request says otherwise: a 10° step, which
@@ -95,6 +100,47 @@ pub fn check_frame_budget(options: &TurntableOptions) -> std::result::Result<(),
     Ok(())
 }
 
+/// The cameras of a turntable, framed ONCE for the whole sweep.
+///
+/// [`super::poster::turntable_cameras`] says where the eye goes; this says
+/// how big the mesh is drawn, and it says it once. The rasterizer's default
+/// [`FrameFit::Auto`](crate::hunyuan3d::raster::FrameFit::Auto) fits every
+/// frame to that frame's own silhouette, and a
+/// silhouette changes as the mesh turns: a box seen down a face projects to
+/// its width, and seen down a diagonal to √2 times that, so an auto-fit
+/// turntable swells and shrinks by up to ~41 % once per quarter turn and pops
+/// where the horizontal and vertical fits cross over. [`frame_fit_for`]
+/// takes the largest half-extent ANY camera in the sweep needs and every
+/// camera carries it, so the orbit is rigid: nothing is clipped, and nothing
+/// changes size.
+///
+/// This mirrors ComfyUI's splat turntable, which frames its default camera
+/// once from a rotation-invariant extent
+/// (`comfy_extras/nodes_gaussian_splat.py:996-1006`) and then rotates that
+/// one camera rigidly per frame (`_orbit_camera_info_yaw`, `:640-655`).
+///
+/// The fit covers exactly the cameras it was given, so a bounce — which
+/// sweeps only a HALF turn, in finer steps — is framed for a different set of
+/// views and legitimately lands on a different scale from a loop of the same
+/// mesh. Neither dominates: the half turn sees fewer angles but samples them
+/// more densely, so it can land closer to the silhouette's true peak. Each is
+/// uniform over its own sweep, which is the property that matters, and a
+/// bounce would look wrong padded out for views it never reaches.
+///
+/// A mesh with no extent to frame keeps
+/// [`FrameFit::Auto`](crate::hunyuan3d::raster::FrameFit::Auto), which draws
+/// nothing either way.
+pub fn turntable_frame_cameras(mesh: &Mesh, frames: usize, bounce: bool) -> Vec<Camera> {
+    let cameras = turntable_cameras(frames, bounce);
+    let Some(fit) = frame_fit_for(mesh, &cameras) else {
+        return cameras;
+    };
+    cameras
+        .into_iter()
+        .map(|camera| camera.with_fit(fit))
+        .collect()
+}
+
 /// Render every frame of the turntable, in playback order for a loop and in
 /// sweep order for a bounce (the encoder appends the reversal).
 pub fn render_turntable(mesh: &Mesh, options: &TurntableOptions) -> Result<Vec<RgbImage>> {
@@ -114,7 +160,7 @@ pub fn render_turntable(mesh: &Mesh, options: &TurntableOptions) -> Result<Vec<R
     if let Err(message) = check_frame_budget(options) {
         bail!("{message}");
     }
-    turntable_cameras(options.frames, options.bounce)
+    turntable_frame_cameras(mesh, options.frames, options.bounce)
         .iter()
         .map(|camera| render_sequence_frame_rgb(mesh, camera, options.size))
         .collect()
@@ -431,5 +477,200 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("frames"), "{error}");
+    }
+
+    /// A closed box spanning `min..max` on every axis, wound counter-clockwise
+    /// seen from outside.
+    fn box_mesh(min: [f32; 3], max: [f32; 3]) -> Mesh {
+        let v = [
+            [min[0], min[1], max[2]],
+            [max[0], min[1], max[2]],
+            [max[0], max[1], max[2]],
+            [min[0], max[1], max[2]],
+            [min[0], min[1], min[2]],
+            [max[0], min[1], min[2]],
+            [max[0], max[1], min[2]],
+            [min[0], max[1], min[2]],
+        ];
+        let quads = [
+            [0, 1, 2, 3],
+            [5, 4, 7, 6],
+            [1, 5, 6, 2],
+            [4, 0, 3, 7],
+            [3, 2, 6, 7],
+            [4, 5, 1, 0],
+        ];
+        let mut faces = Vec::new();
+        for q in quads {
+            faces.push([q[0] as u32, q[1] as u32, q[2] as u32]);
+            faces.push([q[0] as u32, q[2] as u32, q[3] as u32]);
+        }
+        Mesh {
+            vertices: v.to_vec(),
+            faces,
+            ..Default::default()
+        }
+    }
+
+    /// A wide, thin, off-centre plate: the worst case for a per-frame fit,
+    /// because its projected width collapses to a sliver every half turn.
+    fn plate() -> Mesh {
+        box_mesh([-1.5, -0.1, -0.3], [1.0, 0.15, 0.4])
+    }
+
+    fn mesh_center(mesh: &Mesh) -> [f32; 3] {
+        let (min, max) = mesh.bounds();
+        [
+            0.5 * (min[0] + max[0]),
+            0.5 * (min[1] + max[1]),
+            0.5 * (min[2] + max[2]),
+        ]
+    }
+
+    /// The whole point of the fit pre-pass: every frame of a sweep draws the
+    /// mesh at the SAME pixels per unit, so it turns instead of breathing.
+    ///
+    /// The second half is the non-vacuity guard — the very same cameras under
+    /// the rasterizer's default per-frame autofit swing by far more than the
+    /// tolerance above, which is the artifact being removed.
+    #[test]
+    fn one_fit_frames_the_whole_sweep_instead_of_each_frame() {
+        use crate::hunyuan3d::raster::{projection_scale, FrameFit};
+
+        let mesh = plate();
+        let cameras = turntable_frame_cameras(&mesh, 36, false);
+        assert_eq!(cameras.len(), 36);
+
+        let scales: Vec<f32> = cameras
+            .iter()
+            .map(|camera| projection_scale(&mesh, camera, 64, 64).expect("a scale"))
+            .collect();
+        let first = scales[0];
+        for (index, scale) in scales.iter().enumerate() {
+            assert!(
+                ((scale - first) / first).abs() <= 1e-5,
+                "frame {index} renders at {scale}, frame 0 at {first}"
+            );
+        }
+
+        let auto: Vec<f32> = cameras
+            .iter()
+            .map(|camera| {
+                projection_scale(&mesh, &camera.with_fit(FrameFit::Auto), 64, 64).expect("a scale")
+            })
+            .collect();
+        let lo = auto.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = auto.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            hi > 1.25 * lo,
+            "the autofit barely moved ({lo}..{hi}); this mesh cannot prove anything"
+        );
+    }
+
+    /// One fit for the sweep must still CONTAIN the sweep: no frame may put a
+    /// lit pixel on the outermost row or column, or the shared framing would
+    /// have traded breathing for clipping.
+    #[test]
+    fn no_frame_of_a_sweep_touches_the_frame_edge() {
+        let mesh = plate();
+        let size = 64u32;
+        let frames = render_turntable(
+            &mesh,
+            &TurntableOptions {
+                frames: 24,
+                size,
+                ..TurntableOptions::default()
+            },
+        )
+        .expect("render turntable");
+
+        // The background ramp tops out at 0x1e in red; lit geometry starts
+        // near 0x30 even in full shadow, and the 8 % margin means an edge
+        // pixel is never a partial-coverage blend of the two.
+        for (index, frame) in frames.iter().enumerate() {
+            for x in 0..size {
+                for y in [0, size - 1] {
+                    let p = frame.get_pixel(x, y);
+                    assert!(p[0] <= 0x20, "frame {index} is lit at ({x}, {y}): {p:?}");
+                }
+            }
+            for y in 0..size {
+                for x in [0, size - 1] {
+                    let p = frame.get_pixel(x, y);
+                    assert!(p[0] <= 0x20, "frame {index} is lit at ({x}, {y}): {p:?}");
+                }
+            }
+        }
+    }
+
+    /// A loop wraps from the last frame straight back to the first, so those
+    /// two frames must be framed identically or the seam pops once per turn.
+    /// One fit for every camera is what makes that true by construction.
+    #[test]
+    fn a_loop_carries_one_fit_from_the_first_frame_to_the_last() {
+        use crate::hunyuan3d::raster::FrameFit;
+
+        let mesh = plate();
+        let cameras = turntable_frame_cameras(&mesh, 36, false);
+        let fit = cameras[0].fit;
+        assert!(
+            matches!(fit, FrameFit::Extent(extent) if extent > 0.0),
+            "a sweep must pin an extent, got {fit:?}"
+        );
+        assert_eq!(cameras[cameras.len() - 1].fit, fit, "the loop seam differs");
+        assert!(cameras.iter().all(|camera| camera.fit == fit));
+        assert!(cameras
+            .iter()
+            .all(|camera| camera.elevation_deg == cameras[0].elevation_deg));
+
+        // A bounce sweeps half a turn in finer steps, so it is framed for a
+        // DIFFERENT set of views and legitimately lands on a different scale.
+        // Neither is larger by rights - the half turn samples its angles more
+        // densely, so it can land closer to the silhouette's true peak. What
+        // must hold is that its own sweep is uniform too.
+        let bounce = turntable_frame_cameras(&mesh, 36, true);
+        let bounce_fit = bounce[0].fit;
+        assert!(
+            matches!(bounce_fit, FrameFit::Extent(extent) if extent > 0.0),
+            "a bounce must pin an extent too, got {bounce_fit:?}"
+        );
+        assert!(bounce.iter().all(|camera| camera.fit == bounce_fit));
+    }
+
+    /// The swept extent is the bounding CYLINDER of the mesh about the orbit
+    /// axis, and the closed form says so: at a fixed elevation `e`, a vertex
+    /// offset `(dx, dy, dz)` from the centre projects to
+    /// `x = dx·cos a - dz·sin a` and `y = cos e·dy - sin e·(dx·sin a + dz·cos a)`,
+    /// so `|x| ≤ √(dx² + dz²)` and `|y| ≤ cos e·|dy| + sin e·√(dx² + dz²)`.
+    ///
+    /// The fit must never exceed that bound (it would be framing air) and, on
+    /// a sweep fine enough to sample the peak, must come within a few percent
+    /// of it (it would be clipping).
+    #[test]
+    fn the_swept_extent_matches_the_closed_form_cylinder_bound() {
+        use crate::hunyuan3d::poster::POSTER_ELEVATION_DEG;
+        use crate::hunyuan3d::raster::FrameFit;
+
+        let mesh = plate();
+        let FrameFit::Extent(extent) = turntable_frame_cameras(&mesh, 72, false)[0].fit else {
+            panic!("a sweep must pin an extent");
+        };
+
+        let center = mesh_center(&mesh);
+        let (sin_e, cos_e) = POSTER_ELEVATION_DEG.to_radians().sin_cos();
+        let mut bound = 0.0f32;
+        for v in &mesh.vertices {
+            let d = [v[0] - center[0], v[1] - center[1], v[2] - center[2]];
+            let radial = (d[0] * d[0] + d[2] * d[2]).sqrt();
+            bound = bound.max(radial).max(cos_e * d[1].abs() + sin_e * radial);
+        }
+        assert!(
+            extent <= bound * (1.0 + 1e-4),
+            "{extent} frames more than the cylinder bound {bound}"
+        );
+        assert!(
+            extent >= bound * 0.95,
+            "{extent} is well under the cylinder bound {bound}; the sweep is clipping"
+        );
     }
 }

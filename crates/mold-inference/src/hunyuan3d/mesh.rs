@@ -143,6 +143,96 @@ impl Mesh {
         (min, max)
     }
 
+    /// Transform this mesh into the frame a geometry export is written in.
+    ///
+    /// The stored mesh is normalized model space: roughly a unit cube, `y`
+    /// up, and centred on the query GRID rather than on the model itself.
+    /// [`normalize_and_flip`] preserves upstream's hard-coded `v_min = 0` and
+    /// `v_max = max(dim)`, so a model that does not fill its query volume
+    /// sits off-centre. Every step here is therefore taken against the mesh's
+    /// OWN bounding box, never the origin it happens to carry.
+    ///
+    /// In order:
+    ///
+    /// 1. Translate the bounding-box centre to the origin.
+    /// 2. Uniformly scale so the LONGEST bounding-box axis measures
+    ///    `size_mm`, when a size is asked for. A zero or non-finite extent is
+    ///    left alone rather than divided by.
+    /// 3. For [`mold_core::MeshUpAxis::Z`], rotate `(x, y, z) -> (x, -z, y)`.
+    ///    That is a +90 degree rotation about `+X`, determinant +1, and NOT a
+    ///    mirror. `normals` is rotated with the positions: OBJ and PLY write
+    ///    the vertex normals verbatim, and `glb::write_stl` recomputes each
+    ///    facet normal from the triangle's own winding, so a reflection here
+    ///    would flip every facet normal and hand a slicer a solid turned
+    ///    inside out.
+    /// 4. For [`mold_core::MeshExportOrigin::Floor`], shift along the up axis
+    ///    so its minimum is exactly 0 - the mesh RESTS on the ground plane
+    ///    with the other two axes still centred.
+    ///
+    /// `uvs` and `vertex_colors` are untouched: neither is a spatial
+    /// quantity. An empty mesh, or one whose bounds are not finite, is left
+    /// exactly as it was; there is no sensible frame to move it into.
+    pub fn apply_export_geometry(&mut self, geometry: &mold_core::MeshExportGeometry) {
+        if self.vertices.is_empty() {
+            return;
+        }
+        let (min, max) = self.bounds();
+        if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
+            return;
+        }
+
+        let center = [
+            0.5 * (min[0] + max[0]),
+            0.5 * (min[1] + max[1]),
+            0.5 * (min[2] + max[2]),
+        ];
+        for v in &mut self.vertices {
+            v[0] -= center[0];
+            v[1] -= center[1];
+            v[2] -= center[2];
+        }
+
+        if let Some(size_mm) = geometry.size_mm {
+            let extent = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
+            let scale = size_mm as f32 / extent;
+            if extent > 0.0 && scale.is_finite() && scale > 0.0 {
+                for v in &mut self.vertices {
+                    v[0] *= scale;
+                    v[1] *= scale;
+                    v[2] *= scale;
+                }
+            }
+        }
+
+        if geometry.up_axis == mold_core::MeshUpAxis::Z {
+            for v in &mut self.vertices {
+                *v = [v[0], -v[2], v[1]];
+            }
+            if let Some(normals) = self.normals.as_mut() {
+                for n in normals.iter_mut() {
+                    *n = [n[0], -n[2], n[1]];
+                }
+            }
+        }
+
+        if geometry.origin == mold_core::MeshExportOrigin::Floor {
+            let up = match geometry.up_axis {
+                mold_core::MeshUpAxis::Y => 1,
+                mold_core::MeshUpAxis::Z => 2,
+            };
+            // Read the bounds back rather than assuming the half-extent: the
+            // mesh is centred by construction here, but reading the real
+            // minimum makes `min[up] == 0` exact instead of within a rounding
+            // step of it.
+            let (min, _) = self.bounds();
+            if min[up].is_finite() {
+                for v in &mut self.vertices {
+                    v[up] -= min[up];
+                }
+            }
+        }
+    }
+
     /// Rejects the two things that silently produce a corrupt export: a face
     /// index past the end of the vertex array, and a NaN/inf coordinate.
     ///
@@ -2038,5 +2128,267 @@ mod tests {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-6, "normal length {len}");
         }
+    }
+
+    /// A closed box spanning `[-half, half]` scaled per axis, wound
+    /// counter-clockwise seen from outside, with smooth normals.
+    fn export_box(hx: f32, hy: f32, hz: f32) -> Mesh {
+        let v = [
+            [-hx, -hy, hz],
+            [hx, -hy, hz],
+            [hx, hy, hz],
+            [-hx, hy, hz],
+            [-hx, -hy, -hz],
+            [hx, -hy, -hz],
+            [hx, hy, -hz],
+            [-hx, hy, -hz],
+        ];
+        let quads = [
+            [0, 1, 2, 3],
+            [5, 4, 7, 6],
+            [1, 5, 6, 2],
+            [4, 0, 3, 7],
+            [3, 2, 6, 7],
+            [4, 5, 1, 0],
+        ];
+        let mut faces = Vec::new();
+        for q in quads {
+            faces.push([q[0] as u32, q[1] as u32, q[2] as u32]);
+            faces.push([q[0] as u32, q[2] as u32, q[3] as u32]);
+        }
+        let mut mesh = Mesh {
+            vertices: v.to_vec(),
+            faces,
+            ..Default::default()
+        };
+        compute_smooth_normals(&mut mesh);
+        mesh
+    }
+
+    fn extents(mesh: &Mesh) -> [f32; 3] {
+        let (min, max) = mesh.bounds();
+        [max[0] - min[0], max[1] - min[1], max[2] - min[2]]
+    }
+
+    fn geometry(
+        size_mm: Option<f64>,
+        up_axis: mold_core::MeshUpAxis,
+        origin: mold_core::MeshExportOrigin,
+    ) -> mold_core::MeshExportGeometry {
+        mold_core::MeshExportGeometry {
+            size_mm,
+            up_axis,
+            origin,
+        }
+    }
+
+    /// Read every facet normal out of a binary STL.
+    fn stl_facet_normals(bytes: &[u8]) -> Vec<[f32; 3]> {
+        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        (0..count)
+            .map(|i| {
+                let base = 84 + i * 50;
+                let f = |k: usize| {
+                    f32::from_le_bytes(bytes[base + k * 4..base + k * 4 + 4].try_into().unwrap())
+                };
+                [f(0), f(1), f(2)]
+            })
+            .collect()
+    }
+
+    /// A size is the LONGEST axis in millimetres and the scale is uniform, so
+    /// the other two axes keep their proportions. A 2 x 1 x 0.5 box asked for
+    /// 60 mm comes out 60 x 30 x 15.
+    #[test]
+    fn a_size_scales_the_longest_axis_and_keeps_the_proportions() {
+        let mut mesh = export_box(1.0, 0.5, 0.25);
+        assert_eq!(extents(&mesh), [2.0, 1.0, 0.5]);
+        mesh.apply_export_geometry(&geometry(
+            Some(60.0),
+            mold_core::MeshUpAxis::Y,
+            mold_core::MeshExportOrigin::Center,
+        ));
+        let e = extents(&mesh);
+        assert!((e[0] - 60.0).abs() < 1e-3, "{e:?}");
+        assert!((e[1] - 30.0).abs() < 1e-3, "{e:?}");
+        assert!((e[2] - 15.0).abs() < 1e-3, "{e:?}");
+        // Centre origin leaves the box centred on all three axes.
+        let (min, max) = mesh.bounds();
+        for a in 0..3 {
+            assert!((min[a] + max[a]).abs() < 1e-3, "axis {a} is not centred");
+        }
+    }
+
+    /// `z` up is a ROTATION, not a mirror. Positions and vertex normals turn
+    /// together, and the facet normals `write_stl` derives from the winding
+    /// come out as the rotated originals - if the transform reflected, every
+    /// one of them would point the opposite way and the solid would read as
+    /// inside out.
+    #[test]
+    fn z_up_rotates_positions_and_normals_without_mirroring() {
+        let before = export_box(1.0, 0.5, 0.25);
+        let mut after = before.clone();
+        after.apply_export_geometry(&geometry(
+            None,
+            mold_core::MeshUpAxis::Z,
+            mold_core::MeshExportOrigin::Center,
+        ));
+
+        let rotate = |v: [f32; 3]| [v[0], -v[2], v[1]];
+        for (i, v) in before.vertices.iter().enumerate() {
+            let expected = rotate(*v);
+            for a in 0..3 {
+                assert!(
+                    (after.vertices[i][a] - expected[a]).abs() < 1e-6,
+                    "vertex {i} axis {a}: {:?} vs {expected:?}",
+                    after.vertices[i]
+                );
+            }
+        }
+        let before_normals = before.normals.as_ref().expect("normals");
+        let after_normals = after.normals.as_ref().expect("normals");
+        for (i, n) in before_normals.iter().enumerate() {
+            let expected = rotate(*n);
+            for a in 0..3 {
+                assert!(
+                    (after_normals[i][a] - expected[a]).abs() < 1e-6,
+                    "normal {i}"
+                );
+            }
+        }
+        // The extents rotate with the geometry: y and z swap.
+        let e = extents(&after);
+        assert!(
+            (e[0] - 2.0).abs() < 1e-6 && (e[1] - 0.5).abs() < 1e-6 && (e[2] - 1.0).abs() < 1e-6
+        );
+
+        let before_facets = stl_facet_normals(&super::super::glb::write_stl(&before));
+        let after_facets = stl_facet_normals(&super::super::glb::write_stl(&after));
+        assert_eq!(before_facets.len(), after_facets.len());
+        for (i, facet) in before_facets.iter().enumerate() {
+            let expected = rotate(*facet);
+            for a in 0..3 {
+                assert!(
+                    (after_facets[i][a] - expected[a]).abs() < 1e-5,
+                    "facet {i} flipped: {:?} vs {expected:?}",
+                    after_facets[i]
+                );
+            }
+        }
+    }
+
+    /// Floor puts the mesh ON the ground plane of whichever axis is up, with
+    /// the other two still centred - a build plate, not a model half sunk
+    /// into it.
+    #[test]
+    fn floor_rests_the_mesh_on_the_up_plane() {
+        for (up, index) in [
+            (mold_core::MeshUpAxis::Y, 1usize),
+            (mold_core::MeshUpAxis::Z, 2usize),
+        ] {
+            let mut mesh = export_box(1.0, 0.5, 0.25);
+            mesh.apply_export_geometry(&geometry(
+                Some(100.0),
+                up,
+                mold_core::MeshExportOrigin::Floor,
+            ));
+            let (min, max) = mesh.bounds();
+            assert_eq!(min[index], 0.0, "{up} up must rest on 0");
+            assert!(max[index] > 0.0);
+            for a in 0..3 {
+                if a != index {
+                    assert!(
+                        (min[a] + max[a]).abs() < 1e-3,
+                        "{up} up: axis {a} is not centred"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The stored mesh is centred on the query GRID, not on itself, so an
+    /// off-centre model is recentred on ITS OWN bounding box before anything
+    /// else happens.
+    #[test]
+    fn an_off_centre_mesh_is_recentred_on_its_own_bounds() {
+        let mut mesh = export_box(0.5, 0.5, 0.5);
+        for v in &mut mesh.vertices {
+            v[0] += 3.0;
+            v[1] -= 7.5;
+        }
+        mesh.apply_export_geometry(&geometry(
+            Some(10.0),
+            mold_core::MeshUpAxis::Y,
+            mold_core::MeshExportOrigin::Center,
+        ));
+        let (min, max) = mesh.bounds();
+        for a in 0..3 {
+            assert!((min[a] + 5.0).abs() < 1e-3, "axis {a} min {}", min[a]);
+            assert!((max[a] - 5.0).abs() < 1e-3, "axis {a} max {}", max[a]);
+        }
+    }
+
+    /// Nothing to transform is not an error and not a divide by zero: an
+    /// empty mesh, a single point, and a mesh with a non-finite coordinate
+    /// all come back exactly as they went in.
+    #[test]
+    fn a_degenerate_mesh_is_left_alone() {
+        let target = geometry(
+            Some(100.0),
+            mold_core::MeshUpAxis::Z,
+            mold_core::MeshExportOrigin::Floor,
+        );
+
+        let mut empty = Mesh::default();
+        empty.apply_export_geometry(&target);
+        assert_eq!(empty, Mesh::default());
+
+        // A single coincident point has zero extent: recentred to the origin,
+        // never scaled.
+        let mut point = Mesh {
+            vertices: vec![[2.0, 2.0, 2.0]; 3],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        point.apply_export_geometry(&target);
+        assert!(point.vertices.iter().all(|v| v.iter().all(|c| *c == 0.0)));
+
+        let nan = Mesh {
+            vertices: vec![[f32::NAN; 3]; 3],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let mut same = nan.clone();
+        same.apply_export_geometry(&target);
+        assert!(same.vertices.iter().all(|v| v.iter().all(|c| c.is_nan())));
+        assert_eq!(same.faces, nan.faces);
+    }
+
+    /// A geometry that asks for exactly what the mesh already is changes
+    /// NOTHING - every writer produces the same bytes it produced before.
+    #[test]
+    fn a_no_op_geometry_leaves_every_export_byte_identical() {
+        let before = export_box(1.0, 0.5, 0.25);
+        let mut after = before.clone();
+        // Longest axis is already 2.0, the mesh is already centred, and `y`
+        // is already up.
+        after.apply_export_geometry(&geometry(
+            Some(2.0),
+            mold_core::MeshUpAxis::Y,
+            mold_core::MeshExportOrigin::Center,
+        ));
+        assert_eq!(after, before);
+        assert_eq!(
+            super::super::glb::write_obj(&after),
+            super::super::glb::write_obj(&before)
+        );
+        assert_eq!(
+            super::super::glb::write_stl(&after),
+            super::super::glb::write_stl(&before)
+        );
+        assert_eq!(
+            super::super::glb::write_ply(&after),
+            super::super::glb::write_ply(&before)
+        );
     }
 }
