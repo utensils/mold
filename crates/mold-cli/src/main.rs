@@ -1069,10 +1069,12 @@ pub enum LibraryAction {
     /// format is a TURNTABLE: the gallery poster's view rendered around the
     /// mesh, framed once for the whole sweep.
     ///
-    /// A geometry container is written print-ready: STL and PLY are scaled to
+    /// On a host that advertises `capabilities.mesh.export_geometry`, a
+    /// geometry container is written print-ready: STL and PLY are scaled to
     /// 100 mm on their longest axis, turned `z` up and rested on the floor,
     /// and OBJ keeps its model units and `y` up. `--size-mm`, `--up-axis` and
-    /// `--origin` override that.
+    /// `--origin` override that, and are refused outright against a host that
+    /// does not advertise the block, which would silently ignore them.
     #[command(after_long_help = "\
 Examples:
   mold library export mold-hunyuan3d-1700000000000.glb --format stl
@@ -1142,13 +1144,15 @@ impl From<TurntableArgs> for mold_core::MeshTurntableOptions {
 
 /// Geometry controls for `mold library export --format obj|stl|ply`.
 ///
-/// Every one is optional, and an absent flag means the FORMAT's own default
-/// rather than "unchanged": the stored `.glb` is normalized model space, so a
-/// verbatim transcode reaches a slicer as a two-millimetre blob lying on its
-/// side. STL and PLY default to 100 mm on the longest axis, `z` up, resting
-/// on the floor; OBJ keeps its model units and `y` up, because every tool
-/// that reads OBJ converts the axis itself and treats one unit as one metre.
-/// Refused on `glb` and on a turntable, which have no geometry to shape.
+/// Every one is optional, and on a host that advertises
+/// `capabilities.mesh.export_geometry` an absent flag means the FORMAT's own
+/// default rather than "unchanged": the stored `.glb` is normalized model
+/// space, so a verbatim transcode reaches a slicer as a two-millimetre blob
+/// lying on its side. STL and PLY default to 100 mm on the longest axis, `z`
+/// up, resting on the floor; OBJ keeps its model units and `y` up, because
+/// every tool that reads OBJ converts the axis itself and treats one unit as
+/// one metre. Refused on `glb` and on a turntable, which have no geometry to
+/// shape, and against a host without the block, which would drop them.
 #[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq)]
 pub struct GeometryArgs {
     /// Longest bounding-box axis in millimetres, 1 to 1000 (default 100 for

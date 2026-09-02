@@ -2103,6 +2103,21 @@ pub fn mesh_geometry_refusal(format: crate::MeshExportFormat) -> String {
     )
 }
 
+/// The one sentence every client uses to refuse geometry options a host does
+/// not advertise.
+///
+/// The presence of `capabilities.mesh.export_geometry` is the ONLY gate: a
+/// host built before the block existed parses the request, drops the three
+/// keys and answers 200 with an unscaled mesh, so there is nothing in the
+/// answer to catch. `spellings` is the caller's own naming of the three
+/// options — CLI flags, MCP tool arguments — because that is what the reader
+/// has to remove.
+pub fn mesh_geometry_unadvertised_refusal(host: &str, spellings: &str) -> String {
+    format!(
+        "{host} does not advertise geometry export options; it would ignore them and hand back an unscaled mesh — upgrade the server or drop {spellings}"
+    )
+}
+
 /// Resolve a request's geometry options against the per-format defaults.
 ///
 /// `Ok(None)` means the format takes none and the request asked for none - a

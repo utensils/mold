@@ -530,8 +530,11 @@ async fn library_export(
             .is_none_or(|mesh| mesh.export_geometry.is_none())
     {
         bail!(
-            "{} does not advertise geometry export options; it would ignore them and hand back an unscaled mesh — upgrade the server or drop --size-mm/--up-axis/--origin",
-            client.host()
+            "{}",
+            mold_core::validation::mesh_geometry_unadvertised_refusal(
+                client.host(),
+                "--size-mm/--up-axis/--origin"
+            )
         );
     }
 

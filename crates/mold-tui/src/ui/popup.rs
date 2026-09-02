@@ -1662,10 +1662,16 @@ pub(crate) fn mesh_turntable_picker_hint() -> String {
 /// knob either, so it states the per-format defaults it will write. Quoted
 /// from the core constants for the same reason the turntable hint is quoted
 /// from the renderer's — a stated default that drifts is worse than none.
+///
+/// Qualified, because the picker sends nothing: a remote print is shaped by
+/// its own host, and a host built before `capabilities.mesh.export_geometry`
+/// still answers with an unscaled `y`-up mesh. And OBJ's default leaves the
+/// SCALE alone — it is still recentred and floored — so "as stored" would
+/// claim more than it does.
 pub(crate) fn mesh_geometry_picker_hint() -> String {
     use mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM;
     format!(
-        "OBJ / STL / PLY write geometry: STL and PLY at {MESH_EXPORT_DEFAULT_SIZE_MM} mm, Z-up, on the floor; OBJ as stored. Other sizes or axes: mold library export --size-mm ..."
+        "OBJ / STL / PLY write geometry: on a host that advertises it, STL and PLY at {MESH_EXPORT_DEFAULT_SIZE_MM} mm, Z-up, on the floor; OBJ keeps its model units. Other sizes or axes: mold library export --size-mm ..."
     )
 }
 
@@ -1777,13 +1783,17 @@ mod tests {
         }
 
         // The geometry hint quotes the core constant for the same reason,
-        // and names the axis a slicer expects.
+        // and names the axis a slicer expects. It says the defaults hold on
+        // a host that advertises them — the picker sends nothing, and an
+        // older host answers with an unscaled mesh — and it claims only the
+        // SCALE for OBJ, which is still recentred and floored.
         let geometry = super::mesh_geometry_picker_hint();
         for expected in [
             format!("{} mm", mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM),
             "Z-up".to_string(),
             "floor".to_string(),
-            "OBJ as stored".to_string(),
+            "on a host that advertises it".to_string(),
+            "OBJ keeps its model units".to_string(),
             "mold library export".to_string(),
         ] {
             assert!(
@@ -1791,6 +1801,7 @@ mod tests {
                 "{expected} missing from {geometry}"
             );
         }
+        assert!(!geometry.contains("as stored"), "{geometry}");
         for format in [Stl, Ply] {
             assert!(
                 super::mesh_export_format_note(format).contains("Z-up, bed-ready"),

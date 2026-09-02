@@ -6992,9 +6992,13 @@ impl App {
                 Some(url) => {
                     let api_key = crate::hosts::api_key_for(&origin.host_id);
                     let client = crate::hosts::client_for(&url, api_key.as_deref());
-                    // The picker offers no knobs at all; the host's defaults,
-                    // turntable and geometry alike, are the same ones the
-                    // local writer applies.
+                    // The picker offers no knobs at all, so the request
+                    // carries none and the HOST decides. A host on this
+                    // build applies the same defaults as the local writer;
+                    // one built before `capabilities.mesh.export_geometry`
+                    // has no geometry step and answers with an unscaled
+                    // `y`-up mesh, which is why the picker's hint says the
+                    // defaults hold on a host that advertises them.
                     client
                         .export_gallery_mesh(
                             &filename,

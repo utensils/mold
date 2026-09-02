@@ -135,11 +135,11 @@ importer converts Y-up itself and DCC tools already treat one unit as one
 metre. `--size-mm`, `--up-axis` and `--origin` on `obj`, `stl` and `ply` fix
 that at export time, each defaulting to what that format's tools expect:
 
-| Format | Size                                 | Up axis | Origin  |
-| ------ | ------------------------------------ | ------- | ------- |
-| `obj`  | as stored (model units, no scaling)  | `y`     | `floor` |
-| `stl`  | 100 mm                               | `z`     | `floor` |
-| `ply`  | 100 mm                               | `z`     | `floor` |
+| Format | Size                                | Up axis | Origin  |
+| ------ | ----------------------------------- | ------- | ------- |
+| `obj`  | as stored (model units, no scaling) | `y`     | `floor` |
+| `stl`  | 100 mm                              | `z`     | `floor` |
+| `ply`  | 100 mm                              | `z`     | `floor` |
 
 `floor` centres the mesh on the up-axis plane and rests it on `0` — bed-ready
 for a slicer. `center` puts the bounding-box centre at the origin instead;
@@ -155,9 +155,9 @@ mold library export chair.glb --format obj --up-axis y --origin center
 
 A key you leave out takes the table above. `--size-mm` (1 to 1000),
 `--up-axis` (`y` | `z`) and `--origin` (`center` | `floor`) are **refused**,
-not silently dropped, on `glb` and on a turntable, and `mold library export`
-refuses them outright against a host that does not advertise
-`capabilities.mesh.export_geometry`.
+not silently dropped, on `glb` and on a turntable, and both
+`mold library export` and the MCP `export_mesh` tool refuse them outright
+against a host that does not advertise `capabilities.mesh.export_geometry`.
 
 ## Share a turntable
 
