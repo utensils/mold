@@ -13,7 +13,7 @@ async function pick() {
 <template>
   <div class="flex items-center gap-2">
     <span
-      class="font-mono text-xs max-w-64 truncate text-micro text-fg-2"
+      class="font-mono max-w-64 truncate text-micro text-fg-2"
       :title="props.modelValue"
       dir="rtl"
     >

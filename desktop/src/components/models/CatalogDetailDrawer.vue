@@ -364,7 +364,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         <div v-if="merged.installed || unsupported" class="flex flex-wrap gap-1.5">
           <span
             v-if="merged.installed"
-            class="border-border font-mono text-xs rounded-control border px-2 py-0.5 text-micro text-sapphire"
+            class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-sapphire"
             title="Files are present under this host's models directory"
           >
             ● installed
@@ -392,7 +392,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           </div>
           <div>
             <dt class="text-micro text-fg-dim">Family</dt>
-            <dd class="font-mono text-xs text-sm text-fg-2">{{ merged.family }}</dd>
+            <dd class="font-mono text-sm text-fg-2">{{ merged.family }}</dd>
           </div>
           <div>
             <dt class="text-micro text-fg-dim">Source</dt>
@@ -400,25 +400,25 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           </div>
           <div v-if="merged.file_format">
             <dt class="text-micro text-fg-dim">Format</dt>
-            <dd class="font-mono text-xs text-sm text-fg-2">{{ merged.file_format }}</dd>
+            <dd class="font-mono text-sm text-fg-2">{{ merged.file_format }}</dd>
           </div>
           <div v-if="merged.size_bytes != null">
             <dt class="text-micro text-fg-dim">Weights</dt>
-            <dd class="font-mono text-xs text-sm text-fg-2">{{ formatGB(merged.size_bytes) }}</dd>
+            <dd class="font-mono text-sm text-fg-2">{{ formatGB(merged.size_bytes) }}</dd>
           </div>
           <div v-if="merged.download_count">
             <dt class="text-micro text-fg-dim">Downloads</dt>
-            <dd class="font-mono text-xs text-sm text-fg-2">
+            <dd class="font-mono text-sm text-fg-2">
               {{ formatCount(merged.download_count) }}
             </dd>
           </div>
           <div v-if="merged.likes" data-test="drawer-likes">
             <dt class="text-micro text-fg-dim">Likes</dt>
-            <dd class="font-mono text-xs text-sm text-fg-2">♥ {{ formatCount(merged.likes) }}</dd>
+            <dd class="font-mono text-sm text-fg-2">♥ {{ formatCount(merged.likes) }}</dd>
           </div>
           <div v-if="merged.rating != null">
             <dt class="text-micro text-fg-dim">Rating</dt>
-            <dd class="font-mono text-xs text-sm text-fg-2">★ {{ merged.rating.toFixed(1) }}</dd>
+            <dd class="font-mono text-sm text-fg-2">★ {{ merged.rating.toFixed(1) }}</dd>
           </div>
           <div v-if="merged.license" class="col-span-2 min-w-0">
             <dt class="text-micro text-fg-dim">License</dt>
@@ -456,7 +456,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
               {{ weightsHeading }}
             </div>
-            <div class="font-mono text-xs mt-1 text-base text-fg" data-test="stat-checkpoint">
+            <div class="font-mono mt-1 text-base text-fg" data-test="stat-checkpoint">
               {{ checkpointLabel }}
             </div>
           </div>
@@ -464,7 +464,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
               Full footprint
             </div>
-            <div class="font-mono text-xs mt-1 text-base text-fg" data-test="stat-footprint">
+            <div class="font-mono mt-1 text-base text-fg" data-test="stat-footprint">
               {{ footprintLabel }}
             </div>
           </div>
@@ -481,7 +481,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               :key="variant.id"
               type="button"
               data-test="variant-chip"
-              class="font-mono text-xs rounded-control border px-2.5 py-1 text-micro transition-colors duration-100"
+              class="font-mono rounded-control border px-2.5 py-1 text-micro transition-colors duration-100"
               :class="
                 variant.id === selectedVariantId
                   ? 'border-accent text-accent'
@@ -508,7 +508,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
               >DOWNLOAD CONTENTS</span
             >
-            <span class="font-mono text-xs text-micro text-fg">{{ downloadTotalLabel }}</span>
+            <span class="font-mono text-micro text-fg">{{ downloadTotalLabel }}</span>
           </div>
           <ul class="flex flex-col gap-1">
             <li
@@ -519,7 +519,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               <span class="min-w-0 truncate text-micro text-fg-2" :title="item.label">
                 {{ item.label }}
               </span>
-              <span class="font-mono text-xs text-micro text-fg-dim">
+              <span class="font-mono text-micro text-fg-dim">
                 {{ item.kind }} · {{ formatSize(item.sizeBytes) }}
               </span>
             </li>
@@ -534,7 +534,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         >
           <div class="mb-1.5 flex items-baseline justify-between">
             <span class="font-mono text-micro text-fg-dim whitespace-nowrap">ON THIS HOST</span>
-            <span class="font-mono text-xs text-micro text-fg">
+            <span class="font-mono text-micro text-fg">
               {{ componentsPresent }}/{{ componentList.length }} present
             </span>
           </div>
@@ -584,7 +584,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <span
               v-for="word in merged.trained_words"
               :key="word"
-              class="border-border font-mono text-xs rounded-control border px-2 py-0.5 text-micro text-fg-2"
+              class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-fg-2"
             >
               {{ word }}
             </span>

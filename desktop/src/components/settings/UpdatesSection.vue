@@ -142,7 +142,7 @@ onMounted(() => void updater.init());
           </div>
           <span
             v-if="updater.totalBytes !== null"
-            class="font-mono text-xs shrink-0 text-micro text-fg-dim"
+            class="font-mono shrink-0 text-micro text-fg-dim"
           >
             {{ formatBytes(updater.downloadedBytes) }} / {{ formatBytes(updater.totalBytes) }}
           </span>

@@ -116,10 +116,7 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
             >
               {{ target.action === "install" ? "Install" : "Already installed · repair" }}
             </span>
-            <span
-              v-if="target.host.queueDepth != null"
-              class="font-mono text-xs text-micro text-fg-dim"
-            >
+            <span v-if="target.host.queueDepth != null" class="font-mono text-micro text-fg-dim">
               {{ target.host.queueDepth }} queued
             </span>
           </button>

@@ -695,7 +695,7 @@ async function cleanUpDiskConfirmed() {
               <div class="truncate text-sm text-fg" :title="entry.item.metadata.prompt">
                 {{ entry.item.metadata.prompt }}
               </div>
-              <div class="font-mono text-xs mt-0.5 truncate text-micro text-fg-dim">
+              <div class="font-mono mt-0.5 truncate text-micro text-fg-dim">
                 {{ entry.item.metadata.model }} · {{ entry.item.metadata.width }}×{{
                   entry.item.metadata.height
                 }}
@@ -709,9 +709,7 @@ async function cleanUpDiskConfirmed() {
             >
               {{ availabilityLabel(entry) }}
             </span>
-            <span class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{
-              runTime(entry.item)
-            }}</span>
+            <span class="font-mono shrink-0 text-micro text-fg-dim">{{ runTime(entry.item) }}</span>
           </button>
         </template>
         <p
@@ -856,10 +854,8 @@ async function cleanUpDiskConfirmed() {
             >
               {{ entry.hostLabel }}
             </span>
-            <span class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{ entry.model }}</span>
-            <span class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{
-              timeOf(entry)
-            }}</span>
+            <span class="font-mono shrink-0 text-micro text-fg-dim">{{ entry.model }}</span>
+            <span class="font-mono shrink-0 text-micro text-fg-dim">{{ timeOf(entry) }}</span>
           </button>
         </template>
         <p

@@ -147,16 +147,14 @@ const counts = computed(() => {
       <span v-if="entry.author" class="min-w-0 shrink truncate text-micro text-fg-dim">
         {{ entry.author }}
       </span>
-      <span v-if="counts" class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{
-        counts
-      }}</span>
+      <span v-if="counts" class="font-mono shrink-0 text-micro text-fg-dim">{{ counts }}</span>
     </template>
     <template #actions>
       <span v-if="entry.installed" class="font-mono text-micro text-success">● ready</span>
       <span
         v-if="props.runtimeNotice"
         data-test="runtime-unavailable-badge"
-        class="font-mono text-xs text-micro text-fg-dim"
+        class="font-mono text-micro text-fg-dim"
         :title="props.runtimeNotice.message"
       >
         {{ RUNTIME_UNAVAILABLE_BADGE }}

@@ -59,7 +59,7 @@ async function clear() {
       </button>
     </template>
     <template v-else>
-      <span class="font-mono text-xs text-micro" :class="present ? 'text-fg-2' : 'text-fg-dim'">
+      <span class="font-mono text-micro" :class="present ? 'text-fg-2' : 'text-fg-dim'">
         {{ present ? "••••••••  set" : "not set" }}
       </span>
       <button

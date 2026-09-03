@@ -34,6 +34,6 @@ watch(
       @input="live = Number(($event.target as HTMLInputElement).value)"
       @change="emit('commit', live)"
     />
-    <span class="font-mono text-xs w-10 text-right text-micro text-fg-2">{{ live }}</span>
+    <span class="font-mono w-10 text-right text-micro text-fg-2">{{ live }}</span>
   </div>
 </template>

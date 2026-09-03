@@ -5,6 +5,7 @@ import type { FleetActiveWork } from "@studio/api/activity";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useOpenLiveWork } from "./useOpenLiveWork";
 import { useQueueActivity, type QueueRow } from "./useQueueActivity";
+import { useChainJobsStore } from "../stores/chainJobs";
 import { jobCanBeRemoved, useGenerationStore, type Job } from "../stores/generation";
 import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
@@ -40,6 +41,7 @@ export function useQueueCommands(): QueueCommands {
   const contextMenu = useContextMenuStore();
   const draft = useSequenceDraftStore();
   const generation = useGenerationStore();
+  const chainJobs = useChainJobsStore();
   const hosts = useHostsStore();
   const hostStatus = useHostStatusStore();
   const jobs = useJobsStore();
@@ -121,6 +123,7 @@ export function useQueueCommands(): QueueCommands {
   }
 
   function canCancel(row: QueueRow): boolean {
+    if (row.kind === "sequence") return row.sequence.actions.includes("cancel");
     if (row.kind === "print") {
       return (
         row.print.status !== "complete" && row.print.status !== "error" && !row.print.cancelling
@@ -140,6 +143,17 @@ export function useQueueCommands(): QueueCommands {
   async function cancel(row: QueueRow) {
     if (row.kind === "print") await cancelPrint(row.print);
     else if (row.kind === "shared") await cancelShared(row.shared);
+    else await chainJobs.cancel(row.sequence.hostId, row.sequence.jobId).catch(report);
+  }
+
+  /** A held print (a style still downloading, a machine that refused for
+   * now) is retried on its own host through the store's fence. */
+  function retry(job: Job) {
+    if (!job.retryable || job.retrying) return;
+    void generation
+      .retryHeld(job.clientId)
+      .then(() => toasts.push(`Retry queued on ${job.hostLabel ?? "this machine"}.`))
+      .catch(report);
   }
 
   async function stopEverything() {
@@ -193,7 +207,10 @@ export function useQueueCommands(): QueueCommands {
       ];
     }
     if (row.kind === "sequence") {
-      return [{ label: "Open", action: () => open(row) }];
+      return [
+        { label: "Open", action: () => open(row) },
+        { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
+      ];
     }
     const job = row.print;
     const live = job.status !== "complete" && job.status !== "error";
@@ -205,6 +222,9 @@ export function useQueueCommands(): QueueCommands {
             disabled: !jobCanBeRemoved(job),
             action: () => generation.removeSettled(job.clientId),
           },
+      ...(job.retryable
+        ? [{ label: "Retry now", disabled: job.retrying, action: () => retry(job) }]
+        : []),
       { separator: true },
       {
         label: "Use these words",

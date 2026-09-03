@@ -137,7 +137,7 @@ defineExpose({ openCollections, openTags, closePopovers });
     role="toolbar"
     aria-label="Selection actions"
   >
-    <span class="font-mono text-xs px-1 text-micro text-fg">
+    <span class="font-mono px-1 text-micro text-fg">
       {{ selectedCount }}
       <span class="text-fg-dim">/ {{ total }} selected</span>
     </span>

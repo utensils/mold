@@ -55,7 +55,7 @@ async function pull(model: string) {
         :class="starter.recommended ? 'border-accent' : 'border-border'"
       >
         <div class="flex items-center gap-2">
-          <span class="font-mono text-xs text-sm text-fg">{{ starter.model }}</span>
+          <span class="font-mono text-sm text-fg">{{ starter.model }}</span>
           <span
             v-if="starter.recommended"
             data-test="starter-recommended"

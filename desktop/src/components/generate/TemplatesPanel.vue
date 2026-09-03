@@ -108,7 +108,7 @@ async function requestDelete(template: GenerationTemplate) {
   <div data-test="templates-panel">
     <div class="mt-5 mb-2 flex items-center gap-2">
       <span class="font-mono text-micro text-fg-dim whitespace-nowrap">Templates</span>
-      <span class="font-mono text-xs text-micro text-fg-dim">{{ templates.length }}</span>
+      <span class="font-mono text-micro text-fg-dim">{{ templates.length }}</span>
       <div class="border-border h-px flex-1 border-t" />
     </div>
 
@@ -188,7 +188,7 @@ async function requestDelete(template: GenerationTemplate) {
           @click="loadTemplate(template)"
         >
           <span data-test="template-row-name" class="truncate">{{ template.name }}</span>
-          <span class="font-mono text-xs ml-1.5 text-micro text-fg-dim">
+          <span class="font-mono ml-1.5 text-micro text-fg-dim">
             {{ template.form.model ? modelLabel(template.form.model) : "no model" }}
           </span>
         </button>

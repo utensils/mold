@@ -59,7 +59,7 @@ onMounted(() => void refresh());
     <div class="flex max-w-sm flex-col items-end gap-1.5">
       <div class="flex items-center gap-2">
         <span
-          class="font-mono text-xs max-w-56 truncate text-micro text-fg-2"
+          class="font-mono max-w-56 truncate text-micro text-fg-2"
           :title="effectiveDirectory"
           data-test="media-save-directory"
         >

@@ -5118,7 +5118,7 @@ onBeforeUnmount(() => {
               <span
                 v-for="(s, i) in siblings"
                 :key="i"
-                class="font-mono text-xs text-sm"
+                class="font-mono text-sm"
                 :class="siblingDot(s)"
                 :title="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
                 :aria-label="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"

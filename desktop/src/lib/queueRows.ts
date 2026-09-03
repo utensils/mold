@@ -41,6 +41,12 @@ function printStatus(job: Job): string {
       return "Finished — saved to My images";
     case "error":
       if (job.outcomeUnknown) return "Outcome unknown — check My images";
+      // A held print is parked, not failed: the host will take it again.
+      if (job.retryable) {
+        return job.holdCode === "MODEL_NOT_FOUND"
+          ? "Needs a download first"
+          : `Held — ${job.holdError ?? job.error ?? "waiting on the machine"}`;
+      }
       return isCancelledError(job.error) ? "Stopped" : `Failed — ${job.error ?? "no reason given"}`;
   }
   return "";
@@ -72,6 +78,8 @@ export function rowGlyph(row: QueueRow): string {
   if (row.kind === "print") {
     const job = row.print;
     if (job.status === "complete") return "✓";
+    if (job.status === "error" && job.retryable)
+      return job.holdCode === "MODEL_NOT_FOUND" ? "↓" : "·";
     if (job.status === "error") return job.outcomeUnknown ? "?" : "!";
     if (job.status === "queued") {
       return job.queuePosition !== null && job.queuePosition >= 0
@@ -92,6 +100,7 @@ export function rowTone(row: QueueRow): string {
   if (row.kind === "print") {
     const job = row.print;
     if (job.status === "complete") return "text-success";
+    if (job.status === "error" && job.retryable) return "text-warning";
     if (job.status === "error") return job.outcomeUnknown ? "text-fg-dim" : "text-error";
     if (job.status === "queued") return "text-fg-dim";
     return "text-accent";

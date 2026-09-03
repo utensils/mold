@@ -119,8 +119,12 @@ function progressPct(row: QueueRow): number | null {
       <div
         v-if="active"
         data-test="queue-active"
-        class="flex shrink-0 cursor-pointer flex-col gap-2 rounded-control bg-panel-raised p-2.5 shadow-[inset_0_0_0_1px_var(--mold-blue)]"
+        class="flex shrink-0 cursor-pointer flex-col gap-2 rounded-control bg-panel-raised p-2.5 shadow-[inset_0_0_0_1px_var(--mold-blue)] focus-visible:outline-2 focus-visible:outline-accent"
+        role="button"
+        tabindex="0"
         @click="commands.open(active)"
+        @keydown.enter.prevent="commands.open(active)"
+        @keydown.space.prevent="commands.open(active)"
         @contextmenu.prevent="commands.contextMenu($event, active)"
       >
         <div class="flex gap-2.5">
@@ -201,8 +205,12 @@ function progressPct(row: QueueRow): number | null {
         v-for="row in rows"
         :key="row.key"
         :data-test="`queue-row-${row.kind}`"
-        class="flex shrink-0 cursor-pointer items-center gap-2 rounded-control border border-border p-2 transition-colors duration-100 hover:bg-row-hover"
+        class="flex shrink-0 cursor-pointer items-center gap-2 rounded-control border border-border p-2 transition-colors duration-100 hover:bg-row-hover focus-visible:outline-2 focus-visible:outline-accent"
+        role="button"
+        tabindex="0"
         @click="commands.open(row)"
+        @keydown.enter.prevent="commands.open(row)"
+        @keydown.space.prevent="commands.open(row)"
         @contextmenu.prevent="commands.contextMenu($event, row)"
       >
         <span

@@ -48,7 +48,7 @@
  * --danger-hover (error ink only when pointed at). */
 .ms-toolbar-button {
   display: inline-flex;
-  height: var(--mold-ctl-md);
+  height: var(--mold-ctl-md, 26px);
   flex-shrink: 0;
   align-items: center;
   gap: 6px;

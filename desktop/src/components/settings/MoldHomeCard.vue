@@ -87,7 +87,7 @@ async function apply() {
     <div v-if="!editing" class="border-border mt-3 rounded-control border bg-bg-deep px-3 py-2.5">
       <code
         data-selectable
-        class="font-mono text-xs block truncate text-micro text-fg-2"
+        class="font-mono block truncate text-micro text-fg-2"
         :title="info?.path"
       >
         {{ info ? displayedPath : "Loading…" }}
@@ -117,7 +117,7 @@ async function apply() {
           spellcheck="false"
           autocomplete="off"
           placeholder="/Volumes/External/Mold"
-          class="border-border font-mono text-xs h-9 min-w-0 flex-1 rounded-control border bg-bg-deep px-3 text-sm text-fg placeholder:text-fg-dim focus:border-sapphire focus:outline-none"
+          class="border-border font-mono h-9 min-w-0 flex-1 rounded-control border bg-bg-deep px-3 text-sm text-fg placeholder:text-fg-dim focus:border-sapphire focus:outline-none"
           :disabled="busy"
         />
         <button

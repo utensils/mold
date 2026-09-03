@@ -170,8 +170,12 @@ function previewSrc(row: QueueRow): string | null {
           v-for="row in queue.rows.value"
           :key="row.key"
           :data-test="`queue-row-${row.kind}`"
-          class="table-grid min-h-[56px] cursor-pointer items-center border-b border-border px-3.5 py-3 transition-colors duration-100 hover:bg-row-hover"
+          class="table-grid min-h-[56px] cursor-pointer items-center border-b border-border px-3.5 py-3 transition-colors duration-100 hover:bg-row-hover focus-visible:outline-2 focus-visible:outline-accent"
+          role="button"
+          tabindex="0"
           @click="commands.open(row)"
+          @keydown.enter.prevent="commands.open(row)"
+          @keydown.space.prevent="commands.open(row)"
           @contextmenu.prevent="commands.contextMenu($event, row)"
         >
           <div class="flex min-w-0 items-center gap-2.5">

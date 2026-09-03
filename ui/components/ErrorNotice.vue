@@ -98,7 +98,7 @@ async function copyError() {
   padding: 10px 12px;
   border: var(--mold-bw) solid var(--mold-error);
   border-radius: var(--mold-radius-2);
-  background: var(--mold-panel-raised);
+  background: var(--mold-panel-raised, var(--mold-surface));
   color: var(--mold-error);
 }
 

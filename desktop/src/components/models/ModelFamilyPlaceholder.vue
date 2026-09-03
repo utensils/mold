@@ -52,7 +52,7 @@ const identity = computed<FamilyIdentity>(() => {
       {{ identity.mark }}
     </span>
     <span
-      class="family-label font-mono text-xs absolute text-micro"
+      class="family-label font-mono absolute text-micro"
       :class="layout === 'grid' ? 'bottom-2.5 left-3' : 'sr-only'"
     >
       {{ identity.label }}

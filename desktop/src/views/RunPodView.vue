@@ -609,7 +609,7 @@ onBeforeUnmount(() => {
               <div v-if="editingVolumeId !== volume.id" class="flex items-center gap-3">
                 <div class="min-w-0 flex-1">
                   <p class="truncate text-sm font-semibold text-fg">{{ volume.name }}</p>
-                  <p class="font-mono text-xs text-micro text-fg-dim">
+                  <p class="font-mono text-micro text-fg-dim">
                     {{ volume.size }} GB · {{ runPodRegionLabel(volume.dataCenterId) }} ·
                     {{ volume.id }}
                   </p>
@@ -689,7 +689,7 @@ onBeforeUnmount(() => {
             <h2 class="text-base font-semibold text-fg">Your instances</h2>
             <p class="text-micro text-fg-dim">Status refreshes every 10 seconds.</p>
           </div>
-          <span class="font-mono text-xs text-micro text-fg-2"
+          <span class="font-mono text-micro text-fg-2"
             >{{ runpod.runningPods.length }} running · {{ runpod.overview.pods.length }} total</span
           >
         </div>
@@ -726,22 +726,16 @@ onBeforeUnmount(() => {
                     >{{ pod.desiredStatus || "UNKNOWN" }}</span
                   >
                 </div>
-                <p class="font-mono text-xs truncate text-micro text-fg-dim">
+                <p class="font-mono truncate text-micro text-fg-dim">
                   {{ podGpuName(pod) }} · {{ pod.machine?.location ?? "Placement pending" }} ·
                   {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
                     · {{ uptime(pod.uptimeSeconds) }}</span
                   >
                 </p>
-                <p
-                  v-if="podHardwareSummary(pod)"
-                  class="font-mono text-xs truncate text-micro text-fg-dim"
-                >
+                <p v-if="podHardwareSummary(pod)" class="font-mono truncate text-micro text-fg-dim">
                   {{ podHardwareSummary(pod) }}
                 </p>
-                <p
-                  v-if="pod.networkVolume"
-                  class="font-mono text-xs truncate text-micro text-fg-dim"
-                >
+                <p v-if="pod.networkVolume" class="font-mono truncate text-micro text-fg-dim">
                   {{ pod.networkVolume.name }} · {{ pod.networkVolume.size }} GB network volume
                 </p>
                 <p v-if="pod.networkVolume" class="mt-1 text-micro text-fg-dim">
@@ -814,7 +808,7 @@ onBeforeUnmount(() => {
       @confirm="confirmLaunch"
       @cancel="confirmProvision = false"
     >
-      <div class="font-mono text-xs space-y-1 text-micro text-fg-2">
+      <div class="font-mono space-y-1 text-micro text-fg-2">
         <div>
           {{ form.gpuDisplayName || "GPU" }} ·
           {{ form.cloudType === "SECURE" ? "Secure" : "Community" }} cloud

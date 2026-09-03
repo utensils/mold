@@ -35,7 +35,7 @@ function commitBool(e: Event) {
 <template>
   <div class="border-border flex items-center gap-3 border-b py-2 last:border-b-0">
     <div class="min-w-0 flex-1">
-      <div class="font-mono text-xs truncate text-sm text-fg" :title="row.key">{{ row.key }}</div>
+      <div class="font-mono truncate text-sm text-fg" :title="row.key">{{ row.key }}</div>
       <div v-if="locked" class="text-micro text-fg-dim">
         Set by {{ envVar }} in your environment — unset it to edit here.
       </div>

@@ -101,9 +101,7 @@ defineExpose({ focusSearch });
       data-test="library-scope"
       @update:model-value="emit('update:scope', $event)"
     />
-    <span class="font-mono text-xs text-micro text-fg-dim" data-test="library-count">{{
-      countLabel
-    }}</span>
+    <span class="font-mono text-micro text-fg-dim" data-test="library-count">{{ countLabel }}</span>
     <span v-if="error" class="text-micro text-error">{{ error }}</span>
 
     <div class="flex-1" />

@@ -55,6 +55,32 @@ function offenders(text: string): string[] {
   return hits;
 }
 
+/** Two font-size utilities on one element: the later one wins silently. */
+const SIZE_UTILITY = /(?<![\w:-])text-(micro|xs|sm|base|md|lg|xl)(?![\w-])/g;
+function doubleSized(text: string): string[] {
+  // Static class attributes only: a `:class` ternary names alternatives.
+  return [...text.matchAll(/(?<![:\w-])class="([^"]*)"/g)]
+    .map((m) => m[1]!)
+    .filter((attr) => [...attr.matchAll(SIZE_UTILITY)].length > 1);
+}
+
+describe("font-size utilities", () => {
+  it("are recognised by the guard (positive control)", () => {
+    expect(doubleSized('class="font-mono text-xs text-sm"')).toHaveLength(1);
+    expect(doubleSized('class="text-xs sm:text-sm"')).toHaveLength(0);
+    expect(doubleSized('class="text-micro text-fg-dim"')).toHaveLength(0);
+  });
+
+  it("never stack on one element in desktop sources", () => {
+    const found: string[] = [];
+    for (const file of walk("src")) {
+      if (!file.endsWith(".vue")) continue;
+      for (const hit of doubleSized(readFileSync(file, "utf8"))) found.push(`${file}: ${hit}`);
+    }
+    expect(found).toEqual([]);
+  });
+});
+
 describe("legacy token vocabulary", () => {
   it("is recognised by the guard (positive control)", () => {
     // One hit per pattern family: the colour utilities and the type roles.
