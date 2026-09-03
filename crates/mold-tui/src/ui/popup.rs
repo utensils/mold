@@ -16,6 +16,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
         Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
         Some(Popup::ReferencesInput { .. }) => render_references_input(frame, app),
+        Some(Popup::ReferenceImagesInput { .. }) => render_reference_images_input(frame, app),
         Some(Popup::IdentityImageInput { .. }) => render_identity_image_input(frame, app),
         Some(Popup::SourceImageInput { .. }) => render_source_image_input(frame, app),
         Some(Popup::FilingInput { .. }) => render_filing_input(frame, app),
@@ -658,17 +659,52 @@ fn render_stg_blocks_input(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_references_input(frame: &mut Frame, app: &mut App) {
-    let theme = &app.theme;
-    let area = centered_rect(frame.area(), 72, 24);
-    frame.render_widget(Clear, area);
-
     let Some(Popup::ReferencesInput { input, error }) = &app.popup else {
         return;
     };
+    render_ordered_reference_input(
+        frame,
+        &app.theme,
+        " Ordered H3 References ",
+        "Semicolon order is semantic: image=/a.png; video=/b.mp4; audio=/c.wav",
+        input,
+        error.as_deref(),
+    );
+}
+
+/// The ordered `edit_images` group. Same one-line editor as the H3 list —
+/// order is semantic in both — but the entries are plain image paths, because
+/// this group is read from disk rather than streamed through an upload
+/// session.
+fn render_reference_images_input(frame: &mut Frame, app: &mut App) {
+    let Some(Popup::ReferenceImagesInput { input, error }) = &app.popup else {
+        return;
+    };
+    render_ordered_reference_input(
+        frame,
+        &app.theme,
+        " Reference Images ",
+        "Semicolon order is semantic: /a.png; /b.jpg",
+        input,
+        error.as_deref(),
+    );
+}
+
+fn render_ordered_reference_input(
+    frame: &mut Frame,
+    theme: &crate::ui::theme::Theme,
+    title: &str,
+    hint: &str,
+    input: &str,
+    error: Option<&str>,
+) {
+    let area = centered_rect(frame.area(), 72, 24);
+    frame.render_widget(Clear, area);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.popup_border())
-        .title(" Ordered H3 References ")
+        .title(title)
         .title_style(theme.title_focused())
         .style(theme.popup_bg());
     let inner = block.inner(area);
@@ -677,8 +713,7 @@ fn render_references_input(frame: &mut Frame, app: &mut App) {
         return;
     }
     frame.render_widget(
-        Paragraph::new("Semicolon order is semantic: image=/a.png; video=/b.mp4; audio=/c.wav")
-            .style(theme.dim()),
+        Paragraph::new(hint).style(theme.dim()),
         Rect { height: 1, ..inner },
     );
     frame.render_widget(
@@ -693,7 +728,7 @@ fn render_references_input(frame: &mut Frame, app: &mut App) {
     );
     if let Some(error) = error {
         frame.render_widget(
-            Paragraph::new(error.as_str()).style(theme.error()),
+            Paragraph::new(error).style(theme.error()),
             Rect {
                 y: inner.y + inner.height.saturating_sub(2),
                 height: 1,
