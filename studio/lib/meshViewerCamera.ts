@@ -68,19 +68,37 @@ export function azimuthDegOfYaw(yaw: number): number {
  * it depends on neither the azimuth nor the frame count, the poster, a 36-frame
  * turntable, a 72-frame one and this viewer all frame the mesh identically.
  *
- * `0` when there is nothing finite to frame, which the caller reads as "draw
- * nothing" rather than as a scale.
+ * The elevation is used by magnitude, so looking up at the mesh frames it
+ * exactly as looking down does. `0` when there is nothing finite to frame,
+ * which the caller reads as "draw nothing" rather than as a scale.
  */
 export function sweepExtent(
   positions: Float32Array | ArrayLike<number>,
   center: readonly [number, number, number],
   elevationRad: number,
 ): number {
-  const sinE = Math.sin(elevationRad);
-  const cosE = Math.cos(elevationRad);
+  return sweepExtentOfProfile(sweepProfile(positions, center), elevationRad);
+}
+
+/**
+ * The `(radial, |dy|)` pair per finite vertex, interleaved — everything
+ * [`sweepExtentOfProfile`] needs, and nothing else.
+ *
+ * Two thirds the size of the positions it replaces, and it lifts the centring,
+ * the hypotenuse and the finiteness check out of the per-elevation loop. A
+ * viewer that re-frames as the mesh tilts pays for those once, at upload.
+ *
+ * The pairs are stored single-precision, which is the precision `sweep_fit_for`
+ * computes the same bound at.
+ */
+export function sweepProfile(
+  positions: Float32Array | ArrayLike<number>,
+  center: readonly [number, number, number],
+): Float32Array {
   const [cx, cy, cz] = center;
   const triples = positions.length - (positions.length % 3);
-  let extent = 0;
+  const out = new Float32Array((triples / 3) * 2);
+  let count = 0;
   for (let i = 0; i < triples; i += 3) {
     const dx = (positions[i] ?? Number.NaN) - cx;
     const dy = (positions[i + 1] ?? Number.NaN) - cy;
@@ -89,8 +107,35 @@ export function sweepExtent(
     if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) {
       continue;
     }
-    const radial = Math.hypot(dx, dz);
-    const candidate = Math.max(radial, cosE * Math.abs(dy) + sinE * radial);
+    out[count] = Math.hypot(dx, dz);
+    out[count + 1] = Math.abs(dy);
+    count += 2;
+  }
+  return count === out.length ? out : out.slice(0, count);
+}
+
+/**
+ * [`sweepExtent`] evaluated against a prepared [`sweepProfile`], for a viewer
+ * that has to re-frame every time the elevation changes.
+ *
+ * Identical to `sweepExtent` for the same inputs — a test pins that — so the
+ * profile is an optimization and never a second definition of the framing.
+ */
+export function sweepExtentOfProfile(
+  profile: Float32Array | ArrayLike<number>,
+  elevationRad: number,
+): number {
+  // Absolute values, so a camera looking UP at the mesh is bounded exactly as
+  // one looking down: only the magnitudes of the two basis terms matter.
+  // `sweep_fit_for` takes the same absolutes.
+  const sinE = Math.abs(Math.sin(elevationRad));
+  const cosE = Math.abs(Math.cos(elevationRad));
+  const pairs = profile.length - (profile.length % 2);
+  let extent = 0;
+  for (let i = 0; i < pairs; i += 2) {
+    const radial = profile[i] ?? 0;
+    const height = profile[i + 1] ?? 0;
+    const candidate = Math.max(radial, cosE * height + sinE * radial);
     if (candidate > extent) extent = candidate;
   }
   return extent;

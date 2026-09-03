@@ -25,7 +25,8 @@ import {
   POSTER_MARGIN,
   rotationX,
   rotationY,
-  sweepExtent,
+  sweepExtentOfProfile,
+  sweepProfile,
   translation,
   upper3x3,
 } from "../lib/meshViewerCamera";
@@ -178,10 +179,13 @@ interface Scene {
   /** Half the bounding-box diagonal. The depth range only — never the fit. */
   radius: number;
   /**
-   * The rotation-invariant half-extent the poster and the turntable frame to,
-   * so this viewer's home view IS the thumbnail and IS turntable frame 0.
+   * The half-extent the poster and the turntable frame to, at the poster's own
+   * elevation, so this viewer's home view IS the thumbnail and IS turntable
+   * frame 0. Never recomputed: it is the parity value.
    */
   extent: number;
+  /** `(radial, |dy|)` per vertex, so a tilt can re-frame without the mesh. */
+  profile: Float32Array;
   uniforms: {
     modelView: WebGLUniformLocation | null;
     projection: WebGLUniformLocation | null;
@@ -193,6 +197,17 @@ interface Scene {
 }
 
 let scene: Scene | null = null;
+/**
+ * The last pitch the framing was solved for, and its answer.
+ *
+ * The sweep bound is invariant in AZIMUTH, not in elevation, so a viewer
+ * tilted away from the poster's 20° needs its own extent or the silhouette
+ * runs off the top and bottom of the frame. Solving it per drag frame is one
+ * pass over `Scene.profile`; caching on the pitch means a yaw drag, the
+ * auto-rotate tour, a zoom and a resize never pay for it at all.
+ */
+let framedPitch = Number.NaN;
+let framedExtent = 0;
 let controller: AbortController | null = null;
 let frame = 0;
 let intersection: IntersectionObserver | null = null;
@@ -240,6 +255,25 @@ function resizeCanvas(gl: GL): void {
   gl.viewport(0, 0, element.width, element.height);
 }
 
+/**
+ * The half-extent to frame this mesh to at `pitch`.
+ *
+ * Never below the poster's own extent, so the home view is the poster's exact
+ * framing (at `HOME.pitch` the two agree by construction and the max is a
+ * no-op) and a tilt only ever pulls back — a mesh cannot grow past the
+ * thumbnail's size as it is turned.
+ */
+function framedExtentFor(current: Scene, pitch: number): number {
+  if (pitch !== framedPitch) {
+    framedPitch = pitch;
+    framedExtent = Math.max(
+      current.extent,
+      sweepExtentOfProfile(current.profile, pitch),
+    );
+  }
+  return framedExtent;
+}
+
 function draw(): void {
   if (!scene) return;
   const { gl, program, uniforms } = scene;
@@ -254,7 +288,12 @@ function draw(): void {
   // keys have always spoken — larger means further away — so it DIVIDES the
   // fit here exactly as it multiplied the eye distance under perspective.
   const scale =
-    orthographicScale(scene.extent, width, height, POSTER_MARGIN) / camera.zoom;
+    orthographicScale(
+      framedExtentFor(scene, camera.pitch),
+      width,
+      height,
+      POSTER_MARGIN,
+    ) / camera.zoom;
   // A mesh with no extent, or a canvas with no area, has nothing to frame:
   // clear rather than build a projection out of a division by zero.
   if (!(scale > 0)) {
@@ -563,6 +602,8 @@ async function upload(mesh: ParsedMesh): Promise<void> {
       Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2,
       1e-4,
     ) || 1;
+  const profile = sweepProfile(mesh.positions, center);
+  framedPitch = Number.NaN;
 
   scene = {
     gl,
@@ -577,7 +618,8 @@ async function upload(mesh: ParsedMesh): Promise<void> {
     edgeCount: 0,
     center,
     radius,
-    extent: sweepExtent(mesh.positions, center, HOME.pitch),
+    extent: sweepExtentOfProfile(profile, HOME.pitch),
+    profile,
     uniforms,
   };
   hasEdges.value = meshHasEdges(mesh.indices);
@@ -747,6 +789,7 @@ function releaseGl(): void {
     frame = 0;
   }
   wireframe.value = false;
+  framedPitch = Number.NaN;
   const current = scene;
   scene = null;
   if (!current) return;

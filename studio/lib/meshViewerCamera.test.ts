@@ -15,6 +15,8 @@ import {
   rotationX,
   rotationY,
   sweepExtent,
+  sweepExtentOfProfile,
+  sweepProfile,
   translation,
   TURNTABLE_AZIMUTH_STEP_SIGN,
   upper3x3,
@@ -103,7 +105,7 @@ describe("sweepExtent", () => {
     const extent = sweepExtent(positions, [0, 0, 0], elevation);
     expect(extent).toBeCloseTo(
       Math.cos(elevation) + Math.sin(elevation) * Math.SQRT2,
-      12,
+      6,
     );
     expect(extent).toBeCloseTo(1.4233823, 6);
     expect(extent).toBeGreaterThan(Math.SQRT2);
@@ -147,6 +149,18 @@ describe("sweepExtent", () => {
     expect(sweepExtent([Number.NaN, 0, 0], [0, 0, 0], elevation)).toBe(0);
     // A trailing partial vertex is dropped, not read as zeros.
     expect(sweepExtent([0, 0], [0, 0, 0], elevation)).toBe(0);
+  });
+
+  it("frames a camera looking up exactly as one looking down", () => {
+    // `sweep_fit_for` takes the magnitude of both trig terms; a negative
+    // elevation is the same view from below and must frame identically.
+    const positions = [1, 2, 3, -4, 5, -6, 0.5, -7, 2];
+    for (const degrees of [0, 20, 45, 89]) {
+      const radians = (degrees * Math.PI) / 180;
+      expect(sweepExtent(positions, [0, 0, 0], -radians)).toBe(
+        sweepExtent(positions, [0, 0, 0], radians),
+      );
+    }
   });
 
   it("reads a Float32Array the way it reads a plain array", () => {
@@ -246,5 +260,89 @@ describe("matrix helpers", () => {
     expect(Array.from(upper3x3(m))).toEqual(
       Array.from(upper3x3(rotationY(0.4))),
     );
+  });
+});
+
+describe("sweepProfile", () => {
+  const positions = [1, 2, 3, -4, 5, -6, 0.5, -7, 2, 0, 0, 0];
+  const center: [number, number, number] = [0.25, -0.5, 1];
+
+  it("is the (radial, |dy|) pair of every finite vertex", () => {
+    const profile = sweepProfile(positions, center);
+    expect(profile).toBeInstanceOf(Float32Array);
+    expect(profile).toHaveLength(8);
+    expect(profile[0]).toBeCloseTo(Math.hypot(1 - 0.25, 3 - 1), 5);
+    expect(profile[1]).toBeCloseTo(Math.abs(2 + 0.5), 5);
+  });
+
+  it("drops a non-finite vertex and a trailing partial one", () => {
+    expect(
+      sweepProfile([1, 0, 0, Number.NaN, 0, 0, 2, 0, 0], [0, 0, 0]),
+    ).toHaveLength(4);
+    expect(sweepProfile([1, 0, 0, 5, 5], [0, 0, 0])).toHaveLength(2);
+    expect(sweepProfile([], [0, 0, 0])).toHaveLength(0);
+  });
+});
+
+describe("sweepExtentOfProfile", () => {
+  /**
+   * The bound written out longhand, straight from `sweep_fit_for`, with no
+   * profile in between: the oracle both production paths must reproduce.
+   */
+  function reference(
+    positions: number[],
+    center: [number, number, number],
+    elevationRad: number,
+  ): number {
+    const sinE = Math.abs(Math.sin(elevationRad));
+    const cosE = Math.abs(Math.cos(elevationRad));
+    let extent = 0;
+    for (let i = 0; i + 2 < positions.length; i += 3) {
+      const dx = (positions[i] ?? 0) - center[0];
+      const dy = (positions[i + 1] ?? 0) - center[1];
+      const dz = (positions[i + 2] ?? 0) - center[2];
+      const radial = Math.hypot(dx, dz);
+      extent = Math.max(extent, radial, cosE * Math.abs(dy) + sinE * radial);
+    }
+    return extent;
+  }
+
+  /*
+   * The profile exists only so a tilting viewer can re-frame without the
+   * mesh; it must never become a second definition of the framing.
+   */
+  it("agrees with sweepExtent, and with the longhand bound, at every elevation", () => {
+    const positions = [1, 2, 3, -4, 5, -6, 0.5, -7, 2, 0, 0, 0, 9, -1, -2];
+    const center: [number, number, number] = [0.25, -0.5, 1];
+    const profile = sweepProfile(positions, center);
+    for (const degrees of [-89, -20, 0, 20, 45, 89]) {
+      const radians = (degrees * Math.PI) / 180;
+      const value = sweepExtentOfProfile(profile, radians);
+      expect(value).toBe(sweepExtent(positions, center, radians));
+      // The profile stores its pairs as f32, exactly as the Rust bound
+      // computes them, so the agreement is to single precision.
+      expect(value).toBeCloseTo(reference(positions, center, radians), 5);
+    }
+  });
+
+  it("grows as the camera tilts away from the poster's elevation", () => {
+    // A half-unit cube: 0.7117 at 20°, 0.8536 at 45°. Framing the 45° view
+    // with the 20° number would clip a tenth of the silhouette.
+    const positions: number[] = [];
+    for (const x of [-0.5, 0.5])
+      for (const y of [-0.5, 0.5])
+        for (const z of [-0.5, 0.5]) positions.push(x, y, z);
+    const profile = sweepProfile(positions, [0, 0, 0]);
+    const poster = sweepExtentOfProfile(
+      profile,
+      (POSTER_ELEVATION_DEG * Math.PI) / 180,
+    );
+    expect(poster).toBeCloseTo(0.7117, 4);
+    expect(sweepExtentOfProfile(profile, Math.PI / 4)).toBeCloseTo(0.8536, 4);
+    expect(sweepExtentOfProfile(profile, Math.PI / 4)).toBeGreaterThan(poster);
+  });
+
+  it("is zero for an empty profile", () => {
+    expect(sweepExtentOfProfile(new Float32Array(0), 0.3)).toBe(0);
   });
 });

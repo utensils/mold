@@ -11,6 +11,8 @@ import {
   rotationX,
   rotationY,
   sweepExtent,
+  sweepExtentOfProfile,
+  sweepProfile,
   translation,
 } from "../lib/meshViewerCamera";
 import MeshViewer from "./MeshViewer.vue";
@@ -390,6 +392,31 @@ function fullyAttributedGlb(): ArrayBuffer {
     uvs: [0, 0, 1, 0, 0, 1],
   });
   return assemble(json, bin);
+}
+
+/** A unit cube centred on the origin: something with a real silhouette to tilt. */
+function boxGlb(): ArrayBuffer {
+  const positions: number[] = [];
+  for (const x of [-0.5, 0.5])
+    for (const y of [-0.5, 0.5])
+      for (const z of [-0.5, 0.5]) positions.push(x, y, z);
+  const { json, bin } = buildDocument({
+    positions,
+    indices: [
+      0, 1, 3, 0, 3, 2, 4, 5, 7, 4, 7, 6, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 0,
+      2, 6, 0, 6, 4, 1, 3, 7, 1, 7, 5,
+    ],
+  });
+  return assemble(json, bin);
+}
+
+/** The eight corners of `boxGlb`, in the order it writes them. */
+function boxCorners(): [number, number, number][] {
+  const corners: [number, number, number][] = [];
+  for (const x of [-0.5, 0.5])
+    for (const y of [-0.5, 0.5])
+      for (const z of [-0.5, 0.5]) corners.push([x, y, z]);
+  return corners;
 }
 
 /** A well-formed GLB whose one triangle is fully degenerate: no edges at all. */
@@ -803,6 +830,13 @@ describe("MeshViewer camera parity", () => {
     };
   }
 
+  /** The box fixture's own profile and poster-elevation extent. */
+  function boxFrame(): { profile: Float32Array; extent: number } {
+    const mesh = parseGlb(boxGlb());
+    const profile = sweepProfile(mesh.positions, [0, 0, 0]);
+    return { profile, extent: sweepExtentOfProfile(profile, HOME.pitch) };
+  }
+
   /** `T(0,0,-d) · Rx(pitch) · Ry(yaw) · T(-centre)`, the viewer's modelView. */
   function expectedModelView(
     yaw: number,
@@ -911,6 +945,82 @@ describe("MeshViewer camera parity", () => {
       gl.modelViews.at(-1),
       expectedModelView(HOME.yaw, HOME.pitch, radius * 3, center),
     );
+
+    gl.restore();
+    wrapper.unmount();
+  });
+
+  it("re-frames as the mesh tilts, so a 45-degree view is never clipped", async () => {
+    const gl = stubWebgl();
+    const raf = stubRaf();
+    stubFetch(() => ok(boxGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/box.glb" } });
+    await flushPromises();
+
+    const home = gl.projections[0];
+    expect(home).toBeDefined();
+    const homeHalfHeight = 1 / (home?.[5] ?? 1);
+
+    // `orbit(0, dy * 0.008)`: the pixels that take the poster's 20° to 45°.
+    const pixels = (Math.PI / 4 - HOME.pitch) / 0.008;
+    const pitch = HOME.pitch + pixels * 0.008;
+    const canvas = wrapper.get("[data-test=mesh-viewer-canvas]");
+    await canvas.trigger("pointerdown", {
+      pointerId: 1,
+      clientX: 0,
+      clientY: 0,
+    });
+    await canvas.trigger("pointermove", {
+      pointerId: 1,
+      clientX: 0,
+      clientY: pixels,
+    });
+    raf.run(16);
+
+    const tilted = gl.projections.at(-1);
+    const modelView = gl.modelViews.at(-1);
+    expect(tilted).toBeDefined();
+    expect(modelView).toBeDefined();
+    const halfWidth = 1 / (tilted?.[0] ?? 1);
+    const halfHeight = 1 / (tilted?.[5] ?? 1);
+    const view = Float32Array.from(modelView ?? []);
+
+    let tallest = 0;
+    for (const corner of boxCorners()) {
+      const projected = [0, 1].map((row) => {
+        let sum = view[12 + row] ?? 0;
+        for (let k = 0; k < 3; k += 1) {
+          sum += (view[k * 4 + row] ?? 0) * (corner[k] ?? 0);
+        }
+        return sum;
+      });
+      // Nothing runs off the frame at the tilt the person is holding.
+      expect(Math.abs(projected[0] ?? 0)).toBeLessThanOrEqual(halfWidth + 1e-5);
+      expect(Math.abs(projected[1] ?? 0)).toBeLessThanOrEqual(
+        halfHeight + 1e-5,
+      );
+      tallest = Math.max(tallest, Math.abs(projected[1] ?? 0));
+    }
+    // Non-vacuous: the poster's own framing WOULD have clipped this view, so
+    // the assertions above are describing the re-frame and not a coincidence.
+    expect(tallest).toBeGreaterThan(homeHalfHeight);
+    expect(halfHeight).toBeGreaterThan(homeHalfHeight);
+    // The tilt only ever pulls back, and by the sweep bound at that pitch.
+    const { extent } = boxFrame();
+    expect(extent).toBeCloseTo(0.7117, 4);
+    const tiltedExtent = sweepExtentOfProfile(boxFrame().profile, pitch);
+    expect(halfHeight).toBeCloseTo(
+      160 / orthographicScale(tiltedExtent, 320, 320, POSTER_MARGIN),
+      4,
+    );
+
+    // Home is still the poster's exact framing after a round trip.
+    await canvas.trigger("keydown", { key: "0" });
+    raf.run(32);
+    const restored = gl.projections.at(-1);
+    for (let i = 0; i < 16; i += 1) {
+      expect(restored?.[i]).toBeCloseTo(home?.[i] ?? 0, 6);
+    }
 
     gl.restore();
     wrapper.unmount();
