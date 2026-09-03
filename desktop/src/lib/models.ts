@@ -5,7 +5,13 @@
  */
 import type { ModelEntry } from "./api/types";
 import { formatGB } from "./format";
-import { isCatalogModelId, isOpaqueModelId, modelDisplayName, modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
+import {
+  isCatalogModelId,
+  isOpaqueModelId,
+  modelDisplayName,
+  modelDisplayNameForId,
+  type DisplayableModel,
+} from "@studio/lib/modelDisplay";
 
 export {
   isCatalogModelId,

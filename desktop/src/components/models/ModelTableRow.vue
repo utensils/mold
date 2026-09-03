@@ -81,8 +81,8 @@ const footprintDescriptionId = `model-footprint-${useId()}`;
 const familyChip = computed(() => (props.family ? familyLabel(props.family) : ""));
 /** A manifest model's display name IS its id — one line, never two copies —
  * and an opaque install id is a number nobody recognises, so it stays off. */
-const showId = computed(
-  () => Boolean(props.id && props.id !== props.name && !isOpaqueModelId(props.id)),
+const showId = computed(() =>
+  Boolean(props.id && props.id !== props.name && !isOpaqueModelId(props.id)),
 );
 
 /**

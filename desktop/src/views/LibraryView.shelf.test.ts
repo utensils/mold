@@ -1110,7 +1110,7 @@ describe("Trash-aware This-Mac media + file actions", () => {
     await tileFor(wrapper, localTrashed.filename).trigger("dblclick");
     const lightbox = wrapper.getComponent({ name: "Lightbox" });
     expect(lightbox.props("trashed")).toBe(true);
-    const reveal = lightbox.findAll("button").find((b) => b.text() === "Reveal in file manager");
+    const reveal = lightbox.findAll("button").find((b) => b.text() === "Show the file");
     expect(reveal, "trashed local prints keep a working Reveal").toBeDefined();
     await reveal!.trigger("click");
     await flushPromises();

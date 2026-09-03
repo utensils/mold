@@ -102,7 +102,7 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
     />
     <div
       v-if="menu.visible"
-      class="border-border fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-window border bg-bg py-1 shadow-md"
+      class="fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-control border border-border bg-surface py-1 shadow-md"
       :style="{
         left: `${menu.x}px`,
         top: `${menu.y}px`,
@@ -122,7 +122,7 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
           :aria-disabled="entry.disabled || undefined"
           :aria-haspopup="hasChildren(entry) ? 'menu' : undefined"
           :aria-expanded="hasChildren(entry) ? menu.submenu?.parentIndex === i : undefined"
-          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-sm transition-colors duration-75"
+          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-xs transition-colors duration-75"
           :class="itemClasses(entry, i === menu.highlighted)"
           :disabled="entry.disabled"
           @mouseenter="onRootEnter(entry, i, $event)"
@@ -148,7 +148,7 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
     </div>
     <div
       v-if="menu.visible && menu.submenu"
-      class="border-border fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-window border bg-bg py-1 shadow-md"
+      class="fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-control border border-border bg-surface py-1 shadow-md"
       :style="{
         left: `${menu.submenu.x}px`,
         top: `${menu.submenu.y}px`,
@@ -167,7 +167,7 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
           :role="entry.checked !== undefined ? 'menuitemcheckbox' : 'menuitem'"
           :aria-checked="entry.checked !== undefined ? entry.checked : undefined"
           :aria-disabled="entry.disabled || undefined"
-          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-sm transition-colors duration-75"
+          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-xs transition-colors duration-75"
           :class="itemClasses(entry, j === menu.submenu.highlighted)"
           :disabled="entry.disabled"
           @mouseenter="menu.submenu.highlighted = j"

@@ -27,12 +27,14 @@ describe("Toasts a11y roles", () => {
     expect(error.attributes("aria-live")).toBe("assertive");
   });
 
-  it("anchors the shelf to the top of the window, clear of the title bar", async () => {
+  it("anchors the shelf bottom-right, above the status bar", async () => {
     const wrapper = mount(Toasts);
     const classes = wrapper.get("[aria-label='Notifications']").classes();
 
-    expect(classes.some((c) => c.startsWith("top-"))).toBe(true);
-    expect(classes.some((c) => c.startsWith("bottom-"))).toBe(false);
+    expect(classes.some((c) => c.startsWith("bottom-[calc(var(--mold-shell-statusbar-h)"))).toBe(
+      true,
+    );
+    expect(classes.some((c) => c.startsWith("top-"))).toBe(false);
   });
 
   it("renders the newest toast first so it slides in above the older ones", async () => {
@@ -76,7 +78,7 @@ describe("Toasts a11y roles", () => {
     expect(toast.get("[data-test='toast-description']").text()).toBe(
       "It stays listed for reconnect.",
     );
-    expect(toast.classes()).toContain("w-[min(25rem,calc(100vw-2rem))]");
+    expect(toast.classes()).toContain("w-80");
 
     await toast.get("[data-test='toast-action']").trigger("click");
     expect(openMachines).toHaveBeenCalledOnce();

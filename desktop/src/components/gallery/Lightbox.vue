@@ -542,17 +542,83 @@ async function performVideoExport(options: VideoExportOptions) {
 
 <template>
   <div
-    class="lightbox-scrim fixed inset-0 z-40 flex items-center justify-center p-10"
+    class="lightbox-scrim fixed inset-0 z-40 flex flex-col"
     role="dialog"
     aria-modal="true"
     :aria-label="`Print ${index + 1} of ${count}`"
-    @click.self="emit('close')"
   >
+    <!-- header: filename · how it was made, in mono · the print's actions -->
     <div
-      class="ms-fade-up flex max-h-[86vh] w-full max-w-[1000px] overflow-hidden rounded-card-lg border border-border bg-bg shadow-md"
+      class="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-border px-3.5"
+      data-test="lightbox-header"
     >
+      <span
+        class="min-w-0 truncate font-mono text-xs text-fg-2"
+        data-test="lightbox-filename"
+        :title="item.filename"
+      >
+        {{ item.filename }}
+      </span>
+      <span class="shrink-0 font-mono text-micro text-fg-dim">
+        {{ meta.width }}×{{ meta.height }} · {{ modelLabel }} · {{ index + 1 }} / {{ count }}
+      </span>
+      <span class="flex-1" />
+      <button
+        v-if="showOrganization"
+        type="button"
+        class="ms-toolbar-button h-[28px]"
+        :class="{ 'lightbox-fav--on': isFavorite }"
+        :aria-pressed="isFavorite"
+        :aria-label="isFavorite ? 'Unfavorite' : 'Favorite'"
+        :title="isFavorite ? 'Unfavorite (F)' : 'Favorite (F)'"
+        data-test="lightbox-favorite"
+        @click="emit('favorite', !isFavorite)"
+      >
+        <span class="font-mono" :class="isFavorite ? 'text-star' : 'text-fg-dim'">★</span>
+        {{ isFavorite ? "Favourited" : "Favourite" }}
+      </button>
+      <button
+        type="button"
+        data-test="save-media"
+        class="ms-toolbar-button h-[28px]"
+        :disabled="saveBusy"
+        @click="saveMedia"
+      >
+        {{ saveBusy ? "Saving…" : audio ? "Save audio" : video ? "Save video" : "Save image" }}
+      </button>
+      <button
+        type="button"
+        data-test="lightbox-primary-action"
+        class="ms-toolbar-button ms-toolbar-button--on h-[28px] font-semibold"
+        @click="primaryAction"
+      >
+        <Icon name="reuse" :size="13" />
+        {{
+          isSequence
+            ? canEditSequence
+              ? "Edit sequence"
+              : "Duplicate as new"
+            : "Use these settings"
+        }}
+      </button>
+      <button
+        ref="closeBtn"
+        type="button"
+        class="flex h-[28px] w-[28px] items-center justify-center rounded-control text-fg-2 transition-colors duration-100 hover:bg-surface hover:text-fg"
+        title="Close (Esc)"
+        aria-label="Close"
+        @click="emit('close')"
+      >
+        <Icon name="close" :size="15" />
+      </button>
+    </div>
+
+    <div class="flex min-h-0 flex-1">
       <!-- media pane -->
-      <div class="relative flex min-w-0 flex-1 items-center justify-center bg-media-bed p-5">
+      <div
+        class="relative flex min-w-0 flex-1 items-center justify-center p-6"
+        @click.self="emit('close')"
+      >
         <div
           data-test="lightbox-media"
           class="relative flex h-full w-full items-center justify-center overflow-hidden"
@@ -597,47 +663,31 @@ async function performVideoExport(options: VideoExportOptions) {
         </div>
         <button
           type="button"
-          class="absolute top-1/2 left-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control bg-black/50 text-on-media transition-opacity duration-100 hover:bg-black/70 disabled:opacity-30"
+          class="absolute top-1/2 left-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control border border-border bg-surface text-fg-2 transition-colors duration-100 hover:text-fg disabled:opacity-30"
           :disabled="index === 0"
           aria-label="Previous print"
           @click="emit('prev')"
         >
-          <Icon name="chevron-left" :size="22" />
+          <Icon name="chevron-left" :size="20" />
         </button>
         <button
           type="button"
-          class="absolute top-1/2 right-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control bg-black/50 text-on-media transition-opacity duration-100 hover:bg-black/70 disabled:opacity-30"
+          class="absolute top-1/2 right-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control border border-border bg-surface text-fg-2 transition-colors duration-100 hover:text-fg disabled:opacity-30"
           :disabled="index === count - 1"
           aria-label="Next print"
           @click="emit('next')"
         >
-          <Icon name="chevron-right" :size="22" />
+          <Icon name="chevron-right" :size="20" />
         </button>
       </div>
 
-      <!-- details pane -->
-      <aside class="flex w-80 shrink-0 flex-col p-6">
-        <div class="mb-4 flex items-center gap-2.5">
-          <span class="lightbox-kicker">Print details</span>
-          <div class="flex-1" />
-          <span class="font-mono text-xs text-micro text-fg-dim"
-            >{{ index + 1 }} / {{ count }}</span
-          >
-          <button
-            ref="closeBtn"
-            type="button"
-            class="flex h-[30px] w-[30px] items-center justify-center rounded-control bg-row-hover text-base text-fg-2 transition-colors duration-100 hover:text-fg"
-            title="Close (Esc)"
-            aria-label="Close"
-            @click="emit('close')"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div class="min-h-0 flex-1 overflow-y-auto">
-          <!-- Title lead line: editable when a host can organize, else the
-               display title (title ?? prompt excerpt ?? filename stem). -->
+      <!-- aside: words used · how it was made · tags · the secondary actions -->
+      <aside
+        class="flex w-[var(--mold-shell-inspector-w)] shrink-0 flex-col gap-3.5 overflow-y-auto border-l border-border bg-bg-deep p-4"
+      >
+        <!-- Title lead line: editable when a host can organize, else the
+             display title (title ?? prompt excerpt ?? filename stem). -->
+        <div class="flex flex-col gap-1">
           <div class="flex items-center gap-2" data-test="lightbox-title-row">
             <input
               v-if="canOrganize"
@@ -664,42 +714,18 @@ async function performVideoExport(options: VideoExportOptions) {
             >
               {{ headline }}
             </span>
-            <button
-              v-if="showOrganization"
-              type="button"
-              class="lightbox-fav flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-window border transition-colors duration-100"
-              :class="
-                isFavorite
-                  ? 'lightbox-fav--on border-accent text-accent'
-                  : 'border-border text-fg-dim hover:text-fg'
-              "
-              :aria-pressed="isFavorite"
-              :aria-label="isFavorite ? 'Unfavorite' : 'Favorite'"
-              :title="isFavorite ? 'Unfavorite (F)' : 'Favorite (F)'"
-              data-test="lightbox-favorite"
-              @click="emit('favorite', !isFavorite)"
-            >
-              <Icon name="heart" :size="15" />
-            </button>
           </div>
           <p
             v-if="titleError"
-            class="mt-1 text-micro text-error"
+            class="text-micro text-error"
             data-test="lightbox-title-error"
             role="alert"
           >
             {{ titleError }}
           </p>
-          <span
-            class="font-mono text-xs mt-1.5 block truncate text-micro text-fg-dim"
-            data-test="lightbox-filename"
-            :title="item.filename"
-          >
-            {{ item.filename }}
-          </span>
           <p
             v-if="purge"
-            class="mt-2 font-mono text-micro text-fg-2"
+            class="font-mono text-micro text-fg-2"
             data-test="lightbox-purge"
             :data-kind="purge.kind"
           >
@@ -711,30 +737,171 @@ async function performVideoExport(options: VideoExportOptions) {
             </template>
             <template v-else>In the trash · kept until you empty it</template>
           </p>
-          <div class="mt-3 flex items-start gap-2">
-            <p
-              data-selectable
-              data-test="lightbox-prompt"
-              class="min-w-0 flex-1 whitespace-pre-wrap text-sm text-fg"
-              :title="meta.prompt"
-            >
-              {{ meta.prompt }}
-            </p>
+        </div>
+
+        <!-- Words used -->
+        <div class="flex flex-col gap-1.5">
+          <span class="flex items-center gap-2">
+            <span class="ms-group-label uppercase">Words used</span>
+            <span class="flex-1" />
             <button
               v-if="meta.prompt"
               type="button"
               data-test="copy-prompt"
-              class="flex h-[30px] shrink-0 items-center gap-1.5 rounded-window border border-border px-2 font-mono text-micro text-fg-2 transition-colors hover:text-fg"
+              class="flex items-center gap-1 font-mono text-micro text-fg-dim hover:text-fg"
               aria-label="Copy prompt"
               title="Copy prompt"
               @click="copy(meta.prompt)"
             >
-              <Icon name="copy" :size="14" />
-              Copy
+              <Icon name="copy" :size="12" />
+              copy
             </button>
-          </div>
-          <template v-if="showOrganization">
-            <p class="lightbox-kicker mt-4 mb-1.5">Tags</p>
+          </span>
+          <p
+            data-selectable
+            data-test="lightbox-prompt"
+            class="whitespace-pre-wrap text-sm leading-relaxed text-fg"
+            :title="meta.prompt"
+          >
+            {{ meta.prompt }}
+          </p>
+          <p
+            v-if="meta.original_prompt"
+            data-test="lightbox-original"
+            data-selectable
+            class="text-micro text-fg-2"
+            :title="meta.original_prompt"
+          >
+            <span class="text-fg-dim">Before Write more for me</span> {{ meta.original_prompt }}
+          </p>
+          <p
+            v-if="meta.negative_prompt"
+            data-test="lightbox-negative"
+            data-selectable
+            class="text-micro text-fg-2"
+            :title="meta.negative_prompt"
+          >
+            <span class="text-fg-dim">Kept out</span> {{ meta.negative_prompt }}
+          </p>
+          <p
+            v-if="meta.batch_id && meta.batch_index && meta.batch_count"
+            data-test="lightbox-batch"
+            data-selectable
+            class="text-micro text-fg-2"
+            :title="meta.batch_id"
+          >
+            <span class="text-fg-dim">Prepared batch</span>
+            {{ meta.batch_index }} of {{ meta.batch_count }} · {{ meta.batch_id }}
+          </p>
+        </div>
+
+        <!-- How it was made: plain label left, mono truth right -->
+        <div class="flex flex-col gap-2">
+          <span class="ms-group-label uppercase">How it was made</span>
+          <dl class="flex flex-col gap-1.5">
+            <div class="lightbox-fact">
+              <dt>Style</dt>
+              <dd class="truncate">{{ modelLabel }}</dd>
+            </div>
+            <div class="lightbox-fact">
+              <dt>Size</dt>
+              <dd>{{ meta.width }} × {{ meta.height }}</dd>
+            </div>
+            <div class="lightbox-fact">
+              <dt>Detail</dt>
+              <dd>{{ meta.steps }} passes</dd>
+            </div>
+            <div class="lightbox-fact">
+              <dt>Stick to my words</dt>
+              <dd>{{ meta.guidance.toFixed(1) }}</dd>
+            </div>
+            <div class="lightbox-fact">
+              <dt>Repeat this look</dt>
+              <dd>
+                <button
+                  type="button"
+                  class="font-mono hover:text-accent"
+                  title="Copy seed"
+                  @click="copy(String(meta.seed))"
+                >
+                  seed {{ meta.seed }} ⧉
+                </button>
+              </dd>
+            </div>
+            <div v-if="schedulerName" class="lightbox-fact" data-test="lightbox-scheduler">
+              <dt>Scheduler</dt>
+              <dd>{{ schedulerName }}</dd>
+            </div>
+            <div v-if="meta.cfg_plus" class="lightbox-fact" data-test="lightbox-cfg-plus">
+              <dt>CFG++</dt>
+              <dd>on</dd>
+            </div>
+            <div v-if="meta.strength != null" class="lightbox-fact" data-test="lightbox-strength">
+              <dt>{{ strengthCaption }}</dt>
+              <dd>{{ meta.strength.toFixed(2) }}</dd>
+            </div>
+            <div v-if="frames" class="lightbox-fact" data-test="lightbox-video">
+              <dt>Length</dt>
+              <dd>
+                {{ frames }} frames<template v-if="fps"> · {{ fps }} fps</template>
+              </dd>
+            </div>
+            <div v-if="pipeline" class="lightbox-fact" data-test="lightbox-pipeline">
+              <dt>Pipeline</dt>
+              <dd>{{ pipeline }}</dd>
+            </div>
+            <div
+              v-for="l in loraStack"
+              :key="l.path"
+              class="lightbox-fact"
+              data-test="lightbox-lora"
+            >
+              <dt>Add-on look</dt>
+              <dd class="truncate" :title="l.path">{{ l.path }} × {{ l.scale.toFixed(2) }}</dd>
+            </div>
+            <div v-if="identity" class="lightbox-fact" data-test="lightbox-identity-photo">
+              <dt>Face photo</dt>
+              <dd class="truncate" :title="identity.sha256 ?? undefined">
+                {{ identity.name ?? "Identity photo"
+                }}<template v-if="identity.shortSha"> · {{ identity.shortSha }}</template>
+              </dd>
+            </div>
+            <div v-if="identity" class="lightbox-fact" data-test="lightbox-identity">
+              <dt>Face strength</dt>
+              <dd>{{ identity.weight }} · from step {{ identity.startStep }}</dd>
+            </div>
+            <div v-if="fileSize" class="lightbox-fact" data-test="lightbox-file-size">
+              <dt>File size</dt>
+              <dd>{{ fileSize }}</dd>
+            </div>
+            <div v-if="fileFormat" class="lightbox-fact" data-test="lightbox-format">
+              <dt>Format</dt>
+              <dd>{{ fileFormat.toUpperCase() }}</dd>
+            </div>
+            <div class="lightbox-fact">
+              <dt>Made</dt>
+              <dd>{{ when }}</dd>
+            </div>
+            <div v-if="hostLabel" class="lightbox-fact" data-test="lightbox-host">
+              <dt>Made on</dt>
+              <dd class="truncate">{{ hostLabel }}</dd>
+            </div>
+          </dl>
+          <span
+            v-if="meta.version"
+            class="font-mono text-micro text-fg-dim"
+            data-test="lightbox-version"
+          >
+            mold {{ meta.version }}
+          </span>
+          <span v-if="item.metadata_synthetic" class="font-mono text-micro text-fg-dim"
+            >SYNTHETIC METADATA</span
+          >
+        </div>
+
+        <template v-if="showOrganization">
+          <div class="flex flex-col gap-1.5">
+            <span class="ms-group-label uppercase">Tags</span>
             <TagEditor
               :model-value="tags"
               :suggestions="tagSuggestions"
@@ -743,7 +910,9 @@ async function performVideoExport(options: VideoExportOptions) {
               @add="(name) => emit('tags', { add: [name], remove: [] })"
               @remove="(name) => emit('tags', { add: [], remove: [name] })"
             />
-            <p class="lightbox-kicker mt-4 mb-1.5">In collections</p>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <span class="ms-group-label uppercase">Albums</span>
             <CollectionPicker
               :collections="collections"
               :selected="inCollections"
@@ -753,300 +922,129 @@ async function performVideoExport(options: VideoExportOptions) {
               @toggle="(slug, checked) => emit('collections', { slug, checked })"
               @create="(name) => emit('collections', { name, checked: true })"
             />
-          </template>
-          <p
-            v-if="meta.original_prompt"
-            data-test="lightbox-original"
-            data-selectable
-            class="mt-2 text-micro text-fg-2"
-            :title="meta.original_prompt"
-          >
-            <span class="text-fg-dim">Original</span> {{ meta.original_prompt }}
-          </p>
-          <p
-            v-if="meta.negative_prompt"
-            data-test="lightbox-negative"
-            data-selectable
-            class="mt-2 text-micro text-fg-2"
-            :title="meta.negative_prompt"
-          >
-            <span class="text-fg-dim">Negative</span> {{ meta.negative_prompt }}
-          </p>
-          <p
-            v-if="meta.batch_id && meta.batch_index && meta.batch_count"
-            data-test="lightbox-batch"
-            data-selectable
-            class="mt-2 text-micro text-fg-2"
-            :title="meta.batch_id"
-          >
-            <span class="text-fg-dim">Prepared batch</span>
-            {{ meta.batch_index }} of {{ meta.batch_count }} · {{ meta.batch_id }}
-          </p>
+          </div>
+        </template>
 
-          <dl class="mt-4 space-y-2.5 font-mono">
-            <div class="flex justify-between gap-2">
-              <dt class="text-micro text-fg-dim">Model</dt>
-              <dd class="font-mono text-xs truncate text-micro text-fg">{{ modelLabel }}</dd>
-            </div>
-            <div class="flex justify-between gap-2">
-              <dt class="text-micro text-fg-dim">Seed</dt>
-              <dd>
-                <button
-                  type="button"
-                  class="font-mono text-xs text-micro text-fg hover:text-accent"
-                  title="Copy seed"
-                  @click="copy(String(meta.seed))"
-                >
-                  {{ meta.seed }} ⧉
-                </button>
-              </dd>
-            </div>
-            <div class="flex justify-between gap-2">
-              <dt class="text-micro text-fg-dim">Dimensions</dt>
-              <dd class="font-mono text-xs text-micro text-fg">
-                {{ meta.width }}×{{ meta.height }}
-              </dd>
-            </div>
-            <div class="flex justify-between gap-2">
-              <dt class="text-micro text-fg-dim">Steps · guidance</dt>
-              <dd class="font-mono text-xs text-micro text-fg">
-                {{ meta.steps }} · {{ meta.guidance.toFixed(1) }}
-              </dd>
-            </div>
-            <div
-              v-if="schedulerName"
-              class="flex justify-between gap-2"
-              data-test="lightbox-scheduler"
+        <!-- the secondary actions -->
+        <div class="mt-auto flex flex-col gap-2 pt-2">
+          <button
+            v-if="canEditSequence"
+            type="button"
+            data-test="lightbox-duplicate-sequence"
+            class="ms-toolbar-button justify-center"
+            @click="emit('reuseSequence')"
+          >
+            Duplicate as new
+          </button>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              data-test="lightbox-use-source"
+              class="ms-toolbar-button flex-1 justify-center"
+              :disabled="audio || mesh"
+              @click="emit('useSource')"
             >
-              <dt class="text-micro text-fg-dim">Scheduler</dt>
-              <dd class="font-mono text-xs text-micro text-fg">{{ schedulerName }}</dd>
-            </div>
-            <div
-              v-if="meta.cfg_plus"
-              class="flex justify-between gap-2"
-              data-test="lightbox-cfg-plus"
+              Start from this photo
+            </button>
+            <button
+              v-if="upscaleEnabled && !audio && !mesh && !trashed"
+              type="button"
+              data-test="lightbox-upscale"
+              class="ms-toolbar-button flex-1 justify-center"
+              @click="emit('upscale')"
             >
-              <dt class="text-micro text-fg-dim">CFG++</dt>
-              <dd class="font-mono text-xs text-micro text-fg">on</dd>
-            </div>
-            <div
-              v-if="meta.strength != null"
-              class="flex justify-between gap-2"
-              data-test="lightbox-strength"
+              {{ video ? "Framewise upscale…" : "Make bigger…" }}
+            </button>
+          </div>
+          <!-- 3-D transcodes, straight from the holding host's own
+               `mesh.export_formats`. GLB is what is stored; these are made on
+               request. -->
+          <div
+            v-if="meshFileExports.length > 0 || meshAnimationExports.length > 0"
+            class="flex flex-wrap gap-2"
+            data-test="mesh-exports"
+          >
+            <button
+              v-for="format in meshFileExports"
+              :key="format"
+              type="button"
+              :data-test="`mesh-export-${format}`"
+              class="ms-toolbar-button flex-1 justify-center"
+              :disabled="exportBusy"
+              @click="exportMesh(format)"
             >
-              <dt class="text-micro text-fg-dim">{{ strengthCaption }}</dt>
-              <dd class="font-mono text-xs text-micro text-fg">{{ meta.strength.toFixed(2) }}</dd>
-            </div>
-            <div v-if="frames" class="flex justify-between gap-2" data-test="lightbox-video">
-              <dt class="text-micro text-fg-dim">Frames</dt>
-              <dd class="font-mono text-xs text-micro text-fg">
-                {{ frames }}<template v-if="fps"> · {{ fps }} fps</template>
-              </dd>
-            </div>
-            <div v-if="pipeline" class="flex justify-between gap-2" data-test="lightbox-pipeline">
-              <dt class="text-micro text-fg-dim">Pipeline</dt>
-              <dd class="font-mono text-xs text-micro text-fg">{{ pipeline }}</dd>
-            </div>
-            <div
-              v-for="l in loraStack"
-              :key="l.path"
-              class="flex justify-between gap-2"
-              data-test="lightbox-lora"
+              Export as {{ format.toUpperCase() }}…
+            </button>
+            <button
+              v-if="meshAnimationExports.length > 0"
+              type="button"
+              data-test="mesh-export-animation"
+              class="ms-toolbar-button flex-1 justify-center"
+              @click="openMeshAnimationExport"
             >
-              <dt class="text-micro text-fg-dim">LoRA</dt>
-              <dd class="font-mono text-xs truncate text-micro text-fg" :title="l.path">
-                {{ l.path }} × {{ l.scale.toFixed(2) }}
-              </dd>
-            </div>
-            <div
-              v-if="identity"
-              class="flex justify-between gap-2"
-              data-test="lightbox-identity-photo"
+              Export turntable…
+            </button>
+          </div>
+          <div class="flex gap-2">
+            <button
+              v-if="canExportVideo"
+              type="button"
+              data-test="export-video"
+              class="ms-toolbar-button flex-1 justify-center"
+              @click="openVideoExport"
             >
-              <dt class="text-micro text-fg-dim">Identity photo</dt>
-              <dd
-                class="font-mono text-xs truncate text-micro text-fg"
-                :title="identity.sha256 ?? undefined"
+              Export format…
+            </button>
+            <button
+              v-if="canReveal"
+              type="button"
+              class="ms-toolbar-button flex-1 justify-center"
+              @click="reveal"
+            >
+              Show the file
+            </button>
+            <template v-if="trashed">
+              <button
+                type="button"
+                data-test="lightbox-restore"
+                class="ms-toolbar-button flex-1 justify-center"
+                @click="emit('restore')"
               >
-                {{ identity.name ?? "Identity photo"
-                }}<template v-if="identity.shortSha"> · {{ identity.shortSha }}</template>
-              </dd>
-            </div>
-            <div v-if="identity" class="flex justify-between gap-2" data-test="lightbox-identity">
-              <dt class="text-micro text-fg-dim">Identity strength</dt>
-              <dd class="font-mono text-xs text-micro text-fg">
-                {{ identity.weight }} · from step {{ identity.startStep }}
-              </dd>
-            </div>
-            <div v-if="fileSize" class="flex justify-between gap-2" data-test="lightbox-file-size">
-              <dt class="text-micro text-fg-dim">File size</dt>
-              <dd class="font-mono text-xs text-micro text-fg">{{ fileSize }}</dd>
-            </div>
-            <div v-if="fileFormat" class="flex justify-between gap-2" data-test="lightbox-format">
-              <dt class="text-micro text-fg-dim">Format</dt>
-              <dd class="font-mono text-xs text-micro text-fg">{{ fileFormat.toUpperCase() }}</dd>
-            </div>
-            <div class="flex justify-between gap-2">
-              <dt class="text-micro text-fg-dim">Created</dt>
-              <dd class="text-micro text-fg">{{ when }}</dd>
-            </div>
-            <div v-if="hostLabel" class="flex justify-between gap-2" data-test="lightbox-host">
-              <dt class="text-micro text-fg-dim">Host</dt>
-              <dd class="font-mono text-xs truncate text-micro text-fg">{{ hostLabel }}</dd>
-            </div>
-          </dl>
-          <span
-            v-if="meta.version"
-            class="font-mono text-xs mt-2 block text-micro text-fg-dim"
-            data-test="lightbox-version"
-          >
-            mold {{ meta.version }}
-          </span>
-          <span
-            v-if="item.metadata_synthetic"
-            class="font-mono text-micro text-fg-dim whitespace-nowrap mt-2 block"
-            >SYNTHETIC METADATA</span
-          >
-        </div>
-
-        <button
-          type="button"
-          data-test="lightbox-primary-action"
-          class="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-control bg-accent text-base font-bold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
-          @click="primaryAction"
-        >
-          <Icon name="reuse" :size="15" />
-          {{
-            isSequence
-              ? canEditSequence
-                ? "Edit sequence"
-                : "Duplicate as new"
-              : "Reuse these settings"
-          }}
-        </button>
-        <button
-          v-if="canEditSequence"
-          type="button"
-          data-test="lightbox-duplicate-sequence"
-          class="border-border-control mt-2.5 h-10 w-full rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
-          @click="emit('reuseSequence')"
-        >
-          Duplicate as new
-        </button>
-        <div class="mt-2.5 flex gap-2.5">
-          <button
-            type="button"
-            data-test="lightbox-use-source"
-            class="border-border-control h-10 flex-1 rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
-            :disabled="audio || mesh"
-            @click="emit('useSource')"
-          >
-            Use as source
-          </button>
-          <button
-            type="button"
-            data-test="save-media"
-            class="border-border-control h-10 flex-1 rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
-            :disabled="saveBusy"
-            @click="saveMedia"
-          >
-            {{ saveBusy ? "Saving…" : audio ? "Save audio" : video ? "Save video" : "Save image" }}
-          </button>
-        </div>
-        <button
-          v-if="upscaleEnabled && !audio && !mesh && !trashed"
-          type="button"
-          data-test="lightbox-upscale"
-          class="border-border-control mt-2.5 h-10 w-full rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
-          @click="emit('upscale')"
-        >
-          {{ video ? "Framewise upscale…" : "Upscale…" }}
-        </button>
-        <!-- 3-D transcodes, straight from the holding host's own
-             `mesh.export_formats`. GLB is what is stored; these are made on
-             request. -->
-        <div
-          v-if="meshFileExports.length > 0 || meshAnimationExports.length > 0"
-          class="mt-2 flex flex-wrap gap-2.5"
-          data-test="mesh-exports"
-        >
-          <button
-            v-for="format in meshFileExports"
-            :key="format"
-            type="button"
-            :data-test="`mesh-export-${format}`"
-            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
-            :disabled="exportBusy"
-            @click="exportMesh(format)"
-          >
-            Export as {{ format.toUpperCase() }}…
-          </button>
-          <button
-            v-if="meshAnimationExports.length > 0"
-            type="button"
-            data-test="mesh-export-animation"
-            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
-            @click="openMeshAnimationExport"
-          >
-            Export turntable…
-          </button>
-        </div>
-        <div class="mt-2 flex gap-2.5">
-          <button
-            v-if="canExportVideo"
-            type="button"
-            data-test="export-video"
-            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
-            @click="openVideoExport"
-          >
-            Export format…
-          </button>
-          <button
-            v-if="canReveal"
-            type="button"
-            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
-            @click="reveal"
-          >
-            Reveal in file manager
-          </button>
-          <template v-if="trashed">
+                Restore
+              </button>
+              <button
+                type="button"
+                data-test="lightbox-delete-forever"
+                class="ms-toolbar-button ms-toolbar-button--danger-hover flex-1 justify-center"
+                @click="confirmingForever = true"
+              >
+                Delete forever
+              </button>
+            </template>
             <button
+              v-else
               type="button"
-              data-test="lightbox-restore"
-              class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
-              @click="emit('restore')"
+              data-test="lightbox-delete"
+              class="ms-toolbar-button flex-1 justify-center"
+              :class="
+                confirmingDelete ? 'ms-toolbar-button--danger' : 'ms-toolbar-button--danger-hover'
+              "
+              @blur="confirmingDelete = false"
+              @click="onDelete"
             >
-              Restore
+              {{
+                canTrash
+                  ? "Move to trash"
+                  : confirmingDelete
+                    ? "Delete? Can't be undone."
+                    : "Delete"
+              }}
             </button>
-            <button
-              type="button"
-              data-test="lightbox-delete-forever"
-              class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-error"
-              @click="confirmingForever = true"
-            >
-              Delete forever
-            </button>
-          </template>
-          <button
-            v-else
-            type="button"
-            data-test="lightbox-delete"
-            class="border-border h-8 flex-1 rounded-control border text-micro transition-colors duration-100"
-            :class="
-              confirmingDelete
-                ? 'border-error bg-error font-semibold text-on-accent'
-                : 'text-fg-2 hover:text-error'
-            "
-            @blur="confirmingDelete = false"
-            @click="onDelete"
-          >
-            {{
-              canTrash ? "Move to trash" : confirmingDelete ? "Delete? Can't be undone." : "Delete"
-            }}
-          </button>
+          </div>
         </div>
       </aside>
     </div>
+
     <ConfirmDialog
       :open="confirmingForever"
       :title="`Delete “${headline}” forever?`"
@@ -1085,26 +1083,17 @@ async function performVideoExport(options: VideoExportOptions) {
 </template>
 
 <style scoped>
+/* The lightbox is the whole window on a near-solid crust (README §04). */
 .lightbox-scrim {
-  background: rgba(6, 5, 10, 0.82);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--mold-bg-crust) 92%, transparent);
 }
 
-.lightbox-kicker {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
-}
-
-/* Title lead line: display 16/600, a quiet underline that turns accent
-   while editing. 34px tall so it is a real target. */
+/* Title lead line: 15/600, a quiet underline that turns accent while editing. */
 .lightbox-title {
   display: block;
-  height: 34px;
+  height: 30px;
   font-family: var(--mold-font-sans);
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--mold-text);
   background: transparent;
@@ -1112,7 +1101,7 @@ async function performVideoExport(options: VideoExportOptions) {
   border-bottom: 1.5px solid transparent;
   padding: 0 0 2px;
   outline: none;
-  line-height: 30px;
+  line-height: 26px;
   transition: border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
@@ -1130,10 +1119,28 @@ input.lightbox-title:focus,
   border-bottom-color: var(--mold-blue);
 }
 
-/* The filled heart: the registry ships one outline glyph; the active state
-   fills it with the current (accent) color. */
-.lightbox-fav--on :deep(svg) {
-  fill: currentColor;
+.lightbox-fav--on {
+  border-color: var(--mold-star);
+}
+
+/* One fact: plain words left, the technical truth right, in mono. */
+.lightbox-fact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lightbox-fact dt {
+  flex-shrink: 0;
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
+}
+.lightbox-fact dd {
+  min-width: 0;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
+  text-align: right;
 }
 
 .ms-lib-upscaled {

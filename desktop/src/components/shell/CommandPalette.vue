@@ -56,14 +56,16 @@ const appPrefs = useAppPrefsStore();
 const inventoryKnown = useInventoryKnown();
 
 /** Mono section label for a result row, derived from its id prefix. */
+/** The mono group column (README §04): where a command belongs, in the lexicon. */
 function sectionLabel(id: string): string {
   if (id.startsWith("nav-")) return "go";
-  if (id.startsWith("theme-") || id.startsWith("appear-")) return "theme";
-  if (id.startsWith("model-") || id.startsWith("load-") || id.startsWith("unload-")) return "model";
-  if (id.startsWith("install-")) return "install";
+  if (id.startsWith("theme-") || id.startsWith("appear-")) return "look";
+  if (id.startsWith("model-") || id.startsWith("load-") || id.startsWith("unload-"))
+    return "styles";
+  if (id.startsWith("install-")) return "get";
   if (id.startsWith("history-")) return "recent";
-  if (id.startsWith("print-")) return "print";
-  return "run";
+  if (id.startsWith("print-")) return "images";
+  return "do";
 }
 
 const query = ref("");
@@ -582,11 +584,11 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div
     v-if="ui.paletteOpen"
-    class="cmdk-scrim absolute inset-0 z-[120] flex justify-center pt-[84px]"
+    class="absolute inset-0 z-[120] flex justify-center bg-scrim pt-[110px]"
     @click.self="close"
   >
     <div
-      class="ms-fade-up flex h-fit max-h-[440px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-card-lg border border-border-control bg-bg shadow-md"
+      class="ms-fade-up flex h-fit max-h-[400px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-window border border-border bg-surface shadow-md"
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
@@ -598,7 +600,7 @@ function onKeydown(e: KeyboardEvent) {
           v-model="query"
           data-selectable
           type="text"
-          placeholder="Search actions, models, settings…"
+          placeholder="Type what you want to do…"
           class="min-w-0 flex-1 bg-transparent text-base text-fg outline-none placeholder:text-fg-dim"
           role="combobox"
           aria-autocomplete="list"
@@ -610,9 +612,9 @@ function onKeydown(e: KeyboardEvent) {
         />
         <Keycap>esc</Keycap>
       </div>
-      <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto p-2" role="listbox">
-        <p v-if="results.length === 0" class="px-3 py-6 text-center text-sm text-fg-dim">
-          No matches.
+      <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto" role="listbox">
+        <p v-if="results.length === 0" class="px-4 py-6 text-center text-sm text-fg-dim">
+          Nothing matches.
         </p>
         <button
           v-for="(cmd, i) in results"
@@ -621,35 +623,22 @@ function onKeydown(e: KeyboardEvent) {
           type="button"
           role="option"
           :aria-selected="i === selected"
-          class="flex w-full items-center gap-3 rounded-control px-3 py-2.5 text-left transition-colors duration-100"
-          :class="i === selected ? 'bg-surface' : ''"
+          class="flex w-full items-center gap-3 border-b border-border px-4 py-[11px] text-left transition-colors duration-100 last:border-b-0"
+          :class="i === selected ? 'bg-surface-2' : 'hover:bg-surface-2'"
           @mouseenter="selected = i"
           @click="cmd.run()"
         >
-          <span class="w-12 shrink-0 font-mono text-micro tracking-[0.06em] text-fg-dim uppercase">
+          <span
+            class="w-[60px] shrink-0 font-mono text-micro tracking-[0.06em] text-fg-dim uppercase"
+          >
             {{ sectionLabel(cmd.id) }}
           </span>
-          <span
-            class="min-w-0 flex-1 truncate text-sm"
-            :class="i === selected ? 'text-fg' : 'text-fg-2'"
-          >
-            {{ cmd.title }}
-          </span>
-          <span
-            v-if="cmd.subtitle"
-            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
-            >{{ cmd.subtitle }}</span
-          >
-          <Icon name="arrow-right" :size="14" class="shrink-0 text-border-control" />
+          <span class="min-w-0 flex-1 truncate text-sm text-fg">{{ cmd.title }}</span>
+          <span v-if="cmd.subtitle" class="shrink-0 font-mono text-micro text-fg-dim">{{
+            cmd.subtitle
+          }}</span>
         </button>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.cmdk-scrim {
-  background: rgba(6, 5, 10, 0.55);
-  backdrop-filter: blur(4px);
-}
-</style>

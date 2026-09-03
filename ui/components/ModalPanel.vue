@@ -85,7 +85,7 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-modal {
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);
+  background: var(--mold-scrim);
   display: flex;
   align-items: center;
   justify-content: center;

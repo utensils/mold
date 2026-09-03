@@ -21,14 +21,14 @@ const candidate = computed(() => updater.candidate);
     <button
       type="button"
       data-test="banner-install-update"
-      class="h-7 shrink-0 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent hover:brightness-105"
+      class="ms-toolbar-button ms-toolbar-button--on font-semibold"
       @click="updater.install()"
     >
       Update and restart
     </button>
     <button
       type="button"
-      class="h-7 shrink-0 px-1 text-micro text-fg-2 hover:text-fg"
+      class="shrink-0 text-micro text-fg-2 hover:text-fg"
       aria-label="Dismiss update notification"
       @click="updater.dismissCandidate()"
     >
