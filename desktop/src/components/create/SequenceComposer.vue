@@ -8,6 +8,7 @@
  */
 import { computed, ref, watch } from "vue";
 import ClipRail from "@ui/components/ClipRail.vue";
+import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
@@ -111,6 +112,9 @@ const requestClips = computed(() =>
     : draft.clips.map((clip) => ({ ...clip, sourceImage: null })),
 );
 const maxStages = computed(() => props.chainLimits?.max_stages ?? 16);
+const canAdd = computed(() => draft.clips.length < maxStages.value);
+/** "How does this work?" — the timeline explained in one paragraph. */
+const helpOpen = ref(false);
 const newClipFrames = computed(() =>
   defaultClipFrames(props.selectedModel, props.chainLimits, motionTail.value),
 );
@@ -152,7 +156,7 @@ const activeMeta = computed(() => {
   const idx = activeIndex.value;
   const parts = [formatFrameDuration(clip.frames, props.form.fps)];
   if (idx > 0) {
-    parts.push(`${transitionLabel(clip.transition, motionTail.value)} from clip ${idx}`);
+    parts.push(`${transitionLabel(clip.transition, motionTail.value)} from scene ${idx}`);
   }
   return parts.join(" · ");
 });
@@ -179,7 +183,7 @@ function resizeClip(id: string, frames: number) {
 const openSeamId = ref<string | null>(null);
 const seamClip = computed(() => draft.clips.find((clip) => clip.id === openSeamId.value) ?? null);
 const seamIndex = computed(() => draft.clips.findIndex((clip) => clip.id === openSeamId.value));
-const clipLabel = (idx: number) => (idx === 0 ? "opening" : `clip ${idx + 1}`);
+const clipLabel = (idx: number) => (idx === 0 ? "opening" : `scene ${idx + 1}`);
 
 function onSeamClick(id: string) {
   openSeamId.value = openSeamId.value === id ? null : id;
@@ -236,6 +240,11 @@ const duration = computed(() => sequenceDuration(stages.value, props.form.fps, m
 const fitNote = computed(
   () =>
     `✓ fits · ${formatFrameDuration(duration.value.frames, props.form.fps)} @ ${props.form.fps}fps`,
+);
+/** The transport's readouts: the whole clip's length and its scene count. */
+const totalLabel = computed(() => formatFrameDuration(duration.value.frames, props.form.fps));
+const sceneCountLabel = computed(() =>
+  draft.clips.length === 1 ? "1 scene" : `${draft.clips.length} scenes`,
 );
 const disabledReason = computed(() => {
   if (props.chainLimits && props.chainLimits.supports_sequence === false) {
@@ -527,22 +536,52 @@ function onBenchContextMenu(event: MouseEvent) {
       <button
         type="button"
         data-test="edit-duplicate"
-        class="ms-seqbench__banner-btn"
+        class="ms-toolbar-button"
         @click="emit('duplicate')"
       >
         Duplicate as new
       </button>
-      <button
-        type="button"
-        data-test="edit-discard"
-        class="ms-seqbench__banner-btn"
-        @click="discardEdit"
-      >
+      <button type="button" data-test="edit-discard" class="ms-toolbar-button" @click="discardEdit">
         Discard edit
       </button>
     </div>
 
-    <!-- Clip rail; the seam popover anchors to the rail itself -->
+    <!-- Transport row: how long, how many scenes, how it works, add a scene -->
+    <div class="ms-seqbench__transport">
+      <span class="font-mono text-xs text-fg" data-test="sequence-length">{{ totalLabel }}</span>
+      <span class="ms-seqbench__rule" aria-hidden="true" />
+      <span class="text-xs text-fg-2">{{ sceneCountLabel }}, played end to end</span>
+      <span class="ms-seqbench__spacer" />
+      <button
+        type="button"
+        data-test="timeline-help"
+        class="text-micro font-medium text-accent"
+        :aria-expanded="helpOpen"
+        @click="helpOpen = !helpOpen"
+      >
+        How does this work?
+      </button>
+      <button
+        type="button"
+        data-test="add-scene"
+        class="ms-toolbar-button h-6 text-micro"
+        :disabled="!canAdd"
+        @click="draft.addClip(newClipFrames)"
+      >
+        <Icon name="plus" :size="12" :stroke-width="2" />
+        Add a scene
+      </button>
+    </div>
+    <div v-if="helpOpen" class="ms-seqbench__help" data-test="timeline-help-text">
+      <span class="font-mono text-xs text-accent">•</span>
+      <span class="text-micro leading-relaxed text-fg-2" style="text-wrap: pretty">
+        Each block is one scene, written in your own words. Drag a block's right edge to make that
+        scene longer, drag the block itself to reorder, and click the marker between two blocks to
+        say how they should meet. The whole thing is made as one continuous clip.
+      </span>
+    </div>
+
+    <!-- Scenes lane: the shared rail; the seam popover anchors to the rail itself -->
     <Popover
       :open="openSeamId !== null"
       placement="bottom-start"
@@ -552,6 +591,10 @@ function onBenchContextMenu(event: MouseEvent) {
       @contextmenu="onBenchContextMenu"
     >
       <template #trigger>
+        <div class="ms-seqbench__lane-label">
+          <span class="text-xs font-semibold text-fg">Scenes</span>
+          <span class="text-micro text-fg-dim">drag to trim</span>
+        </div>
         <ClipRail
           class="ms-seqbench__rail"
           :clips="draft.clips"
@@ -589,16 +632,18 @@ function onBenchContextMenu(event: MouseEvent) {
       />
     </Popover>
 
-    <!-- Active clip editor -->
+    <!-- Active scene editor -->
     <div v-if="activeClip" class="ms-seqbench__clip">
       <div class="ms-seqbench__cliphead">
-        <span data-test="active-clip-caption" class="ms-seqbench__caption">
-          CLIP {{ activeIndex + 1 }} OF {{ draft.clips.length }}
+        <span data-test="active-clip-caption" class="ms-group-label uppercase">
+          Scene {{ activeIndex + 1 }} of {{ draft.clips.length }}
         </span>
-        <span data-test="active-clip-meta" class="ms-seqbench__meta">{{ activeMeta }}</span>
+        <span data-test="active-clip-meta" class="font-mono text-micro text-fg-dim">{{
+          activeMeta
+        }}</span>
         <div class="ms-seqbench__spacer" />
         <label class="ms-seqbench__frames">
-          <span class="ms-seqbench__frames-label">Frames</span>
+          <span class="text-xs text-fg-dim">Length</span>
           <select
             v-model.number="activeClip.frames"
             data-test="clip-frames"
@@ -618,14 +663,16 @@ function onBenchContextMenu(event: MouseEvent) {
         rows="3"
         class="ms-seqbench__prompt ms-seqbench__prompt--main"
         :placeholder="
-          activeIndex === 0 ? 'Describe the opening clip…' : 'Describe what happens next…'
+          activeIndex === 0
+            ? 'Scene 1 — describe how the clip opens'
+            : `Scene ${activeIndex + 1} — describe what happens next`
         "
         aria-label="Clip prompt"
         @keydown="onPromptKeydown"
       />
     </div>
 
-    <!-- Footer: file tools · audio · validation/fit · primary action -->
+    <!-- Validation: the host's own plan, or its refusal -->
     <section
       v-if="validationPlan"
       class="ms-seqbench__plan"
@@ -633,11 +680,11 @@ function onBenchContextMenu(event: MouseEvent) {
       aria-live="polite"
     >
       <strong>
-        Validated · {{ validationPlan.stage_count }} clips ·
+        Validated · {{ validationPlan.stage_count }} scenes ·
         {{ validationPlan.estimated_total_frames }}f · {{ validationDuration(validationPlan) }}
       </strong>
       <span v-for="(stage, index) in validationPlan.stages" :key="index">
-        Clip {{ index + 1 }} · {{ stage.frames }}f in / {{ stage.output_frames }}f out ·
+        Scene {{ index + 1 }} · {{ stage.frames }}f in / {{ stage.output_frames }}f out ·
         {{ transitionLabel(stage.transition, validationPlan.motion_tail_frames) }}
         <template v-if="stage.has_source_image">
           · {{ index === 0 ? "Opening image" : "Source image" }}
@@ -654,13 +701,14 @@ function onBenchContextMenu(event: MouseEvent) {
     </section>
     <p
       v-if="validationError"
-      class="ms-seqbench__validation-error"
+      class="ms-seqbench__plan ms-seqbench__plan--error"
       data-test="sequence-validation-error"
       role="alert"
     >
       {{ validationError }}
     </p>
 
+    <!-- Footer: file tools · validate · clear · fit or blocker · Generate -->
     <div class="ms-seqbench__footer" data-test="sequence-composer-footer">
       <input
         ref="tomlInput"
@@ -679,7 +727,7 @@ function onBenchContextMenu(event: MouseEvent) {
           <button
             type="button"
             data-test="file-tools-toggle"
-            class="ms-seqbench__tool"
+            class="ms-toolbar-button"
             :aria-expanded="fileToolsOpen"
             aria-haspopup="menu"
             @click="fileToolsOpen = !fileToolsOpen"
@@ -718,7 +766,7 @@ function onBenchContextMenu(event: MouseEvent) {
       <button
         type="button"
         data-test="sequence-validate"
-        class="ms-seqbench__tool"
+        class="ms-toolbar-button"
         :disabled="disabledReason !== null || submitting || validating || !target"
         @click="validatePlan"
       >
@@ -728,7 +776,7 @@ function onBenchContextMenu(event: MouseEvent) {
       <button
         type="button"
         data-test="sequence-clear"
-        class="ms-seqbench__tool ms-seqbench__tool--danger"
+        class="ms-toolbar-button ms-toolbar-button--danger-hover"
         @click="clearConfirmOpen = true"
       >
         Clear sequence
@@ -742,7 +790,9 @@ function onBenchContextMenu(event: MouseEvent) {
         :reason="disabledReason"
         title="Before you generate"
       />
-      <span v-else data-test="sequence-fit" class="ms-seqbench__note">{{ fitNote }}</span>
+      <span v-else data-test="sequence-fit" class="font-mono text-micro text-success">{{
+        fitNote
+      }}</span>
 
       <div class="ms-seqbench__spacer" />
       <button
@@ -775,10 +825,12 @@ function onBenchContextMenu(event: MouseEvent) {
 </template>
 
 <style scoped>
+/* The clip timeline (README §04) under the canvas: transport, the scenes
+   lane, the active scene's words, and the footer — on the deep surface. */
 .ms-seqbench {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   /*
    * The parent panel mounts this `flex: 1 1 0%`. Without an explicit
    * min-height the bench is floored at its own min-content — which counts
@@ -790,9 +842,9 @@ function onBenchContextMenu(event: MouseEvent) {
    * button can clip.
    */
   min-height: 0;
-  border-top: 1px solid var(--mold-border);
-  background: var(--mold-bg);
-  padding: 12px 22px 14px;
+  border-top: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg-deep);
+  padding: 0 12px 11px;
 }
 
 .ms-seqbench__banner {
@@ -800,49 +852,53 @@ function onBenchContextMenu(event: MouseEvent) {
   align-items: center;
   flex-shrink: 0;
   gap: 10px;
-  border: 1px solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
-  background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
-  border-radius: 9px;
-  padding: 8px 12px;
-}
-.ms-seqbench__plan,
-.ms-seqbench__validation-error {
-  display: grid;
-  flex-shrink: 0;
-  gap: 3px;
-  max-height: 112px;
-  overflow: auto;
-  border: 1px solid color-mix(in srgb, var(--mold-sapphire) 35%, var(--mold-border-control));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--mold-sapphire) 8%, transparent);
-  padding: 7px 10px;
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  color: var(--mold-text-2);
-}
-.ms-seqbench__validation-error,
-.ms-seqbench__warning {
-  color: var(--mold-warning);
+  margin-top: 8px;
+  border: var(--mold-bw) solid var(--mold-blue);
+  background: var(--mold-accent-tint);
+  border-radius: var(--mold-radius-2);
+  padding: 6px 10px;
 }
 .ms-seqbench__banner-text {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
-}
-.ms-seqbench__banner-btn {
-  border: 1px solid var(--mold-border-control);
-  background: transparent;
-  color: var(--mold-text-2);
-  border-radius: 7px;
-  padding: 4px 10px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.ms-seqbench__banner-btn:hover {
-  color: var(--mold-text);
 }
 
+.ms-seqbench__transport {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  height: 36px;
+  margin: 0 -12px;
+  padding: 0 12px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+}
+.ms-seqbench__rule {
+  width: var(--mold-bw);
+  height: 16px;
+  background: var(--mold-border);
+}
+.ms-seqbench__help {
+  display: flex;
+  flex-shrink: 0;
+  gap: 10px;
+  margin: -8px -12px 0;
+  padding: 10px 12px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-surface);
+}
+
+.ms-seqbench__lane-label {
+  display: flex;
+  width: 74px;
+  flex-shrink: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  white-space: nowrap;
+}
 /*
  * The filmstrip absorbs bench resizes first: an outsized shrink weight pulls
  * the rail from its preferred 204px basis down to a hard floor before any
@@ -860,6 +916,8 @@ function onBenchContextMenu(event: MouseEvent) {
 }
 .ms-seqbench__railwrap :deep(.ms-popover__trigger) {
   display: flex;
+  align-items: stretch;
+  gap: 8px;
   width: 100%;
   min-width: 0;
   height: 100%;
@@ -877,27 +935,15 @@ function onBenchContextMenu(event: MouseEvent) {
   display: flex;
   flex-direction: column;
   flex: 1;
-  /* Head (28) + gaps (12) + tools (28) + the prompt's 48px floor: below
-     this the editor's own rows would start clipping. */
-  min-height: 116px;
+  /* Head (26) + gap (6) + the prompt's 48px floor: below this the editor's
+     own rows would start clipping. */
+  min-height: 80px;
   gap: 6px;
 }
 .ms-seqbench__cliphead {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-.ms-seqbench__caption {
-  font-family: var(--mold-font-mono);
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
-}
-.ms-seqbench__meta {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  color: var(--mold-text-dim);
 }
 .ms-seqbench__spacer {
   flex: 1;
@@ -907,71 +953,64 @@ function onBenchContextMenu(event: MouseEvent) {
   align-items: center;
   gap: 6px;
 }
-.ms-seqbench__frames-label {
-  font-size: 11px;
-  color: var(--mold-text-dim);
-}
 .ms-seqbench__select {
-  height: 28px;
-  border: 1px solid var(--mold-border-control);
-  border-radius: 6px;
-  background: var(--mold-bg-deep);
-  color: var(--mold-text);
+  height: var(--mold-ctl-md);
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   font-family: var(--mold-font-mono);
-  font-size: 12px;
+  font-size: var(--mold-fs-micro);
   padding: 0 6px;
 }
 .ms-seqbench__prompt {
   width: 100%;
   resize: none;
-  border: 1px solid var(--mold-border-control);
-  border-radius: 9px;
-  background: var(--mold-bg-deep);
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
   color: var(--mold-text);
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 10px 12px;
+  font-size: var(--mold-fs-sm);
+  line-height: var(--mold-lh-body);
+  padding: 8px 10px;
 }
 .ms-seqbench__prompt:focus {
   outline: none;
-  border-color: var(--mold-blue);
+  border-color: var(--mold-border-focus);
 }
 .ms-seqbench__prompt--main {
   flex: 1;
   min-height: 48px;
 }
-.ms-seqbench__prompt--negative {
-  font-size: 12px;
-}
-.ms-seqbench__cliptools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ms-seqbench__tool {
-  border: 1px solid var(--mold-border-control);
-  background: transparent;
+
+.ms-seqbench__plan {
+  display: grid;
+  flex-shrink: 0;
+  gap: 3px;
+  max-height: 112px;
+  overflow: auto;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+  padding: 7px 10px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-2);
-  border-radius: 7px;
-  padding: 5px 10px;
-  font-size: 11px;
-  cursor: pointer;
 }
-.ms-seqbench__tool:hover {
-  color: var(--mold-text);
+.ms-seqbench__plan--error,
+.ms-seqbench__warning {
+  color: var(--mold-warning);
 }
-.ms-seqbench__tool--danger:hover {
-  color: var(--mold-error);
-  border-color: var(--mold-error);
+.ms-seqbench__plan--error {
+  border-color: var(--mold-warning);
 }
 
 .ms-seqbench__footer {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 12px;
+  gap: 8px;
   margin-top: auto;
-  padding-top: 2px;
 }
 .ms-seqbench__menu {
   display: flex;
@@ -984,38 +1023,28 @@ function onBenchContextMenu(event: MouseEvent) {
   background: transparent;
   color: var(--mold-text-2);
   text-align: left;
-  padding: 7px 8px;
-  border-radius: 6px;
-  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: var(--mold-radius-1);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
 .ms-seqbench__menuitem:hover {
-  background: var(--mold-surface);
+  background: var(--mold-surface-2);
   color: var(--mold-text);
-}
-.ms-seqbench__audio {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--mold-text-2);
-}
-.ms-seqbench__note {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  color: var(--mold-sapphire);
 }
 .ms-seqbench__blocker {
   max-width: min(380px, 38vw);
 }
+/* The primary action (README §04): 32px, accent fill, never wraps. */
 .ms-seqbench__generate {
   height: 32px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--mold-radius-2);
   background: var(--mold-blue);
-  color: var(--mold-on-accent, #fff);
-  font-size: 13px;
+  color: var(--mold-on-accent);
+  font-size: var(--mold-fs-sm);
   font-weight: 600;
+  white-space: nowrap;
   padding: 0 16px;
   cursor: pointer;
 }

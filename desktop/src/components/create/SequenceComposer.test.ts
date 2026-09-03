@@ -107,8 +107,8 @@ describe("SequenceComposer — active clip editor", () => {
     const wrapper = mountComposer({
       selectedModel: { name: "ltx-2-19b-distilled:fp8", family: "ltx2" } as ModelEntry,
     });
-    expect(wrapper.get("[data-test='active-clip-caption']").text()).toContain("CLIP 2 OF 2");
-    expect(wrapper.get("[data-test='active-clip-meta']").text()).toContain("Smooth from clip 1");
+    expect(wrapper.get("[data-test='active-clip-caption']").text()).toContain("Scene 2 of 2");
+    expect(wrapper.get("[data-test='active-clip-meta']").text()).toContain("Smooth from scene 1");
 
     await wrapper.get("[data-test='clip-prompt']").setValue("a new beat");
     expect(draft.clips[1]!.prompt).toBe("a new beat");
@@ -242,7 +242,7 @@ describe("SequenceComposer — footer", () => {
       target,
     );
     expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
-      "Validated · 2 clips · 50f · 2.1s",
+      "Validated · 2 scenes · 50f · 2.1s",
     );
     expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain("12.0 GiB");
     expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
@@ -252,8 +252,8 @@ describe("SequenceComposer — footer", () => {
       .get("[data-test='sequence-validation-plan']")
       .text()
       .replace(/\s+/g, " ");
-    expect(planText).toContain("Clip 1 · 25f in / 25f out · Join · Opening image");
-    expect(planText).toContain("Clip 2 · 25f in / 25f out · Join · Source image");
+    expect(planText).toContain("Scene 1 · 25f in / 25f out · Join · Opening image");
+    expect(planText).toContain("Scene 2 · 25f in / 25f out · Join · Source image");
     expect(wrapper.emitted("submit")).toBeUndefined();
 
     await wrapper.get("[data-test='clip-prompt']").setValue("edited opening");
