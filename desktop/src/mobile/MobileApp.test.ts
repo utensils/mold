@@ -10447,9 +10447,13 @@ describe("MobileApp gallery", () => {
   });
 
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {
+    // `print.timestamp` is a clock getter; read it ONCE so the seeded
+    // baseline, the served print, and the expected seen-at stamp cannot
+    // straddle a second boundary (the 2026-09-02 iOS CI flake).
+    const stamp = print.timestamp;
     localStorage.setItem(
       "mold.mobile.library-seen-at.v1",
-      JSON.stringify({ "studio-id": print.timestamp - 1 }),
+      JSON.stringify({ "studio-id": stamp - 1 }),
     );
     localStorage.setItem("mold.mobile.library-visited.v1", "true");
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
@@ -10459,6 +10463,7 @@ describe("MobileApp gallery", () => {
         return Promise.resolve([
           {
             ...print,
+            timestamp: stamp,
             filename: "new-upscaled.png",
             format: "png",
             metadata: {
@@ -10482,7 +10487,7 @@ describe("MobileApp gallery", () => {
     expect(tile.get("[data-test='new-badge']").text()).toBe("New");
     expect(tile.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
     expect(JSON.parse(localStorage.getItem("mold.mobile.library-seen-at.v1") ?? "{}")).toEqual({
-      "studio-id": print.timestamp,
+      "studio-id": stamp,
     });
     expect(localStorage.getItem("mold.mobile.library-seen.v1")).toBeNull();
   });
