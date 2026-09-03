@@ -1922,14 +1922,14 @@ fn request_sensitive_activation_memory_with_wan_geometry(
                     })
             };
             // The engine's own answer, so admission plans against exactly the
-            // multiplier `flux2/pipeline.rs` then reserves — there the ratio is
+            // bytes `flux2/pipeline.rs` then reserves — there the ratio is
             // taken over real packed TOKEN counts, here over pixels, which is
             // the same number because both sides patchify at the same rate.
-            let token_factor = mold_inference::device::flux2_reference_token_factor(
+            activation = mold_inference::device::flux2_reference_scaled_activation_bytes(
+                activation,
                 target_pixels,
                 reference_pixels,
             );
-            activation = activation.saturating_mul(token_factor);
         }
     }
 

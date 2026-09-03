@@ -1559,14 +1559,13 @@ impl Flux2Engine {
         // over, so the workspace scales with the packed length rather than
         // with the canvas. Here the references are already encoded, so the
         // ratio is EXACT — token counts, not the server's pixel estimate —
-        // and it is the same `flux2_reference_token_factor` admission planned
+        // and it is the same `flux2_reference_scaled_activation_bytes` admission planned
         // against.
         let xformer_activation_budget = match reference_tokens.as_ref() {
-            Some((tokens, _)) => xformer_activation_budget.saturating_mul(
-                crate::device::flux2_reference_token_factor(
-                    state.img.dim(1)? as u64,
-                    tokens.dim(1)? as u64,
-                ),
+            Some((tokens, _)) => crate::device::flux2_reference_scaled_activation_bytes(
+                xformer_activation_budget,
+                state.img.dim(1)? as u64,
+                tokens.dim(1)? as u64,
             ),
             None => xformer_activation_budget,
         };
