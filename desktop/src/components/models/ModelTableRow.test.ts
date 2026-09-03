@@ -39,6 +39,22 @@ describe("ModelTableRow", () => {
    * pins it to `tests/fixtures/wan/surface-parity-v1.json` alongside the CLI
    * and TUI readers.
    */
+  it("stacks the request id under a friendlier name, and hides it when they agree", () => {
+    const stacked = mountRow({ name: "Photoreal — best quality", id: "flux-dev:q4" });
+    expect(stacked.get("[data-test='row-title']").text()).toBe("Photoreal — best quality");
+    expect(stacked.get("[data-test='row-id']").text()).toBe("flux-dev:q4");
+    // A manifest model's display name IS its id — one line, not two copies.
+    expect(
+      mountRow({ name: "flux-dev:q4", id: "flux-dev:q4" }).find("[data-test='row-id']").exists(),
+    ).toBe(false);
+  });
+
+  it("carries a one-line note in plain words", () => {
+    const wrapper = mountRow({ note: "Full quality, 20+ passes" });
+    expect(wrapper.get("[data-test='row-note']").text()).toBe("Full quality, 20+ passes");
+    expect(mountRow().find("[data-test='row-note']").exists()).toBe(false);
+  });
+
   it("names wan the way the other surfaces name it", () => {
     const wrapper = mountRow({ name: "wan22-t2v-a14b:q5", family: "wan" });
     expect(wrapper.get("[data-test='row-family']").text()).toBe("Wan Video");

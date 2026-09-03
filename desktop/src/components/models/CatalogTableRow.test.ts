@@ -143,7 +143,7 @@ describe("CatalogTableRow", () => {
     });
     await flushPromises();
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
   });
 
   it("still offers Pull for a model another machine is missing", async () => {
@@ -152,7 +152,7 @@ describe("CatalogTableRow", () => {
     });
     await flushPromises();
     // The host chips say where it already is; the button sends it somewhere new.
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     await wrapper.get("[data-test='pull']").trigger("click");
     expect(wrapper.emitted("pull")).toHaveLength(1);
   });

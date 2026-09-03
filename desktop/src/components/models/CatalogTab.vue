@@ -732,8 +732,8 @@ onUnmounted(() => {
           v-for="s in ['all', 'hf', 'civitai'] as const"
           :key="s"
           type="button"
-          class="border-border h-7 rounded-control border px-2.5 text-micro"
-          :class="source === s ? 'bg-accent text-on-accent' : 'text-fg-2 hover:text-fg'"
+          class="chip"
+          :class="{ 'chip--on': source === s }"
           :aria-pressed="source === s"
           @click="source = s"
         >
@@ -744,8 +744,8 @@ onUnmounted(() => {
       <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Model kind">
         <button
           type="button"
-          class="border-border h-7 rounded-control border px-2.5 text-micro"
-          :class="kind === '' ? 'bg-accent text-on-accent' : 'text-fg-2 hover:text-fg'"
+          class="chip"
+          :class="{ 'chip--on': kind === '' }"
           :aria-pressed="kind === ''"
           @click="kind = ''"
         >
@@ -755,8 +755,8 @@ onUnmounted(() => {
           v-for="opt in CATALOG_KIND_OPTIONS"
           :key="opt.value"
           type="button"
-          class="border-border h-7 rounded-control border px-2.5 text-micro"
-          :class="kind === opt.value ? 'bg-accent text-on-accent' : 'text-fg-2 hover:text-fg'"
+          class="chip"
+          :class="{ 'chip--on': kind === opt.value }"
           :aria-pressed="kind === opt.value"
           @click="kind = opt.value"
         >
@@ -862,7 +862,11 @@ onUnmounted(() => {
           :disabled="!selectedBatchTarget || batchStarting"
           @click="startBatch"
         >
-          {{ batchStarting ? "Starting…" : `Download ${selected.size}` }}
+          {{
+            batchStarting
+              ? "Starting…"
+              : `Get ${selected.size} ${selected.size === 1 ? "style" : "styles"}`
+          }}
         </button>
       </template>
       <span v-else class="ml-auto text-micro text-error">
@@ -870,7 +874,7 @@ onUnmounted(() => {
       </span>
       <button
         type="button"
-        class="border-border h-8 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg"
+        class="ms-toolbar-button"
         :disabled="batchStarting"
         @click="selected = new Map()"
       >
@@ -886,8 +890,8 @@ onUnmounted(() => {
       data-test="catalog-empty"
     >
       <template v-if="combinedEntries.length === 0">
-        <template v-if="query">Nothing on the shelf for "{{ query }}".</template>
-        <template v-else>Search the catalog to find models.</template>
+        <template v-if="query">No styles match "{{ query }}".</template>
+        <template v-else>Search to find more styles.</template>
       </template>
       <template v-else>
         <p>{{ filteredEmptyMessage }}</p>
@@ -895,10 +899,10 @@ onUnmounted(() => {
           v-if="(mediaType ?? 'all') !== 'all'"
           type="button"
           data-test="clear-media-filter"
-          class="border-border mt-3 h-7 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg"
+          class="ms-toolbar-button mt-3"
           @click="emit('clear-media-filter')"
         >
-          Show all media types
+          Show every kind
         </button>
       </template>
     </div>
@@ -909,8 +913,8 @@ onUnmounted(() => {
       v-if="loading || displayEntries.length > 0"
       :class="
         effectiveLayout === 'grid'
-          ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
-          : 'border-border divide-border flex flex-col divide-y overflow-hidden rounded-control border bg-bg'
+          ? 'grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3'
+          : 'border-border divide-border flex flex-col divide-y border bg-panel'
       "
     >
       <template v-for="entry in displayEntries" :key="entry.id">
@@ -979,3 +983,30 @@ onUnmounted(() => {
     />
   </div>
 </template>
+
+<style scoped>
+/* Filter chip (README §04): 24px, 1px border; active = accent tint + inset ring. */
+.chip {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  padding: 0 9px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
+}
+.chip:hover {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
+}
+.chip--on {
+  border-color: var(--mold-blue);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
+  color: var(--mold-text);
+}
+</style>

@@ -69,7 +69,7 @@ describe("LibraryHeader", () => {
     expect(wrapper.find("[aria-label='Refresh library']").exists()).toBe(false);
     const empty = wrapper.get("[data-test='empty-trash']");
     expect(empty.text()).toBe("Empty trash");
-    expect(empty.classes()).toContain("lib-button--danger");
+    expect(empty.classes()).toContain("ms-toolbar-button--danger");
     await empty.trigger("click");
     expect(wrapper.emitted("emptyTrash")).toHaveLength(1);
   });

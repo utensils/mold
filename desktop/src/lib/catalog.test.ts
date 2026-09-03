@@ -76,6 +76,8 @@ describe("catalog labels", () => {
   it("labels the Pull button with the download total", () => {
     expect(catalogPullLabel(two)).toBe("Pull · 33.1 GB");
     expect(catalogPullLabel(one)).toBe("Pull · 6.4 GB");
+    // Desktop speaks the lexicon; the verb is the caller's.
+    expect(catalogPullLabel(one, "Get it")).toBe("Get it · 6.4 GB");
   });
 });
 

@@ -45,6 +45,12 @@ export function percent(used: number, total: number): number {
   return Math.min(100, Math.max(0, (used / total) * 100));
 }
 
+/** Transfer rate for the download banner's mono line: 12_400_000 → "12.4 MB/s". */
+export function formatRate(bytesPerSecond: number | null): string {
+  if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) return "—";
+  return `${(Math.max(0, bytesPerSecond) / 1_000_000).toFixed(1)} MB/s`;
+}
+
 /** Compact ETA for download rows: 42 → "42s", 192 → "3m 12s", 3845 → "1h 4m". */
 export function formatEta(seconds: number | null): string {
   if (seconds == null || !Number.isFinite(seconds)) return "—";

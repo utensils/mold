@@ -200,7 +200,7 @@ const downloadTotalLabel = computed(() => {
 
 const pullLabel = computed(() => {
   if (props.pulling) return "Pulling…";
-  return downloadTotal.value.bytes != null ? `Pull · ${downloadTotalLabel.value}` : "Pull";
+  return downloadTotal.value.bytes != null ? `Get it · ${downloadTotalLabel.value}` : "Get it";
 });
 
 /** Media badge (image/video) — from the detail's modality, else the family. */

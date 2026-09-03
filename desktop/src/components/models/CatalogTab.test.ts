@@ -291,7 +291,7 @@ describe("CatalogTab media filter under pagination", () => {
       "The catalog is catching up.",
     );
     expect(wrapper.find("[data-test='catalog-empty']").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain('Nothing on the shelf for "Alien"');
+    expect(wrapper.text()).not.toContain('No styles match "Alien"');
   });
 
   it("lists Qwen Image Edit models under the Qwen Image family", async () => {
@@ -393,7 +393,7 @@ describe("CatalogTab media filter under pagination", () => {
     // Host chips are the "you have this" indicator.
     const chips = wrapper.findAll("[data-test='installed-host']").map((c) => c.text());
     expect(chips).toContain("This device");
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
     expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
     expect(wrapper.get('[data-test="catalog-description"]').text()).toBe(
@@ -1058,7 +1058,7 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     await flushPromises();
 
     // Installed elsewhere, so the row keeps its marker — and still offers the pull.
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     await wrapper.get("[data-test='pull']").trigger("click");
     await flushPromises();
 
@@ -1100,7 +1100,7 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     wrapper.unmount();
   });
@@ -1153,7 +1153,7 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     wrapper.unmount();
   });

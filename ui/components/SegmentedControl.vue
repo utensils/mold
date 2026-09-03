@@ -27,8 +27,10 @@ const props = withDefaults(
      * inspector or on a phone; 2–4 option controls keep the single row.
      */
     wrap?: boolean;
+    /** Label and sub side by side — tabs carrying a mono count. */
+    inline?: boolean;
   }>(),
-  { disabled: false, compact: false, wrap: false },
+  { disabled: false, compact: false, wrap: false, inline: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: T] }>();
@@ -64,7 +66,11 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="ms-seg"
-    :class="{ 'ms-seg--compact': compact, 'ms-seg--wrap': wrap }"
+    :class="{
+      'ms-seg--compact': compact,
+      'ms-seg--wrap': wrap,
+      'ms-seg--inline': inline,
+    }"
     role="radiogroup"
     :aria-label="label"
     :aria-disabled="disabled || undefined"
@@ -123,6 +129,18 @@ function onKeydown(event: KeyboardEvent) {
 
 .ms-seg--wrap {
   flex-wrap: wrap;
+}
+
+.ms-seg--inline .ms-seg__btn {
+  flex-direction: row;
+  gap: 6px;
+}
+
+.ms-seg--inline .ms-seg__sub {
+  font-family: var(--mold-font-mono);
+  font-size: 10.5px;
+  color: inherit;
+  opacity: 0.8;
 }
 
 /* A wrapped row keeps each segment at its own content width — equal 1/N

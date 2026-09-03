@@ -42,6 +42,71 @@
   animation: ms-pulse 1s steps(2, jump-none) infinite;
 }
 
+/* Toolbar button (README §04): 26px, 1px border, sans 12px; hover lifts the
+ * border to the focus colour. Modifiers: --on (accent fill), --accent
+ * (accent ink, the acquisition verb), --danger (error ink at rest),
+ * --danger-hover (error ink only when pointed at). */
+.ms-toolbar-button {
+  display: inline-flex;
+  height: var(--mold-ctl-md);
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--mold-text-2);
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
+}
+.ms-toolbar-button:hover:not(:disabled) {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
+}
+.ms-toolbar-button:disabled {
+  color: var(--mold-text-faint);
+  cursor: default;
+}
+.ms-toolbar-button--on {
+  border-color: var(--mold-blue);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
+}
+.ms-toolbar-button--accent {
+  border-color: var(--mold-blue);
+  color: var(--mold-blue);
+}
+.ms-toolbar-button--accent:hover:not(:disabled) {
+  border-color: var(--mold-blue);
+  background: var(--mold-accent-tint);
+  color: var(--mold-blue);
+}
+.ms-toolbar-button--danger {
+  border-color: var(--mold-error);
+  color: var(--mold-error);
+  font-weight: 600;
+}
+.ms-toolbar-button--danger:hover:not(:disabled),
+.ms-toolbar-button--danger-hover:hover:not(:disabled) {
+  border-color: var(--mold-error);
+  background: color-mix(in srgb, var(--mold-error) 12%, transparent);
+  color: var(--mold-error);
+}
+
+/* Group and table-header label: mono micro, tracked, dim. Uppercase is the
+ * caller's call — a header that reads as a sentence keeps its case. */
+.ms-group-label {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  letter-spacing: 0.08em;
+  color: var(--mold-text-dim);
+}
+
 /* Entrance for overlays/results — never applied to core chrome. */
 @keyframes ms-fade-up {
   from {

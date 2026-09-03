@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatCount,
   formatEta,
+  formatRate,
   formatGB,
   formatUptime,
   percent,
@@ -87,6 +88,15 @@ describe("percent", () => {
     expect(percent(200, 100)).toBe(100);
     expect(percent(-5, 100)).toBe(0);
     expect(percent(1, 0)).toBe(0);
+  });
+});
+
+describe("formatRate", () => {
+  it("prints decimal megabytes per second, one place, and a dash when unknown", () => {
+    expect(formatRate(12_400_000)).toBe("12.4 MB/s");
+    expect(formatRate(950_000)).toBe("0.9 MB/s");
+    expect(formatRate(0)).toBe("0.0 MB/s");
+    expect(formatRate(null)).toBe("—");
   });
 });
 

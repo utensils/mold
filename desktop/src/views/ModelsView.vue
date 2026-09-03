@@ -1,6 +1,15 @@
 <script setup lang="ts">
+/*
+ * Styles (README §02 lexicon: never "models" as the primary word). One 40px
+ * view toolbar — Ready to use | Browse more, the kind filter, and Filter… —
+ * over a download banner and either the shelf or the catalog. Both share the
+ * merged model set: Ready to use is the full-featured inventory (load /
+ * unload / remove / per-machine actions); Browse more is the live catalog
+ * with ready styles merged in, machine-tagged and sorted first.
+ */
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import Icon from "@ui/components/Icon.vue";
 import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedControl.vue";
 import CatalogTab from "../components/models/CatalogTab.vue";
 import InstalledTab from "../components/models/InstalledTab.vue";
@@ -24,25 +33,15 @@ const router = useRouter();
 const query = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);
 
-/**
- * Installed vs Discover is the primary chrome now (Mold Studio Models). Both
- * views share the merged model set: Installed is the full-featured inventory
- * (load / unload / delete / per-host actions); Discover is the unified live
- * catalog with installed models still merged in, host-tagged and sorted first.
- */
 type Segment = "installed" | "discover";
-const SEGMENTS: SegmentOption<Segment>[] = [
-  { value: "installed", label: "Installed" },
-  { value: "discover", label: "Discover" },
-];
 // Legacy deep links (`?tab=catalog`) opened the browse view — honor them.
 const legacyDiscover = route.query.tab === "catalog" || route.query.tab === "discover";
 const segment = ref<Segment>(legacyDiscover ? "discover" : "installed");
 
-const MEDIA_TYPES: { value: MediaType; label: string }[] = [
+const MEDIA_TYPES: SegmentOption<MediaType>[] = [
   { value: "all", label: "All" },
-  { value: "image", label: "Images" },
-  { value: "video", label: "Video" },
+  { value: "image", label: "Pictures" },
+  { value: "video", label: "Clips" },
 ];
 
 const mediaType = computed(() => mediaTypeFromQuery(route.query));
@@ -71,6 +70,11 @@ const installedModels = computed(() => {
   return [...byName.values()];
 });
 
+const segments = computed<SegmentOption<Segment>[]>(() => [
+  { value: "installed", label: "Ready to use", sub: String(installedModels.value.length) },
+  { value: "discover", label: "Browse more" },
+]);
+
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
     e.preventDefault();
@@ -95,7 +99,7 @@ watch(
   () => {
     for (const host of hosts.all.filter((candidate) => candidate.status === "ready")) {
       void downloads.subscribe(host).catch(() => {
-        // A pre-downloads-API host still participates in the model shelf.
+        // A pre-downloads-API host still participates in the shelf.
       });
     }
     void hostModels.refresh();
@@ -113,53 +117,47 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col">
-    <!-- Workspace header — Installed | Discover is the primary chrome -->
-    <header class="border-border flex h-13 shrink-0 items-center gap-3 border-b px-6">
-      <h1 class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 90%">
-        Models
-      </h1>
-      <div class="flex-1" />
+  <div class="flex h-full min-h-0 flex-col bg-bg">
+    <!-- view toolbar -->
+    <div
+      class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
+    >
       <SegmentedControl
-        class="w-52 shrink-0"
         :model-value="segment"
-        :options="SEGMENTS"
+        :options="segments"
         label="Model view"
+        compact
+        inline
         @update:model-value="segment = $event"
       />
-    </header>
-
-    <!-- Shared filter strip: search + media type apply to both segments -->
-    <div class="border-border flex flex-wrap items-center gap-3 border-b bg-bg px-6 py-2.5">
-      <input
-        ref="searchEl"
-        v-model="query"
-        data-selectable
-        type="search"
-        placeholder="Search models…"
-        class="border-border h-7 min-w-48 flex-1 rounded-control border bg-bg-deep px-2 text-sm text-fg placeholder:text-fg-dim sm:max-w-72"
+      <div class="flex-1" />
+      <SegmentedControl
+        :model-value="mediaType"
+        :options="MEDIA_TYPES"
+        label="Media type"
+        compact
+        @update:model-value="setMediaType"
       />
-
-      <div class="flex items-center gap-1" aria-label="Media type">
-        <button
-          v-for="option in MEDIA_TYPES"
-          :key="option.value"
-          type="button"
-          class="h-7 rounded-control px-2.5 text-sm"
-          :class="mediaType === option.value ? 'bg-bg-deep text-fg' : 'text-fg-2 hover:text-fg'"
-          :aria-pressed="mediaType === option.value"
-          @click="setMediaType(option.value)"
-        >
-          {{ option.label }}
-        </button>
-      </div>
+      <label
+        class="flex h-[26px] w-[190px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
+      >
+        <Icon name="search" :size="14" class="shrink-0 text-fg-dim" />
+        <input
+          ref="searchEl"
+          v-model="query"
+          data-selectable
+          type="search"
+          placeholder="Filter…"
+          aria-label="Filter styles"
+          class="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-dim"
+        />
+      </label>
     </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto">
-      <!-- Downloads pinned above the list in BOTH segments -->
+      <!-- Downloads on their way, pinned above the list on BOTH tabs -->
       <DownloadsTray />
 
-      <!-- Installed: the full-featured inventory scoped to what you have. -->
       <InstalledTab
         v-if="segment === 'installed'"
         :query="query"
@@ -168,8 +166,6 @@ onUnmounted(() => {
         @browse-catalog="segment = 'discover'"
       />
 
-      <!-- Discover: one unified list — live catalog with installed models
-           merged in, host-tagged and sorted first. -->
       <CatalogTab
         v-else
         :query="query"

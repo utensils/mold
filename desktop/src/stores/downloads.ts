@@ -84,15 +84,40 @@ export function pushRateSample(
  * or non-advancing (no rate → no honest ETA).
  */
 export function computeEtaSeconds(samples: RateSample[], bytesTotal: number): number | null {
+  const rate = computeRateBytesPerSecond(samples);
+  if (rate === null) return null;
+  const eta = Math.max(0, bytesTotal - samples[samples.length - 1]!.bytes) / rate;
+  return Number.isFinite(eta) ? Math.round(eta) : null;
+}
+
+/** Bytes per second across the window; null until it holds two advancing samples. */
+export function computeRateBytesPerSecond(samples: RateSample[]): number | null {
   if (samples.length < 2) return null;
   const first = samples[0]!;
   const last = samples[samples.length - 1]!;
   const deltaBytes = last.bytes - first.bytes;
   const deltaMs = last.ts - first.ts;
   if (deltaMs <= 0 || deltaBytes <= 0) return null;
-  const ratePerSec = (deltaBytes * 1000) / deltaMs;
-  const eta = Math.max(0, bytesTotal - last.bytes) / ratePerSec;
-  return Number.isFinite(eta) ? Math.round(eta) : null;
+  return (deltaBytes * 1000) / deltaMs;
+}
+
+/** Every active job on the primary and the extra hosts, with its rate window. */
+function liveRateWindows(state: {
+  activeJobs: DownloadJob[];
+  hostStates: Record<string, DownloadHostState>;
+  rateSamples: Record<string, RateSample[]>;
+}): [DownloadJob, RateSample[]][] {
+  const primary = state.activeJobs.map((job): [DownloadJob, RateSample[]] => [
+    job,
+    state.rateSamples[`${PRIMARY_RATE_SCOPE}:${job.id}`] ?? [],
+  ]);
+  const extra = Object.entries(state.hostStates).flatMap(([hostId, host]) =>
+    host.activeJobs.map((job): [DownloadJob, RateSample[]] => [
+      job,
+      state.rateSamples[`${hostId}:${job.id}`] ?? [],
+    ]),
+  );
+  return [...primary, ...extra];
 }
 
 /**
@@ -155,22 +180,21 @@ export const useDownloadsStore = defineStore("downloads", {
     },
     /** Live ETA (seconds) per active job id, derived from the rate windows. */
     etaByJob(state): Record<string, number | null> {
-      const out: Record<string, number | null> = {};
-      for (const job of state.activeJobs) {
-        out[job.id] = computeEtaSeconds(
-          state.rateSamples[`${PRIMARY_RATE_SCOPE}:${job.id}`] ?? [],
-          job.bytes_total,
-        );
-      }
-      for (const [hostId, host] of Object.entries(state.hostStates)) {
-        for (const job of host.activeJobs) {
-          out[job.id] = computeEtaSeconds(
-            state.rateSamples[`${hostId}:${job.id}`] ?? [],
-            job.bytes_total,
-          );
-        }
-      }
-      return out;
+      return Object.fromEntries(
+        liveRateWindows(state).map(([job, samples]) => [
+          job.id,
+          computeEtaSeconds(samples, job.bytes_total),
+        ]),
+      );
+    },
+    /** Live transfer rate (bytes/s) per active job id, from the same windows. */
+    rateByJob(state): Record<string, number | null> {
+      return Object.fromEntries(
+        liveRateWindows(state).map(([job, samples]) => [
+          job.id,
+          computeRateBytesPerSecond(samples),
+        ]),
+      );
     },
     hasActivity(): boolean {
       return this.hostedInFlight.length > 0;

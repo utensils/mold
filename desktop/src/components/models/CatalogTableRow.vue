@@ -15,7 +15,7 @@ import type { CatalogEntry } from "../../lib/api/types";
  * One catalog search result in the table layout — the shared model-row
  * shape with catalog specifics on top: no preview image (that's the grid
  * card's job), lazy size resolution (HF summary rows arrive without
- * `size_bytes`), SIZE/FETCH as the two size lines, and Pull / installed
+ * `size_bytes`), SIZE/FETCH as the two size lines, and Get it / ready
  * state in the actions column. Clicking the row opens the detail drawer.
  */
 const props = withDefaults(
@@ -152,9 +152,7 @@ const counts = computed(() => {
       }}</span>
     </template>
     <template #actions>
-      <span v-if="entry.installed" class="font-mono text-xs text-micro text-sapphire"
-        >● installed</span
-      >
+      <span v-if="entry.installed" class="font-mono text-micro text-success">● ready</span>
       <span
         v-if="props.runtimeNotice"
         data-test="runtime-unavailable-badge"
@@ -167,11 +165,11 @@ const counts = computed(() => {
         v-if="showAction"
         type="button"
         data-test="pull"
-        class="border-border h-7 rounded-control border px-2.5 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
+        class="ms-toolbar-button ms-toolbar-button--accent disabled:opacity-50"
         :disabled="pulling"
         @click.stop="emit('pull', entry)"
       >
-        {{ pulling ? "Pulling…" : "Pull" }}
+        {{ pulling ? "Getting it…" : "Get it" }}
       </button>
     </template>
   </ModelTableRow>

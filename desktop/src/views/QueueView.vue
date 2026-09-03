@@ -93,7 +93,7 @@ function previewSrc(row: QueueRow): string | null {
         v-if="commands.canPause.value"
         type="button"
         data-test="queue-pause"
-        class="toolbar-button"
+        class="ms-toolbar-button"
         @click="commands.togglePause()"
       >
         {{ commands.paused.value ? "Resume queue" : "Pause queue" }}
@@ -110,7 +110,7 @@ function previewSrc(row: QueueRow): string | null {
       <button
         type="button"
         data-test="queue-stop-all"
-        class="toolbar-button hover:border-error hover:text-error"
+        class="ms-toolbar-button ms-toolbar-button--danger-hover"
         :disabled="queue.liveCount.value === 0"
         @click="commands.stopEverything()"
       >
@@ -138,7 +138,7 @@ function previewSrc(row: QueueRow): string | null {
           :key="stat.label"
           class="flex flex-col gap-1.5 rounded-control border border-border bg-panel p-3.5"
         >
-          <span class="group-label">{{ stat.label }}</span>
+          <span class="ms-group-label uppercase">{{ stat.label }}</span>
           <span class="text-lg font-semibold text-fg">{{ stat.value }}</span>
           <span class="text-xs text-fg-dim">{{ stat.note }}</span>
         </div>
@@ -155,7 +155,7 @@ function previewSrc(row: QueueRow): string | null {
 
       <!-- the table -->
       <div class="border border-border bg-panel">
-        <div class="table-grid group-label border-b border-border px-3.5 py-2.5 normal-case">
+        <div class="table-grid ms-group-label border-b border-border px-3.5 py-2.5">
           <span>Image</span><span>What's happening</span><span>Style</span
           ><span class="text-right">Machine</span><span />
         </div>
@@ -223,36 +223,8 @@ function previewSrc(row: QueueRow): string | null {
 </template>
 
 <style scoped>
-.group-label {
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
-}
 .table-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 250px 150px 128px 34px;
-}
-.toolbar-button {
-  display: inline-flex;
-  height: var(--mold-ctl-md);
-  align-items: center;
-  padding: 0 11px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  font-size: var(--mold-fs-xs);
-  font-weight: 500;
-  color: var(--mold-text-2);
-  transition:
-    border-color var(--mold-dur-quick) var(--mold-ease-out),
-    color var(--mold-dur-quick) var(--mold-ease-out);
-}
-.toolbar-button:hover:not(:disabled) {
-  border-color: var(--mold-border-focus);
-  color: var(--mold-text);
-}
-.toolbar-button:disabled {
-  color: var(--mold-text-faint);
 }
 </style>

@@ -49,9 +49,9 @@ export function catalogFetchCaption(info: CatalogSizeInfo): string | null {
 }
 
 /** Pull button label — the number the user will actually download. */
-export function catalogPullLabel(info: CatalogSizeInfo): string {
+export function catalogPullLabel(info: CatalogSizeInfo, verb = "Pull"): string {
   const bytes = info.fetchBytes ?? info.weightsBytes;
-  return bytes != null ? `Pull · ${formatGB(bytes)}` : "Pull";
+  return bytes != null ? `${verb} · ${formatGB(bytes)}` : verb;
 }
 
 /** Catalog ids look like `cv:8001` / `hf:author/model`; plain names don't. */

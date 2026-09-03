@@ -287,13 +287,13 @@ describe("CatalogDetailDrawer", () => {
     const wrapper = await mountDrawer(summary());
     // 8 GB weights + 16 GB TE, VAE size unknown — the shown total is a floor.
     expect(wrapper.get("[data-test='download-contents']").text()).toContain("≥ 24.0 GB");
-    expect(wrapper.get("[data-test='drawer-pull']").text()).toContain("Pull · ≥ 24.0 GB");
+    expect(wrapper.get("[data-test='drawer-pull']").text()).toContain("Get it · ≥ 24.0 GB");
   });
 
   it("shows an exact download total when every item reports a size", async () => {
     const wrapper = await mountDrawer(summary());
     const pull = wrapper.get("[data-test='drawer-pull']");
-    expect(pull.text()).toContain("Pull · 24.2 GB");
+    expect(pull.text()).toContain("Get it · 24.2 GB");
     expect(pull.text()).not.toContain("≥");
   });
 

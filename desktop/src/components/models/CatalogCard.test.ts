@@ -224,7 +224,7 @@ describe("CatalogCard", () => {
       props: { entry: entry({ installed: true }), pulling: false },
     });
     await flushPromises();
-    expect(installed.text()).toContain("installed");
+    expect(installed.text()).toContain("ready");
     expect(installed.find("[data-test='pull']").exists()).toBe(false);
   });
 
@@ -233,7 +233,7 @@ describe("CatalogCard", () => {
       props: { entry: entry({ installed: true }), pulling: false, installable: true },
     });
     await flushPromises();
-    expect(wrapper.text()).toContain("installed");
+    expect(wrapper.text()).toContain("ready");
     await wrapper.get("[data-test='pull']").trigger("click");
     expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
   });

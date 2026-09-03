@@ -93,7 +93,7 @@ defineExpose({ focusSearch });
   >
     <SegmentedControl
       v-if="scopes.length > 1"
-      class="ms-lib-scope"
+      inline
       :model-value="scope"
       :options="scopeOptions"
       label="Library scope"
@@ -143,8 +143,8 @@ defineExpose({ focusSearch });
 
     <button
       type="button"
-      class="lib-button"
-      :class="selectMode ? 'lib-button--on' : ''"
+      class="ms-toolbar-button"
+      :class="selectMode ? 'ms-toolbar-button--on' : ''"
       :aria-pressed="selectMode"
       title="Select pictures"
       aria-label="Toggle select mode"
@@ -154,7 +154,7 @@ defineExpose({ focusSearch });
     </button>
     <button
       type="button"
-      class="lib-button"
+      class="ms-toolbar-button"
       title="History"
       aria-label="Open history"
       @click="emit('openHistory')"
@@ -165,7 +165,7 @@ defineExpose({ focusSearch });
       v-if="scope === 'trash'"
       type="button"
       data-test="empty-trash"
-      class="lib-button lib-button--danger"
+      class="ms-toolbar-button ms-toolbar-button--danger"
       :disabled="trashCount === 0 || busy"
       @click="emit('emptyTrash')"
     >
@@ -184,59 +184,3 @@ defineExpose({ focusSearch });
     </button>
   </header>
 </template>
-
-<style scoped>
-.lib-button {
-  display: inline-flex;
-  height: var(--mold-ctl-md);
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 0 11px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  font-size: var(--mold-fs-xs);
-  font-weight: 500;
-  white-space: nowrap;
-  color: var(--mold-text-2);
-  transition:
-    border-color var(--mold-dur-quick) var(--mold-ease-out),
-    color var(--mold-dur-quick) var(--mold-ease-out);
-}
-.lib-button:hover:not(:disabled) {
-  border-color: var(--mold-border-focus);
-  color: var(--mold-text);
-}
-.lib-button--on {
-  border-color: var(--mold-blue);
-  background: var(--mold-blue);
-  color: var(--mold-on-accent);
-}
-.lib-button--danger {
-  border-color: var(--mold-error);
-  color: var(--mold-error);
-  font-weight: 600;
-}
-.lib-button--danger:hover:not(:disabled) {
-  border-color: var(--mold-error);
-  background: color-mix(in srgb, var(--mold-error) 12%, transparent);
-  color: var(--mold-error);
-}
-.lib-button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-/* The scope control reads as tabs: label + mono count side by side. */
-.ms-lib-scope :deep(.ms-seg__btn) {
-  flex-direction: row;
-  gap: 6px;
-}
-
-.ms-lib-scope :deep(.ms-seg__sub) {
-  font-family: var(--mold-font-mono);
-  font-size: 10.5px;
-  color: inherit;
-  opacity: 0.8;
-}
-</style>

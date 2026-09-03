@@ -861,7 +861,7 @@ describe("HostDetailView models", () => {
 
     const tray = wrapper.get("[data-test='host-downloads']");
     expect(tray.text()).toContain("qwen-image:q4");
-    expect(tray.text()).toContain("2.5 GB / 10.0 GB");
+    expect(tray.text()).toContain("[2.5 GB/10.0 GB,");
     expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
   });
 
