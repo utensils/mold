@@ -108,6 +108,7 @@ function setFit(mode: SourceFitMode) {
       gallery
       alt="Opening sequence image"
       test-id="sequence-opening-image"
+      drop-target="opening"
       @file="onFile"
       @gallery="openGalleryPicker"
       @clear="clearOpeningImage"

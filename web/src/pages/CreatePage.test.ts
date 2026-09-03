@@ -4681,6 +4681,59 @@ describe("CreatePage layout and behavior", () => {
       "River studies",
     );
   });
+
+  // ── Window-level image drop (§1k) ─────────────────────────────────────
+  // A file dropped a pixel outside a well used to navigate the browser to the
+  // image and take the SPA with it. The window handler routes those through
+  // the SAME shared policy the wells use, and never touches a drop a well
+  // already handled.
+  function fileDrop(file: File): DragEvent {
+    const event = new Event("drop", {
+      bubbles: true,
+      cancelable: true,
+    }) as DragEvent;
+    Object.defineProperty(event, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+    return event;
+  }
+
+  /** A 1×1 PNG, so the header decode that gates every well succeeds. */
+  const PNG_1X1 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  function pngFile(name = "dropped.png"): File {
+    const bytes = Uint8Array.from(atob(PNG_1X1), (c) => c.charCodeAt(0));
+    return new File([bytes], name, { type: "image/png" });
+  }
+
+  it("ignores a drop a well already handled", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "sdxl:fp16",
+        family: "sdxl",
+        downloaded: true,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 7,
+      },
+    ]);
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl:fp16";
+    form.state.value.modelFamily = "sdxl";
+    await nextTick();
+
+    // A well's own `@drop.prevent` runs first and marks the event; the window
+    // handler must not attach the same file a second time.
+    const handled = fileDrop(pngFile("well.png"));
+    handled.preventDefault();
+    window.dispatchEvent(handled);
+    await flushPromises();
+    expect(form.state.value.imageAttachments).toHaveLength(0);
+  });
 });
 
 // ── Multi-host generation routing (spec §08) ────────────────────────────────

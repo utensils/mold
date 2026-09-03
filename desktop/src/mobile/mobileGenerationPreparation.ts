@@ -5,6 +5,7 @@ import {
 } from "@studio/lib/generationProfile";
 import { resolveSourceConditioningTarget } from "@studio/lib/sourceResolution";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import {
   applyMinimaxH3ReferenceCrops,
@@ -115,7 +116,13 @@ export async function prepareMobileGenerationRequest(
     if (result.source) draft.imageAttachments[0] = result.source;
   } else if (
     capabilities.supportsImg2img &&
-    capabilities.sourceImageMode === "single" &&
+    // An exclusive (Klein) recipe fits the source only while it is the well
+    // the request will actually carry; a parked source is never preprocessed.
+    conditioningForRequest(capabilities.sourceImageMode, {
+      hasSource: Boolean(draft.sourceImage),
+      referenceCount: draft.imageAttachments.length,
+      lastWrite: draft.exclusiveWell ?? null,
+    }) === "source" &&
     draft.sourceImage &&
     // A canvasless recipe (a 3-D mesh) renders from the photo itself and
     // advertises a 0×0 canvas, so there is no target to fit toward — running

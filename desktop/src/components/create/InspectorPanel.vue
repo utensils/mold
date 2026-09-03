@@ -41,7 +41,7 @@ import { findInstalledModel, mergeInstalledModels } from "../../lib/generateMode
 import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
-import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import { conditioningForRequest, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import IdentityWell from "./IdentityWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
@@ -662,7 +662,11 @@ const MAX_BATCH_SIZE = 10_000;
 const batchLocked = computed(
   () =>
     caps.value.forcesBatchSizeOne ||
-    (caps.value.sourceImageMode === "references" && props.form.imageAttachments.length > 0),
+    conditioningForRequest(caps.value.sourceImageMode, {
+      hasSource: Boolean(props.form.sourceImage),
+      referenceCount: props.form.imageAttachments.length,
+      lastWrite: props.form.exclusiveWell ?? null,
+    }) === "references",
 );
 const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
 

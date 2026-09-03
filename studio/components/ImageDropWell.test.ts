@@ -127,3 +127,25 @@ describe("ImageDropWell", () => {
     expect(wrapper.get("[data-test='t-replace']").text()).toBe("Replace photo");
   });
 });
+
+describe("ImageDropWell drop-target identity", () => {
+  it("names itself for the shared drop router, filled or empty", () => {
+    // The desktop shell resolves the well under an OS drag with
+    // `elementFromPoint(...).closest("[data-drop-target]")`, so the attribute
+    // has to sit on the ROOT — a filled well renders no drop zone at all.
+    const empty = mount(ImageDropWell, {
+      props: { testId: "t", dropTarget: "identity" },
+    });
+    expect(empty.attributes("data-drop-target")).toBe("identity");
+
+    const filled = mount(ImageDropWell, {
+      props: { testId: "t", image: "cG5n", dropTarget: "source" },
+    });
+    expect(filled.attributes("data-drop-target")).toBe("source");
+  });
+
+  it("renders no attribute when the surface names no target", () => {
+    const wrapper = mount(ImageDropWell, { props: { testId: "t" } });
+    expect(wrapper.attributes("data-drop-target")).toBeUndefined();
+  });
+});
