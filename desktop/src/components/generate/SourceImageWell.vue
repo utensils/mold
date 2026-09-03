@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
-import { generationCapabilitiesForFamily, isFlux2DevModel } from "../../lib/capabilities";
+import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../../lib/image";
 import {
   attachmentRoleLabel,
@@ -23,7 +23,7 @@ import { attachPickedImage } from "../../lib/sourceAttachment";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import { resolveExclusiveWells, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
@@ -99,7 +99,58 @@ const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single policy every surface
  * renders (`@studio/lib/sourceMediaPlan`). */
 const plan = computed(() => sourceMediaPlan(caps.value));
-const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
+/** A strip with no primary Target is a pure reference strip (FLUX.2), which
+ * changes only the wording — the ceiling and the roles come from the plan. */
+const referencesOnly = computed(
+  () =>
+    (plan.value.kind === "attachments" && plan.value.primary === null) ||
+    plan.value.kind === "single-or-references",
+);
+/** The advertised strip ceiling; `null` is unbounded (Qwen edit). */
+const referenceMax = computed(() =>
+  plan.value.kind === "attachments"
+    ? plan.value.max
+    : plan.value.kind === "single-or-references"
+      ? plan.value.references.max
+      : null,
+);
+/**
+ * The exclusive (Klein) parking rule: whichever well holds media is the
+ * active one, the other parks with an inline note and keeps its media, and
+ * Generate stays enabled. Strength and the repaint mask belong to the source
+ * well, so they render only while it is active.
+ */
+const exclusive = computed(() =>
+  plan.value.kind === "single-or-references"
+    ? resolveExclusiveWells({
+        hasSource: Boolean(props.form.sourceImage),
+        referenceCount: props.form.imageAttachments.length,
+        lastWrite: props.form.exclusiveWell ?? null,
+      })
+    : null,
+);
+const sourceActive = computed(() => !exclusive.value || exclusive.value.active !== "references");
+/** Qwen's layout: the strip's first picture IS the primary (Target) well. */
+const targetLayout = computed(
+  () => plan.value.kind === "attachments" && plan.value.primary === "target",
+);
+/** What the shared primary well shows — the Target for a target-first strip,
+ * the source image everywhere else. */
+const primaryWellImage = computed(() =>
+  targetLayout.value
+    ? props.form.imageAttachments[0]
+      ? { data: props.form.imageAttachments[0] }
+      : null
+    : props.form.sourceImage
+      ? { data: props.form.sourceImage, filename: props.form.sourceImageName }
+      : null,
+);
+/** Fit, strength and the repaint mask describe a SOURCE image. */
+const sourceRefinements = computed(
+  () =>
+    plan.value.kind === "single" ||
+    (plan.value.kind === "single-or-references" && sourceActive.value),
+);
 /** Why the attached conditioning would be refused, in the server's own order. */
 const conditioningError = computed(() => sourceConditioningValidationError(props.form));
 const editFitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
@@ -158,7 +209,11 @@ function onEditPicked(picked: PickedImage[]) {
     plan.value.primary === "target" &&
     props.form.imageAttachments.length === 0;
   const next = [...props.form.imageAttachments, ...picked.map((p) => p.base64)];
-  props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
+  const max = referenceMax.value;
+  props.form.imageAttachments = max === null ? next : next.slice(0, max);
+  // On an exclusive recipe this write parks the source well; the source
+  // itself is kept and comes back when the strip empties.
+  props.form.exclusiveWell = "references";
   if (establishesTarget) props.form.sourceFit = defaultSourceFitPolicy();
 }
 function replaceEditTarget(base64: string) {
@@ -288,7 +343,12 @@ function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
     props.form.sourceImage = b64;
     // The label lives and dies with the image (Reuse-settings restore).
     props.form.sourceImageName = b64 ? name : null;
-    if (b64) props.form.sourceFit = defaultSourceFitPolicy();
+    if (b64) {
+      props.form.sourceFit = defaultSourceFitPolicy();
+      // Last write wins on an exclusive recipe: this parks the references
+      // without discarding them.
+      props.form.exclusiveWell = "source";
+    }
   } else if (slot === "end") {
     // The closing still keeps its own name: it ships as the second keyframe,
     // whose provenance is all saved metadata will ever hold of it.
@@ -328,6 +388,22 @@ function onWellGallery(slot: SourceMediaSlot) {
 }
 function onWellClear(slot: SourceMediaSlot) {
   clearSlot(slot === "source" ? "source" : "end");
+}
+
+// The primary well is ONE component for every layout; only what a write means
+// differs — a target-first strip edits attachment 0, everything else the
+// source image.
+function onPrimaryFile(slot: SourceMediaSlot, file: File) {
+  if (targetLayout.value && slot === "source") void onTargetFile(slot, file);
+  else onWellFile(slot, file);
+}
+function onPrimaryGallery(slot: SourceMediaSlot) {
+  if (targetLayout.value && slot === "source") targetPickerOpen.value = true;
+  else onWellGallery(slot);
+}
+function onPrimaryClear(slot: SourceMediaSlot) {
+  if (targetLayout.value && slot === "source") clearEditTarget();
+  else onWellClear(slot);
 }
 
 // ── MiniMax H3 FL2VA boundaries ─────────────────────────────────────────────
@@ -411,18 +487,32 @@ function setSourceFitMode(e: Event) {
     />
   </div>
 
-  <!-- Ordered Qwen edit pictures or FLUX.2 reference images. -->
-  <div v-else-if="plan.kind === 'attachments'">
+  <!-- One source well, an ordered picture strip, or (Klein) both, mutually
+       exclusive. The wells and the strip are the SAME ones every other
+       layout renders; the plan decides which of them appear. -->
+  <div
+    v-else-if="
+      plan.kind === 'attachments' || plan.kind === 'single' || plan.kind === 'single-or-references'
+    "
+    :data-test="plan.kind === 'attachments' ? undefined : 'source-media-controls'"
+  >
     <SourceMediaWells
-      v-if="plan.primary === 'target'"
+      v-if="plan.kind !== 'attachments' || plan.primary === 'target'"
       :plan="plan"
-      :source="form.imageAttachments[0] ? { data: form.imageAttachments[0] } : null"
+      :source="primaryWellImage"
+      :end-frame="
+        !targetLayout && form.endFrame
+          ? { data: form.endFrame.base64, filename: form.endFrame.filename }
+          : null
+      "
       :error="conditioningError"
-      @file="onTargetFile"
-      @gallery="targetPickerOpen = true"
-      @clear="clearEditTarget"
+      :parked="exclusive?.parked === 'source'"
+      :note="exclusive?.parked === 'source' ? exclusive.note : null"
+      @file="onPrimaryFile"
+      @gallery="onPrimaryGallery"
+      @clear="onPrimaryClear"
     />
-    <template v-if="plan.primary === 'target' && form.imageAttachments[0]">
+    <template v-if="targetLayout && form.imageAttachments[0]">
       <label class="mt-3 block text-caption text-ink-2" for="edit-source-fit-policy">
         Source fit
       </label>
@@ -446,12 +536,19 @@ function setSourceFitMode(e: Event) {
         model; Output size is separate.
       </p>
     </template>
-    <div class="mb-2 flex items-center gap-2">
-      <span class="edge-code">Pictures</span>
+    <!-- The ordered picture strip. Qwen's Target + References, FLUX.2 [dev]'s
+         references, and Klein's second (exclusive) well are all THIS strip. -->
+    <div
+      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
+      class="mb-2 flex items-center gap-2"
+      :class="{ 'mt-3': plan.kind === 'single-or-references' }"
+    >
+      <span class="edge-code">{{ referencesOnly ? "References" : "Pictures" }}</span>
       <div class="border-edge h-px flex-1 border-t" />
     </div>
 
     <div
+      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
       class="flex gap-2 overflow-x-auto pb-1"
       data-test="attachment-strip"
       data-drop-target="references"
@@ -474,7 +571,7 @@ function setSourceFitMode(e: Event) {
         />
         <div class="px-1.5 py-1 leading-tight">
           <div class="edge-code" :data-test="`attachment-role-${index}`">
-            {{ flux2Dev ? `Reference ${index + 1}` : attachmentRoleLabel(index) }}
+            {{ referencesOnly ? `Reference ${index + 1}` : attachmentRoleLabel(index) }}
           </div>
           <div class="truncate text-caption text-ink" :data-test="`attachment-title-${index}`">
             {{ attachmentTitleLabel(index) }}
@@ -521,15 +618,29 @@ function setSourceFitMode(e: Event) {
         ＋
       </button>
     </div>
-    <p class="mt-1 text-caption text-ink-3">
+    <p
+      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
+      class="mt-1 text-caption text-ink-3"
+    >
       {{
-        flux2Dev
-          ? "Up to four ordered references. Drag (or ‹ ›) to reorder."
+        referencesOnly
+          ? referenceMax === null
+            ? "Ordered references. Drag (or ‹ ›) to reorder."
+            : `Up to ${referenceMax} ordered references. Drag (or ‹ ›) to reorder.`
           : "First picture is the edit Target; the rest are References. Drag (or ‹ ›) to reorder."
       }}
     </p>
+    <!-- The exclusive parking note, on whichever well is not shipping. -->
+    <p
+      v-if="exclusive?.parked === 'references'"
+      class="mt-1 text-caption text-ink-3"
+      data-test="references-parked-note"
+    >
+      {{ exclusive.note }}
+    </p>
 
     <ImagePickerModal
+      v-if="targetLayout"
       :open="targetPickerOpen"
       :multiple="false"
       title="Edit target"
@@ -538,31 +649,20 @@ function setSourceFitMode(e: Event) {
       @close="targetPickerOpen = false"
     />
     <ImagePickerModal
+      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
       :open="editPickerOpen"
       :multiple="true"
-      title="Add pictures"
+      :title="referencesOnly ? 'Add references' : 'Add pictures'"
       @pick="onEditPicked"
       @close="editPickerOpen = false"
-    />
-  </div>
-
-  <div v-else-if="plan.kind === 'single'" data-test="source-media-controls">
-    <SourceMediaWells
-      :plan="plan"
-      :source="form.sourceImage ? { data: form.sourceImage, filename: form.sourceImageName } : null"
-      :end-frame="
-        form.endFrame ? { data: form.endFrame.base64, filename: form.endFrame.filename } : null
-      "
-      :error="conditioningError"
-      @file="onWellFile"
-      @gallery="onWellGallery"
-      @clear="onWellClear"
     />
 
     <!-- Source fit (how a mismatched source maps onto the target canvas;
          applied client-side on submit — labels mirror the web SPA). A
-         canvasless recipe (a 3-D mesh) has no canvas to fit onto. -->
-    <template v-if="form.sourceImage && !caps.canvasless">
+         canvasless recipe (a 3-D mesh) has no canvas to fit onto. On an
+         exclusive recipe these belong to the Source well, so they render
+         only while it is the active one. -->
+    <template v-if="sourceRefinements && form.sourceImage && !caps.canvasless">
       <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
       <select
         id="source-fit-policy"
@@ -591,7 +691,7 @@ function setSourceFitMode(e: Event) {
     </template>
 
     <!-- Strength (wan pins the first frame exactly and never reads it) -->
-    <template v-if="form.sourceImage && caps.supportsStrength">
+    <template v-if="sourceRefinements && form.sourceImage && caps.supportsStrength">
       <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
         {{ strength.label }}
         <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
@@ -609,7 +709,7 @@ function setSourceFitMode(e: Event) {
     </template>
 
     <!-- Mask well (inpaint families) -->
-    <template v-if="caps.supportsMask && form.sourceImage">
+    <template v-if="sourceRefinements && caps.supportsMask && form.sourceImage">
       <div class="mt-3 flex items-center justify-between">
         <label class="text-caption text-ink-2">Mask</label>
         <button

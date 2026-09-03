@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { baseGenerationCapabilities } from "./generationCapabilities";
 import {
+  conditioningForRequest,
   EXCLUSIVE_WELLS_NOTE,
   resolveExclusiveWells,
   sourceMediaPlan,
@@ -134,8 +135,11 @@ describe("sourceMediaPlan reference bounds come from the recipe", () => {
         capabilities: {
           ...recipe.capabilities,
           reference_images: {
-            ...recipe.capabilities.reference_images!,
+            mode: "adjustable",
+            required: false,
             max_count: 6,
+            primary_is_target: false,
+            source_relation: "replaces",
           },
         },
       } as GenerationRecipeProfile,
@@ -243,5 +247,58 @@ describe("resolveExclusiveWells", () => {
         lastWrite: "source",
       }).active,
     ).toBe("references");
+  });
+});
+
+describe("conditioningForRequest", () => {
+  const empty = { hasSource: false, referenceCount: 0 };
+
+  it("keeps the pre-Klein answer for every existing mode", () => {
+    expect(
+      conditioningForRequest("single", { ...empty, hasSource: true }),
+    ).toBe("source");
+    expect(conditioningForRequest("single", empty)).toBe("none");
+    expect(
+      conditioningForRequest("references", { ...empty, referenceCount: 2 }),
+    ).toBe("references");
+    expect(
+      conditioningForRequest("qwen-edit", { ...empty, referenceCount: 1 }),
+    ).toBe("references");
+    // H3 serializes its own boundaries and ordered references.
+    expect(
+      conditioningForRequest("h3-boundaries", { ...empty, hasSource: true }),
+    ).toBe("none");
+    expect(conditioningForRequest("ordered-references", empty)).toBe("none");
+  });
+
+  it("sends ONE of the two for an exclusive recipe, never both", () => {
+    expect(conditioningForRequest("single-or-references", empty)).toBe("none");
+    expect(
+      conditioningForRequest("single-or-references", {
+        ...empty,
+        hasSource: true,
+      }),
+    ).toBe("source");
+    expect(
+      conditioningForRequest("single-or-references", {
+        ...empty,
+        referenceCount: 3,
+      }),
+    ).toBe("references");
+    // A restored draft holding both ships the last-written well only.
+    expect(
+      conditioningForRequest("single-or-references", {
+        hasSource: true,
+        referenceCount: 3,
+        lastWrite: "references",
+      }),
+    ).toBe("references");
+    expect(
+      conditioningForRequest("single-or-references", {
+        hasSource: true,
+        referenceCount: 3,
+        lastWrite: "source",
+      }),
+    ).toBe("source");
   });
 });

@@ -127,6 +127,13 @@ export interface BaseGenerationCapabilities {
    */
   referenceImages: ReferenceImagesCapabilities | null;
   /**
+   * The server's OWN sentence for why this recipe takes no reference images
+   * (a `hidden` block's `reason`). `null` when references are offered, or
+   * when nothing was advertised — a client must render nothing rather than
+   * compose a sentence the server did not write.
+   */
+  referenceImagesReason: string | null;
+  /**
    * The effective per-model source-image contract (#772): the model's own
    * advertised mode when it has one, this family's heuristic otherwise.
    */
@@ -513,6 +520,9 @@ export function baseGenerationCapabilities(
               : "single-or-references"
           : "single",
     referenceImages,
+    referenceImagesReason: referenceImages
+      ? null
+      : (advertisedReferences?.reason ?? null),
     sourceImageCapability,
     supportsSourceImage: sourceImageCapability !== "unsupported",
     requiresSourceImage: sourceImageCapability === "required",

@@ -1,4 +1,7 @@
-import type { BaseGenerationCapabilities } from "./generationCapabilities";
+import type {
+  BaseGenerationCapabilities,
+  SourceImageMode,
+} from "./generationCapabilities";
 
 /**
  * What image-attachment UI the PRIMARY Create form owes the selected model.
@@ -167,4 +170,33 @@ export function resolveExclusiveWells(
     parked: active === "source" ? "references" : "source",
     note: EXCLUSIVE_WELLS_NOTE,
   };
+}
+
+/**
+ * WHICH conditioning a request built in this mode carries — the one decision
+ * behind every request builder, every request pruner, and the strength/mask
+ * controls that only apply to a source image.
+ *
+ * It exists because `single-or-references` broke the old shorthand
+ * (`mode === "single" ? source : edit_images`): Klein's request is one or the
+ * other depending on what the user attached, and a builder that emitted both
+ * is refused at admission. H3 modes answer `none` — their boundaries and
+ * ordered references have their own serializer.
+ */
+export function conditioningForRequest(
+  mode: SourceImageMode,
+  state: ExclusiveWellsState,
+): ExclusiveWell | "none" {
+  switch (mode) {
+    case "single":
+      return state.hasSource ? "source" : "none";
+    case "references":
+    case "qwen-edit":
+      return state.referenceCount > 0 ? "references" : "none";
+    case "single-or-references":
+      return resolveExclusiveWells(state).active ?? "none";
+    case "h3-boundaries":
+    case "ordered-references":
+      return "none";
+  }
 }

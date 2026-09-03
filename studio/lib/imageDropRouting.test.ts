@@ -56,9 +56,7 @@ describe("resolveDropTarget without a well under the cursor", () => {
     expect(
       resolveDropTarget(h3Boundaries, null, state({ h3FirstPresent: true })),
     ).toBe("h3-last");
-    expect(resolveDropTarget(h3References, null, state())).toBe(
-      "h3-reference",
-    );
+    expect(resolveDropTarget(h3References, null, state())).toBe("h3-reference");
   });
 
   it("refuses a model that takes no image at all", () => {
@@ -70,16 +68,18 @@ describe("resolveDropTarget without a well under the cursor", () => {
       resolveDropTarget(
         { kind: "none" },
         null,
-        state({ refusalReason: "This model does not accept reference images." }),
+        state({
+          refusalReason: "This model does not accept reference images.",
+        }),
       ),
     ).toEqual({ refused: "This model does not accept reference images." });
   });
 
   it("sends a Klein drop to the well that already holds media", () => {
     expect(resolveDropTarget(klein, null, state())).toBe("source");
-    expect(
-      resolveDropTarget(klein, null, state({ referenceCount: 2 })),
-    ).toBe("references");
+    expect(resolveDropTarget(klein, null, state({ referenceCount: 2 }))).toBe(
+      "references",
+    );
     expect(resolveDropTarget(klein, null, state({ hasSource: true }))).toBe(
       "source",
     );
@@ -152,7 +152,11 @@ describe("resolveDropTarget strip bounds", () => {
       resolveDropTarget(attachments, null, state({ referenceCount: 4 })),
     ).toEqual({ refused: referenceCountRefusal(4) });
     expect(
-      resolveDropTarget(attachments, "references", state({ referenceCount: 4 })),
+      resolveDropTarget(
+        attachments,
+        "references",
+        state({ referenceCount: 4 }),
+      ),
     ).toEqual({ refused: referenceCountRefusal(4) });
     expect(
       resolveDropTarget(klein, "references", state({ referenceCount: 4 })),
@@ -160,9 +164,9 @@ describe("resolveDropTarget strip bounds", () => {
   });
 
   it("keeps appending while an unbounded strip grows", () => {
-    expect(
-      resolveDropTarget(qwen, null, state({ referenceCount: 12 })),
-    ).toBe("references");
+    expect(resolveDropTarget(qwen, null, state({ referenceCount: 12 }))).toBe(
+      "references",
+    );
   });
 
   it("bounds the H3 reference panel by its own budget", () => {

@@ -18,12 +18,12 @@
 import {
   baseGenerationCapabilities,
   isAdvancedVideoFamily,
-  isFlux2DevModel,
   isMinimaxH3Family,
   isQwenImageEditFamily,
   MAX_LORA_STACK,
   type BaseGenerationCapabilities,
 } from "@studio/lib/generationCapabilities";
+import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import {
   recipeIsCanvasless,
   type GenerationRecipeProfile,
@@ -35,7 +35,7 @@ import { coerceOutputFormatForRecipe, type OutputFormatRecipe } from "@studio/li
 import type { GenerateRequest, OutputFormat, Scheduler } from "./api/types";
 
 export type { SourceImageMode } from "@studio/lib/generationCapabilities";
-export { isFlux2DevModel, isQwenImageEditFamily, MAX_LORA_STACK };
+export { isQwenImageEditFamily, MAX_LORA_STACK };
 
 export interface GenerationCapabilities extends Omit<
   BaseGenerationCapabilities,
@@ -262,22 +262,38 @@ export function pruneRequestForFamily(
     delete next.distill_strength_low;
   }
 
-  if (
-    caps.forcesBatchSizeOne ||
-    (caps.sourceImageMode === "references" && (next.edit_images?.length ?? 0) > 0)
-  ) {
+  // qwen-edit requests carry `edit_images` (ordered: target first, then
+  // references) and NEVER `source_image`/`strength`; a single-source family is
+  // the exact inverse; an EXCLUSIVE recipe (Klein) is whichever the request
+  // itself carries, so the pruner asks the same shared question the request
+  // builder asked rather than re-deriving one from the mode. The sanitizer
+  // used to strip the image entirely for qwen-edit — keep `edit_images`
+  // intact there (P7 regression flip).
+  const conditioning = conditioningForRequest(caps.sourceImageMode, {
+    hasSource: Boolean(next.source_image),
+    referenceCount: next.edit_images?.length ?? 0,
+    // A request is already resolved: only one of the two can be on the wire,
+    // and a stale pair prefers the references the edit families ship.
+    lastWrite: (next.edit_images?.length ?? 0) > 0 ? "references" : null,
+  });
+
+  if (caps.forcesBatchSizeOne || conditioning === "references") {
     next.batch_size = 1;
   }
 
-  // qwen-edit requests carry `edit_images` (ordered: target first, then
-  // references) and NEVER `source_image`/`strength`; every other family is the
-  // exact inverse. The sanitizer used to strip the image entirely for
-  // qwen-edit — keep `edit_images` intact there (P7 regression flip).
-  if (!caps.supportsImg2img || caps.sourceImageMode !== "single") {
+  // An empty single-source request keeps its strength (it is a form value on
+  // an ordinary img2img family, not conditioning); only a request whose
+  // conditioning is REFERENCES loses the source pair.
+  if (
+    !caps.supportsImg2img ||
+    (conditioning !== "source" &&
+      caps.sourceImageMode !== "single" &&
+      !(caps.sourceImageMode === "single-or-references" && conditioning === "none"))
+  ) {
     delete next.source_image;
     delete next.strength;
   }
-  if (!caps.supportsImg2img || caps.sourceImageMode === "single") {
+  if (!caps.supportsImg2img || conditioning !== "references") {
     delete next.edit_images;
   }
   if (!caps.supportsMask) delete next.mask_image;
