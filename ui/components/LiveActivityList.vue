@@ -191,9 +191,9 @@ function progress(row: FleetActiveWork): number | null {
   gap: 9px;
   min-height: 44px;
   padding: 7px 10px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 9px;
-  background: var(--surface);
+  background: var(--mold-surface);
   color: inherit;
   font: inherit;
   transition: transform 180ms ease;
@@ -213,9 +213,9 @@ function progress(row: FleetActiveWork): number | null {
   width: 100%;
   height: 100%;
   min-height: 44px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 9px;
-  background: color-mix(in srgb, var(--safelight) 18%, var(--surface));
+  background: color-mix(in srgb, var(--mold-blue) 18%, var(--mold-surface));
   color: inherit;
   font: inherit;
 }
@@ -227,20 +227,20 @@ function progress(row: FleetActiveWork): number | null {
   cursor: pointer;
 }
 .live-activity-surface:is(button):hover {
-  border-color: color-mix(in srgb, var(--safelight) 36%, var(--edge));
-  background: color-mix(in srgb, var(--safelight) 7%, var(--surface));
+  border-color: color-mix(in srgb, var(--mold-blue) 36%, var(--mold-border));
+  background: color-mix(in srgb, var(--mold-blue) 7%, var(--mold-surface));
 }
 .live-activity-dot {
   width: 7px;
   height: 7px;
   flex: none;
   border-radius: 50%;
-  background: var(--safelight);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--safelight) 16%, transparent);
+  background: var(--mold-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mold-blue) 16%, transparent);
 }
 .live-activity-dot[data-phase="queued"],
 .live-activity-dot[data-phase="preparing"] {
-  background: var(--ink-3);
+  background: var(--mold-text-dim);
   box-shadow: none;
 }
 .live-activity-copy {
@@ -258,7 +258,7 @@ function progress(row: FleetActiveWork): number | null {
 }
 .live-activity-copy span {
   overflow: hidden;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 11px;
   text-overflow: ellipsis;
   text-transform: capitalize;

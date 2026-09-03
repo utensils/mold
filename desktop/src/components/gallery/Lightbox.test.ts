@@ -100,7 +100,7 @@ describe("Lightbox reuse", () => {
     };
     const wrapper = mountLightbox({ ...item, metadata });
 
-    await wrapper.get("button.bg-safelight").trigger("click");
+    await wrapper.get("button.bg-accent").trigger("click");
 
     expect(wrapper.emitted("reuse")).toHaveLength(1);
     expect(wrapper.emitted("reuseSequence")).toBeUndefined();

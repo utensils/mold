@@ -572,7 +572,11 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
       v-if="controls && (caps?.canPause || (caps?.canCancelAll && hasEntries) || resumeNeeded)"
       class="mb-2 flex items-center gap-2"
     >
-      <span v-if="resumeNeeded" data-test="paused-chip" class="edge-code text-safelight">
+      <span
+        v-if="resumeNeeded"
+        data-test="paused-chip"
+        class="font-mono text-micro text-fg-dim whitespace-nowrap text-accent"
+      >
         PAUSED
       </span>
       <div class="flex-1" />
@@ -580,7 +584,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
         v-if="caps?.canPause"
         type="button"
         data-test="pause-toggle"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
         @click="togglePause"
       >
         {{ resumeNeeded ? "Resume" : "Pause" }}
@@ -589,8 +593,8 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
         v-if="caps?.canCancelAll && hasEntries"
         type="button"
         data-test="cancel-all"
-        class="h-7 rounded-control px-2.5 text-body"
-        :class="cancelAllPending ? 'text-stop' : 'text-ink-3 hover:text-ink-2'"
+        class="h-7 rounded-control px-2.5 text-sm"
+        :class="cancelAllPending ? 'text-error' : 'text-fg-dim hover:text-fg-2'"
         @click="cancelAll"
         @blur="cancelAllPending = false"
       >
@@ -598,7 +602,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
       </button>
     </div>
 
-    <p v-if="snapshot?.error" class="mt-1 text-caption text-stop">{{ snapshot.error }}</p>
+    <p v-if="snapshot?.error" class="mt-1 text-micro text-error">{{ snapshot.error }}</p>
 
     <!-- Multi-GPU hosts split into per-GPU lanes; single-GPU hosts stay flat. -->
     <template v-if="hasEntries">
@@ -607,13 +611,15 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
         :key="lane.key"
         :data-test="lane.key === 'queue' ? 'queue-flat' : `gpu-lane-${lane.key}`"
         class="rounded-control border"
-        :class="laneDroppable(lane.key) ? 'border-edge border-dashed' : 'border-transparent'"
+        :class="laneDroppable(lane.key) ? 'border-border border-dashed' : 'border-transparent'"
         @dragover.prevent
         @drop.prevent="onLaneDrop(lane.key)"
       >
         <div v-if="lane.key !== 'queue'" class="mt-3 flex items-center gap-2">
-          <span class="edge-code text-ink-3">GPU {{ lane.key }}</span>
-          <div class="border-edge h-px flex-1 border-t" />
+          <span class="font-mono text-micro text-fg-dim whitespace-nowrap text-fg-dim"
+            >GPU {{ lane.key }}</span
+          >
+          <div class="border-border h-px flex-1 border-t" />
         </div>
         <ul v-if="lane.entries.length" class="mt-2 space-y-1.5">
           <li
@@ -622,7 +628,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
             :data-test="rowTestId"
             role="button"
             tabindex="0"
-            class="border-edge flex cursor-pointer items-center gap-3 rounded-control border bg-bench px-3 py-2 transition-colors hover:bg-bath"
+            class="border-border flex cursor-pointer items-center gap-3 rounded-control border bg-bg px-3 py-2 transition-colors hover:bg-bg-deep"
             :class="canDragEntry(entry) ? 'active:cursor-grabbing' : ''"
             :draggable="canDragEntry(entry)"
             :aria-label="`Show details for ${modelLabel(entry.model)}`"
@@ -634,7 +640,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
           >
             <div
               v-if="thumbnails"
-              class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
+              class="h-12 w-12 shrink-0 overflow-hidden rounded-inner border border-border bg-media-bed"
             >
               <img
                 v-if="ownJob(entry)?.previewUrl"
@@ -653,34 +659,40 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
             <span
               v-else
               class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="entry.state === 'running' ? 'bg-safelight' : 'bg-halide'"
+              :class="entry.state === 'running' ? 'bg-accent' : 'bg-sapphire'"
               aria-hidden="true"
             />
             <div class="min-w-0 flex-1">
-              <div class="truncate text-body text-ink" :title="ownJob(entry)?.prompt">
+              <div class="truncate text-sm text-fg" :title="ownJob(entry)?.prompt">
                 {{ ownJob(entry)?.prompt ?? modelLabel(entry.model) }}
               </div>
               <div class="mt-0.5 flex items-center gap-2">
-                <span class="edge-code">{{ entryCode(entry) }}</span>
+                <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+                  entryCode(entry)
+                }}</span>
                 <span
                   v-if="
                     lane.key !== 'queue' && entry.state === 'queued' && laneForEntry(entry) === null
                   "
-                  class="edge-code text-ink-3"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap text-fg-dim"
                   title="No GPU requested — the server picks"
                 >
                   AUTO
                 </span>
-                <span class="truncate text-caption text-ink-3">{{ modelLabel(entry.model) }}</span>
+                <span class="truncate text-micro text-fg-dim">{{ modelLabel(entry.model) }}</span>
                 <span
                   v-if="entryHeldReason(entry)"
-                  class="truncate text-caption text-ink-3"
+                  class="truncate text-micro text-fg-dim"
                   :title="entryHeldReason(entry) ?? undefined"
                 >
                   · {{ entryHeldReason(entry) }}
                 </span>
-                <span v-if="!entry.mine" class="edge-code shrink-0 text-ink-3">OTHER CLIENT</span>
-                <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
+                <span
+                  v-if="!entry.mine"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0 text-fg-dim"
+                  >OTHER CLIENT</span
+                >
+                <span v-if="entryElapsed(entry)" class="font-mono text-xs shrink-0 text-fg-dim">
                   {{ entryElapsed(entry) }}
                 </span>
               </div>
@@ -690,7 +702,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
               type="button"
               data-test="pause-entry"
               :disabled="pausingIds.includes(entry.id)"
-              class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-ink"
+              class="h-7 shrink-0 rounded-control px-2.5 text-sm text-fg-dim hover:text-fg"
               @click.stop="toggleEntryPause(entry)"
             >
               {{
@@ -711,7 +723,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
               type="button"
               data-test="cancel-entry"
               :disabled="cancellingIds.includes(entry.id)"
-              class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-stop"
+              class="h-7 shrink-0 rounded-control px-2.5 text-sm text-fg-dim hover:text-error"
               @click.stop="cancelEntry(entry)"
             >
               {{ cancellingIds.includes(entry.id) ? "Cancelling…" : "Cancel" }}
@@ -720,7 +732,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
         </ul>
         <p
           v-else-if="lane.key !== 'queue'"
-          class="mt-2 px-3 py-2 text-caption text-ink-3"
+          class="mt-2 px-3 py-2 text-micro text-fg-dim"
           data-test="empty-lane"
         >
           Nothing on GPU {{ lane.key }}
@@ -732,18 +744,18 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
       v-if="snapshot?.nextCursor"
       type="button"
       data-test="queue-load-more"
-      class="border-edge mt-2 h-8 w-full rounded-control border px-3 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+      class="border-border mt-2 h-8 w-full rounded-control border px-3 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
       :disabled="snapshot.loadingMore"
       @click="jobs.loadMoreHost(host.id)"
     >
       {{ snapshot.loadingMore ? "Loading…" : "Load more jobs" }}
     </button>
-    <p v-if="snapshot?.loadMoreError" class="mt-1 text-caption text-stop">
+    <p v-if="snapshot?.loadMoreError" class="mt-1 text-micro text-error">
       {{ snapshot.loadMoreError }}
     </p>
     <p
       v-if="!hasEntries && !hasPlanOnlyWork"
-      class="mt-1 text-caption text-ink-3"
+      class="mt-1 text-micro text-fg-dim"
       data-test="queue-empty"
     >
       {{ emptyLabel }}

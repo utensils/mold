@@ -219,10 +219,10 @@ const continueDisabled = computed(
   >
     <!-- Step 1 — machine type -->
     <template v-if="step === 1">
-      <div class="font-display text-display-sm font-bold text-ink" style="font-stretch: 92%">
+      <div class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 92%">
         Add a machine
       </div>
-      <p class="mb-4 mt-1 text-caption text-ink-3">
+      <p class="mb-4 mt-1 text-micro text-fg-dim">
         Generate on another GPU. Everything still runs on hardware you control.
       </p>
       <div class="flex flex-col gap-2">
@@ -231,24 +231,24 @@ const continueDisabled = computed(
           :key="option.value"
           type="button"
           :data-test="`connect-type-${option.value}`"
-          class="flex items-center gap-3 rounded-chrome border p-3.5 text-left transition-colors"
+          class="flex items-center gap-3 rounded-window border p-3.5 text-left transition-colors"
           :class="
             type === option.value
-              ? 'border-[var(--sel-border)] bg-[var(--sel-bg)] text-ink'
-              : 'border-ce text-ink hover:border-ink-3'
+              ? 'border-accent bg-accent-tint text-fg'
+              : 'border-border-control text-fg hover:border-fg-dim'
           "
           :aria-pressed="type === option.value"
           @click="pickType(option.value)"
         >
           <span
-            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control text-halide"
-            style="background: color-mix(in srgb, var(--halide) 16%, transparent)"
+            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control text-sapphire"
+            style="background: color-mix(in srgb, var(--mold-sapphire) 16%, transparent)"
           >
             <Icon :name="option.icon" :size="18" :stroke-width="1.8" />
           </span>
           <span class="min-w-0">
-            <span class="block text-body font-semibold text-ink">{{ option.label }}</span>
-            <span class="block text-caption text-ink-3">{{ option.hint }}</span>
+            <span class="block text-sm font-semibold text-fg">{{ option.label }}</span>
+            <span class="block text-micro text-fg-dim">{{ option.hint }}</span>
           </span>
         </button>
       </div>
@@ -256,17 +256,17 @@ const continueDisabled = computed(
 
     <!-- Step 2 — details -->
     <template v-else-if="step === 2">
-      <div class="font-display text-display-sm font-bold text-ink" style="font-stretch: 92%">
+      <div class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 92%">
         Connection details
       </div>
-      <p class="mb-4 mt-1 text-caption text-ink-3">{{ typeLabel }}</p>
+      <p class="mb-4 mt-1 text-micro text-fg-dim">{{ typeLabel }}</p>
 
       <template v-if="type === 'remote'">
-        <label class="text-caption font-semibold text-ink-2" for="connect-address">Address</label>
+        <label class="text-micro font-semibold text-fg-2" for="connect-address">Address</label>
         <div
-          class="mt-1.5 flex items-center gap-2 rounded-chrome border border-ce bg-bath px-3 py-2.5"
+          class="mt-1.5 flex items-center gap-2 rounded-window border border-border-control bg-bg-deep px-3 py-2.5"
         >
-          <Icon name="lock" :size="14" :stroke-width="2" class="shrink-0 text-ink-3" />
+          <Icon name="lock" :size="14" :stroke-width="2" class="shrink-0 text-fg-dim" />
           <input
             id="connect-address"
             ref="addressInput"
@@ -275,12 +275,12 @@ const continueDisabled = computed(
             data-test="connect-address"
             type="text"
             placeholder="192.168.1.42:7680"
-            class="data-mono min-w-0 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3"
+            class="font-mono text-xs min-w-0 flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-fg-dim"
             @keydown.enter="onContinue"
           />
         </div>
 
-        <label class="mt-4 block text-caption font-semibold text-ink-2" for="connect-name">
+        <label class="mt-4 block text-micro font-semibold text-fg-2" for="connect-name">
           Display name
         </label>
         <input
@@ -290,11 +290,11 @@ const continueDisabled = computed(
           data-test="connect-name"
           type="text"
           placeholder="Optional"
-          class="mt-1.5 w-full rounded-chrome border border-ce bg-bath px-3 py-2.5 text-body text-ink outline-none placeholder:text-ink-3"
+          class="mt-1.5 w-full rounded-window border border-border-control bg-bg-deep px-3 py-2.5 text-sm text-fg outline-none placeholder:text-fg-dim"
           @keydown.enter="onContinue"
         />
 
-        <label class="mt-4 block text-caption font-semibold text-ink-2" for="connect-key">
+        <label class="mt-4 block text-micro font-semibold text-fg-2" for="connect-key">
           API key
         </label>
         <input
@@ -305,23 +305,23 @@ const continueDisabled = computed(
           type="password"
           autocomplete="off"
           placeholder="Optional — stored only on this device"
-          class="data-mono mt-1.5 w-full rounded-chrome border border-ce bg-bath px-3 py-2.5 text-body text-ink outline-none placeholder:text-ink-3"
+          class="font-mono text-xs mt-1.5 w-full rounded-window border border-border-control bg-bg-deep px-3 py-2.5 text-sm text-fg outline-none placeholder:text-fg-dim"
           @keydown.enter="onContinue"
         />
 
-        <p class="mt-4 flex items-center gap-2 text-caption text-ink-3">
-          <span class="h-1.5 w-1.5 rounded-full bg-safelight" aria-hidden="true" />
+        <p class="mt-4 flex items-center gap-2 text-micro text-fg-dim">
+          <span class="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />
           Connection is direct — no data leaves your network.
         </p>
       </template>
 
       <template v-else>
         <div class="flex items-center gap-2">
-          <span class="text-caption text-ink-2">Nearby hosts</span>
+          <span class="text-micro text-fg-2">Nearby hosts</span>
           <div class="flex-1" />
           <button
             type="button"
-            class="border-edge h-7 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+            class="border-border h-7 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
             :disabled="scanning"
             @click="scan"
           >
@@ -333,15 +333,23 @@ const continueDisabled = computed(
             v-for="host in discovered"
             :key="host.url"
             data-test="connect-discovered"
-            class="border-edge flex items-center gap-3 rounded-control border bg-bath px-3 py-2"
+            class="border-border flex items-center gap-3 rounded-control border bg-bg-deep px-3 py-2"
           >
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <span class="truncate text-body text-ink">{{ host.name }}</span>
-                <span v-if="isThisMachine(host)" class="edge-code">THIS DEVICE</span>
-                <span v-if="host.authRequired" class="edge-code">KEY</span>
+                <span class="truncate text-sm text-fg">{{ host.name }}</span>
+                <span
+                  v-if="isThisMachine(host)"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                  >THIS DEVICE</span
+                >
+                <span
+                  v-if="host.authRequired"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                  >KEY</span
+                >
               </div>
-              <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+              <div class="font-mono text-xs mt-0.5 truncate text-micro text-fg-dim">
                 {{ addressLabel(host) }} · {{ versionLabel(host) }}
               </div>
             </div>
@@ -349,7 +357,7 @@ const continueDisabled = computed(
               v-if="!isThisMachine(host)"
               type="button"
               data-test="connect-discovered-add"
-              class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+              class="border-border h-7 shrink-0 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
               :disabled="connecting"
               @click="pickDiscovered(host)"
             >
@@ -357,30 +365,30 @@ const continueDisabled = computed(
             </button>
           </li>
         </ul>
-        <p v-else-if="!scanning && !selectedDiscovered" class="mt-2 text-caption text-ink-3">
+        <p v-else-if="!scanning && !selectedDiscovered" class="mt-2 text-micro text-fg-dim">
           No other mold servers found on your network.
         </p>
         <template v-if="selectedDiscovered">
           <div
             data-test="connect-discovered-selected"
-            class="border-edge mt-2 flex items-center gap-3 rounded-control border bg-bath px-3 py-2"
+            class="border-border mt-2 flex items-center gap-3 rounded-control border bg-bg-deep px-3 py-2"
           >
             <div class="min-w-0 flex-1">
-              <div class="truncate text-body text-ink">{{ selectedDiscovered.name }}</div>
-              <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+              <div class="truncate text-sm text-fg">{{ selectedDiscovered.name }}</div>
+              <div class="font-mono text-xs mt-0.5 truncate text-micro text-fg-dim">
                 {{ addressLabel(selectedDiscovered) }} · {{ versionLabel(selectedDiscovered) }}
               </div>
             </div>
             <button
               v-if="!initialHost"
               type="button"
-              class="text-caption text-ink-3 hover:text-ink"
+              class="text-micro text-fg-dim hover:text-fg"
               @click="clearDiscoveredSelection"
             >
               Choose another
             </button>
           </div>
-          <label class="mt-4 block text-caption font-semibold text-ink-2" for="connect-lan-key">
+          <label class="mt-4 block text-micro font-semibold text-fg-2" for="connect-lan-key">
             API key
           </label>
           <input
@@ -392,31 +400,31 @@ const continueDisabled = computed(
             type="password"
             autocomplete="off"
             placeholder="Required by this machine"
-            class="data-mono mt-1.5 w-full rounded-chrome border border-ce bg-bath px-3 py-2.5 text-body text-ink outline-none placeholder:text-ink-3"
+            class="font-mono text-xs mt-1.5 w-full rounded-window border border-border-control bg-bg-deep px-3 py-2.5 text-sm text-fg outline-none placeholder:text-fg-dim"
             @keydown.enter="onContinue"
           />
-          <p class="mt-2 text-caption text-ink-3">
+          <p class="mt-2 text-micro text-fg-dim">
             This machine requires its own API key. The key is stored only on this device.
           </p>
         </template>
       </template>
 
-      <p v-if="error" data-test="connect-error" class="mt-3 text-caption text-stop">{{ error }}</p>
+      <p v-if="error" data-test="connect-error" class="mt-3 text-micro text-error">{{ error }}</p>
     </template>
 
     <!-- Step 3 — confirmation -->
     <template v-else>
       <div data-test="connect-confirm" class="py-2 text-center">
         <div
-          class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full text-safelight"
-          style="background: color-mix(in srgb, var(--safelight) 18%, transparent)"
+          class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-control text-accent"
+          style="background: color-mix(in srgb, var(--mold-blue) 18%, transparent)"
         >
           <Icon name="check" :size="30" :stroke-width="2.4" />
         </div>
-        <div class="font-display text-display-sm font-bold text-ink" style="font-stretch: 92%">
+        <div class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 92%">
           Machine connected
         </div>
-        <p class="mt-1.5 text-caption leading-relaxed text-ink-3">
+        <p class="mt-1.5 text-micro leading-relaxed text-fg-dim">
           {{ connectedName }} is online and ready. Pick it as a generation target from Machines.
         </p>
       </div>
@@ -427,7 +435,7 @@ const continueDisabled = computed(
         v-if="step === 1"
         type="button"
         data-test="connect-cancel"
-        class="border-edge rounded-chrome border px-4 py-2.5 text-body font-semibold text-ink-2 hover:text-ink"
+        class="border-border rounded-window border px-4 py-2.5 text-sm font-semibold text-fg-2 hover:text-fg"
         @click="emit('close')"
       >
         Cancel
@@ -436,7 +444,7 @@ const continueDisabled = computed(
         v-if="canGoBack"
         type="button"
         data-test="connect-back"
-        class="border-edge rounded-chrome border px-4 py-2.5 text-body font-semibold text-ink-2 hover:text-ink"
+        class="border-border rounded-window border px-4 py-2.5 text-sm font-semibold text-fg-2 hover:text-fg"
         @click="onBack"
       >
         Back
@@ -446,7 +454,7 @@ const continueDisabled = computed(
         v-if="step !== 2 || type === 'remote' || selectedDiscovered"
         type="button"
         data-test="connect-continue"
-        class="rounded-chrome bg-safelight px-6 py-2.5 text-body font-bold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
+        class="rounded-window bg-accent px-6 py-2.5 text-sm font-bold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
         :disabled="continueDisabled"
         @click="onContinue"
       >

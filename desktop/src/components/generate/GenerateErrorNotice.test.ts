@@ -18,7 +18,9 @@ describe("GenerateErrorNotice", () => {
       props: { message: "The generation route changed." },
     });
 
-    expect(wrapper.get("[data-test='error-notice-message']").classes()).toContain("text-body");
+    expect(wrapper.get("[data-test='error-notice-message']").classes()).toContain(
+      "ms-error__message",
+    );
     await wrapper.get("[data-test='copy-error-notice']").trigger("click");
 
     expect(writeText).toHaveBeenCalledWith("The generation route changed.");
@@ -58,7 +60,7 @@ describe("GenerateErrorNotice", () => {
       props: { message: "The first generation failed." },
     });
 
-    expect(wrapper.get("[data-test='error-notice']").classes()).toContain("py-1.5");
+    expect(wrapper.get("[data-test='error-notice']").classes()).toContain("ms-error--compact");
     await wrapper.get("[data-test='dismiss-error-notice']").trigger("click");
     expect(wrapper.find("[data-test='error-notice']").exists()).toBe(false);
 

@@ -56,9 +56,9 @@ describe("NavItem", () => {
     expect(wrapper.find("svg").attributes("width")).toBe("22");
   });
 
-  it("row variant uses the 17px icon size", () => {
+  it("row variant uses the 18px icon size", () => {
     const wrapper = make();
-    expect(wrapper.find("svg").attributes("width")).toBe("17");
+    expect(wrapper.find("svg").attributes("width")).toBe("18");
   });
 
   it("renders a badge only when provided", async () => {

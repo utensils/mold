@@ -283,18 +283,18 @@ const statusLabel = computed(() => {
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.32);
   transition:
-    height var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    height var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-clip__resize:hover span,
 .ms-clip__resize:focus-visible span {
   height: 48px;
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .ms-clip__resize:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
 }
 
@@ -305,34 +305,34 @@ const statusLabel = computed(() => {
   padding: 0;
   overflow: hidden;
   text-align: left;
-  background: color-mix(in srgb, var(--print) 92%, black);
-  border: 1px solid color-mix(in srgb, var(--rebate) 22%, transparent);
+  background: color-mix(in srgb, var(--mold-media-bed) 92%, black);
+  border: 1px solid color-mix(in srgb, var(--mold-text) 22%, transparent);
   border-radius: 9px;
-  color: color-mix(in srgb, var(--bath) 90%, white);
-  font-family: var(--f-body);
+  color: color-mix(in srgb, var(--mold-bg-deep) 90%, white);
+  font-family: var(--mold-font-sans);
   font-size: 12px;
   cursor: pointer;
   transition:
-    border-color var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease),
-    transform var(--dur-quick) var(--ease);
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    transform var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-clip__body:hover {
-  border-color: color-mix(in srgb, var(--safelight) 60%, transparent);
+  border-color: color-mix(in srgb, var(--mold-blue) 60%, transparent);
   transform: translateY(-1px);
 }
 
 .ms-clip[data-on="true"] .ms-clip__body {
-  border-color: var(--safelight);
+  border-color: var(--mold-blue);
   color: white;
   box-shadow:
-    0 0 0 1px var(--safelight),
-    0 0 22px color-mix(in srgb, var(--safelight) 18%, transparent);
+    0 0 0 1px var(--mold-blue),
+    0 0 22px color-mix(in srgb, var(--mold-blue) 18%, transparent);
 }
 
 .ms-clip__body:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -343,7 +343,7 @@ const statusLabel = computed(() => {
   height: var(--filmstrip-thumb-height, 104px);
   background: linear-gradient(
     145deg,
-    color-mix(in srgb, var(--halide) 14%, #101113),
+    color-mix(in srgb, var(--mold-sapphire) 14%, #101113),
     #050506
   );
   overflow: hidden;
@@ -378,7 +378,7 @@ const statusLabel = computed(() => {
   border-radius: 5px;
   background: rgba(4, 4, 5, 0.72);
   color: white;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 11px;
 }
 
@@ -393,12 +393,12 @@ const statusLabel = computed(() => {
   gap: 7px;
   background: rgba(5, 5, 6, 0.62);
   color: white;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 11px;
 }
 
 .ms-clip__error-mark {
-  color: var(--stop);
+  color: var(--mold-error);
   font-size: 20px;
   font-weight: 700;
 }
@@ -407,7 +407,7 @@ const statusLabel = computed(() => {
   width: 14px;
   height: 14px;
   border: 2px solid rgba(255, 255, 255, 0.26);
-  border-top-color: var(--safelight);
+  border-top-color: var(--mold-blue);
   border-radius: 50%;
   animation: ms-clip-spin 0.8s linear infinite;
 }
@@ -425,7 +425,7 @@ const statusLabel = computed(() => {
 .ms-clip__progress > span {
   display: block;
   height: 100%;
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .ms-clip__footer {
@@ -445,14 +445,14 @@ const statusLabel = computed(() => {
 }
 
 .ms-clip__frames {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   color: rgba(255, 255, 255, 0.6);
   white-space: nowrap;
 }
 
 .ms-clip[data-on="true"] .ms-clip__frames {
-  color: color-mix(in srgb, var(--safelight) 72%, white);
+  color: color-mix(in srgb, var(--mold-blue) 72%, white);
 }
 
 .ms-clip__status {
@@ -469,7 +469,7 @@ const statusLabel = computed(() => {
   border-radius: 999px;
   background: rgba(5, 5, 6, 0.76);
   color: rgba(255, 255, 255, 0.78);
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -477,15 +477,15 @@ const statusLabel = computed(() => {
 
 .ms-clip__status[data-kind="ready"],
 .ms-clip__status[data-kind="cached"] {
-  color: var(--success);
+  color: var(--mold-success);
 }
 
 .ms-clip__status[data-kind="error"] {
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 .ms-clip__status[data-kind="rerender"] {
-  color: var(--warning);
+  color: var(--mold-warning);
 }
 
 .ms-clip__play {
@@ -506,9 +506,9 @@ const statusLabel = computed(() => {
   opacity: 0;
   transform: translate(-50%, 3px);
   transition:
-    opacity var(--dur-quick) var(--ease),
-    transform var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    opacity var(--mold-dur-quick) var(--mold-ease-out),
+    transform var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-clip:hover .ms-clip__play,
@@ -519,13 +519,13 @@ const statusLabel = computed(() => {
 }
 
 .ms-clip__play:hover {
-  background: var(--safelight);
+  background: var(--mold-blue);
   color: #17120a;
 }
 
 .ms-clip__play:focus-visible {
   opacity: 1;
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -541,17 +541,17 @@ const statusLabel = computed(() => {
   padding: 0;
   border: 0;
   border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--stop) 55%, transparent);
-  background: color-mix(in srgb, var(--print) 90%, black);
+  border: 1px solid color-mix(in srgb, var(--mold-error) 55%, transparent);
+  background: color-mix(in srgb, var(--mold-media-bed) 90%, black);
   color: rgba(255, 255, 255, 0.75);
   font-size: 10px;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
   transition:
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease),
-    opacity var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    opacity var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-clip:hover .ms-clip__remove,
@@ -561,14 +561,14 @@ const statusLabel = computed(() => {
 }
 
 .ms-clip__remove:hover {
-  background: var(--stop);
+  background: var(--mold-error);
   color: white;
 }
 
 .ms-clip__remove:focus-visible {
   opacity: 1;
   pointer-events: auto;
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 

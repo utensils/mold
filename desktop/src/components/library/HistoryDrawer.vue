@@ -577,7 +577,7 @@ async function cleanUpDiskConfirmed() {
     <template #header>
       <span class="ms-drawer-kicker">History</span>
       <div
-        class="ml-3 flex rounded-control border border-control-edge bg-bath p-0.5"
+        class="ml-3 flex rounded-control border border-border-control bg-bg-deep p-0.5"
         role="group"
         aria-label="History view"
       >
@@ -585,8 +585,8 @@ async function cleanUpDiskConfirmed() {
           type="button"
           data-test="tab-runs"
           :aria-pressed="tab === 'runs'"
-          class="rounded-control px-2.5 py-1 text-body transition-colors"
-          :class="tab === 'runs' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          class="rounded-control px-2.5 py-1 text-sm transition-colors"
+          :class="tab === 'runs' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('runs')"
         >
           Runs
@@ -595,8 +595,8 @@ async function cleanUpDiskConfirmed() {
           type="button"
           data-test="tab-prompts"
           :aria-pressed="tab === 'prompts'"
-          class="rounded-control px-2.5 py-1 text-body transition-colors"
-          :class="tab === 'prompts' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          class="rounded-control px-2.5 py-1 text-sm transition-colors"
+          :class="tab === 'prompts' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('prompts')"
         >
           Prompts
@@ -605,8 +605,8 @@ async function cleanUpDiskConfirmed() {
           type="button"
           data-test="tab-sequences"
           :aria-pressed="tab === 'sequences'"
-          class="rounded-control px-2.5 py-1 text-body transition-colors"
-          :class="tab === 'sequences' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          class="rounded-control px-2.5 py-1 text-sm transition-colors"
+          :class="tab === 'sequences' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('sequences')"
         >
           Sequences
@@ -621,17 +621,17 @@ async function cleanUpDiskConfirmed() {
           data-selectable
           type="search"
           :placeholder="tab === 'runs' ? 'Search runs…' : 'Search prompts…'"
-          class="border-edge h-7 flex-1 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
+          class="border-border h-7 flex-1 rounded-control border bg-bg-deep px-2 text-sm text-fg placeholder:text-fg-dim"
         />
         <button
           v-if="tab === 'prompts'"
           type="button"
           data-test="clear-history"
-          class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-body transition-colors duration-100"
+          class="border-border h-7 shrink-0 rounded-control border px-2.5 text-sm transition-colors duration-100"
           :class="
             confirmingClear
-              ? 'border-stop bg-stop font-semibold text-on-accent'
-              : 'text-ink-2 hover:text-stop'
+              ? 'border-error bg-error font-semibold text-on-accent'
+              : 'text-fg-2 hover:text-error'
           "
           @blur="confirmingClear = false"
           @click="clearAll"
@@ -655,25 +655,27 @@ async function cleanUpDiskConfirmed() {
           headline="No runs yet"
           detail="Every print you develop shows up here with its settings and seed."
         />
-        <p v-else-if="query && runs.length === 0" class="mt-6 text-center text-body text-ink-2">
+        <p v-else-if="query && runs.length === 0" class="mt-6 text-center text-sm text-fg-2">
           No runs match “{{ query }}”.
         </p>
         <template v-for="group in runGroups" :key="group.label">
           <div class="mt-3 mb-1 flex items-center gap-2 first:mt-0">
-            <span class="edge-code">{{ group.label.toUpperCase() }}</span>
-            <div class="border-edge h-px flex-1 border-t" />
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+              group.label.toUpperCase()
+            }}</span>
+            <div class="border-border h-px flex-1 border-t" />
           </div>
           <button
             v-for="entry in group.runs"
             :key="runKey(entry)"
             type="button"
             data-test="run-row"
-            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bath"
+            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bg-deep"
             @click="useRun(entry.item)"
             @contextmenu="contextMenu.open($event, runMenu(entry))"
           >
             <div
-              class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
+              class="h-12 w-12 shrink-0 overflow-hidden rounded-inner border border-border bg-media-bed"
             >
               <AuthedMedia
                 :path="
@@ -690,10 +692,10 @@ async function cleanUpDiskConfirmed() {
               />
             </div>
             <div class="min-w-0 flex-1">
-              <div class="truncate text-body text-ink" :title="entry.item.metadata.prompt">
+              <div class="truncate text-sm text-fg" :title="entry.item.metadata.prompt">
                 {{ entry.item.metadata.prompt }}
               </div>
-              <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+              <div class="font-mono text-xs mt-0.5 truncate text-micro text-fg-dim">
                 {{ entry.item.metadata.model }} · {{ entry.item.metadata.width }}×{{
                   entry.item.metadata.height
                 }}
@@ -703,16 +705,20 @@ async function cleanUpDiskConfirmed() {
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code max-w-24 shrink-0 truncate"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap max-w-24 shrink-0 truncate"
             >
               {{ availabilityLabel(entry) }}
             </span>
-            <span class="data-mono shrink-0 text-caption text-ink-3">{{
+            <span class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{
               runTime(entry.item)
             }}</span>
           </button>
         </template>
-        <p v-if="runsCapNote" data-test="runs-cap-note" class="edge-code mt-1">
+        <p
+          v-if="runsCapNote"
+          data-test="runs-cap-note"
+          class="font-mono text-micro text-fg-dim whitespace-nowrap mt-1"
+        >
           {{ runsCapNote }}
         </p>
       </div>
@@ -735,7 +741,7 @@ async function cleanUpDiskConfirmed() {
             v-for="vm in visibleSequences"
             :key="vm.key"
             data-test="sequence-row"
-            class="rounded-control px-2 py-1.5 hover:bg-bath"
+            class="rounded-control px-2 py-1.5 hover:bg-bg-deep"
           >
             <SequenceJobRow
               class="min-w-0"
@@ -751,7 +757,7 @@ async function cleanUpDiskConfirmed() {
                   v-if="printOf(vm)"
                   type="button"
                   data-test="seq-show-print"
-                  class="border-ce shrink-0 rounded-control border px-2 py-0.5 text-caption text-ink-2 hover:text-rebate"
+                  class="border-border-control shrink-0 rounded-control border px-2 py-0.5 text-micro text-fg-2 hover:text-fg"
                   @click.stop="showPrint(vm)"
                 >
                   Show print
@@ -759,21 +765,25 @@ async function cleanUpDiskConfirmed() {
               </template>
             </SequenceJobRow>
           </div>
-          <p v-if="sequenceCapNote" data-test="sequence-cap-note" class="edge-code mt-1">
+          <p
+            v-if="sequenceCapNote"
+            data-test="sequence-cap-note"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap mt-1"
+          >
             {{ sequenceCapNote }}
           </p>
         </template>
 
         <!-- Maintenance lives here now: destructive, host-scoped, rarely used. -->
-        <div class="border-edge mt-2 flex items-center gap-2 border-t pt-2">
+        <div class="border-border mt-2 flex items-center gap-2 border-t pt-2">
           <button
             type="button"
             data-test="seq-clear-inactive"
-            class="border-edge h-7 rounded-control border px-2.5 text-body transition-colors duration-100"
+            class="border-border h-7 rounded-control border px-2.5 text-sm transition-colors duration-100"
             :class="
               confirmingClearSequences
-                ? 'border-stop bg-stop font-semibold text-on-accent'
-                : 'text-ink-2 hover:text-stop'
+                ? 'border-error bg-error font-semibold text-on-accent'
+                : 'text-fg-2 hover:text-error'
             "
             :disabled="clearingSequences"
             title="Delete every sequence job that isn't running or queued"
@@ -785,7 +795,7 @@ async function cleanUpDiskConfirmed() {
           <button
             type="button"
             data-test="seq-cleanup-disk"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink"
+            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg"
             title="Sweep ephemeral jobs and prune artifact directories"
             @click="cleanUpDisk"
           >
@@ -822,35 +832,39 @@ async function cleanUpDiskConfirmed() {
         />
         <template v-for="group in groups" :key="group.label">
           <div class="mt-3 mb-1 flex items-center gap-2 first:mt-0">
-            <span class="edge-code">{{ group.label.toUpperCase() }}</span>
-            <div class="border-edge h-px flex-1 border-t" />
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+              group.label.toUpperCase()
+            }}</span>
+            <div class="border-border h-px flex-1 border-t" />
           </div>
           <button
             v-for="(entry, i) in group.entries"
             :key="`${group.label}-${i}`"
             type="button"
             data-test="prompt-row"
-            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bath"
+            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bg-deep"
             @click="usePrompt(entry)"
             @contextmenu="contextMenu.open($event, promptMenu(entry))"
           >
-            <span class="min-w-0 flex-1 truncate text-body text-ink" :title="entry.prompt">
+            <span class="min-w-0 flex-1 truncate text-sm text-fg" :title="entry.prompt">
               {{ entry.prompt }}
             </span>
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code max-w-24 shrink-0 truncate"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap max-w-24 shrink-0 truncate"
             >
               {{ entry.hostLabel }}
             </span>
-            <span class="data-mono shrink-0 text-caption text-ink-3">{{ entry.model }}</span>
-            <span class="data-mono shrink-0 text-caption text-ink-3">{{ timeOf(entry) }}</span>
+            <span class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{ entry.model }}</span>
+            <span class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{
+              timeOf(entry)
+            }}</span>
           </button>
         </template>
         <p
           v-if="query && visiblePrompts.length === 0 && !unavailable"
-          class="mt-6 text-center text-body text-ink-2"
+          class="mt-6 text-center text-sm text-fg-2"
         >
           No prompts match “{{ query }}”.
         </p>
@@ -880,10 +894,10 @@ async function cleanUpDiskConfirmed() {
 
 <style scoped>
 .ms-drawer-kicker {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 </style>

@@ -60,18 +60,18 @@ const mosaic = computed(() => props.covers.slice(0, 4));
 <template>
   <button
     type="button"
-    class="ms-ccard group flex flex-col gap-0.5 rounded-card border border-edge bg-bench p-2.5 text-left transition-[transform,box-shadow] duration-100 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(0,0,0,0.25)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-safelight"
+    class="ms-ccard group flex flex-col gap-0.5 rounded-control border border-border bg-panel p-2.5 text-left transition-colors duration-100 hover:border-border-focus hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     data-test="collection-card"
     :aria-label="`Open collection ${name}`"
     @click="emit('open')"
     @contextmenu="emit('contextmenu', $event)"
   >
     <span
-      class="ms-ccard__mosaic mb-2 grid aspect-[4/3] w-full overflow-hidden rounded-[8px] bg-print-surface"
+      class="ms-ccard__mosaic mb-2 grid aspect-[4/3] w-full overflow-hidden border border-border bg-media-bed"
       :class="mosaic.length <= 1 ? 'grid-cols-1' : 'grid-cols-2 gap-0.5'"
       data-test="collection-mosaic"
     >
-      <span v-if="mosaic.length === 0" class="flex items-center justify-center text-ink-3">
+      <span v-if="mosaic.length === 0" class="flex items-center justify-center text-fg-dim">
         <Icon name="collection" :size="26" :stroke-width="1.4" />
       </span>
       <AuthedMedia
@@ -86,19 +86,17 @@ const mosaic = computed(() => props.covers.slice(0, 4));
         class="h-full w-full object-cover"
       />
     </span>
-    <span class="font-display text-[15px] font-semibold text-ink" data-test="collection-name">
+    <span class="text-xs font-semibold text-fg" data-test="collection-name">
       {{ name }}
       <span
         v-if="hidden"
-        class="ml-1.5 font-utility text-[9.5px] font-medium uppercase text-ink-3"
+        class="ml-1.5 font-mono text-micro font-medium uppercase text-fg-dim"
         data-test="collection-hidden-badge"
         >Hidden</span
       >
     </span>
-    <span class="font-utility text-[10.5px] text-ink-3" data-test="collection-meta">{{
-      meta
-    }}</span>
-    <span v-if="updated" class="text-[11.5px] text-ink-3" data-test="collection-updated">
+    <span class="font-mono text-micro text-fg-dim" data-test="collection-meta">{{ meta }}</span>
+    <span v-if="updated" class="text-xs text-fg-dim" data-test="collection-updated">
       {{ updated }}
     </span>
   </button>

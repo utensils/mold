@@ -2658,7 +2658,7 @@ describe("hosts store", () => {
     const final = (await appSettingsGet()) as ReturnType<typeof settings>;
     // The merge landed AND the interleaved write survived.
     expect(final.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
-    expect(final.theme).toBe("dark");
+    expect(final.theme).toBe("nebula");
   });
 
   it("serializes this store's settings writers so neither clobbers the other", async () => {

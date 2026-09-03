@@ -2,7 +2,8 @@
 import { onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
-import NavRail from "./components/shell/NavRail.vue";
+import Sidebar from "./components/shell/Sidebar.vue";
+import StatusBar from "./components/shell/StatusBar.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
@@ -32,6 +33,7 @@ import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
 import { useEventsStore } from "./stores/events";
 import { useHostsStore } from "./stores/hosts";
+import { useHostStatusStore } from "./stores/hostStatus";
 import { useGenerationStore } from "./stores/generation";
 import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useToastStore } from "./stores/toasts";
@@ -44,6 +46,7 @@ const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
 const events = useEventsStore();
 const hostsStore = useHostsStore();
+const hostStatus = useHostStatusStore();
 const libraryPrefs = useLibraryPrefsStore();
 
 // App-wide server-event subscription (live gallery). Re-probe whenever the
@@ -59,6 +62,20 @@ const generation = useGenerationStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const updater = useUpdaterStore();
+
+// The machine card and the status bar read one telemetry authority. Its
+// status poll follows the primary connection (the embedded-engine recovery
+// invariant) while the resources stream follows the display host.
+watch(
+  () => connection.ready,
+  (ready) => (ready ? hostStatus.start() : hostStatus.stop()),
+);
+watch(
+  () => `${hostStatus.displayHost?.id ?? "none"}:${hostStatus.connection}`,
+  () => {
+    if (connection.ready) hostStatus.startResourceStream();
+  },
+);
 
 function openNotificationAction(action: NotificationAction | null) {
   if (action) void router.push(notificationRoute(action));
@@ -218,7 +235,7 @@ async function listenForMenu() {
         return void updater.check();
       case "new-generation":
         ui.newGeneration();
-        return void router.push("/generate");
+        return void router.push("/create");
       case "new-sequence":
         return void router.push({ path: "/create", query: { output: "sequence" } });
       case "generate":
@@ -330,19 +347,21 @@ onUnmounted(() => {
   window.removeEventListener("focus", reconcileDurableOnWake);
   document.removeEventListener("visibilitychange", reconcileDurableOnWake);
   unlistenNotificationAction?.();
+  hostStatus.stop();
 });
 </script>
 
 <template>
-  <div class="relative flex h-full flex-col overflow-hidden">
-    <TitleBar class="h-11 shrink-0" />
+  <div class="relative flex h-full flex-col overflow-hidden bg-bg">
+    <TitleBar />
     <UpdateBanner />
-    <div class="grid min-h-0 flex-1 grid-cols-[auto_1fr] overflow-hidden">
-      <NavRail />
-      <main class="min-h-0 min-w-0 overflow-hidden">
+    <div class="flex min-h-0 flex-1 overflow-hidden">
+      <Sidebar />
+      <main class="min-h-0 min-w-0 flex-1 overflow-hidden">
         <router-view />
       </main>
     </div>
+    <StatusBar />
     <Toasts />
     <CommandPalette />
     <ContextMenu />

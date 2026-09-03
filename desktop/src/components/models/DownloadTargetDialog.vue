@@ -52,14 +52,14 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
         aria-modal="true"
         aria-labelledby="download-target-title"
         data-test="download-target-dialog"
-        class="border-edge z-50 w-full max-w-md rounded-chrome border bg-bench p-4 shadow-raised"
+        class="border-border z-50 w-full max-w-md rounded-window border bg-bg p-4 shadow-md"
       >
         <div class="mb-3 flex items-start justify-between gap-4">
           <div>
-            <h2 id="download-target-title" class="text-body-lg font-semibold text-ink">
+            <h2 id="download-target-title" class="text-base font-semibold text-fg">
               {{ title }}
             </h2>
-            <p class="mt-1 text-caption text-ink-2">
+            <p class="mt-1 text-micro text-fg-2">
               <template v-if="action === 'repair'">
                 Only missing or damaged files will be fetched on the selected host.
               </template>
@@ -77,7 +77,7 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
           <button
             ref="closeBtn"
             type="button"
-            class="h-7 rounded-control px-2 text-ink-2 hover:bg-bath hover:text-ink"
+            class="h-7 rounded-control px-2 text-fg-2 hover:bg-bg-deep hover:text-fg"
             :aria-label="`Close ${action} target picker`"
             @click="emit('close')"
           >
@@ -92,31 +92,34 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
             type="button"
             role="listitem"
             :data-test="`download-target-${target.host.id}`"
-            class="border-edge flex min-h-12 items-center gap-3 rounded-control border px-3 py-2 text-left transition-colors duration-150 hover:border-safelight hover:bg-bath"
+            class="border-border flex min-h-12 items-center gap-3 rounded-control border px-3 py-2 text-left transition-colors duration-150 hover:border-accent hover:bg-bg-deep"
             @click="emit('select', target.host)"
           >
             <span
               class="h-2 w-2 shrink-0 rounded-full"
-              :class="target.host.status === 'ready' ? 'bg-halide' : 'bg-stop'"
+              :class="target.host.status === 'ready' ? 'bg-sapphire' : 'bg-error'"
               aria-hidden="true"
             />
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-body font-medium text-ink">
+              <span class="block truncate text-sm font-medium text-fg">
                 {{ target.host.label }}
               </span>
-              <span class="block truncate text-caption text-ink-3">
+              <span class="block truncate text-micro text-fg-dim">
                 {{ target.host.kind === "local" ? "This device" : target.host.baseUrl }}
               </span>
             </span>
             <!-- Says what picking this machine actually does, so a mixed list
                  never leaves the user guessing which one is the fresh copy. -->
             <span
-              class="edge-code shrink-0"
-              :class="target.action === 'install' ? 'text-safelight' : 'text-ink-3'"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+              :class="target.action === 'install' ? 'text-accent' : 'text-fg-dim'"
             >
               {{ target.action === "install" ? "Install" : "Already installed · repair" }}
             </span>
-            <span v-if="target.host.queueDepth != null" class="data-mono text-caption text-ink-3">
+            <span
+              v-if="target.host.queueDepth != null"
+              class="font-mono text-xs text-micro text-fg-dim"
+            >
               {{ target.host.queueDepth }} queued
             </span>
           </button>

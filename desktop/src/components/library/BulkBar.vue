@@ -133,13 +133,13 @@ defineExpose({ openCollections, openTags, closePopovers });
 <template>
   <div
     data-test="bulk-action-bar"
-    class="border-edge absolute bottom-4 left-1/2 z-30 flex max-w-[calc(100%-2rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-chrome border bg-bench px-3 py-2 shadow-lg"
+    class="border-border flex shrink-0 flex-wrap items-center gap-2 border-t bg-chrome px-3.5 py-2.5"
     role="toolbar"
     aria-label="Selection actions"
   >
-    <span class="data-mono px-1 text-caption text-ink">
+    <span class="font-mono text-xs px-1 text-micro text-fg">
       {{ selectedCount }}
-      <span class="text-ink-3">/ {{ total }} selected</span>
+      <span class="text-fg-dim">/ {{ total }} selected</span>
     </span>
     <button
       type="button"
@@ -255,7 +255,7 @@ defineExpose({ openCollections, openTags, closePopovers });
               @add="(name) => emit('addTags', [name])"
               @remove="(name) => emit('removeTags', [name])"
             />
-            <p class="mt-1 px-0.5 font-utility text-[9.5px] text-ink-3">
+            <p class="mt-1 px-0.5 font-mono text-micro text-fg-dim">
               Adding or removing a tag applies to every selected print.
             </p>
           </div>
@@ -290,7 +290,7 @@ defineExpose({ openCollections, openTags, closePopovers });
       <button
         type="button"
         class="ms-bb"
-        :class="confirming && !trash ? 'ms-bb--armed' : 'hover:text-stop'"
+        :class="confirming && !trash ? 'ms-bb--armed' : 'hover:text-error'"
         :disabled="none || busy"
         data-test="bulk-delete"
         @blur="!trash && emit('update:confirming', false)"
@@ -314,7 +314,7 @@ defineExpose({ openCollections, openTags, closePopovers });
 
     <button
       type="button"
-      class="flex h-7 w-7 items-center justify-center rounded-control text-ink-3 transition-colors duration-100 hover:text-ink"
+      class="flex h-7 w-7 items-center justify-center rounded-control text-fg-dim transition-colors duration-100 hover:text-fg"
       aria-label="Exit select mode"
       title="Exit select mode (Esc)"
       @click="emit('exit')"
@@ -330,22 +330,22 @@ defineExpose({ openCollections, openTags, closePopovers });
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   background: transparent;
-  color: var(--ink-2);
-  border-radius: var(--radius-control);
+  color: var(--mold-text-2);
+  border-radius: var(--mold-radius-2);
   padding: 0 10px;
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
   font-size: 11.5px;
   white-space: nowrap;
   transition:
-    color var(--dur-quick) var(--ease),
-    border-color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-bb:hover:not(:disabled) {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-bb:disabled {
@@ -353,40 +353,40 @@ defineExpose({ openCollections, openTags, closePopovers });
 }
 
 .ms-bb--on {
-  border-color: var(--safelight);
-  color: var(--safelight);
-  background: var(--sel-bg);
+  border-color: var(--mold-blue);
+  color: var(--mold-blue);
+  background: var(--mold-accent-tint);
 }
 
 .ms-bb--danger {
-  color: var(--stop);
-  border-color: color-mix(in srgb, var(--stop) 50%, transparent);
+  color: var(--mold-error);
+  border-color: color-mix(in srgb, var(--mold-error) 50%, transparent);
 }
 
 .ms-bb--armed {
-  border-color: var(--stop);
-  background: var(--stop);
-  color: var(--on-accent);
+  border-color: var(--mold-error);
+  background: var(--mold-error);
+  color: var(--mold-on-accent);
   font-weight: 600;
 }
 
 .ms-bb:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .ms-bb-vr {
   width: 1px;
   height: 18px;
-  background: var(--edge);
+  background: var(--mold-border);
   margin: 0 2px;
 }
 
 .lightbox-kicker {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 </style>

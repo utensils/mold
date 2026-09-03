@@ -59,7 +59,7 @@ onMounted(() => void refresh());
     <div class="flex max-w-sm flex-col items-end gap-1.5">
       <div class="flex items-center gap-2">
         <span
-          class="data-mono max-w-56 truncate text-caption text-ink-2"
+          class="font-mono text-xs max-w-56 truncate text-micro text-fg-2"
           :title="effectiveDirectory"
           data-test="media-save-directory"
         >
@@ -67,7 +67,7 @@ onMounted(() => void refresh());
         </span>
         <button
           type="button"
-          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-40"
+          class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg disabled:opacity-40"
           :disabled="saving"
           data-test="choose-media-save-directory"
           @click="chooseDirectory"
@@ -78,14 +78,14 @@ onMounted(() => void refresh());
       <button
         v-if="!usesSystemDefault"
         type="button"
-        class="text-caption text-ink-3 hover:text-ink"
+        class="text-micro text-fg-dim hover:text-fg"
         :disabled="saving"
         data-test="reset-media-save-directory"
         @click="useDownloads"
       >
         Use Downloads
       </button>
-      <span v-else class="text-caption text-ink-3">System default</span>
+      <span v-else class="text-micro text-fg-dim">System default</span>
     </div>
   </SettingRow>
 </template>

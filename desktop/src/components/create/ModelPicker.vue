@@ -125,10 +125,14 @@ onBeforeUnmount(() => {
       <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
         selected ? modelDisplayName(selected) : phantom ? phantomLabel : "Choose a model"
       }}</span>
-      <span v-if="selected?.disk_usage_bytes" class="data-mono ms-model__size">
+      <span v-if="selected?.disk_usage_bytes" class="font-mono text-xs ms-model__size">
         {{ formatGB(selected.disk_usage_bytes) }}
       </span>
-      <span v-else-if="phantom" data-test="selected-model-missing" class="edge-code shrink-0">
+      <span
+        v-else-if="phantom"
+        data-test="selected-model-missing"
+        class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+      >
         Not installed
       </span>
     </button>
@@ -143,8 +147,8 @@ onBeforeUnmount(() => {
         @click="pickMissing"
       >
         <span class="min-w-0 flex-1">
-          <span class="block break-all text-ink" :title="phantomLabel">{{ phantomLabel }}</span>
-          <span class="edge-code mt-0.5 block break-all whitespace-normal">
+          <span class="block break-all text-fg" :title="phantomLabel">{{ phantomLabel }}</span>
+          <span class="font-mono text-micro text-fg-dim mt-0.5 block break-all">
             Not installed — download it
           </span>
         </span>
@@ -160,11 +164,11 @@ onBeforeUnmount(() => {
           :disabled="!!disabledReason?.(m)"
           @click="pick(m)"
         >
-          <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-ink-3" />
+          <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-fg-dim" />
           <span class="min-w-0 flex-1">
             <span
               data-test="model-option-name"
-              class="block break-all text-ink"
+              class="block break-all text-fg"
               :title="modelDisplayName(m)"
             >
               {{ modelDisplayName(m) }}
@@ -172,21 +176,21 @@ onBeforeUnmount(() => {
             <span
               v-if="disabledReason?.(m)"
               data-test="model-disabled-reason"
-              class="edge-code mt-0.5 block break-all whitespace-normal"
+              class="font-mono text-micro text-fg-dim mt-0.5 block break-all"
             >
               {{ disabledReason?.(m) }}
             </span>
             <span
               v-else-if="availabilityTag(m)"
               data-test="model-availability"
-              class="edge-code mt-0.5 block break-all whitespace-normal"
+              class="font-mono text-micro text-fg-dim mt-0.5 block break-all"
             >
               {{ availabilityTag(m) }}
             </span>
           </span>
           <span
             class="ms-model__loaded"
-            :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
+            :class="m.is_loaded ? 'bg-accent' : 'bg-transparent'"
             :title="m.is_loaded ? 'On GPU' : ''"
           />
         </button>
@@ -209,16 +213,16 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 9px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
   padding: 0 12px;
   font-size: 13px;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .ms-model__size {
   flex-shrink: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-model__menu {
   position: absolute;
@@ -229,21 +233,17 @@ onBeforeUnmount(() => {
   min-width: 16rem;
   overflow-y: auto;
   overflow-x: hidden;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 12px;
-  background: var(--bench);
+  background: var(--mold-bg);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
 }
-.ms-model__option .edge-code {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
 .ms-model__group {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   padding: 8px 8px 4px;
 }
 .ms-model__option {
@@ -254,11 +254,11 @@ onBeforeUnmount(() => {
   padding: 6px 8px;
   text-align: left;
   font-size: 13px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .ms-model__option:hover:not(:disabled) {
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
 }
 .ms-model__option--disabled {
   cursor: not-allowed;
@@ -275,13 +275,13 @@ onBeforeUnmount(() => {
   display: flex;
   width: 100%;
   align-items: center;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   padding: 8px;
   text-align: left;
   font-size: 13px;
-  color: var(--halide);
+  color: var(--mold-sapphire);
 }
 .ms-model__browse:hover {
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 </style>

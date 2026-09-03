@@ -37,22 +37,22 @@ const identity = computed<FamilyIdentity>(() => {
 <template>
   <div
     class="family-placeholder relative isolate shrink-0 overflow-hidden"
-    :class="layout === 'grid' ? 'h-32 w-full rounded-t-chrome' : 'h-12 w-16 rounded-media'"
+    :class="layout === 'grid' ? 'h-32 w-full rounded-t-window' : 'h-12 w-16 rounded-inner'"
     :data-tone="identity.tone"
     :data-layout="layout"
     data-test="family-placeholder"
     aria-hidden="true"
   >
-    <span class="family-orbit absolute rounded-full border" aria-hidden="true" />
+    <span class="family-orbit absolute rounded-control border" aria-hidden="true" />
     <span class="family-satellite absolute rounded-full" aria-hidden="true" />
     <span
-      class="family-mark data-mono absolute inset-0 flex items-center justify-center font-semibold"
-      :class="layout === 'grid' ? 'text-display' : 'text-edge-code'"
+      class="family-mark font-mono text-xs absolute inset-0 flex items-center justify-center font-semibold"
+      :class="layout === 'grid' ? 'text-lg' : 'text-micro'"
     >
       {{ identity.mark }}
     </span>
     <span
-      class="family-label data-mono absolute text-edge-code"
+      class="family-label font-mono text-xs absolute text-micro"
       :class="layout === 'grid' ? 'bottom-2.5 left-3' : 'sr-only'"
     >
       {{ identity.label }}
@@ -62,20 +62,20 @@ const identity = computed<FamilyIdentity>(() => {
 
 <style scoped>
 .family-placeholder {
-  --family-primary: var(--halide);
-  --family-secondary: var(--safelight);
+  --family-primary: var(--mold-sapphire);
+  --family-secondary: var(--mold-blue);
   color: var(--family-primary);
-  background: color-mix(in srgb, var(--family-primary) 9%, var(--bench));
+  background: color-mix(in srgb, var(--family-primary) 9%, var(--mold-bg));
 }
 
 .family-placeholder[data-tone="warm"] {
-  --family-primary: var(--safelight);
-  --family-secondary: var(--halide);
+  --family-primary: var(--mold-blue);
+  --family-secondary: var(--mold-sapphire);
 }
 
 .family-placeholder[data-tone="neutral"] {
-  --family-primary: color-mix(in srgb, var(--rebate) 72%, transparent);
-  --family-secondary: var(--halide);
+  --family-primary: color-mix(in srgb, var(--mold-text) 72%, transparent);
+  --family-secondary: var(--mold-sapphire);
 }
 
 .family-orbit {
@@ -104,12 +104,12 @@ const identity = computed<FamilyIdentity>(() => {
 }
 
 .family-mark {
-  color: color-mix(in srgb, var(--family-primary) 88%, var(--rebate));
+  color: color-mix(in srgb, var(--family-primary) 88%, var(--mold-text));
   letter-spacing: -0.04em;
 }
 
 .family-label {
-  color: color-mix(in srgb, var(--family-primary) 72%, var(--rebate));
+  color: color-mix(in srgb, var(--family-primary) 72%, var(--mold-text));
 }
 
 .family-placeholder[data-layout="table"] .family-orbit {

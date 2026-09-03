@@ -5,8 +5,8 @@
  * these helpers own the clamping so every surface agrees on the limits.
  */
 export const PANEL_LIMITS = {
-  // 210 default per the Mold Studio prototype sidebar.
-  navRail: { min: 160, def: 210, max: 320 },
+  // 270 per the shell anatomy (nav + machine card + queue).
+  navRail: { min: 220, def: 270, max: 360 },
   // 340 keeps all five 52px aspect controls on one row after 18px side padding.
   generateParams: { min: 280, def: 340, max: 480 },
   // Wide enough for History tabs; sequence actions wrap below their metadata.

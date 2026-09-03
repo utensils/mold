@@ -135,39 +135,39 @@ function openTerms(event: MouseEvent, url: string) {
 }
 .license-title {
   margin: 0;
-  color: var(--rebate);
-  font: 700 20px/1.2 var(--f-display);
+  color: var(--mold-text);
+  font: 700 20px/1.2 var(--mold-font-sans);
 }
 .license-machine {
   margin: 8px 0 16px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 13px;
 }
 .license-bundle {
   margin-top: 12px;
   padding: 14px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control-lg);
-  background: var(--bath);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
 }
 .license-model {
   margin: 0 0 10px;
-  color: var(--ink-3);
-  font: 600 11px/1.4 var(--f-mono);
+  color: var(--mold-text-dim);
+  font: 600 11px/1.4 var(--mold-font-mono);
 }
 article + article {
   margin-top: 14px;
   padding-top: 14px;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 h3 {
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: 15px;
 }
 article p {
   margin: 6px 0 0;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -176,7 +176,7 @@ article p {
   gap: 16px;
 }
 a {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 .license-error {
   color: var(--danger);
@@ -186,14 +186,14 @@ a {
   display: flex;
   justify-content: space-between;
   margin-top: 14px;
-  color: var(--ink-2);
-  font: 600 12px/1.4 var(--f-mono);
+  color: var(--mold-text-2);
+  font: 600 12px/1.4 var(--mold-font-mono);
 }
 button {
   min-height: 44px;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   padding: 0 16px;
-  font: 600 13px var(--f-body);
+  font: 600 13px var(--mold-font-sans);
   cursor: pointer;
 }
 button:disabled {
@@ -202,13 +202,13 @@ button:disabled {
 }
 .license-secondary {
   margin-left: auto;
-  border: 1px solid var(--ce);
-  color: var(--ink-2);
+  border: 1px solid var(--mold-border-control);
+  color: var(--mold-text-2);
   background: transparent;
 }
 .license-primary {
-  border: 1px solid var(--safelight);
-  color: var(--bath);
-  background: var(--safelight);
+  border: 1px solid var(--mold-blue);
+  color: var(--mold-bg-deep);
+  background: var(--mold-blue);
 }
 </style>

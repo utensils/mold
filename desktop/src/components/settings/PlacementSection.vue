@@ -144,26 +144,23 @@ async function clear() {
 </script>
 
 <template>
-  <section
-    class="border-edge mb-5 rounded-chrome border bg-bench p-4"
-    data-test="placement-section"
-  >
-    <h3 class="text-body font-semibold text-ink">Device placement</h3>
-    <p class="mt-1 text-caption text-ink-3">
+  <section class="border-border mb-5 rounded-window border bg-bg p-4" data-test="placement-section">
+    <h3 class="text-sm font-semibold text-fg">Device placement</h3>
+    <p class="mt-1 text-micro text-fg-dim">
       Pin a model's components to specific GPUs or CPU. Saved as a per-model default in config.toml
       — it applies the next time the model loads.
     </p>
 
-    <div v-if="installed.length === 0" class="mt-3 text-caption text-ink-3">
+    <div v-if="installed.length === 0" class="mt-3 text-micro text-fg-dim">
       No installed models to configure.
     </div>
 
     <template v-else>
-      <label class="mt-4 block text-caption text-ink-2" for="placement-model">Model</label>
+      <label class="mt-4 block text-micro text-fg-2" for="placement-model">Model</label>
       <select
         id="placement-model"
         v-model="selectedModel"
-        class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bath px-2 text-ink"
+        class="border-border font-mono text-xs mt-1 h-8 w-full rounded-control border bg-bg-deep px-2 text-fg"
         data-test="placement-model"
       >
         <option v-for="m in installed" :key="m.name" :value="m.name">
@@ -171,12 +168,12 @@ async function clear() {
         </option>
       </select>
 
-      <label class="mt-4 block text-caption text-ink-2" for="placement-te">Text encoders</label>
-      <p class="text-caption text-ink-3">Group knob for T5, CLIP, and Qwen encoders.</p>
+      <label class="mt-4 block text-micro text-fg-2" for="placement-te">Text encoders</label>
+      <p class="text-micro text-fg-dim">Group knob for T5, CLIP, and Qwen encoders.</p>
       <select
         id="placement-te"
         :value="textEncodersValue"
-        class="border-edge mt-1 h-8 w-full rounded-control border bg-bath px-2 text-ink"
+        class="border-border mt-1 h-8 w-full rounded-control border bg-bg-deep px-2 text-fg"
         data-test="placement-text-encoders"
         @change="onTextEncoders(($event.target as HTMLSelectElement).value)"
       >
@@ -190,7 +187,7 @@ async function clear() {
       <div v-if="tier2" class="mt-4">
         <button
           type="button"
-          class="border-edge h-8 w-full rounded-control border px-3 text-left text-body text-ink-2 hover:text-ink"
+          class="border-border h-8 w-full rounded-control border px-3 text-left text-sm text-fg-2 hover:text-fg"
           data-test="placement-advanced-toggle"
           :aria-expanded="showAdvanced"
           @click="showAdvanced = !showAdvanced"
@@ -200,13 +197,13 @@ async function clear() {
 
         <div v-if="showAdvanced" class="mt-3 space-y-3" data-test="placement-advanced">
           <div>
-            <label class="block text-caption text-ink-2" for="placement-transformer">
+            <label class="block text-micro text-fg-2" for="placement-transformer">
               Transformer
             </label>
             <select
               id="placement-transformer"
               :value="coreValue('transformer')"
-              class="border-edge mt-1 h-8 w-full rounded-control border bg-bath px-2 text-ink"
+              class="border-border mt-1 h-8 w-full rounded-control border bg-bg-deep px-2 text-fg"
               @change="onCore('transformer', ($event.target as HTMLSelectElement).value)"
             >
               <option value="auto">Auto</option>
@@ -218,11 +215,11 @@ async function clear() {
           </div>
 
           <div>
-            <label class="block text-caption text-ink-2" for="placement-vae">VAE</label>
+            <label class="block text-micro text-fg-2" for="placement-vae">VAE</label>
             <select
               id="placement-vae"
               :value="coreValue('vae')"
-              class="border-edge mt-1 h-8 w-full rounded-control border bg-bath px-2 text-ink"
+              class="border-border mt-1 h-8 w-full rounded-control border bg-bg-deep px-2 text-fg"
               @change="onCore('vae', ($event.target as HTMLSelectElement).value)"
             >
               <option value="auto">Auto</option>
@@ -234,13 +231,13 @@ async function clear() {
           </div>
 
           <div v-for="enc in ENCODER_FIELDS" :key="enc.field">
-            <label class="block text-caption text-ink-2" :for="`placement-${enc.field}`">
+            <label class="block text-micro text-fg-2" :for="`placement-${enc.field}`">
               {{ enc.label }}
             </label>
             <select
               :id="`placement-${enc.field}`"
               :value="encoderValue(enc.field)"
-              class="border-edge mt-1 h-8 w-full rounded-control border bg-bath px-2 text-ink"
+              class="border-border mt-1 h-8 w-full rounded-control border bg-bg-deep px-2 text-fg"
               @change="onEncoder(enc.field, ($event.target as HTMLSelectElement).value)"
             >
               <option value="group">Follow text encoders</option>
@@ -257,7 +254,7 @@ async function clear() {
       <div class="mt-4 flex items-center gap-3">
         <button
           type="button"
-          class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="h-8 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
           data-test="placement-save"
           :disabled="saving || !selectedModel"
           @click="save"
@@ -266,7 +263,7 @@ async function clear() {
         </button>
         <button
           type="button"
-          class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+          class="border-border h-8 rounded-control border px-3 text-sm text-fg-2 hover:text-fg disabled:opacity-50"
           data-test="placement-clear"
           :disabled="saving || !selectedModel"
           @click="clear"

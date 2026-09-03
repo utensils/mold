@@ -40,13 +40,13 @@ watch(
     >
       <div
         ref="dialog"
-        class="border-edge flex max-h-[90vh] w-full max-w-3xl flex-col overflow-y-auto rounded-chrome border bg-bench p-5"
+        class="border-border flex max-h-[90vh] w-full max-w-3xl flex-col overflow-y-auto rounded-window border bg-bg p-5"
         role="dialog"
         aria-modal="true"
         :aria-label="title"
         tabindex="-1"
       >
-        <h2 class="text-body-lg mb-3 font-semibold text-ink">{{ title }}</h2>
+        <h2 class="text-base mb-3 font-semibold text-fg">{{ title }}</h2>
         <ReferenceCropEditor
           :image="image"
           :crop="crop"

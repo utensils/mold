@@ -13,7 +13,7 @@ import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage
 installMemoryLocalStorage();
 
 import GenerateView from "./GenerateView.vue";
-import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
+import InspectorPanel from "../components/create/InspectorPanel.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
@@ -92,8 +92,9 @@ async function loadIntoMeshForm(template: GenerationTemplate) {
   form.mesh.octreeResolution = 192;
   expect(form.recipeCapabilities?.canvasless).toBe(true);
 
-  await wrapper.get("[data-test='templates-toggle']").trigger("click");
-  wrapper.findComponent(TemplatesPanel).vm.$emit("load", template);
+  // Starting points are a tab in the inspector now, not a floating popover:
+  // the panel loads the template and the view answers on `load-template`.
+  wrapper.findComponent(InspectorPanel).vm.$emit("load-template", template);
   await flushPromises();
   return form;
 }

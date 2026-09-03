@@ -149,19 +149,21 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
 
 <template>
   <div data-test="queue-column" class="flex flex-col gap-3">
-    <div class="edge-code uppercase">Queue</div>
+    <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">Queue</div>
     <template v-if="rows.length">
       <div
         v-for="row in rows"
         :key="`${row.hostId}:${row.entry.id}`"
         data-test="queue-surface-row"
-        class="border-edge rounded-chrome border bg-bench p-3.5 shadow-[inset_0_1px_0_var(--card-hi)]"
+        class="border-border rounded-window border bg-bg p-3.5"
         @contextmenu="openQueueMenu(row, $event)"
       >
         <div class="flex items-center gap-3">
           <span
-            class="h-9 w-9 shrink-0 overflow-hidden rounded-media"
-            :class="row.entry.state === 'running' ? 'ms-shimmer' : 'border-edge border bg-bath'"
+            class="h-9 w-9 shrink-0 overflow-hidden rounded-inner"
+            :class="
+              row.entry.state === 'running' ? 'ms-shimmer' : 'border-border border bg-bg-deep'
+            "
           >
             <img
               v-if="ownJob(row)?.previewUrl"
@@ -172,12 +174,12 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
             />
           </span>
           <div class="min-w-0 flex-1">
-            <div class="truncate text-body text-ink" :title="promptFor(row)">
+            <div class="truncate text-sm text-fg" :title="promptFor(row)">
               {{ promptFor(row) }}
             </div>
             <div
-              class="data-mono mt-0.5 truncate text-caption"
-              :class="row.entry.state === 'running' ? 'text-safelight' : 'text-ink-3'"
+              class="font-mono text-xs mt-0.5 truncate text-micro"
+              :class="row.entry.state === 'running' ? 'text-accent' : 'text-fg-dim'"
             >
               {{ statusLine(row) }}
             </div>
@@ -195,7 +197,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
               <button
                 type="button"
                 data-test="queue-reorder-up"
-                class="rounded-control p-1 text-ink-3 transition-colors hover:text-ink"
+                class="rounded-control p-1 text-fg-dim transition-colors hover:text-fg"
                 aria-label="Move earlier"
                 @click="reorder(row, -1)"
               >
@@ -204,7 +206,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
               <button
                 type="button"
                 data-test="queue-reorder-down"
-                class="rounded-control p-1 text-ink-3 transition-colors hover:text-ink"
+                class="rounded-control p-1 text-fg-dim transition-colors hover:text-fg"
                 aria-label="Move later"
                 @click="reorder(row, 1)"
               >
@@ -215,7 +217,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
               type="button"
               data-test="queue-cancel"
               :disabled="cancellingIds.includes(row.entry.id)"
-              class="ml-1 rounded-control px-2 py-1 text-caption text-ink-3 transition-colors hover:text-stop"
+              class="ml-1 rounded-control px-2 py-1 text-micro text-fg-dim transition-colors hover:text-error"
               @click="cancel(row)"
             >
               {{ cancellingIds.includes(row.entry.id) ? "Cancelling…" : "Cancel" }}
@@ -231,7 +233,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
         />
       </div>
     </template>
-    <p v-else data-test="queue-empty" class="text-caption text-ink-3">
+    <p v-else data-test="queue-empty" class="text-micro text-fg-dim">
       Nothing running or queued right now.
     </p>
     <div v-if="hostsWithMore.length" class="flex flex-col gap-1.5">
@@ -240,7 +242,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
         :key="host.id"
         type="button"
         data-test="queue-column-load-more"
-        class="border-edge h-8 rounded-control border px-3 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+        class="border-border h-8 rounded-control border px-3 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
         :disabled="jobs.queues[host.id]?.loadingMore"
         @click="jobs.loadMoreHost(host.id)"
       >
@@ -253,7 +255,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
       <p
         v-for="host in hostsWithMore.filter((host) => jobs.queues[host.id]?.loadMoreError)"
         :key="`error:${host.id}`"
-        class="text-caption text-stop"
+        class="text-micro text-error"
       >
         {{ jobs.queues[host.id]?.loadMoreError }}
       </p>

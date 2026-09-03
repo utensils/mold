@@ -39,10 +39,10 @@ async function pull(model: string) {
 
 <template>
   <div data-test="starter-cards" class="flex h-full flex-col items-center justify-center p-8">
-    <h1 class="font-display text-display-lg font-bold text-ink" style="font-stretch: 90%">
+    <h1 class="font-sans font-semibold text-xl font-bold text-fg" style="font-stretch: 90%">
       Develop your first print.
     </h1>
-    <p class="mt-2 max-w-md text-center text-body-lg text-ink-2">
+    <p class="mt-2 max-w-md text-center text-base text-fg-2">
       mold runs models locally on your machine's GPU. Pull one to start.
     </p>
 
@@ -51,35 +51,34 @@ async function pull(model: string) {
         v-for="starter in STARTERS"
         :key="starter.model"
         data-test="starter-card"
-        class="flex flex-col gap-2 rounded-chrome border bg-bench p-4"
-        :class="
-          starter.recommended
-            ? 'border-safelight shadow-[inset_0_1px_0_var(--card-hi)]'
-            : 'border-edge'
-        "
+        class="flex flex-col gap-2 rounded-window border bg-bg p-4"
+        :class="starter.recommended ? 'border-accent' : 'border-border'"
       >
         <div class="flex items-center gap-2">
-          <span class="data-mono text-body text-ink">{{ starter.model }}</span>
+          <span class="font-mono text-xs text-sm text-fg">{{ starter.model }}</span>
           <span
             v-if="starter.recommended"
             data-test="starter-recommended"
-            class="edge-code ml-auto rounded-pill bg-[color-mix(in_srgb,var(--safelight)_16%,transparent)] px-1.5 !text-safelight"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap ml-auto rounded-control bg-accent-tint px-1.5 !text-accent"
           >
             Recommended
           </span>
         </div>
-        <span class="text-caption text-ink-3">{{ starter.speed }}, {{ starter.size }}</span>
+        <span class="text-micro text-fg-dim">{{ starter.speed }}, {{ starter.size }}</span>
         <div class="flex-1" />
         <template v-if="jobFor(starter.model)">
-          <div class="h-1.5 overflow-hidden rounded-full bg-bath">
+          <div class="h-1.5 overflow-hidden bg-bg-deep">
             <div
-              class="h-full bg-safelight transition-[width] duration-300"
+              class="h-full bg-accent transition-[width] duration-300"
               :style="{
                 width: `${percent(jobFor(starter.model)!.bytes_done, jobFor(starter.model)!.bytes_total)}%`,
               }"
             />
           </div>
-          <span class="edge-code" data-test="starter-pulling">
+          <span
+            class="font-mono text-micro text-fg-dim whitespace-nowrap"
+            data-test="starter-pulling"
+          >
             Pulling…
             {{
               Math.round(
@@ -92,11 +91,11 @@ async function pull(model: string) {
           v-else
           type="button"
           data-test="starter-pull"
-          class="h-8 rounded-control text-body font-semibold transition-colors disabled:opacity-50"
+          class="h-8 rounded-control text-sm font-semibold transition-colors disabled:opacity-50"
           :class="
             starter.recommended
-              ? 'bg-safelight text-on-accent hover:brightness-105'
-              : 'border-edge border text-ink-2 hover:text-ink'
+              ? 'bg-accent text-on-accent hover:brightness-105'
+              : 'border-border border text-fg-2 hover:text-fg'
           "
           :disabled="pulling.has(starter.model)"
           @click="pull(starter.model)"
@@ -106,7 +105,7 @@ async function pull(model: string) {
       </div>
     </div>
 
-    <button type="button" class="mt-6 text-body text-halide hover:text-ink" @click="emit('browse')">
+    <button type="button" class="mt-6 text-sm text-sapphire hover:text-fg" @click="emit('browse')">
       Browse all models
     </button>
   </div>

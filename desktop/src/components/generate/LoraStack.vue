@@ -97,17 +97,17 @@ watch(
 <template>
   <div>
     <div class="mt-5 mb-2 flex items-center gap-2">
-      <span class="edge-code">LoRAs</span>
-      <span v-if="route" class="text-caption text-ink-3">{{ route.label }}</span>
-      <div class="border-edge h-px flex-1 border-t" />
+      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">LoRAs</span>
+      <span v-if="route" class="text-micro text-fg-dim">{{ route.label }}</span>
+      <div class="border-border h-px flex-1 border-t" />
     </div>
 
     <div v-for="(lora, i) in form.loras" :key="lora.path" class="mb-3">
       <div class="flex items-center justify-between gap-2">
-        <span class="truncate text-body text-ink" :title="lora.name">{{ lora.name }}</span>
+        <span class="truncate text-sm text-fg" :title="lora.name">{{ lora.name }}</span>
         <button
           type="button"
-          class="text-ink-3 hover:text-stop"
+          class="text-fg-dim hover:text-error"
           title="Remove LoRA"
           aria-label="Remove LoRA"
           @click="removeLora(i)"
@@ -122,16 +122,16 @@ watch(
           min="0"
           max="2"
           step="0.05"
-          class="w-full accent-[var(--safelight)]"
+          class="w-full accent-accent"
         />
-        <span class="data-mono w-9 text-right text-ink">{{ lora.scale.toFixed(2) }}</span>
+        <span class="font-mono text-xs w-9 text-right text-fg">{{ lora.scale.toFixed(2) }}</span>
       </div>
       <div v-if="lora.trainedWords.length" class="mt-1 flex flex-wrap gap-1">
         <button
           v-for="word in lora.trainedWords"
           :key="word"
           type="button"
-          class="border-edge rounded-full border bg-bath px-2 py-0.5 text-caption text-halide hover:text-ink"
+          class="border-border rounded-control border bg-bg-deep px-2 py-0.5 text-micro text-sapphire hover:text-fg"
           title="Insert trigger phrase"
           @click="emit('append-word', word)"
         >
@@ -143,7 +143,7 @@ watch(
     <div>
       <button
         type="button"
-        class="text-body text-halide hover:text-ink disabled:opacity-40"
+        class="text-sm text-sapphire hover:text-fg disabled:opacity-40"
         :disabled="form.loras.length >= MAX_LORA_STACK"
         @click="openPicker"
       >
@@ -152,11 +152,11 @@ watch(
       <div
         v-if="pickerOpen"
         data-test="lora-picker"
-        class="border-edge mt-2 max-h-60 w-full overflow-y-auto rounded-chrome border bg-bench shadow-raised"
+        class="border-border mt-2 max-h-60 w-full overflow-y-auto rounded-window border bg-bg shadow-md"
       >
-        <p v-if="loading" class="px-2 py-2 text-caption text-ink-3">Loading…</p>
-        <p v-else-if="error" class="px-2 py-2 text-caption text-stop">{{ error }}</p>
-        <p v-else-if="available.length === 0" class="px-2 py-2 text-caption text-ink-3">
+        <p v-if="loading" class="px-2 py-2 text-micro text-fg-dim">Loading…</p>
+        <p v-else-if="error" class="px-2 py-2 text-micro text-error">{{ error }}</p>
+        <p v-else-if="available.length === 0" class="px-2 py-2 text-micro text-fg-dim">
           No LoRAs installed for this family.
         </p>
         <button
@@ -164,12 +164,16 @@ watch(
           v-else
           :key="l.path"
           type="button"
-          class="flex w-full items-center justify-between px-2 py-1.5 text-left text-body text-ink-2 hover:bg-bath hover:text-ink disabled:opacity-40"
+          class="flex w-full items-center justify-between px-2 py-1.5 text-left text-sm text-fg-2 hover:bg-bg-deep hover:text-fg disabled:opacity-40"
           :disabled="alreadyAdded(l.path)"
           @click="addLora(l)"
         >
           <span class="truncate">{{ l.name }}</span>
-          <span v-if="alreadyAdded(l.path)" class="edge-code ml-2">added</span>
+          <span
+            v-if="alreadyAdded(l.path)"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap ml-2"
+            >added</span
+          >
         </button>
       </div>
     </div>

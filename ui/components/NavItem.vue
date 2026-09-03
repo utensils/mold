@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /*
  * Navigation item — sidebar row (default) or phone tab-bar column
- * (variant="tab"). Active row gets the selection tint; active tab lights the
- * accent. Optional count badge (top-right) for workspace activity (G11).
+ * (variant="tab"). A row is 36px with an 18px icon and a sans label; the
+ * selected row takes the accent tint plus a 1px inset accent ring (README
+ * §06). The trailing slot carries a mono count, keycap, or status dot; the
+ * `badge` prop is the accent-filled count for work in progress.
  */
 import { computed } from "vue";
 import Icon from "./Icon.vue";
@@ -16,7 +18,7 @@ const props = withDefaults(
     /** Row variant only: center the icon and hide the label. */
     collapsed?: boolean;
     variant?: "row" | "tab";
-    /** Optional count badge shown top-right. */
+    /** Accent-filled count for work in progress. */
     badge?: string | number;
   }>(),
   { active: false, collapsed: false, variant: "row" },
@@ -42,10 +44,14 @@ const hasBadge = computed(
     :data-on="active ? 'true' : undefined"
     :aria-current="active ? 'page' : undefined"
     :aria-label="showLabel ? undefined : label"
+    :title="showLabel ? undefined : label"
     @click="emit('select')"
   >
-    <Icon class="ms-nav__icon" :name="icon" :size="isTab ? 22 : 17" />
+    <Icon class="ms-nav__icon" :name="icon" :size="isTab ? 22 : 18" />
     <span v-if="showLabel" class="ms-nav__label">{{ label }}</span>
+    <span v-if="showLabel && $slots.trailing" class="ms-nav__trailing">
+      <slot name="trailing" />
+    </span>
     <span v-if="hasBadge" class="ms-nav__badge">{{ badge }}</span>
   </button>
 </template>
@@ -58,15 +64,15 @@ const hasBadge = computed(
   border: 0;
   background: transparent;
   cursor: pointer;
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
   transition:
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-nav:focus-visible {
-  outline: 2px solid var(--safelight);
-  outline-offset: 2px;
+  outline: var(--mold-bw) solid var(--mold-border-focus);
+  outline-offset: 1px;
 }
 
 .ms-nav__icon {
@@ -76,30 +82,43 @@ const hasBadge = computed(
 /* ── Row (sidebar) ─────────────────────────────────────────────── */
 .ms-nav--row {
   width: 100%;
-  height: 37px;
-  gap: 11px;
-  padding: 0 12px;
-  border-radius: var(--radius-control);
-  color: var(--ink-2);
-  font-size: 13.5px;
+  min-height: var(--mold-row-h, 36px);
+  gap: 10px;
+  padding: 0 9px;
+  border-radius: var(--mold-radius-2);
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-sm);
+  font-weight: 500;
   text-align: left;
 }
 
 .ms-nav--row:hover {
-  color: var(--rebate);
+  background: var(--mold-row-hover, var(--mold-surface));
+  color: var(--mold-text);
 }
 
 .ms-nav--row[data-on="true"] {
-  background: var(--sel-bg);
-  color: var(--rebate);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
+  color: var(--mold-text);
 }
 
-.ms-nav--row[data-on="true"] .ms-nav__icon {
-  color: var(--sel-ink);
+.ms-nav__label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.ms-nav--row .ms-nav__label {
-  font-weight: 600;
+.ms-nav__trailing {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 
 .ms-nav--collapsed {
@@ -113,39 +132,47 @@ const hasBadge = computed(
   justify-content: center;
   gap: 3px;
   padding: 4px 0;
-  border-radius: var(--radius-control-sm);
-  color: var(--ink-3);
+  border-radius: var(--mold-radius-1);
+  color: var(--mold-text-dim);
 }
 
 .ms-nav--tab[data-on="true"] {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
 .ms-nav--tab .ms-nav__label {
-  font-family: var(--f-mono);
-  font-size: 10px;
+  flex: 0 0 auto;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
 }
 
-/* ── Badge ─────────────────────────────────────────────────────── */
+/* ── Badge: accent count for work in progress ──────────────────── */
 .ms-nav__badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 19px;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ms-nav--collapsed .ms-nav__badge,
+.ms-nav--tab .ms-nav__badge {
   position: absolute;
   top: 3px;
-  right: 8px;
+  right: 4px;
   min-width: 15px;
   height: 15px;
   padding: 0 4px;
-  border-radius: var(--radius-pill);
-  background: var(--safelight);
-  color: var(--on-accent);
-  font-family: var(--f-mono);
   font-size: 9px;
-  font-weight: 700;
-  line-height: 15px;
-  text-align: center;
-}
-
-.ms-nav--collapsed .ms-nav__badge {
-  right: 4px;
 }
 
 .ms-nav--tab .ms-nav__badge {

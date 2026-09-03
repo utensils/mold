@@ -302,24 +302,24 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
 <template>
   <aside
-    class="border-edge fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bench shadow-raised"
+    class="border-border fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bg shadow-md"
     role="dialog"
     aria-modal="false"
     :aria-label="merged.display_name ?? merged.name"
     data-test="catalog-detail-drawer"
   >
     <!-- Header -->
-    <div class="border-edge flex items-center gap-2 border-b px-4 py-3">
-      <SourceGlyph :source="glyphSource" :size="16" class="shrink-0 text-ink-3" />
+    <div class="border-border flex items-center gap-2 border-b px-4 py-3">
+      <SourceGlyph :source="glyphSource" :size="16" class="shrink-0 text-fg-dim" />
       <h2
-        class="min-w-0 flex-1 truncate text-body font-semibold text-ink"
+        class="min-w-0 flex-1 truncate text-sm font-semibold text-fg"
         :title="merged.display_name ?? merged.name"
       >
         {{ merged.display_name ?? merged.name }}
       </h2>
       <button
         type="button"
-        class="h-7 shrink-0 rounded-control px-2 text-ink-2 hover:bg-bath hover:text-ink"
+        class="h-7 shrink-0 rounded-control px-2 text-fg-2 hover:bg-bg-deep hover:text-fg"
         aria-label="Close model detail"
         data-test="drawer-close"
         @click="emit('close')"
@@ -333,7 +333,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       <!-- A 4:3 hero keeps more of a portrait preview than 16:9 did; the
            placeholder branch stays 16:9 because its mark is a fixed height. -->
       <div
-        class="border-edge relative w-full overflow-hidden border-b"
+        class="border-border relative w-full overflow-hidden border-b"
         :class="showHero ? 'aspect-[4/3]' : 'aspect-video'"
       >
         <img
@@ -364,14 +364,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         <div v-if="merged.installed || unsupported" class="flex flex-wrap gap-1.5">
           <span
             v-if="merged.installed"
-            class="border-edge data-mono rounded-full border px-2 py-0.5 text-caption text-halide"
+            class="border-border font-mono text-xs rounded-control border px-2 py-0.5 text-micro text-sapphire"
             title="Files are present under this host's models directory"
           >
             ● installed
           </span>
           <span
             v-if="unsupported"
-            class="rounded-full border border-stop px-2 py-0.5 text-caption text-stop"
+            class="rounded-control border border-error px-2 py-0.5 text-micro text-error"
           >
             Unsupported catalog package
           </span>
@@ -379,61 +379,63 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
         <!-- Description belongs with identity/classification rather than
              being buried after the technical metadata grid. -->
-        <p v-if="merged.description" class="text-caption leading-relaxed text-ink-2">
+        <p v-if="merged.description" class="text-micro leading-relaxed text-fg-2">
           {{ merged.description }}
         </p>
-        <p v-else-if="loading" class="text-caption text-ink-3">Loading details…</p>
+        <p v-else-if="loading" class="text-micro text-fg-dim">Loading details…</p>
 
         <!-- Meta grid -->
         <dl class="grid grid-cols-2 gap-x-3 gap-y-2">
           <div v-if="merged.author" class="min-w-0">
-            <dt class="text-caption text-ink-3">Author</dt>
-            <dd class="truncate text-body text-ink-2">{{ merged.author }}</dd>
+            <dt class="text-micro text-fg-dim">Author</dt>
+            <dd class="truncate text-sm text-fg-2">{{ merged.author }}</dd>
           </div>
           <div>
-            <dt class="text-caption text-ink-3">Family</dt>
-            <dd class="data-mono text-body text-ink-2">{{ merged.family }}</dd>
+            <dt class="text-micro text-fg-dim">Family</dt>
+            <dd class="font-mono text-xs text-sm text-fg-2">{{ merged.family }}</dd>
           </div>
           <div>
-            <dt class="text-caption text-ink-3">Source</dt>
-            <dd class="text-body text-ink-2" data-test="drawer-source">{{ sourceLabel }}</dd>
+            <dt class="text-micro text-fg-dim">Source</dt>
+            <dd class="text-sm text-fg-2" data-test="drawer-source">{{ sourceLabel }}</dd>
           </div>
           <div v-if="merged.file_format">
-            <dt class="text-caption text-ink-3">Format</dt>
-            <dd class="data-mono text-body text-ink-2">{{ merged.file_format }}</dd>
+            <dt class="text-micro text-fg-dim">Format</dt>
+            <dd class="font-mono text-xs text-sm text-fg-2">{{ merged.file_format }}</dd>
           </div>
           <div v-if="merged.size_bytes != null">
-            <dt class="text-caption text-ink-3">Weights</dt>
-            <dd class="data-mono text-body text-ink-2">{{ formatGB(merged.size_bytes) }}</dd>
+            <dt class="text-micro text-fg-dim">Weights</dt>
+            <dd class="font-mono text-xs text-sm text-fg-2">{{ formatGB(merged.size_bytes) }}</dd>
           </div>
           <div v-if="merged.download_count">
-            <dt class="text-caption text-ink-3">Downloads</dt>
-            <dd class="data-mono text-body text-ink-2">{{ formatCount(merged.download_count) }}</dd>
+            <dt class="text-micro text-fg-dim">Downloads</dt>
+            <dd class="font-mono text-xs text-sm text-fg-2">
+              {{ formatCount(merged.download_count) }}
+            </dd>
           </div>
           <div v-if="merged.likes" data-test="drawer-likes">
-            <dt class="text-caption text-ink-3">Likes</dt>
-            <dd class="data-mono text-body text-ink-2">♥ {{ formatCount(merged.likes) }}</dd>
+            <dt class="text-micro text-fg-dim">Likes</dt>
+            <dd class="font-mono text-xs text-sm text-fg-2">♥ {{ formatCount(merged.likes) }}</dd>
           </div>
           <div v-if="merged.rating != null">
-            <dt class="text-caption text-ink-3">Rating</dt>
-            <dd class="data-mono text-body text-ink-2">★ {{ merged.rating.toFixed(1) }}</dd>
+            <dt class="text-micro text-fg-dim">Rating</dt>
+            <dd class="font-mono text-xs text-sm text-fg-2">★ {{ merged.rating.toFixed(1) }}</dd>
           </div>
           <div v-if="merged.license" class="col-span-2 min-w-0">
-            <dt class="text-caption text-ink-3">License</dt>
-            <dd class="truncate text-body text-ink-2" :title="merged.license">
+            <dt class="text-micro text-fg-dim">License</dt>
+            <dd class="truncate text-sm text-fg-2" :title="merged.license">
               {{ merged.license }}
             </dd>
           </div>
           <div v-if="catalogDate" data-test="drawer-updated">
-            <dt class="text-caption text-ink-3">{{ catalogDate.label }}</dt>
-            <dd class="text-body text-ink-2">{{ catalogDate.value }}</dd>
+            <dt class="text-micro text-fg-dim">{{ catalogDate.label }}</dt>
+            <dd class="text-sm text-fg-2">{{ catalogDate.value }}</dd>
           </div>
           <div v-if="detailPageUrl" class="col-span-2 min-w-0">
-            <dt class="text-caption text-ink-3">Model page</dt>
+            <dt class="text-micro text-fg-dim">Model page</dt>
             <dd>
               <button
                 type="button"
-                class="text-body text-safelight hover:underline"
+                class="text-sm text-accent hover:underline"
                 data-test="drawer-page-link"
                 @click="openModelPage"
               >
@@ -450,15 +452,19 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           class="flex gap-2.5"
           data-test="drawer-stat-tiles"
         >
-          <div class="border-edge flex-1 rounded-card border bg-bath p-3">
-            <div class="edge-code uppercase">{{ weightsHeading }}</div>
-            <div class="data-mono mt-1 text-body-lg text-ink" data-test="stat-checkpoint">
+          <div class="border-border flex-1 rounded-card border bg-bg-deep p-3">
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
+              {{ weightsHeading }}
+            </div>
+            <div class="font-mono text-xs mt-1 text-base text-fg" data-test="stat-checkpoint">
               {{ checkpointLabel }}
             </div>
           </div>
-          <div class="border-edge flex-1 rounded-card border bg-bath p-3">
-            <div class="edge-code uppercase">Full footprint</div>
-            <div class="data-mono mt-1 text-body-lg text-ink" data-test="stat-footprint">
+          <div class="border-border flex-1 rounded-card border bg-bg-deep p-3">
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
+              Full footprint
+            </div>
+            <div class="font-mono text-xs mt-1 text-base text-fg" data-test="stat-footprint">
               {{ footprintLabel }}
             </div>
           </div>
@@ -466,24 +472,26 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
         <!-- Variants: the selected chip is the exact pull target. -->
         <section v-if="variants?.length" data-test="drawer-variants">
-          <div class="edge-code mb-1.5 uppercase">Variants</div>
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-1.5 uppercase">
+            Variants
+          </div>
           <div class="flex flex-wrap gap-1.5">
             <button
               v-for="variant in variants"
               :key="variant.id"
               type="button"
               data-test="variant-chip"
-              class="data-mono rounded-full border px-2.5 py-1 text-caption transition-colors duration-100"
+              class="font-mono text-xs rounded-control border px-2.5 py-1 text-micro transition-colors duration-100"
               :class="
                 variant.id === selectedVariantId
-                  ? 'border-safelight text-safelight'
-                  : 'border-edge text-ink-2 hover:text-ink'
+                  ? 'border-accent text-accent'
+                  : 'border-border text-fg-2 hover:text-fg'
               "
               :aria-pressed="variant.id === selectedVariantId"
               @click="selectVariant(variant.id)"
             >
               {{ variant.label }}
-              <span v-if="variant.sizeBytes != null" class="text-ink-3">
+              <span v-if="variant.sizeBytes != null" class="text-fg-dim">
                 · {{ formatSize(variant.sizeBytes) }}
               </span>
             </button>
@@ -493,12 +501,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         <!-- Download contents -->
         <section
           v-if="downloadItems.length"
-          class="border-edge border-t pt-3"
+          class="border-border border-t pt-3"
           data-test="download-contents"
         >
           <div class="mb-1.5 flex items-baseline justify-between">
-            <span class="edge-code">DOWNLOAD CONTENTS</span>
-            <span class="data-mono text-caption text-ink">{{ downloadTotalLabel }}</span>
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
+              >DOWNLOAD CONTENTS</span
+            >
+            <span class="font-mono text-xs text-micro text-fg">{{ downloadTotalLabel }}</span>
           </div>
           <ul class="flex flex-col gap-1">
             <li
@@ -506,10 +516,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               :key="item.key"
               class="grid grid-cols-[1fr_auto] items-baseline gap-2"
             >
-              <span class="min-w-0 truncate text-caption text-ink-2" :title="item.label">
+              <span class="min-w-0 truncate text-micro text-fg-2" :title="item.label">
                 {{ item.label }}
               </span>
-              <span class="data-mono text-caption text-ink-3">
+              <span class="font-mono text-xs text-micro text-fg-dim">
                 {{ item.kind }} · {{ formatSize(item.sizeBytes) }}
               </span>
             </li>
@@ -519,12 +529,12 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         <!-- On-disk components (installed models) -->
         <section
           v-if="componentList.length"
-          class="border-edge border-t pt-3"
+          class="border-border border-t pt-3"
           data-test="component-list"
         >
           <div class="mb-1.5 flex items-baseline justify-between">
-            <span class="edge-code">ON THIS HOST</span>
-            <span class="data-mono text-caption text-ink">
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">ON THIS HOST</span>
+            <span class="font-mono text-xs text-micro text-fg">
               {{ componentsPresent }}/{{ componentList.length }} present
             </span>
           </div>
@@ -537,18 +547,20 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             >
               <span
                 class="h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="c.present ? 'bg-halide' : 'bg-stop'"
+                :class="c.present ? 'bg-sapphire' : 'bg-error'"
                 role="img"
                 :title="c.present ? 'Present' : 'Missing'"
                 :aria-label="c.present ? 'Present' : 'Missing'"
               />
-              <span class="min-w-0 truncate text-caption text-ink-2">{{ c.name }}</span>
-              <span class="edge-code ml-auto shrink-0">{{ c.kind }}</span>
+              <span class="min-w-0 truncate text-micro text-fg-2">{{ c.name }}</span>
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap ml-auto shrink-0">{{
+                c.kind
+              }}</span>
               <button
                 v-if="!c.present && c.repair_model"
                 type="button"
                 data-test="component-repair"
-                class="border-edge h-6 shrink-0 rounded-control border px-2 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-40"
+                class="border-border h-6 shrink-0 rounded-control border px-2 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-40"
                 :disabled="repairing.has(c.name)"
                 :title="`Re-download the missing ${c.name}`"
                 @click="repairComponent(c)"
@@ -562,15 +574,17 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         <!-- Civitai trigger phrases are high-value authoring metadata. -->
         <section
           v-if="merged.trained_words?.length"
-          class="border-edge border-t pt-3"
+          class="border-border border-t pt-3"
           data-test="drawer-trained-words"
         >
-          <div class="edge-code mb-1.5 uppercase">Trigger words</div>
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-1.5 uppercase">
+            Trigger words
+          </div>
           <div class="flex flex-wrap gap-1">
             <span
               v-for="word in merged.trained_words"
               :key="word"
-              class="border-edge data-mono rounded-full border px-2 py-0.5 text-caption text-ink-2"
+              class="border-border font-mono text-xs rounded-control border px-2 py-0.5 text-micro text-fg-2"
             >
               {{ word }}
             </span>
@@ -582,7 +596,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <span
             v-for="tag in merged.tags"
             :key="tag"
-            class="border-edge rounded-full border px-1.5 py-0.5 text-caption text-ink-3"
+            class="border-border rounded-control border px-1.5 py-0.5 text-micro text-fg-dim"
           >
             {{ tag }}
           </span>
@@ -591,11 +605,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     </div>
 
     <!-- Action -->
-    <div class="border-edge border-t p-4">
+    <div class="border-border border-t p-4">
       <p
         v-if="props.runtimeNotice"
         data-test="runtime-unavailable-note"
-        class="text-caption text-ink-2"
+        class="text-micro text-fg-2"
       >
         {{ props.runtimeNotice.message }}
       </p>
@@ -603,7 +617,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         v-if="actionLabel === 'Repair'"
         type="button"
         data-test="drawer-repair"
-        class="border-edge h-8 w-full rounded-control border text-body text-ink-2 transition-colors duration-150 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
+        class="border-border h-8 w-full rounded-control border text-sm text-fg-2 transition-colors duration-150 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
         :disabled="pulling || !downloadable"
         title="Re-fetch any missing or incomplete files for this model"
         @click="emit('pull', pullEntry)"
@@ -614,7 +628,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         v-else
         type="button"
         data-test="drawer-pull"
-        class="border-edge h-8 w-full rounded-control border text-body text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"
+        class="border-border h-8 w-full rounded-control border text-sm text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
         :disabled="pulling || !downloadable"
         :title="downloadable ? 'Download this model' : 'Unsupported catalog package'"
         @click="emit('pull', pullEntry)"

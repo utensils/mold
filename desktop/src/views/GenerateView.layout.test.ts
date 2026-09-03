@@ -5,7 +5,6 @@ import modelPickerSource from "../components/create/ModelPicker.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import sequenceComposerSource from "../components/create/SequenceComposer.vue?raw";
 import composerCardSource from "../components/create/ComposerCard.vue?raw";
-import activityStripSource from "../components/create/ActivityStrip.vue?raw";
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -23,15 +22,8 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-workbench")).toContain("overflow-hidden");
     expect(classesFor(viewSource, "create-bottom-panel")).toContain("overflow-hidden");
     expect(classesFor(viewSource, "create-bottom-panel")).not.toContain("overflow-y-auto");
-    expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
-  });
-
-  it("keeps activity as the bottom bench's only scroll surface", () => {
-    expect(classesFor(activityStripSource, "activity-list-scroll")).toContain("ms-activity__list");
-    expect(activityStripSource).toMatch(/\.ms-activity\s*\{[^}]*min-height:\s*0/s);
-    expect(activityStripSource).toMatch(/\.ms-activity\s*\{[^}]*max-height:/s);
-    expect(activityStripSource).toMatch(/\.ms-activity__list\s*\{[^}]*min-height:\s*0/s);
-    expect(activityStripSource).toMatch(/\.ms-activity__list\s*\{[^}]*overflow-y:\s*auto/s);
+    // The composer takes its own height under the canvas; the canvas absorbs slack.
+    expect(classesFor(viewSource, "generate-composer")).toContain("shrink-0");
   });
 
   it("keeps the canvas visible and makes the bottom bench resizable", () => {
@@ -51,13 +43,17 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-sequence-shell")).toContain("min-h-[300px]");
     expect(classesFor(viewSource, "generate-sequence-shell")).toContain("flex-[1_0_300px]");
     expect(classesFor(viewSource, "generate-sequence-composer")).toContain("flex-1");
-    expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
+    // The composer takes its own height under the canvas; the canvas absorbs slack.
+    expect(classesFor(viewSource, "generate-composer")).toContain("shrink-0");
     expect(sequenceComposerSource).toMatch(/\.ms-seqbench__footer\s*\{[^}]*margin-top:\s*auto/s);
     expect(sequenceComposerSource).toMatch(/\.ms-seqbench__clip\s*\{[^}]*flex:\s*1/s);
     expect(sequenceComposerSource).toMatch(/\.ms-seqbench__prompt--main\s*\{[^}]*flex:\s*1/s);
-    expect(composerCardSource).toMatch(/\.ms-composer__actions\s*\{[^}]*margin-top:\s*auto/s);
-    expect(composerCardSource).toMatch(/\.ms-composer__bench\s*\{[^}]*flex:\s*1/s);
     expect(sequenceComposerSource).toContain('data-test="sequence-composer-footer"');
+    // The one-shot composer is no longer a bench panel: it is a card under
+    // the canvas whose control row carries Generate, so its actions have no
+    // bottom edge of their own to pin to.
+    expect(composerCardSource).toMatch(/\.ms-composer__controls\s*\{[^}]*display:\s*flex/s);
+    expect(tagFor(composerCardSource, "generate-button")).toContain("ms-composer__generate");
   });
 
   it("keeps full model names visible in the shared model picker", () => {
@@ -65,7 +61,7 @@ describe("GenerateView layout", () => {
     expect(classesFor(modelPickerSource, "selected-model-name")).toContain("break-all");
     expect(classesFor(modelPickerSource, "model-option-name")).not.toContain("truncate");
     expect(classesFor(modelPickerSource, "model-option-name")).toContain("break-all");
-    expect(classesFor(modelPickerSource, "model-availability")).toContain("whitespace-normal");
+    expect(classesFor(modelPickerSource, "model-availability")).not.toContain("truncate");
     expect(classesFor(modelPickerSource, "model-availability")).toContain("break-all");
   });
 
@@ -77,7 +73,7 @@ describe("GenerateView layout", () => {
 
   it("renders an instructive brand blank-canvas placeholder before the first print", () => {
     expect(viewSource).toContain('data-test="empty-canvas"');
-    expect(tagFor(viewSource, "preview-frame")).toContain("bg-print-surface");
+    expect(tagFor(viewSource, "preview-frame")).toContain("bg-media-bed");
     expect(viewSource).toContain("Your print develops here");
     expect(viewSource).toContain("Describe an image below, pick a look, and press Generate.");
   });
@@ -147,11 +143,16 @@ describe("GenerateView layout", () => {
     expect(sequenceComposerSource).toMatch(/\.ms-seqbench__rail\s*\{[^}]*height:\s*100%/s);
   });
 
-  it("dismisses the Templates popover on document-level Escape and restores trigger focus", () => {
-    expect(viewSource).toContain('document.addEventListener("keydown", onDocumentKeydown)');
-    expect(viewSource).toContain('document.removeEventListener("keydown", onDocumentKeydown)');
-    expect(viewSource).toContain('event.key !== "Escape"');
-    expect(viewSource).toContain("templatesToggleEl.value?.focus()");
+  // The floating Templates popover is gone: starting points are a tab in the
+  // inspector, so there is no overlay for a document-level Escape to dismiss
+  // and no trigger to restore focus to. The tab itself is covered by
+  // `InspectorPanel.test.ts` and `CreateHeader.test.ts`.
+  it("reaches starting points and recent settings through the inspector's tabs", () => {
+    expect(viewSource).not.toContain("templatesToggleEl");
+    expect(viewSource).toContain('const inspectorTab = ref<InspectorTab>("settings")');
+    expect(viewSource).toContain('@open-tab="inspectorTab = $event"');
+    expect(viewSource).toContain('@update:tab="inspectorTab = $event"');
+    expect(viewSource).toContain('@load-template="loadTemplate"');
   });
 
   it("disables Picture-in-Picture on the generated video preview", () => {

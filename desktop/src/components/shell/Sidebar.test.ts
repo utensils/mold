@@ -1,18 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
-import NavRail from "./NavRail.vue";
+import Sidebar from "./Sidebar.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useGalleryStore } from "../../stores/gallery";
 import { useGenerationStore } from "../../stores/generation";
 import { useChainJobsStore } from "../../stores/chainJobs";
-import { useHostModelsStore } from "../../stores/hostModels";
 import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useComposerStore } from "../../stores/composer";
-import { useContextMenuStore } from "../../stores/contextMenu";
+import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
 import { useJobsStore } from "../../stores/jobs";
 
 const stub = { template: "<div />" };
@@ -25,12 +24,15 @@ const authedMediaStub = {
 function makeRouter(): Router {
   return createRouter({
     history: createMemoryHistory(),
-    routes: ["/create", "/library", "/models", "/settings", "/machines", "/machines/:id"].map(
-      (path) => ({
-        path,
-        component: stub,
-      }),
-    ),
+    routes: [
+      "/create",
+      "/queue",
+      "/library",
+      "/models",
+      "/settings",
+      "/machines",
+      "/machines/:id",
+    ].map((path) => ({ path, component: stub })),
   });
 }
 
@@ -42,17 +44,20 @@ async function mountAt(path: string) {
   await router.isReady();
   const pinia = createPinia();
   setActivePinia(pinia);
-  return mount(NavRail, {
+  return mount(Sidebar, {
     global: {
       plugins: [pinia, router],
-      // StatusPopover opens its own telemetry streams on mount; the rail tests
-      // don't exercise it, so stub it out to keep them off the network.
-      stubs: { StatusPopover: stub, AuthedMedia: authedMediaStub },
+      stubs: { AuthedMedia: authedMediaStub },
     },
   });
 }
 
-describe("NavRail a11y", () => {
+/** The destination button in the sidebar whose label starts with `label`. */
+function navButton(wrapper: VueWrapper, label: string) {
+  return wrapper.findAll("button").find((button) => button.text().startsWith(label));
+}
+
+describe("Sidebar a11y", () => {
   it("labels the primary navigation landmark", async () => {
     const wrapper = await mountAt("/create");
     expect(wrapper.get("nav").attributes("aria-label")).toBe("Primary");
@@ -60,55 +65,64 @@ describe("NavRail a11y", () => {
 
   it("marks the active nav item with aria-current=page", async () => {
     const wrapper = await mountAt("/library");
-    // Destinations render as @ui NavItem buttons now, not RouterLink anchors.
-    const buttons = wrapper.findAll("button");
-    const library = buttons.find((b) => b.text().includes("Library"));
-    const create = buttons.find((b) => b.text().includes("Create"));
-    expect(library?.attributes("aria-current")).toBe("page");
-    expect(create?.attributes("aria-current")).toBeUndefined();
+    // Destinations render as @ui NavItem buttons, not RouterLink anchors.
+    expect(navButton(wrapper, "My images")?.attributes("aria-current")).toBe("page");
+    expect(navButton(wrapper, "New image")?.attributes("aria-current")).toBeUndefined();
   });
 
-  it("collapses to the five destinations plus Settings", async () => {
+  it("shows the MAKE and SETUP destinations plus Settings", async () => {
     const wrapper = await mountAt("/create");
-    for (const label of ["Create", "Library", "Models", "Machines", "Settings"]) {
+    for (const label of ["New image", "Queue", "My images", "Styles", "Machines", "Settings"]) {
       expect(wrapper.text()).toContain(label);
     }
-    // The folded destinations are gone from the rail (still deep-linkable).
-    for (const label of ["Generate", "Gallery", "Chains", "Catalog", "History", "RunPod"]) {
+    // The old lexicon and the folded destinations are gone from the rail.
+    for (const label of [
+      "Create",
+      "Library",
+      "Models",
+      "Generate",
+      "Gallery",
+      "Chains",
+      "Catalog",
+      "History",
+      "RunPod",
+    ]) {
       expect(wrapper.text()).not.toContain(label);
     }
   });
 });
 
-describe("NavRail collapse", () => {
+describe("Sidebar collapse", () => {
   function setCollapsed(collapsed: boolean) {
     const prefs = useAppPrefsStore();
     prefs.settings = { sidebarCollapsed: collapsed } as never;
   }
 
-  it("expands to 210px with visible labels by default", async () => {
+  it("expands to 270px with visible labels and the plain wordmark by default", async () => {
     const wrapper = await mountAt("/create");
-    expect(wrapper.get("nav").attributes("style")).toContain("210px");
-    expect(wrapper.text()).toContain("Create");
-    // Gradient wordmark shows when expanded.
-    expect(wrapper.find(".ms-wordmark").exists()).toBe(true);
+    expect(wrapper.get("nav").attributes("style")).toContain("270px");
+    expect(wrapper.text()).toContain("New image");
+    // Wordmark: the mark plus plain mono "mold studio", no gradient type.
+    expect(wrapper.find('img[alt="mold"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("studio");
   });
 
-  it("collapses to a 62px icon rail with labels and wordmark hidden", async () => {
+  it("collapses to a 62px icon rail with labels, wordmark, and queue hidden", async () => {
     const wrapper = await mountAt("/create");
     setCollapsed(true);
     await flushPromises();
     expect(wrapper.get("nav").attributes("style")).toContain("62px");
-    // Icon-only: nav labels and the wordmark are gone.
-    expect(wrapper.text()).not.toContain("Create");
-    expect(wrapper.find(".ms-wordmark").exists()).toBe(false);
+    // Icon-only: nav labels, the wordmark, and the queue are gone.
+    expect(wrapper.text()).not.toContain("New image");
+    expect(wrapper.text()).not.toContain("studio");
+    expect(wrapper.find("[data-test='queue-rail']").exists()).toBe(false);
     // Destinations are still present as accessible icon buttons.
     const buttons = wrapper.findAll("button");
-    expect(buttons.some((b) => b.attributes("aria-label") === "Create")).toBe(true);
+    expect(buttons.some((b) => b.attributes("aria-label") === "New image")).toBe(true);
   });
 });
 
-describe("NavRail developing jobs", () => {
+describe("Sidebar queue", () => {
   function setLocalAuthority(baseUrl = "http://127.0.0.1:49152", instanceId = "local-instance") {
     const connection = useConnectionStore();
     connection.info = { mode: "local", baseUrl, apiKey: "secret" };
@@ -159,11 +173,11 @@ describe("NavRail developing jobs", () => {
     };
     await flushPromises();
 
-    const text = wrapper.get("[data-test='developing-jobs']").text();
-    expect(text.indexOf("flux-schnell")).toBeLessThan(text.indexOf("flux-dev"));
+    const text = wrapper.get("[data-test='queue-rail']").text();
+    expect(text.indexOf("flux-schnell")).toBeLessThan(text.indexOf("older queued print"));
   });
 
-  it("shows cancellation progress, then offers to remove the cancelled row", async () => {
+  it("shows cancellation progress, then offers to remove the stopped row", async () => {
     const wrapper = await mountAt("/create");
     const generation = useGenerationStore();
     generation.jobs = [
@@ -177,11 +191,11 @@ describe("NavRail developing jobs", () => {
     ];
     await flushPromises();
 
-    const row = wrapper.get("[data-test='developing-print']");
-    expect(row.text()).toContain("cancelling");
+    const row = wrapper.get("[data-test='queue-row-print']");
+    expect(row.text()).toContain("Stopping…");
     await row.trigger("contextmenu");
     expect(useContextMenuStore().entries[0]).toMatchObject({
-      label: "Cancel",
+      label: "Stop",
       disabled: true,
     });
 
@@ -189,7 +203,7 @@ describe("NavRail developing jobs", () => {
     generation.jobs[0]!.error = "Cancelled";
     generation.jobs[0]!.cancelling = false;
     await flushPromises();
-    expect(row.text()).toContain("cancelled");
+    expect(row.text()).toContain("Stopped");
 
     await row.trigger("contextmenu");
     const menu = useContextMenuStore();
@@ -198,13 +212,56 @@ describe("NavRail developing jobs", () => {
     await flushPromises();
 
     expect(generation.jobs).toEqual([]);
-    expect(wrapper.text()).toContain("nothing developing");
+    expect(wrapper.find("[data-test='queue-row-print']").exists()).toBe(false);
   });
 
-  // A mesh print's saved file is binary glTF: neither the gallery-thumbnail
-  // arm nor the result-URL arm can draw it, so the rendered poster the
-  // complete event carries is the rail's only picture of it.
-  it("draws a finished mesh print from its poster, not its glTF bytes", async () => {
+  it("offers the print row's own verbs: reuse the words, show it, clear finished", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      {
+        clientId: 9,
+        model: "flux-dev:q8",
+        prompt: "a finished print",
+        status: "complete",
+        result: { filename: "done.png", image: "" },
+      } as never,
+    ];
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-row-print']").trigger("contextmenu");
+    const labels = useContextMenuStore().entries.flatMap((entry) =>
+      isSeparator(entry) ? [] : [entry.label],
+    );
+    expect(labels).toEqual([
+      "Remove from queue",
+      "Use these words",
+      "Show in My images",
+      "Clear finished",
+    ]);
+  });
+
+  it("opens a row's actions from the ⋯ button, not only the right mouse button", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      {
+        clientId: 10,
+        model: "flux-dev:q8",
+        prompt: "menu me",
+        status: "queued",
+      } as never,
+    ];
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-row-menu']").trigger("click");
+    const menu = useContextMenuStore();
+    expect(menu.visible).toBe(true);
+    expect(menu.entries[0]).toMatchObject({ label: "Stop", danger: true });
+  });
+
+  // A mesh print's saved file is binary glTF: the result-URL arm cannot draw
+  // it, so the rendered poster the complete event carries is the rail's only
+  // picture of it until the host has a gallery thumbnail to serve.
+  it("draws a finished mesh print from its poster, never its glTF bytes", async () => {
     const wrapper = await mountAt("/create");
     useGenerationStore().jobs = [
       {
@@ -217,7 +274,6 @@ describe("NavRail developing jobs", () => {
         result: {
           image: "R0xURg==",
           format: "glb",
-          filename: "mold-hunyuan3d.glb",
           mesh_vertices: 24_576,
           mesh_faces: 49_152,
           mesh_poster: "UE9TVEVS",
@@ -226,10 +282,10 @@ describe("NavRail developing jobs", () => {
     ];
     await flushPromises();
 
-    const row = wrapper.get("[data-test='developing-print']");
-    const poster = row.get("[data-test='rail-mesh-poster']");
-    expect(poster.attributes("src")).toBe("data:image/png;base64,UE9TVEVS");
-    expect(row.find("[data-test='rail-library-thumbnail']").exists()).toBe(false);
+    const row = wrapper.get("[data-test='queue-row-print']");
+    const picture = row.get("img");
+    expect(picture.attributes("src")).toBe("data:image/png;base64,UE9TVEVS");
+    expect(row.find("img[src='blob:mesh']").exists()).toBe(false);
   });
 
   it("shows an unknown outcome in the muted ink, never as a failure", async () => {
@@ -248,13 +304,14 @@ describe("NavRail developing jobs", () => {
     ];
     await flushPromises();
 
-    const row = wrapper.get("[data-test='developing-print']");
-    expect(row.text()).toContain("outcome unknown");
-    expect(row.text()).not.toContain("failed");
-    expect(row.find(".text-stop").exists()).toBe(false);
+    const row = wrapper.get("[data-test='queue-row-print']");
+    expect(row.text()).toContain("Outcome unknown");
+    expect(row.text()).not.toContain("Failed");
+    expect(row.find(".text-error").exists()).toBe(false);
+    expect(row.find(".text-fg-dim").exists()).toBe(true);
   });
 
-  it("cancels another client's running job from its context menu", async () => {
+  it("stops another client's running job from its context menu", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();
     const liveActivity = useLiveActivityStore();
@@ -286,17 +343,17 @@ describe("NavRail developing jobs", () => {
     };
     await flushPromises();
 
-    await wrapper.get("[data-test^='live-activity-select-']").trigger("contextmenu");
+    await wrapper.get("[data-test='queue-active']").trigger("contextmenu");
     const menu = useContextMenuStore();
     expect(menu.visible).toBe(true);
-    expect(menu.entries).toMatchObject([{ label: "Cancel", danger: true, disabled: false }]);
+    expect(menu.entries).toMatchObject([{ label: "Stop", danger: true, disabled: false }]);
 
     menu.activate(menu.entries[0]!);
     await flushPromises();
     expect(cancel).toHaveBeenCalledWith("local", "foreign-running");
   });
 
-  it("cancels an auto-chain generation through its durable chain authority", async () => {
+  it("stops an auto-chain generation through its durable chain authority", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();
     const liveActivity = useLiveActivityStore();
@@ -331,7 +388,7 @@ describe("NavRail developing jobs", () => {
     };
     await flushPromises();
 
-    await wrapper.get("[data-test^='live-activity-select-']").trigger("contextmenu");
+    await wrapper.get("[data-test='queue-active']").trigger("contextmenu");
     const menu = useContextMenuStore();
     menu.activate(menu.entries[0]!);
     await flushPromises();
@@ -341,9 +398,10 @@ describe("NavRail developing jobs", () => {
       expect.objectContaining({ method: "POST" }),
     );
     expect(queueCancel).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
-  it("does not send duplicate cancellation requests while one is in flight", async () => {
+  it("does not send duplicate stop requests while one is in flight", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();
     const liveActivity = useLiveActivityStore();
@@ -378,12 +436,12 @@ describe("NavRail developing jobs", () => {
       .mockImplementation(() => new Promise<void>((resolve) => (finishCancel = resolve)));
     await flushPromises();
 
-    const row = wrapper.get("[data-test^='live-activity-select-']");
+    const row = wrapper.get("[data-test='queue-active']");
     await row.trigger("contextmenu");
     const menu = useContextMenuStore();
     menu.activate(menu.entries[0]!);
     await row.trigger("contextmenu");
-    expect(menu.entries).toMatchObject([{ label: "Cancel", disabled: true }]);
+    expect(menu.entries).toMatchObject([{ label: "Stop", disabled: true }]);
     menu.activate(menu.entries[0]!);
     expect(cancel).toHaveBeenCalledTimes(1);
 
@@ -391,7 +449,7 @@ describe("NavRail developing jobs", () => {
     await flushPromises();
   });
 
-  it("refuses cancellation if the host authority changed after the menu opened", async () => {
+  it("refuses to stop if the host authority changed after the menu opened", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();
     const liveActivity = useLiveActivityStore();
@@ -423,7 +481,7 @@ describe("NavRail developing jobs", () => {
     const cancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
     await flushPromises();
 
-    await wrapper.get("[data-test^='live-activity-select-']").trigger("contextmenu");
+    await wrapper.get("[data-test='queue-active']").trigger("contextmenu");
     useHostsStore().telemetry.local!.instanceId = "replacement-instance";
     const menu = useContextMenuStore();
     menu.activate(menu.entries[0]!);
@@ -467,49 +525,45 @@ describe("NavRail developing jobs", () => {
         ],
       },
     };
+    const queueListing = {
+      entries: [
+        {
+          id: "foreign",
+          model: "flux-dev",
+          state: "running",
+          started_at_unix_ms: 1,
+          position: 0,
+          seed_pinned: true,
+          metadata: {
+            model: "flux-dev",
+            prompt: "restore me",
+            width: 1024,
+            height: 1024,
+            steps: 20,
+            guidance: 3.5,
+            seed: 42,
+          },
+        },
+      ],
+      plan: null,
+    };
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify({ queue_capacity: 8 }), {
+      vi.fn().mockImplementation((url: string) => {
+        const body = String(url).includes("/api/queue") ? queueListing : { queue_capacity: 8 };
+        return Promise.resolve(
+          new Response(JSON.stringify(body), {
             status: 200,
             headers: { "content-type": "application/json" },
           }),
-        )
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({
-              entries: [
-                {
-                  id: "foreign",
-                  model: "flux-dev",
-                  state: "running",
-                  started_at_unix_ms: 1,
-                  position: 0,
-                  seed_pinned: true,
-                  metadata: {
-                    model: "flux-dev",
-                    prompt: "restore me",
-                    width: 1024,
-                    height: 1024,
-                    steps: 20,
-                    guidance: 3.5,
-                    seed: 42,
-                  },
-                },
-              ],
-              plan: null,
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          ),
-        ),
+        );
+      }),
     );
     await flushPromises();
 
-    expect(wrapper.get("[data-test='developing-region']").text()).toContain("Render box");
-    expect(wrapper.text()).not.toContain("nothing developing");
-    await wrapper.get("[data-test^='live-activity-select-']").trigger("click");
+    const active = wrapper.get("[data-test='queue-active']");
+    expect(active.text()).toContain("flux-dev");
+    await active.trigger("click");
     await flushPromises();
 
     expect(useComposerStore().prefill).toMatchObject({
@@ -518,10 +572,9 @@ describe("NavRail developing jobs", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses the remaining rail height before scrolling queued jobs", async () => {
+  it("uses the remaining sidebar height before scrolling the queue", async () => {
     const wrapper = await mountAt("/create");
-    const generation = useGenerationStore();
-    generation.jobs = [
+    useGenerationStore().jobs = [
       {
         clientId: 1,
         model: "flux-dev:q8",
@@ -531,22 +584,22 @@ describe("NavRail developing jobs", () => {
     ];
     await flushPromises();
 
-    const region = wrapper.get("[data-test='developing-region']");
-    const jobs = wrapper.get("[data-test='developing-jobs']");
     expect(wrapper.get("nav").classes()).toEqual(
       expect.arrayContaining(["min-h-0", "overflow-hidden"]),
     );
-    expect(region.classes()).toEqual(expect.arrayContaining(["min-h-0", "flex-1"]));
-    expect(jobs.classes()).toEqual(
+    expect(wrapper.get("[data-test='queue-rail']").classes()).toEqual(
+      expect.arrayContaining(["min-h-0", "flex-1"]),
+    );
+    const rows = wrapper.get("[data-test='queue-rows']");
+    expect(rows.classes()).toEqual(
       expect.arrayContaining(["min-h-0", "flex-1", "overflow-y-auto"]),
     );
-    expect(jobs.classes()).not.toContain("max-h-44");
+    expect(rows.classes()).not.toContain("max-h-44");
   });
 
-  it("uses the available rail space for a longer finished-print history", async () => {
+  it("uses the available sidebar space for a longer finished-print history", async () => {
     const wrapper = await mountAt("/create");
-    const generation = useGenerationStore();
-    generation.jobs = Array.from({ length: 12 }, (_, index) => ({
+    useGenerationStore().jobs = Array.from({ length: 12 }, (_, index) => ({
       clientId: index + 1,
       model: "flux-dev:q8",
       prompt: `finished print ${index + 1}`,
@@ -554,8 +607,8 @@ describe("NavRail developing jobs", () => {
     })) as never;
     await flushPromises();
 
-    expect(wrapper.findAll("[data-test='developing-print']")).toHaveLength(12);
-    expect(wrapper.get("[data-test='developing-jobs']").classes()).toContain("overflow-y-auto");
+    expect(wrapper.findAll("[data-test='queue-row-print']")).toHaveLength(12);
+    expect(wrapper.get("[data-test='queue-rows']").classes()).toContain("overflow-y-auto");
   });
 
   it("reacquires a compacted print when its history row is opened", async () => {
@@ -575,7 +628,7 @@ describe("NavRail developing jobs", () => {
     ];
     await flushPromises();
 
-    await wrapper.get("[data-test='developing-print']").trigger("click");
+    await wrapper.get("[data-test='queue-row-print']").trigger("click");
     expect(refresh).toHaveBeenCalledWith(13);
   });
 
@@ -598,12 +651,12 @@ describe("NavRail developing jobs", () => {
     ];
     await flushPromises();
 
-    await wrapper.get("[data-test='developing-print']").trigger("click");
+    await wrapper.get("[data-test='queue-row-print']").trigger("click");
     // The store decides whether the URL is still fresh; the rail always asks.
     expect(refresh).toHaveBeenCalledWith(15);
   });
 
-  it("shows the authenticated Library thumbnail for a completed video", async () => {
+  it("shows the authenticated My images thumbnail for a completed video", async () => {
     const wrapper = await mountAt("/create");
     const generation = useGenerationStore();
     vi.spyOn(generation, "targetForJob").mockReturnValue({
@@ -633,8 +686,8 @@ describe("NavRail developing jobs", () => {
   });
 
   // G14 hole: the rail only ever read `generation.jobs`, so a running sequence
-  // rendered on the canvas while the sidebar insisted "nothing developing".
-  it("shows a running sequence with its clip counter", async () => {
+  // rendered on the canvas while the sidebar showed nothing.
+  it("shows a running sequence with its scene counter", async () => {
     const wrapper = await mountAt("/create");
     const chains = useChainJobsStore();
     chains.byHost["hal9000-7680"] = {
@@ -654,15 +707,15 @@ describe("NavRail developing jobs", () => {
     };
     await flushPromises();
 
-    const rail = wrapper.get("[data-test='developing-jobs']");
-    expect(rail.text()).toContain("clip 3/5");
-    expect(rail.text()).toContain("developing");
-    expect(wrapper.text()).not.toContain("nothing developing");
+    const rail = wrapper.get("[data-test='queue-rail']");
+    expect(rail.text()).toContain("Making scene 3 of 5");
+    expect(rail.text()).toContain("5-scene clip");
+    expect(wrapper.get("[data-test='queue-count']").text()).toBe("1");
   });
 
-  // Settled sequences have two homes already (the print in Library, the job in
-  // History) — rebuilding the pile one route away is the thing we removed.
-  it("keeps settled sequences out of the rail", async () => {
+  // Settled sequences have two homes already (the print in My images, the job
+  // in History) — rebuilding the pile one route away is the thing we removed.
+  it("keeps settled sequences out of the queue", async () => {
     const wrapper = await mountAt("/create");
     const chains = useChainJobsStore();
     chains.byHost.local = {
@@ -682,19 +735,80 @@ describe("NavRail developing jobs", () => {
     };
     await flushPromises();
 
-    expect(wrapper.find("[data-test='developing-jobs']").exists()).toBe(false);
-    expect(wrapper.text()).toContain("nothing developing");
+    expect(wrapper.find("[data-test='queue-active']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='queue-row-sequence']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='queue-count']").exists()).toBe(false);
   });
 });
 
-describe("NavRail workspace badges (G11)", () => {
-  it("shows a stop dot on Machines when a connected host is offline", async () => {
+describe("Sidebar queue controls", () => {
+  it("opens the full queue view", async () => {
     const wrapper = await mountAt("/create");
+    await wrapper.get("[data-test='queue-open']").trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/queue");
+  });
+
+  it("disables Stop everything while nothing is in flight", async () => {
+    const wrapper = await mountAt("/create");
+    expect(wrapper.get("[data-test='queue-stop-all']").attributes("disabled")).toBeDefined();
+  });
+
+  it("offers pause only when the display host reports a pausable queue", async () => {
+    const wrapper = await mountAt("/create");
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    connection.status = "ready";
+    await flushPromises();
+    expect(wrapper.find("[data-test='queue-pause']").exists()).toBe(false);
+
+    const jobs = useJobsStore();
+    jobs.queues.local = { entries: [], caps: { canPause: true }, paused: false } as never;
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-pause']").trigger("click");
+    await flushPromises();
+    expect(pause).toHaveBeenCalledWith("local");
+  });
+});
+
+describe("Sidebar destination badges (G11)", () => {
+  function readyLocal() {
     const conn = useConnectionStore();
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
     conn.status = "ready";
-    const hosts = useHostsStore();
-    hosts.extras.push({
+  }
+
+  it("turns the Machines dot red when a connected host is offline", async () => {
+    const wrapper = await mountAt("/create");
+    readyLocal();
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "error",
+      error: "down",
+      instanceId: null,
+    });
+    await flushPromises();
+    expect(wrapper.get("[data-test='machines-dot']").classes()).toContain("bg-error");
+  });
+
+  it("keeps the Machines dot green while every host is reachable", async () => {
+    const wrapper = await mountAt("/create");
+    readyLocal();
+    await flushPromises();
+    expect(wrapper.get("[data-test='machines-dot']").classes()).toContain("bg-success");
+    expect(wrapper.find("[data-test='machines-error-dot']").exists()).toBe(false);
+  });
+
+  it("keeps the offline signal visible on the collapsed icon rail", async () => {
+    const wrapper = await mountAt("/create");
+    readyLocal();
+    useAppPrefsStore().settings = { sidebarCollapsed: true } as never;
+    useHostsStore().extras.push({
       id: "hal9000-7680",
       label: "hal9000",
       url: "http://hal9000:7680",
@@ -707,20 +821,9 @@ describe("NavRail workspace badges (G11)", () => {
     expect(wrapper.find("[data-test='machines-error-dot']").exists()).toBe(true);
   });
 
-  it("hides the Machines stop dot while every host is reachable", async () => {
+  it("badges My images with the count of prints made since the last visit", async () => {
     const wrapper = await mountAt("/create");
-    const conn = useConnectionStore();
-    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
-    conn.status = "ready";
-    await flushPromises();
-    expect(wrapper.find("[data-test='machines-error-dot']").exists()).toBe(false);
-  });
-
-  it("badges Library with the count of prints developed since the last visit", async () => {
-    const wrapper = await mountAt("/create");
-    const conn = useConnectionStore();
-    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
-    conn.status = "ready";
+    readyLocal();
     const gallery = useGalleryStore();
     const image = (filename: string, timestamp: number) =>
       ({ filename, timestamp, metadata: { prompt: "p" } }) as never;
@@ -730,40 +833,32 @@ describe("NavRail workspace badges (G11)", () => {
       error: null,
       loaded: true,
     };
+    // Before the first visit nothing is new: the trailing readout is the total.
+    await flushPromises();
+    expect(navButton(wrapper, "My images")?.find(".ms-nav__badge").exists()).toBe(false);
+
     gallery.markLibrarySeen();
     gallery.buckets.local.items = [image("b.png", 3), image("a.png", 1)];
     await flushPromises();
-    const badge = wrapper.find(".ms-nav__badge");
+    const badge = navButton(wrapper, "My images")!.find(".ms-nav__badge");
     expect(badge.exists()).toBe(true);
     expect(badge.text()).toBe("1");
   });
+
+  it("badges Queue with everything in flight", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      { clientId: 1, model: "flux-dev:q8", prompt: "one", status: "queued" } as never,
+      { clientId: 2, model: "flux-dev:q8", prompt: "two", status: "denoising" } as never,
+    ];
+    await flushPromises();
+    expect(navButton(wrapper, "Queue")!.find(".ms-nav__badge").text()).toBe("2");
+  });
 });
 
-describe("NavRail model labels", () => {
-  it("renders the human-readable catalog name for active jobs", async () => {
+describe("Sidebar row titles", () => {
+  it("titles a print by its words, never by a raw catalog model id", async () => {
     const wrapper = await mountAt("/create");
-    const hosts = useHostsStore();
-    hosts.extras.push({
-      id: "plato-7680",
-      label: "plato",
-      url: "http://plato:7680",
-      apiKey: null,
-      status: "ready",
-      error: null,
-      instanceId: null,
-    });
-    useHostModelsStore().byHost["plato-7680"] = {
-      entries: [
-        {
-          name: "cv:1759168",
-          display_name: "Juggernaut XL - Ragnarok",
-          downloaded: true,
-          family: "sdxl",
-        } as never,
-      ],
-      fetchedAt: Date.now(),
-      error: null,
-    };
     useGenerationStore().jobs.push({
       clientId: 1,
       model: "cv:1759168",
@@ -776,9 +871,10 @@ describe("NavRail model labels", () => {
       previewUrl: null,
       result: null,
     } as never);
-
     await flushPromises();
-    expect(wrapper.text()).toContain("Juggernaut XL - Ragnarok · plato");
-    expect(wrapper.text()).not.toContain("cv:1759168");
+
+    const rail = wrapper.get("[data-test='queue-rail']");
+    expect(rail.text()).toContain("portrait");
+    expect(rail.text()).not.toContain("cv:1759168");
   });
 });

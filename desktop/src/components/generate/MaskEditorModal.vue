@@ -204,17 +204,17 @@ function applyMask() {
       @keydown.esc="emit('close')"
     >
       <div
-        class="mask-editor-dialog border-edge flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-chrome border bg-bench p-4"
+        class="mask-editor-dialog border-border flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-window border bg-bg p-4"
         role="dialog"
         aria-modal="true"
         aria-label="Mask editor"
       >
         <div class="flex items-center justify-between gap-3">
-          <h2 class="truncate text-body-lg font-semibold text-ink">Mask editor</h2>
+          <h2 class="truncate text-base font-semibold text-fg">Mask editor</h2>
           <button
             ref="closeBtn"
             type="button"
-            class="text-ink-3 hover:text-ink"
+            class="text-fg-dim hover:text-fg"
             aria-label="Close"
             @click="emit('close')"
           >
@@ -223,15 +223,15 @@ function applyMask() {
         </div>
 
         <div
-          class="mask-editor-toolbar border-edge mt-4 flex flex-wrap items-center gap-2 border-y py-3"
+          class="mask-editor-toolbar border-border mt-4 flex flex-wrap items-center gap-2 border-y py-3"
         >
           <button
             type="button"
-            class="rounded-control px-3 py-1 text-body transition-colors duration-100"
+            class="rounded-control px-3 py-1 text-sm transition-colors duration-100"
             :class="
               mode === 'brush'
-                ? 'bg-safelight font-semibold text-on-accent'
-                : 'border-edge border text-ink-2 hover:text-ink'
+                ? 'bg-accent font-semibold text-on-accent'
+                : 'border-border border text-fg-2 hover:text-fg'
             "
             data-test="mask-mode-brush"
             @click="mode = 'brush'"
@@ -240,18 +240,18 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="rounded-control px-3 py-1 text-body transition-colors duration-100"
+            class="rounded-control px-3 py-1 text-sm transition-colors duration-100"
             :class="
               mode === 'erase'
-                ? 'bg-safelight font-semibold text-on-accent'
-                : 'border-edge border text-ink-2 hover:text-ink'
+                ? 'bg-accent font-semibold text-on-accent'
+                : 'border-border border text-fg-2 hover:text-fg'
             "
             data-test="mask-mode-erase"
             @click="mode = 'erase'"
           >
             Erase
           </button>
-          <label class="ml-2 flex items-center gap-2 text-caption text-ink-2">
+          <label class="ml-2 flex items-center gap-2 text-micro text-fg-2">
             Size
             <input
               v-model.number="brushSize"
@@ -259,13 +259,13 @@ function applyMask() {
               min="4"
               max="128"
               step="1"
-              class="w-32 accent-[var(--safelight)]"
+              class="w-32 accent-accent"
               data-test="mask-brush-size"
             />
           </label>
           <button
             type="button"
-            class="border-edge rounded-control border px-3 py-1 text-body text-ink-2 hover:text-ink"
+            class="border-border rounded-control border px-3 py-1 text-sm text-fg-2 hover:text-fg"
             data-test="mask-clear"
             @click="clearMask"
           >
@@ -273,14 +273,14 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="border-edge rounded-control border px-3 py-1 text-body text-ink-2 hover:text-ink"
+            class="border-border rounded-control border px-3 py-1 text-sm text-fg-2 hover:text-fg"
             @click="invertMask"
           >
             Invert
           </button>
           <button
             type="button"
-            class="border-edge rounded-control border px-3 py-1 text-body text-ink-2 hover:text-ink disabled:opacity-40"
+            class="border-border rounded-control border px-3 py-1 text-sm text-fg-2 hover:text-fg disabled:opacity-40"
             :disabled="undoStack.length === 0"
             data-test="mask-undo"
             @click="undo"
@@ -289,7 +289,7 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="border-edge rounded-control border px-3 py-1 text-body text-ink-2 hover:text-ink disabled:opacity-40"
+            class="border-border rounded-control border px-3 py-1 text-sm text-fg-2 hover:text-fg disabled:opacity-40"
             :disabled="redoStack.length === 0"
             data-test="mask-redo"
             @click="redo"
@@ -298,11 +298,11 @@ function applyMask() {
           </button>
         </div>
 
-        <p class="mt-3 text-caption text-ink-3">White repaints, black preserves.</p>
+        <p class="mt-3 text-micro text-fg-dim">White repaints, black preserves.</p>
 
         <div class="mask-editor-stage mt-2 flex min-h-0 justify-center overflow-auto">
           <div
-            class="border-edge relative max-h-[62vh] max-w-full overflow-hidden rounded-media border"
+            class="border-border relative max-h-[62vh] max-w-full overflow-hidden rounded-inner border"
           >
             <img
               :src="base64ToDataUrl(source)"
@@ -326,14 +326,14 @@ function applyMask() {
         <div class="mask-editor-actions mt-4 flex justify-end gap-2">
           <button
             type="button"
-            class="border-edge rounded-control border px-4 py-2 text-body text-ink-2 hover:text-ink"
+            class="border-border rounded-control border px-4 py-2 text-sm text-fg-2 hover:text-fg"
             @click="emit('close')"
           >
             Cancel
           </button>
           <button
             type="button"
-            class="rounded-control bg-safelight px-4 py-2 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
+            class="rounded-control bg-accent px-4 py-2 text-sm font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
             data-test="mask-apply"
             @click="applyMask"
           >

@@ -19,7 +19,7 @@ function tone(kind: Toast["kind"]) {
     // not read as a wall of alarm.
     chip:
       kind === "error"
-        ? { background: mark.color, color: "var(--on-status)" }
+        ? { background: mark.color, color: "var(--mold-on-accent)" }
         : { background: severityTint(kind, 20), color: mark.color },
   };
 }
@@ -44,7 +44,7 @@ const ordered = computed(() => [...toasts.items].reverse());
       <div
         v-for="toast in ordered"
         :key="toast.id"
-        class="border-edge pointer-events-auto grid w-[min(25rem,calc(100vw-2rem))] grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 rounded-[var(--radius-card)] border bg-bench px-4 py-3 text-body shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
+        class="border-border pointer-events-auto grid w-[min(25rem,calc(100vw-2rem))] grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 rounded-control border bg-bg px-4 py-3 text-sm shadow-md"
         :role="severityIsUrgent(toast.kind) ? 'alert' : 'status'"
         :aria-live="severityIsUrgent(toast.kind) ? 'assertive' : 'polite'"
         @click.self="toasts.click(toast.id)"
@@ -53,7 +53,7 @@ const ordered = computed(() => [...toasts.items].reverse());
           data-test="toast-status-icon"
           aria-hidden="true"
           :data-kind="toast.kind"
-          class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-semibold"
+          class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-control font-semibold"
           :style="tone(toast.kind).chip"
         >
           {{ tone(toast.kind).glyph }}
@@ -65,13 +65,13 @@ const ordered = computed(() => [...toasts.items].reverse());
           @click="toasts.click(toast.id)"
         >
           <span class="sr-only">{{ tone(toast.kind).label }}</span>
-          <span data-test="toast-title" class="block font-semibold text-ink">
+          <span data-test="toast-title" class="block font-semibold text-fg">
             {{ toast.message }}
           </span>
           <span
             v-if="toast.description"
             data-test="toast-description"
-            class="mt-0.5 block text-caption leading-relaxed text-ink-2"
+            class="mt-0.5 block text-micro leading-relaxed text-fg-2"
           >
             {{ toast.description }}
           </span>
@@ -79,7 +79,7 @@ const ordered = computed(() => [...toasts.items].reverse());
         <button
           type="button"
           data-test="toast-dismiss"
-          class="-mt-1 -mr-1 flex h-7 w-7 items-center justify-center rounded-full text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_8%,transparent)] hover:text-ink"
+          class="-mt-1 -mr-1 flex h-7 w-7 items-center justify-center rounded-control text-fg-dim transition-colors duration-100 hover:bg-row-hover hover:text-fg"
           aria-label="Dismiss notification"
           @click="toasts.dismiss(toast.id)"
         >
@@ -97,7 +97,7 @@ const ordered = computed(() => [...toasts.items].reverse());
           v-if="toast.action"
           type="button"
           data-test="toast-action"
-          class="col-start-2 col-end-4 justify-self-end rounded-control px-2 py-1 text-caption font-semibold text-safelight transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)] hover:brightness-110"
+          class="col-start-2 col-end-4 justify-self-end rounded-control px-2 py-1 text-micro font-semibold text-accent transition-colors duration-100 hover:bg-accent-tint hover:brightness-110"
           @click="toasts.runAction(toast.id)"
         >
           {{ toast.action.label }}

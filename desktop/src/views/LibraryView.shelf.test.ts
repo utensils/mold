@@ -311,7 +311,7 @@ describe("scopes + capability gating", () => {
     const labels = control
       .findAll("button")
       .map((b) => `${b.find(".ms-seg__label").text()} ${b.find(".ms-seg__sub").text()}`);
-    expect(labels).toEqual(["Prints 4", "Collections 2", "Trash 1"]);
+    expect(labels).toEqual(["Everything 4", "Albums 2", "Trash 1"]);
     expect(wrapper.get("[data-test='library-count']").text()).toBe("4 prints · 4.0 MB");
     expect(wrapper.find("[data-test='library-chip-row']").exists()).toBe(true);
     wrapper.unmount();

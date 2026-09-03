@@ -66,14 +66,14 @@ watch(
   aspect-ratio: 1;
   border: 0;
   padding: 0;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   overflow: hidden;
-  background: var(--print);
+  background: var(--mold-media-bed);
   cursor: pointer;
-  box-shadow: inset 0 1px 0 var(--card-hi);
+  box-shadow: inset 0 1px 0 transparent;
   transition:
-    transform var(--dur-quick) var(--ease),
-    box-shadow var(--dur-quick) var(--ease);
+    transform var(--mold-dur-quick) var(--mold-ease-out),
+    box-shadow var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-tile:hover {
@@ -82,7 +82,7 @@ watch(
 }
 
 .ms-tile:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -92,7 +92,7 @@ watch(
   object-fit: cover;
   display: block;
   opacity: 1;
-  transition: opacity var(--dur-quick) var(--ease);
+  transition: opacity var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-tile[data-loaded="false"] .ms-tile__img {
@@ -104,22 +104,26 @@ watch(
 .ms-tile__ghost {
   position: absolute;
   inset: 0;
-  background-color: color-mix(in srgb, var(--print) 82%, var(--safelight) 18%);
+  background-color: color-mix(
+    in srgb,
+    var(--mold-media-bed) 82%,
+    var(--mold-blue) 18%
+  );
   background-image:
     radial-gradient(
       circle at 28% 24%,
-      color-mix(in srgb, var(--halide) 16%, transparent),
+      color-mix(in srgb, var(--mold-sapphire) 16%, transparent),
       transparent 34%
     ),
     radial-gradient(
       circle at 72% 76%,
-      color-mix(in srgb, var(--safelight) 14%, transparent),
+      color-mix(in srgb, var(--mold-blue) 14%, transparent),
       transparent 38%
     ),
     linear-gradient(
       100deg,
       transparent 20%,
-      color-mix(in srgb, var(--rebate) 9%, transparent) 50%,
+      color-mix(in srgb, var(--mold-text) 9%, transparent) 50%,
       transparent 80%
     );
   background-size: 220% 100%;
@@ -132,12 +136,12 @@ watch(
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  border: 1px solid color-mix(in srgb, var(--rebate) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mold-text) 20%, transparent);
   border-radius: 999px;
   padding: 5px 9px;
-  background: color-mix(in srgb, var(--print) 78%, transparent);
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  background: color-mix(in srgb, var(--mold-media-bed) 78%, transparent);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -163,15 +167,15 @@ watch(
   position: absolute;
   top: 8px;
   left: 8px;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 8.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  background: var(--safelight);
-  color: var(--on-accent);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   padding: 2px 6px;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
 }
 
 .ms-tile__overlay {

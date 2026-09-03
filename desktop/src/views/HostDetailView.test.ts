@@ -709,7 +709,7 @@ describe("HostDetailView storage and queue", () => {
       }),
     );
     await flushPromises();
-    expect(wrapper.get("[data-test='gpu-card']").html()).toContain("bg-safelight");
+    expect(wrapper.get("[data-test='gpu-card']").html()).toContain("bg-accent");
   });
 
   it("shows an empty queue line and a PAUSED marker from the queue snapshot", async () => {

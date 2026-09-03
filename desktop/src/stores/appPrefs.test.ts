@@ -208,7 +208,7 @@ describe("appPrefs panel widths", () => {
 
   it("defaults to the PANEL_LIMITS defaults before settings load", () => {
     const prefs = useAppPrefsStore();
-    expect(prefs.navRailWidth).toBe(210);
+    expect(prefs.navRailWidth).toBe(270);
     expect(prefs.generateParamsWidth).toBe(340);
     expect(prefs.historyDrawerWidth).toBe(620);
   });
@@ -217,7 +217,7 @@ describe("appPrefs panel widths", () => {
     vi.mocked(ipc.appSettingsGet).mockResolvedValue(panelSettings() as never);
     const prefs = useAppPrefsStore();
     await prefs.init();
-    expect(prefs.navRailWidth).toBe(210);
+    expect(prefs.navRailWidth).toBe(270);
     expect(prefs.generateParamsWidth).toBe(340);
     expect(prefs.historyDrawerWidth).toBe(620);
   });
@@ -247,7 +247,7 @@ describe("appPrefs panel widths", () => {
     );
     const prefs = useAppPrefsStore();
     await prefs.init();
-    expect(prefs.navRailWidth).toBe(320);
+    expect(prefs.navRailWidth).toBe(360);
     expect(prefs.generateParamsWidth).toBe(280);
     expect(prefs.historyDrawerWidth).toBe(960);
   });

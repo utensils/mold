@@ -59,17 +59,17 @@ function pick(id: string) {
   width: 100%;
   border: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 4px 0;
   text-align: left;
   cursor: pointer;
 }
 .ms-styles__kicker {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-styles__spacer {
   flex: 1;

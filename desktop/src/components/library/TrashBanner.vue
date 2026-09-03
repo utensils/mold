@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from "@ui/components/Icon.vue";
 /*
  * TrashBanner — the 40px retention strip under the Library header in the
  * Trash scope (V3 "Shelf"). Copy comes from the shared
@@ -37,14 +38,14 @@ const countLabel = computed(() => {
 
 <template>
   <div
-    class="border-edge flex h-10 shrink-0 items-center gap-2.5 border-b bg-[color-mix(in_srgb,var(--halide)_10%,var(--bath))] px-6 text-[12.5px] text-ink-2"
+    class="border-border flex h-10 shrink-0 items-center gap-2.5 border-b bg-error/10 px-3.5 text-xs text-fg"
     role="status"
     data-test="trash-banner"
   >
-    <span class="text-halide" aria-hidden="true">•</span>
+    <Icon name="trash" :size="15" class="shrink-0 text-error" aria-hidden="true" />
     <span v-if="summary.segments.length > 0" data-test="trash-banner-summary">
       <template v-for="(segment, i) in summary.segments" :key="i">
-        <b v-if="segment.mono" class="font-utility text-[11.5px] font-semibold text-ink">{{
+        <b v-if="segment.mono" class="font-mono text-xs font-semibold text-fg">{{
           segment.text
         }}</b>
         <span v-else>{{ segment.text }}</span>
@@ -52,13 +53,13 @@ const countLabel = computed(() => {
     </span>
     <span v-else data-test="trash-banner-summary">No connected machine keeps a trash.</span>
     <span class="flex-1" />
-    <span class="font-utility text-[10.5px] text-ink-3" data-test="trash-banner-count">{{
+    <span class="font-mono text-micro text-fg-dim" data-test="trash-banner-count">{{
       countLabel
     }}</span>
     <button
       v-if="hosts.length > 0"
       type="button"
-      class="rounded-control px-1 text-[12px] text-safelight underline-offset-2 hover:underline"
+      class="rounded-control px-1 text-xs text-accent underline-offset-2 hover:underline"
       data-test="trash-banner-link"
       @click="emit('changeRetention')"
     >

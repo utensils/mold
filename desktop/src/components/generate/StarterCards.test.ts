@@ -92,7 +92,7 @@ describe("StarterCards (cold start G10)", () => {
 
   it("emits browse for the escape hatch", async () => {
     const wrapper = mount(StarterCards);
-    await wrapper.get("button.text-halide").trigger("click");
+    await wrapper.get("button.text-sapphire").trigger("click");
     expect(wrapper.emitted("browse")).toHaveLength(1);
   });
 });

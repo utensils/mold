@@ -51,15 +51,15 @@ onBeforeUnmount(() => {
 
 <template>
   <div data-test="pod-cost-meter" class="flex items-center gap-2">
-    <span class="data-mono text-caption text-ink-2">
-      <span class="text-ink" data-test="pod-accrued">≈{{ formatUsd(accrued) }}</span>
-      <span class="text-ink-3"> · {{ formatUsd(costPerHr) }}/hr</span>
+    <span class="font-mono text-xs text-micro text-fg-2">
+      <span class="text-fg" data-test="pod-accrued">≈{{ formatUsd(accrued) }}</span>
+      <span class="text-fg-dim"> · {{ formatUsd(costPerHr) }}/hr</span>
     </span>
     <button
       v-if="stoppable"
       type="button"
       data-test="pod-cost-stop"
-      class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+      class="border-border h-7 shrink-0 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg disabled:opacity-50"
       :disabled="busy"
       @click.stop="emit('stop')"
     >

@@ -16,14 +16,12 @@ const emit = defineEmits<{ (e: "commit", value: boolean): void }>();
     :aria-label="ariaLabel"
     :disabled="disabled"
     class="relative h-5 w-9 rounded-full transition-colors duration-150 disabled:opacity-40"
-    :class="
-      props.modelValue ? 'bg-safelight' : 'bg-[color-mix(in_srgb,var(--rebate)_18%,transparent)]'
-    "
+    :class="props.modelValue ? 'bg-accent' : 'bg-surface-2'"
     @click="emit('commit', !props.modelValue)"
   >
     <span
       class="absolute top-0.5 h-4 w-4 rounded-full transition-[left] duration-150"
-      :class="props.modelValue ? 'bg-on-accent' : 'bg-rebate'"
+      :class="props.modelValue ? 'bg-on-accent' : 'bg-fg'"
       :style="{ left: props.modelValue ? '18px' : '2px' }"
     />
   </button>

@@ -55,14 +55,14 @@ async function apply() {
 
 <template>
   <section
-    class="border-edge mt-4 rounded-chrome border bg-bench p-4"
+    class="border-border mt-4 rounded-window border bg-bg p-4"
     data-test="mold-home-card"
     aria-labelledby="mold-home-title"
   >
     <div class="flex items-start gap-4">
       <div class="min-w-0 flex-1">
-        <h2 id="mold-home-title" class="text-body font-medium text-ink">Mold home</h2>
-        <p class="mt-1 text-caption text-ink-3">
+        <h2 id="mold-home-title" class="text-sm font-medium text-fg">Mold home</h2>
+        <p class="mt-1 text-micro text-fg-dim">
           The shared root for configuration, history, logs, and the default model and output
           folders.
         </p>
@@ -71,7 +71,7 @@ async function apply() {
         v-if="!editing"
         type="button"
         data-test="change-mold-home"
-        class="border-edge h-8 shrink-0 rounded-control border px-3 text-body font-semibold text-ink-2 hover:text-ink"
+        class="border-border h-8 shrink-0 rounded-control border px-3 text-sm font-semibold text-fg-2 hover:text-fg"
         :disabled="info?.source === 'environment'"
         :title="
           info?.source === 'environment'
@@ -84,33 +84,29 @@ async function apply() {
       </button>
     </div>
 
-    <div v-if="!editing" class="border-edge mt-3 rounded-control border bg-bath px-3 py-2.5">
+    <div v-if="!editing" class="border-border mt-3 rounded-control border bg-bg-deep px-3 py-2.5">
       <code
         data-selectable
-        class="data-mono block truncate text-caption text-ink-2"
+        class="font-mono text-xs block truncate text-micro text-fg-2"
         :title="info?.path"
       >
         {{ info ? displayedPath : "Loading…" }}
       </code>
-      <span class="mt-1 block text-caption text-ink-3">{{ sourceLabel }}</span>
-      <span
-        v-if="info?.source === 'invalid'"
-        class="mt-1 block text-caption text-stop"
-        role="alert"
-      >
+      <span class="mt-1 block text-micro text-fg-dim">{{ sourceLabel }}</span>
+      <span v-if="info?.source === 'invalid'" class="mt-1 block text-micro text-error" role="alert">
         The saved location could not be read. Choose a folder to repair it.
       </span>
-      <span v-else-if="info && !info.exists" class="mt-1 block text-caption text-stop" role="alert">
+      <span v-else-if="info && !info.exists" class="mt-1 block text-micro text-error" role="alert">
         This folder is unavailable. Reconnect its drive or choose another folder before starting
         This Mac.
       </span>
-      <span v-if="info?.source === 'environment'" class="mt-1 block text-caption text-halide">
+      <span v-if="info?.source === 'environment'" class="mt-1 block text-micro text-sapphire">
         Unset MOLD_HOME in the launch environment to change this location here.
       </span>
     </div>
 
     <form v-else class="mt-4" data-test="mold-home-form" @submit.prevent="apply">
-      <label for="mold-home-path" class="text-caption font-semibold text-ink-2">New folder</label>
+      <label for="mold-home-path" class="text-micro font-semibold text-fg-2">New folder</label>
       <div class="mt-1.5 flex gap-2">
         <input
           id="mold-home-path"
@@ -121,13 +117,13 @@ async function apply() {
           spellcheck="false"
           autocomplete="off"
           placeholder="/Volumes/External/Mold"
-          class="border-edge data-mono h-9 min-w-0 flex-1 rounded-control border bg-bath px-3 text-body text-ink placeholder:text-ink-3 focus:border-halide focus:outline-none"
+          class="border-border font-mono text-xs h-9 min-w-0 flex-1 rounded-control border bg-bg-deep px-3 text-sm text-fg placeholder:text-fg-dim focus:border-sapphire focus:outline-none"
           :disabled="busy"
         />
         <button
           type="button"
           data-test="browse-mold-home"
-          class="border-edge h-9 shrink-0 rounded-control border px-3 text-body font-semibold text-ink-2 hover:text-ink disabled:opacity-50"
+          class="border-border h-9 shrink-0 rounded-control border px-3 text-sm font-semibold text-fg-2 hover:text-fg disabled:opacity-50"
           :disabled="busy"
           @click="browse"
         >
@@ -136,11 +132,11 @@ async function apply() {
       </div>
 
       <fieldset class="mt-4" :disabled="busy">
-        <legend class="text-caption font-semibold text-ink-2">What should Mold do?</legend>
+        <legend class="text-micro font-semibold text-fg-2">What should Mold do?</legend>
         <label
-          class="border-edge mt-2 flex cursor-pointer items-start gap-3 rounded-control border bg-bath p-3"
+          class="border-border mt-2 flex cursor-pointer items-start gap-3 rounded-control border bg-bg-deep p-3"
           :class="[
-            migrate ? 'ring-halide/60 ring-1' : '',
+            migrate ? 'ring-sapphire/60 ring-1' : '',
             info && !info.exists ? 'cursor-not-allowed opacity-50' : '',
           ]"
         >
@@ -153,16 +149,16 @@ async function apply() {
             :disabled="info ? !info.exists : false"
           />
           <span>
-            <span class="block text-body font-medium text-ink">Copy everything</span>
-            <span class="mt-0.5 block text-caption text-ink-3">
+            <span class="block text-sm font-medium text-fg">Copy everything</span>
+            <span class="mt-0.5 block text-micro text-fg-dim">
               Recommended. Copies everything inside the current Mold home; the original stays
               untouched.
             </span>
           </span>
         </label>
         <label
-          class="border-edge mt-2 flex cursor-pointer items-start gap-3 rounded-control border bg-bath p-3"
-          :class="!migrate ? 'ring-halide/60 ring-1' : ''"
+          class="border-border mt-2 flex cursor-pointer items-start gap-3 rounded-control border bg-bg-deep p-3"
+          :class="!migrate ? 'ring-sapphire/60 ring-1' : ''"
         >
           <input
             v-model="migrate"
@@ -172,24 +168,24 @@ async function apply() {
             :value="false"
           />
           <span>
-            <span class="block text-body font-medium text-ink">Use this folder as-is</span>
-            <span class="mt-0.5 block text-caption text-ink-3">
+            <span class="block text-sm font-medium text-fg">Use this folder as-is</span>
+            <span class="mt-0.5 block text-micro text-fg-dim">
               Starts fresh in an empty folder, or opens an existing Mold home without copying.
             </span>
           </span>
         </label>
       </fieldset>
 
-      <p v-if="migrate" class="mt-3 text-caption text-halide">
+      <p v-if="migrate" class="mt-3 text-micro text-sapphire">
         Large model libraries can take a while to copy. Keep both drives connected until Mold
         restarts.
       </p>
-      <p v-if="error" class="mt-3 text-caption text-stop" role="alert">{{ error }}</p>
+      <p v-if="error" class="mt-3 text-micro text-error" role="alert">{{ error }}</p>
 
       <div class="mt-4 flex justify-end gap-2">
         <button
           type="button"
-          class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+          class="border-border h-8 rounded-control border px-3 text-sm text-fg-2 hover:text-fg disabled:opacity-50"
           :disabled="busy"
           @click="editing = false"
         >
@@ -198,7 +194,7 @@ async function apply() {
         <button
           type="submit"
           data-test="apply-mold-home"
-          class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
+          class="h-8 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
           :disabled="busy"
         >
           {{

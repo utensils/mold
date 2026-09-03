@@ -23,7 +23,7 @@ function commit(e: Event) {
     :disabled="disabled"
     :aria-label="ariaLabel"
     data-selectable
-    class="border-edge data-mono h-7 rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3 disabled:opacity-40"
+    class="border-border font-mono text-xs h-7 rounded-control border bg-bg-deep px-2 text-fg placeholder:text-fg-dim disabled:opacity-40"
     :class="wide ? 'w-72' : 'w-44'"
     @change="commit"
     @keydown.enter="($event.target as HTMLInputElement).blur()"

@@ -99,7 +99,7 @@ async function onOpeningImageFile(file: File) {
       <label class="ms-range">
         <span>
           Source strength
-          <output class="data-mono">{{ form.strength.toFixed(2) }}</output>
+          <output class="font-mono text-xs">{{ form.strength.toFixed(2) }}</output>
         </span>
         <input
           v-model.number="form.strength"
@@ -145,7 +145,7 @@ async function onOpeningImageFile(file: File) {
 <style scoped>
 .ms-field__label {
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
 }
@@ -158,7 +158,7 @@ async function onOpeningImageFile(file: File) {
 .ms-field {
   display: grid;
   gap: 6px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 11px;
 }
 .ms-range > span {
@@ -168,20 +168,20 @@ async function onOpeningImageFile(file: File) {
 }
 .ms-range input {
   width: 100%;
-  accent-color: var(--safelight);
+  accent-color: var(--mold-blue);
 }
 .ms-input {
   width: 100%;
   box-sizing: border-box;
   min-height: 36px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 8px;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding: 8px 10px;
 }
 .ms-hint {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 10px;
   line-height: 1.45;
 }

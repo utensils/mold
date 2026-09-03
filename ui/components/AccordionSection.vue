@@ -17,7 +17,7 @@ const props = withDefaults(
     summary?: string;
     icon?: IconName;
     /** Optional accent treatment for contexts that need stronger visual grouping. */
-    tone?: "plain" | "halide";
+    tone?: "plain" | "info";
     /** When false the header is a plain div and no chevron renders. */
     headerInteractive?: boolean;
   }>(),
@@ -37,7 +37,7 @@ function onHeaderClick() {
   <section
     class="ms-acc"
     :class="{
-      'ms-acc--halide': tone === 'halide',
+      'ms-acc--info': tone === 'info',
       'ms-acc--open': open,
     }"
   >
@@ -73,21 +73,29 @@ function onHeaderClick() {
 
 <style scoped>
 .ms-acc {
-  background: var(--bath);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
+  background: var(--mold-bg-deep);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   overflow: hidden;
 }
 
-.ms-acc--halide {
-  background: color-mix(in srgb, var(--halide) 3%, var(--bench));
-  border-color: color-mix(in srgb, var(--halide) 22%, var(--edge));
-  box-shadow: inset 0 1px 0 var(--card-hi);
+.ms-acc--info {
+  background: color-mix(in srgb, var(--mold-sapphire) 3%, var(--mold-bg));
+  border-color: color-mix(
+    in srgb,
+    var(--mold-sapphire) 22%,
+    var(--mold-border)
+  );
+  box-shadow: inset 0 1px 0 transparent;
 }
 
-.ms-acc--halide.ms-acc--open {
-  background: color-mix(in srgb, var(--halide) 5%, var(--bench));
-  border-color: color-mix(in srgb, var(--halide) 34%, var(--edge));
+.ms-acc--info.ms-acc--open {
+  background: color-mix(in srgb, var(--mold-sapphire) 5%, var(--mold-bg));
+  border-color: color-mix(
+    in srgb,
+    var(--mold-sapphire) 34%,
+    var(--mold-border)
+  );
 }
 
 .ms-acc__head {
@@ -97,27 +105,27 @@ function onHeaderClick() {
   gap: 13px;
   border: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   padding: 15px 16px;
   text-align: left;
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
 }
 
 .ms-acc__head--interactive {
   cursor: pointer;
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-acc__head--interactive:hover {
-  background: color-mix(in srgb, var(--rebate) 5%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 5%, transparent);
 }
 
-.ms-acc--halide .ms-acc__head--interactive:hover {
-  background: color-mix(in srgb, var(--halide) 7%, transparent);
+.ms-acc--info .ms-acc__head--interactive:hover {
+  background: color-mix(in srgb, var(--mold-sapphire) 7%, transparent);
 }
 
 .ms-acc__head--interactive:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -125,9 +133,9 @@ function onHeaderClick() {
   width: 34px;
   height: 34px;
   flex: 0 0 34px;
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--halide) 16%, transparent);
-  color: var(--halide);
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-sapphire) 16%, transparent);
+  color: var(--mold-sapphire);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -148,7 +156,7 @@ function onHeaderClick() {
 
 .ms-acc__summary {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -156,11 +164,11 @@ function onHeaderClick() {
 
 .ms-acc__chevron {
   flex: 0 0 auto;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-acc__body {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   padding: 14px 16px;
 }
 </style>

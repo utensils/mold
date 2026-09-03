@@ -170,9 +170,9 @@ onBeforeUnmount(() => {
   max-height: calc(100vh - 16px);
   overflow: auto;
   padding: 8px;
-  background: var(--bench);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-card);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 </style>

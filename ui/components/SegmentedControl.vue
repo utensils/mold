@@ -93,9 +93,9 @@ function onKeydown(event: KeyboardEvent) {
   display: flex;
   gap: 3px;
   padding: 3px;
-  background: var(--bath);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
+  background: var(--mold-bg-deep);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
 }
 
 .ms-seg__btn {
@@ -106,15 +106,15 @@ function onKeydown(event: KeyboardEvent) {
   gap: 1px;
   border: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 7px 8px;
-  border-radius: var(--radius-control-sm);
-  font-family: var(--f-body);
+  border-radius: var(--mold-radius-1);
+  font-family: var(--mold-font-sans);
   font-size: 12px;
   cursor: pointer;
   transition:
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-seg--compact .ms-seg__btn {
@@ -135,14 +135,14 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-seg__btn:hover:not([data-on="true"]):not(:disabled) {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-seg__btn[data-on="true"] {
-  background: var(--sel-bg);
-  color: var(--sel-ink);
+  background: var(--mold-accent-tint);
+  color: var(--mold-blue);
   font-weight: 700;
-  box-shadow: var(--sel-ring);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 .ms-seg__btn:disabled {
@@ -151,12 +151,12 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-seg__btn:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .ms-seg__sub {
   font-size: 9px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 </style>

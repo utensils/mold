@@ -87,7 +87,7 @@ describe("SettingsView shell", () => {
     for (const accordion of accordions) {
       expect(accordion.props("icon")).toBeTruthy();
       expect(accordion.props("summary")).toBeTruthy();
-      expect(accordion.props("tone")).toBe("halide");
+      expect(accordion.props("tone")).toBe("info");
     }
   });
 

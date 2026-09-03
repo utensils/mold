@@ -1038,10 +1038,8 @@ describe("LibraryView Reuse settings retained source media", () => {
 });
 
 describe("LibraryView header + NEW badges", () => {
-  it("titles the workspace Library and counts prints across all hosts", async () => {
+  it("counts prints across all hosts in the header", async () => {
     const { wrapper } = await mountView();
-    const header = wrapper.get("header");
-    expect(header.text()).toContain("Library");
     expect(wrapper.get("[data-test='library-count']").text()).toBe("2 prints");
     wrapper.unmount();
   });

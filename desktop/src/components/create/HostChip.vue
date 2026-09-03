@@ -111,7 +111,7 @@ onBeforeUnmount(() => {
       aria-label="Generation host"
       class="ms-hostchip__popover ms-fade-up"
     >
-      <div class="ms-hostchip__kicker data-mono">run on</div>
+      <div class="ms-hostchip__kicker font-mono text-xs">run on</div>
       <button
         type="button"
         role="menuitemradio"
@@ -121,7 +121,7 @@ onBeforeUnmount(() => {
         @click="pick('auto')"
       >
         <span class="ms-hostchip__row-label">Auto</span>
-        <span class="ms-hostchip__row-sub data-mono">least busy</span>
+        <span class="ms-hostchip__row-sub font-mono text-xs">least busy</span>
         <span v-if="target === 'auto'" class="ms-hostchip__check">✓</span>
       </button>
       <button
@@ -133,7 +133,7 @@ onBeforeUnmount(() => {
         @click="pick('capable')"
       >
         <span class="ms-hostchip__row-label">Most capable</span>
-        <span class="ms-hostchip__row-sub data-mono">strongest gpu</span>
+        <span class="ms-hostchip__row-sub font-mono text-xs">strongest gpu</span>
         <span v-if="target === 'capable'" class="ms-hostchip__check">✓</span>
       </button>
       <div class="ms-hostchip__rule" />
@@ -155,7 +155,7 @@ onBeforeUnmount(() => {
           "
         />
         <span class="ms-hostchip__row-label">{{ h.label }}</span>
-        <span class="ms-hostchip__row-sub data-mono">{{ hostLine(h) }}</span>
+        <span class="ms-hostchip__row-sub font-mono text-xs">{{ hostLine(h) }}</span>
         <span v-if="target === h.id" class="ms-hostchip__check">✓</span>
       </button>
     </div>
@@ -167,9 +167,9 @@ onBeforeUnmount(() => {
   position: relative;
 }
 .ms-hostchip__chip {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -179,19 +179,19 @@ onBeforeUnmount(() => {
 }
 .ms-hostchip__chip--button {
   cursor: pointer;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 20px;
   padding: 4px 10px;
   transition:
-    color var(--dur-quick) var(--ease),
-    border-color var(--dur-quick) var(--ease);
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-hostchip__chip--button:hover {
-  color: var(--rebate);
-  border-color: var(--ce);
+  color: var(--mold-text);
+  border-color: var(--mold-border-control);
 }
 .ms-hostchip__chev {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-hostchip__dot {
   width: 6px;
@@ -200,10 +200,10 @@ onBeforeUnmount(() => {
   border-radius: 50%;
 }
 .ms-hostchip__dot--ready {
-  background: var(--success);
+  background: var(--mold-success);
 }
 .ms-hostchip__dot--wait {
-  background: var(--ink-3);
+  background: var(--mold-text-dim);
 }
 /* Above every composer affordance (Templates sits at z-30 in the workbench). */
 .ms-hostchip__popover {
@@ -213,16 +213,16 @@ onBeforeUnmount(() => {
   z-index: 50;
   width: 264px;
   padding: 8px;
-  background: var(--bench);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-card);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 .ms-hostchip__kicker {
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   padding: 4px 8px 6px;
 }
 .ms-hostchip__row {
@@ -232,16 +232,16 @@ onBeforeUnmount(() => {
   gap: 8px;
   border: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   padding: 8px;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-hostchip__row:hover:not(:disabled) {
-  background: var(--surface);
+  background: var(--mold-surface);
 }
 .ms-hostchip__row:disabled {
   opacity: 0.6;
@@ -256,15 +256,15 @@ onBeforeUnmount(() => {
 }
 .ms-hostchip__row-sub {
   font-size: 9.5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-hostchip__check {
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 12px;
 }
 .ms-hostchip__rule {
   height: 1px;
-  background: var(--edge);
+  background: var(--mold-border);
   margin: 4px 8px;
 }
 </style>

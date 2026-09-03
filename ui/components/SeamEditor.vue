@@ -158,11 +158,11 @@ function onOptionKeydown(event: KeyboardEvent) {
 }
 
 .ms-seam-editor__context {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   padding: 4px 8px 6px;
 }
 
@@ -183,37 +183,37 @@ function onOptionKeydown(event: KeyboardEvent) {
   padding: 7px 8px;
   border: 0;
   background: transparent;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
   cursor: pointer;
   text-align: left;
-  color: var(--rebate);
-  font-family: var(--f-body);
-  transition: background var(--dur-quick) var(--ease);
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-seam-editor--large .ms-seam-editor__row {
   min-height: 56px;
   padding: 10px 12px;
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-card);
-  background: var(--bath);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
 }
 
 .ms-seam-editor__row:hover {
-  background: var(--surface);
+  background: var(--mold-surface);
 }
 
 .ms-seam-editor__row[data-on="true"] {
-  background: var(--surface);
+  background: var(--mold-surface);
 }
 
 .ms-seam-editor--large .ms-seam-editor__row[data-on="true"] {
-  border-color: var(--sel-border);
-  background: var(--sel-bg);
+  border-color: var(--mold-blue);
+  background: var(--mold-accent-tint);
 }
 
 .ms-seam-editor__row:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -225,14 +225,14 @@ function onOptionKeydown(event: KeyboardEvent) {
   width: 32px;
   height: 32px;
   flex: 0 0 32px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 50%;
-  background: var(--bath);
-  color: var(--ink-2);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text-2);
   transition:
-    border-color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-seam-editor--large .ms-seam-editor__diagram {
@@ -254,9 +254,9 @@ function onOptionKeydown(event: KeyboardEvent) {
 }
 
 .ms-seam-editor__row[data-on="true"] .ms-seam-editor__diagram {
-  border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 12%, transparent);
-  color: var(--safelight);
+  border-color: var(--mold-blue);
+  background: color-mix(in srgb, var(--mold-blue) 12%, transparent);
+  color: var(--mold-blue);
 }
 
 .ms-seam-editor__text {
@@ -275,13 +275,13 @@ function onOptionKeydown(event: KeyboardEvent) {
 }
 
 .ms-seam-editor__row[data-on="true"] .ms-seam-editor__label {
-  color: var(--sel-ink);
+  color: var(--mold-blue);
 }
 
 .ms-seam-editor__desc {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9.5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-seam-editor--large .ms-seam-editor__desc {
@@ -289,7 +289,7 @@ function onOptionKeydown(event: KeyboardEvent) {
 }
 
 .ms-seam-editor__check {
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 12px;
   font-weight: 800;
 }
@@ -300,7 +300,7 @@ function onOptionKeydown(event: KeyboardEvent) {
 
 .ms-seam-editor__divider {
   height: 1px;
-  background: var(--edge);
+  background: var(--mold-border);
   margin: 6px 8px;
 }
 
@@ -314,7 +314,7 @@ function onOptionKeydown(event: KeyboardEvent) {
 
 .ms-seam-editor__fade-label {
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .ms-seam-editor--large .ms-seam-editor__fade-label {
@@ -323,8 +323,8 @@ function onOptionKeydown(event: KeyboardEvent) {
 
 .ms-seam-editor__footnote {
   padding: 2px 8px 6px;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9.5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 </style>

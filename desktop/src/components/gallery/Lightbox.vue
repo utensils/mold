@@ -549,10 +549,10 @@ async function performVideoExport(options: VideoExportOptions) {
     @click.self="emit('close')"
   >
     <div
-      class="ms-fade-up flex max-h-[86vh] w-full max-w-[1000px] overflow-hidden rounded-card-lg border border-edge bg-bench shadow-raised"
+      class="ms-fade-up flex max-h-[86vh] w-full max-w-[1000px] overflow-hidden rounded-card-lg border border-border bg-bg shadow-md"
     >
       <!-- media pane -->
-      <div class="relative flex min-w-0 flex-1 items-center justify-center bg-print-surface p-5">
+      <div class="relative flex min-w-0 flex-1 items-center justify-center bg-media-bed p-5">
         <div
           data-test="lightbox-media"
           class="relative flex h-full w-full items-center justify-center overflow-hidden"
@@ -597,7 +597,7 @@ async function performVideoExport(options: VideoExportOptions) {
         </div>
         <button
           type="button"
-          class="absolute top-1/2 left-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-on-media transition-opacity duration-100 hover:bg-black/70 disabled:opacity-30"
+          class="absolute top-1/2 left-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control bg-black/50 text-on-media transition-opacity duration-100 hover:bg-black/70 disabled:opacity-30"
           :disabled="index === 0"
           aria-label="Previous print"
           @click="emit('prev')"
@@ -606,7 +606,7 @@ async function performVideoExport(options: VideoExportOptions) {
         </button>
         <button
           type="button"
-          class="absolute top-1/2 right-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-on-media transition-opacity duration-100 hover:bg-black/70 disabled:opacity-30"
+          class="absolute top-1/2 right-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control bg-black/50 text-on-media transition-opacity duration-100 hover:bg-black/70 disabled:opacity-30"
           :disabled="index === count - 1"
           aria-label="Next print"
           @click="emit('next')"
@@ -620,11 +620,13 @@ async function performVideoExport(options: VideoExportOptions) {
         <div class="mb-4 flex items-center gap-2.5">
           <span class="lightbox-kicker">Print details</span>
           <div class="flex-1" />
-          <span class="data-mono text-caption text-ink-3">{{ index + 1 }} / {{ count }}</span>
+          <span class="font-mono text-xs text-micro text-fg-dim"
+            >{{ index + 1 }} / {{ count }}</span
+          >
           <button
             ref="closeBtn"
             type="button"
-            class="flex h-[30px] w-[30px] items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--rebate)_9%,transparent)] text-body-lg text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="flex h-[30px] w-[30px] items-center justify-center rounded-control bg-row-hover text-base text-fg-2 transition-colors duration-100 hover:text-fg"
             title="Close (Esc)"
             aria-label="Close"
             @click="emit('close')"
@@ -665,11 +667,11 @@ async function performVideoExport(options: VideoExportOptions) {
             <button
               v-if="showOrganization"
               type="button"
-              class="lightbox-fav flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-chrome border transition-colors duration-100"
+              class="lightbox-fav flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-window border transition-colors duration-100"
               :class="
                 isFavorite
-                  ? 'lightbox-fav--on border-safelight text-safelight'
-                  : 'border-edge text-ink-3 hover:text-ink'
+                  ? 'lightbox-fav--on border-accent text-accent'
+                  : 'border-border text-fg-dim hover:text-fg'
               "
               :aria-pressed="isFavorite"
               :aria-label="isFavorite ? 'Unfavorite' : 'Favorite'"
@@ -682,14 +684,14 @@ async function performVideoExport(options: VideoExportOptions) {
           </div>
           <p
             v-if="titleError"
-            class="mt-1 text-caption text-stop"
+            class="mt-1 text-micro text-error"
             data-test="lightbox-title-error"
             role="alert"
           >
             {{ titleError }}
           </p>
           <span
-            class="data-mono mt-1.5 block truncate text-caption text-ink-3"
+            class="font-mono text-xs mt-1.5 block truncate text-micro text-fg-dim"
             data-test="lightbox-filename"
             :title="item.filename"
           >
@@ -697,7 +699,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </span>
           <p
             v-if="purge"
-            class="mt-2 font-utility text-[11px] text-ink-2"
+            class="mt-2 font-mono text-micro text-fg-2"
             data-test="lightbox-purge"
             :data-kind="purge.kind"
           >
@@ -713,7 +715,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <p
               data-selectable
               data-test="lightbox-prompt"
-              class="min-w-0 flex-1 whitespace-pre-wrap text-body text-ink"
+              class="min-w-0 flex-1 whitespace-pre-wrap text-sm text-fg"
               :title="meta.prompt"
             >
               {{ meta.prompt }}
@@ -722,7 +724,7 @@ async function performVideoExport(options: VideoExportOptions) {
               v-if="meta.prompt"
               type="button"
               data-test="copy-prompt"
-              class="flex h-[30px] shrink-0 items-center gap-1.5 rounded-chrome border border-edge px-2 font-utility text-[11px] text-ink-2 transition-colors hover:text-ink"
+              class="flex h-[30px] shrink-0 items-center gap-1.5 rounded-window border border-border px-2 font-mono text-micro text-fg-2 transition-colors hover:text-fg"
               aria-label="Copy prompt"
               title="Copy prompt"
               @click="copy(meta.prompt)"
@@ -756,42 +758,42 @@ async function performVideoExport(options: VideoExportOptions) {
             v-if="meta.original_prompt"
             data-test="lightbox-original"
             data-selectable
-            class="mt-2 text-caption text-ink-2"
+            class="mt-2 text-micro text-fg-2"
             :title="meta.original_prompt"
           >
-            <span class="text-ink-3">Original</span> {{ meta.original_prompt }}
+            <span class="text-fg-dim">Original</span> {{ meta.original_prompt }}
           </p>
           <p
             v-if="meta.negative_prompt"
             data-test="lightbox-negative"
             data-selectable
-            class="mt-2 text-caption text-ink-2"
+            class="mt-2 text-micro text-fg-2"
             :title="meta.negative_prompt"
           >
-            <span class="text-ink-3">Negative</span> {{ meta.negative_prompt }}
+            <span class="text-fg-dim">Negative</span> {{ meta.negative_prompt }}
           </p>
           <p
             v-if="meta.batch_id && meta.batch_index && meta.batch_count"
             data-test="lightbox-batch"
             data-selectable
-            class="mt-2 text-caption text-ink-2"
+            class="mt-2 text-micro text-fg-2"
             :title="meta.batch_id"
           >
-            <span class="text-ink-3">Prepared batch</span>
+            <span class="text-fg-dim">Prepared batch</span>
             {{ meta.batch_index }} of {{ meta.batch_count }} · {{ meta.batch_id }}
           </p>
 
-          <dl class="mt-4 space-y-2.5 font-utility">
+          <dl class="mt-4 space-y-2.5 font-mono">
             <div class="flex justify-between gap-2">
-              <dt class="text-caption text-ink-3">Model</dt>
-              <dd class="data-mono truncate text-caption text-ink">{{ modelLabel }}</dd>
+              <dt class="text-micro text-fg-dim">Model</dt>
+              <dd class="font-mono text-xs truncate text-micro text-fg">{{ modelLabel }}</dd>
             </div>
             <div class="flex justify-between gap-2">
-              <dt class="text-caption text-ink-3">Seed</dt>
+              <dt class="text-micro text-fg-dim">Seed</dt>
               <dd>
                 <button
                   type="button"
-                  class="data-mono text-caption text-ink hover:text-safelight"
+                  class="font-mono text-xs text-micro text-fg hover:text-accent"
                   title="Copy seed"
                   @click="copy(String(meta.seed))"
                 >
@@ -800,12 +802,14 @@ async function performVideoExport(options: VideoExportOptions) {
               </dd>
             </div>
             <div class="flex justify-between gap-2">
-              <dt class="text-caption text-ink-3">Dimensions</dt>
-              <dd class="data-mono text-caption text-ink">{{ meta.width }}×{{ meta.height }}</dd>
+              <dt class="text-micro text-fg-dim">Dimensions</dt>
+              <dd class="font-mono text-xs text-micro text-fg">
+                {{ meta.width }}×{{ meta.height }}
+              </dd>
             </div>
             <div class="flex justify-between gap-2">
-              <dt class="text-caption text-ink-3">Steps · guidance</dt>
-              <dd class="data-mono text-caption text-ink">
+              <dt class="text-micro text-fg-dim">Steps · guidance</dt>
+              <dd class="font-mono text-xs text-micro text-fg">
                 {{ meta.steps }} · {{ meta.guidance.toFixed(1) }}
               </dd>
             </div>
@@ -814,34 +818,34 @@ async function performVideoExport(options: VideoExportOptions) {
               class="flex justify-between gap-2"
               data-test="lightbox-scheduler"
             >
-              <dt class="text-caption text-ink-3">Scheduler</dt>
-              <dd class="data-mono text-caption text-ink">{{ schedulerName }}</dd>
+              <dt class="text-micro text-fg-dim">Scheduler</dt>
+              <dd class="font-mono text-xs text-micro text-fg">{{ schedulerName }}</dd>
             </div>
             <div
               v-if="meta.cfg_plus"
               class="flex justify-between gap-2"
               data-test="lightbox-cfg-plus"
             >
-              <dt class="text-caption text-ink-3">CFG++</dt>
-              <dd class="data-mono text-caption text-ink">on</dd>
+              <dt class="text-micro text-fg-dim">CFG++</dt>
+              <dd class="font-mono text-xs text-micro text-fg">on</dd>
             </div>
             <div
               v-if="meta.strength != null"
               class="flex justify-between gap-2"
               data-test="lightbox-strength"
             >
-              <dt class="text-caption text-ink-3">{{ strengthCaption }}</dt>
-              <dd class="data-mono text-caption text-ink">{{ meta.strength.toFixed(2) }}</dd>
+              <dt class="text-micro text-fg-dim">{{ strengthCaption }}</dt>
+              <dd class="font-mono text-xs text-micro text-fg">{{ meta.strength.toFixed(2) }}</dd>
             </div>
             <div v-if="frames" class="flex justify-between gap-2" data-test="lightbox-video">
-              <dt class="text-caption text-ink-3">Frames</dt>
-              <dd class="data-mono text-caption text-ink">
+              <dt class="text-micro text-fg-dim">Frames</dt>
+              <dd class="font-mono text-xs text-micro text-fg">
                 {{ frames }}<template v-if="fps"> · {{ fps }} fps</template>
               </dd>
             </div>
             <div v-if="pipeline" class="flex justify-between gap-2" data-test="lightbox-pipeline">
-              <dt class="text-caption text-ink-3">Pipeline</dt>
-              <dd class="data-mono text-caption text-ink">{{ pipeline }}</dd>
+              <dt class="text-micro text-fg-dim">Pipeline</dt>
+              <dd class="font-mono text-xs text-micro text-fg">{{ pipeline }}</dd>
             </div>
             <div
               v-for="l in loraStack"
@@ -849,8 +853,8 @@ async function performVideoExport(options: VideoExportOptions) {
               class="flex justify-between gap-2"
               data-test="lightbox-lora"
             >
-              <dt class="text-caption text-ink-3">LoRA</dt>
-              <dd class="data-mono truncate text-caption text-ink" :title="l.path">
+              <dt class="text-micro text-fg-dim">LoRA</dt>
+              <dd class="font-mono text-xs truncate text-micro text-fg" :title="l.path">
                 {{ l.path }} × {{ l.scale.toFixed(2) }}
               </dd>
             </div>
@@ -859,9 +863,9 @@ async function performVideoExport(options: VideoExportOptions) {
               class="flex justify-between gap-2"
               data-test="lightbox-identity-photo"
             >
-              <dt class="text-caption text-ink-3">Identity photo</dt>
+              <dt class="text-micro text-fg-dim">Identity photo</dt>
               <dd
-                class="data-mono truncate text-caption text-ink"
+                class="font-mono text-xs truncate text-micro text-fg"
                 :title="identity.sha256 ?? undefined"
               >
                 {{ identity.name ?? "Identity photo"
@@ -869,36 +873,38 @@ async function performVideoExport(options: VideoExportOptions) {
               </dd>
             </div>
             <div v-if="identity" class="flex justify-between gap-2" data-test="lightbox-identity">
-              <dt class="text-caption text-ink-3">Identity strength</dt>
-              <dd class="data-mono text-caption text-ink">
+              <dt class="text-micro text-fg-dim">Identity strength</dt>
+              <dd class="font-mono text-xs text-micro text-fg">
                 {{ identity.weight }} · from step {{ identity.startStep }}
               </dd>
             </div>
             <div v-if="fileSize" class="flex justify-between gap-2" data-test="lightbox-file-size">
-              <dt class="text-caption text-ink-3">File size</dt>
-              <dd class="data-mono text-caption text-ink">{{ fileSize }}</dd>
+              <dt class="text-micro text-fg-dim">File size</dt>
+              <dd class="font-mono text-xs text-micro text-fg">{{ fileSize }}</dd>
             </div>
             <div v-if="fileFormat" class="flex justify-between gap-2" data-test="lightbox-format">
-              <dt class="text-caption text-ink-3">Format</dt>
-              <dd class="data-mono text-caption text-ink">{{ fileFormat.toUpperCase() }}</dd>
+              <dt class="text-micro text-fg-dim">Format</dt>
+              <dd class="font-mono text-xs text-micro text-fg">{{ fileFormat.toUpperCase() }}</dd>
             </div>
             <div class="flex justify-between gap-2">
-              <dt class="text-caption text-ink-3">Created</dt>
-              <dd class="text-caption text-ink">{{ when }}</dd>
+              <dt class="text-micro text-fg-dim">Created</dt>
+              <dd class="text-micro text-fg">{{ when }}</dd>
             </div>
             <div v-if="hostLabel" class="flex justify-between gap-2" data-test="lightbox-host">
-              <dt class="text-caption text-ink-3">Host</dt>
-              <dd class="data-mono truncate text-caption text-ink">{{ hostLabel }}</dd>
+              <dt class="text-micro text-fg-dim">Host</dt>
+              <dd class="font-mono text-xs truncate text-micro text-fg">{{ hostLabel }}</dd>
             </div>
           </dl>
           <span
             v-if="meta.version"
-            class="data-mono mt-2 block text-caption text-ink-3"
+            class="font-mono text-xs mt-2 block text-micro text-fg-dim"
             data-test="lightbox-version"
           >
             mold {{ meta.version }}
           </span>
-          <span v-if="item.metadata_synthetic" class="edge-code mt-2 block"
+          <span
+            v-if="item.metadata_synthetic"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap mt-2 block"
             >SYNTHETIC METADATA</span
           >
         </div>
@@ -906,7 +912,7 @@ async function performVideoExport(options: VideoExportOptions) {
         <button
           type="button"
           data-test="lightbox-primary-action"
-          class="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-[10px] bg-safelight text-body-lg font-bold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
+          class="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-control bg-accent text-base font-bold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
           @click="primaryAction"
         >
           <Icon name="reuse" :size="15" />
@@ -922,7 +928,7 @@ async function performVideoExport(options: VideoExportOptions) {
           v-if="canEditSequence"
           type="button"
           data-test="lightbox-duplicate-sequence"
-          class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+          class="border-border-control mt-2.5 h-10 w-full rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
           @click="emit('reuseSequence')"
         >
           Duplicate as new
@@ -931,7 +937,7 @@ async function performVideoExport(options: VideoExportOptions) {
           <button
             type="button"
             data-test="lightbox-use-source"
-            class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="border-border-control h-10 flex-1 rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
             :disabled="audio || mesh"
             @click="emit('useSource')"
           >
@@ -940,7 +946,7 @@ async function performVideoExport(options: VideoExportOptions) {
           <button
             type="button"
             data-test="save-media"
-            class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="border-border-control h-10 flex-1 rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
             :disabled="saveBusy"
             @click="saveMedia"
           >
@@ -951,7 +957,7 @@ async function performVideoExport(options: VideoExportOptions) {
           v-if="upscaleEnabled && !audio && !mesh && !trashed"
           type="button"
           data-test="lightbox-upscale"
-          class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+          class="border-border-control mt-2.5 h-10 w-full rounded-control border text-sm font-semibold text-fg-2 transition-colors duration-100 hover:text-fg"
           @click="emit('upscale')"
         >
           {{ video ? "Framewise upscale…" : "Upscale…" }}
@@ -969,7 +975,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :key="format"
             type="button"
             :data-test="`mesh-export-${format}`"
-            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
             :disabled="exportBusy"
             @click="exportMesh(format)"
           >
@@ -979,7 +985,7 @@ async function performVideoExport(options: VideoExportOptions) {
             v-if="meshAnimationExports.length > 0"
             type="button"
             data-test="mesh-export-animation"
-            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
             @click="openMeshAnimationExport"
           >
             Export turntable…
@@ -990,7 +996,7 @@ async function performVideoExport(options: VideoExportOptions) {
             v-if="canExportVideo"
             type="button"
             data-test="export-video"
-            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
             @click="openVideoExport"
           >
             Export format…
@@ -998,7 +1004,7 @@ async function performVideoExport(options: VideoExportOptions) {
           <button
             v-if="canReveal"
             type="button"
-            class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+            class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
             @click="reveal"
           >
             Reveal in file manager
@@ -1007,7 +1013,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <button
               type="button"
               data-test="lightbox-restore"
-              class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-ink"
+              class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-fg"
               @click="emit('restore')"
             >
               Restore
@@ -1015,7 +1021,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <button
               type="button"
               data-test="lightbox-delete-forever"
-              class="border-edge h-8 flex-1 rounded-control border text-caption text-ink-2 transition-colors duration-100 hover:text-stop"
+              class="border-border h-8 flex-1 rounded-control border text-micro text-fg-2 transition-colors duration-100 hover:text-error"
               @click="confirmingForever = true"
             >
               Delete forever
@@ -1025,11 +1031,11 @@ async function performVideoExport(options: VideoExportOptions) {
             v-else
             type="button"
             data-test="lightbox-delete"
-            class="border-edge h-8 flex-1 rounded-control border text-caption transition-colors duration-100"
+            class="border-border h-8 flex-1 rounded-control border text-micro transition-colors duration-100"
             :class="
               confirmingDelete
-                ? 'border-stop bg-stop font-semibold text-on-accent'
-                : 'text-ink-2 hover:text-stop'
+                ? 'border-error bg-error font-semibold text-on-accent'
+                : 'text-fg-2 hover:text-error'
             "
             @blur="confirmingDelete = false"
             @click="onDelete"
@@ -1085,11 +1091,11 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 
 .lightbox-kicker {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 /* Title lead line: display 16/600, a quiet underline that turns accent
@@ -1097,31 +1103,31 @@ async function performVideoExport(options: VideoExportOptions) {
 .lightbox-title {
   display: block;
   height: 34px;
-  font-family: var(--f-display);
+  font-family: var(--mold-font-sans);
   font-size: 16px;
   font-weight: 600;
-  color: var(--rebate);
+  color: var(--mold-text);
   background: transparent;
   border: 0;
   border-bottom: 1.5px solid transparent;
   padding: 0 0 2px;
   outline: none;
   line-height: 30px;
-  transition: border-color var(--dur-quick) var(--ease);
+  transition: border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 input.lightbox-title::placeholder {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-weight: 500;
 }
 
 input.lightbox-title:hover {
-  border-bottom-color: var(--edge);
+  border-bottom-color: var(--mold-border);
 }
 
 input.lightbox-title:focus,
 .lightbox-title--editing {
-  border-bottom-color: var(--safelight);
+  border-bottom-color: var(--mold-blue);
 }
 
 /* The filled heart: the registry ships one outline glyph; the active state
@@ -1131,13 +1137,13 @@ input.lightbox-title:focus,
 }
 
 .ms-lib-upscaled {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 8.5px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  background: color-mix(in srgb, var(--rebate) 88%, black);
-  color: var(--on-accent);
+  background: color-mix(in srgb, var(--mold-text) 88%, black);
+  color: var(--mold-on-accent);
   padding: 2px 6px;
   border-radius: 5px;
 }

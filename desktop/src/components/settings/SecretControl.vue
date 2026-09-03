@@ -42,7 +42,7 @@ async function clear() {
         autocomplete="off"
         data-selectable
         :placeholder="placeholder"
-        class="border-edge data-mono h-7 w-64 rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3"
+        class="border-border font-mono text-xs h-7 w-64 rounded-control border bg-bg-deep px-2 text-fg placeholder:text-fg-dim"
         @keydown.enter="save"
         @keydown.escape="
           editing = false;
@@ -51,7 +51,7 @@ async function clear() {
       />
       <button
         type="button"
-        class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
+        class="h-7 rounded-control bg-accent px-2.5 text-sm font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
         :disabled="!draft.trim()"
         @click="save"
       >
@@ -59,12 +59,12 @@ async function clear() {
       </button>
     </template>
     <template v-else>
-      <span class="data-mono text-caption" :class="present ? 'text-ink-2' : 'text-ink-3'">
+      <span class="font-mono text-xs text-micro" :class="present ? 'text-fg-2' : 'text-fg-dim'">
         {{ present ? "••••••••  set" : "not set" }}
       </span>
       <button
         type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
         @click="editing = true"
       >
         {{ present ? "Replace…" : "Set…" }}
@@ -72,7 +72,7 @@ async function clear() {
       <button
         v-if="present"
         type="button"
-        class="h-7 rounded-control px-1.5 text-caption text-ink-3 hover:text-stop"
+        class="h-7 rounded-control px-1.5 text-micro text-fg-dim hover:text-error"
         title="Remove"
         aria-label="Remove secret"
         @click="clear"

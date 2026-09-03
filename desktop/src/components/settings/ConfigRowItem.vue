@@ -33,10 +33,10 @@ function commitBool(e: Event) {
 </script>
 
 <template>
-  <div class="border-edge flex items-center gap-3 border-b py-2 last:border-b-0">
+  <div class="border-border flex items-center gap-3 border-b py-2 last:border-b-0">
     <div class="min-w-0 flex-1">
-      <div class="data-mono truncate text-body text-ink" :title="row.key">{{ row.key }}</div>
-      <div v-if="locked" class="text-caption text-ink-3">
+      <div class="font-mono text-xs truncate text-sm text-fg" :title="row.key">{{ row.key }}</div>
+      <div v-if="locked" class="text-micro text-fg-dim">
         Set by {{ envVar }} in your environment — unset it to edit here.
       </div>
     </div>
@@ -47,7 +47,7 @@ function commitBool(e: Event) {
         type="checkbox"
         :checked="!!draft"
         :disabled="locked"
-        class="accent-[var(--safelight)] disabled:opacity-50"
+        class="accent-accent disabled:opacity-50"
         @change="commitBool"
       />
     </label>
@@ -57,13 +57,16 @@ function commitBool(e: Event) {
       :type="isNumber ? 'number' : 'text'"
       :disabled="locked"
       data-selectable
-      class="border-edge data-mono h-7 w-48 rounded-control border bg-bath px-1.5 text-ink disabled:opacity-50"
+      class="border-border font-mono text-xs h-7 w-48 rounded-control border bg-bg-deep px-1.5 text-fg disabled:opacity-50"
       @keydown.enter="commitText"
       @blur="commitText"
     />
 
     <!-- provenance tag -->
-    <span class="edge-code w-14 shrink-0 text-right" :title="tag.label">
+    <span
+      class="font-mono text-micro text-fg-dim whitespace-nowrap w-14 shrink-0 text-right"
+      :title="tag.label"
+    >
       {{ tag.glyph }} {{ tag.label }}
     </span>
 
@@ -71,7 +74,7 @@ function commitBool(e: Event) {
     <button
       v-if="row.source === 'db'"
       type="button"
-      class="w-12 shrink-0 text-caption text-ink-3 hover:text-ink"
+      class="w-12 shrink-0 text-micro text-fg-dim hover:text-fg"
       title="Reset to its default"
       @click="emit('reset')"
     >

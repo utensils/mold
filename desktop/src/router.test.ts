@@ -17,11 +17,12 @@ vi.mock("./views/HostDetailView.vue", () => ({ default: { template: "<div />" } 
 vi.mock("./views/SettingsView.vue", () => ({ default: { template: "<div />" } }));
 
 describe("router — five-destination IA", () => {
-  it("serves the five workspaces with their titlebar names", () => {
+  it("serves the six destinations with their plain-English titles", () => {
     for (const [path, title] of [
-      ["/create", "Create"],
-      ["/library", "Library"],
-      ["/models", "Models"],
+      ["/create", "New image"],
+      ["/queue", "Queue"],
+      ["/library", "My images"],
+      ["/models", "Styles"],
       ["/machines", "Machines"],
       ["/settings", "Settings"],
     ] as const) {
@@ -51,10 +52,10 @@ describe("router — five-destination IA", () => {
     expect(router.resolve("/machines/hal9000-7680").name).toBe("host-detail");
   });
 
-  it("retires standalone Jobs into Machines", async () => {
+  it("retires standalone Jobs into the Queue", async () => {
     await router.push("/jobs");
-    expect(router.currentRoute.value.path).toBe("/machines");
-    expect(router.currentRoute.value.name).toBe("machines");
+    expect(router.currentRoute.value.path).toBe("/queue");
+    expect(router.currentRoute.value.name).toBe("queue");
   });
 });
 

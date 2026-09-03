@@ -30,18 +30,18 @@ withDefaults(
 
 <style scoped>
 .ms-card {
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
-  box-shadow: inset 0 1px 0 var(--card-hi);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  box-shadow: inset 0 1px 0 transparent;
 }
 
 .ms-card--large {
-  border-radius: var(--radius-card-lg);
+  border-radius: var(--mold-radius-3);
 }
 
 .ms-card--dashed {
-  border: 1px dashed var(--ce);
+  border: 1px dashed var(--mold-border-control);
   box-shadow: none;
 }
 

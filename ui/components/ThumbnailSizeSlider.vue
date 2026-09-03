@@ -54,10 +54,10 @@ function onInput(event: Event) {
   height: 34px;
   flex: 0 0 136px;
   align-items: center;
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--bath) 82%, transparent);
-  color: var(--ink-3);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-bg-deep) 82%, transparent);
+  color: var(--mold-text-dim);
 }
 
 /*
@@ -98,8 +98,8 @@ function onInput(event: Event) {
   margin-top: 3px;
   -webkit-appearance: none;
   border: 0;
-  border-radius: var(--radius-pill);
-  background: var(--rebate);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
@@ -113,18 +113,18 @@ function onInput(event: Event) {
   width: 7px;
   height: 28px;
   border: 0;
-  border-radius: var(--radius-pill);
-  background: var(--rebate);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 .ms-thumbnail-size__input:focus-visible {
-  border-radius: var(--radius-control);
-  outline: 2px solid var(--safelight);
+  border-radius: var(--mold-radius-2);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .ms-thumbnail-size:hover {
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 </style>

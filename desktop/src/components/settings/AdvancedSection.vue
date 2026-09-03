@@ -157,7 +157,7 @@ async function reset(row: ConfigRow) {
     />
     <ConfigSettingRow schema-key="server_port" />
     <PlacementSection v-if="!filter" class="mt-5" />
-    <p class="mt-4 mb-1 text-caption text-ink-3">
+    <p class="mt-4 mb-1 text-micro text-fg-dim">
       Everything the engine exposes that has no curated control — including keys added by newer
       engines. Provenance: ⌂ database · ⛁ config.toml · ⚿ environment.
     </p>

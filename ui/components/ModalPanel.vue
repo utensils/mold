@@ -82,20 +82,20 @@ useRootFocusOnOpen(root, () => props.open);
   align-items: center;
   justify-content: center;
   padding: 40px;
-  animation: ms-fade-up var(--dur-base) var(--ease);
+  animation: ms-fade-up var(--mold-dur-base) var(--mold-ease-out);
 }
 
 .ms-modal:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .ms-modal__panel {
   max-width: 92%;
   box-sizing: border-box;
-  background: var(--bench);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-card-lg);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
   box-shadow: 0 40px 90px -20px rgba(0, 0, 0, 0.7);
   overflow: hidden;
 }
@@ -111,12 +111,12 @@ useRootFocusOnOpen(root, () => props.open);
   width: 22px;
   height: 3px;
   border-radius: 2px;
-  background: var(--ce);
-  transition: background var(--dur-base) var(--ease);
+  background: var(--mold-border-control);
+  transition: background var(--mold-dur-base) var(--mold-ease-out);
 }
 
 .ms-modal__dot[data-on="true"] {
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .ms-modal__body {
@@ -124,7 +124,7 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-modal__footer {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   padding: 14px 22px;
   display: flex;
   align-items: center;

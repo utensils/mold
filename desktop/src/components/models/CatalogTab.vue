@@ -732,8 +732,8 @@ onUnmounted(() => {
           v-for="s in ['all', 'hf', 'civitai'] as const"
           :key="s"
           type="button"
-          class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="source === s ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
+          class="border-border h-7 rounded-control border px-2.5 text-micro"
+          :class="source === s ? 'bg-accent text-on-accent' : 'text-fg-2 hover:text-fg'"
           :aria-pressed="source === s"
           @click="source = s"
         >
@@ -744,8 +744,8 @@ onUnmounted(() => {
       <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Model kind">
         <button
           type="button"
-          class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="kind === '' ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
+          class="border-border h-7 rounded-control border px-2.5 text-micro"
+          :class="kind === '' ? 'bg-accent text-on-accent' : 'text-fg-2 hover:text-fg'"
           :aria-pressed="kind === ''"
           @click="kind = ''"
         >
@@ -755,8 +755,8 @@ onUnmounted(() => {
           v-for="opt in CATALOG_KIND_OPTIONS"
           :key="opt.value"
           type="button"
-          class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="kind === opt.value ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
+          class="border-border h-7 rounded-control border px-2.5 text-micro"
+          :class="kind === opt.value ? 'bg-accent text-on-accent' : 'text-fg-2 hover:text-fg'"
           :aria-pressed="kind === opt.value"
           @click="kind = opt.value"
         >
@@ -767,7 +767,7 @@ onUnmounted(() => {
       <select
         v-model="family"
         aria-label="Model family"
-        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+        class="border-border h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg"
       >
         <option value="">All families</option>
         <option v-for="f in familyOptions" :key="f" :value="f">{{ f }}</option>
@@ -777,15 +777,15 @@ onUnmounted(() => {
         v-model="sort"
         data-test="catalog-sort"
         aria-label="Sort by"
-        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+        class="border-border h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg"
       >
         <option v-for="opt in CATALOG_SORT_OPTIONS" :key="opt.value" :value="opt.value">
           {{ opt.label }}
         </option>
       </select>
 
-      <label class="flex items-center gap-1 text-caption text-ink-2">
-        <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
+      <label class="flex items-center gap-1 text-micro text-fg-2">
+        <input v-model="includeNsfw" type="checkbox" class="accent-accent" />
         Include NSFW
       </label>
 
@@ -803,10 +803,10 @@ onUnmounted(() => {
     <div
       v-if="error || providerErrors.length"
       data-test="catalog-provider-warning"
-      class="flex items-center gap-3 rounded-control border px-3 py-2 text-caption"
+      class="flex items-center gap-3 rounded-control border px-3 py-2 text-micro"
       :class="
         error
-          ? 'border-stop/30 bg-stop/5 text-stop'
+          ? 'border-error/30 bg-error/5 text-error'
           : 'border-warning/30 bg-warning/10 text-warning'
       "
       role="alert"
@@ -835,19 +835,19 @@ onUnmounted(() => {
 
     <div
       v-if="selected.size > 0"
-      class="border-edge sticky top-2 z-20 flex flex-wrap items-center gap-3 rounded-control border bg-bench/95 p-2.5 shadow-raised backdrop-blur"
+      class="border-border sticky top-2 z-20 flex flex-wrap items-center gap-3 rounded-control border bg-bg/95 p-2.5 shadow-md backdrop-blur"
       data-test="catalog-batch-bar"
       aria-live="polite"
     >
-      <strong class="text-body text-ink">{{ selected.size }} selected</strong>
+      <strong class="text-sm text-fg">{{ selected.size }} selected</strong>
       <template v-if="batchTargets.length">
-        <label class="ml-auto flex items-center gap-2 text-caption text-ink-2">
+        <label class="ml-auto flex items-center gap-2 text-micro text-fg-2">
           Target machine
           <select
             v-model="selectedTargetId"
             data-test="catalog-batch-target"
             :disabled="batchStarting"
-            class="border-edge h-8 rounded-control border bg-bath px-2 text-caption text-ink"
+            class="border-border h-8 rounded-control border bg-bg-deep px-2 text-micro text-fg"
           >
             <option value="" disabled>Choose a machine…</option>
             <option v-for="target in batchTargets" :key="target.host.id" :value="target.host.id">
@@ -858,19 +858,19 @@ onUnmounted(() => {
         <button
           type="button"
           data-test="catalog-batch-download"
-          class="h-8 rounded-control bg-safelight px-3 text-caption font-semibold text-on-accent disabled:opacity-50"
+          class="h-8 rounded-control bg-accent px-3 text-micro font-semibold text-on-accent disabled:opacity-50"
           :disabled="!selectedBatchTarget || batchStarting"
           @click="startBatch"
         >
           {{ batchStarting ? "Starting…" : `Download ${selected.size}` }}
         </button>
       </template>
-      <span v-else class="ml-auto text-caption text-stop">
+      <span v-else class="ml-auto text-micro text-error">
         No machine can receive every selected model.
       </span>
       <button
         type="button"
-        class="border-edge h-8 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink"
+        class="border-border h-8 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg"
         :disabled="batchStarting"
         @click="selected = new Map()"
       >
@@ -882,7 +882,7 @@ onUnmounted(() => {
          the Video chip explains itself instead of rendering a blank grid. -->
     <div
       v-if="!loading && displayEntries.length === 0 && !error && providerErrors.length === 0"
-      class="p-8 text-center text-body text-ink-2"
+      class="p-8 text-center text-sm text-fg-2"
       data-test="catalog-empty"
     >
       <template v-if="combinedEntries.length === 0">
@@ -895,7 +895,7 @@ onUnmounted(() => {
           v-if="(mediaType ?? 'all') !== 'all'"
           type="button"
           data-test="clear-media-filter"
-          class="border-edge mt-3 h-7 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink"
+          class="border-border mt-3 h-7 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg"
           @click="emit('clear-media-filter')"
         >
           Show all media types
@@ -910,7 +910,7 @@ onUnmounted(() => {
       :class="
         effectiveLayout === 'grid'
           ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
-          : 'border-edge divide-edge flex flex-col divide-y overflow-hidden rounded-control border bg-bench'
+          : 'border-border divide-border flex flex-col divide-y overflow-hidden rounded-control border bg-bg'
       "
     >
       <template v-for="entry in displayEntries" :key="entry.id">
@@ -950,7 +950,7 @@ onUnmounted(() => {
       v-if="hasMore"
       ref="sentinel"
       data-test="catalog-scroll-sentinel"
-      class="flex h-8 items-center justify-center text-caption text-ink-2"
+      class="flex h-8 items-center justify-center text-micro text-fg-2"
       aria-hidden="true"
     >
       {{ loading ? "Loading…" : "" }}

@@ -288,7 +288,7 @@ describe("ClipRail", () => {
     expect(railSource).toMatch(/\.ms-rail-frame\s*\{[^}]*height:\s*188px/s);
     expect(railSource).toMatch(/\.ms-rail__perfs/);
     expect(railSource).toMatch(
-      /\.ms-rail-frame\s*\{[^}]*background:[\s\S]*color-mix\(in srgb, var\(--print\)/s,
+      /\.ms-rail-frame\s*\{[^}]*background:[\s\S]*color-mix\(in srgb, var\(--mold-media-bed\)/s,
     );
   });
 

@@ -37,15 +37,15 @@ onMounted(() => cancelBtn.value?.focus());
       @keydown.esc="emit('close')"
     >
       <div
-        class="border-edge w-full max-w-md rounded-chrome border bg-bench p-5"
+        class="border-border w-full max-w-md rounded-window border bg-bg p-5"
         role="dialog"
         aria-modal="true"
         :aria-label="`Model not on ${hostLabel}`"
         data-test="missing-model-dialog"
       >
-        <h2 class="text-body-lg font-semibold text-ink">Model not on {{ hostLabel }}</h2>
-        <p class="mt-2 text-body text-ink-2">
-          <span class="data-mono text-ink">{{ modelLabel() }}</span>
+        <h2 class="text-base font-semibold text-fg">Model not on {{ hostLabel }}</h2>
+        <p class="mt-2 text-sm text-fg-2">
+          <span class="font-mono text-xs text-fg">{{ modelLabel() }}</span>
           isn't installed on {{ hostLabel
           }}<template v-if="sizeGb"> ({{ sizeGb.toFixed(1) }} GB)</template>.
           <template v-if="resumeAfterPull === false">
@@ -60,7 +60,7 @@ onMounted(() => cancelBtn.value?.focus());
           <button
             ref="cancelBtn"
             type="button"
-            class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"
+            class="border-border h-8 rounded-control border px-3 text-sm text-fg-2 hover:text-fg"
             data-test="missing-model-cancel"
             @click="emit('close')"
           >
@@ -68,7 +68,7 @@ onMounted(() => cancelBtn.value?.focus());
           </button>
           <button
             type="button"
-            class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent active:translate-y-px"
+            class="h-8 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent active:translate-y-px"
             data-test="missing-model-pull"
             @click="emit('confirm')"
           >

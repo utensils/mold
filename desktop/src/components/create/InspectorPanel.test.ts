@@ -13,6 +13,7 @@ import Stepper from "@ui/components/Stepper.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
+import TemplatesPanel from "../generate/TemplatesPanel.vue";
 import { aspectIdFor } from "../../lib/resolutions";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
@@ -169,7 +170,9 @@ describe("InspectorPanel — layout", () => {
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
     // Detail + Prompt strength sliders.
     expect(wrapper.findAllComponents(SliderRow)).toHaveLength(2);
-    expect(wrapper.findComponent(Stepper).exists()).toBe(true);
+    // "Make N" moved to the composer's control row — the inspector must not
+    // carry a second copy of it.
+    expect(wrapper.findComponent(Stepper).exists()).toBe(false);
     expect(wrapper.find('[data-test="seed-mode-random"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="open-advanced"]').exists()).toBe(true);
   });
@@ -525,41 +528,49 @@ describe("InspectorPanel — shape + resolution projection", () => {
   });
 });
 
-describe("InspectorPanel — batch", () => {
-  it("steps the batch size through the Stepper", async () => {
-    const form = formFor("flux");
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    wrapper.findComponent(Stepper).vm.$emit("update:modelValue", 3);
-    await flushPromises();
-    expect(form.batchSize).toBe(3);
-    expect(wrapper.findComponent(Stepper).props("max")).toBe(10_000);
-    expect(wrapper.findComponent(Stepper).props("editable")).toBe(true);
+// "Make N" now lives on the composer's control row; its Stepper contract and
+// the one-at-a-time lock are covered by `ComposerCard.test.ts`.
+
+describe("InspectorPanel — tabs", () => {
+  it("opens Starters and Recent as tabs beside Settings, never as popovers", async () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.find('[data-test="inspector-starters"]').exists()).toBe(false);
+    await wrapper.get('[data-test="inspector-tab-starters"]').trigger("click");
+    expect(wrapper.emitted("update:tab")).toEqual([["starters"]]);
+    await wrapper.get('[data-test="inspector-tab-recent"]').trigger("click");
+    expect(wrapper.emitted("update:tab")?.at(-1)).toEqual(["recent"]);
   });
 
-  it("accepts a directly entered large positive batch", async () => {
-    const form = formFor("flux");
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    const input = wrapper.get('input[aria-label="Batch size"]');
-    await input.setValue("1000");
-    await input.trigger("change");
-    await flushPromises();
-    expect(form.batchSize).toBe(1000);
+  it("loads a starting point from the Starters tab", () => {
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("flux"), tab: "starters" },
+    });
+    expect(wrapper.find('[data-test="inspector-starters"]').exists()).toBe(true);
+    const template = { id: "t1", name: "River preset" } as never;
+    wrapper.findComponent(TemplatesPanel).vm.$emit("load", template);
+    expect(wrapper.emitted("load-template")).toEqual([[template]]);
   });
 
-  it("does not overwrite an uncommitted direct entry on an arrow key", async () => {
-    const form = formFor("flux");
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    const input = wrapper.get('input[aria-label="Batch size"]');
-    (input.element as HTMLInputElement).value = "120";
-    await input.trigger("keydown", { key: "ArrowUp" });
-    expect(form.batchSize).toBe(1);
-    expect((input.element as HTMLInputElement).value).toBe("120");
+  it("hands a past prompt back from the Recent tab", async () => {
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("flux"), tab: "recent", history: ["a lighthouse", "a river"] },
+    });
+    const rows = wrapper
+      .get('[data-test="inspector-recent"]')
+      .findAll('[data-test="recent-prompt"]');
+    expect(rows.map((r) => r.text())).toEqual([
+      expect.stringContaining("a lighthouse"),
+      expect.stringContaining("a river"),
+    ]);
+    await rows[1]!.trigger("click");
+    expect(wrapper.emitted("use-prompt")).toEqual([["a river"]]);
   });
 
-  it("locks the batch to one for edit models", () => {
-    const wrapper = mount(InspectorPanel, { props: { form: formFor("qwen-image-edit") } });
-    expect(wrapper.findComponent(Stepper).props("max")).toBe(1);
-    expect(wrapper.text()).toContain("Locked to 1");
+  it("names the machine the print runs on in the Settings tab", () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    const row = wrapper.get('[data-test="inspector-host"]');
+    expect(row.text()).toContain("Where it runs");
+    expect(row.find('[data-test="host-chip"]').exists()).toBe(true);
   });
 });
 
@@ -892,8 +903,8 @@ describe("InspectorPanel — output", () => {
     // A non-capable model is remembered and swapped for the first capable one.
     expect(draft.lastSingleModel).toBe("flux-dev:q8");
     expect(form.model).toBe("ltx-video");
-    // Batch locks to one timeline; the switch-back caption appears.
-    expect(wrapper.text()).toContain("a sequence renders one timeline");
+    // The switch-back caption appears. (The batch lock itself is the
+    // composer's chip now — see `ComposerCard.test.ts`.)
     expect(wrapper.text()).toContain("one-shot and sequence prompts stay separate");
   });
 

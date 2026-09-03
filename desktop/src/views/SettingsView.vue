@@ -137,8 +137,8 @@ function toggle(id: SectionId): void {
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <!-- Workspace header -->
-    <header class="border-edge flex h-13 shrink-0 items-center gap-3 border-b px-6">
-      <h1 class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
+    <header class="border-border flex h-13 shrink-0 items-center gap-3 border-b px-6">
+      <h1 class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 90%">
         Settings
       </h1>
       <div class="flex-1" />
@@ -149,7 +149,7 @@ function toggle(id: SectionId): void {
         type="search"
         aria-label="Search settings"
         placeholder="Search settings…"
-        class="border-edge h-8 w-64 rounded-control border bg-bench px-2.5 text-body text-ink placeholder:text-ink-3"
+        class="border-border h-8 w-64 rounded-control border bg-bg px-2.5 text-sm text-fg placeholder:text-fg-dim"
       />
     </header>
 
@@ -158,12 +158,16 @@ function toggle(id: SectionId): void {
         <!-- Always-open top cards — nothing here blocks first use (G7) -->
         <template v-if="!searching">
           <section data-test="appearance-card">
-            <div class="edge-code mb-2.5 uppercase">Appearance</div>
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
+              Appearance
+            </div>
             <AppearanceCard />
           </section>
 
           <section data-test="mobile-pairing-region">
-            <div class="edge-code mb-2.5 uppercase">Mobile pairing</div>
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
+              Mobile pairing
+            </div>
             <PairingAccessPanel
               :target="pairingTarget"
               :suggested-base-url="pairingBaseUrl"
@@ -172,14 +176,16 @@ function toggle(id: SectionId): void {
           </section>
 
           <section data-test="license-settings-region">
-            <div class="edge-code mb-2.5 uppercase">Model licenses</div>
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
+              Model licenses
+            </div>
             <CardSurface>
               <label
                 v-if="licenseHosts.length > 1"
                 class="mb-2.5 flex items-center gap-2 text-sm"
                 data-test="license-host-select"
               >
-                <span class="text-ink-2">Machine</span>
+                <span class="text-fg-2">Machine</span>
                 <select v-model="licenseHostId" class="input">
                   <option v-for="host in licenseHosts" :key="host.id" :value="host.id">
                     {{ host.label }}
@@ -196,12 +202,16 @@ function toggle(id: SectionId): void {
           </section>
 
           <section ref="updatesCard" data-test="updates-card">
-            <div class="edge-code mb-2.5 uppercase">Updates</div>
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
+              Updates
+            </div>
             <UpdatesSection />
           </section>
 
           <section data-test="about-card">
-            <div class="edge-code mb-2.5 uppercase">About</div>
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
+              About
+            </div>
             <CardSurface>
               <AboutSection />
             </CardSurface>
@@ -212,16 +222,18 @@ function toggle(id: SectionId): void {
              at the top normally, and reappears as a search result when the query
              matches host-owned settings (models_dir / output_dir). -->
         <section v-if="!searching || hostsMatches" data-test="hosts-region">
-          <div class="edge-code mb-2.5 uppercase">Hosts</div>
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
+            Hosts
+          </div>
           <HostsSection />
         </section>
 
         <!-- Everything deeper, collapsed until wanted -->
         <section data-test="all-settings">
-          <div class="edge-code mb-2.5 uppercase">
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2.5 uppercase">
             {{ searching ? "Search results" : "All settings" }}
           </div>
-          <p v-if="config.available === false" class="mb-3 text-caption text-ink-3">
+          <p v-if="config.available === false" class="mb-3 text-micro text-fg-dim">
             This engine doesn't expose configuration — some sections below may be empty.
           </p>
           <div class="flex flex-col gap-2.5">
@@ -232,7 +244,7 @@ function toggle(id: SectionId): void {
               :title="s.label"
               :summary="s.summary"
               :icon="s.icon"
-              tone="halide"
+              tone="info"
               :open="isOpen(s.id)"
               @toggle="toggle(s.id)"
             >
@@ -240,7 +252,7 @@ function toggle(id: SectionId): void {
             </AccordionSection>
             <p
               v-if="searching && visibleSections.length === 0 && !hostsMatches"
-              class="text-caption text-ink-3"
+              class="text-micro text-fg-dim"
               data-test="no-search-results"
             >
               Nothing matches “{{ query }}”.

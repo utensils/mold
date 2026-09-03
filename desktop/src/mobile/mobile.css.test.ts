@@ -16,11 +16,12 @@ const swipeActionRowComponent = readFileSync("../studio/components/SwipeActionRo
 const galleryViewerComponent = readFileSync("src/mobile/MobileGalleryViewer.vue", "utf8");
 
 describe("mobile theme bootstrap", () => {
-  it("paints fresh installs as Safelight Dark before Vue mounts", () => {
-    expect(mobileHtml).toMatch(/<html[^>]*data-theme-family="safelight"[^>]*data-theme="dark"/);
-    expect(mobileHtml).toContain('var family = "safelight"');
-    expect(mobileHtml).toContain('var theme = "dark"');
+  it("paints fresh installs as Safelight before Vue mounts", () => {
+    expect(mobileHtml).toMatch(/<html[^>]*data-theme="safelight"/);
+    expect(mobileHtml).toContain('var theme = "safelight"');
     expect(mobileHtml).toContain('localStorage.getItem("mold.mobile.settings.v1")');
+    // The pre-redesign family + appearance pair still migrates before paint.
+    expect(mobileHtml).toContain('parsed.themeFamily === "mold"');
   });
 });
 

@@ -790,8 +790,8 @@ function onBenchContextMenu(event: MouseEvent) {
    * button can clip.
    */
   min-height: 0;
-  border-top: 1px solid var(--edge);
-  background: var(--bench);
+  border-top: 1px solid var(--mold-border);
+  background: var(--mold-bg);
   padding: 12px 22px 14px;
 }
 
@@ -800,8 +800,8 @@ function onBenchContextMenu(event: MouseEvent) {
   align-items: center;
   flex-shrink: 0;
   gap: 10px;
-  border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--ce));
-  background: color-mix(in srgb, var(--safelight) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
   border-radius: 9px;
   padding: 8px 12px;
 }
@@ -812,35 +812,35 @@ function onBenchContextMenu(event: MouseEvent) {
   gap: 3px;
   max-height: 112px;
   overflow: auto;
-  border: 1px solid color-mix(in srgb, var(--halide) 35%, var(--ce));
+  border: 1px solid color-mix(in srgb, var(--mold-sapphire) 35%, var(--mold-border-control));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--halide) 8%, transparent);
+  background: color-mix(in srgb, var(--mold-sapphire) 8%, transparent);
   padding: 7px 10px;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .ms-seqbench__validation-error,
 .ms-seqbench__warning {
-  color: var(--warning);
+  color: var(--mold-warning);
 }
 .ms-seqbench__banner-text {
   flex: 1;
   min-width: 0;
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .ms-seqbench__banner-btn {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   border-radius: 7px;
   padding: 4px 10px;
   font-size: 11px;
   cursor: pointer;
 }
 .ms-seqbench__banner-btn:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 /*
@@ -888,16 +888,16 @@ function onBenchContextMenu(event: MouseEvent) {
   gap: 10px;
 }
 .ms-seqbench__caption {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-seqbench__meta {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-seqbench__spacer {
   flex: 1;
@@ -909,32 +909,32 @@ function onBenchContextMenu(event: MouseEvent) {
 }
 .ms-seqbench__frames-label {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-seqbench__select {
   height: 28px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 6px;
-  background: var(--bath);
-  color: var(--rebate);
-  font-family: var(--f-mono);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
+  font-family: var(--mold-font-mono);
   font-size: 12px;
   padding: 0 6px;
 }
 .ms-seqbench__prompt {
   width: 100%;
   resize: none;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 9px;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   font-size: 13px;
   line-height: 1.5;
   padding: 10px 12px;
 }
 .ms-seqbench__prompt:focus {
   outline: none;
-  border-color: var(--safelight);
+  border-color: var(--mold-blue);
 }
 .ms-seqbench__prompt--main {
   flex: 1;
@@ -949,20 +949,20 @@ function onBenchContextMenu(event: MouseEvent) {
   gap: 8px;
 }
 .ms-seqbench__tool {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   border-radius: 7px;
   padding: 5px 10px;
   font-size: 11px;
   cursor: pointer;
 }
 .ms-seqbench__tool:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .ms-seqbench__tool--danger:hover {
-  color: var(--stop);
-  border-color: var(--stop);
+  color: var(--mold-error);
+  border-color: var(--mold-error);
 }
 
 .ms-seqbench__footer {
@@ -982,7 +982,7 @@ function onBenchContextMenu(event: MouseEvent) {
 .ms-seqbench__menuitem {
   border: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   text-align: left;
   padding: 7px 8px;
   border-radius: 6px;
@@ -990,20 +990,20 @@ function onBenchContextMenu(event: MouseEvent) {
   cursor: pointer;
 }
 .ms-seqbench__menuitem:hover {
-  background: var(--surface);
-  color: var(--rebate);
+  background: var(--mold-surface);
+  color: var(--mold-text);
 }
 .ms-seqbench__audio {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .ms-seqbench__note {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
-  color: var(--halide);
+  color: var(--mold-sapphire);
 }
 .ms-seqbench__blocker {
   max-width: min(380px, 38vw);
@@ -1012,8 +1012,8 @@ function onBenchContextMenu(event: MouseEvent) {
   height: 32px;
   border: 0;
   border-radius: 9px;
-  background: var(--safelight);
-  color: var(--on-accent, #fff);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent, #fff);
   font-size: 13px;
   font-weight: 600;
   padding: 0 16px;

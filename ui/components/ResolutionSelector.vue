@@ -92,9 +92,9 @@ const resolved = computed(() => {
 
 <style scoped>
 .ms-res__dims {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-res__resolved {
@@ -105,12 +105,12 @@ const resolved = computed(() => {
 }
 
 .ms-res__label {
-  border: 1px solid var(--sel-border);
+  border: 1px solid var(--mold-blue);
   border-radius: 999px;
   padding: 1px 6px;
-  background: var(--sel-bg);
-  color: var(--sel-ink);
-  font-family: var(--f-mono);
+  background: var(--mold-accent-tint);
+  color: var(--mold-blue);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   font-weight: 600;
   line-height: 1.4;
@@ -118,7 +118,7 @@ const resolved = computed(() => {
 
 .ms-res__status {
   margin-top: 4px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 10px;
   line-height: 1.4;
 }

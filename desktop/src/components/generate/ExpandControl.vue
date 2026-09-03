@@ -52,7 +52,7 @@ defineExpose({ expand });
     <button
       type="button"
       data-test="expand-action"
-      class="border-edge min-h-7 rounded-control border px-2 text-body text-ink-2 transition-colors duration-100 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
+      class="border-border min-h-7 rounded-control border px-2 text-sm text-fg-2 transition-colors duration-100 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
       :disabled="!!transformBlockedReason || blocked || running || !prompt.trim()"
       :title="
         transformBlockedReason
@@ -66,13 +66,13 @@ defineExpose({ expand });
       @click="expand"
     >
       {{ actionLabel }}
-      <kbd v-if="!running" class="kbd-hint ml-1">{{ shortcutLabel("E") }}</kbd>
+      <kbd v-if="!running" class="font-mono text-sm ml-1">{{ shortcutLabel("E") }}</kbd>
     </button>
 
     <button
       type="button"
       data-test="remix-action"
-      class="border-edge min-h-7 rounded-control border px-2 text-body text-ink-2 transition-colors duration-100 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
+      class="border-border min-h-7 rounded-control border px-2 text-sm text-fg-2 transition-colors duration-100 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
       :disabled="!!transformBlockedReason || blocked || running || !prompt.trim()"
       :title="
         transformBlockedReason
@@ -85,11 +85,11 @@ defineExpose({ expand });
     >
       Remix
     </button>
-    <label v-if="originalAvailable" class="flex items-center gap-1 text-caption text-ink-3">
+    <label v-if="originalAvailable" class="flex items-center gap-1 text-micro text-fg-dim">
       Source
       <select
         data-test="remix-source-select"
-        class="border-edge min-h-7 rounded-control border bg-bath px-1.5 text-caption text-ink-2 disabled:opacity-50"
+        class="border-border min-h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg-2 disabled:opacity-50"
         :disabled="!!transformBlockedReason"
         :value="remixSource ?? 'original'"
         @change="
@@ -107,7 +107,7 @@ defineExpose({ expand });
     <button
       v-if="!isPreparedBatch && canUndo"
       type="button"
-      class="min-h-7 rounded-control px-1.5 text-body text-halide transition-colors duration-100 hover:text-ink"
+      class="min-h-7 rounded-control px-1.5 text-sm text-sapphire transition-colors duration-100 hover:text-fg"
       title="Restore original prompt"
       aria-label="Restore original prompt"
       @click="emit('restore')"
@@ -118,7 +118,7 @@ defineExpose({ expand });
     <span
       v-if="transformBlockedReason"
       data-test="transform-blocked-hint"
-      class="min-w-0 text-caption text-ink-3"
+      class="min-w-0 text-micro text-fg-dim"
       >{{ transformBlockedReason }}</span
     >
 
@@ -126,7 +126,7 @@ defineExpose({ expand });
       v-else-if="running"
       role="status"
       aria-live="polite"
-      class="min-w-0 text-caption text-halide"
+      class="min-w-0 text-micro text-sapphire"
     >
       {{ progressLabel }}
     </span>

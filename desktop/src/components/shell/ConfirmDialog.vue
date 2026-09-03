@@ -52,19 +52,22 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
     <div
       v-if="open"
       data-test="confirm-dialog"
-      class="fixed inset-0 z-50 flex justify-center bg-[color-mix(in_srgb,var(--bath)_40%,transparent)] pt-24"
+      class="fixed inset-0 z-50 flex justify-center bg-scrim pt-24"
       @click.self="cancel"
     >
       <div
-        class="border-edge h-fit w-[22rem] max-w-[calc(100%-2rem)] rounded-chrome border bg-bench p-4 shadow-xl"
+        class="border-border h-fit w-[22rem] max-w-[calc(100%-2rem)] rounded-window border bg-bg p-4 shadow-xl"
         role="alertdialog"
         aria-modal="true"
         :aria-label="title"
       >
-        <p class="font-display text-body-lg font-semibold text-ink" style="font-stretch: 92%">
+        <p
+          class="font-sans font-semibold text-base font-semibold text-fg"
+          style="font-stretch: 92%"
+        >
           {{ title }}
         </p>
-        <p v-if="message" class="mt-1.5 text-body text-ink-2">{{ message }}</p>
+        <p v-if="message" class="mt-1.5 text-sm text-fg-2">{{ message }}</p>
         <div v-if="$slots.default" class="mt-3">
           <slot />
         </div>
@@ -72,7 +75,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
           <button
             type="button"
             data-test="confirm-cancel"
-            class="min-h-8 rounded-control px-3 py-1.5 text-center text-body leading-tight text-ink-2 hover:text-ink disabled:opacity-50"
+            class="min-h-8 rounded-control px-3 py-1.5 text-center text-sm leading-tight text-fg-2 hover:text-fg disabled:opacity-50"
             :disabled="busy"
             @click="cancel"
           >
@@ -81,8 +84,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
           <button
             type="button"
             data-test="confirm-accept"
-            class="min-h-8 rounded-control px-3.5 py-1.5 text-center text-body leading-tight font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
-            :class="danger ? 'bg-stop' : 'bg-safelight'"
+            class="min-h-8 rounded-control px-3.5 py-1.5 text-center text-sm leading-tight font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
+            :class="danger ? 'bg-error' : 'bg-accent'"
             :disabled="busy"
             @click="emit('confirm')"
           >

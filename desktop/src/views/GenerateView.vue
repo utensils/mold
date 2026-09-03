@@ -10,12 +10,12 @@ import {
   shouldShowStarterCards,
 } from "../lib/generateModels";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
+import Icon from "@ui/components/Icon.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import type { ClipRailMedia } from "@ui/components/types";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
-import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import GenerateErrorNotice from "../components/generate/GenerateErrorNotice.vue";
@@ -33,7 +33,7 @@ import {
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
-import ActivityStrip from "../components/create/ActivityStrip.vue";
+import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
@@ -698,9 +698,8 @@ const form = formStore.form;
 
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 const workbenchRef = ref<HTMLDivElement | null>(null);
-const templatesOpen = ref(false);
-const templatesEl = ref<HTMLDivElement | null>(null);
-const templatesToggleEl = ref<HTMLButtonElement | null>(null);
+const inspectorTab = ref<InspectorTab>("settings");
+const inspectorRef = ref<InstanceType<typeof InspectorPanel> | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
@@ -881,16 +880,12 @@ async function listenForNativeImageDrops() {
   else stopNativeImageDrop = unlisten;
 }
 
-function onDocumentPointerDown(event: PointerEvent) {
-  if (!templatesOpen.value || !templatesEl.value) return;
-  if (!event.composedPath().includes(templatesEl.value)) templatesOpen.value = false;
-}
-
-function onDocumentKeydown(event: KeyboardEvent) {
-  if (!templatesOpen.value || event.defaultPrevented || event.key !== "Escape") return;
-  event.preventDefault();
-  templatesOpen.value = false;
-  void nextTick(() => templatesToggleEl.value?.focus());
+/** Recent tab: a past prompt becomes the words to make, as a recall. */
+function useRecentPrompt(prompt: string) {
+  form.prompt = prompt;
+  onPromptAuthored(prompt, "recalled");
+  inspectorTab.value = "settings";
+  void nextTick(() => composerRef.value?.focus?.());
 }
 
 const selectedQueueRender = ref<{
@@ -1065,11 +1060,15 @@ const stickyTarget = computed<string | null>(() =>
   normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
 );
 
+/** The recipe renders one at a time (an edit model, or a references
+ * pipeline with attachments): the Make chip reads 1 and locks. */
+const batchLocked = computed(
+  () =>
+    caps.value.forcesBatchSizeOne ||
+    (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0),
+);
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne ||
-  (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0)
-    ? 1
-    : Math.max(1, Math.floor(form.batchSize)),
+  batchLocked.value ? 1 : Math.max(1, Math.floor(form.batchSize)),
 );
 
 /** Where the print itself would go. Expansion starts here and only leaves it
@@ -1576,7 +1575,7 @@ watch(
   { immediate: true },
 );
 
-// The activity strip lists every connected host's durable jobs.
+// The queue rail lists every connected host's durable jobs.
 watch(
   () => readyHostSignature(hosts.all),
   () => void chains.fetchAll(),
@@ -2119,7 +2118,7 @@ async function duplicateSequenceAsNew() {
   await generateSequence();
 }
 
-/** ActivityStrip Edit: load a durable job's effective script into an edit
+/** Edit sequence: load a durable job's effective script into an edit
  * session — applying its shared params to the form is the explicit action. */
 async function editSequence(payload: { hostId: string; jobId: string }) {
   await loadSequence(payload, true);
@@ -2358,7 +2357,6 @@ const edgeCode = computed(() => {
 let templateLoadEpoch = 0;
 async function loadTemplate(template: GenerationTemplate) {
   const epoch = ++templateLoadEpoch;
-  templatesOpen.value = false;
   const hydrated = await hydrateGenerationTemplate(template);
   if (epoch !== templateLoadEpoch) return;
   // buildRequest's pruneRequestForFamily still guards anything the (possibly
@@ -2394,9 +2392,9 @@ async function loadTemplate(template: GenerationTemplate) {
 }
 
 function siblingDot(s: Job): string {
-  if (s.status === "complete") return "text-ink"; // ◉ developed
-  if (s.status === "error") return s.outcomeUnknown ? "text-ink-2" : "text-stop";
-  return "text-ink-3"; // ◎ pending
+  if (s.status === "complete") return "text-fg"; // ◉ developed
+  if (s.status === "error") return s.outcomeUnknown ? "text-fg-2" : "text-error";
+  return "text-fg-dim"; // ◎ pending
 }
 
 /** Whether this job produced a WAV rather than a picture or a clip. */
@@ -2651,6 +2649,28 @@ async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promi
   toasts.push(outcome.message);
 }
 
+/** Whether the canvas result can be written out as a file right now. */
+function canSaveCanvasResult(j: Job): boolean {
+  return !!j.result && !j.result.video_frames && !isAudioResult(j) && !!j.result.image;
+}
+
+function saveCanvasResult(j: Job) {
+  if (!j.result?.image) return;
+  const filename =
+    j.result.filename ??
+    suggestOutputFilename(j.result.model, j.result.seed_used, j.result.format, j.submittedAtUnixMs);
+  void ipc
+    .saveMediaBytes(filename, j.result.image)
+    .then((saved) => showSavedMediaToast(toasts, saved))
+    .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
+}
+
+/** The caption strip's "Use as source" — the same gate the menu applies. */
+function canUseCanvasAsSource(j: Job): boolean {
+  const entry = canvasPrintEntry(j);
+  return j.status === "complete" && !!entry && canUseGalleryEntryAsSource(entry.item);
+}
+
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
   if (!j) return [];
@@ -2696,24 +2716,8 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: isMeshResult(j) ? "Save mesh" : "Save image",
-      disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || !j.result.image,
-      action: () => {
-        if (!j.result?.image) return;
-        const filename =
-          j.result.filename ??
-          suggestOutputFilename(
-            j.result.model,
-            j.result.seed_used,
-            j.result.format,
-            j.submittedAtUnixMs,
-          );
-        void ipc
-          .saveMediaBytes(filename, j.result.image)
-          .then((saved) => showSavedMediaToast(toasts, saved))
-          .catch((error) =>
-            toasts.push(error instanceof Error ? error.message : String(error), "error"),
-          );
-      },
+      disabled: !canSaveCanvasResult(j),
+      action: () => saveCanvasResult(j),
     },
     {
       label: "Use as source",
@@ -4741,8 +4745,6 @@ onMounted(() => {
   // ready-host transition refreshes and replaces each live host's slice.
   if (!import.meta.env.TEST) void loadPromptHistory();
   if (!import.meta.env.TEST) liveActivity.start();
-  document.addEventListener("pointerdown", onDocumentPointerDown);
-  document.addEventListener("keydown", onDocumentKeydown);
   window.addEventListener("resize", clampBenchToViewport);
   clampBenchToViewport();
   void listenForNativeImageDrops();
@@ -4770,8 +4772,6 @@ onBeforeUnmount(() => {
   stopNativeImageDrop?.();
   stopBenchResize();
   window.removeEventListener("resize", clampBenchToViewport);
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
 });
 </script>
 
@@ -4782,43 +4782,27 @@ onBeforeUnmount(() => {
     <div
       v-if="nativeImageDragOver"
       data-test="native-image-drop-overlay"
-      class="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-chrome border-2 border-dashed border-safelight bg-bath/90 text-body-lg text-safelight shadow-raised"
+      class="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-window border-2 border-dashed border-accent bg-bg-deep/90 text-base text-accent shadow-md"
     >
       Drop image to load settings and use as source
     </div>
 
     <!-- Main column: header / canvas / activity / composer -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <CreateHeader :form="form" />
+      <CreateHeader
+        :form="form"
+        @open-tab="inspectorTab = $event"
+        @set-output="inspectorRef?.setOutputMode($event)"
+      />
 
       <div
         ref="workbenchRef"
         data-test="generate-workbench"
         class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        <!-- Templates popover (relocated from the inspector) -->
-        <div ref="templatesEl" class="absolute right-3 top-3 z-20">
-          <button
-            ref="templatesToggleEl"
-            type="button"
-            data-test="templates-toggle"
-            class="border-edge rounded-control border bg-bench/80 px-2.5 py-1 text-caption text-ink-2 backdrop-blur transition-colors hover:text-ink"
-            :aria-expanded="templatesOpen"
-            @click="templatesOpen = !templatesOpen"
-          >
-            Templates
-          </button>
-          <div
-            v-if="templatesOpen"
-            class="border-edge absolute right-0 mt-1 w-72 rounded-chrome border bg-bench p-3 shadow-raised"
-          >
-            <TemplatesPanel :form="form" :models="hostModels.unionInstalled" @load="loadTemplate" />
-          </div>
-        </div>
-
         <!-- Canvas -->
         <div
-          class="flex min-h-[144px] flex-1 items-center justify-center overflow-hidden bg-desk p-7"
+          class="flex min-h-[144px] flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
         >
           <!-- Prepared variations review (prototype: this replaces the canvas) -->
           <PreparedExpansionBatch
@@ -4868,7 +4852,7 @@ onBeforeUnmount(() => {
               class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
             >
               <div
-                class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                class="relative max-h-full w-full max-w-full overflow-hidden rounded-inner border border-border-control bg-media-bed"
                 data-test="preview-frame"
                 :style="previewFrameStyle"
                 @contextmenu="job ? contextMenu.open($event, canvasMenu()) : undefined"
@@ -4984,23 +4968,64 @@ onBeforeUnmount(() => {
                     show-label
                   />
                 </div>
+
+                <!-- Caption strip (README §04): the result's actions live in
+                     the image's own caption, never as a pill overlapping it.
+                     Plain words first, the mono truth beside them. -->
+                <div
+                  data-test="canvas-caption"
+                  class="absolute inset-x-0 bottom-0 flex items-center gap-3 border-t border-border bg-bg-crust py-1.5 pr-1.5 pl-2.5"
+                  @contextmenu.stop
+                >
+                  <span
+                    v-if="liveGenerationStatus"
+                    data-test="generation-live-status"
+                    class="min-w-0 flex-1 truncate font-mono text-micro text-accent"
+                  >
+                    {{ liveGenerationStatus }}
+                  </span>
+                  <span
+                    v-else
+                    data-test="generation-edge-code"
+                    class="min-w-0 flex-1 truncate font-mono text-micro text-fg-2"
+                    :title="edgeCode"
+                  >
+                    {{ edgeCode }}
+                  </span>
+                  <template v-if="job && job.status === 'complete'">
+                    <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
+                    <button
+                      v-if="canSaveCanvasResult(job)"
+                      type="button"
+                      data-test="canvas-save"
+                      class="caption-action"
+                      @click="saveCanvasResult(job)"
+                    >
+                      <Icon name="save" :size="14" />
+                      Save
+                    </button>
+                    <button
+                      v-if="canUseCanvasAsSource(job)"
+                      type="button"
+                      data-test="canvas-use-source"
+                      class="caption-action"
+                      @click="useCanvasResultAsSource(job, canvasPrintEntry(job))"
+                    >
+                      Start from this
+                    </button>
+                    <button
+                      type="button"
+                      data-test="canvas-more"
+                      class="caption-action caption-action--icon"
+                      title="More"
+                      aria-label="More actions"
+                      @click="contextMenu.open($event, canvasMenu())"
+                    >
+                      <Icon name="more" :size="14" />
+                    </button>
+                  </template>
+                </div>
               </div>
-            </div>
-
-            <div
-              v-if="liveGenerationStatus"
-              data-test="generation-live-status"
-              class="edge-code mt-2 max-w-full text-center text-safelight"
-            >
-              {{ liveGenerationStatus }}
-            </div>
-
-            <div
-              data-test="generation-edge-code"
-              class="edge-code mt-2 max-w-full truncate"
-              :title="edgeCode"
-            >
-              {{ edgeCode }}
             </div>
 
             <!-- Batch dots -->
@@ -5008,14 +5033,14 @@ onBeforeUnmount(() => {
               <span
                 v-for="(s, i) in siblings"
                 :key="i"
-                class="data-mono text-body"
+                class="font-mono text-xs text-sm"
                 :class="siblingDot(s)"
                 :title="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
                 :aria-label="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
               >
                 {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
               </span>
-              <span class="edge-code ml-1">
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap ml-1">
                 {{ siblings.filter((s) => s.status === "complete").length }} of
                 {{ siblings.length }}
               </span>
@@ -5037,20 +5062,22 @@ onBeforeUnmount(() => {
             <video
               :key="sequencePlaybackSrc"
               :src="sequencePlaybackSrc"
-              class="min-h-0 w-full flex-1 rounded-media border border-control-edge bg-print-surface object-contain"
+              class="min-h-0 w-full flex-1 rounded-inner border border-border-control bg-media-bed object-contain"
               autoplay
               controls
               loop
               playsinline
             />
             <div
-              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-edge bg-bench/90 px-2 py-1.5 shadow-raised backdrop-blur"
+              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-border bg-bg/90 px-2 py-1.5 shadow-md backdrop-blur"
             >
-              <span class="edge-code">Clip {{ (playingSequenceStage ?? 0) + 1 }}</span>
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                >Clip {{ (playingSequenceStage ?? 0) + 1 }}</span
+              >
               <button
                 type="button"
                 data-test="sequence-return-live"
-                class="rounded-control border border-edge px-2 py-1 text-caption text-ink-2 hover:text-ink"
+                class="rounded-control border border-border px-2 py-1 text-micro text-fg-2 hover:text-fg"
                 @click="returnToLiveSequence"
               >
                 Return to live render
@@ -5065,7 +5092,7 @@ onBeforeUnmount(() => {
             class="pointer-events-none flex flex-col items-center justify-center gap-3"
           >
             <ProgressRing :value="watchedSequencePct" :size="96" show-label />
-            <span class="edge-code text-safelight">
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap text-accent">
               clip {{ (chains.live.activeStage ?? watchedSequence.current_stage) + 1 }}/{{
                 watchedSequence.stage_count
               }}
@@ -5074,7 +5101,7 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- Settled sequence: the canvas holds the result, because the
-               activity strip no longer does. -->
+               queue rail never did. -->
           <div
             v-else-if="isSequence && settledSequence"
             data-test="sequence-result"
@@ -5087,7 +5114,7 @@ onBeforeUnmount(() => {
             >
               <div
                 data-test="sequence-result-frame"
-                class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                class="relative max-h-full w-full max-w-full overflow-hidden rounded-inner border border-border-control bg-media-bed"
                 :style="settledFrameStyle"
               >
                 <AuthedMedia
@@ -5114,10 +5141,15 @@ onBeforeUnmount(() => {
               :copy-message="settledSequenceErrorCopy"
             />
             <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
-              <span class="edge-code text-ink-3">saved to Library</span>
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap text-fg-dim"
+                >saved to Library</span
+              >
             </div>
 
-            <div class="edge-code mt-2 max-w-full truncate" :title="settledSequenceCaption">
+            <div
+              class="font-mono text-micro text-fg-dim whitespace-nowrap mt-2 max-w-full truncate"
+              :title="settledSequenceCaption"
+            >
               {{ settledSequenceCaption }}
             </div>
             <div class="mt-2 flex items-center gap-2">
@@ -5125,7 +5157,7 @@ onBeforeUnmount(() => {
                 v-if="settledSequenceError"
                 type="button"
                 data-test="sequence-resume"
-                class="rounded-control bg-stop px-3 py-1 text-body font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px"
+                class="rounded-control bg-error px-3 py-1 text-sm font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px"
                 @click="resumeSettledSequence"
               >
                 Resume
@@ -5133,7 +5165,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-test="sequence-edit"
-                class="border-ce rounded-control border px-3 py-1 text-body text-ink-2 transition-colors hover:text-rebate"
+                class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
                 @click="editSettledSequence"
               >
                 Edit sequence
@@ -5141,7 +5173,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-test="sequence-show-in-library"
-                class="border-ce rounded-control border px-3 py-1 text-body text-ink-2 transition-colors hover:text-rebate"
+                class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
                 @click="showSettledSequenceInLibrary"
               >
                 Show in library
@@ -5173,7 +5205,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-test="reexpand-and-generate"
-              class="rounded-control bg-stop px-3 py-1.5 text-body font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px disabled:opacity-50"
+              class="rounded-control bg-error px-3 py-1.5 text-sm font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px disabled:opacity-50"
               :disabled="expansionRunning || preparedSubmitting"
               @click="reexpandAndGenerate"
             >
@@ -5182,7 +5214,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-test="generate-expanded-anyway"
-              class="border-stop/50 rounded-control border px-3 py-1.5 text-body font-medium text-stop transition-colors hover:bg-stop/10 active:translate-y-px disabled:opacity-50"
+              class="border-error/50 rounded-control border px-3 py-1.5 text-sm font-medium text-error transition-colors hover:bg-error/10 active:translate-y-px disabled:opacity-50"
               :disabled="expansionRunning || preparedSubmitting"
               @click="generateExpandedAnyway"
             >
@@ -5191,7 +5223,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-test="restore-expanded-original"
-              class="rounded-control px-3 py-1.5 text-body text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+              class="rounded-control px-3 py-1.5 text-sm text-fg-2 transition-colors hover:text-fg active:translate-y-px"
               @click="restoreQuickExpansion"
             >
               Restore original
@@ -5217,8 +5249,9 @@ onBeforeUnmount(() => {
         />
 
         <div
+          v-if="isSequence"
           data-test="create-bench-resizer"
-          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-edge bg-bath/80"
+          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-border bg-bg-deep/80"
           role="separator"
           aria-label="Resize Activity and sequence editor"
           aria-orientation="horizontal"
@@ -5234,25 +5267,25 @@ onBeforeUnmount(() => {
           @dblclick="setBenchHeight(DEFAULT_BENCH_HEIGHT)"
         >
           <span
-            class="h-1 w-12 rounded-full bg-ink-3/50 transition-colors group-hover:bg-safelight group-focus-visible:bg-safelight"
+            class="h-1 w-12 rounded-inner bg-fg-dim/50 transition-colors group-hover:bg-accent group-focus-visible:bg-accent"
             aria-hidden="true"
           />
         </div>
 
         <div
+          v-if="isSequence"
           data-test="create-bottom-panel"
-          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-desk"
+          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-bg-crust"
           :style="{
             height: `${benchHeight}px`,
             containerType: 'size',
             containerName: 'create-bench',
           }"
         >
-          <ActivityStrip @edit-sequence="editSequence" />
           <p
             v-if="isSequence && sequenceReuseNotice"
             data-test="sequence-reuse-note"
-            class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0 px-1 pt-1.5 text-fg-dim"
           >
             {{ sequenceReuseNotice }}
           </p>
@@ -5270,7 +5303,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-test="sequence-browse-models"
-                class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
+                class="rounded-control bg-accent px-3 py-1.5 text-sm font-semibold text-on-accent"
                 @click="
                   router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
                 "
@@ -5306,42 +5339,51 @@ onBeforeUnmount(() => {
               @play-clip="playSequenceClip"
             />
           </div>
-          <ComposerCard
-            v-else
-            ref="composerRef"
-            data-test="generate-composer"
-            class="flex-1"
-            :form="form"
-            :effective-batch-size="effectiveBatchSize"
-            :expansion-running="expansionRunning"
-            :expansion-host-label="expansionHostLabel"
-            :can-undo="quickExpansionOriginal !== null"
-            :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-            :disabled="composerDisabled"
-            :disabled-reason="composerBlockerReason"
-            :warning-reason="composerWarningReason"
-            :submitting="submissionPlanning"
-            :button-label="buttonLabel"
-            :estimate-request="estimateRequest"
-            :estimate-target="estimateTarget"
-            :preprocessing-status="submissionStatus"
-            :history="promptHistory"
-            :remix-source="remixSource"
-            @prompt-authored="onPromptAuthored"
-            @generate="generate"
-            @cancel="cancelSubmissionPlanning"
-            @expand="expandForCurrentBatch()"
-            @remix="remixForCurrentPrompt()"
-            @update:remix-source="remixSource = $event"
-            @restore="restoreQuickExpansion"
-          />
         </div>
+        <!-- The sequence bench replaces the single-print composer in place. -->
+        <ComposerCard
+          v-if="!isSequence"
+          ref="composerRef"
+          data-test="generate-composer"
+          class="shrink-0"
+          :form="form"
+          :effective-batch-size="effectiveBatchSize"
+          :expansion-running="expansionRunning"
+          :expansion-host-label="expansionHostLabel"
+          :can-undo="quickExpansionOriginal !== null"
+          :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+          :disabled="composerDisabled"
+          :disabled-reason="composerBlockerReason"
+          :warning-reason="composerWarningReason"
+          :submitting="submissionPlanning"
+          :button-label="buttonLabel"
+          :estimate-request="estimateRequest"
+          :estimate-target="estimateTarget"
+          :preprocessing-status="submissionStatus"
+          :history="promptHistory"
+          :remix-source="remixSource"
+          :batch-locked="batchLocked"
+          :style-label="modelLabels.get(form.model) ?? form.model"
+          :style-id="form.model"
+          @open-style="inspectorTab = 'settings'"
+          @open-shape="inspectorTab = 'settings'"
+          @prompt-authored="onPromptAuthored"
+          @generate="generate"
+          @cancel="cancelSubmissionPlanning"
+          @expand="expandForCurrentBatch()"
+          @remix="remixForCurrentPrompt()"
+          @update:remix-source="remixSource = $event"
+          @restore="restoreQuickExpansion"
+        />
       </div>
     </div>
 
     <!-- Inspector (persisted, left-edge resizable width) -->
     <InspectorPanel
+      ref="inspectorRef"
       :form="form"
+      :tab="inspectorTab"
+      :history="promptHistory"
       :last-seed="generation.lastSeedUsed"
       :chain-limits="chainLimits"
       :canvas-intent="canvasIntent"
@@ -5349,6 +5391,9 @@ onBeforeUnmount(() => {
       @canvas-intent="setCanvasIntent"
       @reset-settings="invalidateRetainedRestore"
       @pull-missing-model="offerPullForSelectedModel"
+      @update:tab="inspectorTab = $event"
+      @load-template="loadTemplate"
+      @use-prompt="useRecentPrompt"
     />
 
     <DownloadTargetDialog
@@ -5380,3 +5425,28 @@ onBeforeUnmount(() => {
     />
   </div>
 </template>
+
+<style scoped>
+.caption-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  border-radius: var(--mold-radius-1);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--mold-text);
+}
+.caption-action:hover {
+  background: var(--mold-surface);
+}
+.caption-action--icon {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  color: var(--mold-text-2);
+}
+</style>

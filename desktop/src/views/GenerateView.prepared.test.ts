@@ -1183,8 +1183,11 @@ describe("GenerateView prepared expansion batches", () => {
       batch_size: 1,
       output_format: "png",
     });
-    job.status = "denoising";
-    job.step = 20;
+    // The caption strip carries the live status while a print develops and
+    // the edge code once it settles, so the model name is read on a settled
+    // print.
+    job.status = "complete";
+    job.step = 25;
     job.total = 25;
     useGenerationStore().jobs = [job];
 
@@ -1217,12 +1220,14 @@ describe("GenerateView prepared expansion batches", () => {
     const wrapper = mountView();
     await flushPromises();
 
-    const frame = wrapper.get("[data-test='preview-frame']");
-    const status = wrapper.get("[data-test='generation-live-status']");
+    // The status reads in the caption strip along the frame's bottom edge —
+    // below the developing image, never a pill floating over it.
+    const caption = wrapper.get("[data-test='canvas-caption']");
+    const status = caption.get("[data-test='generation-live-status']");
     expect(status.text()).toBe("Developing 20/25");
-    expect(frame.find("[data-test='generation-live-status']").exists()).toBe(false);
+    const preview = wrapper.get("[data-test='develop-preview']");
     expect(
-      frame.element.compareDocumentPosition(status.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+      preview.element.compareDocumentPosition(caption.element) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 

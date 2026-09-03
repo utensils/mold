@@ -586,20 +586,20 @@ function onKeydown(e: KeyboardEvent) {
     @click.self="close"
   >
     <div
-      class="ms-fade-up flex h-fit max-h-[440px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-card-lg border border-ce bg-bench shadow-raised"
+      class="ms-fade-up flex h-fit max-h-[440px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-card-lg border border-border-control bg-bg shadow-md"
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
     >
-      <div class="flex items-center gap-2.5 border-b border-edge px-4 py-3.5">
-        <Icon name="search" :size="17" class="shrink-0 text-ink-3" />
+      <div class="flex items-center gap-2.5 border-b border-border px-4 py-3.5">
+        <Icon name="search" :size="17" class="shrink-0 text-fg-dim" />
         <input
           ref="inputEl"
           v-model="query"
           data-selectable
           type="text"
           placeholder="Search actions, models, settings…"
-          class="min-w-0 flex-1 bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
+          class="min-w-0 flex-1 bg-transparent text-base text-fg outline-none placeholder:text-fg-dim"
           role="combobox"
           aria-autocomplete="list"
           aria-expanded="true"
@@ -611,7 +611,7 @@ function onKeydown(e: KeyboardEvent) {
         <Keycap>esc</Keycap>
       </div>
       <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto p-2" role="listbox">
-        <p v-if="results.length === 0" class="px-3 py-6 text-center text-body text-ink-3">
+        <p v-if="results.length === 0" class="px-3 py-6 text-center text-sm text-fg-dim">
           No matches.
         </p>
         <button
@@ -626,19 +626,21 @@ function onKeydown(e: KeyboardEvent) {
           @mouseenter="selected = i"
           @click="cmd.run()"
         >
-          <span
-            class="w-12 shrink-0 font-utility text-[9px] tracking-[0.06em] text-ink-3 uppercase"
-          >
+          <span class="w-12 shrink-0 font-mono text-micro tracking-[0.06em] text-fg-dim uppercase">
             {{ sectionLabel(cmd.id) }}
           </span>
           <span
-            class="min-w-0 flex-1 truncate text-[13.5px]"
-            :class="i === selected ? 'text-ink' : 'text-ink-2'"
+            class="min-w-0 flex-1 truncate text-sm"
+            :class="i === selected ? 'text-fg' : 'text-fg-2'"
           >
             {{ cmd.title }}
           </span>
-          <span v-if="cmd.subtitle" class="edge-code shrink-0">{{ cmd.subtitle }}</span>
-          <Icon name="arrow-right" :size="14" class="shrink-0 text-ce" />
+          <span
+            v-if="cmd.subtitle"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+            >{{ cmd.subtitle }}</span
+          >
+          <Icon name="arrow-right" :size="14" class="shrink-0 text-border-control" />
         </button>
       </div>
     </div>

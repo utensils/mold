@@ -89,7 +89,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
 
 <template>
   <div
-    class="flex h-[30px] shrink-0 items-center gap-1.5 overflow-x-auto border-b border-edge bg-[color-mix(in_srgb,var(--bench)_50%,var(--bath))] px-6"
+    class="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border bg-chrome px-3.5 py-2"
     data-test="library-chip-row"
     role="group"
     aria-label="Library filters"
@@ -130,11 +130,11 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
         :data-tag="tag.name"
         @click="emit('toggleTag', tag.name)"
       >
-        <Icon name="tag" :size="11" class="text-ink-3" />
+        <Icon name="tag" :size="11" class="text-fg-dim" />
         <span class="max-w-32 truncate">{{ tag.name }}</span>
         <span class="ms-lib-chip__n">{{ tag.count }}</span>
       </Chip>
-      <span v-if="tags.length === 0" class="text-caption text-ink-3" data-test="no-tags">
+      <span v-if="tags.length === 0" class="text-micro text-fg-dim" data-test="no-tags">
         No tags yet
       </span>
       <Popover
@@ -157,16 +157,16 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
         </template>
         <div class="flex w-60 flex-col gap-1.5" data-test="more-tags-panel">
           <label
-            class="border-ce flex h-7 items-center gap-1.5 rounded-control border bg-bath px-2"
+            class="border-border-control flex h-7 items-center gap-1.5 rounded-control border bg-bg-deep px-2"
           >
-            <Icon name="search" :size="12" class="shrink-0 text-ink-3" />
+            <Icon name="search" :size="12" class="shrink-0 text-fg-dim" />
             <input
               v-model="moreQuery"
               data-selectable
               type="search"
               placeholder="Filter tags…"
               aria-label="Filter tags"
-              class="min-w-0 flex-1 bg-transparent text-caption text-ink outline-none placeholder:text-ink-3"
+              class="min-w-0 flex-1 bg-transparent text-micro text-fg outline-none placeholder:text-fg-dim"
             />
           </label>
           <div class="max-h-64 overflow-y-auto" role="group" aria-label="All tags">
@@ -176,26 +176,26 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
               type="button"
               role="checkbox"
               :aria-checked="isActive(tag.name)"
-              class="flex h-7 w-full items-center gap-2 rounded-control px-1 text-left text-body text-ink hover:bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)]"
+              class="flex h-7 w-full items-center gap-2 rounded-control px-1 text-left text-sm text-fg hover:bg-accent-tint"
               data-test="more-tag-row"
               :data-tag="tag.name"
               @click="emit('toggleTag', tag.name)"
             >
               <span
-                class="border-ce flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border font-utility text-[11px] leading-none"
+                class="border-border-control flex h-4 w-4 shrink-0 items-center justify-center rounded-inner border font-mono text-micro leading-none"
                 :class="
                   isActive(tag.name)
-                    ? 'border-safelight bg-safelight text-on-accent'
-                    : 'bg-bath text-transparent'
+                    ? 'border-accent bg-accent text-on-accent'
+                    : 'bg-bg-deep text-transparent'
                 "
                 aria-hidden="true"
               >
                 ✓
               </span>
               <span class="min-w-0 flex-1 truncate">{{ tag.name }}</span>
-              <span class="font-utility text-[10px] text-ink-3">{{ tag.count }}</span>
+              <span class="font-mono text-micro text-fg-dim">{{ tag.count }}</span>
             </button>
-            <p v-if="moreMatches.length === 0" class="px-1 py-1 text-caption text-ink-3">
+            <p v-if="moreMatches.length === 0" class="px-1 py-1 text-micro text-fg-dim">
               No tags match.
             </p>
           </div>
@@ -208,7 +208,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
     <button
       v-if="anyFilter"
       type="button"
-      class="shrink-0 rounded-control px-1.5 text-caption text-ink-3 hover:text-ink"
+      class="shrink-0 rounded-control px-1.5 text-micro text-fg-dim hover:text-fg"
       data-test="clear-filters"
       @click="emit('clearFilters')"
     >
@@ -230,48 +230,48 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
    stays 30px. */
 .ms-lib-chip,
 :deep(.ms-lib-chip.ms-chip) {
-  height: 22px;
-  padding: 0 9px 0 8px;
-  gap: 5px;
-  font-size: 11.5px;
+  height: var(--mold-ctl-sm);
+  padding: 0 10px;
+  gap: 6px;
+  font-size: var(--mold-fs-micro);
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-pill);
-  background: var(--bench);
-  color: var(--ink-2);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   flex: 0 0 auto;
 }
 
 .ms-lib-chip--on,
 :deep(.ms-lib-chip.ms-chip[data-on="true"]) {
-  border-color: var(--sel-border);
-  color: var(--sel-ink);
-  background: var(--sel-bg);
-  font-weight: 600;
+  border-color: var(--mold-blue);
+  color: var(--mold-text);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 .ms-lib-chip--more {
   border-style: dashed;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   cursor: pointer;
 }
 
 .ms-lib-chip--more:focus-visible,
 .ms-lib-chip--on:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .ms-lib-chip__n {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  opacity: 0.7;
 }
 
 :deep(.ms-chip[data-on="true"]) .ms-lib-chip__n {
-  color: var(--sel-ink);
+  color: var(--mold-blue);
 }
 
 .ms-lib-heart {
@@ -282,7 +282,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
 .ms-lib-vr {
   width: 1px;
   height: 16px;
-  background: var(--edge);
+  background: var(--mold-border);
   margin: 0 2px;
   flex: 0 0 auto;
 }

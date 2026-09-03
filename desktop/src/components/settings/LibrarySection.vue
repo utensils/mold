@@ -31,7 +31,7 @@ const libraryPrefs = useLibraryPrefsStore();
       />
     </SettingRow>
     <ConfigSettingRow schema-key="gallery.trash_retention_days" />
-    <p class="mt-2 text-caption text-ink-3" data-test="library-remote-note">
+    <p class="mt-2 text-micro text-fg-dim" data-test="library-remote-note">
       Remote machines keep their own retention — change it in Machines ▸ machine ▸ Storage.
     </p>
   </div>

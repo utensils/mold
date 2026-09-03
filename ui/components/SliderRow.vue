@@ -167,27 +167,27 @@ function onPointerCancel() {
 }
 
 .ms-slider__label {
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
   font-size: 12px;
   font-weight: 600;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .ms-slider__value {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 11px;
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
-/* Track — 4px bar; --radius-pill clamps to fully round on this height. */
+/* Track — 4px bar; --mold-radius-2 clamps to fully round on this height. */
 .ms-slider__input {
   -webkit-appearance: none;
   appearance: none;
   display: block;
   width: 100%;
   height: 4px;
-  border-radius: var(--radius-pill);
-  background: var(--ce);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-border-control);
 }
 
 .ms-slider__track--marked .ms-slider__input {
@@ -199,10 +199,10 @@ function onPointerCancel() {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--safelight);
+  background: var(--mold-blue);
   cursor: pointer;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-slider__input::-moz-range-thumb {
@@ -210,14 +210,14 @@ function onPointerCancel() {
   height: 16px;
   border: 0;
   border-radius: 50%;
-  background: var(--safelight);
+  background: var(--mold-blue);
   cursor: pointer;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-slider__input:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -249,8 +249,8 @@ function onPointerCancel() {
   display: grid;
   justify-items: center;
   transform: translateX(-50%);
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
 }
 
 .ms-slider__mark i {

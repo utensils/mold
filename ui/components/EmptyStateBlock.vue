@@ -50,25 +50,25 @@ withDefaults(
   width: 120px;
   height: 120px;
   margin-bottom: 22px;
-  border: 1.5px dashed var(--ce);
+  border: 1.5px dashed var(--mold-border-control);
   /* Frame radius sits between card and card-lg, per the prototype. */
   border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-empty__headline {
   margin: 0 0 7px;
-  font-family: var(--f-display);
+  font-family: var(--mold-font-sans);
   font-size: 20px;
   font-weight: 600;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-empty__headline--brand {
-  background-image: var(--grad);
+  background-image: var(--mold-ink-gradient);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -79,7 +79,7 @@ withDefaults(
   max-width: 340px;
   font-size: 13.5px;
   line-height: 1.5;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-empty__action {

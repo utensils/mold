@@ -49,24 +49,24 @@ function openPrivacyPolicy(): void {
 <template>
   <div class="w-full" data-test="about-section-content">
     <SettingRow label="Mold" help="Desktop app version.">
-      <span class="data-mono text-body text-ink-2">{{ appVersion ?? "dev" }}</span>
+      <span class="font-mono text-xs text-sm text-fg-2">{{ appVersion ?? "dev" }}</span>
     </SettingRow>
     <SettingRow label="Engine" :help="conn.baseUrl ?? undefined">
-      <span class="data-mono text-body text-ink-2">
+      <span class="font-mono text-xs text-sm text-fg-2">
         {{ engine ? `mold ${engine.version}` : "offline" }}
       </span>
     </SettingRow>
     <SettingRow label="Processing" help="Where generations run.">
-      <span class="data-mono text-body text-ink-3">Local + your hosts</span>
+      <span class="font-mono text-xs text-sm text-fg-dim">Local + your hosts</span>
     </SettingRow>
     <SettingRow label="Core contributors">
-      <span class="text-right text-body text-ink-2">James Brink · Jeffrey Dilley</span>
+      <span class="text-right text-sm text-fg-2">James Brink · Jeffrey Dilley</span>
     </SettingRow>
     <SettingRow label="Privacy" help="How Mold handles app and server data.">
       <button
         type="button"
         data-test="desktop-privacy-policy"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
         @click="openPrivacyPolicy"
       >
         Privacy policy
@@ -75,7 +75,7 @@ function openPrivacyPolicy(): void {
     <SettingRow label="Logs" help="Engine and app logs live in the active Mold home.">
       <button
         type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
         @click="ipc.openLogsDir()"
       >
         Open logs folder
@@ -84,7 +84,7 @@ function openPrivacyPolicy(): void {
     <SettingRow label="Diagnostics" help="Versions, connection, and engine state as JSON.">
       <button
         type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
         @click="copyDiagnostics"
       >
         Copy

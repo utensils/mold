@@ -436,7 +436,7 @@ onBeforeUnmount(() => {
 }
 .device-panel__tentative,
 .device-panel__empty {
-  color: var(--ink-3, #777);
+  color: var(--mold-text-dim, #777);
   font-size: 12px;
   font-weight: 500;
 }
@@ -465,7 +465,7 @@ onBeforeUnmount(() => {
 }
 .device-card[data-state="draining"],
 .device-card[data-health="degraded"] {
-  border-color: var(--warning, #b87800);
+  border-color: var(--mold-warning, #b87800);
 }
 .device-card[data-state="disabled"],
 .device-card[data-health="unavailable"],
@@ -510,7 +510,7 @@ onBeforeUnmount(() => {
 .device-card__line,
 .device-card__lane,
 .device-panel__blocked {
-  color: var(--ink-2, #555);
+  color: var(--mold-text-2, #555);
   font-size: 12px;
 }
 .device-card__line {
@@ -562,7 +562,7 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 4px;
   padding: 10px 12px;
-  border-left: 3px solid var(--warning, #b87800);
+  border-left: 3px solid var(--mold-warning, #b87800);
 }
 .device-panel__blocked-action {
   margin-left: 8px;

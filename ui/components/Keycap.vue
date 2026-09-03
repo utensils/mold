@@ -21,13 +21,13 @@ withDefaults(defineProps<{ onAccent?: boolean }>(), { onAccent: false });
   align-items: center;
   gap: 3px;
   line-height: 1;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 11px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   padding: 2px 6px;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
   white-space: nowrap;
 }
 
@@ -36,9 +36,9 @@ withDefaults(defineProps<{ onAccent?: boolean }>(), { onAccent: false });
   font-size: 14px;
   font-weight: 700;
   border: 0;
-  background: var(--on-accent);
-  color: var(--safelight);
+  background: var(--mold-on-accent);
+  color: var(--mold-blue);
   padding: 6px 9px;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
 }
 </style>

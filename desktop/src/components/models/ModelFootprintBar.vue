@@ -53,12 +53,12 @@ const explanation = computed(() => {
   height: 6px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 
 .model-footprint__fill {
   display: block;
   height: 100%;
-  background: var(--halide);
+  background: var(--mold-sapphire);
 }
 </style>

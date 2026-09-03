@@ -58,8 +58,8 @@ const emit = defineEmits<{
 }>();
 
 const SCOPE_LABELS: Record<LibraryScope, string> = {
-  prints: "Prints",
-  collections: "Collections",
+  prints: "Everything",
+  collections: "Albums",
   trash: "Trash",
 };
 
@@ -73,10 +73,10 @@ const scopeOptions = computed(() =>
 
 const searchPlaceholder = computed(() =>
   props.scope === "collections"
-    ? "Search collections…"
+    ? "Search albums…"
     : props.scope === "trash"
-      ? "Search trash…"
-      : "Search prompts…",
+      ? "Search the trash…"
+      : "Search words or tags…",
 );
 
 const searchEl = ref<HTMLInputElement | null>(null);
@@ -88,12 +88,9 @@ defineExpose({ focusSearch });
 
 <template>
   <header
-    class="flex h-[52px] shrink-0 items-center gap-3 border-b border-edge px-6"
+    class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
     data-test="library-header"
   >
-    <span class="font-display text-[17px] font-semibold text-ink" style="font-stretch: 92%">
-      Library
-    </span>
     <SegmentedControl
       v-if="scopes.length > 1"
       class="ms-lib-scope"
@@ -104,10 +101,10 @@ defineExpose({ focusSearch });
       data-test="library-scope"
       @update:model-value="emit('update:scope', $event)"
     />
-    <span class="data-mono text-caption text-ink-3" data-test="library-count">{{
+    <span class="font-mono text-xs text-micro text-fg-dim" data-test="library-count">{{
       countLabel
     }}</span>
-    <span v-if="error" class="text-caption text-stop">{{ error }}</span>
+    <span v-if="error" class="text-micro text-error">{{ error }}</span>
 
     <div class="flex-1" />
 
@@ -129,9 +126,9 @@ defineExpose({ focusSearch });
     />
 
     <label
-      class="flex h-[34px] w-[180px] items-center gap-2 rounded-chrome border border-ce bg-bench px-2.5"
+      class="flex h-[26px] w-[170px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
     >
-      <Icon name="search" :size="14" class="shrink-0 text-ink-3" />
+      <Icon name="search" :size="14" class="shrink-0 text-fg-dim" />
       <input
         ref="searchEl"
         :value="search"
@@ -139,41 +136,36 @@ defineExpose({ focusSearch });
         type="search"
         :placeholder="searchPlaceholder"
         aria-label="Search prints"
-        class="min-w-0 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3"
+        class="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-dim"
         @input="emit('update:search', ($event.target as HTMLInputElement).value)"
       />
     </label>
 
     <button
       type="button"
-      class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
+      class="lib-button"
+      :class="selectMode ? 'lib-button--on' : ''"
+      :aria-pressed="selectMode"
+      title="Select pictures"
+      aria-label="Toggle select mode"
+      @click="emit('toggleSelect')"
+    >
+      Select
+    </button>
+    <button
+      type="button"
+      class="lib-button"
       title="History"
       aria-label="Open history"
       @click="emit('openHistory')"
     >
-      <Icon name="history" :size="17" />
-    </button>
-    <button
-      type="button"
-      class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome transition-colors duration-100"
-      :class="
-        selectMode
-          ? 'bg-[color-mix(in_srgb,var(--safelight)_16%,transparent)] text-safelight'
-          : 'text-ink-3 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink'
-      "
-      :aria-pressed="selectMode"
-      title="Select"
-      aria-label="Toggle select mode"
-      @click="emit('toggleSelect')"
-    >
-      <Icon name="check" :size="17" />
+      History
     </button>
     <button
       v-if="scope === 'trash'"
       type="button"
       data-test="empty-trash"
-      class="flex h-[34px] shrink-0 items-center gap-1.5 rounded-chrome border px-3 text-body text-stop transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--stop)_10%,transparent)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
-      style="border-color: color-mix(in srgb, var(--stop) 50%, transparent)"
+      class="lib-button lib-button--danger"
       :disabled="trashCount === 0 || busy"
       @click="emit('emptyTrash')"
     >
@@ -183,17 +175,58 @@ defineExpose({ focusSearch });
     <button
       v-else
       type="button"
-      class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
+      class="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-control border border-border text-fg-2 transition-colors duration-100 hover:border-border-focus hover:text-fg"
       title="Refresh"
       aria-label="Refresh library"
       @click="emit('refresh')"
     >
-      <Icon name="refresh" :size="17" />
+      <Icon name="refresh" :size="14" />
     </button>
   </header>
 </template>
 
 <style scoped>
+.lib-button {
+  display: inline-flex;
+  height: var(--mold-ctl-md);
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--mold-text-2);
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
+}
+.lib-button:hover:not(:disabled) {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
+}
+.lib-button--on {
+  border-color: var(--mold-blue);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
+}
+.lib-button--danger {
+  border-color: var(--mold-error);
+  color: var(--mold-error);
+  font-weight: 600;
+}
+.lib-button--danger:hover:not(:disabled) {
+  border-color: var(--mold-error);
+  background: color-mix(in srgb, var(--mold-error) 12%, transparent);
+  color: var(--mold-error);
+}
+.lib-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* The scope control reads as tabs: label + mono count side by side. */
 .ms-lib-scope :deep(.ms-seg__btn) {
   flex-direction: row;
@@ -201,7 +234,7 @@ defineExpose({ focusSearch });
 }
 
 .ms-lib-scope :deep(.ms-seg__sub) {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10.5px;
   color: inherit;
   opacity: 0.8;

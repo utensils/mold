@@ -402,17 +402,17 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
       @keydown.esc="emit('close')"
     >
       <div
-        class="border-edge flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-chrome border bg-bench p-5"
+        class="border-border flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-window border bg-bg p-5"
         role="dialog"
         aria-modal="true"
         :aria-label="title"
       >
         <div class="flex items-center justify-between">
-          <h2 class="text-body-lg font-semibold text-ink">{{ title }}</h2>
+          <h2 class="text-base font-semibold text-fg">{{ title }}</h2>
           <button
             ref="closeBtn"
             type="button"
-            class="text-ink-3 hover:text-ink"
+            class="text-fg-dim hover:text-fg"
             aria-label="Close"
             @click="emit('close')"
           >
@@ -423,11 +423,11 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
         <div v-if="!galleryOnly" class="mt-4 flex gap-2">
           <button
             type="button"
-            class="rounded-control px-3 py-1 text-body transition-colors duration-100"
+            class="rounded-control px-3 py-1 text-sm transition-colors duration-100"
             :class="
               tab === 'upload'
-                ? 'bg-safelight font-semibold text-on-accent'
-                : 'border-edge border text-ink-2 hover:text-ink'
+                ? 'bg-accent font-semibold text-on-accent'
+                : 'border-border border text-fg-2 hover:text-fg'
             "
             data-test="picker-tab-upload"
             @click="tab = 'upload'"
@@ -436,11 +436,11 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
           </button>
           <button
             type="button"
-            class="rounded-control px-3 py-1 text-body transition-colors duration-100"
+            class="rounded-control px-3 py-1 text-sm transition-colors duration-100"
             :class="
               tab === 'gallery'
-                ? 'bg-safelight font-semibold text-on-accent'
-                : 'border-edge border text-ink-2 hover:text-ink'
+                ? 'bg-accent font-semibold text-on-accent'
+                : 'border-border border text-fg-2 hover:text-fg'
             "
             data-test="picker-tab-gallery"
             @click="tab = 'gallery'"
@@ -452,8 +452,8 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
         <div v-if="tab === 'upload' && !galleryOnly" class="mt-4 flex-1 overflow-y-auto">
           <button
             type="button"
-            class="flex h-48 w-full cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
-            :class="dragOver ? 'border-safelight text-safelight' : 'border-control-edge text-ink-3'"
+            class="flex h-48 w-full cursor-pointer items-center justify-center rounded-inner border border-dashed text-micro transition-colors"
+            :class="dragOver ? 'border-accent text-accent' : 'border-border-control text-fg-dim'"
             data-test="picker-native-file-button"
             @dragover.prevent="dragOver = true"
             @dragleave="dragOver = false"
@@ -461,7 +461,7 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
             @click="chooseFiles"
           >
             <span
-              class="text-caption text-ink-2 underline decoration-dotted underline-offset-4 hover:text-ink"
+              class="text-micro text-fg-2 underline decoration-dotted underline-offset-4 hover:text-fg"
             >
               Drop a PNG or JPEG here, or choose a file
             </span>
@@ -475,7 +475,7 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
             data-test="picker-browser-file-input"
             @change="onFiles"
           />
-          <p v-if="error" class="mt-2 text-caption text-stop" data-test="picker-upload-error">
+          <p v-if="error" class="mt-2 text-micro text-error" data-test="picker-upload-error">
             {{ error }}
           </p>
         </div>
@@ -487,16 +487,16 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
           data-test="picker-gallery-scroll"
           @scroll.passive="syncGalleryViewport"
         >
-          <p v-if="loading" class="text-caption text-ink-3">Loading…</p>
-          <p v-else-if="error" class="text-caption text-stop">{{ error }}</p>
+          <p v-if="loading" class="text-micro text-fg-dim">Loading…</p>
+          <p v-else-if="error" class="text-micro text-error">{{ error }}</p>
           <p
             v-else-if="galleryError"
-            class="text-caption text-stop"
+            class="text-micro text-error"
             data-test="picker-gallery-error"
           >
             {{ galleryError }}
           </p>
-          <p v-else-if="entries.length === 0" class="text-caption text-ink-3">
+          <p v-else-if="entries.length === 0" class="text-micro text-fg-dim">
             No prints in the gallery yet.
           </p>
           <ul
@@ -517,10 +517,10 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
             >
               <button
                 type="button"
-                class="border-edge relative aspect-square w-full overflow-hidden rounded-media border transition hover:brightness-110"
+                class="border-border relative aspect-square w-full overflow-hidden rounded-inner border transition hover:brightness-110"
                 :class="
                   galleryEntrySelected(tile.entry)
-                    ? 'ring-2 ring-safelight ring-offset-2 ring-offset-bench'
+                    ? 'ring-2 ring-accent ring-offset-2 ring-offset-bench'
                     : ''
                 "
                 data-test="picker-gallery-item"
@@ -549,14 +549,14 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
                 />
                 <span
                   v-if="showHostLabels"
-                  class="edge-code absolute bottom-1 left-1 rounded-control bg-black/60 px-1 !text-on-media"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap absolute bottom-1 left-1 rounded-control bg-black/60 px-1 !text-on-media"
                   data-test="picker-item-host"
                 >
                   {{ tile.entry.hostLabel }}
                 </span>
                 <span
                   v-if="multiple && galleryEntrySelected(tile.entry)"
-                  class="absolute top-1 right-1 grid h-6 w-6 place-items-center rounded-full bg-safelight text-caption font-bold text-on-accent"
+                  class="absolute top-1 right-1 grid h-6 w-6 place-items-center rounded-control bg-accent text-micro font-bold text-on-accent"
                   aria-hidden="true"
                 >
                   {{
@@ -572,15 +572,15 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
           </ul>
           <div
             v-if="multiple && selectedGallery.length"
-            class="border-edge sticky bottom-0 mt-3 flex items-center justify-between gap-3 border-t bg-bench pt-3"
+            class="border-border sticky bottom-0 mt-3 flex items-center justify-between gap-3 border-t bg-bg pt-3"
             data-test="picker-gallery-selection"
           >
-            <span class="text-caption text-ink-2">
+            <span class="text-micro text-fg-2">
               {{ selectedGallery.length }} selected · kept in this order
             </span>
             <button
               type="button"
-              class="rounded-control bg-safelight px-3 py-2 text-body font-semibold text-on-accent"
+              class="rounded-control bg-accent px-3 py-2 text-sm font-semibold text-on-accent"
               data-test="picker-gallery-confirm"
               :disabled="pickingGallery"
               @click="confirmGallerySelection"

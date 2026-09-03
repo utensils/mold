@@ -109,6 +109,9 @@ import {
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 
+/** Batch N has no product ceiling to speak of; the composer's Make chip stops here. */
+export const MAX_BATCH_SIZE = 10_000;
+
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
   path: string;

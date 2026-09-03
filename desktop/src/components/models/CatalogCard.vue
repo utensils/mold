@@ -122,7 +122,7 @@ function openPage(): void {
 
 <template>
   <article
-    class="catalog-card-contained border-edge flex cursor-pointer flex-col rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
+    class="catalog-card-contained border-border flex cursor-pointer flex-col rounded-window border bg-bg-deep transition-colors duration-150 hover:bg-bg"
     :class="selected ? 'catalog-card-contained--selected' : ''"
     data-test="catalog-card"
     data-layout="grid"
@@ -132,13 +132,13 @@ function openPage(): void {
     @click="emit('open', entry)"
   >
     <label
-      class="catalog-card-checkbox border-edge absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-control border bg-bench/95"
+      class="catalog-card-checkbox border-border absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-control border bg-bg/95"
       :title="selectable ? 'Select model for batch download' : 'No download target available'"
       @click.stop
     >
       <input
         type="checkbox"
-        class="h-4 w-4 accent-[var(--safelight)]"
+        class="h-4 w-4 accent-accent"
         :checked="checked"
         :disabled="!selectable"
         :aria-label="`Select ${displayName}`"
@@ -150,9 +150,9 @@ function openPage(): void {
          local family mark when no custom image is available. -->
     <div
       v-if="thumbnailUrl && !thumbFailed"
-      class="relative h-32 w-full overflow-hidden rounded-t-chrome"
+      class="relative h-32 w-full overflow-hidden rounded-t-window"
     >
-      <div v-if="!thumbLoaded" class="grain-shimmer absolute inset-0" aria-hidden="true" />
+      <div v-if="!thumbLoaded" class="ms-shimmer absolute inset-0" aria-hidden="true" />
       <img
         :src="thumbnailUrl"
         alt=""
@@ -169,10 +169,10 @@ function openPage(): void {
     <div class="flex min-h-32 flex-1 flex-col gap-1.5 p-3">
       <div class="flex min-w-0 items-start justify-between gap-2">
         <span class="flex min-w-0 items-center gap-1.5">
-          <SourceGlyph :source="glyphSource" :size="16" class="text-ink-3" />
+          <SourceGlyph :source="glyphSource" :size="16" class="text-fg-dim" />
           <button
             type="button"
-            class="truncate text-left text-body text-ink transition-colors duration-100 hover:text-safelight"
+            class="truncate text-left text-sm text-fg transition-colors duration-100 hover:text-accent"
             :title="`${entry.display_name ?? entry.name} — view details`"
             data-test="card-title"
             @click.stop="emit('open', entry)"
@@ -184,7 +184,7 @@ function openPage(): void {
           <button
             v-if="pageUrl"
             type="button"
-            class="text-ink-3 transition-colors duration-100 hover:text-ink"
+            class="text-fg-dim transition-colors duration-100 hover:text-fg"
             :aria-label="`Open ${entry.display_name ?? entry.name} model page`"
             title="Open model page"
             data-test="page-link"
@@ -206,7 +206,9 @@ function openPage(): void {
               <path d="M10.5 1.5 5.75 6.25" />
             </svg>
           </button>
-          <span class="border-edge data-mono rounded-full border px-1.5 text-caption text-ink-2">
+          <span
+            class="border-border font-mono text-xs rounded-control border px-1.5 text-micro text-fg-2"
+          >
             {{ entry.family }}
           </span>
         </span>
@@ -221,15 +223,15 @@ function openPage(): void {
       />
 
       <div v-if="entry.author || counts" class="flex items-center gap-2">
-        <span v-if="entry.author" class="truncate text-caption text-ink-3">{{ entry.author }}</span>
-        <span v-if="counts" class="data-mono ml-auto shrink-0 text-caption text-ink-3">
+        <span v-if="entry.author" class="truncate text-micro text-fg-dim">{{ entry.author }}</span>
+        <span v-if="counts" class="font-mono text-xs ml-auto shrink-0 text-micro text-fg-dim">
           {{ counts }}
         </span>
       </div>
 
       <p
         v-if="description"
-        class="line-clamp-2 text-caption leading-snug text-ink-2"
+        class="line-clamp-2 text-micro leading-snug text-fg-2"
         data-test="catalog-description"
         :title="description"
       >
@@ -240,7 +242,7 @@ function openPage(): void {
         <span
           v-for="host in hosts"
           :key="host"
-          class="border-edge data-mono rounded-full border px-1.5 text-caption text-ink-2"
+          class="border-border font-mono text-xs rounded-control border px-1.5 text-micro text-fg-2"
           data-test="installed-host"
         >
           {{ host }}
@@ -249,25 +251,27 @@ function openPage(): void {
 
       <div
         v-if="sizePending"
-        class="data-mono text-caption text-ink-3"
+        class="font-mono text-xs text-micro text-fg-dim"
         data-test="size-skeleton"
         aria-label="Resolving size"
       >
         SIZE …
       </div>
-      <div v-else-if="hasSizeLine" class="text-caption">
-        <div class="data-mono text-ink-2">{{ catalogSizeLabel(sizeInfo) }}</div>
-        <div v-if="catalogFetchCaption(sizeInfo)" class="text-ink-3">
+      <div v-else-if="hasSizeLine" class="text-micro">
+        <div class="font-mono text-xs text-fg-2">{{ catalogSizeLabel(sizeInfo) }}</div>
+        <div v-if="catalogFetchCaption(sizeInfo)" class="text-fg-dim">
           {{ catalogFetchCaption(sizeInfo) }}
         </div>
       </div>
 
       <div class="mt-auto flex shrink-0 items-center justify-end gap-2 pt-1">
-        <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
+        <span v-if="entry.installed" class="font-mono text-xs text-micro text-sapphire"
+          >● installed</span
+        >
         <span
           v-if="props.runtimeNotice"
           data-test="runtime-unavailable-badge"
-          class="data-mono text-caption text-ink-3"
+          class="font-mono text-xs text-micro text-fg-dim"
           :title="props.runtimeNotice.message"
         >
           {{ RUNTIME_UNAVAILABLE_BADGE }}
@@ -276,7 +280,7 @@ function openPage(): void {
           v-if="showAction"
           type="button"
           data-test="pull"
-          class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"
+          class="border-border h-7 rounded-control border px-2.5 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
           :disabled="pulling"
           @click.stop="emit('pull', entry)"
         >
@@ -294,15 +298,15 @@ function openPage(): void {
 }
 
 .catalog-card-contained:has(.catalog-card-checkbox input:checked) {
-  border-color: var(--safelight);
-  box-shadow: inset 0 0 0 1px var(--safelight);
+  border-color: var(--mold-blue);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 .catalog-card-contained--selected,
 .catalog-card-contained--selected:hover {
-  border-color: var(--sel-border);
-  background: var(--sel-bg);
-  box-shadow: inset 0 0 0 1px var(--sel-border);
+  border-color: var(--mold-blue);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 /* Model previews are overwhelmingly portrait subjects, and a centred cover

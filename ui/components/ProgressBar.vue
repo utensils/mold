@@ -47,7 +47,7 @@ const clamped = computed(() => Math.min(100, Math.max(0, props.value)));
 
 <style scoped>
 .ms-bar {
-  background: var(--bath);
+  background: var(--mold-bg-deep);
   /* Micro-radius below the control scale, per the prototype telemetry bars. */
   border-radius: 4px;
   overflow: hidden;
@@ -59,22 +59,22 @@ const clamped = computed(() => Math.min(100, Math.max(0, props.value)));
 }
 
 .ms-bar__fill--accent {
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .ms-bar__fill--info {
-  background: var(--halide);
+  background: var(--mold-sapphire);
 }
 
 .ms-bar__fill--success {
-  background: var(--success);
+  background: var(--mold-success);
 }
 
 .ms-bar__fill--warning {
-  background: var(--warning);
+  background: var(--mold-warning);
 }
 
 .ms-bar__fill--danger {
-  background: var(--stop);
+  background: var(--mold-error);
 }
 </style>

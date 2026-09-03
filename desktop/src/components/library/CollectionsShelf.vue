@@ -89,12 +89,12 @@ defineExpose({ startCreate, isCreating: () => creating.value });
     />
     <div
       v-if="canCreate"
-      class="flex flex-col gap-0.5 rounded-card border border-dashed border-ce bg-transparent p-2.5 text-left"
+      class="flex flex-col gap-0.5 rounded-card border border-dashed border-border-control bg-transparent p-2.5 text-left"
       data-test="new-collection-card"
     >
       <button
         type="button"
-        class="mb-2 flex aspect-[4/3] w-full items-center justify-center rounded-[8px] border border-dashed border-ce text-ink-3 transition-colors duration-100 hover:border-safelight hover:text-safelight focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-safelight disabled:opacity-50"
+        class="mb-2 flex aspect-[4/3] w-full items-center justify-center rounded-control border border-dashed border-border-control text-fg-dim transition-colors duration-100 hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
         aria-label="New collection"
         :disabled="busy"
         @click="startCreate"
@@ -109,28 +109,28 @@ defineExpose({ startCreate, isCreating: () => creating.value });
           type="text"
           placeholder="Collection name"
           aria-label="New collection name"
-          class="border-edge h-7 w-full rounded-control border bg-bath px-2 font-display text-[15px] font-semibold text-ink outline-none focus:border-safelight"
+          class="border-border h-7 w-full rounded-control border bg-bg-deep px-2 font-sans font-semibold text-base font-semibold text-fg outline-none focus:border-accent"
           data-test="new-collection-input"
           @keydown.enter.prevent="commitCreate"
           @keydown.esc.prevent.stop="cancelCreate"
           @blur="commitCreate"
         />
-        <span class="text-[11.5px] text-ink-3">Enter to create · Esc to cancel</span>
+        <span class="text-xs text-fg-dim">Enter to create · Esc to cancel</span>
       </template>
       <template v-else>
         <button
           type="button"
-          class="font-display text-left text-[15px] font-semibold text-ink hover:text-safelight"
+          class="font-sans font-semibold text-left text-base font-semibold text-fg hover:text-accent"
           data-test="new-collection-label"
           :disabled="busy"
           @click="startCreate"
         >
           New collection
         </button>
-        <span class="font-utility text-[10.5px] text-ink-3"
+        <span class="font-mono text-micro text-fg-dim"
           ><Keycap>{{ newCollectionChord }}</Keycap></span
         >
-        <span class="text-[11.5px] text-ink-3">
+        <span class="text-xs text-fg-dim">
           Name it, then add prints from the grid or a selection.
         </span>
       </template>

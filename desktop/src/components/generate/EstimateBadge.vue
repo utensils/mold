@@ -66,15 +66,15 @@ onUnmounted(() => {
 <template>
   <p
     v-if="visible"
-    class="edge-code"
+    class="font-mono text-micro text-fg-dim whitespace-nowrap"
     role="status"
     aria-live="polite"
     :title="ESTIMATE_TOOLTIP"
     :class="{
-      'text-halide': fit === 'fits' || fit === 'unknown',
-      'text-safelight': fit === 'tight',
-      'text-stop': fit === 'wont-fit',
-      'text-ink-3': fit === 'unavailable',
+      'text-sapphire': fit === 'fits' || fit === 'unknown',
+      'text-accent': fit === 'tight',
+      'text-error': fit === 'wont-fit',
+      'text-fg-dim': fit === 'unavailable',
     }"
   >
     {{ text }}

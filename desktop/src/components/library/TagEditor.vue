@@ -160,7 +160,7 @@ defineExpose({ focusInput });
 
 <template>
   <div
-    class="border-ce flex min-h-[34px] flex-wrap items-center gap-1.5 rounded-chrome border bg-bath px-1.5 py-1"
+    class="border-border-control flex min-h-[34px] flex-wrap items-center gap-1.5 rounded-window border bg-bg-deep px-1.5 py-1"
     :class="disabled ? 'opacity-60' : 'cursor-text'"
     data-test="tag-editor"
     @click="focusInput"
@@ -168,13 +168,13 @@ defineExpose({ focusInput });
     <span
       v-for="(tag, index) in modelValue"
       :key="tag"
-      class="border-edge inline-flex h-[22px] items-center gap-1 rounded-full border bg-bench pr-1 pl-2 text-[11.5px] text-ink"
+      class="border-border inline-flex h-[22px] items-center gap-1 rounded-control border bg-bg pr-1 pl-2 text-xs text-fg"
       data-test="tag-chip"
     >
       <span class="max-w-40 truncate">{{ tag }}</span>
       <button
         type="button"
-        class="flex h-4 w-4 items-center justify-center rounded-full text-[12px] leading-none text-ink-3 hover:bg-[color-mix(in_srgb,var(--stop)_16%,transparent)] hover:text-stop disabled:cursor-default disabled:hover:bg-transparent"
+        class="flex h-4 w-4 items-center justify-center rounded-inner text-xs leading-none text-fg-dim hover:bg-error/15 hover:text-error disabled:cursor-default disabled:hover:bg-transparent"
         :aria-label="`Remove tag ${tag}`"
         :disabled="disabled"
         data-test="tag-remove"
@@ -189,7 +189,7 @@ defineExpose({ focusInput });
         v-model="draft"
         data-selectable
         type="text"
-        class="h-[22px] w-full bg-transparent px-1 text-[11.5px] text-ink outline-none placeholder:text-ink-3"
+        class="h-[22px] w-full bg-transparent px-1 text-xs text-fg outline-none placeholder:text-fg-dim"
         role="combobox"
         aria-autocomplete="list"
         :aria-expanded="open && matches.length > 0"
@@ -209,7 +209,7 @@ defineExpose({ focusInput });
         :id="listboxId"
         role="listbox"
         aria-label="Tag suggestions"
-        class="border-edge absolute top-full left-0 z-20 mt-1 max-h-48 w-56 overflow-y-auto rounded-chrome border bg-bench py-1 shadow-[0_4px_8px_rgba(0,0,0,0.35)]"
+        class="border-border absolute top-full left-0 z-20 mt-1 max-h-48 w-56 overflow-y-auto rounded-window border bg-bg py-1 shadow-md"
         data-test="tag-suggestions"
       >
         <li
@@ -218,17 +218,13 @@ defineExpose({ focusInput });
           :key="tag.name"
           role="option"
           :aria-selected="i === cursor"
-          class="flex h-[26px] cursor-pointer items-center justify-between px-3 text-body"
-          :class="
-            i === cursor
-              ? 'bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)] text-ink'
-              : 'text-ink-2'
-          "
+          class="flex h-[26px] cursor-pointer items-center justify-between px-3 text-sm"
+          :class="i === cursor ? 'bg-accent-tint text-fg' : 'text-fg-2'"
           @mouseenter="cursor = i"
           @mousedown.prevent="commit(tag.name)"
         >
           <span class="truncate">{{ tag.name }}</span>
-          <span class="font-utility text-[10px] text-ink-3">{{ tag.count }}</span>
+          <span class="font-mono text-micro text-fg-dim">{{ tag.count }}</span>
         </li>
       </ul>
     </span>

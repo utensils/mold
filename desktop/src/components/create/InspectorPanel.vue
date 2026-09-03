@@ -43,6 +43,10 @@ import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
+import TemplatesPanel from "../generate/TemplatesPanel.vue";
+import HostChip from "./HostChip.vue";
+import { INSPECTOR_TABS, type InspectorTab } from "./inspectorTabs";
+import type { GenerationTemplate } from "../../lib/generationTemplates";
 import IdentityWell from "./IdentityWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -82,6 +86,9 @@ import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    tab?: InspectorTab;
+    /** Recent prompts, newest first, for the Recent tab. */
+    history?: string[];
     /** Seed of the most recent finished print — powers "lock last seed". */
     lastSeed?: number | null;
     /** Per-model chain caps for the selected model, when Create has them —
@@ -90,7 +97,13 @@ const props = withDefaults(
     /** Why the canvas holds its current size — the shape resolver's authority. */
     canvasIntent?: CanvasIntent;
   }>(),
-  { lastSeed: null, chainLimits: null, canvasIntent: "model-default" },
+  {
+    tab: "settings",
+    history: () => [],
+    lastSeed: null,
+    chainLimits: null,
+    canvasIntent: "model-default",
+  },
 );
 
 const emit = defineEmits<{
@@ -99,6 +112,10 @@ const emit = defineEmits<{
   "reset-settings": [];
   /** The picker's "Not installed" row: offer the pull for this exact id. */
   "pull-missing-model": [model: string];
+  "update:tab": [tab: InspectorTab];
+  "load-template": [template: GenerationTemplate];
+  /** Recent tab: bring a past prompt back as the words to make. */
+  "use-prompt": [prompt: string];
 }>();
 const durationRoutingRequest = computed(() => buildRequest(props.form));
 
@@ -658,14 +675,6 @@ function rerollSeed() {
   props.form.seed = String(randomSeed());
 }
 
-const MAX_BATCH_SIZE = 10_000;
-const batchLocked = computed(
-  () =>
-    caps.value.forcesBatchSizeOne ||
-    (caps.value.sourceImageMode === "references" && props.form.imageAttachments.length > 0),
-);
-const batchMax = computed(() => (batchLocked.value ? 1 : MAX_BATCH_SIZE));
-
 // ── File under (Create-time Library filing) ────────────────────────────────
 
 // Positive knowledge only, exactly like the V3 Library's own gate: an older
@@ -735,6 +744,7 @@ function resetSettings() {
     draft.clearOpeningImage();
   }
 }
+defineExpose({ setOutputMode });
 </script>
 
 <template>
@@ -746,9 +756,51 @@ function resetSettings() {
       @commit="onInspectorCommit"
       @reset="onInspectorReset"
     />
-    <div class="ms-inspector__scroll">
+    <div class="ms-inspector__tabs" role="tablist" aria-label="Inspector">
+      <button
+        v-for="t in INSPECTOR_TABS"
+        :key="t.id"
+        type="button"
+        role="tab"
+        class="ms-inspector__tab"
+        :data-test="`inspector-tab-${t.id}`"
+        :aria-selected="tab === t.id"
+        :data-on="tab === t.id ? 'true' : undefined"
+        @click="emit('update:tab', t.id)"
+      >
+        {{ t.label }}
+      </button>
+    </div>
+    <div v-if="tab === 'starters'" class="ms-inspector__scroll" data-test="inspector-starters">
+      <p class="ms-inspector__lead">
+        Pick a starting point and change the words — every setting comes with it.
+      </p>
+      <TemplatesPanel
+        :form="form"
+        :models="installedModels"
+        @load="emit('load-template', $event)"
+      />
+    </div>
+    <div v-else-if="tab === 'recent'" class="ms-inspector__scroll" data-test="inspector-recent">
+      <p v-if="history.length === 0" class="ms-inspector__lead">
+        Words you generate with show up here, newest first.
+      </p>
+      <button
+        v-for="(prompt, index) in history"
+        :key="`${index}-${prompt}`"
+        type="button"
+        data-test="recent-prompt"
+        class="ms-recent"
+        :title="prompt"
+        @click="emit('use-prompt', prompt)"
+      >
+        <span class="ms-recent__prompt">{{ prompt }}</span>
+        <span class="ms-recent__action">Use these words</span>
+      </button>
+    </div>
+    <div v-else class="ms-inspector__scroll">
       <div class="ms-inspector__head">
-        <span class="ms-inspector__kicker">Settings</span>
+        <span class="ms-inspector__kicker">Style</span>
         <button
           type="button"
           class="ms-inspector__reset"
@@ -761,9 +813,8 @@ function resetSettings() {
         </button>
       </div>
 
-      <!-- Model -->
-      <div class="ms-field">
-        <div class="ms-field__label">Model</div>
+      <!-- Style (the model) -->
+      <div class="ms-field" data-test="inspector-style">
         <ModelPicker
           :models="pickerModels"
           :selected="selectedPickerModel"
@@ -938,7 +989,7 @@ function resetSettings() {
             placeholder="keep raw surface"
             :value="form.mesh.targetFaces ?? ''"
             :aria-invalid="targetFacesError ? 'true' : undefined"
-            class="ms-seed__input data-mono"
+            class="ms-seed__input font-mono text-xs"
             @input="setTargetFaces(($event.target as HTMLInputElement).value)"
           />
         </div>
@@ -1080,7 +1131,7 @@ function resetSettings() {
             type="text"
             inputmode="numeric"
             aria-label="Seed value"
-            class="ms-seed__input data-mono"
+            class="ms-seed__input font-mono text-xs"
           />
           <button
             type="button"
@@ -1092,7 +1143,7 @@ function resetSettings() {
             <Icon name="reroll" :size="15" />
           </button>
         </div>
-        <p v-if="seedHint" data-test="seed-hint" class="ms-field__hint text-safelight">
+        <p v-if="seedHint" data-test="seed-hint" class="ms-field__hint text-accent">
           {{ seedHint }}
         </p>
         <p v-if="uiSeedMode === 'random'" class="ms-field__hint">
@@ -1111,24 +1162,14 @@ function resetSettings() {
         </p>
       </div>
 
-      <!-- Batch -->
-      <div class="ms-field ms-field--row">
-        <span class="ms-field__label ms-field__label--inline">Batch</span>
-        <Stepper
-          v-if="!isSequence"
-          :model-value="batchLocked ? 1 : form.batchSize"
-          :min="1"
-          :max="batchMax"
-          :editable="!batchLocked"
-          label="Batch size"
-          @update:model-value="form.batchSize = $event"
-        />
-        <span v-else class="data-mono text-ink-2" data-test="batch-locked">1</span>
+      <!-- Where it runs -->
+      <div class="ms-field ms-field--row" data-test="inspector-host">
+        <div>
+          <div class="ms-field__label ms-field__label--inline">Where it runs</div>
+          <p class="ms-field__hint">Auto picks whichever machine has the style</p>
+        </div>
+        <HostChip />
       </div>
-      <p v-if="isSequence" class="ms-field__hint -mt-2">a sequence renders one timeline</p>
-      <p v-else-if="batchLocked" class="ms-field__hint -mt-2">
-        Locked to 1 — edit models render one at a time.
-      </p>
 
       <!-- File under — where this print lands in the Library, decided before
            Generate rather than discovered after it. -->
@@ -1196,17 +1237,78 @@ function resetSettings() {
 
 <style scoped>
 .ms-inspector {
+  display: flex;
+  flex-direction: column;
   position: relative;
   min-height: 0;
   flex: 0 0 auto;
-  border-left: 1px solid var(--edge);
-  background: var(--bench);
+  border-left: 1px solid var(--mold-border);
+  background: var(--mold-bg);
 }
 .ms-inspector__scroll {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 20px 18px;
+  padding: 14px;
+}
+.ms-inspector__tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg);
+}
+.ms-inspector__tab {
+  flex: 1;
+  padding: 6px 0;
+  border: 0;
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ms-inspector__tab[data-on="true"] {
+  background: var(--mold-row-selected);
+  color: var(--mold-text);
+}
+.ms-inspector__lead {
+  margin: 0 0 12px;
+  font-size: var(--mold-fs-xs);
+  line-height: var(--mold-lh-body);
+  color: var(--mold-text-2);
+}
+.ms-recent {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 8px;
+  padding: 10px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.ms-recent:hover {
+  background: var(--mold-row-hover);
+}
+.ms-recent__prompt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
+}
+.ms-recent__action {
+  font-size: var(--mold-fs-micro);
+  font-weight: 600;
+  color: var(--mold-blue);
 }
 .ms-inspector__head {
   display: flex;
@@ -1216,37 +1318,37 @@ function resetSettings() {
   margin-bottom: 16px;
 }
 .ms-inspector__kicker {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-inspector__reset {
   flex-shrink: 0;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 4px 8px;
   border-radius: 8px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition:
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-inspector__reset:hover {
-  background: color-mix(in srgb, var(--rebate) 6%, transparent);
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-text) 6%, transparent);
+  color: var(--mold-text);
 }
 .ms-field {
   margin-bottom: 20px;
 }
 /* Highlighted per mockup 1c: the Output choice reads as a mode, not a knob. */
 .ms-output {
-  border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--ce));
-  background: color-mix(in srgb, var(--safelight) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
   border-radius: 9px;
   padding: 11px;
 }
@@ -1260,7 +1362,7 @@ function resetSettings() {
 }
 .ms-field__label {
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
 }
@@ -1269,7 +1371,7 @@ function resetSettings() {
 }
 .ms-field__hint {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   margin-top: 6px;
   line-height: 1.4;
 }
@@ -1277,18 +1379,18 @@ function resetSettings() {
   margin-top: 12px;
 }
 .ms-field__hint--warning {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 .ms-field__error {
   font-size: 11px;
-  color: var(--stop);
+  color: var(--mold-error);
   margin-top: 6px;
 }
 .ms-field__match-source {
   margin-top: 7px;
   border: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 11px;
   cursor: pointer;
 }
@@ -1299,23 +1401,23 @@ function resetSettings() {
   display: flex;
   gap: 3px;
   padding: 3px;
-  background: var(--bath);
-  border: 1px solid var(--ce);
+  background: var(--mold-bg-deep);
+  border: 1px solid var(--mold-border-control);
   border-radius: 9px;
 }
 .ms-seg__btn {
   flex: 1;
   border: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 7px;
   border-radius: 6px;
   font-size: 12px;
   cursor: pointer;
 }
 .ms-seg__btn[data-on="true"] {
-  background: var(--bench);
-  color: var(--rebate);
+  background: var(--mold-bg);
+  color: var(--mold-text);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 .ms-seed__value {
@@ -1328,34 +1430,34 @@ function resetSettings() {
   height: 32px;
   width: 100%;
   min-width: 0;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 6px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
   padding: 0 8px;
   font-size: 13px;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .ms-seed__reroll {
   flex-shrink: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   background: transparent;
   border: 0;
   cursor: pointer;
 }
 .ms-seed__reroll:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .ms-seed__lock {
-  color: var(--halide);
+  color: var(--mold-sapphire);
 }
 .ms-seed__lock:hover {
   text-decoration: underline;
 }
 .ms-advanced {
   width: 100%;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 11px;
   border-radius: 9px;
   font-size: 12px;
@@ -1365,16 +1467,16 @@ function resetSettings() {
   gap: 8px;
   cursor: pointer;
   transition:
-    background var(--dur-quick) var(--ease),
-    border-color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-advanced:hover {
-  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 6%, transparent);
 }
 .ms-advanced[aria-expanded="true"] {
-  border-color: color-mix(in srgb, var(--safelight) 45%, var(--ce));
-  background: color-mix(in srgb, var(--safelight) 7%, transparent);
-  color: var(--rebate);
+  border-color: color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
+  color: var(--mold-text);
 }
 .ms-advanced__label,
 .ms-advanced__meta {
@@ -1383,6 +1485,6 @@ function resetSettings() {
   gap: 8px;
 }
 .ms-advanced__meta {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 </style>

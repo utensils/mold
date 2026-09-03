@@ -5,12 +5,13 @@
 
 import { CURRENT_PLATFORM, type DesktopPlatform } from "./platform";
 
-// The five destinations map to ⌘1–⌘4 plus ⌘, for Settings.
+// The sidebar's destinations in order — ⌘1–⌘5 — plus ⌘, for Settings.
 export const NAV_ROUTES: Readonly<Record<string, string>> = {
   "1": "/create",
-  "2": "/library",
-  "3": "/models",
-  "4": "/machines",
+  "2": "/queue",
+  "3": "/library",
+  "4": "/models",
+  "5": "/machines",
   ",": "/settings",
 };
 

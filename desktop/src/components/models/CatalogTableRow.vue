@@ -128,7 +128,7 @@ const counts = computed(() => {
       >
         <input
           type="checkbox"
-          class="h-4 w-4 accent-[var(--safelight)]"
+          class="h-4 w-4 accent-accent"
           :checked="checked"
           :disabled="!selectable"
           :aria-label="`Select ${entry.display_name ?? entry.name}`"
@@ -144,17 +144,21 @@ const counts = computed(() => {
         :show-modality="false"
         :data-test="entry.nsfw ? 'nsfw-tag' : undefined"
       />
-      <span v-if="entry.author" class="min-w-0 shrink truncate text-caption text-ink-3">
+      <span v-if="entry.author" class="min-w-0 shrink truncate text-micro text-fg-dim">
         {{ entry.author }}
       </span>
-      <span v-if="counts" class="data-mono shrink-0 text-caption text-ink-3">{{ counts }}</span>
+      <span v-if="counts" class="font-mono text-xs shrink-0 text-micro text-fg-dim">{{
+        counts
+      }}</span>
     </template>
     <template #actions>
-      <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
+      <span v-if="entry.installed" class="font-mono text-xs text-micro text-sapphire"
+        >● installed</span
+      >
       <span
         v-if="props.runtimeNotice"
         data-test="runtime-unavailable-badge"
-        class="data-mono text-caption text-ink-3"
+        class="font-mono text-xs text-micro text-fg-dim"
         :title="props.runtimeNotice.message"
       >
         {{ RUNTIME_UNAVAILABLE_BADGE }}
@@ -163,7 +167,7 @@ const counts = computed(() => {
         v-if="showAction"
         type="button"
         data-test="pull"
-        class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"
+        class="border-border h-7 rounded-control border px-2.5 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
         :disabled="pulling"
         @click.stop="emit('pull', entry)"
       >

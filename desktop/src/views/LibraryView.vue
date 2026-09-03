@@ -1401,8 +1401,8 @@ watch(searchInput, (value) => {
 
 const kindOptions = computed(() => [
   { value: "all" as GalleryKindFilter, label: "All" },
-  { value: "image" as GalleryKindFilter, label: "Images" },
-  { value: "video" as GalleryKindFilter, label: "Video" },
+  { value: "image" as GalleryKindFilter, label: "Pictures" },
+  { value: "video" as GalleryKindFilter, label: "Clips" },
   { value: "audio" as GalleryKindFilter, label: "Audio" },
   { value: "mesh" as GalleryKindFilter, label: "3D" },
 ]);
@@ -2580,29 +2580,29 @@ onUnmounted(() => {
     <!-- Collections drill-in: crumb bar with Select + Edit. -->
     <div
       v-if="inCollections && gallery.collectionSlug"
-      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge bg-[color-mix(in_srgb,var(--bench)_50%,var(--bath))] px-6"
+      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-border bg-scrim px-6"
       data-test="collection-crumbs"
     >
       <button
         type="button"
-        class="flex items-center gap-0.5 rounded-control text-body text-ink-2 hover:text-ink"
+        class="flex items-center gap-0.5 rounded-control text-sm text-fg-2 hover:text-fg"
         data-test="crumb-back"
         @click="exitCollection"
       >
         <Icon name="chevron-left" :size="14" />
         Collections
       </button>
-      <span class="text-ink-3" aria-hidden="true">›</span>
-      <span class="font-display text-[15px] font-semibold text-ink" data-test="crumb-here">
+      <span class="text-fg-dim" aria-hidden="true">›</span>
+      <span class="font-sans font-semibold text-base font-semibold text-fg" data-test="crumb-here">
         {{ drillInName }}
       </span>
-      <span v-if="openCollection" class="font-utility text-[10.5px] text-ink-3">
+      <span v-if="openCollection" class="font-mono text-micro text-fg-dim">
         {{ openCollection.hosts.map((h) => sourceLabel(h.hostId)).join(" · ") }}
       </span>
       <div class="flex-1" />
       <button
         type="button"
-        class="flex h-[30px] items-center gap-1.5 rounded-chrome border border-edge bg-bench px-2.5 text-[12.5px] text-ink-2 hover:text-ink"
+        class="flex h-[30px] items-center gap-1.5 rounded-window border border-border bg-bg px-2.5 text-xs text-fg-2 hover:text-fg"
         data-test="collection-edit"
         aria-haspopup="menu"
         @click="openEditMenu"
@@ -2692,15 +2692,15 @@ onUnmounted(() => {
         <div
           v-for="tile in visibleTiles"
           :key="tile.model.key"
-          class="ms-lib-tile group overflow-hidden rounded-[9px] border"
+          class="ms-lib-tile group overflow-hidden rounded-control border"
           :class="
             (
               selectMode
                 ? bulkSelection.has(tile.model.item.filename)
                 : isSelected(tile.model.entry)
             )
-              ? 'border-transparent ring-2 ring-safelight'
-              : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
+              ? 'border-transparent ring-2 ring-accent'
+              : 'border-border'
           "
           :style="{
             width: `${tile.width}px`,
@@ -2761,7 +2761,7 @@ onUnmounted(() => {
               <span
                 v-if="tile.model.video || tile.model.audio || tile.model.mesh"
                 data-test="media-kind-badge"
-                class="rounded-control bg-black/60 px-1 text-caption text-on-media"
+                class="rounded-control bg-black/60 px-1 text-micro text-on-media"
                 :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
               >
                 {{ tile.model.mesh ? "◈" : tile.model.audio ? "♪" : "▶" }}
@@ -2770,10 +2770,10 @@ onUnmounted(() => {
             <span
               v-if="selectMode"
               data-test="select-indicator"
-              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
+              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-control text-micro"
               :class="
                 bulkSelection.has(tile.model.item.filename)
-                  ? 'bg-safelight font-semibold text-on-accent'
+                  ? 'bg-accent font-semibold text-on-accent'
                   : 'border border-white/70 bg-black/40 text-on-media'
               "
             >
@@ -2784,7 +2784,7 @@ onUnmounted(() => {
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
               :title="`Available on ${tile.model.availability}`"
             >
               {{ tile.model.availability }}
@@ -2792,7 +2792,7 @@ onUnmounted(() => {
             <span
               v-if="!inTrash"
               data-test="edge-strip"
-              class="edge-code absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
             >
               {{ tile.model.title }} · {{ tile.model.modelLabel }} · S
               {{ tile.model.item.metadata.seed }}
@@ -2804,7 +2804,7 @@ onUnmounted(() => {
             v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
             type="button"
             data-test="tile-favorite"
-            class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-on-media transition-opacity duration-100"
+            class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-control text-on-media transition-opacity duration-100"
             :class="
               tile.model.favorite
                 ? 'ms-lib-heart--on opacity-100'
@@ -3007,7 +3007,7 @@ onUnmounted(() => {
   left: 0;
   contain: layout paint style;
   transform: translate3d(var(--tile-x), var(--tile-y), 0);
-  transition: transform var(--dur-quick) var(--ease);
+  transition: transform var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-lib-tile:hover {
@@ -3021,30 +3021,30 @@ onUnmounted(() => {
 }
 
 .ms-lib-tile > button:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: -2px;
 }
 
 .ms-lib-new {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 8.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  background: var(--safelight);
-  color: var(--on-accent);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   padding: 2px 6px;
   border-radius: 5px;
 }
 
 .ms-lib-upscaled {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 8.5px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  background: color-mix(in srgb, var(--rebate) 88%, black);
-  color: var(--on-accent);
+  background: color-mix(in srgb, var(--mold-text) 88%, black);
+  color: var(--mold-on-accent);
   padding: 2px 6px;
   border-radius: 5px;
 }
@@ -3060,7 +3060,7 @@ onUnmounted(() => {
 }
 
 .ms-lib-heart:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
   opacity: 1;
 }

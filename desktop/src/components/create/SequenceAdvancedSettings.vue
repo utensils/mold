@@ -193,14 +193,14 @@ function reset() {
   margin-bottom: 10px;
 }
 .ms-adv__summary {
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
 }
 .ms-adv__reset {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   border-radius: 8px;
   cursor: pointer;
 }
@@ -217,20 +217,20 @@ function reset() {
   width: 100%;
   box-sizing: border-box;
   resize: none;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 8px;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding: 9px 10px;
 }
 .ms-input {
   width: 100%;
   box-sizing: border-box;
   min-height: 36px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 8px;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding: 8px 10px;
 }
 .ms-camera-path,
@@ -238,7 +238,7 @@ function reset() {
   margin-top: 9px;
 }
 .ms-hint {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 10px;
   line-height: 1.45;
 }
@@ -249,7 +249,7 @@ function reset() {
   margin-top: 9px;
 }
 .ms-switch-row {
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 12px;
 }
 </style>

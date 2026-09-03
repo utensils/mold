@@ -87,9 +87,9 @@ function onRowKeydown(event: KeyboardEvent): void {
 
 <template>
   <div
-    class="model-table-row rounded-control transition-colors duration-100 hover:bg-bath"
+    class="model-table-row rounded-control transition-colors duration-100 hover:bg-bg-deep"
     :class="[
-      clickable ? 'cursor-pointer focus-visible:outline-2 focus-visible:outline-safelight' : '',
+      clickable ? 'cursor-pointer focus-visible:outline-2 focus-visible:outline-accent' : '',
       barPercent != null ? 'model-table-row--has-footprint' : '',
       $slots.actions ? 'model-table-row--has-actions' : '',
       selected ? 'model-table-row--selected' : '',
@@ -113,16 +113,16 @@ function onRowKeydown(event: KeyboardEvent): void {
       <Tooltip v-if="loaded !== undefined" :text="loaded ? 'On GPU' : 'Cold'" class="shrink-0">
         <span
           class="h-1.5 w-1.5 rounded-full"
-          :class="loaded ? 'bg-safelight' : 'bg-transparent'"
+          :class="loaded ? 'bg-accent' : 'bg-transparent'"
           role="img"
           :aria-label="loaded ? 'On GPU' : 'Cold'"
         />
       </Tooltip>
-      <SourceGlyph :source="source" class="shrink-0 text-ink-3" />
+      <SourceGlyph :source="source" class="shrink-0 text-fg-dim" />
       <button
         v-if="clickable"
         type="button"
-        class="model-table-row__title truncate text-left text-body text-ink transition-colors duration-100 hover:text-safelight"
+        class="model-table-row__title truncate text-left text-sm text-fg transition-colors duration-100 hover:text-accent"
         :title="`${name} — view details`"
         :aria-label="
           !interactiveContainer ? (accessibilityLabel ?? `${name} — view details`) : undefined
@@ -134,7 +134,7 @@ function onRowKeydown(event: KeyboardEvent): void {
       </button>
       <span
         v-else
-        class="model-table-row__title truncate text-body text-ink"
+        class="model-table-row__title truncate text-sm text-fg"
         :title="name"
         data-test="row-title"
       >
@@ -144,23 +144,26 @@ function onRowKeydown(event: KeyboardEvent): void {
         v-for="label in hostLabels"
         :key="label"
         data-test="installed-host"
-        class="border-edge data-mono shrink-0 rounded-full border px-1.5 text-caption text-ink-3"
+        class="border-border font-mono text-xs shrink-0 rounded-control border px-1.5 text-micro text-fg-dim"
       >
         {{ label }}
       </span>
       <span
         v-if="quant"
-        class="border-edge data-mono shrink-0 rounded-full border px-1.5 text-caption text-ink-2"
+        class="border-border font-mono text-xs shrink-0 rounded-control border px-1.5 text-micro text-fg-2"
       >
         {{ quant }}
       </span>
-      <span v-if="familyChip" class="edge-code shrink-0" data-test="row-family">{{
-        familyChip
-      }}</span>
+      <span
+        v-if="familyChip"
+        class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+        data-test="row-family"
+        >{{ familyChip }}</span
+      >
       <Tooltip v-if="pageUrl" text="Open model page" class="shrink-0">
         <button
           type="button"
-          class="text-ink-3 transition-colors duration-100 hover:text-ink"
+          class="text-fg-dim transition-colors duration-100 hover:text-fg"
           :aria-label="`Open ${name} model page`"
           data-test="model-page-link"
           @click.stop="pageUrl && void openExternal(pageUrl)"
@@ -200,14 +203,14 @@ function onRowKeydown(event: KeyboardEvent): void {
       <span class="min-w-0 max-w-40 shrink text-right" data-test="row-sizes">
         <span
           v-if="sizePrimary"
-          class="data-mono block truncate text-caption text-ink-2"
+          class="font-mono text-xs block truncate text-micro text-fg-2"
           :title="sizePrimary"
         >
           {{ sizePrimary }}
         </span>
         <span
           v-if="sizeSecondary"
-          class="data-mono block truncate text-[10px] text-ink-3"
+          class="font-mono text-xs block truncate text-micro text-fg-dim"
           :title="sizeSecondary"
         >
           {{ sizeSecondary }}
@@ -251,8 +254,8 @@ function onRowKeydown(event: KeyboardEvent): void {
 
 .model-table-row--selected,
 .model-table-row--selected:hover {
-  background: var(--sel-bg);
-  box-shadow: inset 3px 0 var(--sel-border);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 3px 0 var(--mold-blue);
 }
 
 .model-table-row__footprint {

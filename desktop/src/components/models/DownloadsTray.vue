@@ -45,11 +45,11 @@ const modelLabel = (row: HostedDownloadJob) =>
 
 /** Safelight chip palette per download status. */
 const STATUS_CHIP: Record<DownloadJobStatus, string> = {
-  active: "border-safelight/40 text-safelight",
-  queued: "border-edge text-ink-2",
-  completed: "border-halide/60 text-halide",
-  failed: "border-stop/60 text-stop",
-  cancelled: "border-edge text-ink-3",
+  active: "border-accent/40 text-accent",
+  queued: "border-border text-fg-2",
+  completed: "border-sapphire/60 text-sapphire",
+  failed: "border-error/60 text-error",
+  cancelled: "border-border text-fg-dim",
 };
 
 function rowKey(row: HostedDownloadJob): string {
@@ -84,35 +84,38 @@ async function retry(row: HostedDownloadJob) {
 <template>
   <div
     v-if="rows.length || history.length > 0"
-    class="border-edge border-b bg-bench px-4 py-2"
+    class="border-border border-b bg-bg px-4 py-2"
     data-test="downloads-tray"
   >
-    <div class="edge-code mb-2">Downloads</div>
+    <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-2">Downloads</div>
     <div class="flex flex-col gap-2">
       <div
         v-for="row in rows"
         :key="rowKey(row)"
-        class="-mx-1 flex flex-col gap-1 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
+        class="-mx-1 flex flex-col gap-1 rounded-control px-1 transition-colors duration-100 hover:bg-bg-deep"
       >
         <div class="flex items-center gap-3">
           <span class="flex w-52 shrink-0 items-center gap-1.5">
-            <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-ink-3" />
-            <span class="min-w-0 truncate text-body text-ink" :title="modelLabel(row)">
+            <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-fg-dim" />
+            <span class="min-w-0 truncate text-sm text-fg" :title="modelLabel(row)">
               {{ modelLabel(row) }}
             </span>
-            <span class="edge-code shrink-0" data-test="download-host">
+            <span
+              class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+              data-test="download-host"
+            >
               · {{ hostLabel(row.hostLabel) }}
             </span>
           </span>
           <span
-            class="data-mono shrink-0 rounded-full border px-1.5 text-caption"
+            class="font-mono text-xs shrink-0 rounded-control border px-1.5 text-micro"
             :class="STATUS_CHIP[row.job.status]"
             data-test="download-status"
           >
             {{ statusLabel(row) }}
           </span>
           <div
-            class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath"
+            class="h-1.5 flex-1 overflow-hidden bg-bg-deep"
             role="progressbar"
             aria-valuemin="0"
             aria-valuemax="100"
@@ -120,16 +123,16 @@ async function retry(row: HostedDownloadJob) {
             :aria-label="`Downloading ${modelLabel(row)} on ${hostLabel(row.hostLabel)}`"
           >
             <div
-              class="h-full bg-safelight transition-[width] duration-300"
+              class="h-full bg-accent transition-[width] duration-300"
               :style="{ width: `${percent(row.job.bytes_done, row.job.bytes_total)}%` }"
             />
           </div>
-          <span class="data-mono w-28 shrink-0 text-right text-ink-3">
+          <span class="font-mono text-xs w-28 shrink-0 text-right text-fg-dim">
             {{ formatGB(row.job.bytes_done) }} / {{ formatGB(row.job.bytes_total) }}
           </span>
           <button
             type="button"
-            class="text-ink-3 hover:text-stop active:translate-y-px"
+            class="text-fg-dim hover:text-error active:translate-y-px"
             title="Cancel download"
             :aria-label="`Cancel download of ${modelLabel(row)} on ${hostLabel(row.hostLabel)}`"
             :disabled="downloads.isCancelling(row.hostId, row.job.id)"
@@ -140,11 +143,11 @@ async function retry(row: HostedDownloadJob) {
         </div>
         <div
           v-if="row.job.status === 'active'"
-          class="flex items-center gap-3 pl-6 text-caption text-ink-3"
+          class="flex items-center gap-3 pl-6 text-micro text-fg-dim"
         >
           <span
             v-if="row.job.current_file"
-            class="data-mono min-w-0 truncate"
+            class="font-mono text-xs min-w-0 truncate"
             :title="row.job.current_file"
             data-test="download-current-file"
           >
@@ -162,7 +165,7 @@ async function retry(row: HostedDownloadJob) {
     <div v-if="history.length > 0" :class="downloads.hasActivity ? 'mt-2' : ''">
       <button
         type="button"
-        class="edge-code flex items-center gap-1 text-ink-3 hover:text-ink"
+        class="font-mono text-micro text-fg-dim whitespace-nowrap flex items-center gap-1 text-fg-dim hover:text-fg"
         :aria-expanded="historyOpen"
         data-test="history-toggle"
         @click="historyOpen = !historyOpen"
@@ -176,27 +179,30 @@ async function retry(row: HostedDownloadJob) {
         <li
           v-for="row in history"
           :key="rowKey(row)"
-          class="-mx-1 flex items-center gap-3 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
+          class="-mx-1 flex items-center gap-3 rounded-control px-1 transition-colors duration-100 hover:bg-bg-deep"
         >
           <span
-            class="data-mono shrink-0 rounded-full border px-1.5 text-caption"
+            class="font-mono text-xs shrink-0 rounded-control border px-1.5 text-micro"
             :class="STATUS_CHIP[row.job.status]"
             data-test="history-status"
           >
             {{ row.job.status }}
           </span>
           <span class="flex min-w-0 items-center gap-1.5">
-            <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-ink-3" />
-            <span class="min-w-0 truncate text-body text-ink" :title="modelLabel(row)">
+            <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-fg-dim" />
+            <span class="min-w-0 truncate text-sm text-fg" :title="modelLabel(row)">
               {{ modelLabel(row) }}
             </span>
-            <span class="edge-code shrink-0" data-test="download-host">
+            <span
+              class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+              data-test="download-host"
+            >
               · {{ hostLabel(row.hostLabel) }}
             </span>
           </span>
           <span
             v-if="row.job.error"
-            class="min-w-0 flex-1 truncate text-caption text-stop"
+            class="min-w-0 flex-1 truncate text-micro text-error"
             :title="row.job.error"
           >
             {{ row.job.error }}
@@ -205,7 +211,7 @@ async function retry(row: HostedDownloadJob) {
           <button
             v-if="row.job.status === 'failed'"
             type="button"
-            class="border-edge shrink-0 rounded-full border px-2 text-caption text-ink-2 hover:border-safelight hover:text-safelight active:translate-y-px"
+            class="border-border shrink-0 rounded-control border px-2 text-micro text-fg-2 hover:border-accent hover:text-accent active:translate-y-px"
             :aria-label="`Retry download of ${modelLabel(row)} on ${hostLabel(row.hostLabel)}`"
             :disabled="isRetrying(row)"
             data-test="download-retry"

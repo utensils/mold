@@ -30,7 +30,7 @@ async function create() {
 
 <template>
   <div class="max-w-md">
-    <p class="mb-3 text-caption text-ink-3">
+    <p class="mb-3 text-micro text-fg-dim">
       Profiles keep separate per-model preferences and generation settings (rows tagged ⌂ DB).
       Bootstrap settings (⛁ file) are shared.
     </p>
@@ -39,25 +39,29 @@ async function create() {
         v-for="p in config.profiles"
         :key="p"
         type="button"
-        class="flex h-8 items-center gap-2 rounded-control px-2.5 text-left text-body"
+        class="flex h-8 items-center gap-2 rounded-control px-2.5 text-left text-sm"
         :class="
           p === config.activeProfile
-            ? 'bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)] text-ink'
-            : 'text-ink-2 hover:bg-bench hover:text-ink'
+            ? 'bg-accent-tint text-fg'
+            : 'text-fg-2 hover:bg-bg hover:text-fg'
         "
         @click="switchTo(p)"
       >
         <span class="min-w-0 flex-1 truncate">{{ p }}</span>
-        <span v-if="p === config.activeProfile" class="edge-code text-safelight">ACTIVE</span>
+        <span
+          v-if="p === config.activeProfile"
+          class="font-mono text-micro text-fg-dim whitespace-nowrap text-accent"
+          >ACTIVE</span
+        >
       </button>
     </div>
-    <p v-else class="text-caption text-ink-3">No profiles reported by this engine.</p>
+    <p v-else class="text-micro text-fg-dim">No profiles reported by this engine.</p>
 
     <div class="mt-3">
       <button
         v-if="!creating"
         type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
         @click="creating = true"
       >
         New profile…
@@ -68,7 +72,7 @@ async function create() {
           data-selectable
           type="text"
           placeholder="profile name"
-          class="border-edge data-mono h-7 w-48 rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3"
+          class="border-border font-mono text-xs h-7 w-48 rounded-control border bg-bg-deep px-2 text-fg placeholder:text-fg-dim"
           @keydown.enter="create"
           @keydown.escape="
             creating = false;
@@ -77,7 +81,7 @@ async function create() {
         />
         <button
           type="button"
-          class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-on-accent disabled:opacity-50"
+          class="h-7 rounded-control bg-accent px-2.5 text-sm font-semibold text-on-accent disabled:opacity-50"
           :disabled="!newName.trim()"
           @click="create"
         >

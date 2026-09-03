@@ -50,7 +50,7 @@ describe("CollectionCard", () => {
     expect(wrapper.get("[data-test='collection-hidden-badge']").text()).toBe("Hidden");
     const meta = wrapper.get("[data-test='collection-meta']");
     expect(meta.text()).toBe("9 prints · This Mac · plato");
-    expect(meta.classes()).toContain("font-utility");
+    expect(meta.classes()).toContain("font-mono");
     expect(wrapper.get("[data-test='collection-updated']").text()).toBe("Updated 2h ago");
   });
 

@@ -12,7 +12,7 @@ export const router = createRouter({
     {
       path: "/create",
       name: "create",
-      meta: { title: "Create" },
+      meta: { title: "New image" },
       component: () => import("./views/GenerateView.vue"),
     },
     {
@@ -23,15 +23,21 @@ export const router = createRouter({
       redirect: { path: "/create", query: { output: "sequence" } },
     },
     {
+      path: "/queue",
+      name: "queue",
+      meta: { title: "Queue" },
+      component: () => import("./views/QueueView.vue"),
+    },
+    {
       path: "/library",
       name: "library",
-      meta: { title: "Library" },
+      meta: { title: "My images" },
       component: () => import("./views/LibraryView.vue"),
     },
     {
       path: "/models",
       name: "models",
-      meta: { title: "Models" },
+      meta: { title: "Styles" },
       component: () => import("./views/ModelsView.vue"),
     },
     {
@@ -45,13 +51,13 @@ export const router = createRouter({
       // `/machines/:id` host-detail route so it wins the literal segment.
       path: "/machines/runpod",
       name: "runpod",
-      meta: { title: "RunPod" },
+      meta: { title: "Rent a GPU" },
       component: () => import("./views/RunPodView.vue"),
     },
     {
       path: "/machines/:id",
       name: "host-detail",
-      meta: { title: "Host" },
+      meta: { title: "Machine" },
       component: () => import("./views/HostDetailView.vue"),
     },
     {
@@ -68,7 +74,7 @@ export const router = createRouter({
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
     { path: "/chains", redirect: { path: "/create", query: { output: "sequence" } } },
     { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
-    { path: "/jobs", redirect: "/machines" },
+    { path: "/jobs", redirect: "/queue" },
     { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
     { path: "/runpod", redirect: "/machines/runpod" },
   ],

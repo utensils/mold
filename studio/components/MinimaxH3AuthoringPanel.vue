@@ -605,14 +605,14 @@ function imagePreview(
 .h3-authoring__add small,
 .h3-authoring__budget {
   margin: 3px 0 0;
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-size: 12px;
   line-height: 1.45;
 }
 .h3-authoring__add {
   display: grid;
   gap: 7px;
-  border: 1px dashed var(--edge, #bbb);
+  border: 1px dashed var(--mold-border, #bbb);
   border-radius: 10px;
   padding: 12px;
 }
@@ -622,9 +622,9 @@ function imagePreview(
 .h3-authoring__choose-library {
   min-width: 44px;
   min-height: 44px;
-  border: 1px solid var(--edge, #bbb);
+  border: 1px solid var(--mold-border, #bbb);
   border-radius: 8px;
-  background: var(--bench, transparent);
+  background: var(--mold-bg, transparent);
   color: inherit;
 }
 .h3-authoring__add-actions {
@@ -683,7 +683,7 @@ function imagePreview(
   max-width: 100%;
   align-items: center;
   gap: 9px;
-  border: 1px solid var(--edge, #bbb);
+  border: 1px solid var(--mold-border, #bbb);
   border-radius: 10px;
   padding: 8px;
 }
@@ -693,10 +693,10 @@ function imagePreview(
   width: 56px;
   height: 56px;
   overflow: hidden;
-  border: 1px solid var(--edge, #bbb);
+  border: 1px solid var(--mold-border, #bbb);
   border-radius: 8px;
   background: var(--well, rgba(128, 128, 128, 0.14));
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -718,7 +718,7 @@ function imagePreview(
 }
 .h3-authoring__notice {
   margin: 0;
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -749,7 +749,7 @@ function imagePreview(
 }
 .h3-authoring__errors {
   margin: 0;
-  color: var(--stop, #b42318);
+  color: var(--mold-error, #b42318);
   font-size: 12px;
   line-height: 1.45;
 }

@@ -30,11 +30,17 @@ async function mountAt(path: string) {
 describe("TitleBar", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
-  it("centers the workspace title from the active route meta", async () => {
+  it("names the view from the active route meta", async () => {
     const gallery = await mountAt("/gallery");
-    expect(gallery.text()).toContain("Mold Studio — Gallery");
+    expect(gallery.get("[data-test='shell-title']").text()).toBe("Gallery");
     const generate = await mountAt("/generate");
-    expect(generate.text()).toContain("Mold Studio — Generate");
+    expect(generate.get("[data-test='shell-title']").text()).toBe("Generate");
+  });
+
+  it("offers back and forward only where history allows", async () => {
+    const wrapper = await mountAt("/generate");
+    expect(wrapper.get("[aria-label='Back']").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[aria-label='Forward']").attributes("disabled")).toBeDefined();
   });
 
   it("toggles the persisted sidebar collapse", async () => {

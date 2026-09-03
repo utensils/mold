@@ -147,14 +147,14 @@ function onKeydown(event: KeyboardEvent) {
   gap: 1px;
   min-height: 38px;
   padding: 2px;
-  background: var(--bath);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
-  box-shadow: inset 0 1px color-mix(in srgb, var(--rebate) 4%, transparent);
+  background: var(--mold-bg-deep);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  box-shadow: inset 0 1px color-mix(in srgb, var(--mold-text) 4%, transparent);
 }
 
 .ms-stepper:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -163,24 +163,24 @@ function onKeydown(event: KeyboardEvent) {
   height: 32px;
   border: 0;
   background: transparent;
-  color: var(--ink-2);
-  font-family: var(--f-body);
+  color: var(--mold-text-2);
+  font-family: var(--mold-font-sans);
   font-size: 18px;
   line-height: 1;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
   cursor: pointer;
   transition:
-    color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-stepper__btn:hover:not([aria-disabled="true"]) {
-  color: var(--rebate);
-  background: color-mix(in srgb, var(--rebate) 7%, transparent);
+  color: var(--mold-text);
+  background: color-mix(in srgb, var(--mold-text) 7%, transparent);
 }
 
 .ms-stepper__btn:active:not([aria-disabled="true"]) {
-  background: color-mix(in srgb, var(--rebate) 12%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 12%, transparent);
 }
 
 .ms-stepper__btn[aria-disabled="true"] {
@@ -189,7 +189,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-stepper__btn:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -197,7 +197,7 @@ function onKeydown(event: KeyboardEvent) {
   min-width: 52px;
   padding: 0 4px;
   text-align: center;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -209,13 +209,13 @@ function onKeydown(event: KeyboardEvent) {
   border: 0;
   outline: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   appearance: textfield;
 }
 
 .ms-stepper__input:focus-visible {
-  border-radius: var(--radius-control-sm);
-  outline: 2px solid var(--safelight);
+  border-radius: var(--mold-radius-1);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
 }
 

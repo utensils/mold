@@ -268,14 +268,14 @@ function memoryPct(host: HostView): number {
 }
 
 function statusDot(host: HostView): string {
-  if (host.stale) return "bg-halide animate-pulse";
+  if (host.stale) return "bg-sapphire animate-pulse";
   switch (host.status) {
     case "ready":
-      return "bg-safelight";
+      return "bg-accent";
     case "connecting":
-      return "bg-halide animate-pulse";
+      return "bg-sapphire animate-pulse";
     default:
-      return "bg-stop";
+      return "bg-error";
   }
 }
 
@@ -398,15 +398,15 @@ async function onConnected() {
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <!-- Workspace header -->
-    <header class="border-edge flex h-13 shrink-0 items-center gap-3 border-b px-6">
-      <h1 class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
+    <header class="border-border flex h-13 shrink-0 items-center gap-3 border-b px-6">
+      <h1 class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 90%">
         Machines
       </h1>
       <div class="flex-1" />
       <button
         type="button"
         data-test="add-machine"
-        class="border-ce flex items-center gap-1.5 rounded-chrome border px-3.5 py-2 text-body font-semibold text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+        class="border-border-control flex items-center gap-1.5 rounded-window border px-3.5 py-2 text-sm font-semibold text-fg-2 transition-colors hover:text-fg active:translate-y-px"
         @click="openConnectModal()"
       >
         <Icon name="plus" :size="14" :stroke-width="2" />
@@ -418,7 +418,7 @@ async function onConnected() {
       <div class="flex flex-col gap-5 xl:flex-row xl:items-start">
         <!-- Machine cards -->
         <div class="flex min-w-0 flex-1 flex-col gap-3">
-          <div class="edge-code uppercase">Connected</div>
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">Connected</div>
 
           <!-- This device + connected remotes -->
           <button
@@ -426,36 +426,44 @@ async function onConnected() {
             :key="host.id"
             type="button"
             :data-test="host.primary ? 'this-device-card' : 'host-card'"
-            class="border-edge rounded-chrome border bg-bench p-4 text-left shadow-[inset_0_1px_0_var(--card-hi)] transition-colors hover:border-ink-3"
+            class="border-border rounded-window border bg-bg p-4 text-left transition-colors hover:border-fg-dim"
             @click="openDetail(host)"
             @contextmenu="contextMenu.open($event, connectedHostMenu(host))"
           >
             <div class="flex items-center gap-2.5">
               <span class="h-2 w-2 shrink-0 rounded-full" :class="statusDot(host)" />
-              <span class="text-body-lg font-semibold text-ink">{{ host.label }}</span>
-              <span class="data-mono ml-auto truncate text-caption text-ink-3">
+              <span class="text-base font-semibold text-fg">{{ host.label }}</span>
+              <span class="font-mono text-xs ml-auto truncate text-micro text-fg-dim">
                 {{ hardwareLine(host) }}
               </span>
-              <Icon name="chevron-right" :size="16" :stroke-width="2" class="shrink-0 text-ink-3" />
+              <Icon
+                name="chevron-right"
+                :size="16"
+                :stroke-width="2"
+                class="shrink-0 text-fg-dim"
+              />
             </div>
             <!-- The 10 s status poll keeps probing an unreachable machine, so
                  it comes back on its own; say so rather than leaving a bare
                  red dot that reads as "gone". -->
             <div
               v-if="host.status === 'error' || host.status === 'connecting' || host.stale"
-              class="mt-2 text-caption text-warning"
+              class="mt-2 text-micro text-warning"
               data-test="host-reconnecting"
             >
               {{ HOST_RECONNECTING_LABEL }}
             </div>
             <div
               v-if="memoryLabel(host)"
-              class="data-mono mt-3.5 mb-1.5 flex items-center justify-between text-caption text-ink-3"
+              class="font-mono text-xs mt-3.5 mb-1.5 flex items-center justify-between text-micro text-fg-dim"
             >
               <span>{{ memoryLabel(host) }}</span>
               <span>queue {{ host.queueDepth ?? 0 }}</span>
             </div>
-            <div v-else class="data-mono mt-3.5 mb-1.5 flex justify-end text-caption text-ink-3">
+            <div
+              v-else
+              class="font-mono text-xs mt-3.5 mb-1.5 flex justify-end text-micro text-fg-dim"
+            >
               <span>queue {{ host.queueDepth ?? 0 }}</span>
             </div>
             <ProgressBar
@@ -469,16 +477,16 @@ async function onConnected() {
           <!-- RunPod offer -->
           <CardSurface dashed>
             <div class="flex items-center gap-2.5">
-              <span class="h-2 w-2 shrink-0 rounded-full bg-ink-3" />
-              <span class="text-body-lg font-semibold text-ink-2">RunPod cloud</span>
-              <span class="data-mono ml-auto text-caption text-ink-3">pay per minute</span>
+              <span class="h-2 w-2 shrink-0 rounded-full bg-fg-dim" />
+              <span class="text-base font-semibold text-fg-2">RunPod cloud</span>
+              <span class="font-mono text-xs ml-auto text-micro text-fg-dim">pay per minute</span>
             </div>
             <div class="mt-3.5 flex items-center justify-between">
-              <span class="text-caption text-ink-3">Off · pay only while running</span>
+              <span class="text-micro text-fg-dim">Off · pay only while running</span>
               <button
                 type="button"
                 data-test="start-pod"
-                class="rounded-chrome bg-safelight px-3.5 py-1.5 text-caption font-bold text-on-accent hover:brightness-105 active:translate-y-px"
+                class="rounded-window bg-accent px-3.5 py-1.5 text-micro font-bold text-on-accent hover:brightness-105 active:translate-y-px"
                 @click="router.push('/machines/runpod')"
               >
                 Start pod
@@ -491,7 +499,7 @@ async function onConnected() {
             v-for="pod in runpod.runningPods"
             :key="pod.id"
             data-test="runpod-running"
-            class="border-edge relative flex cursor-pointer items-center gap-3 rounded-chrome border bg-bench px-4 py-3 text-left transition-colors hover:border-ink-3"
+            class="border-border relative flex cursor-pointer items-center gap-3 rounded-window border bg-bg px-4 py-3 text-left transition-colors hover:border-fg-dim"
             @click="openPodDetail(pod)"
             @contextmenu="contextMenu.open($event, podMenu(pod))"
           >
@@ -499,15 +507,15 @@ async function onConnected() {
               type="button"
               data-test="runpod-open"
               :aria-label="`Open ${pod.name ?? pod.id} machine details`"
-              class="absolute inset-0 rounded-chrome focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-halide"
+              class="absolute inset-0 rounded-window focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sapphire"
               @click.stop="openPodDetail(pod)"
             />
             <span
-              class="pointer-events-none relative z-10 h-2 w-2 shrink-0 rounded-full bg-halide"
+              class="pointer-events-none relative z-10 h-2 w-2 shrink-0 rounded-full bg-sapphire"
             />
             <div class="pointer-events-none relative z-10 min-w-0 flex-1">
-              <div class="truncate text-body font-semibold text-ink">{{ pod.name ?? pod.id }}</div>
-              <div class="data-mono truncate text-caption text-ink-3">
+              <div class="truncate text-sm font-semibold text-fg">{{ pod.name ?? pod.id }}</div>
+              <div class="font-mono text-xs truncate text-micro text-fg-dim">
                 {{ podGpuName(pod) }} · RunPod
               </div>
             </div>
@@ -524,29 +532,31 @@ async function onConnected() {
               data-test="machine-chevron"
               :size="16"
               :stroke-width="2"
-              class="pointer-events-none relative z-10 shrink-0 text-ink-3"
+              class="pointer-events-none relative z-10 shrink-0 text-fg-dim"
             />
           </div>
 
           <!-- Remembered (offline) -->
           <template v-if="rememberedHosts.length">
-            <div class="edge-code mt-2 uppercase">Remembered</div>
+            <div class="font-mono text-micro text-fg-dim whitespace-nowrap mt-2 uppercase">
+              Remembered
+            </div>
             <div
               v-for="saved in rememberedHosts"
               :key="saved.id"
               data-test="remembered-host"
-              class="border-edge flex items-center gap-3 rounded-chrome border bg-bench px-4 py-3 opacity-70"
+              class="border-border flex items-center gap-3 rounded-window border bg-bg px-4 py-3 opacity-70"
               @contextmenu="contextMenu.open($event, rememberedHostMenu(saved))"
             >
-              <span class="h-2 w-2 shrink-0 rounded-full bg-ink-3" />
+              <span class="h-2 w-2 shrink-0 rounded-full bg-fg-dim" />
               <div class="min-w-0 flex-1">
-                <div class="truncate text-body text-ink">{{ savedHostLabel(saved) }}</div>
-                <div class="data-mono truncate text-caption text-ink-3">{{ saved.url }}</div>
+                <div class="truncate text-sm text-fg">{{ savedHostLabel(saved) }}</div>
+                <div class="font-mono text-xs truncate text-micro text-fg-dim">{{ saved.url }}</div>
               </div>
               <button
                 type="button"
                 data-test="remembered-connect"
-                class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+                class="border-border h-7 shrink-0 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
                 :disabled="adding"
                 @click="connectSaved(saved)"
               >
@@ -557,11 +567,13 @@ async function onConnected() {
 
           <!-- On your network -->
           <div class="mt-2 flex items-center gap-2">
-            <span class="edge-code uppercase">On your network</span>
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase"
+              >On your network</span
+            >
             <div class="flex-1" />
             <button
               type="button"
-              class="border-edge h-7 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+              class="border-border h-7 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
               :disabled="scanning"
               @click="scan"
             >
@@ -572,17 +584,25 @@ async function onConnected() {
             v-for="host in undiscovered"
             :key="host.url"
             data-test="discovered-host"
-            class="border-edge flex items-center gap-3 rounded-chrome border bg-bench px-4 py-3"
+            class="border-border flex items-center gap-3 rounded-window border bg-bg px-4 py-3"
             @contextmenu="contextMenu.open($event, discoveredHostMenu(host))"
           >
-            <span class="h-2 w-2 shrink-0 rounded-full bg-halide" />
+            <span class="h-2 w-2 shrink-0 rounded-full bg-sapphire" />
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <span class="truncate text-body text-ink">{{ host.name }}</span>
-                <span v-if="isThisMachine(host)" class="edge-code">THIS DEVICE</span>
-                <span v-if="host.authRequired" class="edge-code">KEY</span>
+                <span class="truncate text-sm text-fg">{{ host.name }}</span>
+                <span
+                  v-if="isThisMachine(host)"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                  >THIS DEVICE</span
+                >
+                <span
+                  v-if="host.authRequired"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                  >KEY</span
+                >
               </div>
-              <div class="data-mono truncate text-caption text-ink-3">
+              <div class="font-mono text-xs truncate text-micro text-fg-dim">
                 {{ addressLabel(host) }} · {{ versionLabel(host) }}
               </div>
             </div>
@@ -590,18 +610,18 @@ async function onConnected() {
               v-if="!isThisMachine(host)"
               type="button"
               data-test="discovered-add"
-              class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+              class="border-border h-7 shrink-0 rounded-control border px-2.5 text-micro text-fg-2 hover:text-fg disabled:opacity-50"
               :disabled="adding"
               @click="addDiscovered(host)"
             >
               Connect
             </button>
           </div>
-          <p v-if="!undiscovered.length && !scanning" class="text-caption text-ink-3">
+          <p v-if="!undiscovered.length && !scanning" class="text-micro text-fg-dim">
             No other mold servers found on your network.
           </p>
 
-          <p v-if="actionError" class="text-caption text-stop">{{ actionError }}</p>
+          <p v-if="actionError" class="text-micro text-error">{{ actionError }}</p>
         </div>
 
         <!-- Queue mirror -->

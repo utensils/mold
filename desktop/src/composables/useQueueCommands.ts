@@ -1,0 +1,254 @@
+import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { useRouter } from "vue-router";
+import { apiFetchTo } from "@studio/api/client";
+import type { FleetActiveWork } from "@studio/api/activity";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useOpenLiveWork } from "./useOpenLiveWork";
+import { useQueueActivity, type QueueRow } from "./useQueueActivity";
+import { jobCanBeRemoved, useGenerationStore, type Job } from "../stores/generation";
+import { useComposerStore } from "../stores/composer";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
+import { useHostsStore } from "../stores/hosts";
+import { useHostStatusStore } from "../stores/hostStatus";
+import { useJobsStore } from "../stores/jobs";
+import { useLiveActivityStore } from "../stores/liveActivity";
+import { useToastStore } from "../stores/toasts";
+
+export interface QueueCommands {
+  /** Whether the display host reports a pausable queue. */
+  canPause: ComputedRef<boolean>;
+  paused: ComputedRef<boolean>;
+  togglePause(): Promise<void>;
+  /** Cancel every live print this client owns and every host's queue. */
+  stopEverything(): Promise<void>;
+  canCancel(row: QueueRow): boolean;
+  cancel(row: QueueRow): Promise<void>;
+  /** Bring the row to the canvas (or the surface that can inspect it). */
+  open(row: QueueRow): void;
+  contextMenu(event: MouseEvent, row: QueueRow): void;
+  menu(row: QueueRow): MenuEntry[];
+  cancellingShared: Ref<string[]>;
+}
+
+/**
+ * Every action the queue offers, shared by the sidebar rail and the Queue
+ * view so both surfaces act on the same authorities.
+ */
+export function useQueueCommands(): QueueCommands {
+  const router = useRouter();
+  const composer = useComposerStore();
+  const contextMenu = useContextMenuStore();
+  const draft = useSequenceDraftStore();
+  const generation = useGenerationStore();
+  const hosts = useHostsStore();
+  const hostStatus = useHostStatusStore();
+  const jobs = useJobsStore();
+  const liveActivity = useLiveActivityStore();
+  const toasts = useToastStore();
+  const queue = useQueueActivity();
+  const openLiveWork = useOpenLiveWork();
+  const cancellingShared = ref<string[]>([]);
+
+  const displayQueue = computed(() => {
+    const host = hostStatus.displayHost;
+    return host ? (jobs.queues[host.id] ?? null) : null;
+  });
+  const canPause = computed(() => displayQueue.value?.caps?.canPause === true);
+  const paused = computed(() => displayQueue.value?.paused === true);
+
+  function report(error: unknown) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+
+  async function togglePause() {
+    const host = hostStatus.displayHost;
+    if (!host) return;
+    try {
+      if (paused.value) await jobs.resume(host.id);
+      else await jobs.pause(host.id);
+    } catch (error) {
+      report(error);
+    }
+  }
+
+  async function cancelPrint(job: Job) {
+    try {
+      if (await generation.cancel(job.clientId)) toasts.push("Stopped");
+    } catch (error) {
+      report(error);
+    }
+  }
+
+  async function cancelShared(row: FleetActiveWork) {
+    if (cancellingShared.value.includes(row.key)) return;
+    const snapshot = liveActivity.hosts[row.hostId];
+    const host = hosts.all.find((candidate) => candidate.id === row.hostId);
+    if (
+      !snapshot ||
+      snapshot.stale ||
+      snapshot.routeUrl !== row.routeUrl ||
+      snapshot.instanceId !== row.instanceId ||
+      host?.baseUrl !== row.routeUrl ||
+      host.instanceId !== row.instanceId
+    ) {
+      toasts.push("This machine changed. Refresh its jobs and try again.", "error");
+      void liveActivity.refresh();
+      return;
+    }
+    cancellingShared.value = [...cancellingShared.value, row.key];
+    try {
+      if (row.execution === "chain") {
+        await apiFetchTo(snapshot.target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
+          method: "POST",
+        });
+      } else {
+        await jobs.cancelJob(row.hostId, row.id);
+      }
+      const current = liveActivity.hosts[row.hostId]?.items.find(
+        (item) => item.kind === row.kind && item.id === row.id,
+      );
+      if (current) {
+        current.can_cancel = false;
+        current.phase = "cancelling";
+      }
+      toasts.push("Stopped");
+    } catch (error) {
+      report(error);
+    } finally {
+      await liveActivity.refresh();
+      cancellingShared.value = cancellingShared.value.filter((key) => key !== row.key);
+    }
+  }
+
+  function canCancel(row: QueueRow): boolean {
+    if (row.kind === "print") {
+      return (
+        row.print.status !== "complete" && row.print.status !== "error" && !row.print.cancelling
+      );
+    }
+    if (row.kind === "shared") {
+      return (
+        row.shared.kind === "generation" &&
+        row.shared.can_cancel &&
+        !row.shared.stale &&
+        !cancellingShared.value.includes(row.shared.key)
+      );
+    }
+    return false;
+  }
+
+  async function cancel(row: QueueRow) {
+    if (row.kind === "print") await cancelPrint(row.print);
+    else if (row.kind === "shared") await cancelShared(row.shared);
+  }
+
+  async function stopEverything() {
+    await Promise.all(queue.rows.value.filter(canCancel).map((row) => cancel(row)));
+    for (const host of hosts.all) {
+      if (host.status === "ready" && jobs.queues[host.id]?.caps?.canCancelAll) {
+        await jobs.cancelAll(host.id).catch(report);
+      }
+    }
+  }
+
+  function openPrint(job: Job) {
+    generation.select(job.clientId);
+    draft.stopEditing();
+    draft.output = "single";
+    if (job.request) composer.set({ request: job.request });
+    if (job.status === "complete") {
+      if (job.result?.filename) {
+        // The store no-ops on a fresh URL and re-mints an expired media
+        // ticket, so a print re-selected an hour later opens on the canvas
+        // instead of failing its fetch against a dead URL.
+        void generation.refreshRemoteResultUrl(job.clientId).catch(() => {
+          toasts.push("Open this older print in My images");
+          void router.push("/library");
+        });
+      } else if (!job.resultUrl) {
+        toasts.push("Open this older print in My images");
+        void router.push("/library");
+        return;
+      }
+    }
+    void router.push("/create");
+  }
+
+  function open(row: QueueRow) {
+    if (row.kind === "print") openPrint(row.print);
+    else if (row.kind === "sequence") {
+      composer.setSequence({
+        kind: "inspect",
+        hostId: row.sequence.hostId,
+        jobId: row.sequence.jobId,
+      });
+      void router.push("/create");
+    } else void openLiveWork(row.shared);
+  }
+
+  function menu(row: QueueRow): MenuEntry[] {
+    if (row.kind === "shared") {
+      return [
+        { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
+      ];
+    }
+    if (row.kind === "sequence") {
+      return [{ label: "Open", action: () => open(row) }];
+    }
+    const job = row.print;
+    const live = job.status !== "complete" && job.status !== "error";
+    return [
+      live
+        ? { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) }
+        : {
+            label: "Remove from queue",
+            disabled: !jobCanBeRemoved(job),
+            action: () => generation.removeSettled(job.clientId),
+          },
+      { separator: true },
+      {
+        label: "Use these words",
+        action: () => {
+          composer.set({
+            prompt: job.prompt,
+            model: job.model,
+            seed: null,
+            width: job.width,
+            height: job.height,
+            steps: job.total,
+            guidance: job.guidance,
+          });
+          void router.push("/create");
+        },
+      },
+      {
+        label: "Show in My images",
+        disabled: job.status !== "complete",
+        action: () => void router.push("/library"),
+      },
+      { separator: true },
+      {
+        label: "Clear finished",
+        disabled: !generation.jobs.some((j) => j.status === "complete" || j.status === "error"),
+        action: () => generation.prune(0),
+      },
+    ];
+  }
+
+  function openContextMenu(event: MouseEvent, row: QueueRow) {
+    contextMenu.open(event, menu(row));
+  }
+
+  return {
+    canPause,
+    paused,
+    togglePause,
+    stopEverything,
+    canCancel,
+    cancel,
+    open,
+    contextMenu: openContextMenu,
+    menu,
+    cancellingShared,
+  };
+}

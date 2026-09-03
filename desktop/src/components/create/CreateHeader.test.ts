@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import CreateHeader from "./CreateHeader.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
-import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { useGenerateFormStore } from "../../stores/generateForm";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
@@ -34,131 +36,101 @@ function readyLocal() {
   useHostsStore().initialized = true;
 }
 
-function addRemote(id = "hal9000-7680", label = "hal9000") {
-  useHostsStore().extras.push({
-    id,
-    label,
-    url: `http://${label}:7680`,
-    apiKey: null,
-    status: "ready",
-    error: null,
-    instanceId: null,
-  });
+/** Install models on the local host so the header's mesh door can appear. */
+function installLocal(entries: ModelEntry[]) {
+  useHostModelsStore().byHost.local = { entries, fetchedAt: Date.now(), error: null };
+}
+
+const meshModel = {
+  name: "hunyuan3d-mini-turbo:fp16",
+  family: "hunyuan3d",
+  downloaded: true,
+  default_width: 0,
+  default_height: 0,
+  default_steps: 5,
+  default_guidance: 5,
+} as ModelEntry;
+
+const stillModel = {
+  name: "flux-dev:q8",
+  family: "flux",
+  downloaded: true,
+  default_width: 1024,
+  default_height: 1024,
+  default_steps: 20,
+  default_guidance: 4.5,
+} as ModelEntry;
+
+function outputSegments(wrapper: ReturnType<typeof mount>) {
+  return wrapper.get("[data-test='output-kind']").findAll("button");
 }
 
 describe("CreateHeader", () => {
   it("no longer renders the retired Single | Sequence switch", () => {
-    // Output is a setting in the inspector now, not a place — the header
-    // must not push a route to change modes.
+    // Output is a setting, not a place — the header must not push a route to
+    // change modes.
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
     expect(wrapper.find("[data-test='composer-mode']").exists()).toBe(false);
+    expect(routerPush).not.toHaveBeenCalled();
   });
 
-  it("renders the live summary of shape, dimensions, and steps", () => {
+  describe("what to make", () => {
+    it("offers Still picture and Short clip, with the 3-D door only where a 3-D style is installed", () => {
+      readyLocal();
+      installLocal([stillModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(wrapper).map((b) => b.text())).toEqual(["Still picture", "Short clip"]);
+
+      installLocal([stillModel, meshModel]);
+      const withMesh = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(withMesh).map((b) => b.text())).toEqual([
+        "Still picture",
+        "Short clip",
+        "3-D object",
+      ]);
+    });
+
+    it("hands Short clip to the inspector, which owns the model swap", async () => {
+      readyLocal();
+      installLocal([stillModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
+    });
+
+    it("returns a clip draft to one shot", async () => {
+      readyLocal();
+      installLocal([stillModel]);
+      useSequenceDraftStore().output = "sequence";
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(wrapper.emitted("set-output")).toEqual([["single"]]);
+    });
+
+    it("applies the first installed 3-D style, and restores the parked still style", async () => {
+      readyLocal();
+      installLocal([stillModel, meshModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[2]!.trigger("click");
+      expect(store.form.model).toBe(meshModel.name);
+      expect(store.form.family).toBe("hunyuan3d");
+
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
+    });
+  });
+
+  it("opens the inspector's Starters and Recent tabs instead of floating a popover", async () => {
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
-    expect(wrapper.get(".ms-header__title").text()).toBe("Untitled print");
-    expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 4 steps");
-  });
-
-  it("omits the aspect and canvas for a canvasless (3-D mesh) recipe, showing octree instead", () => {
-    // A Hunyuan3D recipe renders no pixel canvas: width/height sit at the
-    // recipe's zero default (they describe a poster, not a canvas), so the
-    // old `${aspect} · ${width}×${height} · ${steps} steps` summary read
-    // "1:1 · 0×0 · 5 steps" — nonsense for a mesh. The snapshot's
-    // `canvasless` flag (mirroring the form's own source-of-truth) swaps in
-    // the octree resolution instead.
-    readyLocal();
-    const meshForm = form();
-    meshForm.family = "hunyuan3d";
-    meshForm.width = 0;
-    meshForm.height = 0;
-    meshForm.steps = 5;
-    meshForm.recipeCapabilities = {
-      outputFormats: ["glb"],
-      defaultOutputFormat: "glb",
-      promptMode: "ignored",
-      supportsStrength: false,
-      canvasless: true,
-      mesh: {
-        octree_resolutions: [128, 192, 256, 320, 384],
-        octree_default: 256,
-        threshold: { default: 0.6, min: 0.0, max: 1.0, step: 0.01, mode: "adjustable" },
-        target_faces_min: 100,
-        target_faces_max: 2_000_000,
-        texture: { mode: "hidden", required: false, reason: "not available" },
-      },
-    };
-    const wrapper = mount(CreateHeader, { props: { form: meshForm } });
-    const text = wrapper.get(".ms-header__summary").text();
-    expect(text).not.toContain("0×0");
-    expect(text).not.toContain("1:1");
-    expect(text).toBe("octree 256 · 5 steps");
-  });
-
-  it("uses the form's explicit octree override, not the recipe default, in the mesh summary", () => {
-    readyLocal();
-    const meshForm = form();
-    meshForm.family = "hunyuan3d";
-    meshForm.width = 0;
-    meshForm.height = 0;
-    meshForm.steps = 5;
-    meshForm.mesh.octreeResolution = 192;
-    meshForm.recipeCapabilities = {
-      outputFormats: ["glb"],
-      defaultOutputFormat: "glb",
-      promptMode: "ignored",
-      supportsStrength: false,
-      canvasless: true,
-      mesh: {
-        octree_resolutions: [128, 192, 256, 320, 384],
-        octree_default: 256,
-        threshold: { default: 0.6, min: 0.0, max: 1.0, step: 0.01, mode: "adjustable" },
-        target_faces_min: 100,
-        target_faces_max: 2_000_000,
-        texture: { mode: "hidden", required: false, reason: "not available" },
-      },
-    };
-    const wrapper = mount(CreateHeader, { props: { form: meshForm } });
-    expect(wrapper.get(".ms-header__summary").text()).toBe("octree 192 · 5 steps");
-  });
-
-  it("keeps the aspect and canvas summary unchanged for an ordinary (non-mesh) recipe", () => {
-    // Regression guard: an SDXL-style recipe with no recipeCapabilities
-    // snapshot (or one with canvasless: false) must still summarize as
-    // aspect · dimensions · steps.
-    readyLocal();
-    const sdxlForm = form();
-    sdxlForm.family = "sdxl";
-    sdxlForm.width = 1024;
-    sdxlForm.height = 1024;
-    sdxlForm.steps = 30;
-    sdxlForm.recipeCapabilities = {
-      outputFormats: ["png"],
-      defaultOutputFormat: "png",
-      promptMode: "required",
-      supportsStrength: false,
-      canvasless: false,
-      mesh: null,
-    };
-    const wrapper = mount(CreateHeader, { props: { form: sdxlForm } });
-    expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 30 steps");
-  });
-
-  it("titles a sequence draft and summarizes clips + fps instead of steps", () => {
-    readyLocal();
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(97);
-    const sequenceForm = form();
-    sequenceForm.family = "ltx2";
-    sequenceForm.width = 1216;
-    sequenceForm.height = 704;
-    sequenceForm.fps = 24;
-    const wrapper = mount(CreateHeader, { props: { form: sequenceForm } });
-    expect(wrapper.get(".ms-header__title").text()).toBe("Untitled sequence");
-    expect(wrapper.get(".ms-header__summary").text()).toBe("16:9 · 1216×704 · 2 clips · 24 fps");
+    await wrapper.get("[data-test='open-starters']").trigger("click");
+    await wrapper.get("[data-test='open-recent']").trigger("click");
+    expect(wrapper.emitted("open-tab")).toEqual([["starters"], ["recent"]]);
   });
 
   describe("editable print title", () => {
@@ -178,7 +150,7 @@ describe("CreateHeader", () => {
       await wrapper.get("[data-test='print-title']").trigger("click");
       const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
       expect(input.attributes("aria-label")).toBe("Print title");
-      expect(input.attributes("placeholder")).toBe("Untitled print");
+      expect(input.attributes("placeholder")).toBe("Untitled picture");
       // No raw maxlength: it counts UTF-16 code units, truncating emoji
       // titles early. The scalar-aware validator enforces the 120 limit.
       expect(input.attributes("maxlength")).toBeUndefined();
@@ -214,7 +186,7 @@ describe("CreateHeader", () => {
       const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
       await wrapper.get("[data-test='print-title']").trigger("click");
       const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
-      await input.setValue("bad\u0007title");
+      await input.setValue("badtitle");
       await input.trigger("keydown", { key: "Enter" });
       expect(f.title).toBe("");
       expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(true);
@@ -248,88 +220,14 @@ describe("CreateHeader", () => {
       expect(wrapper.get("[data-test='print-title-error']").text()).toContain("120");
     });
 
-    it("uses the sequence placeholder for a sequence draft", async () => {
+    it("uses the clip placeholder for a sequence draft", async () => {
       readyLocal();
       useSequenceDraftStore().output = "sequence";
       const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
       await wrapper.get("[data-test='print-title']").trigger("click");
       expect(wrapper.get("[data-test='print-title-input']").attributes("placeholder")).toBe(
-        "Untitled sequence",
+        "Untitled clip",
       );
     });
-  });
-
-  it("does not open a routing menu with a single host", async () => {
-    readyLocal();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
-  });
-
-  it("toggles the routing menu open and closed from the chip", async () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: null } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(true);
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
-  });
-
-  it("lists Auto, Most capable, and every host; picking one persists and closes", async () => {
-    readyLocal();
-    const prefs = useAppPrefsStore();
-    prefs.settings = { generateTargetHost: null } as never;
-    const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined as never);
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-option-auto']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='host-option-capable']").exists()).toBe(true);
-    await wrapper.get("[data-test='host-option-hal9000-7680']").trigger("click");
-    await flushPromises();
-    expect(update).toHaveBeenCalledWith({ generateTargetHost: "hal9000-7680" });
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
-  });
-
-  it("maps Auto back to null in the persisted setting", async () => {
-    readyLocal();
-    const prefs = useAppPrefsStore();
-    prefs.settings = { generateTargetHost: "hal9000-7680" } as never;
-    const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined as never);
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    await wrapper.get("[data-test='host-option-auto']").trigger("click");
-    expect(update).toHaveBeenCalledWith({ generateTargetHost: null });
-  });
-
-  it("shows a stale persisted pick as Auto when the host is gone", async () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: "ghost-7680" } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.get("[data-test='host-option-auto']").attributes("aria-checked")).toBe("true");
-  });
-
-  it("names the sticky pick on the chip", () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() } });
-    expect(wrapper.get("[data-test='host-chip']").text()).toContain("hal9000");
-  });
-
-  it("closes the menu on Escape", async () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: null } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    await flushPromises();
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
   });
 });

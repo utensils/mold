@@ -18,16 +18,16 @@ const key = (k: string, mods: Partial<Parameters<typeof resolveShellShortcut>[0]
 const resolveMacShortcut = (event: ReturnType<typeof key>) => resolveShellShortcut(event, "macos");
 
 describe("resolveShellShortcut", () => {
-  it("maps ⌘1–⌘4 and ⌘, to the five destinations", () => {
+  it("maps ⌘1–⌘5 and ⌘, to the sidebar's destinations in order", () => {
     expect(resolveMacShortcut(key("1"))).toEqual({ kind: "navigate", route: "/create" });
-    expect(resolveMacShortcut(key("2"))).toEqual({ kind: "navigate", route: "/library" });
-    expect(resolveMacShortcut(key("3"))).toEqual({ kind: "navigate", route: "/models" });
-    expect(resolveMacShortcut(key("4"))).toEqual({ kind: "navigate", route: "/machines" });
+    expect(resolveMacShortcut(key("2"))).toEqual({ kind: "navigate", route: "/queue" });
+    expect(resolveMacShortcut(key("3"))).toEqual({ kind: "navigate", route: "/library" });
+    expect(resolveMacShortcut(key("4"))).toEqual({ kind: "navigate", route: "/models" });
+    expect(resolveMacShortcut(key("5"))).toEqual({ kind: "navigate", route: "/machines" });
     expect(resolveMacShortcut(key(","))).toEqual({ kind: "navigate", route: "/settings" });
   });
 
-  it("does not retain the retired ⌘5 and ⌘6 aliases", () => {
-    expect(resolveMacShortcut(key("5"))).toBeNull();
+  it("does not retain the retired ⌘6 alias", () => {
     expect(resolveMacShortcut(key("6"))).toBeNull();
   });
 
@@ -81,9 +81,9 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("k"), "unknown")).toBeNull();
   });
 
-  it("resolves to exactly the five destinations", () => {
+  it("resolves to exactly the six destinations", () => {
     expect(new Set(Object.values(NAV_ROUTES))).toEqual(
-      new Set(["/create", "/library", "/models", "/machines", "/settings"]),
+      new Set(["/create", "/queue", "/library", "/models", "/machines", "/settings"]),
     );
   });
 });

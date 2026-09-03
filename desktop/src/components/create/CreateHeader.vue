@@ -1,18 +1,21 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
-import type { GenerateForm } from "../../lib/generateForm";
-import { outputFamilyLabel } from "@studio/lib/outputShape";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
-import HostChip from "./HostChip.vue";
+import type { GenerateForm } from "../../lib/generateForm";
+import { findInstalledModel } from "../../lib/generateModels";
+import { useGenerateFormStore } from "../../stores/generateForm";
+import { useHostModelsStore } from "../../stores/hostModels";
+import type { InspectorTab } from "./inspectorTabs";
 
 /**
- * Create header (Mold Studio): the editable print/sequence title, a live
- * summary pill, and the shared generation-host chip. Output (One shot |
- * Sequence) is a setting in the inspector, not a place — the old Single |
- * Sequence route switch is gone.
+ * The New image view toolbar (README §04): the editable print title, the
+ * output kind as a segmented control — Still picture | Short clip | 3-D
+ * object — and the two inspector doors, Starting points and Use these
+ * settings again. Nothing floats over the canvas.
  *
  * The title is `form.title` (Library organization, D5): click to edit, Enter
  * or blur commits, Escape reverts; the value ships as `GenerateRequest.title`
@@ -20,11 +23,63 @@ import HostChip from "./HostChip.vue";
  * > 120 chars) keeps the editor open with the reason instead of committing.
  */
 const props = defineProps<{ form: GenerateForm }>();
+const emit = defineEmits<{
+  "open-tab": [tab: InspectorTab];
+  /** Still picture ↔ Short clip: the inspector owns the model swap. */
+  "set-output": [mode: "single" | "sequence"];
+}>();
 
 const draft = useSequenceDraftStore();
-const isSequence = computed(() => draft.output === "sequence");
+const formStore = useGenerateFormStore();
+const hostModels = useHostModelsStore();
 
-const placeholder = computed(() => (isSequence.value ? "Untitled sequence" : "Untitled print"));
+export type OutputKind = "still" | "clip" | "mesh";
+
+const isSequence = computed(() => draft.output === "sequence");
+const isMesh = computed(() => isMeshFamily(props.form.family));
+const meshModels = computed(() => hostModels.unionInstalled.filter((m) => isMeshFamily(m.family)));
+
+const outputKind = computed<OutputKind>(() =>
+  isSequence.value ? "clip" : isMesh.value ? "mesh" : "still",
+);
+const outputOptions = computed(() => [
+  { value: "still" as const, label: "Still picture" },
+  { value: "clip" as const, label: "Short clip" },
+  // The 3-D door only exists where a 3-D style is installed; a style the
+  // machine cannot run would be a dead end.
+  ...(meshModels.value.length > 0 || isMesh.value
+    ? [{ value: "mesh" as const, label: "3-D object" }]
+    : []),
+]);
+
+/** The still-picture style parked while a 3-D style is selected. */
+const lastStillModel = ref<string | null>(null);
+
+function setOutputKind(kind: string | number) {
+  if (kind === outputKind.value) return;
+  if (kind === "clip") {
+    emit("set-output", "sequence");
+    return;
+  }
+  if (isSequence.value) emit("set-output", "single");
+  if (kind === "mesh") {
+    const pick = meshModels.value[0];
+    if (!pick) return;
+    if (!isMesh.value) lastStillModel.value = props.form.model || null;
+    formStore.applyModel(pick);
+    return;
+  }
+  if (isMesh.value) {
+    const restored =
+      (lastStillModel.value &&
+        findInstalledModel(hostModels.unionInstalled, lastStillModel.value)) ||
+      hostModels.unionInstalled.find((m) => !isMeshFamily(m.family));
+    if (restored) formStore.applyModel(restored);
+    lastStillModel.value = null;
+  }
+}
+
+const placeholder = computed(() => (isSequence.value ? "Untitled clip" : "Untitled picture"));
 const title = computed(() => props.form.title?.trim() ?? "");
 
 const editing = ref(false);
@@ -67,27 +122,6 @@ function onBlur() {
   if (result.ok) commitEdit();
   else revertEdit();
 }
-
-const summary = computed(() => {
-  const { width, height, steps } = props.form;
-  if (isSequence.value) {
-    const aspect = outputFamilyLabel(width, height);
-    return `${aspect} · ${width}×${height} · ${draft.clips.length} clips · ${props.form.fps} fps`;
-  }
-  // A canvasless recipe (a 3-D mesh) has no aspect or pixel canvas — its
-  // width/height default to 0×0, so the ordinary summary read nonsense like
-  // "1:1 · 0×0 · 5 steps". Show its octree resolution instead, using the
-  // same canvasless predicate the rest of the form relies on (recipe
-  // snapshot first, family fallback for a form restored pre-snapshot).
-  const canvasless = props.form.recipeCapabilities?.canvasless ?? isMeshFamily(props.form.family);
-  if (canvasless) {
-    const octree =
-      props.form.mesh?.octreeResolution ?? props.form.recipeCapabilities?.mesh?.octree_default;
-    return octree != null ? `octree ${octree} · ${steps} steps` : `${steps} steps`;
-  }
-  const aspect = outputFamilyLabel(width, height);
-  return `${aspect} · ${width}×${height} · ${steps} steps`;
-});
 </script>
 
 <template>
@@ -128,61 +162,90 @@ const summary = computed(() => {
         class="ms-header__title-button"
         :class="{ 'ms-header__title-button--placeholder': !title }"
         aria-label="Print title"
-        :title="title ? `${title} — click to rename` : 'Click to name this print'"
+        :title="title ? `${title} — click to rename` : 'Click to name this picture'"
         @click="startEdit"
       >
         <span class="ms-header__title-text">{{ title || placeholder }}</span>
         <Icon name="pencil" :size="13" class="ms-header__title-pencil" aria-hidden="true" />
       </button>
     </div>
-    <span class="ms-header__summary data-mono">{{ summary }}</span>
+
     <div class="ms-header__spacer" />
-    <HostChip />
+
+    <SegmentedControl
+      data-test="output-kind"
+      :model-value="outputKind"
+      :options="outputOptions"
+      label="What to make"
+      @update:model-value="setOutputKind"
+    />
+
+    <span class="ms-header__divider" aria-hidden="true" />
+
+    <button
+      type="button"
+      data-test="open-starters"
+      class="ms-header__door"
+      @click="emit('open-tab', 'starters')"
+    >
+      <Icon name="grid" :size="14" />
+      Starting points
+    </button>
+    <button
+      type="button"
+      data-test="open-recent"
+      class="ms-header__door"
+      @click="emit('open-tab', 'recent')"
+    >
+      <Icon name="reuse" :size="14" />
+      Use these settings again
+    </button>
   </header>
 </template>
 
 <style scoped>
 .ms-header {
-  height: 52px;
-  flex: 0 0 52px;
-  border-bottom: 1px solid var(--edge);
+  height: var(--mold-shell-viewbar-h);
+  flex: 0 0 var(--mold-shell-viewbar-h);
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 22px;
+  gap: 10px;
+  padding: 0 14px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-chrome);
 }
 .ms-header__title {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  font-family: var(--f-display);
-  font-size: 15px;
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-sm);
   font-weight: 600;
+  color: var(--mold-text);
 }
 .ms-header__title-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 40vw;
-  height: 30px;
+  max-width: 34vw;
+  height: 26px;
   margin-left: -6px;
   padding: 0 6px;
-  border-radius: var(--r-control, 6px);
+  border-radius: var(--mold-radius-2);
   font: inherit;
   color: inherit;
   background: transparent;
-  border: 1px solid transparent;
+  border: var(--mold-bw) solid transparent;
   cursor: text;
 }
 .ms-header__title-button:hover,
 .ms-header__title-button:focus-visible {
-  border-color: var(--edge);
-  background: var(--bench, transparent);
+  border-color: var(--mold-border);
 }
 .ms-header__title-button--placeholder .ms-header__title-text {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-weight: 500;
 }
 .ms-header__title-text {
@@ -193,48 +256,59 @@ const summary = computed(() => {
 }
 .ms-header__title-pencil {
   flex: 0 0 auto;
-  color: var(--ink-3);
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-.ms-header__title-button:hover .ms-header__title-pencil,
-.ms-header__title-button:focus-visible .ms-header__title-pencil {
-  opacity: 1;
+  color: var(--mold-text-faint);
 }
 .ms-header__title-input {
-  width: min(40vw, 420px);
-  height: 30px;
+  width: min(34vw, 420px);
+  height: 26px;
   margin-left: -6px;
   padding: 0 6px;
-  border-radius: var(--r-control, 6px);
-  border: 1px solid var(--edge);
-  background: var(--bench, transparent);
-  color: var(--ink);
+  border-radius: var(--mold-radius-2);
+  border: var(--mold-bw) solid var(--mold-border-control);
+  background: var(--mold-bg);
+  color: var(--mold-text);
   font: inherit;
 }
 .ms-header__title-input:focus {
   outline: none;
-  border-color: var(--safelight);
+  border-color: var(--mold-border-focus);
 }
 .ms-header__title-input--invalid,
 .ms-header__title-input--invalid:focus {
-  border-color: var(--stop);
+  border-color: var(--mold-error);
 }
 .ms-header__title-error {
-  font-family: var(--f-body, inherit);
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   font-weight: 500;
-  color: var(--stop);
+  color: var(--mold-error);
   white-space: nowrap;
-}
-.ms-header__summary {
-  font-size: 10px;
-  color: var(--ink-3);
-  padding: 3px 8px;
-  border: 1px solid var(--edge);
-  border-radius: 20px;
 }
 .ms-header__spacer {
   flex: 1;
+}
+.ms-header__divider {
+  width: var(--mold-bw);
+  height: 20px;
+  background: var(--mold-border);
+}
+.ms-header__door {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--mold-ctl-md);
+  padding: 0 10px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--mold-text-2);
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
+}
+.ms-header__door:hover {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
 }
 </style>

@@ -32,7 +32,7 @@ describe("LibraryHeader", () => {
     const labels = scope
       .findAll("button")
       .map((b) => `${b.find(".ms-seg__label").text()} ${b.find(".ms-seg__sub").text()}`);
-    expect(labels).toEqual(["Prints 24", "Collections 4", "Trash 3"]);
+    expect(labels).toEqual(["Everything 24", "Albums 4", "Trash 3"]);
     expect(scope.findAll("button")[0]!.attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='library-count']").text()).toBe("24 prints · 3.1 GB");
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(true);
@@ -54,9 +54,7 @@ describe("LibraryHeader", () => {
     const wrapper = mountHeader({ scope: "collections", countLabel: "4 collections" });
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(false);
     expect(wrapper.find("[aria-label='Media kind']").exists()).toBe(false);
-    expect(wrapper.get("input[type='search']").attributes("placeholder")).toBe(
-      "Search collections…",
-    );
+    expect(wrapper.get("input[type='search']").attributes("placeholder")).toBe("Search albums…");
     expect(wrapper.find("[aria-label='Toggle select mode']").exists()).toBe(true);
   });
 
@@ -71,7 +69,7 @@ describe("LibraryHeader", () => {
     expect(wrapper.find("[aria-label='Refresh library']").exists()).toBe(false);
     const empty = wrapper.get("[data-test='empty-trash']");
     expect(empty.text()).toBe("Empty trash");
-    expect(empty.classes()).toContain("text-stop");
+    expect(empty.classes()).toContain("lib-button--danger");
     await empty.trigger("click");
     expect(wrapper.emitted("emptyTrash")).toHaveLength(1);
   });
@@ -84,7 +82,8 @@ describe("LibraryHeader", () => {
   it("renders no scope control when the hosts only offer Prints", () => {
     const wrapper = mountHeader({ scopes: ["prints"] });
     expect(wrapper.find("[data-test='library-scope']").exists()).toBe(false);
-    expect(wrapper.text()).toContain("Library");
+    // The shell's title already names the view; the header keeps the count.
+    expect(wrapper.find("[data-test='library-count']").exists()).toBe(true);
   });
 
   it("forwards search, select, history, and refresh", async () => {

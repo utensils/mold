@@ -82,14 +82,14 @@ function laneLabel(item: QueueWorkItem): string {
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid var(--line, var(--ce));
+  border: 1px solid var(--line, var(--mold-border-control));
   border-radius: 7px;
-  color: var(--ink-2, currentColor);
+  color: var(--mold-text-2, currentColor);
   font-size: 12px;
 }
 .plan-work__phase {
   padding: 2px 6px;
-  border: 1px solid var(--line, var(--ce));
+  border: 1px solid var(--line, var(--mold-border-control));
   border-radius: 999px;
   font-size: 10px;
   text-transform: uppercase;
@@ -108,7 +108,7 @@ function laneLabel(item: QueueWorkItem): string {
   white-space: nowrap;
 }
 .plan-work__lane {
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   white-space: nowrap;
 }
 @media (max-width: 639px) {

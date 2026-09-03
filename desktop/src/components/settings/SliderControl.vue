@@ -30,10 +30,10 @@ watch(
       :step="step"
       :disabled="disabled"
       :aria-label="ariaLabel"
-      class="w-36 accent-[var(--safelight)] disabled:opacity-40"
+      class="w-36 accent-accent disabled:opacity-40"
       @input="live = Number(($event.target as HTMLInputElement).value)"
       @change="emit('commit', live)"
     />
-    <span class="data-mono w-10 text-right text-caption text-ink-2">{{ live }}</span>
+    <span class="font-mono text-xs w-10 text-right text-micro text-fg-2">{{ live }}</span>
   </div>
 </template>

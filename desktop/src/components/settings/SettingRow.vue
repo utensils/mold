@@ -22,21 +22,29 @@ defineEmits<{ (e: "reset"): void }>();
 </script>
 
 <template>
-  <div class="border-edge flex items-start gap-4 border-b py-3 last:border-b-0">
+  <div class="border-border flex items-start gap-4 border-b py-3 last:border-b-0">
     <div class="min-w-0 flex-1">
       <div class="flex items-center gap-2">
-        <span class="text-body font-medium text-ink">{{ label }}</span>
-        <span v-if="source" class="edge-code" :title="`stored in ${provenance(source).label}`">
+        <span class="text-sm font-medium text-fg">{{ label }}</span>
+        <span
+          v-if="source"
+          class="font-mono text-micro text-fg-dim whitespace-nowrap"
+          :title="`stored in ${provenance(source).label}`"
+        >
           {{ provenance(source).glyph }} {{ provenance(source).label.toUpperCase() }}
         </span>
-        <span v-if="needsEngineRestart" class="edge-code text-halide">RESTART ENGINE</span>
+        <span
+          v-if="needsEngineRestart"
+          class="font-mono text-micro text-fg-dim whitespace-nowrap text-sapphire"
+          >RESTART ENGINE</span
+        >
       </div>
-      <p v-if="help" class="mt-0.5 max-w-md text-caption text-ink-3">{{ help }}</p>
-      <p v-if="locked" class="mt-0.5 text-caption text-halide">
+      <p v-if="help" class="mt-0.5 max-w-md text-micro text-fg-dim">{{ help }}</p>
+      <p v-if="locked" class="mt-0.5 text-micro text-sapphire">
         <template v-if="lockedReason">{{ lockedReason }}</template>
         <template v-else>
-          Locked by <span class="data-mono">{{ lockedBy ?? "the environment" }}</span> — unset it to
-          edit here.
+          Locked by <span class="font-mono text-xs">{{ lockedBy ?? "the environment" }}</span> —
+          unset it to edit here.
         </template>
       </p>
     </div>
@@ -45,7 +53,7 @@ defineEmits<{ (e: "reset"): void }>();
       <button
         v-if="resettable && !locked"
         type="button"
-        class="h-7 rounded-control px-1.5 text-caption text-ink-3 hover:text-stop"
+        class="h-7 rounded-control px-1.5 text-micro text-fg-dim hover:text-error"
         title="Reset to default"
         aria-label="Reset to default"
         @click="$emit('reset')"

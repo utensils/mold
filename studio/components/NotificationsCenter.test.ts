@@ -259,9 +259,9 @@ describe("NotificationsCenter severity colors", () => {
     ];
     // Newest first: error, warning, success.
     expect(dots.map((dot) => dot.style.color)).toEqual([
-      "var(--stop)",
-      "var(--warning)",
-      "var(--success)",
+      "var(--mold-error)",
+      "var(--mold-warning)",
+      "var(--mold-success)",
     ]);
     // Each severity also carries its own mark, so color is never the only cue.
     expect(dots.map((dot) => dot.textContent?.trim())).toEqual(["✕", "!", "✓"]);
@@ -295,20 +295,20 @@ describe("NotificationsCenter severity colors", () => {
     // Only notices waiting: the bell reads green, not red.
     expect(
       wrapper.get('[data-test="notifications-unread"]').attributes("style"),
-    ).toContain("var(--success)");
+    ).toContain("var(--mold-success)");
 
     store.record({ kind: "warning", text: "Can't reach plato", atMs: 2 });
     await flushPromises();
     expect(
       wrapper.get('[data-test="notifications-unread"]').attributes("style"),
-    ).toContain("var(--warning)");
+    ).toContain("var(--mold-warning)");
 
     store.record({ kind: "error", text: "Generation failed", atMs: 2 });
     await flushPromises();
     const badge = wrapper.get('[data-test="notifications-unread"]');
-    expect(badge.attributes("style")).toContain("var(--stop)");
+    expect(badge.attributes("style")).toContain("var(--mold-error)");
     // The count itself sits on that fill with the per-theme status ink.
-    expect(badge.attributes("style")).toContain("var(--on-status)");
+    expect(badge.attributes("style")).toContain("var(--mold-on-accent)");
     wrapper.unmount();
   });
 });

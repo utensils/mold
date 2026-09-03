@@ -4,7 +4,8 @@ import { reactive } from "vue";
 import ComposerCard from "./ComposerCard.vue";
 import StyleChips from "./StyleChips.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
-import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import Stepper from "@ui/components/Stepper.vue";
+import { MAX_BATCH_SIZE, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { recipeCapabilitiesSnapshot } from "../../lib/capabilities";
 import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
 import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
@@ -231,7 +232,7 @@ describe("ComposerCard — prompt requirement", () => {
     form.recipeCapabilities = recipeCapabilitiesSnapshot(sdxlRecipe(), "sdxl");
     const wrapper = mountComposer(form);
     expect(wrapper.get("textarea[aria-label='Prompt']").attributes("placeholder")).toBe(
-      "Describe the image you want to create…",
+      "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
     );
   });
 });
@@ -276,5 +277,93 @@ describe("ComposerCard — prompt transforms a recipe ignores", () => {
     expect(wrapper.findComponent(ExpandControl).props("transformBlockedReason")).toBeNull();
     expect(wrapper.get('[data-test="expand-action"]').attributes("disabled")).toBeUndefined();
     expect(wrapper.find('[data-test="transform-blocked-hint"]').exists()).toBe(false);
+  });
+});
+
+// "Make N" moved out of the inspector onto the composer's control row, where
+// the count sits beside Generate. The Stepper contract is unchanged.
+describe("ComposerCard — batch", () => {
+  it("steps the batch size through the Stepper", async () => {
+    const form = baseForm();
+    const wrapper = mountComposer(form);
+    const stepper = wrapper.get("[data-test='batch-chip']").findComponent(Stepper);
+    stepper.vm.$emit("update:modelValue", 3);
+    await wrapper.vm.$nextTick();
+    expect(form.batchSize).toBe(3);
+    expect(stepper.props("max")).toBe(MAX_BATCH_SIZE);
+    expect(stepper.props("editable")).toBe(true);
+  });
+
+  it("accepts a directly entered large positive batch", async () => {
+    const form = baseForm();
+    const wrapper = mountComposer(form);
+    const input = wrapper.get('input[aria-label="How many to make"]');
+    await input.setValue("1000");
+    await input.trigger("change");
+    await wrapper.vm.$nextTick();
+    expect(form.batchSize).toBe(1000);
+  });
+
+  it("does not overwrite an uncommitted direct entry on an arrow key", async () => {
+    const form = baseForm();
+    const wrapper = mountComposer(form);
+    const input = wrapper.get('input[aria-label="How many to make"]');
+    (input.element as HTMLInputElement).value = "120";
+    await input.trigger("keydown", { key: "ArrowUp" });
+    expect(form.batchSize).toBe(1);
+    expect((input.element as HTMLInputElement).value).toBe("120");
+  });
+
+  it("locks the batch to one for a recipe that renders one at a time", () => {
+    // The edit-model rule itself lives on the view (`forcesBatchSizeOne`);
+    // here the locked chip must read 1 and refuse both entry and stepping.
+    const form = baseForm();
+    form.batchSize = 4;
+    const wrapper = mountComposer(form, { batchLocked: true });
+    const stepper = wrapper.get("[data-test='batch-chip']").findComponent(Stepper);
+    expect(stepper.props("modelValue")).toBe(1);
+    expect(stepper.props("max")).toBe(1);
+    expect(stepper.props("editable")).toBe(false);
+    expect(wrapper.find('input[aria-label="How many to make"]').exists()).toBe(false);
+  });
+});
+
+// The Shape chip carries the canvas summary the Create header used to print
+// as "1:1 · 1024×1024 · N steps". A canvasless (3-D) recipe renders no pixel
+// canvas — width/height sit at the recipe's zero default — so it shows no
+// chip at all rather than a nonsensical "0×0".
+describe("ComposerCard — shape and style chips", () => {
+  it("names a square canvas once and a rectangular one by family", () => {
+    const square = baseForm();
+    square.width = 1024;
+    square.height = 1024;
+    expect(mountComposer(square).get("[data-test='shape-chip']").text()).toContain("Square · 1024");
+
+    const wide = baseForm();
+    wide.width = 1216;
+    wide.height = 704;
+    expect(mountComposer(wide).get("[data-test='shape-chip']").text()).toContain("16:9 · 1216×704");
+  });
+
+  it("omits the Shape chip for a canvasless (3-D mesh) recipe", () => {
+    const form = baseForm();
+    form.family = "hunyuan3d";
+    form.width = 0;
+    form.height = 0;
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(hunyuan3dRecipe(), "hunyuan3d");
+    const wrapper = mountComposer(form);
+    expect(wrapper.find("[data-test='shape-chip']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("0×0");
+  });
+
+  it("opens the inspector's settings from the Style and Shape chips", async () => {
+    const wrapper = mountComposer(baseForm(), { styleLabel: "FLUX Dev", styleId: "flux-dev:q8" });
+    const style = wrapper.get("[data-test='style-chip']");
+    expect(style.text()).toContain("FLUX Dev");
+    expect(style.text()).toContain("flux-dev:q8");
+    await style.trigger("click");
+    await wrapper.get("[data-test='shape-chip']").trigger("click");
+    expect(wrapper.emitted("open-style")).toHaveLength(1);
+    expect(wrapper.emitted("open-shape")).toHaveLength(1);
   });
 });

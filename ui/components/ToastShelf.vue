@@ -115,8 +115,8 @@ function borderStyle(kind: Toast["kind"]) {
 .ms-toast-leave-active,
 .ms-toast-move {
   transition:
-    opacity var(--dur-slow) var(--ease),
-    transform var(--dur-slow) var(--ease);
+    opacity var(--mold-dur-slow) var(--mold-ease-out),
+    transform var(--mold-dur-slow) var(--mold-ease-out);
 }
 
 /* Out of flow while leaving so the survivors slide up under the move class
@@ -141,9 +141,9 @@ function borderStyle(kind: Toast["kind"]) {
   align-items: center;
   gap: 10px;
   max-width: 380px;
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   padding: 10px 14px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
@@ -169,47 +169,47 @@ function borderStyle(kind: Toast["kind"]) {
 .ms-toast__text {
   flex: 1;
   min-width: 0;
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
   font-size: 13px;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-toast__action {
   flex: 0 0 auto;
   border: 0;
   background: transparent;
-  color: var(--safelight);
-  font-family: var(--f-body);
+  color: var(--mold-blue);
+  font-family: var(--mold-font-sans);
   font-size: 12.5px;
   font-weight: 700;
   padding: 0;
   cursor: pointer;
-  transition: color var(--dur-quick) var(--ease);
+  transition: color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-toast__action:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-toast__dismiss {
   flex: 0 0 auto;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 11px;
   line-height: 1;
   padding: 2px;
   cursor: pointer;
-  transition: color var(--dur-quick) var(--ease);
+  transition: color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-toast__dismiss:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-toast__action:focus-visible,
 .ms-toast__dismiss:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 </style>

@@ -234,14 +234,14 @@ async function unload(m: LibraryModelEntry) {
 
 <template>
   <div v-if="filtered.length === 0" class="p-8 text-center">
-    <p class="text-body text-ink-2">
+    <p class="text-sm text-fg-2">
       <template v-if="(query ?? '').trim()">Nothing installed matches "{{ query }}".</template>
       <template v-else>Nothing on the shelf yet.</template>
     </p>
     <button
       v-if="!(query ?? '').trim()"
       type="button"
-      class="mt-2 text-body text-halide hover:text-ink"
+      class="mt-2 text-sm text-sapphire hover:text-fg"
       @click="emit('browse-catalog')"
     >
       Browse the catalog
@@ -252,12 +252,14 @@ async function unload(m: LibraryModelEntry) {
     <template v-for="[heading, list] in sections" :key="heading">
       <section v-if="list.length">
         <div class="mb-2 flex items-center gap-2">
-          <span class="edge-code">{{ heading.toUpperCase() }}</span>
-          <div class="border-edge h-px flex-1 border-t" />
+          <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+            heading.toUpperCase()
+          }}</span>
+          <div class="border-border h-px flex-1 border-t" />
         </div>
 
         <ul
-          class="border-edge divide-edge divide-y overflow-hidden rounded-control border bg-bench"
+          class="border-border divide-border divide-y overflow-hidden rounded-control border bg-bg"
         >
           <li v-for="m in list" :key="m.name">
             <ModelTableRow
@@ -296,7 +298,7 @@ async function unload(m: LibraryModelEntry) {
                   v-if="installPlan(m).canInstall"
                   type="button"
                   data-test="install-elsewhere"
-                  class="border-edge h-7 rounded-control border px-2 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-40"
+                  class="border-border h-7 rounded-control border px-2 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-40"
                   title="Install this model on another machine"
                   :disabled="busy === m.name"
                   @click="requestDownload(m)"
@@ -306,7 +308,7 @@ async function unload(m: LibraryModelEntry) {
                 <span
                   v-if="runtimeUnavailable(m)"
                   data-test="runtime-unavailable-note"
-                  class="flex h-7 items-center text-caption text-ink-3"
+                  class="flex h-7 items-center text-micro text-fg-dim"
                   :title="runtimeUnavailableTitle(m)"
                 >
                   {{ RUNTIME_UNAVAILABLE_BADGE }}
@@ -315,7 +317,7 @@ async function unload(m: LibraryModelEntry) {
                   v-else-if="!m.is_loaded"
                   type="button"
                   data-test="load-btn"
-                  class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px disabled:opacity-40"
+                  class="border-border h-7 rounded-control border px-2 text-micro text-fg-2 hover:text-fg active:translate-y-px disabled:opacity-40"
                   :disabled="busy === m.name"
                   @click="load(m)"
                 >
@@ -325,7 +327,7 @@ async function unload(m: LibraryModelEntry) {
                   v-else
                   type="button"
                   data-test="unload-btn"
-                  class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px disabled:opacity-40"
+                  class="border-border h-7 rounded-control border px-2 text-micro text-fg-2 hover:text-fg active:translate-y-px disabled:opacity-40"
                   :disabled="busy === m.name"
                   @click="unload(m)"
                 >
@@ -333,11 +335,11 @@ async function unload(m: LibraryModelEntry) {
                 </button>
                 <button
                   type="button"
-                  class="h-7 rounded-control border px-2 text-caption transition-colors duration-100 active:translate-y-px"
+                  class="h-7 rounded-control border px-2 text-micro transition-colors duration-100 active:translate-y-px"
                   :class="
                     confirmingRemove === m.name
-                      ? 'border-stop bg-stop font-semibold text-on-accent'
-                      : 'border-edge text-ink-2 hover:text-stop'
+                      ? 'border-error bg-error font-semibold text-on-accent'
+                      : 'border-border text-fg-2 hover:text-error'
                   "
                   :disabled="busy === m.name"
                   @blur="confirmingRemove = null"

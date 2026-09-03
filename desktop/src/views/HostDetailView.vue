@@ -514,8 +514,8 @@ const hostBusy = computed(() => {
 });
 
 function vramFill(gpu: GpuSnapshot): string {
-  if (vramLevel(gpu.vram_used, gpu.vram_total) === "critical") return "bg-stop";
-  return hostBusy.value ? "bg-safelight" : "bg-halide";
+  if (vramLevel(gpu.vram_used, gpu.vram_total) === "critical") return "bg-error";
+  return hostBusy.value ? "bg-accent" : "bg-sapphire";
 }
 
 /** The RAM meter colors off the scheduler's own ledger rather than used/total:
@@ -525,11 +525,11 @@ const hostMemoryPressure = computed(() => hostMemoryLevel(queueSnapshot.value?.p
 const ramFill = computed(() => {
   switch (hostMemoryPressure.value) {
     case "critical":
-      return "bg-stop";
+      return "bg-error";
     case "warn":
-      return "bg-safelight";
+      return "bg-accent";
     default:
-      return "bg-halide";
+      return "bg-sapphire";
   }
 });
 const ramPressureLabel = computed(() => {
@@ -575,11 +575,11 @@ async function repairFromDrawer() {
 function statusDot(s: "connecting" | "ready" | "error"): string {
   switch (s) {
     case "ready":
-      return "bg-safelight";
+      return "bg-accent";
     case "connecting":
-      return "bg-halide animate-pulse";
+      return "bg-sapphire animate-pulse";
     default:
-      return "bg-stop";
+      return "bg-error";
   }
 }
 
@@ -651,7 +651,7 @@ async function forget() {
           <RouterLink
             to="/machines"
             data-test="back-to-machines"
-            class="-ml-1 flex items-center gap-1 rounded-control px-1.5 py-1 text-body font-semibold text-safelight hover:brightness-110"
+            class="-ml-1 flex items-center gap-1 rounded-control px-1.5 py-1 text-sm font-semibold text-accent hover:brightness-110"
           >
             <Icon name="chevron-left" :size="18" :stroke-width="2.4" />
             Machines
@@ -662,20 +662,24 @@ async function forget() {
             data-test="host-status-dot"
           />
           <h1
-            class="min-w-0 truncate font-display text-display-sm font-bold text-ink"
+            class="min-w-0 truncate font-sans font-semibold text-md font-bold text-fg"
             style="font-stretch: 90%"
             data-test="host-title"
           >
             {{ host.label }}
           </h1>
-          <span class="edge-code shrink-0">
+          <span class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0">
             {{ host.kind === "local" ? "THIS DEVICE" : "REMOTE" }}
           </span>
-          <span v-if="host.version" class="edge-code shrink-0" data-test="host-version">
+          <span
+            v-if="host.version"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
+            data-test="host-version"
+          >
             v{{ host.version }}
           </span>
           <span
-            class="data-mono truncate text-caption text-ink-3"
+            class="font-mono text-xs truncate text-micro text-fg-dim"
             data-selectable
             data-test="host-url"
             >{{ host.baseUrl }}</span
@@ -695,7 +699,7 @@ async function forget() {
           <Tooltip v-if="host.instanceId" :text="`${host.instanceId} — click to copy`">
             <button
               type="button"
-              class="edge-code max-w-40 truncate hover:text-ink"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap max-w-40 truncate hover:text-fg"
               data-test="host-instance-id"
               @click="copyInstanceId"
             >
@@ -706,7 +710,7 @@ async function forget() {
             v-if="host.kind === 'remote'"
             type="button"
             data-test="rename-host"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink"
+            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg"
             @click="renameOpen = true"
           >
             Rename…
@@ -714,7 +718,7 @@ async function forget() {
           <button
             type="button"
             data-test="open-web-ui"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink disabled:opacity-40"
+            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg disabled:opacity-40"
             :disabled="!host.baseUrl"
             @click="openHostUrl(host.baseUrl ?? '')"
           >
@@ -724,13 +728,13 @@ async function forget() {
             v-if="host.kind === 'remote'"
             type="button"
             data-test="disconnect-host"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-stop"
+            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-error"
             @click="disconnect"
           >
             Disconnect
           </button>
         </div>
-        <p v-if="host.status === 'error'" class="mt-2 pl-7 text-caption text-stop">
+        <p v-if="host.status === 'error'" class="mt-2 pl-7 text-micro text-error">
           Unreachable — reconnect below or check the server.
         </p>
 
@@ -743,16 +747,19 @@ async function forget() {
                  same column tracks, so the panel reads as one machine. -->
             <CardSurface large>
               <div class="mb-3 flex items-center gap-2">
-                <h2 class="edge-code">TELEMETRY</h2>
-                <div class="border-edge h-px flex-1 border-t" />
-                <span v-if="uptime !== null" class="edge-code uppercase" data-test="host-uptime">
+                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">TELEMETRY</h2>
+                <div class="border-border h-px flex-1 border-t" />
+                <span
+                  v-if="uptime !== null"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase"
+                  data-test="host-uptime"
+                >
                   UP {{ formatUptime(uptime) }}
                 </span>
-                <span v-if="snapshot" class="edge-code flex items-center gap-1.5"
-                  ><span
-                    class="h-1.5 w-1.5 rounded-full bg-safelight"
-                    aria-hidden="true"
-                  />LIVE</span
+                <span
+                  v-if="snapshot"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap flex items-center gap-1.5"
+                  ><span class="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />LIVE</span
                 >
               </div>
               <div
@@ -763,25 +770,33 @@ async function forget() {
                 <template v-for="gpu in gpus" :key="gpu.ordinal">
                   <div class="contents" data-test="gpu-card">
                     <div class="col-span-full flex min-w-0 items-baseline gap-2">
-                      <span v-if="gpus.length > 1" class="edge-code">GPU {{ gpu.ordinal }}</span>
-                      <span class="min-w-0 truncate text-body font-medium text-ink">{{
+                      <span
+                        v-if="gpus.length > 1"
+                        class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                        >GPU {{ gpu.ordinal }}</span
+                      >
+                      <span class="min-w-0 truncate text-sm font-medium text-fg">{{
                         gpu.name
                       }}</span>
-                      <span class="edge-code shrink-0">{{ backendLabel(gpu) }}</span>
+                      <span class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0">{{
+                        backendLabel(gpu)
+                      }}</span>
                       <div class="flex-1" />
                       <span
                         v-if="gpu.gpu_utilization !== null && gpu.gpu_utilization !== undefined"
-                        class="data-mono shrink-0 text-ink-3"
+                        class="font-mono text-xs shrink-0 text-fg-dim"
                       >
-                        <span class="text-ink-2" data-test="gpu-utilization"
+                        <span class="text-fg-2" data-test="gpu-utilization"
                           >{{ gpu.gpu_utilization }}%</span
                         >
                         util
                       </span>
                     </div>
-                    <span class="edge-code">{{ unifiedMemory ? "MEMORY" : "VRAM" }}</span>
+                    <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+                      unifiedMemory ? "MEMORY" : "VRAM"
+                    }}</span>
                     <div
-                      class="h-1.5 overflow-hidden rounded-full bg-bath"
+                      class="h-1.5 overflow-hidden bg-bg-deep"
                       role="meter"
                       aria-valuemin="0"
                       aria-valuemax="100"
@@ -798,15 +813,15 @@ async function forget() {
                         :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
                       />
                     </div>
-                    <span class="data-mono text-right text-ink-3">
+                    <span class="font-mono text-xs text-right text-fg-dim">
                       {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }}
                     </span>
                   </div>
                 </template>
                 <div v-if="cpu" class="contents" data-test="cpu-card">
-                  <span class="edge-code">CPU</span>
+                  <span class="font-mono text-micro text-fg-dim whitespace-nowrap">CPU</span>
                   <div
-                    class="h-1.5 overflow-hidden rounded-full bg-bath"
+                    class="h-1.5 overflow-hidden bg-bg-deep"
                     role="meter"
                     aria-valuemin="0"
                     aria-valuemax="100"
@@ -814,18 +829,18 @@ async function forget() {
                     aria-label="CPU usage"
                   >
                     <div
-                      class="h-full bg-halide transition-[width] duration-300"
+                      class="h-full bg-sapphire transition-[width] duration-300"
                       :style="{ width: `${cpu.usage_percent}%` }"
                     />
                   </div>
-                  <span class="data-mono text-right text-ink-3">
+                  <span class="font-mono text-xs text-right text-fg-dim">
                     {{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} CORES
                   </span>
                 </div>
                 <div v-if="ram && !unifiedMemory" class="contents" data-test="ram-card">
-                  <span class="edge-code">RAM</span>
+                  <span class="font-mono text-micro text-fg-dim whitespace-nowrap">RAM</span>
                   <div
-                    class="h-1.5 overflow-hidden rounded-full bg-bath"
+                    class="h-1.5 overflow-hidden bg-bg-deep"
                     role="meter"
                     aria-valuemin="0"
                     aria-valuemax="100"
@@ -840,14 +855,18 @@ async function forget() {
                       :style="{ width: `${percent(ram.used, ram.total)}%` }"
                     />
                   </div>
-                  <span class="data-mono text-right text-ink-3">
+                  <span class="font-mono text-xs text-right text-fg-dim">
                     {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
                   </span>
                 </div>
                 <div v-if="modelsDisk" class="contents" data-test="storage-card">
-                  <span class="edge-code" title="Models disk">DISK</span>
+                  <span
+                    class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                    title="Models disk"
+                    >DISK</span
+                  >
                   <div
-                    class="h-1.5 overflow-hidden rounded-full bg-bath"
+                    class="h-1.5 overflow-hidden bg-bg-deep"
                     role="meter"
                     aria-valuemin="0"
                     aria-valuemax="100"
@@ -856,25 +875,25 @@ async function forget() {
                   >
                     <div
                       class="h-full transition-[width] duration-300"
-                      :class="diskUsedPct >= 92 ? 'bg-stop' : 'bg-halide'"
+                      :class="diskUsedPct >= 92 ? 'bg-error' : 'bg-sapphire'"
                       :style="{ width: `${diskUsedPct}%` }"
                     />
                   </div>
-                  <span class="data-mono text-right text-ink-3">
+                  <span class="font-mono text-xs text-right text-fg-dim">
                     {{ formatGB(modelsDisk.free_bytes) }} free of
                     {{ formatGB(modelsDisk.total_bytes) }}
                   </span>
                 </div>
               </div>
-              <p v-else class="text-caption text-ink-3">No live telemetry from this host yet.</p>
+              <p v-else class="text-micro text-fg-dim">No live telemetry from this host yet.</p>
             </CardSurface>
 
             <!-- Downloads on this host -->
             <CardSurface large :padded="false">
               <div class="flex items-center gap-2 px-4 pt-4">
-                <h2 class="edge-code">DOWNLOADS</h2>
-                <div class="border-edge h-px flex-1 border-t" />
-                <RouterLink to="/models" class="text-caption text-ink-3 hover:text-ink">
+                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">DOWNLOADS</h2>
+                <div class="border-border h-px flex-1 border-t" />
+                <RouterLink to="/models" class="text-micro text-fg-dim hover:text-fg">
                   Catalog →
                 </RouterLink>
               </div>
@@ -902,16 +921,19 @@ async function forget() {
                  with full management absorbed from the Jobs view. -->
             <CardSurface large>
               <div class="mb-2 flex items-center gap-2">
-                <h2 class="edge-code">QUEUE</h2>
-                <div class="border-edge h-px flex-1 border-t" />
+                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">QUEUE</h2>
+                <div class="border-border h-px flex-1 border-t" />
                 <span
                   v-if="queuePaused"
-                  class="data-mono text-caption text-stop"
+                  class="font-mono text-xs text-micro text-error"
                   data-test="queue-paused"
                 >
                   PAUSED
                 </span>
-                <span class="edge-code" data-test="queue-depth">
+                <span
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                  data-test="queue-depth"
+                >
                   <template v-if="scheduledWorkCount"> {{ scheduledWorkCount }} work · </template>
                   {{ queueDepth ?? "—"
                   }}<template v-if="queueCapacity">/{{ queueCapacity }}</template
@@ -935,7 +957,12 @@ async function forget() {
             data-test="host-model-column"
           >
             <CardSurface large>
-              <h2 class="edge-code" data-test="loaded-label">LOADED</h2>
+              <h2
+                class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                data-test="loaded-label"
+              >
+                LOADED
+              </h2>
               <div v-if="loadedChips.length" class="mt-3 flex flex-col gap-2">
                 <div
                   v-for="m in loadedChips"
@@ -943,17 +970,17 @@ async function forget() {
                   data-test="loaded-model-chip"
                   class="flex items-center gap-2"
                 >
-                  <span class="shrink-0 text-safelight" aria-hidden="true">★</span>
+                  <span class="shrink-0 text-accent" aria-hidden="true">★</span>
                   <span
-                    class="data-mono min-w-0 flex-1 truncate text-caption text-ink-2"
+                    class="font-mono text-xs min-w-0 flex-1 truncate text-micro text-fg-2"
                     data-test="loaded-model-name"
                     >{{ modelLabel(m) }}</span
                   >
                   <button
                     type="button"
                     data-test="unload-chip"
-                    class="shrink-0 text-caption transition-colors hover:text-stop disabled:opacity-40"
-                    :class="unloadPending === m ? 'font-semibold text-stop' : 'text-ink-3'"
+                    class="shrink-0 text-micro transition-colors hover:text-error disabled:opacity-40"
+                    :class="unloadPending === m ? 'font-semibold text-error' : 'text-fg-dim'"
                     :aria-label="`Unload ${modelLabel(m)}`"
                     :title="`Unload ${modelLabel(m)} from this host's GPU`"
                     :disabled="unloading.has(m)"
@@ -964,21 +991,25 @@ async function forget() {
                   </button>
                 </div>
               </div>
-              <p v-else class="mt-2 text-caption text-ink-3">
+              <p v-else class="mt-2 text-micro text-fg-dim">
                 No models loaded — the next generation loads one first.
               </p>
             </CardSurface>
 
             <CardSurface large :padded="false">
               <div class="flex items-center gap-2 px-4 pt-4">
-                <h2 class="edge-code">INSTALLED MODELS</h2>
+                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">INSTALLED MODELS</h2>
                 <div class="flex-1" />
-                <span v-if="installedModels.length" class="edge-code" data-test="models-summary">
+                <span
+                  v-if="installedModels.length"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                  data-test="models-summary"
+                >
                   {{ installedModels.length
                   }}<template v-if="installedTotalLabel"> · {{ installedTotalLabel }}</template>
                 </span>
               </div>
-              <ul v-if="installedModels.length" class="divide-edge mt-2 divide-y">
+              <ul v-if="installedModels.length" class="divide-border mt-2 divide-y">
                 <li v-for="m in installedModels" :key="m.name" data-test="model-row">
                   <ModelTableRow
                     :name="modelDisplayName(m)"
@@ -1011,7 +1042,7 @@ async function forget() {
                   </ModelTableRow>
                 </li>
               </ul>
-              <p v-else class="px-4 pb-4 pt-2 text-caption text-ink-3">
+              <p v-else class="px-4 pb-4 pt-2 text-micro text-fg-dim">
                 No installed models reported
               </p>
             </CardSurface>
@@ -1021,21 +1052,21 @@ async function forget() {
                  with Empty trash behind the shared confirm (no typed phrase). -->
             <CardSurface v-if="storageAvailable" large data-test="host-storage">
               <div class="mb-3 flex items-center gap-2">
-                <h2 class="edge-code">STORAGE</h2>
-                <div class="border-edge h-px flex-1 border-t" />
+                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">STORAGE</h2>
+                <div class="border-border h-px flex-1 border-t" />
               </div>
               <div class="flex flex-col gap-3">
                 <div class="flex items-center gap-3">
-                  <label for="host-trash-retention" class="min-w-0 flex-1 text-body text-ink">
+                  <label for="host-trash-retention" class="min-w-0 flex-1 text-sm text-fg">
                     Trash retention
-                    <span class="block text-caption text-ink-3">
+                    <span class="block text-micro text-fg-dim">
                       Deleted prints are purged after this long on {{ host.label }}.
                     </span>
                   </label>
                   <select
                     id="host-trash-retention"
                     data-test="host-trash-retention"
-                    class="border-edge h-8 shrink-0 rounded-control border bg-bench px-2 text-body text-ink disabled:opacity-50"
+                    class="border-border h-8 shrink-0 rounded-control border bg-bg px-2 text-sm text-fg disabled:opacity-50"
                     :value="String(retentionDays)"
                     :disabled="retentionLocked || retentionSaving || host.status !== 'ready'"
                     :title="
@@ -1056,17 +1087,17 @@ async function forget() {
                   </select>
                 </div>
                 <div class="flex items-center gap-3">
-                  <span class="min-w-0 flex-1 text-body text-ink" data-test="host-trash-count">
+                  <span class="min-w-0 flex-1 text-sm text-fg" data-test="host-trash-count">
                     Prints in trash:
-                    <span class="data-mono">{{ trashCount ?? "—" }}</span>
-                    <span v-if="trashLoadError" class="block text-caption text-stop">
+                    <span class="font-mono text-xs">{{ trashCount ?? "—" }}</span>
+                    <span v-if="trashLoadError" class="block text-micro text-error">
                       {{ trashLoadError }}
                     </span>
                   </span>
                   <button
                     type="button"
                     data-test="host-empty-trash"
-                    class="border-edge h-8 shrink-0 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-stop disabled:opacity-40"
+                    class="border-border h-8 shrink-0 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-error disabled:opacity-40"
                     :disabled="!trashCount || emptyingTrash || host.status !== 'ready'"
                     @click="emptyTrashOpen = true"
                   >
@@ -1080,7 +1111,7 @@ async function forget() {
               <button
                 type="button"
                 data-test="reconnect-host"
-                class="border-ce h-9 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+                class="border-border-control h-9 flex-1 rounded-control border text-sm font-semibold text-fg-2 transition-colors hover:text-fg active:translate-y-px"
                 @click="hosts.reconnect(host.id)"
               >
                 Reconnect
@@ -1088,7 +1119,7 @@ async function forget() {
               <button
                 type="button"
                 data-test="forget-host"
-                class="h-9 flex-1 rounded-control border border-[color-mix(in_srgb,var(--stop)_50%,transparent)] text-body font-semibold text-stop transition-colors hover:bg-stop/10 active:translate-y-px"
+                class="h-9 flex-1 rounded-control border border-error/50 text-sm font-semibold text-error transition-colors hover:bg-error/10 active:translate-y-px"
                 @click="forgetOpen = true"
               >
                 Forget
@@ -1143,16 +1174,16 @@ async function forget() {
 
       <!-- Unknown id — quiet empty state -->
       <div v-else class="mt-16 text-center" data-test="host-missing">
-        <h1 class="font-display text-display font-bold text-ink" style="font-stretch: 90%">
+        <h1 class="font-sans font-semibold text-lg font-bold text-fg" style="font-stretch: 90%">
           Host not found
         </h1>
-        <p class="mt-2 text-body text-ink-2">
+        <p class="mt-2 text-sm text-fg-2">
           This host isn't connected. It may have been disconnected or forgotten.
         </p>
         <RouterLink
           to="/machines"
           data-test="back-to-hosts"
-          class="mt-4 inline-block text-body text-safelight hover:brightness-110"
+          class="mt-4 inline-block text-sm text-accent hover:brightness-110"
         >
           Back to Machines
         </RouterLink>

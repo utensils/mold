@@ -4,7 +4,7 @@
  * offset is computed directly from `value`: no tween, no transition —
  * progress tracks the reported value exactly. The ring always sits on
  * media (the shimmering print bed, which never inverts), so the track is
- * a fixed white alpha and the label uses --on-media, not --rebate.
+ * a fixed white alpha and the label uses --mold-on-media, not --mold-text.
  */
 import { computed } from "vue";
 
@@ -77,14 +77,14 @@ const dashOffset = computed(() => CIRCUMFERENCE * (1 - clamped.value / 100));
 
 .ms-ring__value {
   fill: none;
-  stroke: var(--safelight);
+  stroke: var(--mold-blue);
 }
 
 .ms-ring__label {
   position: absolute;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 16px;
   font-weight: 600;
-  color: var(--on-media);
+  color: var(--mold-on-media);
 }
 </style>

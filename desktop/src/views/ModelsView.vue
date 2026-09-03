@@ -115,8 +115,8 @@ onUnmounted(() => {
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <!-- Workspace header — Installed | Discover is the primary chrome -->
-    <header class="border-edge flex h-13 shrink-0 items-center gap-3 border-b px-6">
-      <h1 class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
+    <header class="border-border flex h-13 shrink-0 items-center gap-3 border-b px-6">
+      <h1 class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 90%">
         Models
       </h1>
       <div class="flex-1" />
@@ -130,14 +130,14 @@ onUnmounted(() => {
     </header>
 
     <!-- Shared filter strip: search + media type apply to both segments -->
-    <div class="border-edge flex flex-wrap items-center gap-3 border-b bg-bench px-6 py-2.5">
+    <div class="border-border flex flex-wrap items-center gap-3 border-b bg-bg px-6 py-2.5">
       <input
         ref="searchEl"
         v-model="query"
         data-selectable
         type="search"
         placeholder="Search models…"
-        class="border-edge h-7 min-w-48 flex-1 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3 sm:max-w-72"
+        class="border-border h-7 min-w-48 flex-1 rounded-control border bg-bg-deep px-2 text-sm text-fg placeholder:text-fg-dim sm:max-w-72"
       />
 
       <div class="flex items-center gap-1" aria-label="Media type">
@@ -145,8 +145,8 @@ onUnmounted(() => {
           v-for="option in MEDIA_TYPES"
           :key="option.value"
           type="button"
-          class="h-7 rounded-control px-2.5 text-body"
-          :class="mediaType === option.value ? 'bg-bath text-ink' : 'text-ink-2 hover:text-ink'"
+          class="h-7 rounded-control px-2.5 text-sm"
+          :class="mediaType === option.value ? 'bg-bg-deep text-fg' : 'text-fg-2 hover:text-fg'"
           :aria-pressed="mediaType === option.value"
           @click="setMediaType(option.value)"
         >

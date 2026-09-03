@@ -85,11 +85,11 @@ useRootFocusOnOpen(root, () => props.open);
   backdrop-filter: blur(5px);
   display: flex;
   justify-content: flex-end;
-  animation: ms-fade-up var(--dur-base) var(--ease);
+  animation: ms-fade-up var(--mold-dur-base) var(--mold-ease-out);
 }
 
 .ms-drawer:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -98,8 +98,8 @@ useRootFocusOnOpen(root, () => props.open);
   max-width: 100%;
   height: 100%;
   box-sizing: border-box;
-  background: var(--bench);
-  border-left: 1px solid var(--edge);
+  background: var(--mold-bg);
+  border-left: 1px solid var(--mold-border);
   box-shadow: -24px 0 70px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
@@ -108,7 +108,7 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-drawer__header {
   height: 52px;
   flex: 0 0 52px;
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -116,11 +116,11 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-drawer__title {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-drawer__spacer {
@@ -131,26 +131,26 @@ useRootFocusOnOpen(root, () => props.open);
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--mold-radius-2);
   border: 0;
-  background: color-mix(in srgb, var(--rebate) 9%, transparent);
-  color: var(--ink-2);
+  background: color-mix(in srgb, var(--mold-text) 9%, transparent);
+  color: var(--mold-text-2);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition:
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-drawer__close:hover {
-  background: color-mix(in srgb, var(--rebate) 14%, transparent);
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-text) 14%, transparent);
+  color: var(--mold-text);
 }
 
 .ms-drawer__close:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -162,7 +162,7 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-drawer__footer {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   padding: 14px 20px;
 }
 </style>

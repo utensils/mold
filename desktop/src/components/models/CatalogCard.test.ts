@@ -99,7 +99,7 @@ describe("CatalogCard", () => {
     await flushPromises();
     await wrapper.get("img").trigger("error");
     expect(wrapper.find("img").exists()).toBe(false);
-    expect(wrapper.find(".grain-shimmer").exists()).toBe(false);
+    expect(wrapper.find(".ms-shimmer").exists()).toBe(false);
     expect(wrapper.get('[data-test="family-placeholder"]').text()).toContain("FLUX");
   });
 

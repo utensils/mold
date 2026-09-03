@@ -237,9 +237,7 @@ describe("QueueColumn", () => {
     await flushPromises();
 
     expect(
-      wrapper
-        .findAll("[data-test='queue-surface-row']")
-        .map((row) => row.find(".text-body").text()),
+      wrapper.findAll("[data-test='queue-surface-row']").map((row) => row.find(".text-sm").text()),
     ).toEqual(["new-queued", "middle-queued", "old-running"]);
     // Display is newest-first: B, A, running. Reorder still uses the server's
     // queued subset: A index 0, B index 1.

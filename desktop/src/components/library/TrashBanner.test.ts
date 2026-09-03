@@ -17,7 +17,7 @@ describe("TrashBanner", () => {
     const summary = wrapper.find("[data-test='trash-banner-summary']");
     expect(summary.text()).toBe("Prints stay in the trash 30 d before purge · plato keeps 7 d");
     expect(summary.findAll("b").map((b) => b.text())).toEqual(["30 d", "7 d"]);
-    expect(summary.find("b").classes()).toContain("font-utility");
+    expect(summary.find("b").classes()).toContain("font-mono");
     expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe(
       "3 prints in trash · 41.6 MB",
     );

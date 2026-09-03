@@ -596,7 +596,7 @@ function reset() {
             step="0.5"
             min="0"
             placeholder="Model default"
-            class="ms-input data-mono"
+            class="ms-input font-mono text-xs"
             data-test="wan-sample-shift"
             :value="wanRecipe.sampleShift ?? ''"
             @input="
@@ -617,7 +617,7 @@ function reset() {
               min="0"
               :max="MAX_WAN_DISTILL_STRENGTH"
               placeholder="1.0"
-              class="ms-input data-mono"
+              class="ms-input font-mono text-xs"
               data-test="wan-distill-high"
               :value="wanRecipe.distillStrengthHigh ?? ''"
               @input="
@@ -636,7 +636,7 @@ function reset() {
               min="0"
               :max="MAX_WAN_DISTILL_STRENGTH"
               placeholder="1.0"
-              class="ms-input data-mono"
+              class="ms-input font-mono text-xs"
               data-test="wan-distill-low"
               :value="wanRecipe.distillStrengthLow ?? ''"
               @input="
@@ -716,7 +716,7 @@ function reset() {
             :min="ID_WEIGHT_MIN"
             :max="ID_WEIGHT_MAX"
             :placeholder="identityWeightPlaceholder"
-            class="ms-input data-mono"
+            class="ms-input font-mono text-xs"
             data-test="identity-weight"
             :value="form.identityWeight ?? ''"
             @input="form.identityWeight = numberOrNull(($event.target as HTMLInputElement).value)"
@@ -732,7 +732,7 @@ function reset() {
             min="0"
             :max="identityMaxStartStep"
             :placeholder="String(ID_START_STEP_DEFAULT)"
-            class="ms-input data-mono"
+            class="ms-input font-mono text-xs"
             data-test="identity-start-step"
             :aria-invalid="identityMessage ? 'true' : undefined"
             :value="form.identityStartStep ?? ''"
@@ -818,7 +818,7 @@ function reset() {
               :step="resolutionAlignment"
               min="64"
               aria-label="Width"
-              class="ms-input data-mono"
+              class="ms-input font-mono text-xs"
               @change="snapWidth"
             />
             <button
@@ -836,7 +836,7 @@ function reset() {
               :step="resolutionAlignment"
               min="64"
               aria-label="Height"
-              class="ms-input data-mono"
+              class="ms-input font-mono text-xs"
               @change="snapHeight"
             />
           </div>
@@ -851,7 +851,7 @@ function reset() {
             type="text"
             inputmode="numeric"
             aria-label="Fixed seed value"
-            class="ms-input data-mono"
+            class="ms-input font-mono text-xs"
           />
         </template>
       </AccordionSection>
@@ -885,7 +885,7 @@ function reset() {
           :min="frameMinimum"
           aria-label="Frames"
           :aria-invalid="framesError ? 'true' : undefined"
-          class="ms-input data-mono"
+          class="ms-input font-mono text-xs"
           :class="framesError ? 'ms-input--error' : ''"
           @change="snapFramesField"
         />
@@ -893,7 +893,9 @@ function reset() {
 
         <div v-if="chainDecision.kind === 'chain'" data-test="chain-cue" class="ms-cue">
           Will render as
-          <span class="data-mono font-semibold text-ink">{{ chainDecision.stageCount }}</span>
+          <span class="font-mono text-xs font-semibold text-fg">{{
+            chainDecision.stageCount
+          }}</span>
           chained clips of up to {{ chainDecision.clipFrames }} frames (motion-tail
           {{ chainDecision.motionTail }}) — expect this to take substantially longer than a single
           clip.
@@ -921,7 +923,7 @@ function reset() {
           max="60"
           :disabled="fixedFps !== null"
           aria-label="Frames per second"
-          class="ms-input data-mono"
+          class="ms-input font-mono text-xs"
         />
         <p v-if="fpsError" class="ms-error" role="alert">{{ fpsError }}</p>
 
@@ -952,7 +954,7 @@ function reset() {
             type="text"
             placeholder="/path/to/lora.safetensors"
             aria-label="Camera motion LoRA path"
-            class="ms-input data-mono ms-input--mt"
+            class="ms-input font-mono text-xs ms-input--mt"
             :value="form.cameraControl ?? ''"
             @input="setCameraControl(($event.target as HTMLInputElement).value)"
           />
@@ -1103,7 +1105,7 @@ function reset() {
                     min="0"
                     :max="MAX_GUIDANCE_SCALE"
                     placeholder="Default"
-                    class="ms-input data-mono"
+                    class="ms-input font-mono text-xs"
                     data-test="ltx2-stg-scale"
                     :value="guidance.stgScale ?? ''"
                     @input="
@@ -1119,7 +1121,7 @@ function reset() {
                     type="text"
                     inputmode="numeric"
                     placeholder="28, 29"
-                    class="ms-input data-mono"
+                    class="ms-input font-mono text-xs"
                     data-test="ltx2-stg-blocks"
                     :aria-invalid="stgBlocksMessage ? 'true' : undefined"
                     :value="guidance.stgBlocks"
@@ -1145,7 +1147,7 @@ function reset() {
                     min="0"
                     max="1"
                     placeholder="Default"
-                    class="ms-input data-mono"
+                    class="ms-input font-mono text-xs"
                     data-test="ltx2-rescale-scale"
                     :value="guidance.rescaleScale ?? ''"
                     @input="
@@ -1164,7 +1166,7 @@ function reset() {
                     min="0"
                     :max="MAX_GUIDANCE_SCALE"
                     placeholder="Default"
-                    class="ms-input data-mono"
+                    class="ms-input font-mono text-xs"
                     data-test="ltx2-modality-scale"
                     :value="guidance.modalityScale ?? ''"
                     @input="
@@ -1184,7 +1186,7 @@ function reset() {
                   min="0"
                   :max="MAX_GUIDANCE_SKIP_STEP"
                   placeholder="Every step"
-                  class="ms-input data-mono"
+                  class="ms-input font-mono text-xs"
                   data-test="ltx2-guidance-skip-step"
                   :aria-invalid="skipStepMessage ? 'true' : undefined"
                   :value="guidance.skipStep ?? ''"
@@ -1215,7 +1217,7 @@ function reset() {
                   :value="form.retakeRange?.start_seconds ?? ''"
                   placeholder="start"
                   aria-label="Retake start (seconds)"
-                  class="ms-input data-mono"
+                  class="ms-input font-mono text-xs"
                   data-test="ltx2-retake-start"
                   @input="setRetake('start', ($event.target as HTMLInputElement).value)"
                 />
@@ -1226,7 +1228,7 @@ function reset() {
                   :value="form.retakeRange?.end_seconds ?? ''"
                   placeholder="end"
                   aria-label="Retake end (seconds)"
-                  class="ms-input data-mono"
+                  class="ms-input font-mono text-xs"
                   data-test="ltx2-retake-end"
                   @input="setRetake('end', ($event.target as HTMLInputElement).value)"
                 />
@@ -1236,9 +1238,11 @@ function reset() {
             <template v-if="form.pipeline === 'a2-vid'">
               <label class="ms-label ms-label--mt">Conditioning audio</label>
               <div v-if="form.audioFile" class="ms-file-row">
-                <span class="data-mono ms-file-row__name" :title="form.audioFile.filename">{{
-                  form.audioFile.filename
-                }}</span>
+                <span
+                  class="font-mono text-xs ms-file-row__name"
+                  :title="form.audioFile.filename"
+                  >{{ form.audioFile.filename }}</span
+                >
                 <button type="button" class="ms-file-row__clear" @click="clearAudioFile">
                   clear
                 </button>
@@ -1257,9 +1261,11 @@ function reset() {
 
             <label class="ms-label ms-label--mt">Source video</label>
             <div v-if="form.sourceVideo" class="ms-file-row">
-              <span class="data-mono ms-file-row__name" :title="form.sourceVideo.filename">{{
-                form.sourceVideo.filename
-              }}</span>
+              <span
+                class="font-mono text-xs ms-file-row__name"
+                :title="form.sourceVideo.filename"
+                >{{ form.sourceVideo.filename }}</span
+              >
               <button type="button" class="ms-file-row__clear" @click="clearSourceVideo">
                 clear
               </button>
@@ -1295,7 +1301,7 @@ function reset() {
                 min="0"
                 :value="keyframe.frame"
                 :aria-label="`Keyframe ${index + 1} frame`"
-                class="ms-input data-mono ms-kf-row__frame"
+                class="ms-input font-mono text-xs ms-kf-row__frame"
                 :data-test="`ltx2-keyframe-frame-${index}`"
                 @input="updateKeyframeFrame(index, ($event.target as HTMLInputElement).value)"
               />
@@ -1327,7 +1333,7 @@ function reset() {
         <template v-if="canExtend">
           <label class="ms-label ms-label--mt">Continue a video</label>
           <div v-if="form.extendVideo" class="ms-file-row">
-            <span class="data-mono ms-file-row__name" :title="form.extendVideo.filename">{{
+            <span class="font-mono text-xs ms-file-row__name" :title="form.extendVideo.filename">{{
               form.extendVideo.filename
             }}</span>
             <button
@@ -1385,9 +1391,9 @@ function reset() {
   margin-bottom: 10px;
 }
 .ms-adv__summary {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9.5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   letter-spacing: 0.04em;
 }
 .ms-adv__list {
@@ -1398,7 +1404,7 @@ function reset() {
 .ms-label {
   display: block;
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
 }
@@ -1410,10 +1416,10 @@ function reset() {
   width: 100%;
   box-sizing: border-box;
   height: 40px;
-  background: var(--bench);
-  border: 1px solid var(--ce);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
   border-radius: 9px;
-  color: var(--rebate);
+  color: var(--mold-text);
   padding: 0 12px;
   font-size: 13px;
 }
@@ -1421,16 +1427,16 @@ function reset() {
   margin-top: 6px;
 }
 .ms-input--error {
-  border-color: var(--stop);
+  border-color: var(--mold-error);
 }
 .ms-textarea {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bench);
-  border: 1px solid var(--ce);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
   border-radius: 10px;
-  color: var(--rebate);
-  font-family: var(--f-body);
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
   font-size: 13.5px;
   resize: none;
   outline: none;
@@ -1456,12 +1462,12 @@ function reset() {
 }
 .ms-switch-row__title {
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-weight: 600;
 }
 .ms-switch-row__hint {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   margin-top: 2px;
 }
 .ms-size {
@@ -1471,7 +1477,7 @@ function reset() {
 }
 .ms-size__swap {
   flex-shrink: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -1483,7 +1489,7 @@ function reset() {
 }
 .ms-error {
   font-size: 11px;
-  color: var(--stop);
+  color: var(--mold-error);
   margin-top: 6px;
 }
 .ms-error--mt {
@@ -1491,24 +1497,24 @@ function reset() {
 }
 .ms-hint {
   font-size: 10.5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   margin-top: 6px;
   line-height: 1.45;
 }
 .ms-cue {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   margin-top: 6px;
   border-radius: 9px;
-  background: color-mix(in srgb, var(--safelight) 10%, transparent);
+  background: color-mix(in srgb, var(--mold-blue) 10%, transparent);
   padding: 8px 10px;
   font-size: 11px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .ms-file {
   display: block;
   width: 100%;
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-file-row {
   display: flex;
@@ -1518,14 +1524,14 @@ function reset() {
 }
 .ms-file-row__name {
   font-size: 11px;
-  color: var(--rebate);
+  color: var(--mold-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ms-file-row__clear {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -1537,7 +1543,7 @@ function reset() {
 }
 .ms-kf-add {
   font-size: 11px;
-  color: var(--safelight);
+  color: var(--mold-blue);
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -1554,19 +1560,19 @@ function reset() {
 }
 .ms-kf-row__name {
   font-size: 11px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ms-kf-row__remove {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   background: transparent;
   border: 0;
   cursor: pointer;
 }
 .ms-guidance {
-  border-top: 1px solid var(--ce);
+  border-top: 1px solid var(--mold-border-control);
   padding-top: 16px;
 }
 .ms-guidance__head {
@@ -1582,22 +1588,22 @@ function reset() {
   display: inline-block;
   margin-left: 5px;
   padding: 1px 6px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 999px;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
 }
 .ms-guidance__reset {
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   cursor: pointer;
   font-size: 11px;
   font-weight: 600;
 }
 .ms-guidance__label {
   display: block;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 11px;
   font-weight: 600;
 }
@@ -1605,9 +1611,9 @@ function reset() {
   margin-top: 6px;
 }
 .ms-adv__reset {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 6px 9px;
   border-radius: 8px;
   font-size: 11px;
@@ -1615,7 +1621,7 @@ function reset() {
   cursor: pointer;
 }
 .ms-adv__reset:hover {
-  background: color-mix(in srgb, var(--rebate) 6%, transparent);
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-text) 6%, transparent);
+  color: var(--mold-text);
 }
 </style>

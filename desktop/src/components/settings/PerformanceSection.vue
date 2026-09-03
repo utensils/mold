@@ -42,19 +42,19 @@ async function restartEngine() {
 
 <template>
   <div>
-    <p v-if="!isEmbedded" class="text-caption text-ink-3">
+    <p v-if="!isEmbedded" class="text-micro text-fg-dim">
       Performance knobs configure the built-in engine. You're connected to a shared or remote server
       — its environment is managed where it runs.
     </p>
     <template v-else>
       <div
         v-if="dirty.size > 0"
-        class="mb-3 flex items-center gap-3 rounded-chrome border border-halide bg-[color-mix(in_srgb,var(--halide)_10%,transparent)] px-3 py-2"
+        class="mb-3 flex items-center gap-3 rounded-window border border-sapphire bg-sapphire/10 px-3 py-2"
       >
-        <span class="text-body text-ink">Knobs changed — restart the engine to apply.</span>
+        <span class="text-sm text-fg">Knobs changed — restart the engine to apply.</span>
         <button
           type="button"
-          class="ml-auto h-7 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="ml-auto h-7 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
           :disabled="restarting"
           @click="restartEngine"
         >
@@ -68,7 +68,9 @@ async function restartEngine() {
         :help="knob.help"
         :needs-engine-restart="false"
       >
-        <span class="edge-code mr-1">{{ envName(knob.key) }}</span>
+        <span class="font-mono text-micro text-fg-dim whitespace-nowrap mr-1">{{
+          envName(knob.key)
+        }}</span>
         <NumberControl
           v-if="knob.editor === 'number'"
           :model-value="valueOf(knob.key) === '' ? null : Number(valueOf(knob.key))"

@@ -170,7 +170,7 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   display: flex;
   flex-direction: column;
   gap: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 13px;
 }
 .license-settings__lede,
@@ -189,28 +189,28 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   align-items: center;
   gap: 16px;
   padding: 12px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control-lg);
-  background: var(--bath);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
 }
 .license-settings__row > div:first-child {
   flex: 1;
   min-width: 0;
 }
 .license-settings__row strong {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 a {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 .license-settings__accepted {
-  color: var(--success);
-  font: 600 11px var(--f-mono);
+  color: var(--mold-success);
+  font: 600 11px var(--mold-font-mono);
   text-transform: uppercase;
 }
 .license-settings__pending {
   color: var(--danger);
-  font: 600 11px var(--f-mono);
+  font: 600 11px var(--mold-font-mono);
   text-transform: uppercase;
 }
 .license-settings__actions {
@@ -227,16 +227,16 @@ a {
 }
 button {
   min-height: 44px;
-  border: 1px solid var(--safelight);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-blue);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   padding: 0 12px;
-  font: 600 12px var(--f-body);
+  font: 600 12px var(--mold-font-sans);
   cursor: pointer;
 }
 .license-settings__success {
-  color: var(--success);
+  color: var(--mold-success);
 }
 @media (max-width: 600px) {
   .license-settings__row {
