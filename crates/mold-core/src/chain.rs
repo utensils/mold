@@ -719,6 +719,66 @@ pub fn routing_clip_frames(family: &str, model: &str) -> Option<u32> {
     }
 }
 
+/// The refusal a **one-shot** auto-chain earns on a text-to-video wan tier —
+/// the single authority every door renders.
+///
+/// A wan checkpoint whose advertised `source_image` contract is `Unsupported`
+/// has no conditioning channel at all, so nothing crosses a clip boundary:
+/// every stage re-derives the scene from the same prompt and the same seed and
+/// the "longer" video is the same clip rendered again, with a visible reset at
+/// each seam. Measured on `wan22-t2v-a14b:q8` at 219 frames / 3 stages, frames
+/// a whole stage apart scored 38.1-44.2 dB PSNR against each other while
+/// frames ten apart INSIDE a stage scored 26.0 dB — a stage boundary moved the
+/// picture less than ten frames of ordinary motion did. So this is a refusal
+/// rather than a zero-length seam (#1508).
+///
+/// The rule applies to the auto-chain a user did not ask for: `mold run
+/// --frames 259`, the Studio's Create rail, and the `ephemeral` chain job both
+/// of them post. An AUTHORED sequence is untouched — there, repeated stages
+/// are what the author asked for.
+///
+/// The sentence is deliberately surface-neutral: it reaches a GUI user as the
+/// reason a control is disabled as often as it reaches a terminal, so it names
+/// no CLI flag. It also names image-to-video TAGS rather than model families,
+/// because `wan22-ti2v-5b:dmd` is itself refused — recommending the bare
+/// family would send a user to a tier this same rule turns away.
+///
+/// `family` is a parameter rather than a manifest lookup because an installed
+/// `cv:` / `hf:` checkpoint is only classified through the server's sidecar
+/// overlay, and because the contract means something different elsewhere: an
+/// LTX-2 tier carries latent context across the seam whatever it says about
+/// source images. An unclassified contract (`None`) is "unknown", never a
+/// declared refusal — #783 added wan auto-chaining precisely so opaque catalog
+/// ids route, and refusing them on a guess would undo that.
+///
+/// `clip_frames` is the size ONE generation renders — [`routing_clip_frames`],
+/// or the caller's own `--clip-frames` / `clip_frames` override.
+pub fn text_only_wan_auto_chain_refusal(
+    family: Option<&str>,
+    model: &str,
+    source_image: Option<crate::SourceImageCapability>,
+    total_frames: u32,
+    clip_frames: u32,
+) -> Option<String> {
+    if family != Some("wan")
+        || !matches!(
+            source_image,
+            Some(crate::SourceImageCapability::Unsupported)
+        )
+        || total_frames <= clip_frames
+    {
+        return None;
+    }
+    Some(format!(
+        "'{model}' is text-to-video and cannot continue motion across a clip \
+         boundary, so rendering {total_frames} frames would repeat the same \
+         ~{clip_frames}-frame clip rather than extend it. Reduce the frame count \
+         to {clip_frames} or fewer for one continuous clip, or use an \
+         image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which \
+         seeds each continuation with the previous clip's final frame."
+    ))
+}
+
 impl ChainRequest {
     /// Canonicalize raw prompt text at one chain ingress. Callers that forward
     /// an already-canonical request must protect backslashes on that wire hop
@@ -2802,6 +2862,139 @@ mod tests {
                 .stitched_output_metadata(OutputFormat::Mp4, 190, None)
                 .output_mode,
             Some(crate::GenerationOutputMode::OneShot)
+        );
+    }
+
+    /// The shared Wan surface-parity fixture (#806) also pins the ONE-SHOT
+    /// auto-chain refusal, because three doors render it: the CLI router, the
+    /// server's `POST /api/chain-jobs` admission, and
+    /// `studio/lib/chainRouting.ts` (whose own test reads the same block).
+    ///
+    /// A wan tier that declares `source_image: Unsupported` has no channel to
+    /// hand anything across a clip boundary, so every stage re-derives the
+    /// scene from the same prompt and seed: the "long" video is the same clip
+    /// repeated with a visible reset at each seam. Chaining it is not a longer
+    /// render, it is the same render three times.
+    #[test]
+    fn text_only_wan_auto_chain_refusal_matches_the_surface_parity_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        let block = &fixture["auto_chain"]["text_only_refusal"];
+        let template = block["template"].as_str().expect("template");
+        let total = block["total_frames"].as_u64().expect("total_frames") as u32;
+
+        let render = |model: &str, clip: u32| {
+            template
+                .replace("{model}", model)
+                .replace("{total_frames}", &total.to_string())
+                .replace("{clip_frames}", &clip.to_string())
+        };
+
+        for entry in block["refused"].as_array().expect("refused") {
+            let model = entry["model"].as_str().expect("model");
+            let clip = entry["clip_frames"].as_u64().expect("clip_frames") as u32;
+
+            // The fixture's contract is the manifest's, not a second opinion.
+            let manifest =
+                crate::manifest::find_manifest(&crate::manifest::resolve_model_name(model))
+                    .unwrap_or_else(|| panic!("{model} is in the manifest"));
+            assert_eq!(
+                manifest.defaults.source_image,
+                Some(crate::SourceImageCapability::Unsupported),
+                "{model} must declare an unsupported source-image contract"
+            );
+            assert_eq!(
+                manifest.defaults.frames,
+                Some(entry["tier_default_frames"].as_u64().expect("tier default") as u32),
+                "{model}'s recorded default frame count drifted from the fixture"
+            );
+            assert_eq!(
+                routing_clip_frames("wan", model),
+                Some(clip),
+                "{model}'s routing clip size drifted from the fixture"
+            );
+
+            assert_eq!(
+                text_only_wan_auto_chain_refusal(
+                    Some("wan"),
+                    model,
+                    manifest.defaults.source_image,
+                    total,
+                    clip,
+                ),
+                Some(render(model, clip)),
+                "{model} must refuse a one-shot auto-chain with the fixture's sentence"
+            );
+            // At or below the clip size there is no chain to refuse.
+            assert_eq!(
+                text_only_wan_auto_chain_refusal(
+                    Some("wan"),
+                    model,
+                    manifest.defaults.source_image,
+                    clip,
+                    clip,
+                ),
+                None,
+                "{model} renders its own clip size as one clip"
+            );
+        }
+
+        for entry in block["chained"].as_array().expect("chained") {
+            let model = entry["model"].as_str().expect("model");
+            let clip = entry["clip_frames"].as_u64().expect("clip_frames") as u32;
+            let manifest =
+                crate::manifest::find_manifest(&crate::manifest::resolve_model_name(model))
+                    .unwrap_or_else(|| panic!("{model} is in the manifest"));
+            assert_eq!(
+                manifest.defaults.source_image,
+                Some(crate::SourceImageCapability::Optional),
+                "{model} must still advertise an image-conditioned contract"
+            );
+            assert_eq!(routing_clip_frames("wan", model), Some(clip));
+            assert_eq!(
+                text_only_wan_auto_chain_refusal(
+                    Some("wan"),
+                    model,
+                    manifest.defaults.source_image,
+                    total,
+                    clip,
+                ),
+                None,
+                "{model} seeds each continuation and must still chain"
+            );
+        }
+
+        // An unclassified checkpoint — an opaque `cv:` / `hf:` catalog id — is
+        // "unknown", never a declared refusal. #783 added wan auto-chaining
+        // precisely so those route; refusing them on a guess would undo it.
+        assert_eq!(
+            text_only_wan_auto_chain_refusal(Some("wan"), "cv:12345", None, total, 121),
+            None,
+        );
+        // The contract only means this on wan. LTX-2 carries latent context
+        // across the seam whatever its source-image contract says.
+        assert_eq!(
+            text_only_wan_auto_chain_refusal(
+                Some("ltx2"),
+                "ltx-2-19b-distilled:fp8",
+                Some(crate::SourceImageCapability::Unsupported),
+                total,
+                97,
+            ),
+            None,
+        );
+        assert_eq!(
+            text_only_wan_auto_chain_refusal(
+                None,
+                "wan21-t2v-1.3b:turbo",
+                Some(crate::SourceImageCapability::Unsupported),
+                total,
+                121,
+            ),
+            None,
         );
     }
 }

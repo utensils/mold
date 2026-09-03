@@ -100,6 +100,81 @@ describe("video duration controls", () => {
     });
   });
 
+  it("enters a text-to-video wan tier on its own clip, never a refused duration", () => {
+    // The reported defect: the form's carried 97 is on wan's 4k+1 grid, so it
+    // survived model selection onto an A14B T2V tier whose clip is 73 — and a
+    // text-to-video tier past its clip size is refused now, so Generate was
+    // disabled with the refusal as its blocker reason the moment the model
+    // was picked, before the user touched anything.
+    const wanT2v = {
+      name: "wan22-t2v-a14b:q8",
+      family: "wan",
+      source_image: "unsupported",
+      default_frames: 73,
+      default_fps: 16,
+      max_frames: 257,
+      frame_step: 4,
+    };
+
+    expect(videoFramesForModelSelection(97, wanT2v)).toBe(73);
+
+    // The tier's clip IS its single-request ceiling: it hands nothing across a
+    // seam, so there is no longer render to reach. The slider therefore cannot
+    // travel to a value submit would refuse.
+    expect(maxVideoFrames(wanT2v, 16)).toBe(73);
+    expect(clampVideoFrames(257, 16, wanT2v)).toBe(73);
+    expect(videoFramesError(97, wanT2v)).toContain("between 1 and 73");
+
+    // ... and the marks collapse to the honest single generation instead of
+    // advertising 257 frames as "1×".
+    expect(videoGenerationCount(73, 16, wanT2v)).toBe(1);
+    expect(videoGenerationMarks(16, wanT2v)).toEqual([
+      { frames: 73, generations: 1, label: "1×" },
+    ]);
+
+    // A refused count is not "one generation" — the count and the routing
+    // verdict must never be able to disagree again.
+    expect(videoGenerationCount(259, 16, wanT2v)).toBeNull();
+  });
+
+  it("leaves an image-conditioned wan tier its full sequencing ceiling", () => {
+    // Only a tier that carries nothing across the seam loses the range. A
+    // TI2V tier seeds each continuation from the previous clip's final frame,
+    // so its slider still reaches the family ceiling and still marks the
+    // sequence stops.
+    const wanTi2v = {
+      name: "wan22-ti2v-5b:turbo",
+      family: "wan",
+      source_image: "optional",
+      default_frames: 121,
+      default_fps: 24,
+      max_frames: 257,
+      frame_step: 4,
+    };
+    expect(maxVideoFrames(wanTi2v, 24)).toBe(257);
+    expect(videoFramesForModelSelection(257, wanTi2v)).toBe(257);
+    expect(videoGenerationCount(257, 24, wanTi2v)).toBe(3);
+  });
+
+  it("keeps LTX-Video sequencing even though it advertises no source image", () => {
+    // `unsupported` is not by itself the rule: every LTX-Video tier advertises
+    // it, and that family IS auto-chained (its clips simply concatenate, the
+    // same honest Join behaviour). Keying the reset or the ceiling on the
+    // contract string alone would shorten a carried duration here for no
+    // reason and take away sequencing the family supports.
+    const ltxVideo = {
+      name: "ltx-video-0.9.6:bf16",
+      family: "ltx-video",
+      source_image: "unsupported",
+      default_frames: 25,
+      default_fps: 30,
+      frame_step: 8,
+    };
+    expect(maxVideoFrames(ltxVideo, 30)).toBe(257);
+    expect(videoFramesForModelSelection(97, ltxVideo)).toBe(97);
+    expect(videoGenerationCount(177, 30, ltxVideo)).toBe(2);
+  });
+
   it("validates frame counts against the selected model grid", () => {
     expect(videoFramesError(45, { family: "wan" })).toBeNull();
     expect(videoFramesError(45, { family: "ltx2" })).toBe(

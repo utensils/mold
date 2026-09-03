@@ -61,6 +61,12 @@ export type GenerateRoutingRequest = {
 export type GenerateRoutingModel = {
   default_frames?: number | null | undefined;
   source_image?: string | null | undefined;
+  /** `/api/models.max_frames` — the HOST's single-request ceiling, which
+   * outranks this module's family fallback exactly as it does in
+   * `maxVideoFrames`. Without it the two disagreed on a model whose row
+   * advertises more than the client constant, and the router refused a frame
+   * count the duration control offered and the server accepts. */
+  max_frames?: number | null | undefined;
 };
 
 export type AutoChainUnsupportedField =
@@ -171,6 +177,73 @@ export function wanCarriesContext(
 }
 
 /**
+ * The refusal a **one-shot** auto-chain earns on a text-to-video wan tier.
+ *
+ * Byte-identical mirror of `mold_core::chain::text_only_wan_auto_chain_refusal`,
+ * which is the single authority: the CLI router calls it and the server renders
+ * it at `POST /api/chain-jobs` for the same ephemeral job this router submits,
+ * so a user meets one sentence whichever door they came through. The shared
+ * fixture `tests/fixtures/wan/surface-parity-v1.json` pins the template and
+ * both sides read it (`chainRouting.wan.test.ts`, and the Rust test in
+ * `mold-core`'s `chain.rs`).
+ *
+ * A wan checkpoint whose advertised `source_image` contract is `unsupported`
+ * has no conditioning channel, so nothing crosses a clip boundary: every stage
+ * re-derives the scene from the same prompt and seed and the "longer" video is
+ * the same clip repeated with a visible reset at each seam (#1508). An
+ * unclassified contract is "unknown", never a declared refusal.
+ *
+ * Only the automatic split reaches here. An authored Sequence builds its own
+ * stages and is untouched: repeated clips there are what the author asked for.
+ */
+/**
+ * The single-request frame ceiling of a wan tier that cannot be auto-chained.
+ *
+ * For every other video model the routing clip size and the single-request
+ * ceiling are different numbers: the ceiling is what one denoise may ask for,
+ * and anything past the clip becomes an automatic sequence. A wan tier that
+ * declares `source_image: "unsupported"` has no sequence to become — the split
+ * is refused — so its clip size IS its ceiling, and a control that offered
+ * more was offering a value submit would turn away. `null` for every model
+ * this does not apply to, which is the only thing callers should key on.
+ */
+export function textOnlyWanSingleClipCeiling(
+  family: string | null | undefined,
+  model: string,
+  sourceImage: string | null | undefined,
+  tierDefault: number | null | undefined,
+): number | null {
+  if (canonicalizeFamily(family) !== "wan" || sourceImage !== "unsupported") {
+    return null;
+  }
+  return wanRoutingClipFrames(model, tierDefault);
+}
+
+export function textOnlyWanAutoChainRefusal(
+  family: string | null | undefined,
+  model: string,
+  sourceImage: string | null | undefined,
+  totalFrames: number,
+  clipFrames: number,
+): string | null {
+  if (
+    canonicalizeFamily(family) !== "wan" ||
+    sourceImage !== "unsupported" ||
+    totalFrames <= clipFrames
+  ) {
+    return null;
+  }
+  return (
+    `'${model}' is text-to-video and cannot continue motion across a clip ` +
+    `boundary, so rendering ${totalFrames} frames would repeat the same ` +
+    `~${clipFrames}-frame clip rather than extend it. Reduce the frame count ` +
+    `to ${clipFrames} or fewer for one continuous clip, or use an ` +
+    `image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which ` +
+    `seeds each continuation with the previous clip's final frame.`
+  );
+}
+
+/**
  * Auto-chaining clip length for a wan render.
  *
  * Wan's per-clip ceiling is the family's flat 257-frame request cap, but the
@@ -257,16 +330,21 @@ export function decideGenerateRequestRouting(
     req.fps,
     model?.source_image,
     model?.default_frames,
+    model?.max_frames,
   );
   if (decision.kind !== "chain") return decision;
 
   const unsupported = unsupportedAutoChainFields(req);
   if (unsupported.length === 0) return decision;
 
-  const singleShotCap = maxFramesForFamilyAtFps(
-    canonicalizeFamily(family),
-    req.fps,
-  );
+  // Same preference as the non-chain-capable branch above: the host is
+  // authoritative about its own single-request ceiling and the family table is
+  // only the fallback. Reading the table alone here let one half of this
+  // function trust a row's advertised `max_frames` while the other half did
+  // not, so a row whose ceiling differs from its family's saw two caps.
+  const singleShotCap =
+    model?.max_frames ??
+    maxFramesForFamilyAtFps(canonicalizeFamily(family), req.fps);
   const frameCount = frames ?? 0;
   if (singleShotCap !== null && frameCount <= singleShotCap) {
     return { kind: "single", preservedAutoChainFields: unsupported };
@@ -297,6 +375,10 @@ export function decideChainRouting(
   /** `/api/models.default_frames`; wan tiers may raise their one-generation
    * routing size above the family floor. */
   tierDefault: number | null | undefined = undefined,
+  /** `/api/models.max_frames`. The host is authoritative about its own
+   * single-request ceiling; the family table below is only the fallback for a
+   * row that does not advertise one. */
+  advertisedMaxFrames: number | null | undefined = undefined,
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
@@ -312,6 +394,7 @@ export function decideChainRouting(
     // ceiling; only fall back to the routing default when the family
     // publishes none.
     const cap =
+      advertisedMaxFrames ??
       maxFramesForFamilyAtFps(normalizedFamily, fps) ??
       LTX2_DEFAULT_CLIP_FRAMES;
     if (frames <= cap) return { kind: "single" };
@@ -326,6 +409,19 @@ export function decideChainRouting(
     ? wanRoutingClipFrames(model, tierDefault)
     : LTX2_DEFAULT_CLIP_FRAMES;
   if (frames <= clipFrames) return { kind: "single" };
+
+  // A wan tier that declares it carries nothing across a seam cannot be
+  // auto-chained into a longer video — it would render the same clip again.
+  // The sentence is `mold-core`'s, rendered identically here so the Studio,
+  // the CLI, and the server's own 422 read the same.
+  const textOnly = textOnlyWanAutoChainRefusal(
+    normalizedFamily,
+    model,
+    sourceImage,
+    frames,
+    clipFrames,
+  );
+  if (textOnly) return { kind: "reject", reason: textOnly };
 
   // Families without context handoff are forced to zero by the server. Wan's
   // answer is per checkpoint, so it comes from the advertised source-image

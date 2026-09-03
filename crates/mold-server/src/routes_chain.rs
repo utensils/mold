@@ -435,6 +435,69 @@ pub(crate) fn validate_and_normalize_chain_family(
         return Err(ApiError::validation(message));
     }
 
+    // A ONE-SHOT long video is a chain only because the model cannot render it
+    // in one pass, so admission owes the caller the same answer the CLI router
+    // gives: a wan tier that declares `source_image: Unsupported` hands nothing
+    // across a clip boundary, and every stage re-derives the scene from the
+    // same prompt and seed. The "longer" video is the same clip repeated with a
+    // visible reset at each seam, paid for at full GPU price. `mold-core` owns
+    // the decision and the sentence so the CLI, the Studio router, and this 422
+    // cannot drift (#1508 landed it on the CLI alone, and the web Studio kept
+    // submitting the same job here).
+    //
+    // Scoped to `ephemeral`: an AUTHORED sequence that repeats stages is what
+    // its author asked for, and admission must not second-guess it. A client
+    // that omits the field (serde default `false`) is therefore exempt by
+    // design, and that is safe because every one-shot auto-chainer sets it —
+    // the CLI (`commands/chain.rs`), the web (`useGenerateStream.ts`), desktop
+    // (`stores/generation.ts`), and the iPhone (via `buildAutoChainRequest`).
+    // The TUI never builds an ephemeral chain at all.
+    if req.ephemeral && family == "wan" {
+        // Derived from the STAGES when there are stages: the largest stage is
+        // the clip the caller actually rendered with, and it is the only form
+        // of the answer that survives `normalise`, which clears `clip_frames`
+        // along with the rest of the auto-expand sugar. Reading `clip_frames`
+        // alone made this door contradict itself — `validate_chain` preflights
+        // before AND after normalising, so a `{total_frames: 97,
+        // clip_frames: 97}` body on a 73-frame-routing tier passed the first
+        // call and was refused by the second, i.e. validate refusing what
+        // `create_chain_job` (one call, pre-normalise) admits. The CLI needs
+        // the same derivation for a different reason: it normalises
+        // client-side, so its ephemeral chain arrives with stages and no
+        // `clip_frames` at all.
+        //
+        // The caller's own clip size still wins on the auto-expand form —
+        // `--clip-frames` is documented to go up to the family budget, and
+        // refusing a request that would have been ONE clip would be a false
+        // refusal.
+        let clip_frames = req
+            .stages
+            .iter()
+            .map(|stage| stage.frames)
+            .max()
+            .or(req.clip_frames)
+            .or_else(|| mold_core::chain::routing_clip_frames(&family, &req.model))
+            .unwrap_or(mold_core::chain::LTX2_DEFAULT_CLIP_FRAMES);
+        let clip_frames = crate::chain_limits::family_cap_at_fps(&family, req.fps)
+            .map_or(clip_frames, |cap| clip_frames.min(cap));
+        // Both shapes reach this door: the Studio and the auto-expand sugar
+        // send `total_frames`, the CLI's own router sends the expanded stages.
+        let total_frames = if req.stages.is_empty() {
+            req.total_frames.unwrap_or(0)
+        } else {
+            req.stages.iter().map(|stage| stage.frames).sum()
+        };
+        if let Some(message) = mold_core::chain::text_only_wan_auto_chain_refusal(
+            Some(family.as_str()),
+            &req.model,
+            contract,
+            total_frames,
+            clip_frames,
+        ) {
+            return Err(ApiError::validation(message));
+        }
+    }
+
     if family == "wan" {
         // Wan has no latent motion tail. Its seam re-renders exactly the one
         // frame the continuation was seeded with, and only an image-conditioned
@@ -1002,5 +1065,202 @@ mod tests {
         auto_expand.clip_frames = Some(53);
         auto_expand.source_image = Some(vec![1, 2, 3]);
         validate_and_normalize_chain_family(&config, &mut auto_expand).expect("admitted");
+    }
+
+    /// A ONE-SHOT long video on a text-to-video wan tier is refused at this
+    /// door too (#1508 shipped it on the CLI router alone).
+    ///
+    /// The bug: a 259-frame one-shot submitted from the web Studio on
+    /// `wan21-t2v-1.3b:turbo` was admitted here as an ephemeral three-stage
+    /// chain (121/121/17, every stage on the same seed with a zero seam) and
+    /// the delivered video reset at both boundaries — the second one a hard
+    /// cut to a different composition. The tier declares
+    /// `source_image: Unsupported`, so there is nothing to hand across a clip
+    /// boundary and each stage re-derives the scene from the same prompt.
+    ///
+    /// The refusal is scoped to `ephemeral`: an AUTHORED sequence that repeats
+    /// stages is what its author asked for, and admission must not second-guess
+    /// it. The sentence is `mold_core::chain::text_only_wan_auto_chain_refusal`'s,
+    /// so the CLI, the Studio router, and this 422 all read the same.
+    #[test]
+    fn chain_preflight_refuses_a_text_only_wan_one_shot_auto_chain() {
+        let config = mold_core::Config::default();
+        let one_shot = |model: &str, width: u32, height: u32, ephemeral: bool| {
+            let mut request = req(OutputFormat::Mp4);
+            request.model = model.into();
+            request.width = width;
+            request.height = height;
+            request.motion_tail_frames = 0;
+            request.stages = Vec::new();
+            request.prompt = Some("a village at dusk".into());
+            request.total_frames = Some(259);
+            request.clip_frames = None;
+            request.ephemeral = ephemeral;
+            request
+        };
+
+        let mut refused = one_shot("wan21-t2v-1.3b:turbo", 832, 480, true);
+        let error = validate_and_normalize_chain_family(&config, &mut refused)
+            .expect_err("a text-only tier cannot be auto-chained into a longer video");
+        assert_eq!(
+            error.error,
+            mold_core::chain::text_only_wan_auto_chain_refusal(
+                Some("wan"),
+                "wan21-t2v-1.3b:turbo",
+                Some(mold_core::SourceImageCapability::Unsupported),
+                259,
+                121,
+            )
+            .expect("core refuses this one"),
+            "the 422 must render mold-core's sentence verbatim"
+        );
+        assert_eq!(
+            error.code, "VALIDATION_ERROR",
+            "a client mistake, not a hold"
+        );
+
+        // The same request AUTHORED is still admitted: repeated stages are
+        // what the author asked for.
+        let mut authored = one_shot("wan21-t2v-1.3b:turbo", 832, 480, false);
+        validate_and_normalize_chain_family(&config, &mut authored)
+            .expect("an authored wan sequence is untouched by the one-shot rule");
+
+        // The explicit-stages shape of the same one-shot is refused too — the
+        // CLI's own auto-chain posts stages, not the auto-expand sugar.
+        let mut staged = one_shot("wan21-t2v-1.3b:turbo", 832, 480, true);
+        staged.prompt = None;
+        staged.total_frames = None;
+        staged.stages = vec![
+            ChainStage {
+                prompt: "a village at dusk".into(),
+                frames: 121,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+            ChainStage {
+                prompt: "a village at dusk".into(),
+                frames: 121,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+        ];
+        assert!(
+            validate_and_normalize_chain_family(&config, &mut staged).is_err(),
+            "an ephemeral multi-stage wan T2V job repeats its clip whatever shape it arrives in"
+        );
+
+        // An image-conditioned tier seeds each continuation from the previous
+        // clip's final frame, so its one-shot still chains.
+        let mut admitted = one_shot("wan22-ti2v-5b:turbo", 1280, 704, true);
+        validate_and_normalize_chain_family(&config, &mut admitted)
+            .expect("an image-conditioned tier carries its seam and still chains");
+
+        // At or below the tier's own clip size there is no chain to refuse.
+        let mut single = one_shot("wan21-t2v-1.3b:turbo", 832, 480, true);
+        single.total_frames = Some(121);
+        validate_and_normalize_chain_family(&config, &mut single)
+            .expect("one clip of the tier's own routing size is one render");
+    }
+
+    /// `POST /api/generate/chain/validate` must never refuse what
+    /// `POST /api/chain-jobs` admits.
+    ///
+    /// `validate_chain` calls `validate_and_normalize_chain_family` BEFORE and
+    /// AFTER `normalise`, while `create_chain_job` calls it once; `normalise`
+    /// clears `clip_frames` along with the rest of the auto-expand sugar. A
+    /// derivation that read `req.clip_frames` therefore saw the caller's clip
+    /// on the first pass and the tier's routing default on the second, so
+    /// `{total_frames: 97, clip_frames: 97}` on a 73-frame-routing tier passed
+    /// validate's first call, normalised to ONE 97-frame stage, and was refused
+    /// by its second — validate saying no to a body chain-jobs says yes to,
+    /// which is exactly the disagreement #783 closed.
+    ///
+    /// Deriving the clip from the stages when there are stages fixes it at the
+    /// root: the largest stage IS the clip the caller rendered with, and it
+    /// survives normalisation. The CLI depends on the same thing — it
+    /// normalises client-side, so its ephemeral chain arrives with stages and
+    /// no `clip_frames` at all.
+    #[test]
+    fn chain_preflight_agrees_with_itself_across_normalise() {
+        let config = mold_core::Config::default();
+        let one_shot_clip = || {
+            let mut request = req(OutputFormat::Mp4);
+            // Routing clip 73 (family floor 53 raised by the tier's own
+            // recorded default), and the caller asked for one 97-frame clip.
+            request.model = "wan22-t2v-a14b:q8".into();
+            request.width = 832;
+            request.height = 480;
+            request.motion_tail_frames = 0;
+            request.stages = Vec::new();
+            request.prompt = Some("a village at dusk".into());
+            request.total_frames = Some(97);
+            request.clip_frames = Some(97);
+            request.ephemeral = true;
+            request
+        };
+
+        // The validate endpoint's own sequence: preflight, normalise,
+        // preflight again. Both preflights must reach the same verdict.
+        let mut request = one_shot_clip();
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("one 97-frame clip is one generation, not a repeated chain");
+        let mut normalized = request
+            .normalise_with_family(Some("wan"))
+            .expect("the auto-expand form normalises");
+        assert_eq!(
+            normalized.stages.len(),
+            1,
+            "97 frames at a 97-frame clip is a single stage"
+        );
+        validate_and_normalize_chain_family(&config, &mut normalized).expect(
+            "the post-normalise preflight must agree with the pre-normalise one, or              validate refuses a body chain-jobs admits",
+        );
+
+        // And the refusal still stands on the shape that survives normalise:
+        // an ephemeral multi-stage chain whose stitched total runs past the
+        // clip each stage rendered.
+        let mut staged = one_shot_clip();
+        staged.prompt = None;
+        staged.total_frames = None;
+        staged.clip_frames = None;
+        staged.stages = (0..3)
+            .map(|idx| ChainStage {
+                prompt: "a village at dusk".into(),
+                frames: if idx == 2 { 17 } else { 73 },
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            })
+            .collect();
+        let error = validate_and_normalize_chain_family(&config, &mut staged)
+            .expect_err("three clips of one repeated scene is not a longer video");
+        assert_eq!(
+            error.error,
+            mold_core::chain::text_only_wan_auto_chain_refusal(
+                Some("wan"),
+                "wan22-t2v-a14b:q8",
+                Some(mold_core::SourceImageCapability::Unsupported),
+                73 + 73 + 17,
+                73,
+            )
+            .expect("core refuses this one"),
+        );
     }
 }

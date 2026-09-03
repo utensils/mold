@@ -7,6 +7,7 @@ import {
 } from "./minimaxH3Authoring";
 import {
   decideGenerateRequestRouting,
+  textOnlyWanSingleClipCeiling,
   type GenerateRoutingRequest,
 } from "./chainRouting";
 
@@ -129,6 +130,20 @@ export function maxVideoFrames(
       maxFramesForFamilyAtFps(model?.family, rate) ??
       LEGACY_MAX_FRAMES;
   }
+  // A wan tier that hands nothing across a clip boundary has no automatic
+  // sequence to reach for, so its clip size is the real ceiling — the host's
+  // advertised `max_frames` is the family's 257, which submit now refuses.
+  // Without this the Duration slider ran to 257 and, because a refused count
+  // has no generation count of its own, collapsed every notch into a single
+  // "1×" mark reading "257 frames · 16 fps · 16.1s · 1 generation" — an
+  // advertised single generation that admission answers 422 to.
+  const clipCeiling = textOnlyWanSingleClipCeiling(
+    model?.family,
+    model?.name ?? "",
+    model?.source_image,
+    model?.default_frames,
+  );
+  if (clipCeiling !== null) cap = Math.min(cap, clipCeiling);
   return snapVideoFrames(cap, model, "down");
 }
 
@@ -221,6 +236,20 @@ export function videoFramesForModelSelection(
   if (frames == null || videoFrameGridError(frames, model)) {
     return normalizedDefault;
   }
+  // A carried count the TARGET model refuses is not a duration it can be
+  // entered on. 97 is on wan's `4k+1` grid, so it used to survive selection
+  // onto an A14B text-to-video tier whose clip is 73 — and that tier refuses
+  // an automatic split, so Generate came up disabled with the refusal as its
+  // reason before the user touched anything.
+  //
+  // Asked of the routing authority rather than keyed on the contract string:
+  // every LTX-Video tier also advertises `unsupported` and that family IS
+  // auto-chained, so a string test would shorten a carried duration there for
+  // no reason. An above-ceiling count on a chain-capable family stays exactly
+  // as authored — that is the documented way to ask for a long video.
+  if (videoGenerationCount(frames, rate, model) === null) {
+    return normalizedDefault;
+  }
   return frames;
 }
 
@@ -264,7 +293,7 @@ export function videoGenerationCount(
   fps: number,
   model?: VideoFrameContract | null,
   routingRequest: Partial<GenerateRoutingRequest> = {},
-): number {
+): number | null {
   const decision = decideGenerateRequestRouting(
     {
       ...routingRequest,
@@ -275,6 +304,11 @@ export function videoGenerationCount(
     model?.family,
     model,
   );
+  // A REFUSED duration is not a number of generations. Reporting 1 for it let
+  // the slider advertise "1 generation" for a frame count the same routing
+  // authority was about to reject at submit — the two answers came from one
+  // call and still disagreed. `null` is the honest third answer.
+  if (decision.kind === "reject") return null;
   return decision.kind === "chain" ? decision.stageCount : 1;
 }
 
@@ -292,7 +326,17 @@ export function videoGenerationMarks(
   const step = videoFrameStep(model);
   const marks = new Map<number, number>();
   for (let frames = minimum; frames <= maximum; frames += step) {
-    marks.set(videoGenerationCount(frames, fps, model, routingRequest), frames);
+    const generations = videoGenerationCount(
+      frames,
+      fps,
+      model,
+      routingRequest,
+    );
+    // A refused stop is not a notch. With the ceiling above this is already
+    // unreachable for the tier that motivated it; skipping is what keeps a
+    // future refusal from inventing a mark.
+    if (generations === null) continue;
+    marks.set(generations, frames);
   }
   return [...marks]
     .sort(([left], [right]) => left - right)

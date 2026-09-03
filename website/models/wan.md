@@ -805,8 +805,22 @@ stage: an I2V or TI2V tier seeds each continuation with the previous clip's
 final frame. A **text-to-video** checkpoint has no image conditioning at all, so
 it carries nothing across the boundary and every stage re-derives the scene from
 the same prompt and seed — the result is the same clip repeated, not a longer
-one. `mold run` refuses that up front rather than spending the renders; ask for
-`--frames` within the tier's budget, or use `wan22-i2v-a14b` / `wan22-ti2v-5b`.
+one.
+
+Every door refuses that up front rather than spending the renders: `mold run`,
+the web/desktop Studio's Create rail, and `POST /api/chain-jobs`, which answers
+422 for an `ephemeral` (one-shot) chain on such a tier. All three render one
+sentence, from `mold_core::chain::text_only_wan_auto_chain_refusal`. Ask for
+`--frames` within the tier's budget, or use an image-conditioned tier —
+`wan22-i2v-a14b:*` or `wan22-ti2v-5b:fp16` / `:q8` / `:turbo`. Note the tag:
+`wan22-ti2v-5b:dmd` refuses the source frame, so it falls under this same rule
+rather than being the way around it.
+
+An **authored** sequence is untouched. Repeating a text-to-video clip is a
+legitimate thing to compose deliberately — `mold run --script`, and the Studio's
+Sequence mode, still build one and still concatenate independent clips with
+Join / Cut / Crossfade seams. The refusal is only for the split mold performs on
+your behalf when you asked for one long video.
 
 ## Quantized checkpoints and adapters
 

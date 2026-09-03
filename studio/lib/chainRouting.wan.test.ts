@@ -16,6 +16,8 @@
  * matching test.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -25,6 +27,52 @@ import {
   decideChainRouting,
   wanCarriesContext,
 } from "./chainRouting";
+
+/** The shared cross-surface fixture the CLI, the server, and mold-core read
+ * (#806). Located by walking up from the working directory: the vitest root
+ * differs between the studio, web, and desktop configs, so the fixture's own
+ * location is the only reliable anchor. */
+const FIXTURE_RELATIVE = "tests/fixtures/wan/surface-parity-v1.json";
+
+interface TextOnlyRefusalTier {
+  model: string;
+  source_image: string;
+  tier_default_frames: number;
+  clip_frames: number;
+}
+
+interface TextOnlyRefusalFixture {
+  template: string;
+  total_frames: number;
+  refused: TextOnlyRefusalTier[];
+  chained: TextOnlyRefusalTier[];
+}
+
+function fixturePath(): string {
+  let directory = process.cwd();
+  for (;;) {
+    const candidate = resolve(directory, FIXTURE_RELATIVE);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(directory);
+    if (parent === directory) {
+      throw new Error(
+        `could not find ${FIXTURE_RELATIVE} above ${process.cwd()}`,
+      );
+    }
+    directory = parent;
+  }
+}
+
+const textOnlyRefusal: TextOnlyRefusalFixture = JSON.parse(
+  readFileSync(fixturePath(), "utf8"),
+).auto_chain.text_only_refusal;
+
+function renderRefusal(model: string, clipFrames: number): string {
+  return textOnlyRefusal.template
+    .replaceAll("{model}", model)
+    .replaceAll("{total_frames}", String(textOnlyRefusal.total_frames))
+    .replaceAll("{clip_frames}", String(clipFrames));
+}
 
 describe("wan chain routing", () => {
   it("carries context only for an image-conditioned checkpoint", () => {
@@ -55,13 +103,16 @@ describe("wan chain routing", () => {
   });
 
   it("uses the two-expert envelope for A14B and the wider one for 5B", () => {
+    // Unclassified rather than "unsupported": a declared text-to-video tier
+    // is refused outright now (see the text-only case below), and the point
+    // here is the envelope, not the contract.
     const a14b = decideChainRouting(
       300,
       "wan",
       "wan22-t2v-a14b:q5",
       undefined,
       16,
-      "unsupported",
+      null,
     );
     expect(a14b.kind === "chain" && a14b.clipFrames).toBe(
       WAN_DEFAULT_CLIP_FRAMES,
@@ -136,14 +187,80 @@ describe("wan chain routing", () => {
 
     expect(routed("optional")).toBe(WAN_HANDOFF_DUPLICATED_FRAMES);
     expect(routed("required")).toBe(WAN_HANDOFF_DUPLICATED_FRAMES);
-    // A text-to-video checkpoint has no conditioning channel, so nothing
-    // crosses the seam and nothing is trimmed.
-    expect(routed("unsupported")).toBe(0);
+    // An unclassified checkpoint may or may not be image-conditioned, so
+    // nothing is assumed to cross the seam and nothing is trimmed. (A tier
+    // that DECLARES it carries nothing is refused rather than seamed — see
+    // the text-only case below.)
     expect(routed(null)).toBe(0);
 
     // The seeded frame is the only duplicate; 17 would discard sixteen good
     // frames at every boundary.
     expect(WAN_HANDOFF_DUPLICATED_FRAMES).toBe(1);
+  });
+
+  it("refuses a one-shot auto-chain on a text-only tier, in the fixture's words", () => {
+    // The bug this closes: a 259-frame one-shot on `wan21-t2v-1.3b:turbo`
+    // submitted from the web Studio became a three-stage ephemeral chain
+    // (121/121/17, every stage the same seed, motion tail 0) whose video reset
+    // at both boundaries. The CLI had refused the same request since #1508;
+    // the Studio and the HTTP chain-jobs door had not.
+    for (const tier of textOnlyRefusal.refused) {
+      const decision = decideChainRouting(
+        textOnlyRefusal.total_frames,
+        "wan",
+        tier.model,
+        undefined,
+        24,
+        tier.source_image,
+        tier.tier_default_frames,
+      );
+      expect(decision.kind, `${tier.model} must refuse`).toBe("reject");
+      if (decision.kind !== "reject") continue;
+      expect(decision.reason).toBe(renderRefusal(tier.model, tier.clip_frames));
+
+      // At or below its own clip size there is nothing to chain, so the same
+      // tier still renders one continuous clip.
+      expect(
+        decideChainRouting(
+          tier.clip_frames,
+          "wan",
+          tier.model,
+          undefined,
+          24,
+          tier.source_image,
+          tier.tier_default_frames,
+        ),
+      ).toEqual({ kind: "single" });
+    }
+
+    // An image-conditioned tier seeds every continuation from the previous
+    // clip's final frame, so it still chains.
+    for (const tier of textOnlyRefusal.chained) {
+      expect(
+        decideChainRouting(
+          textOnlyRefusal.total_frames,
+          "wan",
+          tier.model,
+          undefined,
+          24,
+          tier.source_image,
+          tier.tier_default_frames,
+        ),
+      ).toMatchObject({ kind: "chain", clipFrames: tier.clip_frames });
+    }
+
+    // Unclassified is "unknown", never a declared refusal: an opaque catalog
+    // id must keep routing.
+    expect(
+      decideChainRouting(
+        textOnlyRefusal.total_frames,
+        "wan",
+        "cv:12345",
+        undefined,
+        24,
+        null,
+      ).kind,
+    ).toBe("chain");
   });
 
   it("leaves the LTX families exactly as they were", () => {
@@ -165,5 +282,37 @@ describe("wan chain routing", () => {
       24,
     );
     expect(withHint).toEqual(withoutHint);
+  });
+
+  // The host is authoritative about its own single-request ceiling on a family
+  // this router cannot chain: without the row's own `max_frames` the cap fell
+  // back to the family table and refused a count the server accepts, and with
+  // it a row that advertises LESS than the table is held to its own number.
+  it("prefers a row's advertised ceiling over the family table when it cannot chain", () => {
+    expect(
+      decideChainRouting(
+        200,
+        "brandnew",
+        "cv:1",
+        undefined,
+        24,
+        null,
+        100,
+        257,
+      ),
+    ).toEqual({ kind: "single" });
+
+    const refused = decideChainRouting(
+      200,
+      "minimax-h3",
+      "hf:x",
+      undefined,
+      25,
+      "optional",
+      124,
+      124,
+    );
+    expect(refused.kind).toBe("reject");
+    expect(refused.kind === "reject" && refused.reason).toContain("124");
   });
 });
