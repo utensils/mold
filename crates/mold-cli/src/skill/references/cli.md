@@ -17,6 +17,29 @@ Use `mold info <model>` or `/api/models` before selecting dimensions, frame
 counts, steps, guidance, conditioning, or audio. A catalog model can differ
 from a built-in manifest profile.
 
+## Reference-image editing
+
+`--reference PATH` sends one ordered reference image; repeat it in semantic
+order, and name each image's role in the prompt ("the jacket from image 1 on
+the model from image 2"). The recipe decides whether a model has the protocol
+at all: `/api/models[].generation_profile` carries a
+`capabilities.reference_images` block, and a model without one refuses
+`--reference` by name rather than silently ignoring it.
+
+```bash
+mold run flux2-klein:bf16 "Put sunglasses on the person; keep the pose and background" --reference person.jpg
+mold run flux2-klein-9b:q8 "The woman from image 1 wearing the eyeglasses from image 2" --reference person.jpg --reference glasses.jpg
+```
+
+The block also says what references do to the source image.
+FLUX.2 [klein] renders from a source image OR from references, never both in
+one pass, so `--reference` together with `--image` is refused. FLUX.2 [dev] and
+Qwen-Image-Edit have no source image at all: there the ordered group IS
+`--image`, repeated, and for Qwen-Image-Edit the first image is the thing being
+edited. `--reference` also carries MiniMax H3's Ref2VA inputs, which is why it
+additionally accepts `video=PATH` and `audio=PATH`; a bare path always means an
+image.
+
 ## Local and remote execution
 
 `mold run` first targets `MOLD_HOST` (default `http://localhost:7680`) and can
