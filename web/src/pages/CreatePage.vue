@@ -3558,9 +3558,16 @@ function validateSubmit(): boolean {
     composerError.value = "Qwen image edit needs a target image.";
     return false;
   }
-  const referenceEdit = referencesReplaceSource.value;
+  // A repaint mask describes the SOURCE well, so it is only a mistake when
+  // this request is actually going to carry a source image. References that
+  // replace the source (Qwen, FLUX.2 [dev]) never had one; on an EXCLUSIVE
+  // recipe (Klein) the mask PARKS with the well it belongs to the moment the
+  // references become active — `toRequest` already drops it there, so blocking
+  // would strand Generate behind a control the user cannot even see.
+  const maskParked =
+    referencesReplaceSource.value || requestConditioning.value === "references";
   if (
-    !referenceEdit &&
+    !maskParked &&
     form.state.value.maskImage &&
     form.state.value.imageAttachments.length === 0
   ) {
@@ -5674,7 +5681,10 @@ async function onWindowDrop(event: DragEvent): Promise<void> {
   // Always: this is what stops the browser navigating away from the SPA.
   event.preventDefault();
   if (sequenceMode.value && !showSequenceOpeningImage.value) return;
-  const routed = routeCreateDrop(form.state.value, dropContext());
+  // The well under the pointer decides. A labelled well that handled the drop
+  // itself never reaches here, but one that only NAMES itself still routes
+  // correctly — which is why this is a hit test rather than a plan default.
+  const routed = routeCreateDrop(form.state.value, dropContext(), event);
   if (typeof routed !== "string") {
     composerError.value = routed.refused;
     return;

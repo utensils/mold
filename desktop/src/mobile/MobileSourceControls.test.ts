@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { flux2KleinRecipe, hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../lib/api/types";
 import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValidation";
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
@@ -790,5 +790,52 @@ describe("MobileSourceControls — H3 boundary media budget", () => {
 
     expect(form.h3Authoring?.firstFrame ?? null).toBeNull();
     expect(wrapper.text()).toContain("45 MiB");
+  });
+});
+
+/**
+ * The ceiling belongs in the sentence. The `referenceMax` interpolation was
+ * dropped, leaving "Add up to  optional references." on screen with a hole
+ * where the number should be.
+ */
+describe("MobileSourceControls - the References strip names its ceiling", () => {
+  function kleinModel(): ModelEntry {
+    return {
+      ...model("flux2-klein:bf16", "flux2"),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  it("names the advertised ceiling for a strip-only recipe", () => {
+    const form = formFor("flux2");
+    form.model = "flux2-dev:bf16";
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+    expect(wrapper.get("[data-test='mobile-references-note']").text()).toBe(
+      "Add up to 4 optional references. Their order is preserved.",
+    );
+  });
+
+  it("names it for the exclusive recipe too", () => {
+    const form = formFor("flux2");
+    form.model = "flux2-klein:bf16";
+    const wrapper = mount(MobileSourceControls, {
+      props: { form, model: kleinModel() },
+    });
+    expect(wrapper.get("[data-test='mobile-references-note']").text()).toBe(
+      "Add up to 4 optional references. Their order is preserved.",
+    );
+  });
+
+  it("drops the ceiling clause entirely for an unbounded strip", () => {
+    const wrapper = mount(MobileSourceControls, {
+      props: { form: formFor("qwen-image-edit") },
+    });
+    expect(wrapper.text()).not.toContain("Add up to");
   });
 });

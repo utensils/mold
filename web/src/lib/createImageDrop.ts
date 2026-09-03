@@ -44,12 +44,45 @@ export function droppedReferenceCount(
     : state.imageAttachments.length;
 }
 
-/** Route one dropped file with no well under the cursor (the window path). */
+/**
+ * Where the drop actually LANDED, as its `data-drop-target` value.
+ *
+ * The web mirror of desktop's `dropTargetAtPosition`: the same attribute, the
+ * same `closest(…)` walk from the hit-tested element, so a hit on a thumbnail
+ * inside a well resolves to the well. A `DragEvent`'s `clientX`/`clientY` are
+ * already CSS pixels, so unlike the Tauri bridge there is no
+ * `devicePixelRatio` division. `null` means the drop landed on chrome, which
+ * the shared router reads as "use the plan default".
+ */
+export function dropTargetAtPoint(
+  point: DropPoint | null | undefined,
+): DropTarget | null {
+  if (!point || typeof document === "undefined") return null;
+  const element = document.elementFromPoint(point.clientX, point.clientY);
+  const well = element?.closest("[data-drop-target]");
+  return (well?.getAttribute("data-drop-target") as DropTarget | null) ?? null;
+}
+
+/** The two coordinates a `DragEvent` carries; nothing else is read. */
+export interface DropPoint {
+  clientX: number;
+  clientY: number;
+}
+
+/**
+ * Route one dropped file.
+ *
+ * `point` is the drop's own coordinates: the well under it wins whenever the
+ * plan renders it, which is what makes a labelled strip a real drop target
+ * even when the strip itself did not handle the event. Omit it (or drop on
+ * chrome) and the plan's default receives the file.
+ */
 export function routeCreateDrop(
   state: GenerateFormState,
   context: CreateDropContext,
+  point?: DropPoint | null,
 ): DropRouting {
-  return resolveDropTarget(context.plan, null, {
+  return resolveDropTarget(context.plan, dropTargetAtPoint(point), {
     hasSource: Boolean(state.imageAttachments[0]?.base64),
     referenceCount: droppedReferenceCount(state, context.plan),
     identityVisible: context.identityVisible,
