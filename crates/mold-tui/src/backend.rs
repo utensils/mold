@@ -1575,11 +1575,35 @@ pub(crate) fn build_request(
     // admission for a request the form had no way to author.
     let reference_images =
         mold_core::generation_profile::reference_images_for_recipe(&family, &params.model);
-    let reference_bytes: Vec<Vec<u8>> = params
-        .edit_image_paths
-        .iter()
-        .filter_map(|path| std::fs::read(path).ok())
-        .collect();
+    // Every reference is read or the dispatch fails. `edit_images` is
+    // ORDERED — each entry is packed at its own time coordinate — so
+    // skipping the one file that could not be read renumbers every reference
+    // after it and renders something the user did not ask for, silently; and
+    // if they all fail the request quietly degrades to img2img. The path is
+    // the user's own, shown back to them in their own TUI, so it is quoted
+    // whole rather than redacted.
+    //
+    // Read only on a recipe that HAS a References row: on a target-first
+    // recipe the arm below never looks at these paths, and failing a render
+    // over a group that recipe cannot carry would be a refusal with no
+    // control on screen to clear it.
+    let reference_bytes: Vec<Vec<u8>> = if reference_images.primary_is_target {
+        Vec::new()
+    } else {
+        params
+            .edit_image_paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                std::fs::read(path).map_err(|err| {
+                    format!(
+                        "Reference image {} ({path}) could not be read: {err}",
+                        index + 1
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
     let (edit_images, source_image, strength, mask_image) = if reference_images.primary_is_target {
         // The FIRST image is the thing being edited, so the Source row IS
         // the reference group's head and there is no denoise pass to weight.
@@ -2484,6 +2508,38 @@ mod tests {
         );
         assert!(req.source_image.is_none());
         assert!(req.mask_image.is_none());
+    }
+
+    /// An unreadable reference is a hard failure, never a silent gap.
+    ///
+    /// `edit_images` is ORDERED — each entry is packed at its own time
+    /// coordinate — so dropping the one file that could not be read
+    /// renumbers every reference after it and renders a different picture
+    /// than the one asked for, with nothing on screen to say so. Worse, if
+    /// every path fails, the request quietly reverts to img2img. The refusal
+    /// names the one-based position and the path, unredacted: it is the
+    /// user's own path, in their own TUI.
+    #[test]
+    fn build_request_refuses_an_unreadable_reference_instead_of_dropping_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("a.png");
+        std::fs::write(&good, b"first").unwrap();
+        let missing = dir.path().join("gone.png");
+        let missing = missing.to_string_lossy().into_owned();
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "flux2-klein:bf16".to_string();
+        params.edit_image_paths = vec![good.to_string_lossy().into_owned(), missing.clone()];
+        let error = build_request(&params, "a cat", &None)
+            .expect_err("a reference that cannot be read must fail the dispatch");
+        assert!(
+            error.contains('2'),
+            "the refusal names the one-based position: {error}"
+        );
+        assert!(
+            error.contains(&missing),
+            "the refusal names the path: {error}"
+        );
     }
 
     /// With no references attached, Klein is an ordinary img2img recipe —

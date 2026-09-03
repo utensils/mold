@@ -164,7 +164,7 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
     }
     if caps.supports_source_image
         || caps.supports_references
-        || caps.reference_images.is_some()
+        || caps.reference_images_row().is_some()
         || caps.supports_strength
         || caps.supports_mask
         || caps.supports_controlnet
@@ -218,8 +218,10 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             // The ordered `edit_images` group sits ABOVE Source for the same
             // reason H3's list does: on every recipe that has both, the
             // references are the primary conditioning and the source is the
-            // alternative.
-            if caps.reference_images.is_some() {
+            // alternative. `reference_images_row` — never the raw capability
+            // — is the gate, so a target-first recipe (qwen-image-edit,
+            // whose first image IS the Source well's image) gets no row.
+            if caps.reference_images_row().is_some() {
                 fields.push(ParamField::ReferenceImages);
             }
             if caps.supports_source_image {
