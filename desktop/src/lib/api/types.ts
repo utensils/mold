@@ -686,46 +686,6 @@ export interface Ltx2CameraControlInfo {
   download_sha256: string;
 }
 
-/** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
-export type ProgressEvent =
-  | { type: "queued"; position: number; id?: string }
-  | { type: "dependency_wait"; dependency: string; reason: string }
-  | { type: "stage_start"; name: string }
-  | { type: "stage_done"; name: string; elapsed_ms: number }
-  | { type: "stage_progress"; name: string; current: number; total: number }
-  | { type: "info"; message: string }
-  | { type: "cache_hit"; resource: string }
-  | { type: "denoise_step"; step: number; total: number; elapsed_ms: number }
-  /** Live latent preview: base64 PNG at latent resolution (client upscales). */
-  | { type: "preview"; image: string; step: number; total: number }
-  | {
-      type: "weight_load";
-      bytes_loaded: number;
-      bytes_total: number;
-      component: string;
-    }
-  | {
-      type: "download_progress";
-      filename: string;
-      file_index: number;
-      total_files: number;
-      bytes_downloaded: number;
-      bytes_total: number;
-      batch_bytes_downloaded: number;
-      batch_bytes_total: number;
-      batch_elapsed_ms: number;
-    }
-  | {
-      type: "download_done";
-      filename: string;
-      file_index: number;
-      total_files: number;
-      batch_bytes_downloaded: number;
-      batch_bytes_total: number;
-      batch_elapsed_ms: number;
-    }
-  | { type: "pull_complete"; model: string };
-
 export interface CompleteEvent {
   /** Advisories the server attached to this render: it succeeded, but
    * something was adjusted, dropped, or is worth knowing — the multi-face

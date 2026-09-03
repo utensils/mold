@@ -199,9 +199,7 @@ describe("SettingsPage", () => {
         },
       } as Response;
     }) as typeof fetch;
-    const wrapper = mount(SettingsPage, {
-      global: { stubs: { DeviceSettingsPanel: true } },
-    });
+    const wrapper = mount(SettingsPage);
     await vi.waitFor(() =>
       expect(subscribeToDeviceSnapshots).toHaveBeenCalled(),
     );
