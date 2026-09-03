@@ -63,9 +63,15 @@ async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => vo
     history: createMemoryHistory(),
     routes: [
       { path: "/", component: stub },
-      { path: "/machines", component: stub },
-      { path: "/machines/runpod", component: stub },
-      { path: "/machines/:id", component: stub },
+      {
+        path: "/machines",
+        name: "machines",
+        component: stub,
+        children: [
+          { path: "runpod", name: "runpod", component: stub },
+          { path: ":id", name: "host-detail", component: stub },
+        ],
+      },
     ],
   });
   router.push("/machines");
@@ -206,7 +212,7 @@ describe("MachinesView overview", () => {
 
     expect(wrapper.get("[data-test='host-reconnecting']").text()).toBe("reconnecting…");
     expect(wrapper.get("[data-test='host-card']").text()).toContain("NVIDIA B200");
-    expect(wrapper.get("[data-test='host-card']").text()).toContain("queue 0");
+    expect(wrapper.get("[data-test='host-card']").text()).toContain("nothing waiting");
   });
 
   it("offers common context-menu actions for connected, remembered, and discovered hosts", async () => {
@@ -217,7 +223,7 @@ describe("MachinesView overview", () => {
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
     ).toEqual([
       "Open details",
-      "Set as generation target",
+      "Make images here",
       "Copy address",
       "Open web UI",
       "Disconnect",
@@ -234,6 +240,32 @@ describe("MachinesView overview", () => {
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
     ).toEqual(["Connect", "Copy address"]);
     wrapper.unmount();
+  });
+
+  it("lands on the machine the shell talks about and marks it selected", async () => {
+    const wrapper = await mountView();
+    // No pin and nothing running: this device.
+    expect(router.currentRoute.value.path).toBe("/machines/local");
+    expect(wrapper.get("[data-test='this-device-card']").attributes("aria-current")).toBe("true");
+    expect(wrapper.get("[data-test='host-card']").attributes("aria-current")).toBeUndefined();
+  });
+
+  it("badges the machine that makes images and offers the rest the job", async () => {
+    appSettingsGet.mockResolvedValue({
+      savedHosts: [],
+      connectedHostIds: [],
+      generateTargetHost: "hal9000-7680",
+    });
+    const wrapper = await mountView();
+    const { useAppPrefsStore } = await import("../stores/appPrefs");
+    await useAppPrefsStore().init();
+    await flushPromises();
+    expect(wrapper.get("[data-test='host-card']").find("[data-test='target-badge']").text()).toBe(
+      "making images here",
+    );
+    expect(
+      wrapper.get("[data-test='this-device-card']").find("[data-test='target-badge']").exists(),
+    ).toBe(false);
   });
 
   it("renders This device first, then connected remote cards", async () => {
@@ -301,7 +333,7 @@ describe("MachinesView overview", () => {
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
     ).toEqual([
       "Open details",
-      "Set as generation target",
+      "Make images here",
       "Copy address",
       "Open web UI",
       "Disconnect",
@@ -335,7 +367,7 @@ describe("MachinesView overview", () => {
     await wrapper.get("[data-test='pod-cost-stop']").trigger("click");
     await flushPromises();
     expect(runpodStop).toHaveBeenCalledWith("pod-123");
-    expect(router.currentRoute.value.path).toBe("/machines");
+    expect(router.currentRoute.value.path).not.toContain("pod-123");
   });
 
   it("lists remembered (offline) hosts with a Connect action", async () => {
@@ -428,10 +460,10 @@ describe("MachinesView overview", () => {
 
   it("opens the connect-a-machine modal from Add machine", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='connect-type-remote']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(false);
     await wrapper.get("[data-test='add-machine']").trigger("click");
     await flushPromises();
-    expect(wrapper.find("[data-test='connect-type-remote']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(true);
   });
 
   it("connecting a discovered box finds a stored key under its instance-id twin's slug", async () => {

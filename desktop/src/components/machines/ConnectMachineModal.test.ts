@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
 const testRemoteHost = vi.fn();
 const discoverServers = vi.fn();
+const appSettingsSet = vi.fn().mockResolvedValue(undefined);
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
   ipc: {
@@ -14,7 +14,7 @@ vi.mock("../../lib/ipc", () => ({
     appSettingsGet: vi
       .fn()
       .mockResolvedValue({ savedHosts: [], connectedHostIds: [], generateTargetHost: null }),
-    appSettingsSet: vi.fn().mockResolvedValue(undefined),
+    appSettingsSet: (...a: unknown[]) => appSettingsSet(...a),
     discoverServers: (...a: unknown[]) => discoverServers(...(a as [])),
   },
 }));
@@ -24,29 +24,28 @@ vi.mock("../../lib/api/client", async (importOriginal) => ({
 }));
 
 import ConnectMachineModal from "./ConnectMachineModal.vue";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 
-const stub = { template: "<div />" };
-let router: Router;
+const LOCKED = {
+  name: "locked-7680",
+  url: "http://192.168.1.30:7680",
+  host: "192.168.1.30",
+  port: 7680,
+  version: "1",
+  authRequired: true,
+  isThisMachine: false,
+};
 
-async function mountModal() {
-  router = createRouter({
-    history: createMemoryHistory(),
-    routes: [
-      { path: "/", component: stub },
-      { path: "/machines/runpod", component: stub },
-    ],
-  });
-  router.push("/");
-  await router.isReady();
+async function mountModal(props: Record<string, unknown> = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
   conn.status = "ready";
   const wrapper = mount(ConnectMachineModal, {
-    props: { open: true },
-    global: { plugins: [pinia, router] },
+    props: { open: true, ...props },
+    global: { plugins: [pinia] },
   });
   await flushPromises();
   return wrapper;
@@ -65,41 +64,24 @@ beforeEach(() => {
 });
 
 describe("ConnectMachineModal", () => {
-  it("walks type → details → confirmation for a remote server", async () => {
+  it("connects a typed address, then reports and closes", async () => {
     const wrapper = await mountModal();
-    expect(wrapper.find("[data-test='connect-type-remote']").exists()).toBe(true);
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
-
-    const address = wrapper.get("[data-test='connect-address']");
-    await address.setValue("hal9000");
+    await wrapper.get("[data-test='connect-address']").setValue("hal9000");
     await wrapper.get("[data-test='connect-continue']").trigger("click");
     await flushPromises();
 
     expect(testRemoteHost).toHaveBeenCalledWith("http://hal9000:7680", null);
-    const confirm = wrapper.get("[data-test='connect-confirm']");
-    expect(confirm.text()).toContain("hal9000");
-    expect(confirm.text()).toContain("online and ready");
+    expect(wrapper.emitted("connected")).toHaveLength(1);
+    expect(wrapper.emitted("close")).toHaveLength(1);
   });
 
   it("probes a bare IP through the default protocol and port", async () => {
     const wrapper = await mountModal();
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
     await wrapper.get("[data-test='connect-address']").setValue("100.123.198.98");
     await wrapper.get("[data-test='connect-continue']").trigger("click");
     await flushPromises();
 
     expect(testRemoteHost).toHaveBeenCalledWith("http://100.123.198.98:7680", null);
-  });
-
-  it("hands the RunPod type off to the provisioning view and closes", async () => {
-    const wrapper = await mountModal();
-    await wrapper.get("[data-test='connect-type-runpod']").trigger("click");
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/machines/runpod");
-    expect(wrapper.emitted("close")).toBeTruthy();
   });
 
   it("keeps the entered address and shows a blunt error when the connect fails", async () => {
@@ -111,96 +93,78 @@ describe("ConnectMachineModal", () => {
       hostname: null,
     });
     const wrapper = await mountModal();
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
-    const address = wrapper.get("[data-test='connect-address']");
-    await address.setValue("hal9000");
+    await wrapper.get("[data-test='connect-address']").setValue("hal9000");
     await wrapper.get("[data-test='connect-continue']").trigger("click");
     await flushPromises();
 
     expect(wrapper.get("[data-test='connect-error']").text()).toContain("Connection refused.");
-    // Still on the details step with the value preserved.
     expect((wrapper.get("[data-test='connect-address']").element as HTMLInputElement).value).toBe(
       "hal9000",
     );
-    expect(wrapper.find("[data-test='connect-confirm']").exists()).toBe(false);
+    expect(wrapper.emitted("close")).toBeUndefined();
   });
 
-  it("offers the live discovered list for Local network and connects a pick", async () => {
-    discoverServers.mockResolvedValue([
-      {
-        name: "studio-7680",
-        url: "http://192.168.1.20:7680",
-        host: "192.168.1.20",
-        port: 7680,
-        version: "1",
-        authRequired: false,
-        isThisMachine: false,
-      },
-    ]);
+  it("lists the machines found on the network and connects the picked one", async () => {
+    discoverServers.mockResolvedValue([{ ...LOCKED, name: "studio-7680", authRequired: false }]);
     const wrapper = await mountModal();
-    await wrapper.get("[data-test='connect-type-lan']").trigger("click");
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
 
     const row = wrapper.get("[data-test='connect-discovered']");
     expect(row.text()).toContain("studio-7680");
-    await row.get("[data-test='connect-discovered-add']").trigger("click");
+    await row.trigger("click");
+    expect(wrapper.get("[data-test='connect-discovered-selected']").text()).toContain("selected");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
     await flushPromises();
-    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.20:7680", null);
-    expect(wrapper.find("[data-test='connect-confirm']").exists()).toBe(true);
+
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.30:7680", null);
+    expect(wrapper.emitted("connected")).toHaveLength(1);
   });
 
-  it("prompts for a key before connecting an authenticated discovered host", async () => {
-    discoverServers.mockResolvedValue([
-      {
-        name: "locked-7680",
-        url: "http://192.168.1.30:7680",
-        host: "192.168.1.30",
-        port: 7680,
-        version: "1",
-        authRequired: true,
-        isThisMachine: false,
-      },
-    ]);
+  it("holds Connect until an authenticated pick has its key", async () => {
+    discoverServers.mockResolvedValue([LOCKED]);
     const wrapper = await mountModal();
-    await wrapper.get("[data-test='connect-type-lan']").trigger("click");
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
-    await flushPromises();
+    await wrapper.get("[data-test='connect-discovered']").trigger("click");
 
-    await wrapper.get("[data-test='connect-discovered-add']").trigger("click");
-    await flushPromises();
-    expect(wrapper.get("[data-test='connect-discovered-selected']").text()).toContain(
-      "locked-7680",
-    );
-    expect(testRemoteHost).not.toHaveBeenCalled();
+    const connect = wrapper.get("[data-test='connect-continue']");
+    expect(connect.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("this machine asks for one");
 
     await wrapper.get("[data-test='connect-key']").setValue("peer-secret");
-    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await connect.trigger("click");
     await flushPromises();
     expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.30:7680", "peer-secret");
   });
 
-  it("clears a direct discovered-host prompt when navigating back to LAN discovery", async () => {
-    const initialHost = {
-      name: "locked-7680",
-      url: "http://192.168.1.30:7680",
-      host: "192.168.1.30",
-      port: 7680,
-      version: "1",
-      authRequired: true,
-      isThisMachine: false,
-    };
-    const wrapper = await mountModal();
-    await wrapper.setProps({ open: false, initialHost });
+  it("opens straight on a machine that asked for a key, and lets a typed address replace a pick", async () => {
+    const wrapper = await mountModal({ open: false });
+    await wrapper.setProps({ open: true, initialHost: LOCKED });
+    await flushPromises();
+    expect(wrapper.get("[data-test='connect-discovered-selected']").text()).toContain(
+      "locked-7680",
+    );
+    expect(discoverServers).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(false);
+
+    // A pick from a scan can be swapped out by hand.
+    discoverServers.mockResolvedValue([LOCKED]);
+    await wrapper.setProps({ open: false, initialHost: null });
     await wrapper.setProps({ open: true });
     await flushPromises();
+    await wrapper.get("[data-test='connect-discovered']").trigger("click");
     expect(wrapper.find("[data-test='connect-discovered-selected']").exists()).toBe(true);
+    await wrapper.get("[data-test='connect-address']").setValue("hal9000");
+    expect(wrapper.find("[data-test='connect-discovered-selected']").exists()).toBe(false);
+  });
 
-    await wrapper.get("[data-test='connect-back']").trigger("click");
-    await wrapper.get("[data-test='connect-type-lan']").trigger("click");
+  it("makes the new machine the generation target when asked", async () => {
+    const wrapper = await mountModal();
+    await wrapper.get("[data-test='connect-address']").setValue("hal9000");
+    await wrapper.get("[data-test='connect-make-target']").trigger("click");
     await wrapper.get("[data-test='connect-continue']").trigger("click");
     await flushPromises();
-    expect(wrapper.find("[data-test='connect-discovered-selected']").exists()).toBe(false);
+
+    expect(useAppPrefsStore().settings?.generateTargetHost).toBe("hal9000-7680");
+    expect(appSettingsSet).toHaveBeenCalledWith(
+      expect.objectContaining({ generateTargetHost: "hal9000-7680" }),
+    );
   });
 });

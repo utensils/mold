@@ -52,6 +52,11 @@ describe("router — five-destination IA", () => {
     expect(router.resolve("/machines/hal9000-7680").name).toBe("host-detail");
   });
 
+  it("keeps the Machines title on a machine's pane and on Rent a GPU", () => {
+    expect(router.resolve("/machines/hal9000-7680").meta.title).toBe("Machines");
+    expect(router.resolve("/machines/runpod").meta.title).toBe("Machines");
+  });
+
   it("retires standalone Jobs into the Queue", async () => {
     await router.push("/jobs");
     expect(router.currentRoute.value.path).toBe("/queue");

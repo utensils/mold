@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /*
- * Centered task modal (spec §05) — e.g. connect-machine flow. Optional
- * stepped progress bars along the top. Renders INSIDE its owning frame:
- * absolute overlay, never Teleport or position:fixed. Backdrop click and
- * Esc close; clicks inside the panel do not.
+ * Centered task dialog (README §04: 480–560px, header / body / footer,
+ * radius-3, a 72% crust scrim) — e.g. connect a machine. Optional stepped
+ * progress bars along the top. Renders INSIDE its owning frame: absolute
+ * overlay, never Teleport or position:fixed. Backdrop click and Esc close;
+ * clicks inside the panel do not.
  */
 import { ref, useSlots } from "vue";
 import { useRootFocusOnOpen } from "../lib/useRootFocusOnOpen";
@@ -19,6 +20,10 @@ const props = withDefaults(
     step?: number;
     /** Accessible name for the dialog. */
     label?: string;
+    /** Header title; with it the header block renders, bordered below. */
+    title?: string;
+    /** One plain sentence under the title. */
+    description?: string;
   }>(),
   { width: 480, step: 1 },
 );
@@ -51,6 +56,10 @@ useRootFocusOnOpen(root, () => props.open);
           :data-on="i <= step ? 'true' : undefined"
         />
       </div>
+      <div v-if="title" class="ms-modal__head">
+        <span class="ms-modal__title">{{ title }}</span>
+        <span v-if="description" class="ms-modal__desc">{{ description }}</span>
+      </div>
       <div class="ms-modal__body">
         <slot />
       </div>
@@ -76,8 +85,7 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-modal {
   position: absolute;
   inset: 0;
-  background: rgba(6, 5, 10, 0.72);
-  backdrop-filter: blur(5px);
+  background: color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -93,11 +101,30 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-modal__panel {
   max-width: 92%;
   box-sizing: border-box;
-  background: var(--mold-bg);
-  border: 1px solid var(--mold-border-control);
+  background: var(--mold-surface);
+  border: var(--mold-bw) solid var(--mold-border);
   border-radius: var(--mold-radius-3);
-  box-shadow: 0 40px 90px -20px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--mold-shadow-md);
   overflow: hidden;
+}
+
+.ms-modal__head {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 16px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+}
+
+.ms-modal__title {
+  font-size: var(--mold-fs-md);
+  font-weight: 600;
+  color: var(--mold-text);
+}
+
+.ms-modal__desc {
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
 }
 
 .ms-modal__steps {
@@ -120,14 +147,15 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-modal__body {
-  padding: 16px 22px 22px;
+  padding: 16px;
 }
 
 .ms-modal__footer {
-  border-top: 1px solid var(--mold-border);
-  padding: 14px 22px;
+  border-top: var(--mold-bw) solid var(--mold-border);
+  padding: 14px 16px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

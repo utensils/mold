@@ -648,14 +648,6 @@ async function forget() {
       <template v-if="host">
         <!-- Header: back to Machines · status · name · address · target chip -->
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <RouterLink
-            to="/machines"
-            data-test="back-to-machines"
-            class="-ml-1 flex items-center gap-1 rounded-control px-1.5 py-1 text-sm font-semibold text-accent hover:brightness-110"
-          >
-            <Icon name="chevron-left" :size="18" :stroke-width="2.4" />
-            Machines
-          </RouterLink>
           <span
             class="h-2 w-2 shrink-0 rounded-full"
             :class="statusDot(host.status)"

@@ -18,6 +18,7 @@ import { useToastStore } from "../stores/toasts";
 import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
+import Icon from "@ui/components/Icon.vue";
 
 const runpod = useRunPodStore();
 const prefs = useAppPrefsStore();
@@ -282,54 +283,27 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <header class="border-border flex h-11 shrink-0 items-center gap-3 border-b px-4">
-      <RouterLink
-        to="/machines"
-        class="-ml-1 flex items-center gap-0.5 rounded-control px-1.5 py-1 text-sm font-semibold text-accent hover:brightness-110"
+    <div
+      class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
+    >
+      <Icon name="cloud" :size="15" class="shrink-0 text-fg-dim" />
+      <span class="font-mono text-base font-bold text-fg">runpod cloud</span>
+      <span v-if="runpod.overview.account" class="min-w-0 truncate text-xs text-fg-dim">
+        {{ runpod.overview.account.email }} ·
+        <span class="font-mono">{{ money(runpod.overview.account.spendPerHour) }}/hr</span> active ·
+        <span class="font-mono">{{ money(runpod.overview.account.balance) }}</span> balance
+      </span>
+      <span class="flex-1" />
+      <button
+        type="button"
+        aria-label="Refresh RunPod status"
+        class="ms-toolbar-button"
+        @click="runpod.load()"
       >
-        <svg
-          width="18"
-          height="18"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.4"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M15 6l-6 6 6 6" />
-        </svg>
-        Machines
-      </RouterLink>
-      <span class="font-sans font-semibold text-md font-bold text-fg" style="font-stretch: 90%">
-        RunPod
-      </span>
-      <span v-if="runpod.overview.account" class="text-micro text-fg-dim">
-        {{ runpod.overview.account.email }}
-      </span>
-      <div class="ml-auto flex items-center gap-2">
-        <span v-if="runpod.overview.account" class="font-mono text-xs text-micro text-fg-2">
-          {{ money(runpod.overview.account.spendPerHour) }}/hr active ·
-          {{ money(runpod.overview.account.balance) }} balance
-        </span>
-        <button
-          type="button"
-          aria-label="Refresh RunPod status"
-          class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
-          @click="runpod.load()"
-        >
-          Refresh
-        </button>
-        <button
-          type="button"
-          class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
-          @click="openConsole"
-        >
-          RunPod console ↗
-        </button>
-      </div>
-    </header>
+        Refresh
+      </button>
+      <button type="button" class="ms-toolbar-button" @click="openConsole">RunPod console ↗</button>
+    </div>
 
     <div
       v-if="runpod.loaded && !runpod.overview.configured"
@@ -375,11 +349,14 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-else class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden">
-      <aside class="border-border min-h-0 overflow-y-auto border-r bg-bg p-4">
+      <aside class="min-h-0 overflow-y-auto border-r border-border bg-chrome p-3.5">
         <div class="flex items-center justify-between">
-          <h2 class="text-base font-semibold text-fg">Launch an instance</h2>
-          <span class="font-mono text-micro text-fg-dim whitespace-nowrap">MOLD SERVE</span>
+          <h2 class="text-base font-semibold text-fg">Rent a GPU</h2>
+          <span class="font-mono text-micro text-fg-dim">MOLD SERVE</span>
         </div>
+        <p class="mt-1 text-xs text-fg-dim">
+          Billing starts the moment it boots and stops when you stop it.
+        </p>
 
         <label class="mt-4 block text-micro text-fg-dim" for="runpod-gpu">GPU</label>
         <select
@@ -520,7 +497,7 @@ onBeforeUnmount(() => {
           :disabled="!form.gpuTypeId || runpod.mutating === 'create'"
           @click="launch"
         >
-          {{ runpod.mutating === "create" ? "Requesting GPU…" : "Launch GPU instance" }}
+          {{ runpod.mutating === "create" ? "Requesting GPU…" : "Rent a GPU" }}
         </button>
         <p class="mt-2 text-micro text-fg-dim">
           Uses the Mold CUDA image matched to the selected GPU and exposes the server on port 7680.
@@ -721,8 +698,8 @@ onBeforeUnmount(() => {
           v-if="runpod.overview.pods.length === 0"
           class="border-border mt-4 rounded-window border p-8 text-center"
         >
-          <p class="text-sm font-medium text-fg">No RunPod instances</p>
-          <p class="mt-1 text-micro text-fg-dim">Choose a GPU and launch your first Mold server.</p>
+          <p class="text-sm font-medium text-fg">No rented GPUs</p>
+          <p class="mt-1 text-micro text-fg-dim">Choose a card and rent your first one.</p>
         </div>
 
         <div v-else class="border-border mt-4 overflow-hidden rounded-window border">
@@ -830,8 +807,8 @@ onBeforeUnmount(() => {
 
     <ConfirmDialog
       :open="confirmProvision"
-      title="Launch GPU instance?"
-      confirm-label="Launch — billing begins immediately"
+      title="Rent this GPU?"
+      confirm-label="Start it — billing begins now"
       danger
       :busy="runpod.mutating === 'create'"
       @confirm="confirmLaunch"

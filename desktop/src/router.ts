@@ -41,24 +41,25 @@ export const router = createRouter({
       component: () => import("./views/ModelsView.vue"),
     },
     {
+      // Master/detail (README §03): the machine list frames every pane, so
+      // the titlebar keeps saying Machines on a machine and on Rent a GPU.
       path: "/machines",
       name: "machines",
       meta: { title: "Machines" },
       component: () => import("./views/MachinesView.vue"),
-    },
-    {
-      // RunPod provisioning lives under Machines. Declared before the
-      // `/machines/:id` host-detail route so it wins the literal segment.
-      path: "/machines/runpod",
-      name: "runpod",
-      meta: { title: "Rent a GPU" },
-      component: () => import("./views/RunPodView.vue"),
-    },
-    {
-      path: "/machines/:id",
-      name: "host-detail",
-      meta: { title: "Machine" },
-      component: () => import("./views/HostDetailView.vue"),
+      children: [
+        {
+          // Declared before `:id` so it wins the literal segment.
+          path: "runpod",
+          name: "runpod",
+          component: () => import("./views/RunPodView.vue"),
+        },
+        {
+          path: ":id",
+          name: "host-detail",
+          component: () => import("./views/HostDetailView.vue"),
+        },
+      ],
     },
     {
       path: "/settings",

@@ -29,6 +29,10 @@ export function useShellSubtitle(): ComputedRef<string> {
   return computed(() => {
     const waiting = activity.waitingCount.value;
     const making = activity.activeCount.value;
+    if (route.path.startsWith("/machines")) {
+      if (route.name === "runpod") return "Rent a GPU · billed by the minute";
+      return `${countPhrase(hosts.all.filter((h) => h.status === "ready").length, "machine")} connected`;
+    }
     switch (route.path) {
       case "/create": {
         const output = draft.output === "sequence" ? "Short clip" : "Still picture";
@@ -42,11 +46,6 @@ export function useShellSubtitle(): ComputedRef<string> {
         const pulling = downloads.hostedInFlight.length;
         return `${countPhrase(models.installed.length, "style")} ready${pulling ? ` · ${pulling} downloading` : ""}`;
       }
-      case "/machines":
-        return (
-          countPhrase(hosts.all.filter((h) => h.status === "ready").length, "machine") +
-          " connected"
-        );
       case "/settings":
         return hosts.primaryHost?.label ?? "";
       default:
