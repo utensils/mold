@@ -11,9 +11,9 @@
 //! See [`super::poster::turntable_cameras`] for why a loop is a full turn
 //! stopping one step short and a bounce is a half turn played back.
 //!
-//! A turntable is framed ONCE for the whole sweep ([`turntable_frame_cameras`]),
-//! so the mesh keeps one size as it turns; frame 0 is the poster's camera at
-//! that sweep's scale rather than the poster's exact pixels.
+//! A turntable is framed ONCE for the whole sweep ([`turntable_frame_cameras`])
+//! by the same rotation-invariant bound the poster uses, so the mesh keeps one
+//! size as it turns and frame 0 IS the poster, pixel for pixel.
 
 use std::ops::RangeInclusive;
 
@@ -21,8 +21,10 @@ use anyhow::{bail, Result};
 use image::RgbImage;
 
 use crate::hunyuan3d::mesh::Mesh;
-use crate::hunyuan3d::poster::{render_sequence_frame_rgb, turntable_cameras, MAX_POSTER_SIZE};
-use crate::hunyuan3d::raster::{frame_fit_for, Camera};
+use crate::hunyuan3d::poster::{
+    render_sequence_frame_rgb, turntable_cameras, MAX_POSTER_SIZE, POSTER_ELEVATION_DEG,
+};
+use crate::hunyuan3d::raster::{sweep_fit_for, Camera};
 use crate::ltx_video::video_enc;
 
 /// Frames in a turntable unless the request says otherwise: a 10° step, which
@@ -109,9 +111,10 @@ pub fn check_frame_budget(options: &TurntableOptions) -> std::result::Result<(),
 /// silhouette changes as the mesh turns: a box seen down a face projects to
 /// its width, and seen down a diagonal to √2 times that, so an auto-fit
 /// turntable swells and shrinks by up to ~41 % once per quarter turn and pops
-/// where the horizontal and vertical fits cross over. [`frame_fit_for`]
-/// takes the largest half-extent ANY camera in the sweep needs and every
-/// camera carries it, so the orbit is rigid: nothing is clipped, and nothing
+/// where the horizontal and vertical fits cross over.
+/// [`sweep_fit_for`](crate::hunyuan3d::raster::sweep_fit_for) bounds every
+/// azimuth at the poster's elevation in closed form and every camera carries
+/// that one value, so the orbit is rigid: nothing is clipped, and nothing
 /// changes size.
 ///
 /// This mirrors ComfyUI's splat turntable, which frames its default camera
@@ -119,20 +122,24 @@ pub fn check_frame_budget(options: &TurntableOptions) -> std::result::Result<(),
 /// (`comfy_extras/nodes_gaussian_splat.py:996-1006`) and then rotates that
 /// one camera rigidly per frame (`_orbit_camera_info_yaw`, `:640-655`).
 ///
-/// The fit covers exactly the cameras it was given, so a bounce — which
-/// sweeps only a HALF turn, in finer steps — is framed for a different set of
-/// views and legitimately lands on a different scale from a loop of the same
-/// mesh. Neither dominates: the half turn sees fewer angles but samples them
-/// more densely, so it can land closer to the silhouette's true peak. Each is
-/// uniform over its own sweep, which is the property that matters, and a
-/// bounce would look wrong padded out for views it never reaches.
+/// **A loop and a bounce share one framing, and so does the poster.** An
+/// earlier version measured the discrete camera list it was handed, so a
+/// half-turn bounce — fewer angles, sampled more densely — legitimately
+/// landed on a different scale from a loop of the same mesh, and both landed
+/// a little under the poster's own auto-fit. Three renders of one mesh at
+/// three sizes is exactly the disagreement a client sees when it swaps a
+/// gallery tile for a GIF or for the interactive viewer. The closed form is
+/// preferred over sampling because it depends on neither the frame count nor
+/// the sweep's span: it is an upper bound over ALL azimuths, so it cannot
+/// clip, and on a real mesh some vertex sits at the radial maximum and some
+/// azimuth brings it to the frame edge, so it does not frame air either.
 ///
 /// A mesh with no extent to frame keeps
 /// [`FrameFit::Auto`](crate::hunyuan3d::raster::FrameFit::Auto), which draws
 /// nothing either way.
 pub fn turntable_frame_cameras(mesh: &Mesh, frames: usize, bounce: bool) -> Vec<Camera> {
     let cameras = turntable_cameras(frames, bounce);
-    let Some(fit) = frame_fit_for(mesh, &cameras) else {
+    let Some(fit) = sweep_fit_for(mesh, POSTER_ELEVATION_DEG) else {
         return cameras;
     };
     cameras
@@ -363,10 +370,11 @@ mod tests {
         )
         .expect("a plane still turns");
         assert_eq!(frames.len(), 36);
-        // The poster view (frame 0) sees the face; the frame at azimuth 90°
-        // (index 6, 30° + 6 * 10°) sees the edge and is background only.
+        // The poster view (frame 0) sees the face; the frame at azimuth -90°
+        // (index 12, 30° - 12 * 10°, the sweep steps the azimuth DOWN) sees
+        // the edge and is background only.
         assert!(frames[0].pixels().any(|p| p[0] > 100));
-        assert!(frames[6].pixels().all(|p| p[0] < 0x20));
+        assert!(frames[12].pixels().all(|p| p[0] < 0x20));
     }
 
     #[test]
@@ -623,18 +631,11 @@ mod tests {
             .iter()
             .all(|camera| camera.elevation_deg == cameras[0].elevation_deg));
 
-        // A bounce sweeps half a turn in finer steps, so it is framed for a
-        // DIFFERENT set of views and legitimately lands on a different scale.
-        // Neither is larger by rights - the half turn samples its angles more
-        // densely, so it can land closer to the silhouette's true peak. What
-        // must hold is that its own sweep is uniform too.
+        // A bounce sweeps half a turn in finer steps, and is framed by the
+        // same azimuth-independent bound: one mesh has one size on every
+        // surface, whatever the sweep.
         let bounce = turntable_frame_cameras(&mesh, 36, true);
-        let bounce_fit = bounce[0].fit;
-        assert!(
-            matches!(bounce_fit, FrameFit::Extent(extent) if extent > 0.0),
-            "a bounce must pin an extent too, got {bounce_fit:?}"
-        );
-        assert!(bounce.iter().all(|camera| camera.fit == bounce_fit));
+        assert!(bounce.iter().all(|camera| camera.fit == fit));
     }
 
     /// The swept extent is the bounding CYLINDER of the mesh about the orbit
@@ -643,9 +644,10 @@ mod tests {
     /// `x = dx·cos a - dz·sin a` and `y = cos e·dy - sin e·(dx·sin a + dz·cos a)`,
     /// so `|x| ≤ √(dx² + dz²)` and `|y| ≤ cos e·|dy| + sin e·√(dx² + dz²)`.
     ///
-    /// The fit must never exceed that bound (it would be framing air) and, on
-    /// a sweep fine enough to sample the peak, must come within a few percent
-    /// of it (it would be clipping).
+    /// The fit IS that bound, not an approximation of it: the sweep framing
+    /// is computed in closed form, so it holds to the last few ulps at any
+    /// frame count rather than converging on the bound as the sweep gets
+    /// finer.
     #[test]
     fn the_swept_extent_matches_the_closed_form_cylinder_bound() {
         use crate::hunyuan3d::poster::POSTER_ELEVATION_DEG;
@@ -665,12 +667,20 @@ mod tests {
             bound = bound.max(radial).max(cos_e * d[1].abs() + sin_e * radial);
         }
         assert!(
-            extent <= bound * (1.0 + 1e-4),
-            "{extent} frames more than the cylinder bound {bound}"
+            (extent - bound).abs() <= bound * 1e-5,
+            "{extent} is not the cylinder bound {bound}"
         );
-        assert!(
-            extent >= bound * 0.95,
-            "{extent} is well under the cylinder bound {bound}; the sweep is clipping"
-        );
+
+        // And it is the same value at any frame count and either sweep.
+        for (frames, bounce) in [(8usize, false), (36, false), (36, true), (72, true)] {
+            let FrameFit::Extent(other) = turntable_frame_cameras(&mesh, frames, bounce)[0].fit
+            else {
+                panic!("a sweep must pin an extent");
+            };
+            assert_eq!(
+                other, extent,
+                "a {frames}-frame sweep (bounce {bounce}) is framed apart"
+            );
+        }
     }
 }

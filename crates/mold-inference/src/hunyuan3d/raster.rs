@@ -79,7 +79,7 @@ pub enum Culling {
 /// (`comfy_extras/nodes_gaussian_splat.py:996-1006`) and then rotates that
 /// one camera rigidly per frame (`_orbit_camera_info_yaw`, `:640-655`).
 ///
-/// See [`frame_fit_for`] for building the shared value.
+/// See [`sweep_fit_for`] for building the shared value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrameFit {
     /// Fit this frame to the mesh's own projected extents.
@@ -573,23 +573,77 @@ pub fn projection_scale(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -
     }
 }
 
-/// One [`FrameFit::Extent`] that frames `mesh` from EVERY camera in `cameras`.
+/// The ONE [`FrameFit::Extent`] that frames `mesh` from EVERY azimuth at
+/// `elevation_deg` — the bounding cylinder about the orbit axis, in closed
+/// form.
 ///
-/// The largest half-extent any of those views needs, on either axis — so
-/// stamping it on all of them gives a rigid orbit in which nothing is ever
-/// clipped and nothing changes size. `None` when there is nothing to frame
-/// (an empty camera list, or a mesh with no extent), and the caller keeps
-/// [`FrameFit::Auto`].
+/// # Derivation
 ///
-/// The pre-pass mirrors ComfyUI's splat turntable, which computes its default
-/// camera once from a rotation-invariant extent
+/// A vertex sits at `d = (dx, dy, dz)` from the bounding-box centre, which is
+/// what every camera aims at. At azimuth `a` and elevation `e` the
+/// orthographic basis is `right = (cos a, 0, -sin a)` and
+/// `up = (-sin e·sin a, cos e, -sin e·cos a)` (see [`Camera::basis`]), so the
+/// projected coordinates are
+///
+/// ```text
+/// x = dx·cos a - dz·sin a
+/// y = cos e·dy - sin e·(dx·sin a + dz·cos a)
+/// ```
+///
+/// Both are a fixed vector dotted with `(dx, dz)` rotated by `a`, so with
+/// `radial = sqrt(dx² + dz²)`:
+///
+/// ```text
+/// |x| <= radial
+/// |y| <= |cos e|·|dy| + |sin e|·radial
+/// ```
+///
+/// The maximum over all vertices of those two bounds is therefore a half-
+/// extent that no view at this elevation can exceed — and it mentions no
+/// azimuth at all. That is the whole point: it is **rotation-invariant and
+/// frame-count-independent**, so the poster, the interactive viewer, and a
+/// turntable of 8, 36 or 72 frames all draw the mesh at exactly the same
+/// pixels per unit. Sampling a discrete camera list instead (what this
+/// function replaced) gave each of those a slightly different answer, so a
+/// GIF's first frame was never the poster's own pixels and two GIFs of one
+/// mesh disagreed on its size.
+///
+/// It is an upper bound rather than the exact swept silhouette, which is the
+/// safe direction: a shared fit that is a touch generous frames a little air,
+/// while one that is a touch tight clips the mesh once per turn. On a real
+/// mesh the two coincide, because some vertex sits at the radial maximum and
+/// some azimuth brings it to the frame edge.
+///
+/// `None` when there is nothing to frame — non-finite bounds, or a mesh whose
+/// vertices are all coincident — and the caller keeps [`FrameFit::Auto`].
+///
+/// The rigid-orbit idea mirrors ComfyUI's splat turntable, which frames its
+/// default camera once from a rotation-invariant extent
 /// (`comfy_extras/nodes_gaussian_splat.py:996-1006`) and then orbits that one
 /// camera rigidly (`:640-655`).
-pub fn frame_fit_for(mesh: &Mesh, cameras: &[Camera]) -> Option<FrameFit> {
+pub fn sweep_fit_for(mesh: &Mesh, elevation_deg: f32) -> Option<FrameFit> {
+    let (min, max) = mesh.bounds();
+    if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    let center = [
+        0.5 * (min[0] + max[0]),
+        0.5 * (min[1] + max[1]),
+        0.5 * (min[2] + max[2]),
+    ];
+    // Absolute values, so a camera looking UP at the mesh is bounded exactly
+    // as one looking down: only the magnitudes of the two basis terms matter.
+    let (sin_e, cos_e) = elevation_deg.to_radians().sin_cos();
+    let (sin_e, cos_e) = (sin_e.abs(), cos_e.abs());
+
     let mut extent = 0.0f32;
-    for camera in cameras {
-        let (ext_x, ext_y) = projected_half_extent(mesh, camera)?;
-        extent = extent.max(ext_x).max(ext_y);
+    for vertex in &mesh.vertices {
+        let d = sub(*vertex, center);
+        if !d.iter().all(|c| c.is_finite()) {
+            continue;
+        }
+        let radial = (d[0] * d[0] + d[2] * d[2]).sqrt();
+        extent = extent.max(radial).max(cos_e * d[1].abs() + sin_e * radial);
     }
     (extent.is_finite() && extent > 0.0).then_some(FrameFit::Extent(extent))
 }
@@ -1081,24 +1135,110 @@ mod tests {
         );
     }
 
-    /// The shared fit is the largest half-extent any camera in the set needs,
+    /// The shared fit covers every camera of a full orbit at that elevation,
     /// so no view is ever clipped and every view is the same size.
+    ///
+    /// Ported from the old discrete `frame_fit_for`, whose pin was the max
+    /// over a camera LIST. The closed form is azimuth-independent, so it can
+    /// only ever be larger than any sample of that same orbit — the pin the
+    /// discrete pre-pass produced is now a lower bound rather than the
+    /// answer.
     #[test]
-    fn frame_fit_for_covers_every_camera_in_the_set() {
+    fn the_sweep_fit_covers_every_camera_of_an_orbit() {
         let mesh = cube(0.5);
         let cameras = camera_ring(12, 20.0);
-        let FrameFit::Extent(extent) = frame_fit_for(&mesh, &cameras).expect("a fit") else {
-            panic!("frame_fit_for must pin an extent");
+        let FrameFit::Extent(extent) = sweep_fit_for(&mesh, 20.0).expect("a fit") else {
+            panic!("sweep_fit_for must pin an extent");
         };
         let mut largest = 0.0f32;
         for camera in &cameras {
             let (ext_x, ext_y) = projected_half_extent(&mesh, camera).expect("extents");
-            assert!(ext_x <= extent + 1e-6 && ext_y <= extent + 1e-6);
+            assert!(
+                ext_x <= extent + 1e-6 && ext_y <= extent + 1e-6,
+                "a camera of the ring needs ({ext_x}, {ext_y}), past the pinned {extent}"
+            );
             largest = largest.max(ext_x).max(ext_y);
         }
-        assert!((extent - largest).abs() < 1e-6);
+        assert!(
+            extent >= largest - 1e-6,
+            "{extent} is under the widest sampled view {largest}"
+        );
+        // Framing air is the other failure: a twelve-camera ring of a cube
+        // samples the peak closely, so the bound cannot be far above it.
+        assert!(
+            extent <= largest * 1.05,
+            "{extent} frames far more than the widest sampled view {largest}"
+        );
 
-        assert_eq!(frame_fit_for(&mesh, &[]), None, "nothing to frame");
-        assert_eq!(frame_fit_for(&Mesh::default(), &cameras), None);
+        assert_eq!(sweep_fit_for(&Mesh::default(), 20.0), None);
+        // A single point has no extent to frame, at any elevation.
+        let point = Mesh {
+            vertices: vec![[1.0, 2.0, 3.0]],
+            faces: vec![[0, 0, 0]],
+            ..Default::default()
+        };
+        assert_eq!(sweep_fit_for(&point, 20.0), None);
+    }
+
+    /// The bound is a property of the ELEVATION and the mesh, not of any
+    /// azimuth: the same value frames the poster, the interactive viewer, and
+    /// a turntable of any frame count.
+    #[test]
+    fn the_sweep_fit_is_azimuth_independent() {
+        let mesh = cube(0.5);
+        let FrameFit::Extent(extent) = sweep_fit_for(&mesh, 20.0).expect("a fit") else {
+            panic!("sweep_fit_for must pin an extent");
+        };
+        for azimuth in [0.0f32, 30.0, 137.0, -95.0, 350.0] {
+            let camera = Camera::orthographic(azimuth, 20.0).with_fit(FrameFit::Extent(extent));
+            let scale = projection_scale(&mesh, &camera, 64, 64).expect("a scale");
+            let reference = projection_scale(
+                &mesh,
+                &Camera::orthographic(0.0, 20.0).with_fit(FrameFit::Extent(extent)),
+                64,
+                64,
+            )
+            .expect("a scale");
+            assert!(
+                (scale - reference).abs() <= 1e-6 * reference,
+                "azimuth {azimuth} renders at {scale}, azimuth 0 at {reference}"
+            );
+        }
+    }
+
+    /// The sweep sign is the one that matches a rightward drag in the
+    /// viewer: a marker on the mesh's +Z face must move RIGHT across the
+    /// screen from frame 0 to frame 1.
+    ///
+    /// This lives in the rasterizer's tests rather than the poster's because
+    /// projecting one named point needs `view_frame` / `project_vertex`,
+    /// which are private here. The projected x is what the pixel column is
+    /// an affine, order-preserving function of (`project`: `half_w + scale *
+    /// x`), so a larger x IS further right.
+    #[test]
+    fn the_turntable_spins_like_a_rightward_drag() {
+        use crate::hunyuan3d::poster::turntable_cameras;
+
+        let mesh = cube(0.5);
+        let cameras = turntable_cameras(36, false);
+        assert!(
+            cameras[1].azimuth_deg < cameras[0].azimuth_deg,
+            "the eye must orbit toward -X: frame 1 is at {}, frame 0 at {}",
+            cameras[1].azimuth_deg,
+            cameras[0].azimuth_deg
+        );
+
+        // Dead centre of the +Z face, the point a viewer is looking at.
+        let marker = [0.0f32, 0.0, 0.5];
+        let x_of = |camera: &Camera| {
+            let frame = view_frame(&mesh, camera).expect("a view frame");
+            project_vertex(marker, &frame).x
+        };
+        let first = x_of(&cameras[0]);
+        let second = x_of(&cameras[1]);
+        assert!(
+            second > first,
+            "the +Z face moved left ({first} -> {second}); the sweep spins the wrong way"
+        );
     }
 }

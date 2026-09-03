@@ -55,6 +55,51 @@ pub fn file_media_version(metadata: &std::fs::Metadata) -> String {
     format!("{modified}-{}", metadata.len())
 }
 
+/// Revision of the mesh poster renderer, appended to a mesh print's media
+/// version by [`poster_revision_suffix`].
+///
+/// A mesh tile is not read out of the file the way a raster thumbnail is —
+/// it is RENDERED from the geometry, so it changes when the renderer changes
+/// while the `.glb`'s mtime and size do not. Every client cache downstream
+/// (the desktop's `mold-thumb://` store and the studio's persistent cache)
+/// is keyed on the opaque media version, so without this an existing print
+/// keeps the poster it was first served forever.
+///
+/// Bump this in the same change as any alteration to the poster's camera,
+/// framing, lighting, or palette. `p2` is the shared sweep framing: the
+/// poster is now fit to the rotation-invariant bound that also frames the
+/// turntable and the interactive viewer, so every mesh print rendered before
+/// it is drawn at a different size.
+pub const MESH_POSTER_REVISION: &str = ":p2";
+
+/// The poster-revision suffix for `filename`, or `""`.
+///
+/// The one decision behind [`media_version_for`] and the gallery row's wire
+/// `media_version`, so the cache path, the ETag, and what a client keys its
+/// own cache on can never disagree about which prints are revisioned. Reads
+/// [`is_mesh_filename`] rather than testing for `.glb` itself: a mesh is
+/// exactly the kind of print whose tile is derived rather than decoded.
+pub fn poster_revision_suffix(filename: &str) -> &'static str {
+    if is_mesh_filename(filename) {
+        MESH_POSTER_REVISION
+    } else {
+        ""
+    }
+}
+
+/// The cache identity of a print: [`file_media_version`] for a raster,
+/// byte for byte, plus [`poster_revision_suffix`] for a mesh.
+///
+/// Prefer this over [`file_media_version`] wherever the answer reaches a
+/// cache key, an ETag, or a client.
+pub fn media_version_for(filename: &str, metadata: &std::fs::Metadata) -> String {
+    let base = file_media_version(metadata);
+    match poster_revision_suffix(filename) {
+        "" => base,
+        suffix => format!("{base}{suffix}"),
+    }
+}
+
 /// Where the 256 px PNG tile for (`filename`, `media_version`) lives.
 pub fn versioned_thumbnail_path(thumb_dir: &Path, filename: &str, media_version: &str) -> PathBuf {
     let key = Sha256::digest(format!("{filename}:{media_version}").as_bytes());
@@ -428,7 +473,10 @@ pub fn sweep_orphans(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            let version = file_media_version(&metadata);
+            // The same identity the thumbnail route computes, revision suffix
+            // included: a name this sweeper cannot reproduce is a tile it
+            // deletes out from under a live print.
+            let version = media_version_for(&name, &metadata);
             for variant in ThumbnailVariant::all() {
                 if let Some(file) = variant.cache_path(thumb_dir, &name, &version).file_name() {
                     expected.insert(file.to_string_lossy().into_owned());
@@ -757,6 +805,98 @@ mod tests {
             foreign.exists() && waveform.exists(),
             "other layouts are never touched"
         );
+    }
+
+    /// A mesh tile is rendered from geometry, so it must carry the poster
+    /// renderer's own revision: two prints with identical mtime and size,
+    /// one `.glb` and one `.png`, cannot share a cache identity.
+    #[test]
+    fn a_mesh_and_a_raster_with_identical_metadata_get_different_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let raster = dir.path().join("chair.png");
+        let mesh = dir.path().join("chair.glb");
+        let shouty = dir.path().join("CHAIR.GLB");
+        for path in [&raster, &mesh, &shouty] {
+            std::fs::write(path, b"same length!").unwrap();
+        }
+        let stamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        for path in [&raster, &mesh, &shouty] {
+            filetime::set_file_mtime(path, stamp).unwrap();
+        }
+
+        let raster_meta = std::fs::metadata(&raster).unwrap();
+        let mesh_meta = std::fs::metadata(&mesh).unwrap();
+        assert_eq!(
+            file_media_version(&raster_meta),
+            file_media_version(&mesh_meta),
+            "the fixture must differ only in its name"
+        );
+
+        let raster_version = media_version_for("chair.png", &raster_meta);
+        let mesh_version = media_version_for("chair.glb", &mesh_meta);
+        assert_ne!(raster_version, mesh_version);
+
+        // A raster is untouched: existing tiles and existing client caches
+        // must stay valid.
+        assert_eq!(raster_version, file_media_version(&raster_meta));
+        assert_eq!(poster_revision_suffix("chair.png"), "");
+        assert_eq!(poster_revision_suffix("clip.mp4"), "");
+        assert_eq!(poster_revision_suffix("take.wav"), "");
+
+        // The extension test is case-insensitive, so a `.GLB` print is
+        // revisioned like any other.
+        assert_eq!(poster_revision_suffix("CHAIR.GLB"), MESH_POSTER_REVISION);
+        assert_eq!(
+            media_version_for("CHAIR.GLB", &std::fs::metadata(&shouty).unwrap()),
+            mesh_version
+        );
+
+        // And the suffix is exactly what separates them.
+        assert_eq!(
+            mesh_version,
+            format!("{}{MESH_POSTER_REVISION}", file_media_version(&mesh_meta))
+        );
+    }
+
+    /// The sweeper computes the names it EXPECTS to find, so it has to agree
+    /// with the route about the revision suffix or it deletes a live tile.
+    #[test]
+    fn the_sweeper_keeps_a_mesh_tile_at_its_revisioned_version() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mesh = output.path().join("chair.glb");
+        std::fs::write(&mesh, b"glTF-ish").unwrap();
+        let metadata = std::fs::metadata(&mesh).unwrap();
+
+        let kept = ThumbnailVariant::DEFAULT.cache_path(
+            cache.path(),
+            "chair.glb",
+            &media_version_for("chair.glb", &metadata),
+        );
+        // What the sweeper would have expected before the revision existed.
+        let stale = ThumbnailVariant::DEFAULT.cache_path(
+            cache.path(),
+            "chair.glb",
+            &file_media_version(&metadata),
+        );
+        assert_ne!(kept, stale);
+        for path in [&kept, &stale] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        for path in [&kept, &stale] {
+            filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+
+        let removed = sweep_orphans(
+            output.path(),
+            cache.path(),
+            std::time::Duration::from_secs(24 * 3600),
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(kept.exists(), "the live mesh tile was swept");
+        assert!(!stale.exists(), "the pre-revision tile is an orphan now");
     }
 
     #[test]
