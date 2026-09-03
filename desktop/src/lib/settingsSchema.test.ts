@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  ACCORDION_SECTIONS,
   ENGINE_KEY_SCHEMAS,
   ENV_KNOB_SCHEMAS,
   matchesSearch,
@@ -18,9 +17,12 @@ describe("settings schema", () => {
     expect(sectionForConfigKey("expand.temperature")).toBe("expansion");
   });
 
-  it("names the first section Hosts (the default) and keeps Updates", () => {
-    expect(SECTIONS[0]).toMatchObject({ id: "hosts", label: "Hosts" });
-    expect(SECTIONS.find((section) => section.id === "updates")?.label).toBe("Updates");
+  it("leads with Look and ends with Updates & about, in the lexicon", () => {
+    expect(SECTIONS[0]).toMatchObject({ id: "app", label: "Look" });
+    expect(SECTIONS.at(-1)).toMatchObject({ id: "updates", label: "Updates & about" });
+    expect(SECTIONS.find((section) => section.id === "hosts")?.label).toBe("Machines");
+    expect(SECTIONS.find((section) => section.id === "library")?.label).toBe("My images & trash");
+    expect(SECTIONS.find((section) => section.id === "expansion")?.label).toBe("Write more for me");
   });
 
   it("unknown keys fall through to advanced — future engine keys must surface", () => {
@@ -68,33 +70,17 @@ describe("settings schema", () => {
   });
 });
 
-describe("Settings accordion sections", () => {
-  it("lists the collapsible 'All settings' region in order, without top-card sections", () => {
-    expect(ACCORDION_SECTIONS.map((s) => s.id)).toEqual([
-      "performance",
-      "generation",
-      "media",
-      "library",
-      "expansion",
-      "accounts",
-      "profiles",
-      "advanced",
-    ]);
-    // Appearance / Updates / About / Hosts are top cards, not accordions.
-    for (const id of ["app", "updates", "about", "hosts"]) {
-      expect(ACCORDION_SECTIONS.some((s) => s.id === id)).toBe(false);
-    }
-  });
-
-  it("gives every group an icon and concise summary for the shared Settings treatment", () => {
-    for (const section of ACCORDION_SECTIONS) {
-      expect(section.icon, section.id).toBeTruthy();
+describe("Settings sections", () => {
+  it("lists every section once, each with a summary sentence", () => {
+    const ids = SECTIONS.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const section of SECTIONS) {
       expect(section.summary, section.id).toBeTruthy();
     }
   });
 
   it("finds the saved-media section using the user's save-location language", () => {
-    const media = ACCORDION_SECTIONS.find((section) => section.id === "media")!;
+    const media = SECTIONS.find((section) => section.id === "media")!;
     expect(sectionMatchesSearch("save location", media)).toBe(true);
     expect(sectionMatchesSearch("default save location", media)).toBe(true);
   });
@@ -108,9 +94,8 @@ describe("Settings accordion sections", () => {
     expect(schema.options?.find((o) => o.value === "0")?.label).toBe("Forever");
     expect(schema.options?.find((o) => o.value === "30")?.label).toBe("30 days");
     expect(schema.help).toContain("0 keeps them until you empty the trash");
-    const library = ACCORDION_SECTIONS.find((section) => section.id === "library")!;
-    expect(library.label).toBe("Library");
-    expect(library.icon).toBe("library");
+    const library = SECTIONS.find((section) => section.id === "library")!;
+    expect(library.label).toBe("My images & trash");
     expect(sectionMatchesSearch("trash", library)).toBe(true);
     expect(sectionMatchesSearch("retention", library)).toBe(true);
     expect(sectionMatchesSearch("collections", library)).toBe(true);
@@ -123,9 +108,9 @@ describe("Settings accordion sections", () => {
 });
 
 describe("sectionMatchesSearch", () => {
-  const expansion = ACCORDION_SECTIONS.find((s) => s.id === "expansion")!;
-  const accounts = ACCORDION_SECTIONS.find((s) => s.id === "accounts")!;
-  const advanced = ACCORDION_SECTIONS.find((s) => s.id === "advanced")!;
+  const expansion = SECTIONS.find((s) => s.id === "expansion")!;
+  const accounts = SECTIONS.find((s) => s.id === "accounts")!;
+  const advanced = SECTIONS.find((s) => s.id === "advanced")!;
 
   it("matches a section by a curated key it owns", () => {
     expect(sectionMatchesSearch("temperature", expansion)).toBe(true);

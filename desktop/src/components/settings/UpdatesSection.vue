@@ -30,7 +30,7 @@ onMounted(() => void updater.init());
 </script>
 
 <template>
-  <div class="max-w-2xl">
+  <div>
     <SettingRow
       label="Update channel"
       help="Stable follows versioned releases. Nightly follows signed builds from main."
@@ -44,21 +44,23 @@ onMounted(() => void updater.init());
       />
     </SettingRow>
 
-    <p v-if="prefs.updateChannel === 'nightly'" class="mt-3 text-micro text-sapphire" role="status">
+    <p
+      v-if="prefs.updateChannel === 'nightly'"
+      class="px-3.5 pt-3 text-micro text-sapphire"
+      role="status"
+    >
       Nightly builds may contain regressions. Every build is still signature-verified before Mold
       installs it.
     </p>
 
     <section
-      class="border-border mt-4 rounded-window border bg-bg p-4"
+      class="border-b border-border px-3.5 py-3"
       aria-labelledby="desktop-update-status"
       :aria-busy="updater.isBusy"
     >
       <div class="flex items-start gap-4">
         <div class="min-w-0 flex-1">
-          <h2 id="desktop-update-status" class="text-base font-semibold text-fg">
-            Desktop updates
-          </h2>
+          <h2 id="desktop-update-status" class="text-sm font-medium text-fg">Desktop updates</h2>
           <p class="mt-0.5 text-micro text-fg-dim">
             Current version
             <span class="font-mono text-xs text-fg-2">{{ updater.currentVersion ?? "dev" }}</span>
@@ -68,11 +70,11 @@ onMounted(() => void updater.init());
         <button
           v-if="['idle', 'up-to-date'].includes(updater.phase)"
           type="button"
-          class="border-border h-8 shrink-0 rounded-control border px-3 text-sm text-fg-2 hover:text-fg disabled:opacity-50"
+          class="ms-toolbar-button"
           :disabled="updater.isBusy"
           @click="updater.check()"
         >
-          Check for updates
+          Check now
         </button>
       </div>
 

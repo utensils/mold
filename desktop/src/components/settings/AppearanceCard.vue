@@ -6,7 +6,6 @@
  */
 import { computed } from "vue";
 import ToggleControl from "./ToggleControl.vue";
-import CardSurface from "@ui/components/CardSurface.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { THEME_META, THEME_PAIR, THEME_TONE, themeMeta, type ThemeId } from "../../lib/theme";
 import { shortcutLabel } from "../../lib/platform";
@@ -60,7 +59,7 @@ function pick(theme: ThemeId) {
 </script>
 
 <template>
-  <CardSurface>
+  <div class="p-3.5">
     <!-- Theme -->
     <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Theme">
       <button
@@ -145,5 +144,5 @@ function pick(theme: ThemeId) {
         />
       </div>
     </div>
-  </CardSurface>
+  </div>
 </template>

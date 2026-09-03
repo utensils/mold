@@ -1,8 +1,7 @@
-import type { IconName } from "@ui/icons";
 import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
 
 /**
- * The Darkroom Bench: curated metadata for the Settings surface.
+ * Settings (README §02 lexicon): curated metadata for the Settings surface.
  *
  * Known engine-config keys (`/api/config`) map to a section and a purposeful
  * editor; anything unknown falls through to Advanced as a raw provenance row,
@@ -12,76 +11,65 @@ import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganizati
  */
 
 export type SectionId =
-  | "hosts"
-  | "performance"
+  | "app"
   | "generation"
+  | "expansion"
+  | "hosts"
   | "media"
   | "library"
-  | "expansion"
+  | "licenses"
+  | "pairing"
+  | "performance"
   | "accounts"
-  | "app"
-  | "updates"
   | "profiles"
   | "advanced"
-  | "about";
+  | "updates";
 
 export interface SectionInfo {
   id: SectionId;
   label: string;
-  /** Icon-led header treatment shared by desktop and web Settings groups. */
-  icon?: IconName;
-  /** One-line explanation shown beneath the group title. */
-  summary?: string;
+  /** One plain sentence beside the section label. */
+  summary: string;
   /** Extra search terms for sections whose controls carry no curated key
-   *  (Accounts tokens, Profiles) so the global search still finds them. */
+   *  (Accounts tokens, Profiles, Look) so the global search still finds them. */
   keywords?: string[];
 }
 
-export interface AccordionSectionInfo extends SectionInfo {
-  icon: IconName;
-  summary: string;
-}
-
-export const SECTIONS: SectionInfo[] = [
-  { id: "hosts", label: "Hosts" },
-  { id: "performance", label: "Performance" },
-  { id: "generation", label: "Generation" },
-  { id: "media", label: "Saved media" },
-  { id: "library", label: "Library" },
-  { id: "expansion", label: "Prompt expansion" },
-  { id: "accounts", label: "Accounts & tokens" },
-  { id: "app", label: "Appearance & app" },
-  { id: "updates", label: "Updates" },
-  { id: "profiles", label: "Profiles" },
-  { id: "advanced", label: "Advanced" },
-  { id: "about", label: "About" },
-];
-
 /**
- * The Settings surface is now a single column: Appearance, Updates, and About
- * ride at the top as always-open cards, Hosts is a link to the Machines
- * workspace, and everything deeper collapses into the "All settings" region as
- * one-open-at-a-time accordions. This list is that region, in order — none of
- * it blocks first use (spec G7).
+ * The Settings surface is one scrolling page behind a 200px jump nav: every
+ * section is always open, in this order, and search narrows both the nav and
+ * the page to the sections that match. Nothing here blocks first use (G7);
+ * `?section=` deep links (the Library trash banner, the native Check for
+ * Updates action) jump to a section by id.
  */
-export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
+export const SECTIONS: SectionInfo[] = [
   {
-    id: "performance",
-    label: "Performance",
-    icon: "scheduler",
-    summary: "Memory, previews, queueing, and compute backends",
+    id: "app",
+    label: "Look",
+    summary: "Theme, interface size, and how the app behaves",
+    keywords: ["theme", "appearance", "dark", "light", "match system", "scale", "notifications"],
   },
   {
     id: "generation",
-    label: "Generation",
-    icon: "image",
-    summary: "Defaults for new image and video jobs",
+    label: "Defaults for new images",
+    summary: "What a fresh New image starts with",
+  },
+  {
+    id: "expansion",
+    label: "Write more for me",
+    summary: "How the prompt rewriter works and which model it uses",
+    keywords: ["expand", "expansion", "rewrite", "prompt"],
+  },
+  {
+    id: "hosts",
+    label: "Machines",
+    summary: "This device, its key, and where its styles and pictures live",
+    keywords: ["hosts", "this device", "engine", "api key", "mold home"],
   },
   {
     id: "media",
-    label: "Saved media",
-    icon: "save",
-    summary: "Where photos, videos, and converted exports are saved",
+    label: "Saving pictures & clips",
+    summary: "Where saved pictures, clips, and exports go",
     keywords: [
       "save",
       "save location",
@@ -96,36 +84,50 @@ export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
   },
   {
     id: "library",
-    label: "Library",
-    icon: "library",
+    label: "My images & trash",
     summary: "Trash retention on this device",
-    keywords: ["trash", "retention", "collections", "deleted prints", "purge", "library"],
+    keywords: ["trash", "retention", "collections", "albums", "deleted prints", "purge", "library"],
   },
   {
-    id: "expansion",
-    label: "Prompt expansion",
-    icon: "sparkle",
-    summary: "Rewrite behavior, model, and sampling controls",
+    id: "licenses",
+    label: "Style licences",
+    summary: "Some styles need you to accept their terms once per machine",
+    keywords: ["licence", "license", "terms", "accept"],
+  },
+  {
+    id: "pairing",
+    label: "Phone pairing",
+    summary: "Use mold on your phone",
+    keywords: ["phone", "iphone", "pair", "pairing", "qr", "mobile"],
+  },
+  {
+    id: "performance",
+    label: "Speed & memory",
+    summary: "Memory, previews, queueing, and compute backends",
+    keywords: ["performance", "vram", "offload", "preview"],
   },
   {
     id: "accounts",
     label: "Accounts & tokens",
-    icon: "lock",
-    summary: "Credentials used for catalogs and model downloads",
+    summary: "Credentials used for catalogs and style downloads",
     keywords: ["hugging face", "huggingface", "hf", "civitai", "token", "api key"],
   },
   {
     id: "profiles",
     label: "Profiles",
-    icon: "history",
     summary: "Keep separate sets of engine preferences",
     keywords: ["profile"],
   },
   {
     id: "advanced",
     label: "Advanced",
-    icon: "settings",
     summary: "Uncommon and newly discovered engine options",
+  },
+  {
+    id: "updates",
+    label: "Updates & about",
+    summary: "Version, update channel, logs, and diagnostics",
+    keywords: ["update", "version", "about", "nightly", "stable", "logs", "diagnostics", "privacy"],
   },
 ];
 

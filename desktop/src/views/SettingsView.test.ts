@@ -2,16 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
-import AccordionSection from "@ui/components/AccordionSection.vue";
 
-// The top cards and accordion bodies pull in stores and IPC that aren't the
-// subject here — stub them to identifiable markers so this suite tests the
-// SettingsView shell: the single-column structure, one-open-at-a-time
-// accordions, and search that opens the owning accordion.
+// The section bodies pull in stores and IPC that aren't the subject here —
+// stub them to identifiable markers so this suite tests the SettingsView
+// shell: the jump nav, the always-open lexicon sections, deep links, and the
+// search that narrows both to the sections that match.
 function stub(marker: string) {
   return { default: { template: `<div data-test="${marker}" />` } };
 }
-vi.mock("../components/settings/AppearanceCard.vue", () => stub("stub-appearance"));
+vi.mock("../components/settings/AppearanceCard.vue", () => stub("stub-app"));
 vi.mock("../components/settings/UpdatesSection.vue", () => stub("stub-updates"));
 vi.mock("../components/settings/AboutSection.vue", () => stub("stub-about"));
 vi.mock("../components/settings/HostsSection.vue", () => stub("stub-hosts"));
@@ -23,9 +22,11 @@ vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansio
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
 vi.mock("../components/settings/AdvancedSection.vue", () => stub("stub-advanced"));
-vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-paired-access"));
+vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-pairing"));
+vi.mock("@studio/components/LicenseSettingsPanel.vue", () => stub("stub-licenses"));
 
 import SettingsView from "./SettingsView.vue";
+import { SECTIONS } from "../lib/settingsSchema";
 
 const scrollIntoView = vi.fn();
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
@@ -33,17 +34,21 @@ Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
   value: scrollIntoView,
 });
 
-async function mountView() {
+async function mountView(section?: string) {
   const pinia = createPinia();
   setActivePinia(pinia);
-  const wrapper = mount(SettingsView, { global: { plugins: [pinia] } });
+  const plugins: unknown[] = [pinia];
+  if (section) {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/settings", component: { template: "<div />" } }],
+    });
+    await router.push({ path: "/settings", query: { section } });
+    plugins.push(router);
+  }
+  const wrapper = mount(SettingsView, { global: { plugins: plugins as never[] } });
   await flushPromises();
   return wrapper;
-}
-
-/** Click a section accordion's header button. */
-async function toggleAccordion(wrapper: Awaited<ReturnType<typeof mountView>>, id: string) {
-  await wrapper.get(`[data-test="accordion-${id}"]`).get("button").trigger("click");
 }
 
 async function typeSearch(wrapper: Awaited<ReturnType<typeof mountView>>, value: string) {
@@ -56,127 +61,100 @@ beforeEach(() => {
 });
 
 describe("SettingsView shell", () => {
-  it("renders the top cards, the hosts doorway, and every accordion", async () => {
+  it("renders every lexicon section open, in nav order, with its body", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='appearance-card']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='updates-card']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='about-card']").exists()).toBe(true);
-    // Hosts is a doorway to the Machines workspace, not a full section here.
-    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-hosts']").exists()).toBe(true);
+    const navLabels = wrapper.findAll("nav button").map((b) => b.text());
+    expect(navLabels).toEqual(SECTIONS.map((s) => s.label));
+    expect(navLabels[0]).toBe("Look");
+    expect(navLabels.at(-1)).toBe("Updates & about");
 
     for (const id of [
-      "performance",
+      "app",
       "generation",
+      "expansion",
+      "hosts",
       "media",
       "library",
-      "expansion",
+      "licenses",
+      "pairing",
+      "performance",
       "accounts",
       "profiles",
       "advanced",
+      "updates",
     ]) {
-      expect(wrapper.find(`[data-test="accordion-${id}"]`).exists()).toBe(true);
+      expect(wrapper.find(`[data-test="section-${id}"]`).exists(), id).toBe(true);
+      expect(wrapper.find(`[data-test="stub-${id}"]`).exists(), id).toBe(true);
     }
+    // About folded into Updates & about.
+    expect(
+      wrapper.get("[data-test='section-updates']").find("[data-test='stub-about']").exists(),
+    ).toBe(true);
   });
 
-  it("renders icon-led, accented All settings groups with explanatory summaries", async () => {
+  it("highlights Look first and jumps to a section from the nav", async () => {
     const wrapper = await mountView();
-    const accordions = wrapper.findAllComponents(AccordionSection);
+    expect(wrapper.get("[data-test='settings-nav-app']").attributes("aria-current")).toBe("true");
 
-    expect(accordions).toHaveLength(8);
-    for (const accordion of accordions) {
-      expect(accordion.props("icon")).toBeTruthy();
-      expect(accordion.props("summary")).toBeTruthy();
-      expect(accordion.props("tone")).toBe("info");
-    }
-  });
-
-  it("keeps every accordion closed by default — nothing blocks first use", async () => {
-    const wrapper = await mountView();
-    for (const id of [
-      "performance",
-      "generation",
-      "media",
-      "library",
-      "expansion",
-      "accounts",
-      "profiles",
-      "advanced",
-    ]) {
-      expect(wrapper.find(`[data-test="stub-${id}"]`).exists()).toBe(false);
-    }
-  });
-
-  it("opens one accordion at a time", async () => {
-    const wrapper = await mountView();
-    await toggleAccordion(wrapper, "performance");
-    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(true);
-
-    await toggleAccordion(wrapper, "generation");
-    expect(wrapper.find("[data-test='stub-generation']").exists()).toBe(true);
-    // Opening generation closes performance.
-    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
-
-    // Clicking the open one again closes it.
-    await toggleAccordion(wrapper, "generation");
-    expect(wrapper.find("[data-test='stub-generation']").exists()).toBe(false);
-  });
-
-  it("opens the accordion named by ?section= (the Library trash banner's deep link)", async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: "/settings", component: { template: "<div />" } }],
-    });
-    await router.push({ path: "/settings", query: { section: "library" } });
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const wrapper = mount(SettingsView, { global: { plugins: [pinia, router] } });
-    await flushPromises();
-    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
-  });
-
-  it("scrolls the Updates card into view for the native update-check deep link", async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: "/settings", component: { template: "<div />" } }],
-    });
-    await router.push({ path: "/settings", query: { section: "updates" } });
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    mount(SettingsView, { global: { plugins: [pinia, router] } });
-    await flushPromises();
-
+    await wrapper.get("[data-test='settings-nav-library']").trigger("click");
+    expect(wrapper.get("[data-test='settings-nav-library']").attributes("aria-current")).toBe(
+      "true",
+    );
+    expect(
+      wrapper.get("[data-test='settings-nav-app']").attributes("aria-current"),
+    ).toBeUndefined();
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
   });
 
-  it("search opens the owning accordion and hides the rest", async () => {
+  it("jumps to the section named by ?section= (the Library trash banner's deep link)", async () => {
+    const wrapper = await mountView("library");
+    expect(wrapper.get("[data-test='settings-nav-library']").attributes("aria-current")).toBe(
+      "true",
+    );
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+  });
+
+  it("jumps to Updates & about for the native update-check deep link, old name included", async () => {
+    for (const section of ["updates", "about"]) {
+      scrollIntoView.mockClear();
+      const wrapper = await mountView(section);
+      expect(wrapper.get("[data-test='settings-nav-updates']").attributes("aria-current")).toBe(
+        "true",
+      );
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    }
+  });
+
+  it("search narrows the nav and the page to the owning section", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "temperature");
 
-    // The expansion accordion owns expand.temperature — shown and open.
-    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(true);
+    // Write more for me owns expand.temperature — the one section left.
+    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(true);
     expect(wrapper.find("[data-test='stub-expansion']").exists()).toBe(true);
-    // Non-matching accordions drop out entirely.
-    expect(wrapper.find("[data-test='accordion-performance']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='accordion-generation']").exists()).toBe(false);
-    // Top cards collapse away while searching to focus the results.
-    expect(wrapper.find("[data-test='appearance-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-performance']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-app']").exists()).toBe(false);
+    expect(wrapper.findAll("nav button").map((b) => b.text())).toEqual(["Write more for me"]);
   });
 
-  it("finds keyword-only sections (Accounts) that carry no curated key", async () => {
+  it("finds keyword-only sections (Accounts, Look, Phone pairing) that carry no curated key", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "civitai");
     expect(wrapper.find("[data-test='stub-accounts']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(false);
+
+    await typeSearch(wrapper, "theme");
+    expect(wrapper.find("[data-test='section-app']").exists()).toBe(true);
+
+    await typeSearch(wrapper, "phone");
+    expect(wrapper.find("[data-test='section-pairing']").exists()).toBe(true);
   });
 
-  it("opens the Library accordion for trash / retention searches", async () => {
+  it("finds My images & trash for trash / retention searches", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "trash");
-    expect(wrapper.find("[data-test='accordion-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(false);
     await typeSearch(wrapper, "retention");
     expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
   });
@@ -185,20 +163,16 @@ describe("SettingsView shell", () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "zzznope");
     expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(true);
+    expect(wrapper.findAll("nav button")).toHaveLength(0);
   });
 
-  it("surfaces the Hosts doorway when a search matches a host-owned setting", async () => {
+  it("finds Machines for a host-owned setting by key or by label", async () => {
     const wrapper = await mountView();
-    // models_dir / output_dir belong to the Hosts section, which is the doorway
-    // card (excluded from the accordions) and hidden while searching.
     await typeSearch(wrapper, "models_dir");
-    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-hosts']").exists()).toBe(true);
-    // A host-owned match is a real result, not "nothing matches".
+    expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
     expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(false);
 
-    // The human label works too.
     await typeSearch(wrapper, "Output directory");
-    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
   });
 });
