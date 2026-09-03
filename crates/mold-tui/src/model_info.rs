@@ -192,14 +192,21 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             reference_images: None,
             default_scheduler: None,
         },
+        // The family answer: every flux2-klein* tier's engine
+        // (`crates/mold-inference/src/flux2/pipeline.rs` img2img path) and
+        // generation profile support img2img/strength/mask. flux2-dev does
+        // not, because its reference protocol REPLACES the source image
+        // rather than running alongside it — `capabilities_for_model` turns
+        // these four off there by reading the resolved `reference_images`
+        // relation, not by name-testing "dev".
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
-            supports_img2img: false,
-            supports_source_image: false,
+            supports_img2img: true,
+            supports_source_image: true,
             supports_references: false,
-            supports_strength: false,
-            supports_mask: false,
+            supports_strength: true,
+            supports_mask: true,
             supports_controlnet: false,
             supports_lora: true,
             supports_identity: false,
@@ -436,6 +443,27 @@ pub fn capabilities_for_model(
     caps.reference_images = visible_reference_images(
         mold_core::generation_profile::reference_images_for_recipe(family, model),
     );
+    // A live reference protocol whose relation is `Replaces` never reads
+    // `source_image` — admission refuses it outright ("... uses edit_images
+    // instead of source_image") — so the Source row and its img2img/
+    // strength/mask siblings describe a path this checkpoint cannot take.
+    // Read the resolved relation, never a name test on "dev", so flux2-dev
+    // loses all four while flux2-klein's `Exclusive` protocol (renders from
+    // ONE of source image or references, never both) keeps them. Skip a
+    // `primary_is_target` protocol (qwen-image-edit): there the first
+    // reference IS the source/target image, so the Source row is how that
+    // image reaches the request rather than a control this checkpoint lacks.
+    if let Some(profile) = caps.reference_images.as_ref() {
+        if profile.source_relation
+            == mold_core::generation_profile::ReferenceSourceRelation::Replaces
+            && !profile.primary_is_target
+        {
+            caps.supports_img2img = false;
+            caps.supports_source_image = false;
+            caps.supports_strength = false;
+            caps.supports_mask = false;
+        }
+    }
     // H3 has no unconditional/CFG branch. Contradictory checkpoint metadata
     // may not expose an editor for conditioning the model cannot consume.
     if !mold_core::minimax_h3::is_family(family) {
@@ -912,7 +940,17 @@ mod tests {
         let caps = capabilities_for_family("flux2");
         assert!(!caps.supports_negative_prompt);
         assert!(!caps.supports_scheduler);
-        assert!(!caps.supports_img2img);
+        // The family answer is true: the engine
+        // (`crates/mold-inference/src/flux2/pipeline.rs`) and every
+        // flux2-klein* recipe support img2img/strength/mask.
+        // `capabilities_for_model` turns them off for flux2-dev, whose
+        // reference protocol REPLACES the source image, but the family-level
+        // default must stay the Klein answer so a catalog-only lookup with
+        // no resolved model still offers the row.
+        assert!(caps.supports_img2img);
+        assert!(caps.supports_source_image);
+        assert!(caps.supports_strength);
+        assert!(caps.supports_mask);
         assert!(!caps.supports_controlnet);
         assert!(caps.supports_lora);
     }
@@ -1186,6 +1224,50 @@ mod tests {
         assert!(
             !flux.supports_references,
             "H3's uploaded group is a different capability"
+        );
+    }
+
+    /// Klein's reference protocol is `Exclusive`: the engine
+    /// (`crates/mold-inference/src/flux2/pipeline.rs` img2img path) and
+    /// every flux2-klein* recipe support img2img/strength/mask beside the
+    /// References row, so `capabilities_for_model` must keep all four on.
+    #[test]
+    fn klein_keeps_img2img_strength_and_mask_beside_references() {
+        let klein = capabilities_for_model("flux2", "flux2-klein:bf16", None, None, None, None);
+        assert!(klein.supports_img2img);
+        assert!(klein.supports_source_image);
+        assert!(klein.supports_strength);
+        assert!(klein.supports_mask);
+        assert_eq!(
+            klein
+                .reference_images
+                .as_ref()
+                .expect("Klein advertises the reference protocol")
+                .source_relation,
+            mold_core::generation_profile::ReferenceSourceRelation::Exclusive
+        );
+    }
+
+    /// [dev]'s reference protocol REPLACES the source image: its
+    /// `source_relation` is `Replaces`, admission refuses `source_image`
+    /// outright ("flux2-dev uses edit_images instead of source_image"), and
+    /// the generation profile advertises `supports_strength: false` and
+    /// `mask.mode: "hidden"`. `capabilities_for_model` must read that
+    /// resolved relation — never a name test on "dev" — and turn all four
+    /// controls off.
+    #[test]
+    fn flux2_dev_hides_img2img_strength_and_mask_because_references_replace_the_source() {
+        let dev = capabilities_for_model("flux2", "flux2-dev:bf16", None, None, None, None);
+        assert!(!dev.supports_img2img);
+        assert!(!dev.supports_source_image);
+        assert!(!dev.supports_strength);
+        assert!(!dev.supports_mask);
+        assert_eq!(
+            dev.reference_images
+                .as_ref()
+                .expect("flux2-dev advertises the reference protocol too")
+                .source_relation,
+            mold_core::generation_profile::ReferenceSourceRelation::Replaces
         );
     }
 
