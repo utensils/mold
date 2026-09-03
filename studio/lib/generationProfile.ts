@@ -35,6 +35,8 @@ export type {
   ProfileAspectGroup,
   ProfileFpsControl,
   ProfileResolutionPreset,
+  ReferenceImagesProfile,
+  ReferenceSourceRelation,
   ResolutionDomain,
   ResolutionProfile,
   TemporalProfile,

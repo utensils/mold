@@ -1392,9 +1392,9 @@ impl Flux2Engine {
         let reference_tokens = if self.is_dev() {
             if let Some(references) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
                 let max_pixels = if references.len() == 1 {
-                    mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
+                    mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS
                 } else {
-                    mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
+                    mold_core::validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS
                 };
                 let (vae, _) = self.load_sequential_vae(&device, gpu_dtype)?;
                 self.base

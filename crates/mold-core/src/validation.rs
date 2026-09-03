@@ -45,12 +45,18 @@ pub const LTX2_COMPOSED_MAX_AXIS_PIXELS: u32 = 2 * LTX2_MAX_AXIS_PIXELS;
 pub const LTX2_COMPOSED_MAX_PIXELS: u64 = 4_096 * 2_176;
 pub const MAX_INLINE_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
-pub const FLUX2_DEV_MAX_REFERENCE_IMAGES: usize = 4;
-/// BFL's pixel cap for a single FLUX.2 Dev reference. The upstream value is
+/// The ordered-reference ceiling for the WHOLE FLUX.2 family.
+///
+/// [dev] and [klein] — distilled and base, 4B and 9B — speak one reference
+/// protocol with one checkpoint layout, so the bound is a family property
+/// rather than a dev one. `queue_media_store`'s `PROJECTION_EDIT_SLOTS_END
+/// <= 56` assertion is the tripwire if this ever grows.
+pub const FLUX2_MAX_REFERENCE_IMAGES: usize = 4;
+/// BFL's pixel cap for a single FLUX.2 reference. The upstream value is
 /// intentionally 2024 squared, not 2048 squared.
-pub const FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS: u64 = 2_024 * 2_024;
-/// BFL's per-image pixel cap when a FLUX.2 Dev request has multiple references.
-pub const FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS: u64 = 1_024 * 1_024;
+pub const FLUX2_SINGLE_REFERENCE_MAX_PIXELS: u64 = 2_024 * 2_024;
+/// BFL's per-image pixel cap when a FLUX.2 request has multiple references.
+pub const FLUX2_MULTI_REFERENCE_MAX_PIXELS: u64 = 1_024 * 1_024;
 pub const LORA_CAPABLE_FAMILIES: &[&str] = &[
     "flux",
     "flux2",
@@ -1195,7 +1201,7 @@ pub fn fit_to_target_area(src_w: u32, src_h: u32, target_area: u32, align: u32) 
 }
 
 /// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
-fn is_valid_image_format(data: &[u8]) -> bool {
+pub(crate) fn is_valid_image_format(data: &[u8]) -> bool {
     let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
     let is_jpeg = data.len() >= 2 && data[..2] == [0xFF, 0xD8];
     is_png || is_jpeg
@@ -1225,6 +1231,15 @@ fn resolved_family<'a>(model_name: &'a str, family_hint: Option<&'a str>) -> Opt
     family_hint
         .filter(|h| !h.is_empty())
         .or_else(|| model_family(model_name))
+}
+
+/// [`resolved_family`] with no hint, for callers that hold only a request.
+///
+/// The generation-profile door has the model but no family hint, and it must
+/// resolve the reference subject the same way family validation does — two
+/// doors, one answer.
+pub(crate) fn resolved_family_for(model_name: &str) -> Option<&str> {
+    resolved_family(model_name, None)
 }
 
 /// Whether `req` must carry a non-empty prompt.
@@ -2465,68 +2480,26 @@ fn validate_generate_request_after_activation_with(
         .map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let flux2_dev = is_flux2_dev_model(&req.model);
-    if family == Some("qwen-image-edit") {
-        if req.edit_images.as_ref().is_none_or(Vec::is_empty) {
-            return Err(
-                "Qwen Image Edit needs at least one image. Add a Target image and try again."
-                    .to_string(),
-            );
-        }
-        if req.batch_size != 1 {
-            return Err("qwen-image-edit only supports batch_size = 1".to_string());
-        }
-        if req.source_image.is_some() {
-            return Err("qwen-image-edit uses edit_images instead of source_image".to_string());
-        }
-        if req.mask_image.is_some() {
-            return Err("qwen-image-edit does not support mask_image".to_string());
-        }
-        if req.control_image.is_some() || req.control_model.is_some() {
-            return Err("qwen-image-edit does not support ControlNet inputs".to_string());
-        }
-        if let Some(ref images) = req.edit_images {
-            for image in images {
-                if !is_valid_image_format(image) {
-                    return Err("edit_images must contain only PNG or JPEG images".to_string());
-                }
-            }
-        }
-    } else if flux2_dev {
-        if req.batch_size != 1
-            && req
-                .edit_images
-                .as_ref()
-                .is_some_and(|images| !images.is_empty())
-        {
-            return Err("flux2-dev reference editing only supports batch_size = 1".to_string());
-        }
-        if req.source_image.is_some() {
-            return Err("flux2-dev uses edit_images instead of source_image".to_string());
-        }
-        if req.mask_image.is_some() {
-            return Err("flux2-dev does not support mask_image".to_string());
-        }
-        if req.control_image.is_some() || req.control_model.is_some() {
-            return Err("flux2-dev does not support ControlNet inputs".to_string());
-        }
-        if req.lora.is_some() || req.loras.as_ref().is_some_and(|loras| !loras.is_empty()) {
-            return Err("flux2-dev does not support LoRA".to_string());
-        }
-        if let Some(images) = &req.edit_images {
-            if images.len() > FLUX2_DEV_MAX_REFERENCE_IMAGES {
-                return Err(format!(
-                    "flux2-dev supports at most {FLUX2_DEV_MAX_REFERENCE_IMAGES} ordered reference images"
-                ));
-            }
-            if images.iter().any(|image| !is_valid_image_format(image)) {
-                return Err("edit_images must contain only PNG or JPEG images".to_string());
-            }
-        }
-    } else if req.edit_images.is_some() {
-        return Err(
-            "edit_images are only supported for qwen-image-edit and flux2-dev models".to_string(),
-        );
+    // ONE reference contract, resolved from the generation profile and
+    // validated by the ONE generic validator the profile door also calls, so
+    // a family can never gain references on one door and not the other. The
+    // per-family triad this replaced is why FLUX.2 [klein] had reference
+    // plumbing in the engine and no way to reach it.
+    let reference_images = crate::generation_profile::reference_images_for_recipe(
+        family.unwrap_or_default(),
+        &req.model,
+    );
+    let subject =
+        crate::generation_profile::reference_subject_label(family.unwrap_or_default(), &req.model);
+    crate::generation_profile::validate_edit_images_against(&reference_images, &subject, req)?;
+    // The adapter refusal is the CHECKPOINT's, not the reference protocol's:
+    // BFL's [dev] loader refuses a LoRA, and Klein - which has references
+    // too - does not. Keeping it here is what lets the block above stay
+    // family-neutral.
+    if is_flux2_dev_model(&req.model)
+        && (req.lora.is_some() || req.loras.as_ref().is_some_and(|loras| !loras.is_empty()))
+    {
+        return Err("flux2-dev does not support LoRA".to_string());
     }
     // img2img validation
     if let Some(ref img) = req.source_image {
@@ -7017,7 +6990,7 @@ mod tests {
     fn flux2_dev_bounds_reference_count_and_rejects_lora() {
         let mut req = valid_req();
         req.model = "flux2-dev:bf16".to_string();
-        req.edit_images = Some(vec![png_bytes(); FLUX2_DEV_MAX_REFERENCE_IMAGES + 1]);
+        req.edit_images = Some(vec![png_bytes(); FLUX2_MAX_REFERENCE_IMAGES + 1]);
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("at most"));
@@ -7048,6 +7021,137 @@ mod tests {
         );
     }
 
+    /// FLUX.2 [klein] runs the identical reference protocol upstream copies
+    /// from the dev pipeline, so admission must accept an ordered group on
+    /// every Klein tier — distilled and base, 4B and 9B.
+    #[test]
+    fn klein_accepts_ordered_references() {
+        for model in [
+            "flux2-klein:bf16",
+            "flux2-klein:q8",
+            "flux2-klein-9b:q8",
+            "flux2-klein-base:q8",
+            "flux2-klein-base-9b:q4",
+        ] {
+            let mut req = valid_req();
+            req.model = model.to_string();
+            req.guidance = 4.0;
+            req.edit_images = Some(vec![png_bytes(), jpeg_bytes()]);
+            assert!(
+                validate_generate_request(&req).is_ok(),
+                "{model}: {:?}",
+                validate_generate_request(&req)
+            );
+        }
+    }
+
+    /// `Exclusive`: no upstream pipeline takes an img2img latent and a
+    /// reference group in one pass (`pipeline_flux2_klein_inpaint.py` is a
+    /// separate class), so the pair is refused rather than silently resolved.
+    #[test]
+    fn klein_refuses_a_source_image_and_references_together() {
+        let mut req = valid_req();
+        req.model = "flux2-klein:bf16".to_string();
+        req.guidance = 4.0;
+        req.edit_images = Some(vec![png_bytes()]);
+        req.source_image = Some(png_bytes());
+        req.strength = 0.6;
+        assert_eq!(
+            validate_generate_request(&req).unwrap_err(),
+            "flux2-klein uses edit_images instead of source_image"
+        );
+
+        req.source_image = None;
+        req.mask_image = Some(png_bytes());
+        assert_eq!(
+            validate_generate_request(&req).unwrap_err(),
+            "flux2-klein does not support mask_image"
+        );
+
+        req.mask_image = None;
+        req.control_model = Some("controlnet-canny".to_string());
+        assert_eq!(
+            validate_generate_request(&req).unwrap_err(),
+            "flux2-klein does not support ControlNet inputs"
+        );
+    }
+
+    /// Gaining references must not cost Klein anything it already had: with
+    /// no references attached it is an ordinary img2img/inpaint checkpoint
+    /// that takes a LoRA.
+    #[test]
+    fn klein_keeps_img2img_mask_and_lora_without_references() {
+        let mut req = valid_req();
+        req.model = "flux2-klein:bf16".to_string();
+        req.guidance = 4.0;
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(png_bytes());
+        req.strength = 0.6;
+        req.lora = Some(LoraWeight {
+            path: "adapter.safetensors".into(),
+            scale: 1.0,
+
+            expert: None,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "{:?}",
+            validate_generate_request(&req)
+        );
+    }
+
+    #[test]
+    fn klein_bounds_reference_count_at_the_family_ceiling() {
+        let mut req = valid_req();
+        req.model = "flux2-klein:bf16".to_string();
+        req.guidance = 4.0;
+        req.edit_images = Some(vec![png_bytes(); FLUX2_MAX_REFERENCE_IMAGES]);
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.edit_images = Some(vec![png_bytes(); FLUX2_MAX_REFERENCE_IMAGES + 1]);
+        assert_eq!(
+            validate_generate_request(&req).unwrap_err(),
+            format!(
+                "flux2-klein supports at most {FLUX2_MAX_REFERENCE_IMAGES} ordered reference images"
+            )
+        );
+
+        req.edit_images = Some(vec![png_bytes()]);
+        req.batch_size = 2;
+        assert_eq!(
+            validate_generate_request(&req).unwrap_err(),
+            "flux2-klein reference editing only supports batch_size = 1"
+        );
+    }
+
+    /// A family with no reference protocol refuses `edit_images` with the
+    /// profile's OWN advertised sentence, so the refusal and the sentence the
+    /// client renders instead of the control cannot drift apart.
+    #[test]
+    fn a_family_without_references_refuses_edit_images_by_name() {
+        for model in ["sdxl-base:q4", "wan22-t2v-a14b:q8", "z-image-turbo:q8"] {
+            let mut req = valid_req();
+            req.model = model.to_string();
+            req.edit_images = Some(vec![png_bytes()]);
+            let error = validate_generate_request(&req).unwrap_err();
+            assert_eq!(
+                error,
+                crate::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON,
+                "{model}"
+            );
+            assert_eq!(
+                crate::generation_profile::reference_images_for_recipe(
+                    model_family(model).unwrap_or_default(),
+                    model
+                )
+                .reason
+                .as_deref(),
+                Some(error.as_str()),
+                "{model}"
+            );
+        }
+    }
+
     #[test]
     fn non_edit_models_reject_edit_images() {
         let mut req = valid_req();
@@ -7055,7 +7159,7 @@ mod tests {
         req.edit_images = Some(vec![png_bytes()]);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
-            err.contains("only supported for qwen-image-edit"),
+            err == crate::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON,
             "got: {err}"
         );
     }
@@ -7067,7 +7171,7 @@ mod tests {
         req.edit_images = Some(vec![b"not-an-image".to_vec()]);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
-            err.contains("only supported for qwen-image-edit"),
+            err == crate::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON,
             "got: {err}"
         );
     }

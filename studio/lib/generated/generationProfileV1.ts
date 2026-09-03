@@ -100,6 +100,44 @@ texture: FeatureControlProfile, };
 
 export type SourceImageCapability = "unsupported" | "optional" | "required";
 
+export type ReferenceSourceRelation = "replaces" | "exclusive" | "combines";
+
+export type ReferenceImagesProfile = {
+/**
+ * `Hidden` on a recipe that has no reference protocol at all; every
+ * recipe that does advertises `Adjustable`.
+ */
+mode: ControlMode,
+/**
+ * Whether a render is impossible without at least one reference.
+ */
+required: boolean,
+/**
+ * The family ceiling on the ordered group. `None` means the recipe
+ * imposes no count bound of its own (Qwen-Image-Edit); a `Hidden` recipe
+ * carries `Some(0)`.
+ */
+max_count?: number | null,
+/**
+ * Whether the FIRST reference is the image being edited rather than a
+ * side reference. True only for Qwen-Image-Edit, whose canvas is
+ * therefore source-driven.
+ */
+primary_is_target: boolean, source_relation: ReferenceSourceRelation,
+/**
+ * Per-image pixel ceiling when the request carries exactly one reference.
+ */
+max_pixels_single?: number | null,
+/**
+ * Per-image pixel ceiling when the request carries several.
+ */
+max_pixels_multi?: number | null,
+/**
+ * The one human sentence a client shows instead of the control, and the
+ * refusal a `Hidden` recipe answers `edit_images` with.
+ */
+reason?: string | null, };
+
 export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "edm-dpm-pp-2m" | "euler" | "dpm-pp";
 
 export type GenerationCapabilitiesProfile = { guidance: GuidanceCapabilities, negative_prompt: FeatureControlProfile, source_image?: SourceImageCapability | null, supports_lora: boolean, supports_controlnet: boolean,
@@ -126,6 +164,18 @@ prompt: PromptCapabilitiesProfile,
  * nobody wrote.
  */
 supports_strength: boolean,
+/**
+ * The ordered reference-image contract, or `None` on an OLDER SERVER.
+ *
+ * `Option`, not a bare default, for the reason `supports_strength`'s
+ * `false` is documented above but inverted: absence here is not a
+ * refusal. A server that predates this field still renders FLUX.2 [dev]
+ * and Qwen-Image-Edit references, so a client that read absence as "no
+ * references" would hide a control that works. Fall back to the legacy
+ * name predicate, never to a `Hidden` nobody wrote. Every recipe this
+ * build emits carries `Some`.
+ */
+reference_images?: ReferenceImagesProfile | null,
 /**
  * 3-D controls. Present only on a mesh recipe; its absence means
  * `GenerateRequest.mesh` is refused here.

@@ -381,10 +381,10 @@ fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) ->
             "multiple --image values are only supported for Qwen-Image-Edit and FLUX.2 Dev models"
         );
     }
-    if flux2_dev && image.len() > mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES {
+    if flux2_dev && image.len() > mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES {
         anyhow::bail!(
             "FLUX.2 Dev supports at most {} ordered --image references",
-            mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES
+            mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES
         );
     }
     Ok(())
