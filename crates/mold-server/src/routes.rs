@@ -8870,7 +8870,11 @@ async fn import_gallery_file(
                         backend: None,
                     },
                 )
-                .map(|record| Box::new(record.to_gallery_image()))
+                .map(|record| {
+                    let mut image = record.to_gallery_image();
+                    crate::thumbnails::stamp_poster_revision(&mut image);
+                    Box::new(image)
+                })
             });
             events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename_for_task.clone(),
@@ -8945,7 +8949,11 @@ async fn import_gallery_file(
                 .as_ref()
                 .as_ref()
                 .and_then(|db| db.get(&output_dir, &filename).ok().flatten())
-                .map(|record| Box::new(record.to_gallery_image()));
+                .map(|record| {
+                    let mut image = record.to_gallery_image();
+                    crate::thumbnails::stamp_poster_revision(&mut image);
+                    Box::new(image)
+                });
             state.events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename.clone(),
                 image,
@@ -9972,33 +9980,6 @@ async fn list_gallery(
     gallery_list_response(&headers, images, only)
 }
 
-/// Append the poster renderer's revision to every mesh row's wire
-/// `media_version`.
-///
-/// A mesh tile is RENDERED from the geometry rather than decoded out of the
-/// file, so it changes when the renderer changes while the `.glb`'s own mtime
-/// and size do not. Web and desktop key their persistent tile caches on this
-/// opaque value, so without the suffix an existing print shows the poster it
-/// was first served forever.
-///
-/// It happens HERE, at the one listing exit, rather than in
-/// `GenerationRecord::to_gallery_image`: `mold-db` cannot see the renderer,
-/// and stamping in each of the four row-building paths is how the DB view and
-/// the filesystem fallback would come to disagree. The suffix itself is
-/// `thumbnails::poster_revision_suffix`, the same decision behind the
-/// thumbnail route's cache path and ETag.
-fn stamp_poster_revision(images: &mut [mold_core::GalleryImage]) {
-    for image in images {
-        let revision = poster_revision_suffix(&image.filename);
-        if revision.is_empty() {
-            continue;
-        }
-        if let Some(version) = image.media_version.as_mut() {
-            version.push_str(revision);
-        }
-    }
-}
-
 /// Every listing exit funnels through here, so `?filename=` is applied once
 /// and cannot miss a path (the DB view, the archive overlay, the filesystem
 /// fallback, and both output-disabled short circuits).
@@ -10007,8 +9988,13 @@ fn gallery_list_response(
     images: Vec<mold_core::GalleryImage>,
     only: Option<&str>,
 ) -> Result<Response, ApiError> {
+    // Every LISTING exit is here; the row-building helpers
+    // (`queue::gallery_image_with_filing`,
+    // `gallery_organization::enriched_gallery_image`) stamp their own
+    // single-row exits. The stamp is idempotent, so a row that passes through
+    // both is still correct.
     let mut images = images;
-    stamp_poster_revision(&mut images);
+    crate::thumbnails::stamp_poster_revision_all(&mut images);
     let images = match only {
         Some(filename) => images
             .into_iter()
@@ -10322,13 +10308,18 @@ async fn render_gallery_thumbnail(
     // save time — there is nothing in a WAV for a raster decoder to read, so
     // a missing cache entry goes straight to the placeholder.
     let is_audio = lower.ends_with(".wav");
-    // A mesh keeps audio's sidecar NAME (`<file>.png`, not the versioned
-    // cache path) because both are written at save time by whichever process
-    // generated the print. Where they part company is the fallback: a WAV
-    // holds no picture, but a glTF buffer holds the geometry, so a missing
-    // mesh sidecar is rendered here rather than answered with a cube.
+    // A mesh keeps a sidecar NAME rather than the versioned cache path,
+    // because it is written at save time by whichever process generated the
+    // print, exactly as audio's waveform is. Two things part it from audio:
+    // a WAV holds no picture while a glTF buffer holds the geometry, so a
+    // missing mesh sidecar is RENDERED here rather than answered with a cube;
+    // and because it is a render, its name carries the poster renderer's
+    // revision (`mesh_poster_sidecar`), so a poster drawn by an older mold is
+    // an ordinary miss and is redrawn.
     let is_mesh = crate::thumbnails::is_mesh_filename(&clean_name);
-    let thumb_path = if is_audio || is_mesh {
+    let thumb_path = if is_mesh {
+        crate::thumbnails::mesh_poster_sidecar(&thumb_dir, &clean_name)
+    } else if is_audio {
         thumb_dir.join(format!("{clean_name}.png"))
     } else {
         variant.cache_path(&thumb_dir, &clean_name, &media_version)
@@ -10492,8 +10483,8 @@ async fn render_gallery_thumbnail(
 // desktop app's offline tiles share them; these names stay as thin aliases
 // for the route, the warmup, and the trash sweeper.
 use crate::thumbnails::{
-    media_version_for, poster_revision_suffix, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG,
-    MESH_PLACEHOLDER_SVG, VIDEO_PLACEHOLDER_SVG,
+    media_version_for, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, MESH_PLACEHOLDER_SVG,
+    VIDEO_PLACEHOLDER_SVG,
 };
 
 fn thumbnail_singleflight(path: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
@@ -12958,7 +12949,7 @@ mod tests {
             version_of("mold-hunyuan3d-1.glb"),
             format!(
                 "1700000000000:4096{}",
-                crate::thumbnails::MESH_POSTER_REVISION
+                crate::thumbnails::MESH_POSTER_REVISION_SUFFIX
             )
         );
         // A raster keeps its historical value, so no existing tile cache is
@@ -12971,8 +12962,20 @@ mod tests {
         let mut versionless = row("mold-hunyuan3d-2.glb", mold_core::OutputFormat::Glb);
         versionless.media_version = None;
         let mut rows = vec![versionless];
-        stamp_poster_revision(&mut rows);
+        crate::thumbnails::stamp_poster_revision_all(&mut rows);
         assert_eq!(rows[0].media_version, None);
+
+        // And the stamp is idempotent, which is what lets the row-building
+        // helpers stamp their own single-row exits without any of them
+        // having to know whether this listing funnel already did.
+        let mut twice = vec![row("mold-hunyuan3d-3.glb", mold_core::OutputFormat::Glb)];
+        crate::thumbnails::stamp_poster_revision_all(&mut twice);
+        let once = twice[0].media_version.clone();
+        crate::thumbnails::stamp_poster_revision_all(&mut twice);
+        assert_eq!(
+            twice[0].media_version, once,
+            "the revision was appended twice"
+        );
     }
 
     #[test]

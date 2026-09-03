@@ -188,8 +188,11 @@ fn render_frame(
 /// * **Bounce** (`bounce = true`): a half turn, first frame to last
 ///   inclusive, in steps of `180 / (frames - 1)`. The GIF encoder's bounce
 ///   (`encode_gif_with_options`) appends the interior frames in reverse, so
-///   the playback swings 0° -> 180° -> 0°: the far side is seen once on the
-///   way out, and the reversal reads as a deliberate to-and-fro. A full
+///   the playback swings the poster azimuth out half a turn and back —
+///   30° -> -150° -> 30° at the shipped [`POSTER_AZIMUTH_DEG`], the azimuth
+///   DECREASING on the way out per
+///   [`TURNTABLE_AZIMUTH_STEP_SIGN`]: the far side is seen once on the way
+///   out, and the reversal reads as a deliberate to-and-fro. A full
 ///   turn played forward then backward would show the object snap into
 ///   reverse at the very frame it had come round to the front again.
 pub fn turntable_cameras(frames: usize, bounce: bool) -> Vec<Camera> {
@@ -777,13 +780,21 @@ mod tests {
             ("POSTER_MARGIN", POSTER_MARGIN),
             ("TURNTABLE_AZIMUTH_STEP_SIGN", TURNTABLE_AZIMUTH_STEP_SIGN),
         ] {
-            let ts = ts_export_const(&source, name).unwrap_or_else(|| {
-                panic!(
-                    "{path} does not export `{name}`. It and \
-                     crates/mold-inference/src/hunyuan3d/poster.rs are ONE camera \
-                     convention: change both files together."
-                )
-            });
+            let ts = ts_export_const(&source, name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{path} does not export `{name}`. It and \
+                         crates/mold-inference/src/hunyuan3d/poster.rs are ONE camera \
+                         convention: change both files together."
+                    )
+                })
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{path}: {error}. The export is there but its value is not a \
+                         plain number this test can compare against \
+                         crates/mold-inference/src/hunyuan3d/poster.rs."
+                    )
+                });
             assert!(
                 (ts - rust).abs() < 1e-6,
                 "{name} is {ts} in studio/lib/meshViewerCamera.ts and {rust} in \
@@ -794,13 +805,20 @@ mod tests {
         }
     }
 
-    /// `export const NAME = <number>;` from a TypeScript source.
+    /// `export const NAME = <number>;` from a TypeScript source, with an
+    /// optional trailing `// comment`.
     ///
     /// A hand parser rather than a regex: `regex` is not a dependency of this
     /// crate, and the shape being matched is fixed by the file this test
     /// exists to police.
+    ///
+    /// The two failures are kept APART. `None` means the export is not in the
+    /// file at all; `Some(Err)` means it is there and its value did not
+    /// parse. Collapsing them told a reader whose only mistake was writing
+    /// `= 0.08 // note` that the constant was missing, and sent them looking
+    /// for a line that is right in front of them.
     #[cfg(test)]
-    fn ts_export_const(source: &str, name: &str) -> Option<f32> {
+    fn ts_export_const(source: &str, name: &str) -> Option<Result<f32, String>> {
         for line in source.lines() {
             let line = line.trim();
             let Some(rest) = line.strip_prefix("export const ") else {
@@ -814,23 +832,54 @@ mod tests {
             if declared != name {
                 continue;
             }
-            return value.trim().trim_end_matches(';').trim().parse().ok();
+            // `30; // a comment` -> `30`. The statement ends at the `;`, so a
+            // trailing comment is dropped with everything after it; a
+            // comment on a line of its own never reaches here, because it
+            // does not start with `export const`.
+            let value = value.split("//").next().unwrap_or_default();
+            let value = value.trim().trim_end_matches(';').trim();
+            return Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("could not parse the value of {name}: `{value}`")),
+            );
         }
         None
     }
 
     /// The parser is only as good as its own pin: a renamed export, a typed
-    /// declaration and a different number must each be visible to it.
+    /// declaration, a trailing comment and a different number must each be
+    /// visible to it, and a missing export must not look like an unparseable
+    /// one.
     #[test]
     fn the_typescript_parser_reads_what_it_claims_to() {
         let source = "export const A = 30;\nexport const B: number = -1;\nconst C = 5;\n\
-                      export const LONG_NAME_A = 7;\n";
-        assert_eq!(ts_export_const(source, "A"), Some(30.0));
-        assert_eq!(ts_export_const(source, "B"), Some(-1.0));
-        assert_eq!(ts_export_const(source, "LONG_NAME_A"), Some(7.0));
-        // Not exported, and not present at all.
+                      export const LONG_NAME_A = 7;\n\
+                      export const COMMENTED = 0.08; // the poster's margin\n\
+                      export const NO_SEMI = 20 // trailing\n\
+                      export const NOT_A_NUMBER = Math.PI / 6;\n";
+        let value = |name| ts_export_const(source, name).map(|parsed| parsed.expect("a number"));
+        assert_eq!(value("A"), Some(30.0));
+        assert_eq!(value("B"), Some(-1.0));
+        assert_eq!(value("LONG_NAME_A"), Some(7.0));
+        // A trailing comment is part of the line, not part of the value.
+        assert_eq!(value("COMMENTED"), Some(0.08));
+        assert_eq!(value("NO_SEMI"), Some(20.0));
+
+        // Not exported, and not present at all: `None`, never a parse error.
         assert_eq!(ts_export_const(source, "C"), None);
         assert_eq!(ts_export_const(source, "MISSING"), None);
+
+        // Present but not a number a comparison can use: a DISTINCT answer,
+        // so the caller reports the value rather than claiming the export is
+        // missing.
+        let error = ts_export_const(source, "NOT_A_NUMBER")
+            .expect("the export is present")
+            .expect_err("`Math.PI / 6` is not a plain number");
+        assert!(
+            error.contains("could not parse the value of NOT_A_NUMBER"),
+            "{error}"
+        );
     }
 
     /// Guards the save path: the poster runs inline when a mesh print is
