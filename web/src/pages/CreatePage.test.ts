@@ -4707,32 +4707,6 @@ describe("CreatePage layout and behavior", () => {
     return new File([bytes], name, { type: "image/png" });
   }
 
-  it("attaches a window drop to the plan's default well", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "sdxl:fp16",
-        family: "sdxl",
-        downloaded: true,
-        default_width: 1024,
-        default_height: 1024,
-        default_steps: 20,
-        default_guidance: 7,
-      },
-    ]);
-    mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.model = "sdxl:fp16";
-    form.state.value.modelFamily = "sdxl";
-    await nextTick();
-
-    window.dispatchEvent(fileDrop(pngFile()));
-    await vi.waitFor(() =>
-      expect(form.state.value.imageAttachments).toHaveLength(1),
-    );
-    expect(form.state.value.imageAttachments[0]?.filename).toBe("dropped.png");
-  });
-
   it("ignores a drop a well already handled", async () => {
     hostModelsMock.mockResolvedValue([
       {

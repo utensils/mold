@@ -1614,4 +1614,6 @@ export const __testing__ = {
   clearDraftsForTest() {
     clearMemoryDraftsForTest();
   },
+  /** A pristine form, for tests of pure form-shaped helpers. */
+  defaultForm,
 };

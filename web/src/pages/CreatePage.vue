@@ -228,10 +228,8 @@ import {
   conditioningForRequest,
   sourceMediaPlan,
 } from "@studio/lib/sourceMediaPlan";
-import {
-  resolveDropTarget,
-  type DropTarget,
-} from "@studio/lib/imageDropRouting";
+import type { DropTarget } from "@studio/lib/imageDropRouting";
+import { applyCreateDrop, routeCreateDrop } from "../lib/createImageDrop";
 import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
@@ -277,7 +275,6 @@ import { meshStatsLabel } from "@studio/lib/meshControls";
 import {
   appendMinimaxH3PickedImageReferences,
   appendMinimaxH3GalleryImageReference,
-  MINIMAX_H3_MAX_REFERENCES,
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
@@ -5616,6 +5613,17 @@ function openAdvanced() {
 // own `@drop.prevent` marks the event first, which is exactly what
 // `defaultPrevented` reports here in the bubble phase.
 
+/** Everything the shared router needs, read from the advertised recipe. */
+function dropContext() {
+  return {
+    plan: sourcePlan.value,
+    referenceMax: capabilities.value.referenceImages?.max ?? null,
+    refusalReason: capabilities.value.referenceImagesReason,
+    identityVisible: identitySupported.value === true,
+    openingVisible: sequenceMode.value && showSequenceOpeningImage.value,
+  };
+}
+
 /** Read a dropped file the same way every well does: PNG/JPEG only, and the
  * header decoded for the dimensions a gallery pick would have carried. */
 async function droppedSourceImage(
@@ -5639,69 +5647,18 @@ async function droppedSourceImage(
 
 /** Write the dropped image into the SAME form field the well's own picker
  * writes, so a drag and a click produce identical facts. */
-function applyDropToForm(target: DropTarget, image: SourceImageState): void {
-  const s = form.state.value;
-  switch (target) {
-    case "source":
-      s.imageAttachments =
-        sourcePlan.value.kind === "attachments"
-          ? [image, ...s.imageAttachments.slice(1)]
-          : [image];
-      s.sourceFitPolicy = defaultSourceFitPolicy();
-      s.exclusiveWell = "source";
-      return;
-    case "references": {
-      // APPEND, never replace — the click path appends too.
-      const max = capabilities.value.referenceImages?.max ?? undefined;
-      if (sourcePlan.value.kind === "single-or-references") {
-        s.referenceImages = [...(s.referenceImages ?? []), image].slice(0, max);
-      } else {
-        s.imageAttachments = [...s.imageAttachments, image].slice(0, max);
-      }
-      s.exclusiveWell = "references";
-      return;
-    }
-    case "end":
-      s.endFrame = image;
-      return;
-    case "identity":
-      s.identityImage = image;
-      return;
-    case "opening":
-      draft.openingImage = { filename: image.filename, base64: image.base64 };
-      return;
-    case "h3-first":
-    case "h3-last": {
-      const result = setMinimaxH3PickedImageBoundary(
-        s.h3Authoring,
-        target === "h3-first" ? "firstFrame" : "lastFrame",
-        {
-          filename: image.filename,
-          base64: image.base64,
-          width: image.width ?? undefined,
-          height: image.height ?? undefined,
-          mimeType: image.mime ?? undefined,
-        },
-      );
-      if (result.ok) s.h3Authoring = result.state;
-      else composerError.value = result.error;
-      return;
-    }
-    case "h3-reference":
-      void appendMinimaxH3PickedImageReferences(s.h3Authoring, [
-        {
-          filename: image.filename,
-          base64: image.base64,
-          width: image.width ?? undefined,
-          height: image.height ?? undefined,
-          mimeType: image.mime ?? undefined,
-        },
-      ]).then((result) => {
-        if (result.ok) s.h3Authoring = result.state;
-        else composerError.value = result.error;
-      });
-      return;
-  }
+async function applyDropToForm(
+  target: DropTarget,
+  image: SourceImageState,
+): Promise<void> {
+  const error = await applyCreateDrop(
+    form.state.value,
+    target,
+    image,
+    dropContext(),
+    sequenceMode.value ? draft : null,
+  );
+  composerError.value = error;
 }
 
 function onWindowDragOver(event: DragEvent): void {
@@ -5714,22 +5671,10 @@ async function onWindowDrop(event: DragEvent): Promise<void> {
   if (event.defaultPrevented) return;
   const file = event.dataTransfer?.files?.[0];
   if (!file) return;
+  // Always: this is what stops the browser navigating away from the SPA.
   event.preventDefault();
   if (sequenceMode.value && !showSequenceOpeningImage.value) return;
-  const routed = resolveDropTarget(sourcePlan.value, null, {
-    hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
-    referenceCount:
-      sourcePlan.value.kind === "single-or-references"
-        ? (form.state.value.referenceImages?.length ?? 0)
-        : form.state.value.imageAttachments.length,
-    identityVisible: identitySupported.value === true,
-    openingVisible: sequenceMode.value && showSequenceOpeningImage.value,
-    h3FirstPresent: Boolean(form.state.value.h3Authoring?.firstFrame),
-    h3ReferenceCount: form.state.value.h3Authoring?.references.length ?? 0,
-    h3ReferenceMax: MINIMAX_H3_MAX_REFERENCES,
-    lastWrite: form.state.value.exclusiveWell ?? null,
-    refusalReason: capabilities.value.referenceImagesReason,
-  });
+  const routed = routeCreateDrop(form.state.value, dropContext());
   if (typeof routed !== "string") {
     composerError.value = routed.refused;
     return;
@@ -5737,7 +5682,7 @@ async function onWindowDrop(event: DragEvent): Promise<void> {
   const image = await droppedSourceImage(file);
   if (!image) return;
   composerError.value = null;
-  applyDropToForm(routed, image);
+  await applyDropToForm(routed, image);
 }
 
 onMounted(async () => {
