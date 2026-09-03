@@ -76,6 +76,26 @@ export type SourceImageMode =
   | "h3-boundaries"
   | "ordered-references";
 
+/**
+ * The layout the reference contract projects onto, for every family whose
+ * layout is a projection of it (H3's two tasks own their own).
+ *
+ * Exported so a surface holding only a SNAPSHOT of the contract — desktop's
+ * `RecipeCapabilitiesSnapshot`, which the request builders read after the
+ * model row is out of scope — resolves the mode from the same one authority
+ * `baseGenerationCapabilities` does, rather than from a second copy of the
+ * rule or (worse) from the family sniff that stands in for an older host.
+ */
+export function sourceImageModeForReferences(
+  referenceImages: ReferenceImagesCapabilities | null,
+): SourceImageMode {
+  if (!referenceImages) return "single";
+  if (referenceImages.primaryIsTarget) return "qwen-edit";
+  return referenceImages.sourceRelation === "replaces"
+    ? "references"
+    : "single-or-references";
+}
+
 /** Whether the resolved model takes the wan sampler-recipe controls. */
 export interface WanRecipeCapabilities {
   /** Flow shift and the sample-solver picker apply to this model. */
@@ -512,13 +532,7 @@ export function baseGenerationCapabilities(
       ? "ordered-references"
       : h3
         ? "h3-boundaries"
-        : referenceImages
-          ? referenceImages.primaryIsTarget
-            ? "qwen-edit"
-            : referenceImages.sourceRelation === "replaces"
-              ? "references"
-              : "single-or-references"
-          : "single",
+        : sourceImageModeForReferences(referenceImages),
     referenceImages,
     referenceImagesReason: referenceImages
       ? null

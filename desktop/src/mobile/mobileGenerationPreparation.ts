@@ -13,7 +13,7 @@ import {
 } from "@studio/lib/minimaxH3Authoring";
 import type { ApiTarget } from "../lib/api/client";
 import type { GenerateRequest, ModelEntry } from "../lib/api/types";
-import { generationCapabilitiesForFamily } from "../lib/capabilities";
+import { generationCapabilitiesForForm } from "../lib/capabilities";
 import { buildRequest, type GenerateForm } from "../lib/generateForm";
 import { mobileMediaBudgetValidationError } from "../lib/generateValidation";
 import {
@@ -67,12 +67,16 @@ export async function prepareMobileGenerationRequest(
     draft,
     fixedRecipeControlOverrides(effectiveGenerationRecipe(input.selectedModel, draft.pipeline)),
   );
-  const capabilities = generationCapabilitiesForFamily(
+  // The draft's own recipe snapshot decides the reference contract — the same
+  // authority the wells rendered from and the same one `buildRequest` submits
+  // under, so an exclusive (Klein) recipe never fits a PARKED source.
+  const capabilities = generationCapabilitiesForForm(
     draft.family,
     draft.model,
     draft.pipeline,
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
+    draft.recipeCapabilities,
   );
   // The advertised recipe answers whether this render has a pixel canvas at
   // all; the pre-profile mesh family rule is the fallback for a host that

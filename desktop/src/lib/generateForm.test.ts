@@ -23,7 +23,11 @@ import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import { addTag, emptyFileUnderState, pickCollection } from "@studio/lib/fileUnder";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
-import { flux2KleinRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  flux2DevRecipe,
+  flux2KleinRecipe,
+  qwenImageEditRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 
 describe("loraHostBinding", () => {
   it("binds host-local LoRA paths to one machine and rejects mixed stacks", () => {
@@ -1223,7 +1227,11 @@ describe("buildRequest — qwen-edit edit_images", () => {
 });
 
 describe("buildRequest — FLUX.2 Dev references", () => {
-  it("uses edit_images while keeping Klein on classic source_image", () => {
+  // The legacy (no advertised recipe) contract: Dev's references come from
+  // `legacyReferenceImages`, and Klein deliberately answers `null` there — an
+  // older host has no Klein reference engine — so it stays on `source_image`.
+  // The recipe-backed contract is the describe block below.
+  it("uses edit_images while an unprofiled Klein keeps classic source_image", () => {
     const dev = newGenerateForm();
     dev.model = "flux2-dev:bf16";
     dev.family = "flux2";
@@ -1240,6 +1248,8 @@ describe("buildRequest — FLUX.2 Dev references", () => {
     klein.family = "flux2";
     klein.prompt = "a cat";
     klein.sourceImage = "SOURCE";
+    // No `recipeCapabilities` snapshot: the host advertises no recipe.
+    expect(klein.recipeCapabilities).toBeNull();
     const kleinRequest = buildRequest(klein);
     expect(kleinRequest.source_image).toBe("SOURCE");
     expect("edit_images" in kleinRequest).toBe(false);
@@ -1255,6 +1265,139 @@ describe("buildRequest — FLUX.2 Dev references", () => {
     expect(buildRequest(dev).batch_size).toBe(3);
     dev.imageAttachments = ["REFERENCE"];
     expect(buildRequest(dev).batch_size).toBe(1);
+  });
+});
+
+/**
+ * `buildRequest` reads the ADVERTISED reference contract, not a family sniff.
+ *
+ * The snapshot the model row already puts on the form (`recipeCapabilities`)
+ * is the same authority the wells render from, so an exclusive (Klein) recipe
+ * ships `edit_images` OR `source_image`, and never both. Before this the
+ * builder derived its capabilities with no recipe at all, so Klein fell
+ * through to `legacyReferenceImages` (which answers `null` for Klein on
+ * purpose) → mode `single` → `edit_images` could never reach the wire even
+ * though the References strip rendered and accepted pictures.
+ */
+describe("buildRequest — FLUX.2 [klein] reads the advertised reference contract", () => {
+  function kleinRecipeModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "flux2-klein:bf16",
+      family: "flux2",
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  function kleinForm(): GenerateForm {
+    const form = newGenerateForm();
+    applyModelDefaults(form, kleinRecipeModel());
+    form.prompt = "a lantern on a pier";
+    return form;
+  }
+
+  it("ships ordered edit_images while the references well is the active one", () => {
+    const form = kleinForm();
+    form.imageAttachments = ["REF_A", "REF_B"];
+    form.exclusiveWell = "references";
+    form.batchSize = 3;
+
+    const req = buildRequest(form);
+    expect(req.edit_images).toEqual(["REF_A", "REF_B"]);
+    expect("source_image" in req).toBe(false);
+    expect("strength" in req).toBe(false);
+    expect("mask_image" in req).toBe(false);
+    expect(req.batch_size).toBe(1);
+  });
+
+  it("clamps the strip to the ceiling the recipe advertises", () => {
+    const form = kleinForm();
+    // A stale restore can hold more than the recipe's `max_count` of 4.
+    form.imageAttachments = ["A", "B", "C", "D", "E", "F"];
+    form.exclusiveWell = "references";
+
+    expect(buildRequest(form).edit_images).toEqual(["A", "B", "C", "D"]);
+  });
+
+  it("ships source_image, strength and mask while the source well is the active one", () => {
+    const form = kleinForm();
+    form.sourceImage = "SOURCE";
+    form.sourceImageName = "pier.png";
+    form.maskImage = "MASK";
+    form.strength = 0.42;
+    form.imageAttachments = ["PARKED"];
+    form.exclusiveWell = "source";
+
+    const req = buildRequest(form);
+    expect(req.source_image).toBe("SOURCE");
+    expect(req.source_image_name).toBe("pier.png");
+    expect(req.strength).toBe(0.42);
+    expect(req.mask_image).toBe("MASK");
+    expect("edit_images" in req).toBe(false);
+  });
+
+  it("keeps the legacy single-source behaviour when the host advertises no recipe", () => {
+    const form = newGenerateForm();
+    form.model = "flux2-klein:q8";
+    form.family = "flux2";
+    form.prompt = "a cat";
+    form.sourceImage = "SOURCE";
+    form.imageAttachments = ["REF"];
+    form.exclusiveWell = "references";
+
+    const req = buildRequest(form);
+    expect(req.source_image).toBe("SOURCE");
+    expect("edit_images" in req).toBe(false);
+  });
+
+  it("leaves a profiled FLUX.2 [dev] and qwen-image-edit exactly as they were", () => {
+    const dev = newGenerateForm();
+    applyModelDefaults(dev, {
+      ...kleinRecipeModel(),
+      name: "flux2-dev:bf16",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-dev",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [flux2DevRecipe()],
+      },
+    } as unknown as ModelEntry);
+    dev.prompt = "preserve the subject";
+    dev.imageAttachments = ["REF_ONE", "REF_TWO"];
+    dev.sourceImage = "STALE";
+    const devRequest = buildRequest(dev);
+    expect(devRequest.edit_images).toEqual(["REF_ONE", "REF_TWO"]);
+    expect("source_image" in devRequest).toBe(false);
+    expect("strength" in devRequest).toBe(false);
+
+    const qwen = newGenerateForm();
+    applyModelDefaults(qwen, {
+      ...qwenEditModel(),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "qwen-image-edit",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [qwenImageEditRecipe()],
+      },
+    } as unknown as ModelEntry);
+    qwen.prompt = "make the sky pink";
+    qwen.imageAttachments = ["TARGET", "REF_A", "REF_B"];
+    const qwenRequest = buildRequest(qwen);
+    // Qwen advertises no `max_count` — the strip stays unbounded.
+    expect(qwenRequest.edit_images).toEqual(["TARGET", "REF_A", "REF_B"]);
+    expect("source_image" in qwenRequest).toBe(false);
   });
 });
 

@@ -142,7 +142,10 @@ import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
-import { generationCapabilitiesForFamily } from "../lib/capabilities";
+import {
+  generationCapabilitiesForFamily,
+  generationCapabilitiesForForm,
+} from "../lib/capabilities";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -3594,12 +3597,16 @@ async function preprocessSourceFit(
   draft: ReturnType<typeof cloneGenerateForm>,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const draftCaps = generationCapabilitiesForFamily(
+  // The frozen draft's own recipe snapshot decides the reference contract, so
+  // an exclusive (Klein) recipe fits the well the request will actually carry
+  // rather than the family heuristic's guess at it.
+  const draftCaps = generationCapabilitiesForForm(
     draft.family,
     draft.model,
     draft.pipeline,
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
+    draft.recipeCapabilities,
   );
   // A canvasless recipe (a 3-D mesh) has no canvas to fit onto: its own
   // advertised target is 0 × 0, so every fit below would resize the source to
@@ -3746,7 +3753,14 @@ async function preprocessSourceFit(
 }
 
 function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateForm>): boolean {
-  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
+  const draftCaps = generationCapabilitiesForForm(
+    draft.family,
+    draft.model,
+    draft.pipeline,
+    draft.guidanceCapabilities,
+    draft.sourceImageCapability,
+    draft.recipeCapabilities,
+  );
   const conditioning = conditioningForRequest(draftCaps.sourceImageMode, {
     hasSource: Boolean(draft.sourceImage),
     referenceCount: draft.imageAttachments.length,

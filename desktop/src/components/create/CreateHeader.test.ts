@@ -89,6 +89,7 @@ describe("CreateHeader", () => {
         target_faces_max: 2_000_000,
         texture: { mode: "hidden", required: false, reason: "not available" },
       },
+      referenceImages: null,
     };
     const wrapper = mount(CreateHeader, { props: { form: meshForm } });
     const text = wrapper.get(".ms-header__summary").text();
@@ -119,6 +120,7 @@ describe("CreateHeader", () => {
         target_faces_max: 2_000_000,
         texture: { mode: "hidden", required: false, reason: "not available" },
       },
+      referenceImages: null,
     };
     const wrapper = mount(CreateHeader, { props: { form: meshForm } });
     expect(wrapper.get(".ms-header__summary").text()).toBe("octree 192 · 5 steps");
@@ -141,6 +143,7 @@ describe("CreateHeader", () => {
       supportsStrength: false,
       canvasless: false,
       mesh: null,
+      referenceImages: null,
     };
     const wrapper = mount(CreateHeader, { props: { form: sdxlForm } });
     expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 30 steps");

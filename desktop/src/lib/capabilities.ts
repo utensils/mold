@@ -21,7 +21,9 @@ import {
   isMinimaxH3Family,
   isQwenImageEditFamily,
   MAX_LORA_STACK,
+  sourceImageModeForReferences,
   type BaseGenerationCapabilities,
+  type ReferenceImagesCapabilities,
 } from "@studio/lib/generationCapabilities";
 import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import {
@@ -95,6 +97,17 @@ export interface RecipeCapabilitiesSnapshot {
   canvasless: boolean;
   /** The recipe's 3-D controls, or `null` when `mesh` is refused. */
   mesh: MeshCapabilitiesProfile | null;
+  /**
+   * The recipe's ordered-reference contract (`GenerateRequest.edit_images`),
+   * or `null` where it takes none.
+   *
+   * Without this the request builders — which take only the form — fell
+   * through to `legacyReferenceImages`, whose answer for FLUX.2 [klein] is
+   * deliberately `null` (an older host has no Klein reference engine). The
+   * References strip rendered from the recipe and the wire never carried what
+   * the user put in it.
+   */
+  referenceImages: ReferenceImagesCapabilities | null;
 }
 
 export function recipeCapabilitiesSnapshot(
@@ -120,6 +133,46 @@ export function recipeCapabilitiesSnapshot(
     supportsStrength: caps.supportsStrength,
     canvasless: recipeIsCanvasless(recipe),
     mesh: caps.mesh ?? null,
+    referenceImages: caps.referenceImages,
+  };
+}
+
+/**
+ * The capabilities a FORM-ONLY caller reads — the request builders, the
+ * request pruner, and the submit-time source-fit preprocessors, none of which
+ * still have the model row in hand.
+ *
+ * It is `generationCapabilitiesForFamily` plus the recipe snapshot the form
+ * already carries, so those callers resolve the reference contract (and the
+ * layout it projects) from exactly what the wells rendered from. Without the
+ * snapshot — an older host that advertises no recipe — the answer is
+ * byte-identical to the family derivation, which is the whole point of the
+ * `null`.
+ *
+ * H3's two tasks own their own layouts and their own serializer, so their
+ * mode is never overridden here.
+ */
+export function generationCapabilitiesForForm(
+  family: string,
+  model = "",
+  pipeline: string | null = null,
+  advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
+  advertisedSourceImage?: string | null,
+  snapshot?: RecipeCapabilitiesSnapshot | null,
+): GenerationCapabilities {
+  const caps = generationCapabilitiesForFamily(
+    family,
+    model,
+    pipeline,
+    advertisedGuidance,
+    advertisedSourceImage,
+  );
+  if (!snapshot || isMinimaxH3Family(family)) return caps;
+  return {
+    ...caps,
+    referenceImages: snapshot.referenceImages,
+    referenceImagesReason: snapshot.referenceImages ? null : caps.referenceImagesReason,
+    sourceImageMode: sourceImageModeForReferences(snapshot.referenceImages),
   };
 }
 
@@ -210,7 +263,14 @@ export function pruneRequestForFamily(
   advertisedSourceImage?: string | null,
   recipe?: RecipeCapabilitiesSnapshot | null,
 ): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(family, model, null, null, advertisedSourceImage);
+  const caps = generationCapabilitiesForForm(
+    family,
+    model,
+    null,
+    null,
+    advertisedSourceImage,
+    recipe,
+  );
   const next: GenerateRequest = { ...req };
 
   // MiniMax H3 has its own final serializer in `minimaxH3Authoring`; do not

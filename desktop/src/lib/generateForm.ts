@@ -22,6 +22,7 @@ import {
   coerceFormOutputFormat,
   defaultOutputFormat,
   generationCapabilitiesForFamily,
+  generationCapabilitiesForForm,
   outputFormatsForFamily,
   pruneRequestForFamily,
   recipeCapabilitiesSnapshot,
@@ -1010,12 +1011,16 @@ export function formExtendOverlapFrames(form: GenerateForm): number {
 }
 
 export function buildRequest(form: GenerateForm): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(
+  // The form's own recipe snapshot rides along, so the builder resolves the
+  // reference contract from the SAME authority the wells rendered from. With
+  // no snapshot (an older host) this is the plain family derivation.
+  const caps = generationCapabilitiesForForm(
     form.family,
     form.model,
     form.pipeline,
     form.guidanceCapabilities,
     form.sourceImageCapability,
+    form.recipeCapabilities,
   );
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
   let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
@@ -1102,7 +1107,12 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // References) and never source_image/strength; batch is already locked to 1
   // by forcesBatchSizeOne + pruneRequestForFamily.
   if (caps.supportsImg2img && conditioning === "references") {
-    req.edit_images = [...form.imageAttachments];
+    // Ordered, and clamped to the ceiling the recipe advertises — a stale
+    // restored strip must not ship more pictures than admission accepts.
+    // `max: null` (Qwen edit) is unbounded.
+    const max = caps.referenceImages?.max ?? null;
+    req.edit_images =
+      max === null ? [...form.imageAttachments] : form.imageAttachments.slice(0, max);
   }
 
   if (caps.supportsImg2img && conditioning === "source" && form.sourceImage) {

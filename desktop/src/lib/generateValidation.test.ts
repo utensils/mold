@@ -158,6 +158,7 @@ describe("sourceConditioningValidationError — a canvasless mesh recipe", () =>
       supportsStrength: false,
       canvasless: true,
       mesh: null,
+      referenceImages: null,
     };
     return form;
   }
@@ -227,6 +228,7 @@ describe("meshTargetFacesError", () => {
       supportsStrength: false,
       canvasless: true,
       mesh,
+      referenceImages: null,
     };
     expect(meshTargetFacesValidationError(form)).toMatch(/from 100 to 2000000/);
     form.mesh.targetFaces = null;
