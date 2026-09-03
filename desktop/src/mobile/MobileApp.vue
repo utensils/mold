@@ -221,12 +221,8 @@ import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import { licenseRequirements } from "@studio/lib/licenseAcceptance";
 import { upscaleImage } from "../lib/api/upscale";
 import { openExternal } from "../lib/openExternal";
-import {
-  generationCapabilitiesForFamily,
-  isFlux2DevModel,
-  outputFormatsForFamily,
-} from "../lib/capabilities";
-import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
+import { conditioningForRequest, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
   ChainCreateRequest,
@@ -1621,6 +1617,23 @@ const generatedAudioUnavailableReason = computed(() => {
  * Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
 const showSourceMedia = computed(() => sourcePlan.value.kind !== "none");
+/** A strip with no Target is a pure reference strip; both numbers below come
+ * from the advertised recipe, never from a model name. */
+const referencesOnly = computed(
+  () =>
+    (sourcePlan.value.kind === "attachments" && sourcePlan.value.primary === null) ||
+    sourcePlan.value.kind === "single-or-references",
+);
+const referenceMax = computed(() => caps.value.referenceImages?.max ?? null);
+/** Which conditioning this form's request will carry — the shared decision
+ * `buildRequest` makes, so nothing here can disagree with the wire. */
+const requestConditioning = computed(() =>
+  conditioningForRequest(caps.value.sourceImageMode, {
+    hasSource: Boolean(form.sourceImage),
+    referenceCount: form.imageAttachments.length,
+    lastWrite: form.exclusiveWell ?? null,
+  }),
+);
 const h3AuthoringError = computed(() =>
   minimaxH3AuthoringError(
     form.family,
@@ -1630,8 +1643,7 @@ const h3AuthoringError = computed(() =>
   ),
 );
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne ||
-  (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0)
+  caps.value.forcesBatchSizeOne || requestConditioning.value === "references"
     ? 1
     : Math.max(1, Math.floor(form.batchSize)),
 );
@@ -1863,8 +1875,10 @@ const upscalers = computed(() =>
 const controlModels = computed(() => models.value.filter((model) => model.family === "controlnet"));
 const sourceSectionTitle = computed(() => {
   if (sourcePlan.value.kind === "h3-boundaries") return "Frame endpoints";
+  // Klein offers both wells, so the section is named for what it holds.
+  if (sourcePlan.value.kind === "single-or-references") return "Source or references";
   return caps.value.sourceImageMode !== "single"
-    ? isFlux2DevModel(form.model)
+    ? referencesOnly.value
       ? "References"
       : "Pictures"
     : "Source image";
@@ -1878,8 +1892,10 @@ const sourceSectionSummary = computed(() => {
   }
   if (caps.value.sourceImageMode !== "single") {
     const count = form.imageAttachments.length;
-    if (isFlux2DevModel(form.model)) {
-      return count === 0 ? "Optional · up to 4" : `${count} reference${count === 1 ? "" : "s"}`;
+    if (referencesOnly.value) {
+      if (count > 0) return `${count} reference${count === 1 ? "" : "s"}`;
+      if (form.sourceImage) return form.sourceImageName || "Source selected";
+      return referenceMax.value === null ? "Optional" : `Optional · up to ${referenceMax.value}`;
     }
     return count === 0 ? "Target required" : `${count} photo${count === 1 ? "" : "s"}`;
   }
@@ -1968,7 +1984,12 @@ function applyMobileSourceResolution(
     form.pipeline,
   );
   const replaced = base64 !== previous.base64;
-  if (caps.value.sourceImageMode !== "references") {
+  // A reference strip is not a canvas: the size comes from the model. Qwen
+  // edit is the exception the profile names (`primary_is_target`).
+  if (
+    requestConditioning.value !== "references" ||
+    caps.value.referenceImages?.primaryIsTarget === true
+  ) {
     const preserveReplacement = replaced && preservedSourceReplacement === base64;
     const nextResolution = resolveSourceCanvasTransition({
       source: resolution,
@@ -2017,7 +2038,7 @@ function restoreReusedPrintCanvas(metadata: OutputMetadata): void {
 watch(
   [
     () =>
-      caps.value.sourceImageMode !== "single"
+      requestConditioning.value === "references"
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => selectedGenerationModel.value?.name ?? form.model,
@@ -2049,7 +2070,7 @@ watch(
     previousStillSource = next.base64;
     previousStillResolution = next.resolution;
     previousStillAutomaticResolution = next.automaticResolution;
-    if (replaced && caps.value.sourceImageMode === "single") {
+    if (replaced && requestConditioning.value === "source") {
       form.sourceFit = defaultSourceFitPolicy();
     }
   },
@@ -8537,7 +8558,12 @@ async function restoreOrdinaryReusedSource(
       // Preserve the pre-feature local and same-name gallery fallbacks.
     }
   }
-  if (caps.value.sourceImageMode !== "single") {
+  // An exclusive (Klein) recipe still has a single-source restore path; only a
+  // strip-only layout has nothing to restore into the source well.
+  if (
+    caps.value.sourceImageMode !== "single" &&
+    caps.value.sourceImageMode !== "single-or-references"
+  ) {
     return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
   }
   const stored = await restoreGenerationSourceMedia(print.metadata.source_image_sha256).catch(
@@ -8793,7 +8819,11 @@ async function useSelectedPrintAsSource(
     });
     if (!isCurrent()) return false;
     const h3Task = minimaxH3TaskForModel(form.model);
-    const attachmentMode = caps.value.sourceImageMode !== "single";
+    // A gallery print used as source lands in the SOURCE well on an exclusive
+    // recipe (the plan default), not on its reference strip.
+    const attachmentMode =
+      caps.value.sourceImageMode !== "single" &&
+      caps.value.sourceImageMode !== "single-or-references";
     const existingBytes = inlineGenerationMediaBytes(
       form,
       h3Task === "fl2va" ? "h3FirstFrame" : attachmentMode ? null : "sourceImage",
@@ -8842,13 +8872,15 @@ async function useSelectedPrintAsSource(
         "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
       );
     } else if (attachmentMode) {
+      // The strip ceiling is the recipe's, never a client constant.
       form.imageAttachments = [base64, ...form.imageAttachments].slice(
         0,
-        isFlux2DevModel(form.model) ? 4 : undefined,
+        referenceMax.value ?? undefined,
       );
+      form.exclusiveWell = "references";
       form.sourceFit = defaultSourceFitPolicy();
       setGenerationStatus(
-        isFlux2DevModel(form.model)
+        referencesOnly.value
           ? "Added gallery print as reference 1"
           : "Added gallery print as the edit target",
       );
@@ -8856,6 +8888,7 @@ async function useSelectedPrintAsSource(
       form.sourceImage = base64;
       form.sourceImageName = print.filename;
       form.sourceFit = defaultSourceFitPolicy();
+      form.exclusiveWell = "source";
       setGenerationStatus("Gallery print selected as source");
     }
     dismissSelectedPrint();

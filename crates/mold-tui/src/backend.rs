@@ -1569,13 +1569,55 @@ pub(crate) fn build_request(
         .as_ref()
         .and_then(|p| std::fs::read(p).ok());
 
-    let (edit_images, source_image, strength, mask_image) = if family == "qwen-image-edit" {
+    // The ordered reference group, resolved from the recipe's own contract
+    // rather than from the family name — the sniff here is what left
+    // flux2-dev falling through to `source_image` and being refused at
+    // admission for a request the form had no way to author.
+    let reference_images =
+        mold_core::generation_profile::reference_images_for_recipe(&family, &params.model);
+    // Every reference is read or the dispatch fails. `edit_images` is
+    // ORDERED — each entry is packed at its own time coordinate — so
+    // skipping the one file that could not be read renumbers every reference
+    // after it and renders something the user did not ask for, silently; and
+    // if they all fail the request quietly degrades to img2img. The path is
+    // the user's own, shown back to them in their own TUI, so it is quoted
+    // whole rather than redacted.
+    //
+    // Read only on a recipe that HAS a References row: on a target-first
+    // recipe the arm below never looks at these paths, and failing a render
+    // over a group that recipe cannot carry would be a refusal with no
+    // control on screen to clear it.
+    let reference_bytes: Vec<Vec<u8>> = if reference_images.primary_is_target {
+        Vec::new()
+    } else {
+        params
+            .edit_image_paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                std::fs::read(path).map_err(|err| {
+                    format!(
+                        "Reference image {} ({path}) could not be read: {err}",
+                        index + 1
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    let (edit_images, source_image, strength, mask_image) = if reference_images.primary_is_target {
+        // The FIRST image is the thing being edited, so the Source row IS
+        // the reference group's head and there is no denoise pass to weight.
         (
             source_image.clone().map(|image| vec![image]),
             None,
             0.75,
             None,
         )
+    } else if !reference_bytes.is_empty() {
+        // References attached: `Replaces` and `Exclusive` both refuse the
+        // img2img fields alongside them, so the request carries the group
+        // alone.
+        (Some(reference_bytes), None, params.strength, None)
     } else {
         (None, source_image, params.strength, mask_image)
     };
@@ -2437,6 +2479,83 @@ mod tests {
         params.batch = 4;
         let req = build_request(&params, "test prompt", &None).unwrap();
         assert_eq!(req.batch_size, 4);
+    }
+
+    /// Klein's References row ships `edit_images` and drops the img2img
+    /// fields the `Exclusive` contract refuses beside them. Before the
+    /// recipe answered this question, flux2-dev fell through to
+    /// `source_image` and was refused at admission for a request the form
+    /// had no way to author.
+    #[test]
+    fn build_request_ships_the_reference_group_as_edit_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for (name, bytes) in [("a.png", b"first" as &[u8]), ("b.png", b"second")] {
+            let file = dir.path().join(name);
+            std::fs::write(&file, bytes).unwrap();
+            paths.push(file.to_string_lossy().into_owned());
+        }
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "flux2-klein:bf16".to_string();
+        params.edit_image_paths = paths;
+        params.mask_image_path = Some("/tmp/does-not-matter.png".to_string());
+        let req = build_request(&params, "put sunglasses on the person", &None).unwrap();
+        assert_eq!(
+            req.edit_images,
+            Some(vec![b"first".to_vec(), b"second".to_vec()]),
+            "order is semantic"
+        );
+        assert!(req.source_image.is_none());
+        assert!(req.mask_image.is_none());
+    }
+
+    /// An unreadable reference is a hard failure, never a silent gap.
+    ///
+    /// `edit_images` is ORDERED — each entry is packed at its own time
+    /// coordinate — so dropping the one file that could not be read
+    /// renumbers every reference after it and renders a different picture
+    /// than the one asked for, with nothing on screen to say so. Worse, if
+    /// every path fails, the request quietly reverts to img2img. The refusal
+    /// names the one-based position and the path, unredacted: it is the
+    /// user's own path, in their own TUI.
+    #[test]
+    fn build_request_refuses_an_unreadable_reference_instead_of_dropping_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("a.png");
+        std::fs::write(&good, b"first").unwrap();
+        let missing = dir.path().join("gone.png");
+        let missing = missing.to_string_lossy().into_owned();
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "flux2-klein:bf16".to_string();
+        params.edit_image_paths = vec![good.to_string_lossy().into_owned(), missing.clone()];
+        let error = build_request(&params, "a cat", &None)
+            .expect_err("a reference that cannot be read must fail the dispatch");
+        assert!(
+            error.contains('2'),
+            "the refusal names the one-based position: {error}"
+        );
+        assert!(
+            error.contains(&missing),
+            "the refusal names the path: {error}"
+        );
+    }
+
+    /// With no references attached, Klein is an ordinary img2img recipe —
+    /// the whole reason its relation is `Exclusive` rather than `Replaces`.
+    #[test]
+    fn build_request_leaves_klein_img2img_alone_without_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        std::fs::write(&source, b"source").unwrap();
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "flux2-klein:bf16".to_string();
+        params.source_image_path = Some(source.to_string_lossy().into_owned());
+        let req = build_request(&params, "a cat", &None).unwrap();
+        assert_eq!(req.source_image, Some(b"source".to_vec()));
+        assert!(req.edit_images.is_none());
     }
 
     #[test]

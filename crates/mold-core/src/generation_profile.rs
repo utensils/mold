@@ -311,6 +311,81 @@ pub struct AdapterControlProfile {
     pub reason: Option<String>,
 }
 
+/// How a recipe's ordered reference images relate to `source_image`.
+///
+/// Two questions, two fields: `source_image` keeps saying whether the
+/// checkpoint can start from a latent at all, and this says what happens when
+/// references are also present. Absent that split, a recipe that accepts both
+/// forms could only advertise one of them.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReferenceSourceRelation {
+    /// References REPLACE the source image: the pipeline never reads
+    /// `source_image`, so sending one is a client mistake. Qwen-Image-Edit
+    /// (whose first image IS the edit target) and FLUX.2 [dev].
+    #[default]
+    Replaces,
+    /// The recipe renders from a source image OR from references, never both
+    /// in one pass. FLUX.2 [klein]: upstream's reference edit
+    /// (`pipeline_flux2_klein.py`) and its inpaint pipeline
+    /// (`pipeline_flux2_klein_inpaint.py`) are separate classes, so no single
+    /// pass takes an img2img latent and a reference group together.
+    Exclusive,
+    /// Reserved: a recipe that reads a source image and references in the same
+    /// pass. Nothing advertises it today; it exists so a client's `match` is
+    /// written against the contract rather than against today's families.
+    Combines,
+}
+
+/// The ordered reference-image (`GenerateRequest.edit_images`) contract.
+///
+/// The SINGLE authority for "does this model do reference editing, how many
+/// images, and what does that mean for `source_image`". Before it existed,
+/// every surface re-derived the answer from the model NAME — which is exactly
+/// how FLUX.2 [klein]'s reference support stayed invisible on the wire while
+/// the engine already had the plumbing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct ReferenceImagesProfile {
+    /// `Hidden` on a recipe that has no reference protocol at all; every
+    /// recipe that does advertises `Adjustable`.
+    pub mode: ControlMode,
+    /// Whether a render is impossible without at least one reference.
+    pub required: bool,
+    /// The family ceiling on the ordered group. `None` means the recipe
+    /// imposes no count bound of its own (Qwen-Image-Edit); a `Hidden` recipe
+    /// carries `Some(0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_count: Option<u32>,
+    /// Whether the FIRST reference is the image being edited rather than a
+    /// side reference. True only for Qwen-Image-Edit, whose canvas is
+    /// therefore source-driven.
+    pub primary_is_target: bool,
+    pub source_relation: ReferenceSourceRelation,
+    /// Per-image pixel ceiling when the request carries exactly one reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_pixels_single: Option<u64>,
+    /// Per-image pixel ceiling when the request carries several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_pixels_multi: Option<u64>,
+    /// The one human sentence a client shows instead of the control, and the
+    /// refusal a `Hidden` recipe answers `edit_images` with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The sentence a recipe with no reference protocol shows and refuses with.
+///
+/// Deliberately family-neutral: naming today's edit models here is what made
+/// the previous wording ("only supported for qwen-image-edit and flux2-dev")
+/// go stale the moment Klein gained references.
+pub const REFERENCE_IMAGES_UNSUPPORTED_REASON: &str =
+    "This model does not accept reference images (edit_images).";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct OutputCapabilitiesProfile {
     pub default_format: OutputFormat,
@@ -389,6 +464,17 @@ pub struct GenerationCapabilitiesProfile {
     /// nobody wrote.
     #[serde(default)]
     pub supports_strength: bool,
+    /// The ordered reference-image contract, or `None` on an OLDER SERVER.
+    ///
+    /// `Option`, not a bare default, for the reason `supports_strength`'s
+    /// `false` is documented above but inverted: absence here is not a
+    /// refusal. A server that predates this field still renders FLUX.2 [dev]
+    /// and Qwen-Image-Edit references, so a client that read absence as "no
+    /// references" would hide a control that works. Fall back to the legacy
+    /// name predicate, never to a `Hidden` nobody wrote. Every recipe this
+    /// build emits carries `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_images: Option<ReferenceImagesProfile>,
     /// 3-D controls. Present only on a mesh recipe; its absence means
     /// `GenerateRequest.mesh` is refused here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -580,6 +666,183 @@ fn prompt_reason(mode: PromptRequirement) -> Option<String> {
     }
 }
 
+/// The reference-image contract for one model, and the ONE place it is
+/// decided.
+///
+/// Every surface — admission, the profile door, the CLI, the TUI, and the
+/// browser clients through the serialized block — reads this rather than
+/// matching on the model name. Upstream references:
+///
+///   - FLUX.2: `diffusers/pipelines/flux2/pipeline_flux2_klein.py:616,765-809`
+///     takes `image: list | PIL | None` and prepares reference ids at
+///     `t = 10 + 10 * i`; the block is "Copied from" the dev pipeline
+///     (`pipeline_flux2.py:406`), so distilled Klein, Klein base, and dev all
+///     speak the identical protocol with the same checkpoint layout.
+///     ComfyUI's `comfy/model_detection.py:242-256` sets
+///     `ref_index_scale = 10.0` for EVERY flux2 checkpoint.
+///   - The per-image pixel budget is BFL's 2024²/1024² split
+///     (`InvokeAI/invokeai/backend/flux2/ref_image_extension.py:27-29`), which
+///     mold applies family-wide; diffusers' flat 1 MP cap is the documented
+///     divergence.
+///   - Qwen-Image-Edit's first image is the edit TARGET
+///     (`qwen_image/pipeline.rs`), which is why its canvas is source-driven
+///     and why it imposes no count ceiling of its own.
+pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImagesProfile {
+    match canonical_family(family) {
+        "qwen-image-edit" => ReferenceImagesProfile {
+            mode: ControlMode::Adjustable,
+            required: true,
+            // No count ceiling of its own. Upstream's "1-3 images" is advice
+            // about quality, not a bound admission can enforce.
+            max_count: None,
+            primary_is_target: true,
+            source_relation: ReferenceSourceRelation::Replaces,
+            max_pixels_single: Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
+            max_pixels_multi: Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
+            reason: None,
+        },
+        "flux2" => ReferenceImagesProfile {
+            mode: ControlMode::Adjustable,
+            required: false,
+            max_count: Some(validation::FLUX2_MAX_REFERENCE_IMAGES as u32),
+            primary_is_target: false,
+            // [dev]'s reference protocol REPLACES img2img — it advertises no
+            // strength and no mask. Klein's does not: it renders from one or
+            // the other, so it keeps both when no references are attached.
+            source_relation: if validation::is_flux2_dev_model(model) {
+                ReferenceSourceRelation::Replaces
+            } else {
+                ReferenceSourceRelation::Exclusive
+            },
+            max_pixels_single: Some(validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS),
+            max_pixels_multi: Some(validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS),
+            reason: None,
+        },
+        _ => ReferenceImagesProfile {
+            mode: ControlMode::Hidden,
+            required: false,
+            max_count: Some(0),
+            primary_is_target: false,
+            source_relation: ReferenceSourceRelation::Replaces,
+            max_pixels_single: None,
+            max_pixels_multi: None,
+            reason: Some(REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()),
+        },
+    }
+}
+
+/// The name a reference refusal calls the model by.
+///
+/// The model the USER typed, with its quantization tag dropped, so the pinned
+/// family wordings ("qwen-image-edit uses edit_images instead of
+/// source_image") survive the move to one generic validator. A catalog id or
+/// any other identity that is not a manifest stable name is quoted back
+/// whole — inventing a friendlier label for it would name a model the caller
+/// never asked for.
+pub fn reference_subject_label(family: &str, model: &str) -> String {
+    let resolved = crate::manifest::resolve_model_name(model);
+    if let Some((name, _tag)) = resolved.split_once(':') {
+        if !name.is_empty()
+            && !name.contains('/')
+            && crate::manifest::known_manifests()
+                .iter()
+                .any(|manifest| manifest.name == resolved)
+        {
+            return name.to_string();
+        }
+    }
+    if resolved.is_empty() {
+        return canonical_family(family).to_string();
+    }
+    resolved
+}
+
+/// Validate a request's `edit_images` against ONE recipe's reference contract.
+///
+/// The generic replacement for the per-family triad `validation.rs` carried:
+/// the refusals below were the qwen-image-edit and flux2-dev branches, and
+/// they read identically because they always were the same contract with the
+/// subject substituted. `subject` comes from [`reference_subject_label`], so
+/// both doors — family validation and the profile door — produce byte-equal
+/// sentences.
+///
+/// The FLUX.2 [dev] LoRA refusal deliberately does NOT live here: Klein has
+/// references AND LoRA, so that refusal belongs to the checkpoint, not to the
+/// reference protocol.
+pub fn validate_edit_images_against(
+    profile: &ReferenceImagesProfile,
+    subject: &str,
+    request: &crate::GenerateRequest,
+) -> Result<(), String> {
+    let images = request.edit_images.as_deref();
+    if matches!(profile.mode, ControlMode::Hidden) {
+        if images.is_some() {
+            return Err(profile
+                .reason
+                .clone()
+                .unwrap_or_else(|| REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()));
+        }
+        return Ok(());
+    }
+    let attached = images.is_some_and(|images| !images.is_empty());
+    if profile.required && !attached {
+        // A target-first recipe's first image is the thing being edited, so
+        // the sentence names the Target well the user is looking at.
+        return Err(if profile.primary_is_target {
+            "Qwen Image Edit needs at least one image. Add a Target image and try again."
+                .to_string()
+        } else {
+            format!("{subject} needs at least one reference image. Add one and try again.")
+        });
+    }
+    if images.is_some_and(<[Vec<u8>]>::is_empty) {
+        return Err("edit_images must not be empty when provided".to_string());
+    }
+    if attached {
+        let images = images.unwrap_or_default();
+        if request.batch_size != 1 {
+            return Err(format!(
+                "{subject} reference editing only supports batch_size = 1"
+            ));
+        }
+        if let Some(max) = profile.max_count {
+            if images.len() > max as usize {
+                return Err(format!(
+                    "{subject} supports at most {max} ordered reference images"
+                ));
+            }
+        }
+        if images
+            .iter()
+            .any(|image| !crate::validation::is_valid_image_format(image))
+        {
+            return Err("edit_images must contain only PNG or JPEG images".to_string());
+        }
+    }
+    // `Replaces` never reads `source_image`, so the img2img fields are refused
+    // whether or not references are attached. `Exclusive` renders from ONE of
+    // the two, so the same fields are refused only once references are here.
+    let refuse_source = match profile.source_relation {
+        ReferenceSourceRelation::Replaces => true,
+        ReferenceSourceRelation::Exclusive => attached,
+        ReferenceSourceRelation::Combines => false,
+    };
+    if refuse_source {
+        if request.source_image.is_some() {
+            return Err(format!(
+                "{subject} uses edit_images instead of source_image"
+            ));
+        }
+        if request.mask_image.is_some() {
+            return Err(format!("{subject} does not support mask_image"));
+        }
+        if request.control_image.is_some() || request.control_model.is_some() {
+            return Err(format!("{subject} does not support ControlNet inputs"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate an explicit output format against a recipe's advertised delivery.
 ///
 /// Extracted from [`validate_request_against_recipe`] so durable admission can
@@ -696,6 +959,17 @@ pub fn validate_request_against_recipe(
         validate_output_format_against_generation_profile(recipe, output_format)?;
     }
     validate_mesh_against_recipe(recipe, request)?;
+    // The reference contract is advertised once and validated against the
+    // same block, exactly like `mesh`. The subject is resolved from the
+    // request's own model so this door and family validation cannot word the
+    // same refusal differently.
+    if let Some(reference_images) = recipe.capabilities.reference_images.as_ref() {
+        let subject = reference_subject_label(
+            crate::validation::resolved_family_for(&request.model).unwrap_or_default(),
+            &request.model,
+        );
+        validate_edit_images_against(reference_images, &subject, request)?;
+    }
 
     let resolution = &recipe.resolution;
     if resolution.domain != ResolutionDomain::None {
@@ -1296,7 +1570,21 @@ fn recipe(
     // picks, so advertising a resolution control here would offer a knob the
     // engine ignores.
     let mesh_only = family == crate::manifest::HUNYUAN3D_FAMILY;
-    let source_driven = family == "qwen-image-edit"
+    // The reference contract is resolved ONCE, here, and everything that used
+    // to sniff `qwen-image-edit` or `contains("dev")` reads it instead.
+    let reference_images = reference_images_for_recipe(family, input.model);
+    let references_visible = !matches!(reference_images.mode, ControlMode::Hidden);
+    // Only a recipe whose references REPLACE the source latent loses img2img:
+    // an `Exclusive` recipe (Klein) still renders from a source image when no
+    // references are attached, so it keeps strength and the mask.
+    let references_replace_source = references_visible
+        && matches!(
+            reference_images.source_relation,
+            ReferenceSourceRelation::Replaces
+        );
+    // A target-first recipe edits the image it is given, so the canvas follows
+    // the source rather than a picked size.
+    let source_driven = reference_images.primary_is_target
         || matches!(
             pipeline,
             Some(Ltx2PipelineMode::Retake | Ltx2PipelineMode::LipDub)
@@ -1388,8 +1676,13 @@ fn recipe(
             } else {
                 validation::max_pixels_for_family_composed(Some(family), composition)
             },
-            source_max_pixels: (family == "qwen-image-edit")
-                .then_some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
+            // A target-first recipe's "source" IS its first reference, so the
+            // conditioning ceiling is the reference ceiling — one number, not
+            // two that can drift.
+            source_max_pixels: reference_images
+                .primary_is_target
+                .then_some(reference_images.max_pixels_single)
+                .flatten(),
             max_axis_pixels: if h3_compact {
                 Some(crate::minimax_h3::reviewed_compact_max_axis_pixels())
             } else {
@@ -1440,10 +1733,12 @@ fn recipe(
             note: None,
         };
     }
-    let flux2_dev = family == "flux2"
-        && crate::manifest::resolve_model_name(input.model)
-            .to_ascii_lowercase()
-            .contains("dev");
+    // This predicate now answers exactly ONE question: does the checkpoint's
+    // own loader refuse a LoRA? FLUX.2 [dev] does; Klein does not, and Klein
+    // has references too, so the reference contract above is what mask,
+    // strength, and the canvas read. It matches `validation::is_flux2_dev_model`
+    // so admission and the profile cannot disagree about which tier this is.
+    let flux2_dev = family == "flux2" && validation::is_flux2_dev_model(input.model);
     let wan = family == "wan";
     let normalized_model = crate::manifest::resolve_model_name(input.model).to_ascii_lowercase();
     // A DMD-distilled Wan tier walks exactly the rungs
@@ -1479,11 +1774,8 @@ fn recipe(
     let audio_input_supported = family == "ltx2" && !audio_only;
     let mask_supported = !audio_only
         && !mesh_only
-        && !matches!(
-            family,
-            "ltx-video" | "ltx2" | "wan" | "qwen-image-edit" | "minimax-h3"
-        )
-        && !flux2_dev
+        && !matches!(family, "ltx-video" | "ltx2" | "wan" | "minimax-h3")
+        && !references_replace_source
         && input.source_image != Some(SourceImageCapability::Unsupported);
     // Denoise strength describes how much of an existing latent survives. A
     // family that never starts from one — audio-only, mesh, wan's pinned
@@ -1493,9 +1785,8 @@ fn recipe(
     let supports_strength = !audio_only
         && !mesh_only
         && !wan
-        && family != "qwen-image-edit"
         && family != "minimax-h3"
-        && !flux2_dev
+        && !references_replace_source
         && input.source_image != Some(SourceImageCapability::Unsupported);
     // The advertised mode is the answer for a CONDITIONED request, because
     // that is the only one that can differ from `Required`. A client resolves
@@ -1661,6 +1952,7 @@ fn recipe(
                 "This recipe does not encode a negative prompt.",
             ),
             source_image: input.source_image,
+            reference_images: Some(reference_images),
             supports_lora: lora_supported,
             supports_controlnet: controlnet_supported,
             supports_identity: identity_supported,
@@ -2039,6 +2331,223 @@ mod tests {
             let lora = profile.default_recipe().unwrap().capabilities.lora.mode;
             assert_ne!(lora, ControlMode::Hidden, "{model} must still offer LoRA");
         }
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    }
+
+    /// A request the recipe would otherwise accept, so a refusal below can
+    /// only be the reference contract talking.
+    fn reference_request(profile: &GenerationProfileSet, model: &str) -> crate::GenerateRequest {
+        let recipe = profile.default_recipe().unwrap();
+        let preset = recipe
+            .resolution
+            .aspect_groups
+            .first()
+            .and_then(|group| group.presets.first())
+            .map(|preset| (preset.width, preset.height))
+            .unwrap_or((1024, 1024));
+        let mut request = request_for(profile, preset.0, preset.1);
+        request.model = model.to_string();
+        request
+    }
+
+    /// FLUX.2 [klein] speaks the SAME reference protocol as [dev] — upstream
+    /// copies the block verbatim between the two pipelines — but it is not a
+    /// dev checkpoint, so gaining references must not cost it img2img. This is
+    /// the whole point of `source_relation`: `Exclusive`, not `Replaces`.
+    #[test]
+    fn klein_advertises_references_without_losing_strength_mask_or_lora() {
+        for model in [
+            "flux2-klein:bf16",
+            "flux2-klein:q8",
+            "flux2-klein-9b:q8",
+            "flux2-klein-base:q8",
+            "flux2-klein-base-9b:q4",
+        ] {
+            let profile = resolve_generation_profile(input(model, "flux2"));
+            let recipe = profile.default_recipe().unwrap();
+            let capabilities = &recipe.capabilities;
+            let references = capabilities
+                .reference_images
+                .as_ref()
+                .unwrap_or_else(|| panic!("{model} advertises a reference block"));
+            assert_eq!(references.mode, ControlMode::Adjustable, "{model}");
+            assert!(!references.required, "{model}");
+            assert_eq!(
+                references.max_count,
+                Some(validation::FLUX2_MAX_REFERENCE_IMAGES as u32),
+                "{model}"
+            );
+            assert!(!references.primary_is_target, "{model}");
+            assert_eq!(
+                references.source_relation,
+                ReferenceSourceRelation::Exclusive,
+                "{model}"
+            );
+            assert_eq!(
+                references.max_pixels_single,
+                Some(validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS),
+                "{model}"
+            );
+            assert_eq!(
+                references.max_pixels_multi,
+                Some(validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS),
+                "{model}"
+            );
+            assert!(references.reason.is_none(), "{model}");
+
+            // Everything Klein had before is still here.
+            assert!(capabilities.supports_strength, "{model} keeps strength");
+            assert_eq!(
+                capabilities.mask.mode,
+                ControlMode::Adjustable,
+                "{model} keeps the inpainting mask"
+            );
+            assert!(capabilities.supports_lora, "{model} keeps LoRA");
+            assert_ne!(
+                recipe.resolution.domain,
+                ResolutionDomain::SourceDriven,
+                "{model} picks its own canvas"
+            );
+            assert!(recipe.resolution.source_max_pixels.is_none(), "{model}");
+        }
+    }
+
+    /// One function answers the reference question for every family, and the
+    /// recipe serializes exactly what it returned.
+    #[test]
+    fn reference_images_for_recipe_is_the_single_family_answer() {
+        let qwen = reference_images_for_recipe("qwen-image-edit", "qwen-image-edit-2511:q4");
+        assert_eq!(qwen.mode, ControlMode::Adjustable);
+        assert!(qwen.required);
+        assert_eq!(qwen.max_count, None);
+        assert!(qwen.primary_is_target);
+        assert_eq!(qwen.source_relation, ReferenceSourceRelation::Replaces);
+        assert_eq!(
+            qwen.max_pixels_single,
+            Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS)
+        );
+        assert_eq!(qwen.max_pixels_multi, qwen.max_pixels_single);
+
+        let dev = reference_images_for_recipe("flux2", "flux2-dev:bf16");
+        assert_eq!(dev.mode, ControlMode::Adjustable);
+        assert!(!dev.required);
+        assert_eq!(dev.source_relation, ReferenceSourceRelation::Replaces);
+        assert!(!dev.primary_is_target);
+
+        let klein = reference_images_for_recipe("flux2", "flux2-klein:bf16");
+        assert_eq!(klein.source_relation, ReferenceSourceRelation::Exclusive);
+
+        for (family, model) in [
+            ("flux", "flux-dev:q4"),
+            ("sdxl", "sdxl-base:q4"),
+            ("wan", "wan22-t2v-a14b:q8"),
+            ("hunyuan3d", "hunyuan3d-2:q8"),
+            ("", "not-a-model"),
+        ] {
+            let none = reference_images_for_recipe(family, model);
+            assert_eq!(none.mode, ControlMode::Hidden, "{model}");
+            assert_eq!(none.max_count, Some(0), "{model}");
+            assert_eq!(
+                none.reason.as_deref(),
+                Some(REFERENCE_IMAGES_UNSUPPORTED_REASON),
+                "{model}"
+            );
+        }
+
+        // The recipe serializes the same answer it was given.
+        let profile = resolve_generation_profile(input("flux2-klein:bf16", "flux2"));
+        assert_eq!(
+            profile
+                .default_recipe()
+                .unwrap()
+                .capabilities
+                .reference_images
+                .as_ref(),
+            Some(&klein)
+        );
+    }
+
+    /// The two families that already had references keep every refusal they
+    /// had — but now they are DERIVED from the block instead of from a family
+    /// list, which is why Klein could be added without touching them.
+    #[test]
+    fn dev_and_qwen_derive_their_refusals_from_the_reference_block() {
+        let dev = resolve_generation_profile(input("flux2-dev:bf16", "flux2"));
+        let dev_recipe = dev.default_recipe().unwrap();
+        assert!(!dev_recipe.capabilities.supports_strength);
+        assert_eq!(dev_recipe.capabilities.mask.mode, ControlMode::Hidden);
+        assert!(!dev_recipe.capabilities.supports_lora);
+        assert_ne!(dev_recipe.resolution.domain, ResolutionDomain::SourceDriven);
+
+        let qwen = resolve_generation_profile(input("qwen-image-edit-2511:q4", "qwen-image-edit"));
+        let qwen_recipe = qwen.default_recipe().unwrap();
+        assert!(!qwen_recipe.capabilities.supports_strength);
+        assert_eq!(qwen_recipe.capabilities.mask.mode, ControlMode::Hidden);
+        assert_eq!(
+            qwen_recipe.resolution.domain,
+            ResolutionDomain::SourceDriven
+        );
+        assert_eq!(
+            qwen_recipe.resolution.source_max_pixels,
+            Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS)
+        );
+    }
+
+    /// The recipe's dev predicate now answers only "does this checkpoint's
+    /// loader refuse a LoRA", and it must be the SAME predicate admission
+    /// uses. The old `contains("dev")` sniff was wider: any flux2 identity
+    /// with `dev` in it lost its adapter stack.
+    #[test]
+    fn recipe_dev_predicate_matches_validation_is_flux2_dev_model() {
+        for model in [
+            "flux2-dev:bf16",
+            "flux2-dev:q4",
+            "hf:black-forest-labs/FLUX.2-dev",
+            "flux2-klein:bf16",
+            "flux2-klein-base-9b:q8",
+            "hf:someone/klein-dev-merge",
+        ] {
+            let profile = resolve_generation_profile(input(model, "flux2"));
+            let capabilities = &profile.default_recipe().unwrap().capabilities;
+            assert_eq!(
+                !capabilities.supports_lora,
+                validation::is_flux2_dev_model(model),
+                "{model}"
+            );
+        }
+    }
+
+    /// Both doors refuse with the same sentence, because there is one
+    /// validator and one subject label behind them.
+    #[test]
+    fn the_profile_door_answers_references_exactly_as_family_validation_does() {
+        let klein = resolve_generation_profile(input("flux2-klein:bf16", "flux2"));
+        let mut request = reference_request(&klein, "flux2-klein:bf16");
+        request.edit_images = Some(vec![png_bytes()]);
+        request.source_image = Some(png_bytes());
+        let door = validate_request_against_generation_profile(&klein, &request).unwrap_err();
+        assert_eq!(door, "flux2-klein uses edit_images instead of source_image");
+        assert_eq!(
+            door,
+            crate::validation::validate_generate_request_with_family(&request, Some("flux2"))
+                .unwrap_err()
+        );
+
+        // A recipe advertising no reference protocol refuses the field with
+        // its own advertised sentence.
+        let flux = resolve_generation_profile(input("flux-dev:q4", "flux"));
+        let mut plain = reference_request(&flux, "flux-dev:q4");
+        plain.edit_images = Some(vec![png_bytes()]);
+        let refusal = validate_request_against_generation_profile(&flux, &plain).unwrap_err();
+        assert_eq!(refusal, REFERENCE_IMAGES_UNSUPPORTED_REASON);
+        assert_eq!(
+            refusal,
+            crate::validation::validate_generate_request_with_family(&plain, Some("flux"))
+                .unwrap_err()
+        );
     }
 
     #[test]
@@ -2432,11 +2941,79 @@ mod tests {
         caps.remove("prompt");
         caps.remove("supports_strength");
         caps.remove("mesh");
+        caps.remove("reference_images");
         let parsed: GenerationProfileSet = serde_json::from_value(json).unwrap();
         let caps = &parsed.recipes[0].capabilities;
         assert_eq!(caps.prompt.mode, PromptRequirement::Required);
         assert!(!caps.supports_strength);
         assert!(caps.mesh.is_none());
+        // Absence is an OLDER SERVER, never a refusal: that host still
+        // renders flux2-dev and qwen-image-edit references, so a client must
+        // fall back to its legacy predicate rather than read a `Hidden`
+        // nobody wrote.
+        assert!(caps.reference_images.is_none());
+    }
+
+    /// The cross-surface reference fixture (§1g) pins what every surface must
+    /// believe about each tier. Rust reads it here and the browser reads the
+    /// same file, so a drift on either side fails CI.
+    #[test]
+    fn flux2_reference_parity_fixture_pins_every_surface() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/flux2/reference-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        assert_eq!(
+            fixture["schema"].as_str(),
+            Some("mold.flux2.reference-parity.v1")
+        );
+        let rows = fixture["models"].as_array().expect("models array");
+        assert!(!rows.is_empty(), "the fixture must pin at least one tier");
+        for row in rows {
+            let model = row["model"].as_str().expect("model");
+            let family = row["family"].as_str().expect("family");
+            let actual = reference_images_for_recipe(family, model);
+            assert_eq!(
+                format!("{:?}", actual.mode).to_lowercase(),
+                row["mode"].as_str().expect("mode"),
+                "{model} mode"
+            );
+            assert_eq!(
+                actual.required,
+                row["required"].as_bool().expect("required"),
+                "{model} required"
+            );
+            assert_eq!(
+                actual.max_count.map(u64::from),
+                row["max_count"].as_u64(),
+                "{model} max_count"
+            );
+            assert_eq!(
+                actual.primary_is_target,
+                row["primary_is_target"]
+                    .as_bool()
+                    .expect("primary_is_target"),
+                "{model} primary_is_target"
+            );
+            assert_eq!(
+                serde_json::to_value(actual.source_relation).unwrap(),
+                row["source_relation"],
+                "{model} source_relation"
+            );
+            // The recipe every client reads must carry that same block.
+            let profile = resolve_generation_profile(input(model, family));
+            assert_eq!(
+                profile
+                    .default_recipe()
+                    .unwrap()
+                    .capabilities
+                    .reference_images
+                    .as_ref(),
+                Some(&actual),
+                "{model} recipe block"
+            );
+        }
     }
 
     #[test]

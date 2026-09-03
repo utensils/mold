@@ -445,6 +445,8 @@ use crate::queue::clean_error_message;
         mold_core::MeshExportGeometry,
         mold_core::MeshUpAxis,
         mold_core::MeshExportOrigin,
+        mold_core::ReferenceImagesProfile,
+        mold_core::ReferenceSourceRelation,
         mold_core::ProfileProvenance,
         mold_core::ProvenanceKind,
         mold_core::LoraInfo,
@@ -11440,6 +11442,63 @@ mod tests {
     use crate::test_support::env_lock;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    /// Every `$ref` the OpenAPI document emits must name a component the
+    /// document also defines.
+    ///
+    /// `components(schemas(...))` is an explicit list maintained by hand, and
+    /// nothing fails to compile when a new nested type is left off it — so
+    /// "did the reference-images block reach the served document resolved?"
+    /// is a question that has to be ASKED rather than assumed. (It does:
+    /// utoipa collects transitively reachable `ToSchema` types, so the two
+    /// reference entries beside the mesh ones are belt-and-braces, and this
+    /// test is what says so. Removing them must not break the document, and
+    /// removing this test is what would let a genuinely unreachable type
+    /// through.)
+    #[test]
+    fn the_openapi_document_resolves_every_schema_reference_it_emits() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).expect("serialize openapi");
+        let defined: std::collections::BTreeSet<String> = doc
+            .pointer("/components/schemas")
+            .and_then(serde_json::Value::as_object)
+            .map(|schemas| schemas.keys().cloned().collect())
+            .unwrap_or_default();
+
+        fn collect(value: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(serde_json::Value::String(reference)) = map.get("$ref") {
+                        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                            out.insert(name.to_string());
+                        }
+                    }
+                    for nested in map.values() {
+                        collect(nested, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for nested in items {
+                        collect(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut referenced = std::collections::BTreeSet::new();
+        collect(&doc, &mut referenced);
+        assert!(
+            referenced.contains("ReferenceImagesProfile"),
+            "the generation profile must still carry the reference-images block"
+        );
+
+        let dangling: Vec<&String> = referenced.difference(&defined).collect();
+        assert!(
+            dangling.is_empty(),
+            "OpenAPI references components it never defines: {dangling:?} \
+             — add them to `components(schemas(...))`"
+        );
+    }
 
     #[test]
     fn framewise_capability_requires_codec_runtime_without_disabling_image_upscale() {

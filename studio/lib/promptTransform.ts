@@ -173,6 +173,11 @@ export function conditioningFingerprint(request: ExpansionTaskRequest): string {
     pipeline: request.pipeline ?? null,
     retake_range: request.retake_range ?? null,
     references: request.references?.map(referenceFingerprint) ?? null,
+    // Ordered reference images are the conditioning for an edit recipe and
+    // one half of it for an exclusive one (FLUX.2 [klein]) — a swap, a
+    // reorder, or one more reference changes what renders, so it stales
+    // reviewed prompt work through this same rule.
+    edit_images: request.edit_images ?? null,
     // The identity photo is conditioning media like any other: swapping the
     // face behind a reviewed rewrite must stale it through this one rule, not
     // a second identity-only staleness check.

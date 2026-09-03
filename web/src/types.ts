@@ -1218,6 +1218,23 @@ export interface GenerateFormState {
   expand: ExpandFormState;
   sourceFitPolicy?: SourceFitPolicy;
   imageAttachments: SourceImageState[];
+  /**
+   * The ordered reference strip of an EXCLUSIVE recipe (FLUX.2 [klein]),
+   * whose source image and references are mutually exclusive and therefore
+   * need two stores: `imageAttachments[0]` stays the source well, these are
+   * the references. Every other layout keeps its single list — a `replaces`
+   * strip (Qwen edit, FLUX.2 [dev]) is `imageAttachments`.
+   *
+   * Optional because a draft persisted before this field existed has none,
+   * and every read spells that `?? []` rather than assuming an array.
+   */
+  referenceImages?: SourceImageState[];
+  /**
+   * Which exclusive well was written last. `resolveExclusiveWells` reads it
+   * to decide which one ships and which parks; `null` — an untouched form or
+   * a draft saved before the field existed — reads as the source well.
+   */
+  exclusiveWell?: "source" | "references" | null;
   maskImage: SourceImageState | null;
   controlImage: SourceImageState | null;
   controlModel: string;

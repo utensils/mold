@@ -33,6 +33,16 @@ const props = withDefaults(
     accept?: string;
     /** Prefix for surface-specific test hooks while keeping one component. */
     testIdPrefix?: string;
+    /**
+     * `single-or-references` only: this well's media is PARKED because the
+     * References strip holds the conditioning that ships. The well stays
+     * fully interactive — attaching here makes it the active one again
+     * (`resolveExclusiveWells` is last-write-wins) — and its media is kept,
+     * never discarded. Generate stays enabled either way.
+     */
+    parked?: boolean;
+    /** The parking sentence, from `EXCLUSIVE_WELLS_NOTE`. */
+    note?: string | null;
   }>(),
   {
     source: null,
@@ -42,6 +52,8 @@ const props = withDefaults(
     error: null,
     accept: "image/png,image/jpeg",
     testIdPrefix: "",
+    parked: false,
+    note: null,
   },
 );
 
@@ -52,18 +64,27 @@ const emit = defineEmits<{
 }>();
 
 const wells = computed(() =>
-  props.plan.kind === "single" || props.plan.kind === "h3-boundaries"
+  props.plan.kind === "single" ||
+  props.plan.kind === "h3-boundaries" ||
+  props.plan.kind === "single-or-references"
     ? props.plan
     : props.plan.kind === "attachments" && props.plan.primary === "target"
       ? props.plan
       : null,
 );
 const h3 = computed(() => props.plan.kind === "h3-boundaries");
+/** H3's boundaries are their own drop targets; every other layout's primary
+ * well is the shared `source` one (Qwen's Target included). */
+const sourceDropTarget = computed(() => (h3.value ? "h3-first" : "source"));
+const endDropTarget = computed(() => (h3.value ? "h3-last" : "end"));
 const target = computed(
   () => props.plan.kind === "attachments" && props.plan.primary === "target",
 );
 const video = computed(
-  () => h3.value || (props.plan.kind === "single" && props.plan.video),
+  () =>
+    h3.value ||
+    (props.plan.kind === "single" && props.plan.video) ||
+    (props.plan.kind === "single-or-references" && props.plan.single.video),
 );
 const required = computed(() =>
   props.plan.kind === "single"
@@ -72,7 +93,9 @@ const required = computed(() =>
       ? props.plan.requiredEndpoint === "first"
       : props.plan.kind === "attachments"
         ? props.plan.required
-        : false,
+        : props.plan.kind === "single-or-references"
+          ? props.plan.single.required
+          : false,
 );
 const sourceLabel = computed(() =>
   h3.value ? "First frame" : target.value ? "Target" : "Source",
@@ -96,6 +119,8 @@ const endIncompatible = computed(
 );
 const showEndWell = computed(() => {
   if (props.plan.kind === "single") return props.plan.endFrame;
+  if (props.plan.kind === "single-or-references")
+    return props.plan.single.endFrame;
   if (props.plan.kind === "h3-boundaries")
     return props.plan.requiredEndpoint !== "first" || !!props.endFrame;
   return false;
@@ -113,8 +138,9 @@ const endHint = computed(() =>
   <div
     v-if="wells"
     class="smw"
-    :class="{ 'smw--touch': touchFriendly }"
+    :class="{ 'smw--touch': touchFriendly, 'smw--parked': parked }"
     data-test="source-media-wells"
+    :data-parked="parked || undefined"
   >
     <div class="smw__head">
       <span class="smw__label">{{ sourceLabel }}</span>
@@ -138,10 +164,15 @@ const endHint = computed(() =>
       :touch-friendly="touchFriendly"
       :alt="sourceAlt"
       :test-id="`${testIdPrefix}source`"
+      :drop-target="sourceDropTarget"
       @file="emit('file', 'source', $event)"
       @gallery="emit('gallery', 'source')"
       @clear="emit('clear', 'source')"
     />
+
+    <p v-if="note" class="smw__hint" data-test="source-parked-note">
+      {{ note }}
+    </p>
 
     <p
       v-if="error"
@@ -172,6 +203,7 @@ const endHint = computed(() =>
         :touch-friendly="touchFriendly"
         :alt="endAlt"
         :test-id="`${testIdPrefix}end-frame`"
+        :drop-target="endDropTarget"
         @file="emit('file', 'end', $event)"
         @gallery="emit('gallery', 'end')"
         @clear="emit('clear', 'end')"
@@ -194,6 +226,11 @@ const endHint = computed(() =>
 }
 .smw__head--end {
   margin-top: 8px;
+}
+/* Parked, not disabled: the media is still there and still acquirable — the
+ * muting says which well ships, and the note says why. */
+.smw--parked .smw__label:not(.smw__label--required) {
+  opacity: 0.7;
 }
 .smw__label {
   color: var(--mold-text-dim, #737373);

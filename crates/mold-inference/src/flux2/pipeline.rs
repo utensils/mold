@@ -13,7 +13,7 @@
 //! - No pooled text vector input
 //! - Linear timestep schedule (distilled, no time-shifting)
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
@@ -315,6 +315,28 @@ impl Flux2Engine {
             .is_ok_and(|config| config.hidden_size == 6144)
     }
 
+    /// The ordered reference images this request conditions on, if any.
+    ///
+    /// Tier-agnostic on purpose. FLUX.2's reference protocol is a property of
+    /// the ARCHITECTURE, not of one checkpoint: diffusers' Klein pipeline
+    /// takes `image: list | PIL | None` and prepares its reference ids in a
+    /// block marked "Copied from" the [dev] pipeline
+    /// (`pipeline_flux2_klein.py:318-366,616,765-782` vs
+    /// `pipeline_flux2.py:406`), BFL's first-party `flux2/src/flux2/sampling.py`
+    /// numbers references from one `scale = 10` (`:53`, `default_prep` at
+    /// `:226`) for every variant, and ComfyUI sets `ref_index_scale = 10.0`
+    /// for EVERY flux2 checkpoint (`comfy/model_detection.py:242-256`).
+    /// Gating this on `is_dev()` is what kept Klein — the tier people actually
+    /// run locally — on plain img2img.
+    ///
+    /// An empty vector is not a reference request; it must leave a plain
+    /// text-to-image render byte-identical.
+    fn reference_images(req: &GenerateRequest) -> Option<&[Vec<u8>]> {
+        req.edit_images
+            .as_deref()
+            .filter(|images| !images.is_empty())
+    }
+
     /// The negative prompt this render's unconditional branch encodes, or
     /// `None` when the render runs one forward per step.
     ///
@@ -444,6 +466,13 @@ impl Flux2Engine {
             || self.offload
             || !self.pending_loras.is_empty()
             || req.source_image.is_some()
+            // References are VAE-encoded in a phase of their own and the VAE
+            // is dropped before the transformer loads — the same reason a
+            // source image forces this path. An eager plan keeps both
+            // resident, which is what OOMs Klein-9B BF16 on a 24 GB card.
+            // Routing references through the eager path (VAE already resident,
+            // saves a transformer reload on 4B/GGUF) is filed as a follow-up.
+            || Self::reference_images(req).is_some()
     }
 
     fn load_sequential_vae(
@@ -1161,6 +1190,19 @@ impl Flux2Engine {
             );
         }
 
+        // Klein renders from a source image OR from references, never both in
+        // one pass: upstream has no pipeline that takes the two together
+        // (`pipeline_flux2_klein_inpaint.py` is a separate class with its own
+        // `image_reference` argument). Admission already refuses the pair
+        // through the profile's `Exclusive` source relation; this is the
+        // engine's own tripwire so a private or future caller that skips that
+        // door fails loudly instead of silently dropping one of them.
+        if req.source_image.is_some() && Self::reference_images(req).is_some() {
+            bail!(
+                "FLUX.2 renders from a source image or from reference images, not both in one pass"
+            );
+        }
+
         tracing::info!(
             prompt = %req.prompt,
             seed, width, height,
@@ -1385,56 +1427,50 @@ impl Flux2Engine {
             );
         }
 
-        // FLUX.2 [dev] conditions on independently VAE-encoded reference
-        // images appended after the noisy target tokens. References retain
-        // their order through time coordinates 10, 20, ... and remain fixed
-        // throughout denoising.
-        let reference_tokens = if self.is_dev() {
-            if let Some(references) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
-                let max_pixels = if references.len() == 1 {
-                    mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
-                } else {
-                    mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
-                };
-                let (vae, _) = self.load_sequential_vae(&device, gpu_dtype)?;
-                self.base
-                    .progress
-                    .stage_start("Encoding FLUX.2 reference images (VAE)");
-                let encode_start = Instant::now();
-                let mut token_groups = Vec::with_capacity(references.len());
-                let mut id_groups = Vec::with_capacity(references.len());
-                for (index, image_bytes) in references.iter().enumerate() {
-                    let source = crate::img_utils::decode_flux2_reference_image(
-                        image_bytes,
-                        max_pixels,
-                        &device,
-                        gpu_dtype,
-                    )?;
-                    let latent = vae.encode(&source)?;
-                    let time_coordinate = u32::try_from(index + 1)
-                        .context("too many FLUX.2 reference images")?
-                        .checked_mul(10)
-                        .context("FLUX.2 reference time coordinate overflow")?;
-                    let (tokens, ids) = sampling::pack_image_tokens(&latent, time_coordinate)?;
-                    token_groups.push(tokens);
-                    id_groups.push(ids);
-                }
-                self.base.progress.phase_done(
-                    crate::ProgressPhase::Vae,
-                    "Encoding FLUX.2 reference images (VAE)",
-                    encode_start.elapsed(),
-                );
-                let tokens = Tensor::cat(&token_groups.iter().collect::<Vec<_>>(), 1)?;
-                let ids = Tensor::cat(&id_groups.iter().collect::<Vec<_>>(), 1)?;
-                drop(vae);
-                device.synchronize()?;
-                self.base
-                    .progress
-                    .info("Freed VAE after reference encoding");
-                Some((tokens, ids))
+        // FLUX.2 conditions on independently VAE-encoded reference images
+        // appended after the noisy target tokens. References retain their
+        // order through time coordinates 10, 20, ... and remain fixed
+        // throughout denoising. Every tier speaks this protocol — see
+        // `Self::reference_images` for the upstream citations.
+        let reference_tokens = if let Some(references) = Self::reference_images(req) {
+            let max_pixels = if references.len() == 1 {
+                mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS
             } else {
-                None
+                mold_core::validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS
+            };
+            let (vae, vae_dtype) = self.load_sequential_vae(&device, gpu_dtype)?;
+            self.base
+                .progress
+                .stage_start("Encoding FLUX.2 reference images (VAE)");
+            let encode_start = Instant::now();
+            let mut latents = Vec::with_capacity(references.len());
+            for image_bytes in references {
+                // Decode at the VAE's OWN resolved dtype, not the
+                // transformer's: `MOLD_VAE_DTYPE` can pin the autoencoder to
+                // f32 on a bf16 render, and handing it a bf16 input is a
+                // dtype mismatch inside `encode`. The latent is cast back to
+                // the transformer's dtype before it is packed.
+                let source = crate::img_utils::decode_flux2_reference_image(
+                    image_bytes,
+                    max_pixels,
+                    &device,
+                    vae_dtype,
+                )?;
+                latents.push(vae.encode(&source)?.to_dtype(gpu_dtype)?);
             }
+            let (tokens, ids) = sampling::pack_reference_group(&latents)?;
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding FLUX.2 reference images (VAE)",
+                encode_start.elapsed(),
+            );
+            drop(latents);
+            drop(vae);
+            device.synchronize()?;
+            self.base
+                .progress
+                .info("Freed VAE after reference encoding");
+            Some((tokens, ids))
         } else {
             None
         };
@@ -1445,21 +1481,24 @@ impl Flux2Engine {
         // co-resident on 24 GB cards.
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
             let start_t = timesteps[0];
-            let (vae, _vae_dtype) = self.load_sequential_vae(&device, gpu_dtype)?;
+            let (vae, vae_dtype) = self.load_sequential_vae(&device, gpu_dtype)?;
 
             self.base
                 .progress
                 .stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
+            // Same rule as the reference path: decode at the VAE's resolved
+            // dtype (`MOLD_VAE_DTYPE` may differ from the transformer's) and
+            // cast the latent back afterwards.
             let source_tensor = crate::img_utils::decode_source_image(
                 source_bytes,
                 req.width,
                 req.height,
                 Self::img2img_source_normalize_range(),
                 &device,
-                gpu_dtype,
+                vae_dtype,
             )?;
-            let encoded = vae.encode(&source_tensor)?;
+            let encoded = vae.encode(&source_tensor)?.to_dtype(gpu_dtype)?;
             self.base.progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -1516,6 +1555,20 @@ impl Flux2Engine {
             crate::device::dtype_bytes(gpu_dtype),
             crate::device::ActivationFamily::Flux2Dit,
         );
+        // Reference tokens lengthen the ONE sequence the transformer attends
+        // over, so the workspace scales with the packed length rather than
+        // with the canvas. Here the references are already encoded, so the
+        // ratio is EXACT — token counts, not the server's pixel estimate —
+        // and it is the same `flux2_reference_scaled_activation_bytes` admission planned
+        // against.
+        let xformer_activation_budget = match reference_tokens.as_ref() {
+            Some((tokens, _)) => crate::device::flux2_reference_scaled_activation_bytes(
+                xformer_activation_budget,
+                state.img.dim(1)? as u64,
+                tokens.dim(1)? as u64,
+            ),
+            None => xformer_activation_budget,
+        };
         // Block offload reserves a bounded GPU working set; the full
         // transformer remains host-mapped and is accounted by Scheduler V2's
         // host-memory ledger.
@@ -2293,6 +2346,48 @@ mod tests {
         assert!(engine.uses_sequential_generate_path(&req));
         req.source_image = None;
         assert!(!engine.uses_sequential_generate_path(&req));
+    }
+
+    /// Reference images are VAE-encoded in a phase of their own and the VAE is
+    /// dropped before the transformer loads, exactly like a source image
+    /// (`load_sequential_vae` builds the shared config for every tier). An
+    /// eager plan keeps both resident, which is what OOMs Klein-9B BF16 on a
+    /// 24 GB card — so a Klein render carrying references takes the sequential
+    /// path whatever the engine's configured strategy says, and a LoRA on top
+    /// of it changes nothing.
+    #[test]
+    fn klein_reference_images_require_sequential_generation_even_for_eager_engines() {
+        let dir = temp_test_dir("mold-flux2-reference-sequential");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+        let mut req = test_generate_request();
+        assert!(!engine.uses_sequential_generate_path(&req));
+
+        req.edit_images = Some(vec![vec![0x89, 0x50, 0x4e, 0x47]]);
+        assert!(engine.uses_sequential_generate_path(&req));
+
+        // An empty vector is not a reference request — it must not silently
+        // reroute a plain text-to-image render.
+        req.edit_images = Some(vec![]);
+        assert!(!engine.uses_sequential_generate_path(&req));
+
+        // References plus a LoRA: Klein keeps LoRA (only [dev]'s checkpoint
+        // refuses one), and either reason alone already forces the sequential
+        // path.
+        req.edit_images = Some(vec![vec![0x89, 0x50, 0x4e, 0x47]]);
+        engine.pending_loras = vec![LoraWeight {
+            path: dir.join("style.safetensors").display().to_string(),
+            scale: 0.8,
+            expert: None,
+        }];
+        assert!(engine.uses_sequential_generate_path(&req));
     }
 
     #[test]

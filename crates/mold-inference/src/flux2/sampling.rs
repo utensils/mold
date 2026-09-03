@@ -5,6 +5,7 @@
 //! - 4D positional IDs (vs FLUX.1's 3D)
 //! - No pooled text vector (Dev adds guidance conditioning separately)
 
+use anyhow::Context as _;
 use candle_core::{Result, Tensor};
 
 /// Sampling state for FLUX.2 Klein and Dev checkpoints.
@@ -112,6 +113,43 @@ pub fn pack_image_tokens(img: &Tensor, time_coordinate: u32) -> Result<(Tensor, 
     .to_dtype(candle_core::DType::F32)?
     .reshape((1, ph * pw, 4))?
     .repeat((batch, 1, 1))?;
+    Ok((tokens, ids))
+}
+
+/// Pack an ORDERED group of VAE-encoded reference latents into the single
+/// token/id pair the transformer appends after the noisy target tokens.
+///
+/// Reference `i` (zero-based) takes time coordinate `10 * (i + 1)`, and the
+/// groups concatenate along the sequence axis in the order they were given.
+/// The scale of 10 is first-party BFL: `flux2/src/flux2/sampling.py:53` sets
+/// `scale = 10` and `default_prep` (`:226`) numbers the references from it;
+/// diffusers mirrors it in `_prepare_image_ids`
+/// (`pipeline_flux2_klein.py:318-366`, `t = scale + scale * i` at `:352`), and
+/// ComfyUI's `comfy/model_detection.py:242-256` sets `ref_index_scale = 10.0`
+/// for EVERY flux2 checkpoint — which is why distilled Klein, Klein base, and
+/// [dev] all speak this protocol with the same checkpoint layout.
+///
+/// Each group restarts its own row/column grid, so the coordinate that keeps
+/// two references apart is the time plane and nothing else. That is also why
+/// this is a function rather than a loop inside the pipeline: the ordering is
+/// the contract, and it is unit-testable without weights.
+pub fn pack_reference_group(latents: &[Tensor]) -> anyhow::Result<(Tensor, Tensor)> {
+    if latents.is_empty() {
+        anyhow::bail!("pack_reference_group requires at least one reference latent");
+    }
+    let mut token_groups = Vec::with_capacity(latents.len());
+    let mut id_groups = Vec::with_capacity(latents.len());
+    for (index, latent) in latents.iter().enumerate() {
+        let time_coordinate = u32::try_from(index + 1)
+            .context("too many FLUX.2 reference images")?
+            .checked_mul(10)
+            .context("FLUX.2 reference time coordinate overflow")?;
+        let (tokens, ids) = pack_image_tokens(latent, time_coordinate)?;
+        token_groups.push(tokens);
+        id_groups.push(ids);
+    }
+    let tokens = Tensor::cat(&token_groups.iter().collect::<Vec<_>>(), 1)?;
+    let ids = Tensor::cat(&id_groups.iter().collect::<Vec<_>>(), 1)?;
     Ok((tokens, ids))
 }
 
@@ -223,6 +261,54 @@ mod tests {
         let mu_small = compute_empirical_mu(256, 4);
         let mu_large = compute_empirical_mu(4096, 4);
         assert!(mu_large > mu_small, "larger images should have higher mu");
+    }
+
+    /// Ordered references are told apart by their TIME plane and nothing
+    /// else: reference 1 sits at t=10, reference 2 at t=20
+    /// (`flux2/src/flux2/sampling.py:53` `scale = 10`, `default_prep` at
+    /// `:226`; diffusers `pipeline_flux2_klein.py:352`), each restarts its own
+    /// row/column grid, and axis 3 stays 0 for every image token. Two
+    /// differently shaped latents pin all of it at once, because a group that
+    /// carried the target's grid instead would still concatenate cleanly.
+    #[test]
+    fn ordered_klein_references_occupy_successive_time_planes() {
+        let dev = Device::Cpu;
+        let first = Tensor::randn(0f32, 1., (1, 32, 8, 6), &dev).unwrap();
+        let second = Tensor::randn(0f32, 1., (1, 32, 4, 4), &dev).unwrap();
+        let (tokens, ids) = pack_reference_group(&[first, second]).unwrap();
+
+        // (8/2)*(6/2) = 12 tokens, then (4/2)*(4/2) = 4.
+        assert_eq!(tokens.dims(), &[1, 12 + 4, 128]);
+        assert_eq!(ids.dims(), &[1, 12 + 4, 4]);
+
+        let ids = ids.i(0).unwrap().to_vec2::<f32>().unwrap();
+        for row in ids.iter().take(12) {
+            assert_eq!(row[0], 10.0, "the first reference occupies time plane 10");
+        }
+        for row in ids.iter().skip(12) {
+            assert_eq!(row[0], 20.0, "the second reference occupies time plane 20");
+        }
+        // Row/column coordinates restart per group rather than continuing the
+        // previous one's grid.
+        assert_eq!((ids[0][1], ids[0][2]), (0.0, 0.0));
+        assert_eq!((ids[11][1], ids[11][2]), (3.0, 2.0));
+        assert_eq!((ids[12][1], ids[12][2]), (0.0, 0.0));
+        assert_eq!((ids[15][1], ids[15][2]), (1.0, 1.0));
+        // Axis 3 is unused by the image branch and must stay zero.
+        assert!(ids.iter().all(|row| row[3] == 0.0));
+
+        // A single reference still lands on t=10, never on the target's 0.
+        let (_, solo) =
+            pack_reference_group(&[Tensor::randn(0f32, 1., (1, 32, 4, 4), &dev).unwrap()]).unwrap();
+        assert!(solo
+            .i(0)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap()
+            .iter()
+            .all(|row| row[0] == 10.0));
+
+        assert!(pack_reference_group(&[]).is_err());
     }
 
     #[test]

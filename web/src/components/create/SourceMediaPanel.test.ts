@@ -1,6 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import SourceMediaPanel from "./SourceMediaPanel.vue";
+import { flux2KleinRecipe } from "@studio/lib/generationProfile.testFixtures";
 import {
   useGenerateForm,
   __testing__,
@@ -443,5 +444,138 @@ describe("SourceMediaPanel — direct file uploads", () => {
     expect(
       wrapper.get("[data-test='source-conditioning-error']").text(),
     ).toContain("Only PNG or JPEG");
+  });
+});
+
+/**
+ * The References strip is a DROP TARGET in its own right.
+ *
+ * It was not: the strip rendered click-only buttons, so a file dragged onto it
+ * fell through to the window listener in `CreatePage.vue`, which routed with
+ * `hovered = null` and handed the picture to the SOURCE well. On a Klein form
+ * that is the opposite of what the user aimed at, and it parks the strip they
+ * were adding to. The container now carries `data-drop-target="references"`
+ * and its own `@drop.prevent`, which both writes through the same fields the
+ * strip's picker writes AND marks the event handled so the window listener
+ * leaves it alone.
+ */
+describe("SourceMediaPanel - the References strip is a drop target", () => {
+  const PNG_7x4 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+
+  function droppedPng(name = "ref.png"): File {
+    const bytes = Uint8Array.from(atob(PNG_7x4), (c) => c.charCodeAt(0));
+    return new File([bytes], name, { type: "image/png" });
+  }
+
+  /** Klein's two-well layout comes from the ADVERTISED recipe: the interim
+   * legacy sniff deliberately answers "no references" for Klein. */
+  function kleinModel(): ModelInfoExtended {
+    return {
+      name: "flux2-klein:bf16",
+      family: "flux2",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+  }
+
+  function klein(overrides: Partial<GenerateFormState> = {}) {
+    return factory(
+      "flux2",
+      { model: "flux2-klein:bf16", modelFamily: "flux2", ...overrides },
+      { models: [kleinModel()] },
+    );
+  }
+
+  it("labels both strips as the references drop target", () => {
+    expect(
+      factory("flux2", { model: "flux2-dev" })
+        .get("[data-test='reference-strip']")
+        .attributes("data-drop-target"),
+    ).toBe("references");
+    expect(
+      klein()
+        .get("[data-test='reference-strip']")
+        .attributes("data-drop-target"),
+    ).toBe("references");
+  });
+
+  it("appends a drop on the strip to the strip, never the Source well", async () => {
+    const wrapper = factory("flux2", {
+      model: "flux2-dev",
+      imageAttachments: [
+        { kind: "upload", filename: "held.png", base64: "HELD" },
+      ],
+    });
+    await wrapper
+      .get("[data-test='reference-strip']")
+      .trigger("drop", { dataTransfer: { files: [droppedPng()] } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.imageAttachments.map((m) => m.filename)).toEqual([
+      "held.png",
+      "ref.png",
+    ]);
+  });
+
+  it("keeps an exclusive recipe's Source well untouched by a strip drop", async () => {
+    const wrapper = klein({
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "SRC" },
+      ],
+    });
+    await wrapper
+      .get("[data-test='reference-strip']")
+      .trigger("drop", { dataTransfer: { files: [droppedPng()] } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    // The source PARKS with its media kept; the references become active.
+    expect(next.imageAttachments.map((m) => m.filename)).toEqual([
+      "source.png",
+    ]);
+    expect(next.referenceImages?.map((m) => m.filename)).toEqual(["ref.png"]);
+    expect(next.exclusiveWell).toBe("references");
+  });
+
+  it("marks the drop handled so the window listener leaves it alone", async () => {
+    const wrapper = factory("flux2", { model: "flux2-dev" });
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { files: [droppedPng()] },
+    });
+    wrapper.get("[data-test='reference-strip']").element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  /**
+   * The ceiling belongs in the sentence. The `referenceMax` interpolation was
+   * dropped from both renderings, leaving "Up to  ordered references." on
+   * screen with a hole where the number should be.
+   */
+  it("names the advertised ceiling in the strip copy", () => {
+    expect(factory("flux2", { model: "flux2-dev" }).text()).toContain(
+      "Up to 4 ordered references.",
+    );
+    expect(klein().text()).toContain("Up to 4 ordered references.");
+  });
+
+  it("drops the ceiling clause entirely when the recipe is unbounded", () => {
+    expect(factory("qwen-image-edit").text()).not.toContain("Up to");
   });
 });

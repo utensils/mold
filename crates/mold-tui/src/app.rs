@@ -595,6 +595,10 @@ pub enum ParamField {
     // Advanced — Source
     SourceImage,
     References,
+    /// The ordered `edit_images` group a reference-editing recipe takes.
+    /// Distinct from `References`, which is MiniMax H3's uploaded Ref2VA
+    /// group: different wire field, different transport.
+    ReferenceImages,
     Strength,
     MaskImage,
     ControlImage,
@@ -660,6 +664,7 @@ impl ParamField {
             Self::Offload => "Offload",
             Self::SourceImage => "Source",
             Self::References => "References",
+            Self::ReferenceImages => "References",
             Self::Strength => "Strength",
             Self::MaskImage => "Mask",
             Self::ControlImage => "Control",
@@ -826,6 +831,10 @@ pub struct GenerateParams {
     /// Ordered H3 reference paths. This transient state is deliberately not
     /// serialized; only basename + digest provenance crosses the wire.
     pub reference_paths: Vec<crate::h3_references::ReferencePath>,
+    /// Ordered reference-image paths for a recipe that advertises
+    /// `capabilities.reference_images`. Transient TUI state, like the source
+    /// image: only the bytes and the basenames cross the wire.
+    pub edit_image_paths: Vec<String>,
     pub strength: f64,
     pub mask_image_path: Option<String>,
     // Identity (PuLID). The path is transient TUI state: only the
@@ -996,6 +1005,7 @@ impl GenerateParams {
             source_image_path: None,
             source_image_recall: None,
             reference_paths: Vec::new(),
+            edit_image_paths: Vec::new(),
             strength: 0.75,
             mask_image_path: None,
             identity_image_path: None,
@@ -1107,6 +1117,11 @@ impl GenerateParams {
                 0 => "\u{27e8}none\u{27e9}".to_string(),
                 1 => "1 ordered file".to_string(),
                 count => format!("{count} ordered files"),
+            },
+            ParamField::ReferenceImages => match self.edit_image_paths.len() {
+                0 => "\u{27e8}none\u{27e9}".to_string(),
+                1 => "1 image".to_string(),
+                count => format!("{count} images"),
             },
             ParamField::Strength => format!("{:.2}", self.strength),
             // The three mesh rows read "default" while untouched: the
@@ -2315,6 +2330,12 @@ pub enum Popup {
         input: String,
         error: Option<String>,
     },
+    /// Ordered reference-image paths for an `edit_images` recipe, as
+    /// `a.png; b.jpg`. Local paths only; the bytes are read at dispatch.
+    ReferenceImagesInput {
+        input: String,
+        error: Option<String>,
+    },
     /// Local path to the PuLID face-identity photo. Committing opens the file
     /// no-follow and bounds-checks it through `mold_core::identity`, so a
     /// rejected photo never leaves the picker; the refusal stays visible here
@@ -3337,6 +3358,14 @@ impl App {
         if !self.generate.capabilities.supports_references {
             self.generate.params.reference_paths.clear();
         }
+        // Same rule for the ordered reference group: with no References row
+        // there is no editor left to clear it, and `edit_images` on a model
+        // with no reference protocol is refused at admission by name. Gated
+        // on the ROW, so switching to a target-first recipe also drops a
+        // group that recipe's request builder would never read.
+        if self.generate.capabilities.reference_images_row().is_none() {
+            self.generate.params.edit_image_paths.clear();
+        }
         // `id_start_step` is bounded by the step count, which every model
         // switch can move; a restored 20 against a 4-step model would be
         // refused at admission for a value the form never let the user set.
@@ -4285,6 +4314,14 @@ impl App {
         self.dispatch_action(action);
     }
 
+    /// Whether an attached reference group leaves no room for a source image
+    /// on the selected recipe. The decision lives on
+    /// [`crate::model_info::ModelCapabilities`], beside the row gate it reads,
+    /// so the form and the commit can never disagree.
+    fn reference_group_replaces_source(&self) -> bool {
+        self.generate.capabilities.reference_group_replaces_source()
+    }
+
     /// Close the active popup and refresh the preview image so it re-renders
     /// over the area the popup occupied.
     fn close_popup(&mut self) {
@@ -4602,6 +4639,47 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::ReferenceImagesInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        // The count ceiling is the recipe's own, so the
+                        // refusal a user reads here is the one admission
+                        // would have sent back.
+                        let max = self
+                            .generate
+                            .capabilities
+                            .reference_images_row()
+                            .and_then(|profile| profile.max_count);
+                        match crate::source_image::parse_reference_image_input(input, max) {
+                            Ok(paths) => {
+                                // A recipe that renders from ONE of the two
+                                // parks the Source row rather than shipping a
+                                // request `validate_edit_images_against`
+                                // refuses.
+                                if !paths.is_empty() && self.reference_group_replaces_source() {
+                                    self.generate.params.source_image_path = None;
+                                    self.generate.params.source_image_recall = None;
+                                    self.generate.params.mask_image_path = None;
+                                }
+                                self.generate.params.edit_image_paths = paths;
+                                self.close_popup();
+                            }
+                            Err(message) => *error = Some(message),
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if input.len() + c.len_utf8()
+                            <= crate::source_image::REFERENCE_INPUT_MAX_BYTES =>
+                    {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
                 Some(Popup::IdentityImageInput { input, error }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
@@ -4653,6 +4731,13 @@ impl App {
                         } else {
                             match crate::source_image::validate_source_image_path(input) {
                                 Ok(path) => {
+                                    // The other half of the exclusive pair:
+                                    // attaching a source parks the reference
+                                    // group, exactly as attaching references
+                                    // parks the source.
+                                    if self.reference_group_replaces_source() {
+                                        self.generate.params.edit_image_paths.clear();
+                                    }
                                     self.generate.params.source_image_path = Some(path);
                                     self.generate.params.source_image_recall = None;
                                     self.close_popup();
@@ -6413,6 +6498,7 @@ impl App {
             | ParamField::SourceImage
             | ParamField::IdentityImage
             | ParamField::References
+            | ParamField::ReferenceImages
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel
@@ -7463,6 +7549,12 @@ impl App {
                     &self.generate.params.reference_paths,
                 );
                 self.popup = Some(Popup::ReferencesInput { input, error: None });
+            }
+            ParamField::ReferenceImages => {
+                let input = crate::source_image::format_reference_image_input(
+                    &self.generate.params.edit_image_paths,
+                );
+                self.popup = Some(Popup::ReferenceImagesInput { input, error: None });
             }
             ParamField::IdentityImage => {
                 let input = self

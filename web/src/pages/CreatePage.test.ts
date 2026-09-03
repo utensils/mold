@@ -37,6 +37,7 @@ import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import {
+  flux2KleinRecipe,
   hunyuan3dRecipe,
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
@@ -1718,6 +1719,58 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("whole numbers");
+  });
+
+  /**
+   * On an EXCLUSIVE (FLUX.2 [klein]) recipe the mask belongs to the SOURCE
+   * well, so when the references are the active conditioning the mask is
+   * parked with the well it describes: `toRequest` already omits it, and the
+   * submit gate must not block Generate on a control the user cannot even see.
+   */
+  it("lets a Klein form with active references submit past a parked mask", async () => {
+    const klein = {
+      ...installedModelRow("flux2-klein:bf16", "flux2"),
+      default_steps: 4,
+      default_guidance: 1,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "klein",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([klein]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:bf16";
+    form.state.value.modelFamily = "flux2";
+    form.state.value.prompt = "a cat";
+    // The Source well is empty; the references are the active well, and a
+    // mask staged earlier (while a source WAS attached) is still in the form.
+    form.state.value.imageAttachments = [];
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    form.state.value.exclusiveWell = "references";
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK",
+    };
+    await nextTick();
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Mask image needs a source image.");
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    const request = submitMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(request.edit_images).toEqual(["REF"]);
+    expect(request.source_image ?? null).toBeNull();
+    expect(request.mask_image ?? null).toBeNull();
   });
 
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
@@ -4680,6 +4733,59 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.get("[data-test='file-under-collection']").text()).toContain(
       "River studies",
     );
+  });
+
+  // ── Window-level image drop (§1k) ─────────────────────────────────────
+  // A file dropped a pixel outside a well used to navigate the browser to the
+  // image and take the SPA with it. The window handler routes those through
+  // the SAME shared policy the wells use, and never touches a drop a well
+  // already handled.
+  function fileDrop(file: File): DragEvent {
+    const event = new Event("drop", {
+      bubbles: true,
+      cancelable: true,
+    }) as DragEvent;
+    Object.defineProperty(event, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+    return event;
+  }
+
+  /** A 1×1 PNG, so the header decode that gates every well succeeds. */
+  const PNG_1X1 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  function pngFile(name = "dropped.png"): File {
+    const bytes = Uint8Array.from(atob(PNG_1X1), (c) => c.charCodeAt(0));
+    return new File([bytes], name, { type: "image/png" });
+  }
+
+  it("ignores a drop a well already handled", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "sdxl:fp16",
+        family: "sdxl",
+        downloaded: true,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 7,
+      },
+    ]);
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl:fp16";
+    form.state.value.modelFamily = "sdxl";
+    await nextTick();
+
+    // A well's own `@drop.prevent` runs first and marks the event; the window
+    // handler must not attach the same file a second time.
+    const handled = fileDrop(pngFile("well.png"));
+    handled.preventDefault();
+    window.dispatchEvent(handled);
+    await flushPromises();
+    expect(form.state.value.imageAttachments).toHaveLength(0);
   });
 });
 

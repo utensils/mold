@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
-import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { flux2KleinRecipe, hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import type { ModelEntry } from "../lib/api/types";
 import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
 
@@ -273,6 +273,47 @@ describe("mobile generation request preparation", () => {
     expect(request.height).toBe(0);
     expect(request.source_fit).toBeUndefined();
     expect(request.output_format).toBe("glb");
+  });
+
+  /**
+   * The exclusive (Klein) recipe: preparation reads the ADVERTISED reference
+   * contract, so a parked source is never fitted and the request the phone
+   * builds carries `edit_images` instead of the well the user parked.
+   */
+  it("prepares the active references well on an exclusive recipe, never the parked source", async () => {
+    const selected = model({
+      name: "flux2-klein:bf16",
+      family: "flux2",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "flux2-klein-hash",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    });
+    const draft = newGenerateForm();
+    applyModelDefaults(draft, selected);
+    Object.assign(draft, {
+      prompt: "a lantern on a pier",
+      sourceImage: "parked-source",
+      imageAttachments: ["REF_A", "REF_B"],
+      exclusiveWell: "references",
+    });
+
+    const request = await prepareMobileGenerationRequest(
+      {
+        target: { baseUrl: "http://studio.test:7680", apiKey: "secret" },
+        draft,
+        selectedModel: selected,
+      },
+      services(),
+    );
+
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+    expect(request.edit_images).toEqual(["REF_A", "REF_B"]);
+    expect(request.source_image).toBeUndefined();
+    expect(request.mask_image).toBeUndefined();
   });
 
   it("suppresses late preprocessing status after the caller becomes stale", async () => {

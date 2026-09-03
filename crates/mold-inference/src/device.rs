@@ -926,6 +926,37 @@ pub fn activation_bytes(
     raw.max(ACTIVATION_FLOOR_BYTES)
 }
 
+/// Scale a FLUX.2 activation budget by how much longer the sequence becomes
+/// once reference tokens are appended.
+///
+/// The transformer sees ONE sequence: the noisy target tokens followed by
+/// every reference group (`pipeline_flux2_klein.py:845-846`), and both CFG
+/// branches see the same input (`:862-873`). Attention therefore scales with
+/// the packed length, not with the canvas — which is why the budget cannot be
+/// derived from `width × height` alone.
+///
+/// The ratio is applied to the BYTES, not rounded to a whole-number
+/// multiplier first: a 1 MP target with one 2024²-capped reference is a 4.9×
+/// sequence, and rounding that up to 5× over-reserves on exactly the 24 GB
+/// cards Klein targets. Rounding happens once, up to the byte.
+/// Pixels and packed tokens patchify at the same rate, so the caller may pass
+/// either as long as both arguments use the same unit; a zero-pixel target
+/// never divides by zero and no references cost exactly what they did before.
+///
+/// This is the server's admission gate and the engine's own preflight sharing
+/// one answer — the server plans against the same bytes the pipeline then
+/// reserves.
+pub fn flux2_reference_scaled_activation_bytes(
+    activation_bytes: u64,
+    target_units: u64,
+    reference_units: u64,
+) -> u64 {
+    let target = u128::from(target_units.max(1));
+    let total = target + u128::from(reference_units);
+    let scaled = (u128::from(activation_bytes) * total).div_ceil(target);
+    u64::try_from(scaled).unwrap_or(u64::MAX)
+}
+
 /// Bytes per element for a given candle dtype, used to feed
 /// [`activation_bytes`] from a runtime `DType`. Returns `2` for bf16/fp16 and
 /// `4` for f32; integer / quantized weights still flow as bf16/fp16
@@ -4453,6 +4484,25 @@ mod tests {
     }
 
     /// Tiny inputs return at least 256 MB (kernel-workspace floor).
+    #[test]
+    fn reference_scaling_is_byte_exact_not_a_whole_number_multiplier() {
+        // No references: the budget is untouched.
+        assert_eq!(
+            flux2_reference_scaled_activation_bytes(1_000, 4_096, 0),
+            1_000
+        );
+        // One 2024²-capped reference beside a 1 MP target is a 4.9× sequence,
+        // not 5× — the `div_ceil`-to-an-integer answer over-reserved.
+        let target = 1024 * 1024;
+        let reference = 2024 * 2024;
+        let scaled = flux2_reference_scaled_activation_bytes(1_000_000, target, reference);
+        assert!((4_900_000..5_000_000).contains(&scaled), "{scaled}");
+        // Rounding is up, to the byte.
+        assert_eq!(flux2_reference_scaled_activation_bytes(10, 3, 1), 14);
+        // A zero-pixel target never divides by zero.
+        assert_eq!(flux2_reference_scaled_activation_bytes(7, 0, 5), 42);
+    }
+
     #[test]
     fn activation_bytes_floors_at_256mb() {
         let tiny = activation_bytes(64, 64, 1, 2, ActivationFamily::FluxDit);

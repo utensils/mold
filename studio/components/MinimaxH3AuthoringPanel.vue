@@ -393,6 +393,7 @@ function imagePreview(
     class="h3-authoring"
     :class="{ 'h3-authoring--touch': touchFriendly }"
     data-test="h3-authoring"
+    data-drop-target="h3-reference"
   >
     <header class="h3-authoring__header">
       <div>

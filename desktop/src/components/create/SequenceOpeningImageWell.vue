@@ -91,6 +91,7 @@ async function onOpeningImageFile(file: File) {
       gallery
       alt="Opening sequence image"
       test-id="sequence-opening-image"
+      drop-target="opening"
       @file="onOpeningImageFile"
       @gallery="pickerOpen = true"
       @clear="draft.openingImage = null"

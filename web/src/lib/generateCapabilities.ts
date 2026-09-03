@@ -1,13 +1,12 @@
 import {
   baseGenerationCapabilities,
-  isFlux2DevModel,
   isQwenImageEditFamily,
   type BaseGenerationCapabilities,
 } from "@studio/lib/generationCapabilities";
 import type { Scheduler } from "../types";
 
 export type { SourceImageMode } from "@studio/lib/generationCapabilities";
-export { isFlux2DevModel, isQwenImageEditFamily };
+export { isQwenImageEditFamily };
 
 export interface GenerationCapabilities extends Omit<
   BaseGenerationCapabilities,

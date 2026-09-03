@@ -3,6 +3,43 @@
 Mold supports the distilled Klein checkpoints, the undistilled Klein base
 checkpoints, and the full FLUX.2 Dev checkpoint.
 
+## Reference-image editing
+
+Every FLUX.2 checkpoint speaks the same reference protocol — Black Forest Labs
+ships text-to-image, single-reference editing, and multi-reference editing in
+one model for Klein 4B and 9B, both Base tiers, and Dev. Mold accepts up to
+four ordered PNG/JPEG references per render, each placed on its own time plane
+in the order given, so "image 1" in the prompt is the first reference.
+
+```bash
+# Klein: --reference carries the ordered group
+mold run flux2-klein:bf16 "put sunglasses on the person, keep the pose and background" \
+  --reference person.jpg
+
+mold run flux2-klein-9b:q8 "the woman from image 1 wearing the eyeglasses from image 2" \
+  --reference person.jpg --reference glasses.jpg
+
+# Dev reads its ordered references from repeated --image
+mold run flux2-dev:q6 "the jacket from image 1 on the model from image 2" \
+  --image jacket.png --image model.png
+```
+
+The difference between the tiers is what references do to the source image, and
+`/api/models[].generation_profile.capabilities.reference_images` is the single
+place that says so — no client derives it from the model name:
+
+| Tier                       | Source image                                     | References                  | Together?                                   |
+| -------------------------- | ------------------------------------------------ | --------------------------- | ------------------------------------------- |
+| Klein (distilled and Base) | `--image`, with `--strength`, `--mask`, and LoRA | `--reference`, up to 4      | No — one pass renders from one or the other |
+| Dev                        | none                                             | repeated `--image`, up to 4 | n/a                                         |
+
+Klein's relation is _exclusive_: passing `--reference` and `--image` together is
+refused rather than silently dropping one, and a Klein render with no references
+attached is an ordinary img2img (or text-to-image) pass with every control
+intact. Name each reference's role in the prompt — BFL's guidance is to
+"clearly describe the role of each: subject from image 1, style from image 2,
+background from image 3" — because references with no stated role blend.
+
 ## Flux.2 Dev
 
 The 32B-class checkpoint uses a streamed Mistral3 prompt encoder and
@@ -54,7 +91,9 @@ mold pull flux2-dev:bf16
 
 Classic strength-based img2img, masks, ControlNet, LoRA, and batches with
 references are rejected because the checkpoint-native reference protocol does
-not implement those controls. Text-only batches remain supported.
+not implement those controls. Text-only batches remain supported. This is Dev
+alone: Klein keeps img2img, masks, and LoRA, because its references are an
+alternative to the source image rather than a replacement for it.
 
 ## Flux.2 Klein
 

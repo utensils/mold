@@ -164,6 +164,7 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
     }
     if caps.supports_source_image
         || caps.supports_references
+        || caps.reference_images_row().is_some()
         || caps.supports_strength
         || caps.supports_mask
         || caps.supports_controlnet
@@ -213,6 +214,15 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             let mut fields = Vec::new();
             if caps.supports_references {
                 fields.push(ParamField::References);
+            }
+            // The ordered `edit_images` group sits ABOVE Source for the same
+            // reason H3's list does: on every recipe that has both, the
+            // references are the primary conditioning and the source is the
+            // alternative. `reference_images_row` — never the raw capability
+            // — is the gate, so a target-first recipe (qwen-image-edit,
+            // whose first image IS the Source well's image) gets no row.
+            if caps.reference_images_row().is_some() {
+                fields.push(ParamField::ReferenceImages);
             }
             if caps.supports_source_image {
                 fields.push(ParamField::SourceImage);
@@ -353,6 +363,9 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
         AdvSection::Source if !params.reference_paths.is_empty() => {
             format!("{} ordered", params.reference_paths.len())
         }
+        AdvSection::Source if !params.edit_image_paths.is_empty() => {
+            format!("{} reference images", params.edit_image_paths.len())
+        }
         AdvSection::Source => params
             .source_image_path
             .as_deref()
@@ -486,6 +499,7 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         count += 1;
     }
     if !params.reference_paths.is_empty()
+        || !params.edit_image_paths.is_empty()
         || params.source_image_path.is_some()
         || params.mask_image_path.is_some()
         || params.control_image_path.is_some()
