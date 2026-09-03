@@ -2,7 +2,7 @@
 //! `app_data_dir`. These are window/app preferences only — engine
 //! configuration stays in mold's own config stores (config.toml + mold.db).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -361,19 +361,86 @@ impl Default for AppSettings {
 
 /// Load settings from `path`. A missing or unreadable file yields defaults —
 /// settings must never block app startup.
+///
+/// Recovery is PER KEY. A value this build cannot read — a theme, channel, or
+/// mode that a newer nightly wrote and an older build (or a dev build sharing
+/// the same app data) now reads back — falls back to its default alone, while
+/// the update channel, saved machines, panel widths, and every other key stay
+/// exactly as the user left them. Whole-struct defaults here are the one
+/// thing this function must never answer with: the next save persists them,
+/// which is how a stale dev build moved a Nightly install back to Stable and
+/// forgot every remembered machine (2026-09-03).
 pub fn load(path: &Path) -> AppSettings {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return AppSettings::default();
     };
-    serde_json::from_str::<serde_json::Value>(&raw)
-        .and_then(|mut value| {
-            migrate_theme_keys(&mut value);
-            serde_json::from_value(value)
+    let document = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(serde_json::Value::Object(object)) => object,
+        Ok(_) => {
+            preserve_invalid_document(path, &raw, "the document is not a JSON object");
+            return AppSettings::default();
+        }
+        Err(e) => {
+            preserve_invalid_document(path, &raw, &e.to_string());
+            return AppSettings::default();
+        }
+    };
+    let mut value = serde_json::Value::Object(document);
+    migrate_theme_keys(&mut value);
+    parse_keeping_readable_keys(value)
+}
+
+/// Parse a settings document, dropping only the keys this build cannot read.
+/// The struct is `#[serde(default)]`, so probing one key at a time against
+/// the whole struct is exact: a key survives iff its value deserializes.
+fn parse_keeping_readable_keys(mut value: serde_json::Value) -> AppSettings {
+    let whole = match serde_json::from_value::<AppSettings>(value.clone()) {
+        Ok(settings) => return settings,
+        Err(e) => e,
+    };
+    let Some(object) = value.as_object_mut() else {
+        return AppSettings::default();
+    };
+    let unreadable: Vec<String> = object
+        .iter()
+        .filter(|(key, entry)| {
+            let mut probe = serde_json::Map::new();
+            probe.insert((*key).clone(), (*entry).clone());
+            serde_json::from_value::<AppSettings>(serde_json::Value::Object(probe)).is_err()
         })
-        .unwrap_or_else(|e| {
-            tracing::warn!("settings.json is invalid ({e}); using defaults");
-            AppSettings::default()
-        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in &unreadable {
+        object.remove(key);
+        tracing::warn!(
+            "settings.json: `{key}` holds a value this build cannot read; keeping its default and every other key"
+        );
+    }
+    serde_json::from_value(value).unwrap_or_else(|e| {
+        tracing::warn!("settings.json is invalid ({whole}; after recovery: {e}); using defaults");
+        AppSettings::default()
+    })
+}
+
+/// Keep the bytes of a document this build cannot parse at all beside the
+/// store, so the defaults the next save writes never erase what was there.
+fn preserve_invalid_document(path: &Path, raw: &str, reason: &str) {
+    let backup = invalid_backup_path(path);
+    match std::fs::write(&backup, raw) {
+        Ok(()) => tracing::warn!(
+            "settings.json is invalid ({reason}); using defaults and keeping the original at {}",
+            backup.display()
+        ),
+        Err(e) => tracing::warn!(
+            "settings.json is invalid ({reason}); using defaults (could not keep the original: {e})"
+        ),
+    }
+}
+
+/// Where a document this build cannot parse at all is kept before the next
+/// save replaces it with defaults: `settings.json.invalid` beside the file.
+fn invalid_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.invalid")
 }
 
 /// Persist settings atomically (write to a sibling temp file, then rename).
@@ -620,11 +687,93 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_yields_defaults() {
+    fn corrupt_file_is_preserved_beside_the_defaults() {
+        // A file this build cannot even parse as JSON must not be silently
+        // overwritten by the defaults the next save writes: keep the bytes
+        // beside it so nothing is lost.
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(&path, "not json {").unwrap();
         assert_eq!(load(&path), AppSettings::default());
+        let backup = std::fs::read_to_string(invalid_backup_path(&path)).unwrap();
+        assert_eq!(backup, "not json {");
+    }
+
+    #[test]
+    fn a_value_this_build_cannot_read_keeps_every_other_key() {
+        // The 2026-09-03 incident: a build that knew `theme: system|dark|light`
+        // read a file a newer build had migrated to `theme: mocha`, failed the
+        // WHOLE struct, fell back to defaults, and saved them — resetting the
+        // update channel to stable and erasing every saved host. Only the key
+        // this build cannot read may fall back; the rest of the file is the
+        // user's and stays.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{
+              "mode": "teleport",
+              "theme": "blueprint",
+              "matchSystem": true,
+              "updateChannel": "nightly",
+              "uiScalePercent": 120,
+              "savedHosts": [{"id": "hal9000-7680", "url": "http://hal9000:7680"}],
+              "connectedHostIds": ["hal9000-7680"]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load(&path);
+
+        assert_eq!(
+            loaded.mode,
+            ConnectionMode::Local,
+            "only the unreadable key defaults"
+        );
+        assert_eq!(loaded.update_channel, UpdateChannel::Nightly);
+        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert!(loaded.match_system);
+        assert_eq!(loaded.ui_scale_percent, 120);
+        assert_eq!(loaded.saved_hosts.len(), 1);
+        assert_eq!(loaded.saved_hosts[0].url, "http://hal9000:7680");
+        assert_eq!(loaded.connected_host_ids, vec!["hal9000-7680".to_string()]);
+    }
+
+    #[test]
+    fn several_unreadable_values_each_fall_back_alone() {
+        // A downgrade can meet more than one newer value at once (a channel
+        // and a mode this build never learned); each falls back on its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{"mode":"teleport","updateChannel":"beta","uiScalePercent":"huge","theme":"blueprint","dockBadge":false}"#,
+        )
+        .unwrap();
+
+        let loaded = load(&path);
+
+        assert_eq!(loaded.mode, ConnectionMode::Local);
+        assert_eq!(loaded.update_channel, UpdateChannel::Stable);
+        assert_eq!(loaded.ui_scale_percent, 100);
+        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert!(!loaded.dock_badge);
+        assert!(
+            loaded.notifications,
+            "untouched defaults keep their defaults"
+        );
+    }
+
+    #[test]
+    fn a_non_object_document_is_preserved_beside_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        assert_eq!(load(&path), AppSettings::default());
+        assert_eq!(
+            std::fs::read_to_string(invalid_backup_path(&path)).unwrap(),
+            "[1, 2, 3]"
+        );
     }
 
     #[test]
