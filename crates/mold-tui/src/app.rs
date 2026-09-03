@@ -3360,8 +3360,10 @@ impl App {
         }
         // Same rule for the ordered reference group: with no References row
         // there is no editor left to clear it, and `edit_images` on a model
-        // with no reference protocol is refused at admission by name.
-        if self.generate.capabilities.reference_images.is_none() {
+        // with no reference protocol is refused at admission by name. Gated
+        // on the ROW, so switching to a target-first recipe also drops a
+        // group that recipe's request builder would never read.
+        if self.generate.capabilities.reference_images_row().is_none() {
             self.generate.params.edit_image_paths.clear();
         }
         // `id_start_step` is bounded by the step count, which every model
@@ -4313,23 +4315,11 @@ impl App {
     }
 
     /// Whether an attached reference group leaves no room for a source image
-    /// on the selected recipe.
-    ///
-    /// Read from the recipe's `source_relation`, never from the family name.
-    /// `Replaces` never reads `source_image` at all and `Exclusive` renders
-    /// from one or the other, so both park the Source row while references
-    /// are attached; the reserved `Combines` would keep both.
+    /// on the selected recipe. The decision lives on
+    /// [`crate::model_info::ModelCapabilities`], beside the row gate it reads,
+    /// so the form and the commit can never disagree.
     fn reference_group_replaces_source(&self) -> bool {
-        self.generate
-            .capabilities
-            .reference_images
-            .as_ref()
-            .is_some_and(|profile| {
-                !matches!(
-                    profile.source_relation,
-                    mold_core::generation_profile::ReferenceSourceRelation::Combines
-                )
-            })
+        self.generate.capabilities.reference_group_replaces_source()
     }
 
     /// Close the active popup and refresh the preview image so it re-renders
@@ -4658,8 +4648,7 @@ impl App {
                         let max = self
                             .generate
                             .capabilities
-                            .reference_images
-                            .as_ref()
+                            .reference_images_row()
                             .and_then(|profile| profile.max_count);
                         match crate::source_image::parse_reference_image_input(input, max) {
                             Ok(paths) => {
