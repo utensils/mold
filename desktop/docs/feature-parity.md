@@ -351,9 +351,10 @@ the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
 **CLI** (`mold config`): `list [--json]` (tags rows `[db]`/`[file]`/`[env]`), `get <key> [--raw]`, `set <key> <val>` (routes by prefix — `expand.*`→DB, `models_dir`→TOML; `none` clears), `path`, `edit` ($EDITOR), `where <key>` (which surface owns it), `reset <key>|--all [--yes]` (drop DB key → fall back). `--profile <name>` global override. Multi-profile keyed on `(profile,key)`; resolves `MOLD_PROFILE`→`settings.profile.active`→`default`. One-shot idempotent config.toml→DB migration on first boot. Web `SettingsPage.vue` (with `ConfigSettingsPanel.vue`) and `GenerationTemplatesPanel.vue` (saved param presets); desktop `TemplatesPanel.vue` (parity — `localStorage` key `mold.desktop.generation.templates.v1`, base64 media stripped on save).
 
 **iPhone app settings:** `mold.mobile.settings.v1` stores four validated
-fields — `theme` (`system|dark|light`), `themeFamily` (`mold|safelight`),
-`autoSavePhotos`, and `autoTagTitle` — defaulting fresh installs to Dark +
-Safelight with Photos auto-save and title auto-tagging both on, while
+fields — `theme` (one of the six Mold Studio theme ids), `matchSystem`,
+`autoSavePhotos`, and `autoTagTitle` — defaulting fresh installs to
+Safelight with Photos auto-save and title auto-tagging both on (a saved
+`theme`/`themeFamily` pair from before the six themes migrates), while
 preserving valid saved choices (`website/guide/iphone.md` is canonical for the
 user-facing defaults).
 `src/lib/theme.ts` is the shared desktop/mobile contract. Mobile

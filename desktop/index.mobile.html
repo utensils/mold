@@ -15,18 +15,36 @@
       // family + appearance pair migrates, and a fresh phone starts on
       // Safelight.
       (function () {
-        var ids = ["mocha", "safelight", "blueprint", "graphite", "porcelain", "nebula"];
+        var pair = {
+          mocha: ["mocha", "blueprint"],
+          blueprint: ["mocha", "blueprint"],
+          graphite: ["graphite", "porcelain"],
+          porcelain: ["graphite", "porcelain"],
+          safelight: ["safelight", "porcelain"],
+          nebula: ["nebula", "porcelain"],
+        };
         var theme = "safelight";
+        var matchSystem = false;
         try {
           var raw = localStorage.getItem("mold.mobile.settings.v1");
           if (raw) {
             var parsed = JSON.parse(raw);
-            if (ids.indexOf(parsed.theme) >= 0) theme = parsed.theme;
-            else if (parsed.themeFamily === "mold")
+            if (pair[parsed.theme]) {
+              theme = parsed.theme;
+              matchSystem = parsed.matchSystem === true;
+            } else if (parsed.themeFamily === "mold") {
               theme = parsed.theme === "light" ? "blueprint" : "mocha";
-            else if (parsed.theme === "light") theme = "porcelain";
+              matchSystem = parsed.theme === "system";
+            } else {
+              if (parsed.theme === "light") theme = "porcelain";
+              matchSystem = parsed.theme === "system";
+            }
           }
         } catch (e) {}
+        if (matchSystem && window.matchMedia) {
+          var light = window.matchMedia("(prefers-color-scheme: light)").matches;
+          theme = pair[theme][light ? 1 : 0];
+        }
         document.documentElement.dataset.theme = theme;
       })();
     </script>
