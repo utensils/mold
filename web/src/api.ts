@@ -2,7 +2,6 @@ import type {
   ChainJobDetail,
   ChainJobListing,
   ChainJobSummary,
-  ChainProgressEvent,
   ChainRequestWire,
   CreateChainJobResponse,
   ExpandRequestWire,
@@ -15,8 +14,6 @@ import type {
   ModelInfoExtended,
   ModelComponentsResponse,
   ServerStatus,
-  SseChainCompleteEvent,
-  SseCompleteEvent,
   SseProgressEvent,
   SseUpscaleCompleteEvent,
   RetakeRequest,
@@ -283,13 +280,6 @@ export async function remixPrompt(
   return (await res.json()) as RemixResponseWire;
 }
 
-export interface GenerateStreamHandlers {
-  onProgress: (evt: SseProgressEvent) => void;
-  onComplete: (evt: SseCompleteEvent) => void;
-  onError: (err: StreamError) => void;
-  onRequestWarnings?: (warnings: string[]) => void;
-}
-
 /**
  * Where a generation stream is dispatched. Omitted = the serving origin (the
  * single-host case and every non-routed caller). The key travels as the
@@ -379,13 +369,6 @@ export async function upscaleStream(
     handlers,
     silentCloseMessage: "upscale stream closed before completion",
   });
-}
-
-export interface ChainStreamHandlers {
-  onProgress: (evt: ChainProgressEvent) => void;
-  onComplete: (evt: SseChainCompleteEvent) => void;
-  onError: (err: StreamError) => void;
-  onRequestWarnings?: (warnings: string[]) => void;
 }
 
 /** POST /api/generate/chain/stream — SSE stream for chained video

@@ -17,21 +17,83 @@ pub enum ConnectionMode {
     Off,
 }
 
+/// One of the six Mold Studio themes (ui/theme.ts is the TypeScript twin).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
-pub enum Theme {
-    System,
+pub enum ThemeId {
     #[default]
-    Dark,
-    Light,
+    Mocha,
+    Safelight,
+    Blueprint,
+    Graphite,
+    Porcelain,
+    Nebula,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum ThemeFamily {
-    #[default]
-    Safelight,
-    Mold,
+impl ThemeId {
+    fn parse(value: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
+    }
+
+    /// The theme a dark pick becomes when the system appearance turns light —
+    /// the `light` half of `THEME_PAIR` in ui/theme.ts (a light pick never
+    /// reaches here, because migration only ever produces a dark pick first);
+    /// keep the two in step.
+    fn light_partner(self) -> Self {
+        match self {
+            ThemeId::Mocha | ThemeId::Blueprint => ThemeId::Blueprint,
+            _ => ThemeId::Porcelain,
+        }
+    }
+}
+
+/// The pre-redesign contract stored `theme: system|dark|light` beside
+/// `themeFamily: safelight|mold`. Map that pair onto a named theme plus the
+/// match-system flag. A theme that already parses as a `ThemeId` wins; anything
+/// unrecognized lands on the default without touching the flag.
+fn migrate_theme(theme: Option<&str>, family: Option<&str>) -> (ThemeId, Option<bool>) {
+    if let Some(id) = theme.and_then(ThemeId::parse) {
+        return (id, None);
+    }
+    let dark = match family {
+        Some("mold") => ThemeId::Mocha,
+        _ => ThemeId::Safelight,
+    };
+    match theme {
+        Some("light") => (dark.light_partner(), Some(false)),
+        Some("system") => (dark, Some(true)),
+        // Absent or unrecognised: the family's dark theme, exactly like
+        // `migrateLegacyTheme` in ui/theme.ts. A settings file that predates
+        // the theme preference belongs to a Safelight-only install.
+        _ => (dark, None),
+    }
+}
+
+/// Rewrite the legacy theme keys in a raw settings document before the typed
+/// parse. Done on the JSON value rather than through serde defaults because a
+/// PRESENT-but-unparseable `theme` would fail the whole struct and `load`
+/// would fall back to defaults — silently erasing saved hosts and every
+/// panel width.
+fn migrate_theme_keys(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let family = object.remove("themeFamily");
+    let theme = object
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let (id, match_system) =
+        migrate_theme(theme.as_deref(), family.as_ref().and_then(|v| v.as_str()));
+    object.insert(
+        "theme".into(),
+        serde_json::to_value(id).expect("ThemeId serializes"),
+    );
+    if let Some(flag) = match_system {
+        object
+            .entry("matchSystem")
+            .or_insert(serde_json::Value::Bool(flag));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -217,10 +279,6 @@ fn carry_remote_primary_key(settings: &AppSettings, secrets: &SecretStore, id: &
     true
 }
 
-fn legacy_theme_family() -> ThemeFamily {
-    ThemeFamily::Safelight
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -232,9 +290,9 @@ pub struct AppSettings {
     pub last_route: Option<String>,
     /// Environment applied to the embedded engine at start (Performance knobs).
     pub engine_env: std::collections::HashMap<String, String>,
-    pub theme: Theme,
-    #[serde(default = "legacy_theme_family")]
-    pub theme_family: ThemeFamily,
+    pub theme: ThemeId,
+    /// Follow the OS appearance: paint `theme` or its light/dark partner.
+    pub match_system: bool,
     #[serde(default = "default_true")]
     pub notifications: bool,
     #[serde(default = "default_true")]
@@ -279,8 +337,8 @@ impl Default for AppSettings {
             remote_api_key: None,
             last_route: None,
             engine_env: Default::default(),
-            theme: Theme::default(),
-            theme_family: ThemeFamily::Safelight,
+            theme: ThemeId::default(),
+            match_system: false,
             notifications: true,
             dock_badge: true,
             restore_last_route: false,
@@ -304,13 +362,18 @@ impl Default for AppSettings {
 /// Load settings from `path`. A missing or unreadable file yields defaults —
 /// settings must never block app startup.
 pub fn load(path: &Path) -> AppSettings {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return AppSettings::default();
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .and_then(|mut value| {
+            migrate_theme_keys(&mut value);
+            serde_json::from_value(value)
+        })
+        .unwrap_or_else(|e| {
             tracing::warn!("settings.json is invalid ({e}); using defaults");
             AppSettings::default()
-        }),
-        Err(_) => AppSettings::default(),
-    }
+        })
 }
 
 /// Persist settings atomically (write to a sibling temp file, then rename).
@@ -344,8 +407,8 @@ mod tests {
             engine_env: [("MOLD_VAE_TILED".to_string(), "force".to_string())]
                 .into_iter()
                 .collect(),
-            theme: Theme::Light,
-            theme_family: ThemeFamily::Mold,
+            theme: ThemeId::Blueprint,
+            match_system: true,
             notifications: false,
             dock_badge: true,
             restore_last_route: true,
@@ -523,8 +586,8 @@ mod tests {
         let loaded = load(&path);
         assert!(loaded.notifications);
         assert!(loaded.dock_badge);
-        assert_eq!(loaded.theme, Theme::Dark);
-        assert_eq!(loaded.theme_family, ThemeFamily::Safelight);
+        assert_eq!(loaded.theme, ThemeId::Safelight);
+        assert!(!loaded.match_system);
         assert!(loaded.engine_env.is_empty());
         assert!(!loaded.runpod_include_hf_token);
         assert_eq!(loaded.runpod_network_volume_id, None);
@@ -537,8 +600,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(&path_in(&dir)), AppSettings::default());
         assert_eq!(AppSettings::default().mode, ConnectionMode::Local);
-        assert_eq!(AppSettings::default().theme, Theme::Dark);
-        assert_eq!(AppSettings::default().theme_family, ThemeFamily::Safelight);
+        assert_eq!(AppSettings::default().theme, ThemeId::Mocha);
+        assert!(!AppSettings::default().match_system);
         assert_eq!(AppSettings::default().update_channel, UpdateChannel::Stable);
     }
 
@@ -569,11 +632,90 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"local","futureField":42}"#).unwrap();
+        // A file with no theme key predates the preference: a Safelight install.
         let expected = AppSettings {
-            theme_family: ThemeFamily::Safelight,
+            theme: ThemeId::Safelight,
             ..AppSettings::default()
         };
         assert_eq!(load(&path), expected);
+    }
+
+    #[test]
+    fn legacy_theme_pair_migrates_to_a_named_theme() {
+        // (appearance, family) -> (theme, matchSystem), the same table as
+        // ui/theme.ts migrateLegacyTheme.
+        let cases = [
+            ("dark", "safelight", ThemeId::Safelight, false),
+            ("light", "safelight", ThemeId::Porcelain, false),
+            ("system", "safelight", ThemeId::Safelight, true),
+            ("dark", "mold", ThemeId::Mocha, false),
+            ("light", "mold", ThemeId::Blueprint, false),
+            ("system", "mold", ThemeId::Mocha, true),
+        ];
+        for (theme, family, expected, match_system) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = path_in(&dir);
+            std::fs::write(
+                &path,
+                format!(r#"{{"mode":"local","theme":"{theme}","themeFamily":"{family}"}}"#),
+            )
+            .unwrap();
+            let loaded = load(&path);
+            assert_eq!(loaded.theme, expected, "{theme}/{family}");
+            assert_eq!(loaded.match_system, match_system, "{theme}/{family}");
+        }
+    }
+
+    #[test]
+    fn legacy_theme_migration_preserves_every_sibling_field() {
+        // The migration must never cost the user their hosts or panel widths:
+        // a present-but-legacy `theme` used to fail the whole struct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{"mode":"local","theme":"light","themeFamily":"mold","updateChannel":"nightly","navRailWidth":240,"engineEnv":{"MOLD_VAE_TILED":"force"},"savedHosts":[{"id":"hal9000-7680","url":"http://hal9000:7680"}],"connectedHostIds":["hal9000-7680"]}"#,
+        )
+        .unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert_eq!(loaded.update_channel, UpdateChannel::Nightly);
+        assert_eq!(loaded.nav_rail_width, Some(240));
+        assert_eq!(
+            loaded.engine_env.get("MOLD_VAE_TILED").map(String::as_str),
+            Some("force")
+        );
+        assert_eq!(loaded.saved_hosts.len(), 1);
+        assert_eq!(loaded.connected_host_ids, vec!["hal9000-7680"]);
+        // The first save completes the migration on disk.
+        save(&path, &loaded).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("themeFamily"));
+    }
+
+    #[test]
+    fn unknown_theme_falls_back_to_the_legacy_family_without_discarding_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{"mode":"local","theme":"chartreuse","uiScalePercent":120}"#,
+        )
+        .unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.theme, ThemeId::Safelight);
+        assert_eq!(loaded.ui_scale_percent, 120);
+    }
+
+    #[test]
+    fn named_theme_round_trips_and_keeps_an_explicit_match_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, r#"{"theme":"nebula","matchSystem":true}"#).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.theme, ThemeId::Nebula);
+        assert!(loaded.match_system);
     }
 
     fn secret_store() -> (SecretStore, tempfile::TempDir) {

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme-family="safelight" data-theme="dark">
+<html lang="en" data-theme="safelight">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -11,24 +11,41 @@
     <title>Mold</title>
     <script>
       // Apply the saved mobile theme before first paint. Mirrors
-      // src/mobile/settings.ts, including its Safelight Dark default.
+      // src/mobile/settings.ts: a named theme wins, the pre-redesign
+      // family + appearance pair migrates, and a fresh phone starts on
+      // Safelight.
       (function () {
-        var family = "safelight";
-        var theme = "dark";
+        var pair = {
+          mocha: ["mocha", "blueprint"],
+          blueprint: ["mocha", "blueprint"],
+          graphite: ["graphite", "porcelain"],
+          porcelain: ["graphite", "porcelain"],
+          safelight: ["safelight", "porcelain"],
+          nebula: ["nebula", "porcelain"],
+        };
+        var theme = "safelight";
+        var matchSystem = false;
         try {
           var raw = localStorage.getItem("mold.mobile.settings.v1");
           if (raw) {
             var parsed = JSON.parse(raw);
-            if (parsed.themeFamily === "safelight" || parsed.themeFamily === "mold")
-              family = parsed.themeFamily;
-            if (parsed.theme === "system" || parsed.theme === "dark" || parsed.theme === "light")
+            if (pair[parsed.theme]) {
               theme = parsed.theme;
+              matchSystem = parsed.matchSystem === true;
+            } else if (parsed.themeFamily === "mold") {
+              theme = parsed.theme === "light" ? "blueprint" : "mocha";
+              matchSystem = parsed.theme === "system";
+            } else {
+              if (parsed.theme === "light") theme = "porcelain";
+              matchSystem = parsed.theme === "system";
+            }
           }
         } catch (e) {}
-        var root = document.documentElement;
-        root.dataset.themeFamily = family;
-        if (theme === "system") delete root.dataset.theme;
-        else root.dataset.theme = theme;
+        if (matchSystem && window.matchMedia) {
+          var light = window.matchMedia("(prefers-color-scheme: light)").matches;
+          theme = pair[theme][light ? 1 : 0];
+        }
+        document.documentElement.dataset.theme = theme;
       })();
     </script>
   </head>

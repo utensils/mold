@@ -590,18 +590,48 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   background: var(--preview-bath);
 }
 
-.mobile-theme-preview[data-theme-family="mold"] {
-  --preview-bath: #12101d;
-  --preview-bench: #201b30;
-  --preview-halide: #67e8f9;
-  --preview-safelight: #e879f9;
+/* One swatch per theme: chrome, content, data-series and accent, lifted from
+   the maps in ui/tokens.css so the picker previews a look without applying it. */
+.mobile-theme-preview[data-theme="mocha"] {
+  --preview-bath: #181825;
+  --preview-bench: #1e1e2e;
+  --preview-halide: #74c7ec;
+  --preview-safelight: #89b4fa;
 }
 
-.mobile-theme-preview[data-theme-family="safelight"] {
-  --preview-bath: #141110;
-  --preview-bench: #211b16;
-  --preview-halide: #93a7b0;
-  --preview-safelight: #f08a24;
+.mobile-theme-preview[data-theme="safelight"] {
+  --preview-bath: #171210;
+  --preview-bench: #241c15;
+  --preview-halide: #8fb4c4;
+  --preview-safelight: #f79433;
+}
+
+.mobile-theme-preview[data-theme="blueprint"] {
+  --preview-bath: #e9eff7;
+  --preview-bench: #f4f7fb;
+  --preview-halide: #1d4ed8;
+  --preview-safelight: #1d4ed8;
+}
+
+.mobile-theme-preview[data-theme="graphite"] {
+  --preview-bath: #141517;
+  --preview-bench: #1b1c1e;
+  --preview-halide: #6ba8e5;
+  --preview-safelight: #f0a22e;
+}
+
+.mobile-theme-preview[data-theme="porcelain"] {
+  --preview-bath: #f3f3f6;
+  --preview-bench: #fbfbfd;
+  --preview-halide: #2563a8;
+  --preview-safelight: #0f766e;
+}
+
+.mobile-theme-preview[data-theme="nebula"] {
+  --preview-bath: #11090d;
+  --preview-bench: #1b0c12;
+  --preview-halide: #d08f92;
+  --preview-safelight: #ff315d;
 }
 
 .mobile-theme-preview > span:first-child {

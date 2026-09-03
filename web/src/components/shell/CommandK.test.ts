@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computed, nextTick, ref } from "vue";
 import CommandK from "./CommandK.vue";
 import PalettePanel from "@ui/components/PalettePanel.vue";
-import { theme, themeFamily } from "../../lib/theme";
+import { matchSystem, theme } from "../../lib/theme";
 import {
   useGenerateForm,
   __testing__ as generateFormTesting,
@@ -163,8 +163,8 @@ describe("CommandK", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
-    theme.value = "system";
-    themeFamily.value = "mold";
+    theme.value = "safelight";
+    matchSystem.value = false;
   });
 
   it("offers navigation, action, and theme commands", async () => {
@@ -174,7 +174,7 @@ describe("CommandK", () => {
     expect(ids).toContain("go-machines");
     expect(ids).toContain("go-settings");
     expect(ids).toContain("action-new-print");
-    expect(ids).toContain("theme-family-safelight");
+    expect(ids).toContain("theme-safelight");
   });
 
   it("lists installed models across the fleet as use commands", async () => {
@@ -471,7 +471,7 @@ describe("CommandK", () => {
     const wrapper = await openPalette();
     await type(wrapper, "safelight");
 
-    expect(items(wrapper).map((i) => i.id)).toEqual(["theme-family-safelight"]);
+    expect(items(wrapper).map((i) => i.id)).toEqual(["theme-safelight"]);
   });
 
   it("runs a navigation command and closes", async () => {
@@ -500,13 +500,13 @@ describe("CommandK", () => {
     const wrapper = await openPalette();
     const palette = wrapper.findComponent(PalettePanel);
 
-    palette.vm.$emit("run", "theme-appearance-dark");
+    palette.vm.$emit("run", "theme-graphite");
     await nextTick();
-    expect(theme.value).toBe("dark");
+    expect(theme.value).toBe("graphite");
 
-    palette.vm.$emit("run", "theme-family-safelight");
+    palette.vm.$emit("run", "theme-match-system");
     await nextTick();
-    expect(themeFamily.value).toBe("safelight");
+    expect(matchSystem.value).toBe(true);
   });
 
   it("selects a model and opens create when a model command runs", async () => {

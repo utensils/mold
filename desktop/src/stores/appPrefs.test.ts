@@ -10,8 +10,8 @@ vi.mock("../lib/ipc", () => ({
       remoteApiKey: null,
       lastRoute: "/gallery",
       engineEnv: { MOLD_VAE_TILED: "force" },
-      theme: "dark",
-      themeFamily: "mold",
+      theme: "mocha",
+      matchSystem: false,
       notifications: false,
       dockBadge: true,
       restoreLastRoute: true,
@@ -33,52 +33,33 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import { ipc } from "../lib/ipc";
-import { resolveThemeAttributes, useAppPrefsStore } from "./appPrefs";
-
-describe("resolveThemeAttributes", () => {
-  it("maps appearance and family onto independent root attributes", () => {
-    expect(resolveThemeAttributes("dark", "mold")).toEqual({
-      appearance: "dark",
-      family: "mold",
-    });
-    expect(resolveThemeAttributes("light", "safelight")).toEqual({
-      appearance: "light",
-      family: "safelight",
-    });
-    expect(resolveThemeAttributes("system", "mold")).toEqual({
-      appearance: null,
-      family: "mold",
-    });
-  });
-});
+import { useAppPrefsStore } from "./appPrefs";
 
 describe("appPrefs store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     delete document.documentElement.dataset.theme;
-    delete document.documentElement.dataset.themeFamily;
   });
 
-  it("defaults a fresh store to Safelight Dark", () => {
+  it("defaults a fresh store to Mocha without system matching", () => {
     const prefs = useAppPrefsStore();
-    expect(prefs.themeFamily).toBe("safelight");
-    expect(prefs.theme).toBe("dark");
+    expect(prefs.theme).toBe("mocha");
+    expect(prefs.matchSystem).toBe(false);
     expect(prefs.updateChannel).toBe("stable");
   });
 
   it("init loads settings and stamps the theme on the root element", async () => {
     const prefs = useAppPrefsStore();
     await prefs.init();
-    expect(prefs.theme).toBe("dark");
-    expect(prefs.themeFamily).toBe("mold");
+    expect(prefs.theme).toBe("mocha");
+    expect(prefs.matchSystem).toBe(false);
     expect(prefs.notifications).toBe(false);
     expect(prefs.engineEnv).toEqual({ MOLD_VAE_TILED: "force" });
     expect(prefs.runpodIncludeHfToken).toBe(true);
     expect(prefs.runpodNetworkVolumeId).toBe("nv-models");
     expect(prefs.uiScalePercent).toBe(120);
     expect(prefs.updateChannel).toBe("nightly");
-    expect(document.documentElement.dataset.theme).toBe("dark");
-    expect(document.documentElement.dataset.themeFamily).toBe("mold");
+    expect(document.documentElement.dataset.theme).toBe("mocha");
   });
 
   it("persists whole-app scaling", async () => {
@@ -120,21 +101,26 @@ describe("appPrefs store", () => {
   it("switches theme family without changing appearance", async () => {
     const prefs = useAppPrefsStore();
     await prefs.init();
-    await prefs.update({ themeFamily: "safelight" });
-    expect(document.documentElement.dataset.theme).toBe("dark");
-    expect(document.documentElement.dataset.themeFamily).toBe("safelight");
+    await prefs.update({ theme: "safelight" });
+    expect(document.documentElement.dataset.theme).toBe("safelight");
     expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
-      expect.objectContaining({ theme: "dark", themeFamily: "safelight" }),
+      expect.objectContaining({ theme: "safelight", matchSystem: false }),
     );
   });
 
-  it("update persists and re-applies the theme; system clears the attribute", async () => {
+  it("update persists and re-applies the theme; match-system follows the OS", async () => {
     const prefs = useAppPrefsStore();
     await prefs.init();
-    await prefs.update({ theme: "system" });
-    expect(document.documentElement.dataset.theme).toBeUndefined();
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("light"),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    await prefs.update({ matchSystem: true });
+    // A light system appearance paints the pick's light partner.
+    expect(document.documentElement.dataset.theme).toBe("blueprint");
     expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenCalledWith(
-      expect.objectContaining({ theme: "system" }),
+      expect.objectContaining({ matchSystem: true }),
     );
   });
 
@@ -164,10 +150,10 @@ describe("appPrefs concurrent-writer safety", () => {
       connectedHostIds: ["hal9000-7680"],
     });
     // …then a routine pref write happens. It must NOT erase the host.
-    await prefs.update({ theme: "light" });
+    await prefs.update({ theme: "porcelain" });
     expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        theme: "light",
+        theme: "porcelain",
         connectedHostIds: ["hal9000-7680"],
         savedHosts: [expect.objectContaining({ id: "hal9000-7680" })],
       }),
@@ -196,8 +182,8 @@ describe("appPrefs panel widths", () => {
       remoteApiKey: null,
       lastRoute: null,
       engineEnv: {},
-      theme: "system",
-      themeFamily: "mold",
+      theme: "mocha",
+      matchSystem: true,
       notifications: true,
       dockBadge: true,
       restoreLastRoute: false,

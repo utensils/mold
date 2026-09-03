@@ -1,182 +1,425 @@
 /*
- * Mold Studio — design tokens. THE single source for every UI surface
- * (desktop, iOS, web, mobile web). See docs/design/mold-studio-spec.html §02.
+ * Mold Studio — design tokens. THE single source for every GUI surface
+ * (desktop, web, iPhone/Android). See docs/design/README.md §03.
  *
- * Two theme families — Mold (cyan & magenta) and Safelight (warm darkroom
- * amber) — each in Dark and Light. Selected via root dataset attributes:
- *   data-theme-family: "mold" | "safelight"   (absent = safelight)
- *   data-theme:        "dark" | "light"       (absent = follow prefers-color-scheme)
+ * Six themes, selected by ONE root attribute: `data-theme="<id>"`, where the
+ * id is a ThemeId from ui/theme.ts (mocha · safelight · blueprint · graphite ·
+ * porcelain · nebula). "Match system" is resolved in JS (ui/theme.ts pairs each
+ * theme with a light/dark partner), so this sheet never sees more than one id.
  *
- * Surfaces step desk → bath → bench → surface with a family tint. The two
- * accents have fixed jobs: safelight is warm/primary (actions, selection),
- * halide is cool/informational (models, telemetry, links). Selection derives
- * one set (--sel-*) from the accent — never a new hue. No component may
- * hard-code hex; a new theme is added by extending this file only.
+ * A theme is a COMPLETE token map: surfaces, four text ranks, borders, the
+ * single accent (`--mold-blue` — read it as "accent": amber in Safelight,
+ * crimson in Nebula), status hues, four data-series hues, two font families,
+ * a seven-step type scale, two leadings, a theme-scoped radius scale, the ink
+ * for text on an accent fill, and the control-boundary stroke. Every block
+ * declares every key — a partial map would inherit stale values from the
+ * default. No component hard-codes a hex, a font, or a radius; a new theme is
+ * added by extending this file and ui/theme.ts only.
  */
 
 :root {
-  /* ── Safelight · Dark (default family) ─────────────────────────── */
-  --desk: #0a0805;
-  --bath: #171210;
-  --bench: #241c15;
-  --surface: #332619;
-  --rebate: #f1e8da;
-  --halide: #8fb4c4;
-  --safelight: #f79433;
-  --success: #8fd39a;
-  --warning: #f5a623;
-  --stop: #e5715a;
-  --on-accent: #1a1206;
-  /* Ink for text sitting ON a status fill (--success/--warning/--stop/--halide).
-     Dark themes carry bright status hues, light themes carry deep ones, so the
-     safe foreground is per-theme rather than per-color. */
-  --on-status: #0a0805;
-  --grad: linear-gradient(96deg, #f0b429, #f0743f 55%, #d96b8f);
-  --card-hi: rgba(255, 244, 230, 0.05);
+  /* ── Theme-invariant ───────────────────────────────────────────── */
+  --mold-sp-0: 0;
+  --mold-sp-1: 4px;
+  --mold-sp-2: 8px;
+  --mold-sp-3: 12px;
+  --mold-sp-4: 16px;
+  --mold-sp-5: 24px;
+  --mold-sp-6: 32px;
+  --mold-sp-7: 48px;
+  --mold-sp-8: 64px;
 
-  /* ── Derived (recompute automatically per palette) ─────────────── */
-  --ink-2: color-mix(in srgb, var(--rebate) 76%, transparent);
-  --ink-3: color-mix(in srgb, var(--rebate) 52%, transparent);
-  --edge: color-mix(in srgb, var(--rebate) 13%, transparent);
-  --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
-  --sel-ink: var(--safelight);
-  --sel-border: var(--safelight);
-  --sel-bg: color-mix(in srgb, var(--safelight) 20%, transparent);
-  --sel-fill: color-mix(in srgb, var(--safelight) 32%, transparent);
-  --sel-ring: 0 0 0 1.5px color-mix(in srgb, var(--safelight) 60%, transparent);
+  --mold-bw: 1px;
+  --mold-bw-thick: 2px;
 
-  /* ── Media (never inverts — prints are always viewed on a dark bed) ── */
-  --print: #141110;
-  --on-media: #f5efff;
+  /* Elevation: the window and dialogs only. Inside the window, depth is
+     surface value alone. */
+  --mold-shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.35);
+  --mold-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
 
-  /* ── Type ──────────────────────────────────────────────────────── */
-  --f-display: "Bricolage Grotesque", system-ui, sans-serif;
-  --f-body: "Schibsted Grotesk", system-ui, sans-serif;
-  --f-mono: "Martian Mono", ui-monospace, monospace;
+  --mold-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --mold-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --mold-dur-quick: 120ms;
+  --mold-dur-base: 180ms;
+  --mold-dur-slow: 320ms;
 
-  /* ── Radius: controls 6–10 · cards 12–16 · pills/chips 20 ─────── */
-  --radius-control-sm: 6px;
-  --radius-control: 9px;
-  --radius-control-lg: 10px;
-  --radius-card: 12px;
-  --radius-card-lg: 16px;
-  --radius-pill: 20px;
+  /* Brand gradient (logo-derived). Decorative only — never an accent. */
+  --mold-ink-gradient: linear-gradient(
+    135deg,
+    #89dceb 0%,
+    #89b4fa 50%,
+    #cba6f7 100%
+  );
 
-  /* ── Motion (spec §09) ─────────────────────────────────────────── */
-  --dur-quick: 120ms;
-  --dur-base: 180ms;
-  --dur-slow: 240ms;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  /* Media bed: prints are always judged on a dark bed, in every theme. Used by
+     the Lightbox and fullscreen viewers only; the Create canvas follows the
+     theme onto --mold-bg-crust. */
+  --mold-media-bed: #141110;
+  --mold-on-media: #f5efff;
 
+  /* Derived once from the accent — the 13 % selection tint the mock draws and
+     the 72 % crust scrim behind dialogs. */
+  --mold-accent-tint: color-mix(in srgb, var(--mold-blue) 13%, transparent);
+  --mold-scrim: color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);
+
+  /* ── Mocha (default) · Dark · the original ─────────────────────── */
+  --mold-bg: #1e1e2e;
+  --mold-bg-deep: #181825;
+  --mold-bg-crust: #11111b;
+  --mold-surface: #313244;
+  --mold-surface-2: #45475a;
+  --mold-surface-3: #585b70;
+  --mold-text: #cdd6f4;
+  --mold-text-2: #bac2de;
+  --mold-text-dim: #979db2;
+  --mold-text-faint: #585b70;
+  --mold-border: #45475a;
+  --mold-border-focus: #89b4fa;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 45%, transparent);
+  --mold-blue: #89b4fa;
+  --mold-on-accent: var(--mold-bg-deep);
+  --mold-success: #a6e3a1;
+  --mold-warning: #f9e2af;
+  --mold-error: #f38ba8;
+  --mold-star: #f9e2af;
+  --mold-sapphire: #74c7ec;
+  --mold-mauve: #cba6f7;
+  --mold-teal: #94e2d5;
+  --mold-lavender: #b4befe;
+  --mold-font-sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mold-font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mold-fs-micro: 11px;
+  --mold-fs-xs: 12px;
+  --mold-fs-sm: 13px;
+  --mold-fs-base: 14px;
+  --mold-fs-md: 16px;
+  --mold-fs-lg: 20px;
+  --mold-fs-xl: 28px;
+  --mold-lh-snug: 1.3;
+  --mold-lh-body: 1.5;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
   color-scheme: dark;
 }
 
-/* ── Safelight · Light ("lights on") ─────────────────────────────── */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --desk: #e6dcc7;
-    --bath: #f7f1e6;
-    --bench: #fffdf8;
-    --surface: #f0e7d5;
-    --rebate: #231d16;
-    --halide: #3f6570;
-    --safelight: #9b4d00;
-    --success: #2f7d4f;
-    --warning: #8a5300;
-    --stop: #a93629;
-    --on-accent: #ffffff;
-    --on-status: #ffffff;
-    --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
-    --card-hi: rgba(255, 255, 255, 0.7);
-    --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
-    color-scheme: light;
-  }
-}
-:root[data-theme="light"] {
-  --desk: #e6dcc7;
-  --bath: #f7f1e6;
-  --bench: #fffdf8;
-  --surface: #f0e7d5;
-  --rebate: #231d16;
-  --halide: #3f6570;
-  --safelight: #9b4d00;
-  --success: #2f7d4f;
-  --warning: #8a5300;
-  --stop: #a93629;
-  --on-accent: #ffffff;
-  --on-status: #ffffff;
-  --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
-  --card-hi: rgba(255, 255, 255, 0.7);
-  --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
-  color-scheme: light;
-}
-
-/* ── Mold · Dark ─────────────────────────────────────────────────── */
-:root[data-theme-family="mold"] {
-  --desk: #08060f;
-  --bath: #14111f;
-  --bench: #221c34;
-  --surface: #2e2743;
-  --rebate: #f3effb;
-  --halide: #5cd0ff;
-  --safelight: #e879f9;
-  --success: #6ee7a5;
-  --warning: #fbbf24;
-  --stop: #fb7185;
-  --on-accent: #150f1e;
-  --on-status: #08060f;
-  --grad: linear-gradient(96deg, #89dceb, #89b4fa 45%, #cba6f7);
-  --card-hi: rgba(255, 255, 255, 0.055);
-  --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
+:root[data-theme="mocha"] {
+  --mold-bg: #1e1e2e;
+  --mold-bg-deep: #181825;
+  --mold-bg-crust: #11111b;
+  --mold-surface: #313244;
+  --mold-surface-2: #45475a;
+  --mold-surface-3: #585b70;
+  --mold-text: #cdd6f4;
+  --mold-text-2: #bac2de;
+  --mold-text-dim: #979db2;
+  --mold-text-faint: #585b70;
+  --mold-border: #45475a;
+  --mold-border-focus: #89b4fa;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 45%, transparent);
+  --mold-blue: #89b4fa;
+  --mold-on-accent: var(--mold-bg-deep);
+  --mold-success: #a6e3a1;
+  --mold-warning: #f9e2af;
+  --mold-error: #f38ba8;
+  --mold-star: #f9e2af;
+  --mold-sapphire: #74c7ec;
+  --mold-mauve: #cba6f7;
+  --mold-teal: #94e2d5;
+  --mold-lavender: #b4befe;
+  --mold-font-sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mold-font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mold-fs-micro: 11px;
+  --mold-fs-xs: 12px;
+  --mold-fs-sm: 13px;
+  --mold-fs-base: 14px;
+  --mold-fs-md: 16px;
+  --mold-fs-lg: 20px;
+  --mold-fs-xl: 28px;
+  --mold-lh-snug: 1.3;
+  --mold-lh-body: 1.5;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
   color-scheme: dark;
 }
 
-/* ── Mold · Light ────────────────────────────────────────────────── */
-@media (prefers-color-scheme: light) {
-  :root[data-theme-family="mold"]:not([data-theme="dark"]) {
-    --desk: #e5e0f1;
-    --bath: #f6f4fb;
-    --bench: #ffffff;
-    --surface: #efeaf8;
-    --rebate: #221430;
-    --halide: #0e7490;
-    --safelight: #a21caf;
-    --success: #0b6f43;
-    --warning: #8a5a00;
-    --stop: #b4233b;
-    --on-accent: #ffffff;
-    --on-status: #ffffff;
-    --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
-    --card-hi: rgba(255, 255, 255, 0.65);
-    --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
-    color-scheme: light;
-  }
+/* ── Safelight · Dark · the darkroom family the app shipped with ───── */
+:root[data-theme="safelight"] {
+  --mold-bg: #241c15;
+  --mold-bg-deep: #171210;
+  --mold-bg-crust: #0a0805;
+  --mold-surface: #332619;
+  --mold-surface-2: #453424;
+  --mold-surface-3: #574430;
+  --mold-text: #f1e8da;
+  --mold-text-2: #c4b7ab;
+  --mold-text-dim: #a29888;
+  --mold-text-faint: #6a6158;
+  --mold-border: #3f372f;
+  --mold-border-focus: #f79433;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 45%, transparent);
+  --mold-blue: #f79433;
+  --mold-on-accent: var(--mold-bg-deep);
+  --mold-success: #8fd39a;
+  --mold-warning: #f5a623;
+  --mold-error: #e5715a;
+  --mold-star: #f5a623;
+  --mold-sapphire: #8fb4c4;
+  --mold-mauve: #d96b8f;
+  --mold-teal: #8fb4c4;
+  --mold-lavender: #b9cdd8;
+  --mold-font-sans: "Schibsted Grotesk", system-ui, sans-serif;
+  --mold-font-mono: "Martian Mono", ui-monospace, monospace;
+  --mold-fs-micro: 10px;
+  --mold-fs-xs: 11px;
+  --mold-fs-sm: 13px;
+  --mold-fs-base: 14px;
+  --mold-fs-md: 16px;
+  --mold-fs-lg: 20px;
+  --mold-fs-xl: 28px;
+  --mold-lh-snug: 1.3;
+  --mold-lh-body: 1.5;
+  --mold-radius-1: 6px;
+  --mold-radius-2: 9px;
+  --mold-radius-3: 16px;
+  color-scheme: dark;
 }
-:root[data-theme-family="mold"][data-theme="light"] {
-  --desk: #e5e0f1;
-  --bath: #f6f4fb;
-  --bench: #ffffff;
-  --surface: #efeaf8;
-  --rebate: #221430;
-  --halide: #0e7490;
-  --safelight: #a21caf;
-  --success: #0b6f43;
-  --warning: #8a5a00;
-  --stop: #b4233b;
-  --on-accent: #ffffff;
-  --on-status: #ffffff;
-  --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
-  --card-hi: rgba(255, 255, 255, 0.65);
-  --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
+
+/* ── Blueprint · Light · drafting table ────────────────────────────── */
+:root[data-theme="blueprint"] {
+  --mold-bg: #f4f7fb;
+  --mold-bg-deep: #e9eff7;
+  --mold-bg-crust: #dde6f2;
+  --mold-surface: #ffffff;
+  --mold-surface-2: #dce6f4;
+  --mold-surface-3: #c6d5ea;
+  --mold-text: #0d1b2e;
+  --mold-text-2: #33465f;
+  --mold-text-dim: #52627a;
+  --mold-text-faint: #94a5bb;
+  --mold-border: #cfdcec;
+  --mold-border-focus: #1d4ed8;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 52%, transparent);
+  --mold-blue: #1d4ed8;
+  --mold-on-accent: var(--mold-surface);
+  --mold-success: #0f7b5f;
+  --mold-warning: #8a5200;
+  --mold-error: #c02b34;
+  --mold-star: #8a5200;
+  --mold-sapphire: #1d4ed8;
+  --mold-mauve: #6c4cd1;
+  --mold-teal: #0f7b8f;
+  --mold-lavender: #5b6ee1;
+  --mold-font-sans: "Archivo", system-ui, sans-serif;
+  --mold-font-mono: "Azeret Mono", ui-monospace, monospace;
+  --mold-fs-micro: 10.5px;
+  --mold-fs-xs: 11.5px;
+  --mold-fs-sm: 12.5px;
+  --mold-fs-base: 13.5px;
+  --mold-fs-md: 15.5px;
+  --mold-fs-lg: 19px;
+  --mold-fs-xl: 27px;
+  --mold-lh-snug: 1.25;
+  --mold-lh-body: 1.45;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
   color-scheme: light;
 }
 
-/* Under reduced motion every duration collapses to near-zero; shimmer
- * placeholders become a static tint (see kit.css). */
+/* ── Graphite · Dark · neutral, warm signal ────────────────────────── */
+:root[data-theme="graphite"] {
+  --mold-bg: #1b1c1e;
+  --mold-bg-deep: #141517;
+  --mold-bg-crust: #0e0f10;
+  --mold-surface: #232528;
+  --mold-surface-2: #2e3134;
+  --mold-surface-3: #3b3e42;
+  --mold-text: #ecedef;
+  --mold-text-2: #c0c3c7;
+  --mold-text-dim: #8a8e93;
+  --mold-text-faint: #676b70;
+  --mold-border: #2c2e32;
+  --mold-border-focus: #f0a22e;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 45%, transparent);
+  --mold-blue: #f0a22e;
+  --mold-on-accent: var(--mold-bg-deep);
+  --mold-success: #58c08a;
+  --mold-warning: #e8c34a;
+  --mold-error: #e5654b;
+  --mold-star: #f0a22e;
+  --mold-sapphire: #6ba8e5;
+  --mold-mauve: #a98be0;
+  --mold-teal: #4fbfae;
+  --mold-lavender: #93a6e8;
+  --mold-font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --mold-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --mold-fs-micro: 11px;
+  --mold-fs-xs: 12px;
+  --mold-fs-sm: 13px;
+  --mold-fs-base: 14px;
+  --mold-fs-md: 16px;
+  --mold-fs-lg: 20px;
+  --mold-fs-xl: 28px;
+  --mold-lh-snug: 1.3;
+  --mold-lh-body: 1.45;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
+  color-scheme: dark;
+}
+
+/* ── Porcelain · Light · high-key, compact ─────────────────────────── */
+:root[data-theme="porcelain"] {
+  --mold-bg: #fbfbfd;
+  --mold-bg-deep: #f3f3f6;
+  --mold-bg-crust: #e9e9ee;
+  --mold-surface: #ffffff;
+  --mold-surface-2: #e6e6eb;
+  --mold-surface-3: #d5d5dc;
+  --mold-text: #16171a;
+  --mold-text-2: #45474d;
+  --mold-text-dim: #63666d;
+  --mold-text-faint: #a0a3ab;
+  --mold-border: #e1e1e7;
+  --mold-border-focus: #0f766e;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 52%, transparent);
+  --mold-blue: #0f766e;
+  --mold-on-accent: var(--mold-surface);
+  --mold-success: #17795a;
+  --mold-warning: #8a5200;
+  --mold-error: #c0392b;
+  --mold-star: #8a5200;
+  --mold-sapphire: #2563a8;
+  --mold-mauve: #7a4fb0;
+  --mold-teal: #0f766e;
+  --mold-lavender: #5b62c7;
+  --mold-font-sans: "Manrope", system-ui, sans-serif;
+  --mold-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --mold-fs-micro: 10.5px;
+  --mold-fs-xs: 11.5px;
+  --mold-fs-sm: 12.5px;
+  --mold-fs-base: 13.5px;
+  --mold-fs-md: 15.5px;
+  --mold-fs-lg: 19px;
+  --mold-fs-xl: 27px;
+  --mold-lh-snug: 1.25;
+  --mold-lh-body: 1.45;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
+  color-scheme: light;
+}
+
+/* ── Nebula · Dark · oxblood & crimson ─────────────────────────────── */
+:root[data-theme="nebula"] {
+  --mold-bg: #1b0c12;
+  --mold-bg-deep: #11090d;
+  --mold-bg-crust: #090407;
+  --mold-surface: #241018;
+  --mold-surface-2: #33161f;
+  --mold-surface-3: #45202b;
+  --mold-text: #fff8ee;
+  --mold-text-2: #c6aca7;
+  --mold-text-dim: #a98d8f;
+  --mold-text-faint: #7a6266;
+  --mold-border: #352d2f;
+  --mold-border-focus: #ff315d;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 45%, transparent);
+  --mold-blue: #ff315d;
+  --mold-on-accent: var(--mold-bg-deep);
+  --mold-success: #86c79a;
+  --mold-warning: #ffb05c;
+  --mold-error: #ff6c76;
+  --mold-star: #ffb05c;
+  --mold-sapphire: #d08f92;
+  --mold-mauve: #ff6c76;
+  --mold-teal: #e0a090;
+  --mold-lavender: #ff6c76;
+  /* Georgia is a system face (not OFL, so never bundled); Linux falls back to
+     Liberation Serif. */
+  --mold-font-sans: Georgia, "Times New Roman", "Liberation Serif", serif;
+  --mold-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+  --mold-fs-micro: 11px;
+  --mold-fs-xs: 12px;
+  --mold-fs-sm: 13.5px;
+  --mold-fs-base: 14.5px;
+  --mold-fs-md: 17px;
+  --mold-fs-lg: 21px;
+  --mold-fs-xl: 30px;
+  --mold-lh-snug: 1.35;
+  --mold-lh-body: 1.6;
+  --mold-radius-1: 0px;
+  --mold-radius-2: 2px;
+  --mold-radius-3: 6px;
+  color-scheme: dark;
+}
+
+/* Under reduced motion every duration collapses to near-zero; the shimmer
+ * placeholder becomes a static tint (see kit.css). */
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --dur-quick: 1ms;
-    --dur-base: 1ms;
-    --dur-slow: 1ms;
+    --mold-dur-quick: 1ms;
+    --mold-dur-base: 1ms;
+    --mold-dur-slow: 1ms;
   }
+}
+
+/* ============================================================================
+ * LEGACY BRIDGE — delete when web/ and desktop/src/mobile/ are redesigned.
+ * ----------------------------------------------------------------------------
+ * The pre-redesign darkroom vocabulary (desk → bath → bench → surface, rebate
+ * for text, safelight/halide for the two accents) is still spoken by the web
+ * SPA and the iPhone/Android surface. Every name below is an alias onto a
+ * --mold-* token, so those surfaces re-tint with the active theme and nothing
+ * here carries a colour of its own. Desktop, ui/, and studio/ never use these
+ * names (desktop/src/styles/tokens.legacy.test.ts enforces it).
+ * ========================================================================== */
+:root {
+  --desk: var(--mold-bg-crust);
+  --bath: var(--mold-bg-deep);
+  --bench: var(--mold-bg);
+  --surface: var(--mold-surface);
+  --rebate: var(--mold-text);
+  --ink-2: var(--mold-text-2);
+  --ink-3: var(--mold-text-dim);
+  --edge: var(--mold-border);
+  --ce: var(--mold-border-control);
+  --control-edge: var(--mold-border-control);
+  --safelight: var(--mold-blue);
+  --halide: var(--mold-sapphire);
+  --success: var(--mold-success);
+  --warning: var(--mold-warning);
+  --stop: var(--mold-error);
+  --on-accent: var(--mold-on-accent);
+  --on-status: var(--mold-on-accent);
+  --print: var(--mold-media-bed);
+  --on-media: var(--mold-on-media);
+  --grad: var(--mold-ink-gradient);
+  /* Inset card highlight: the raised surface, which is lighter than the
+     content plane in every tone, so it still reads as a highlight. */
+  --card-hi: color-mix(in srgb, var(--mold-surface) 60%, transparent);
+  --sel-ink: var(--mold-blue);
+  --sel-border: var(--mold-blue);
+  --sel-bg: var(--mold-accent-tint);
+  --sel-fill: color-mix(in srgb, var(--mold-blue) 32%, transparent);
+  --sel-ring: 0 0 0 1.5px color-mix(in srgb, var(--mold-blue) 60%, transparent);
+  --f-display: var(--mold-font-sans);
+  --f-body: var(--mold-font-sans);
+  --f-mono: var(--mold-font-mono);
+  --radius-control-sm: var(--mold-radius-1);
+  --radius-control: var(--mold-radius-2);
+  --radius-control-lg: 10px;
+  --radius-card: 12px;
+  --radius-card-lg: var(--mold-radius-3);
+  --radius-pill: 20px;
+  --dur-quick: var(--mold-dur-quick);
+  --dur-base: var(--mold-dur-base);
+  --dur-slow: var(--mold-dur-slow);
+  --ease: var(--mold-ease-out);
 }

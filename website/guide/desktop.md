@@ -266,9 +266,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   cancellation, and queue capacity live with the host that owns them. The old
   standalone `/jobs` URL redirects to Machines.
 - **Settings**: a single-column preferences workspace. Appearance
-  (the original Safelight by default or the website-aligned Mold palette,
-  each with System/Dark/Light — a fresh install starts on Safelight Dark;
-  media never inverts), Updates, and About sit up
+  (six themes — Mocha, Safelight, Blueprint, Graphite, Porcelain, Nebula —
+  plus a **Match system appearance** toggle that swaps to the paired light or
+  dark theme with macOS; a fresh install starts on Mocha; media never
+  inverts), Updates, and About sit up
   top; a **Hosts** link jumps to the **Machines** workspace, where host,
   API-key, and network-discovery management now live. The deeper controls
   collapse into accordion sections: Performance (the `MOLD_*` engine knobs as
@@ -395,11 +396,15 @@ right-click menus. Choose 80–130% from **Settings → Appearance & app → Int
 use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
-Appearance offers the Mold Studio theme families (Mold and Safelight) in
-System, Light, or Dark mode. New iPhone installs start with Safelight and Dark
-(see [iPhone → Settings](/guide/iphone)); existing saved choices are preserved.
-All combinations keep text and interactive boundaries at WCAG AA
-contrast; an empty generation canvas follows the selected chrome, while actual
+Appearance offers six Mold Studio themes: Mocha (the default), Safelight,
+Graphite, and Nebula are dark; Blueprint and Porcelain are light. Each theme
+brings its own type pairing and corner radius, and **Match system appearance**
+swaps a pick for its light or dark partner when macOS changes. Saved choices
+from earlier releases migrate to the nearest theme (Safelight stays
+Safelight; the Mold palette becomes Mocha or Blueprint; System becomes the
+match toggle). New iPhone installs start with Safelight (see
+[iPhone → Settings](/guide/iphone)). Every theme keeps text and interactive
+boundaries at WCAG AA contrast; an empty generation canvas follows the selected chrome, while actual
 generated media remains on a color-stable viewing surface.
 
 ## Generation templates

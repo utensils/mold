@@ -14,6 +14,7 @@ import { useGenerationStore } from "../../stores/generation";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { THEME_META } from "../../lib/theme";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
@@ -276,50 +277,25 @@ const staticCommands = computed<Command[]>(() => {
         close();
       },
     },
-    {
-      id: "theme-mold",
-      title: "Theme: Mold",
-      subtitle: "cyan & magenta",
-      keywords: ["theme", "palette", "appearance", "family", "color"],
+    ...THEME_META.map((meta) => ({
+      id: `theme-${meta.id}`,
+      title: `Theme: ${meta.label}`,
+      subtitle: meta.blurb,
+      keywords: ["theme", "look", "appearance", "color", meta.tone, meta.label.toLowerCase()],
       run: () => {
-        void appPrefs.update({ themeFamily: "mold" });
+        void appPrefs.update({ theme: meta.id });
         close();
       },
-    },
+    })),
     {
-      id: "theme-safelight",
-      title: "Theme: Safelight",
-      subtitle: "warm darkroom",
-      keywords: ["theme", "palette", "appearance", "family", "color"],
+      id: "appear-match-system",
+      title: appPrefs.matchSystem
+        ? "Stop matching the system appearance"
+        : "Match the system appearance",
+      subtitle: "Swap to the paired light or dark theme when macOS does",
+      keywords: ["theme", "appearance", "system", "auto", "light", "dark"],
       run: () => {
-        void appPrefs.update({ themeFamily: "safelight" });
-        close();
-      },
-    },
-    {
-      id: "appear-dark",
-      title: "Appearance: Dark",
-      keywords: ["theme", "appearance", "dark", "lights off"],
-      run: () => {
-        void appPrefs.update({ theme: "dark" });
-        close();
-      },
-    },
-    {
-      id: "appear-light",
-      title: "Appearance: Light",
-      keywords: ["theme", "appearance", "light", "lights on"],
-      run: () => {
-        void appPrefs.update({ theme: "light" });
-        close();
-      },
-    },
-    {
-      id: "appear-system",
-      title: "Appearance: System",
-      keywords: ["theme", "appearance", "system", "auto"],
-      run: () => {
-        void appPrefs.update({ theme: "system" });
+        void appPrefs.update({ matchSystem: !appPrefs.matchSystem });
         close();
       },
     },

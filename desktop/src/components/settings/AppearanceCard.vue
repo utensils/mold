@@ -1,30 +1,25 @@
 <script setup lang="ts">
 /*
- * The top Appearance card (Mold Studio Settings, spec §04/G7): theme family
- * and light/dark as segmented rows, interface scale as a slider, and the
- * remaining app-behaviour toggles beneath a divider. All of it drives the
- * existing appPrefs plumbing — nothing here blocks first use.
+ * The top Appearance card (Mold Studio Settings, spec §04/G7): the six themes
+ * as cards, the Match-system toggle, interface scale, and the remaining
+ * app-behaviour toggles beneath a divider. All of it drives the existing
+ * appPrefs plumbing — nothing here blocks first use.
  */
 import { computed } from "vue";
-import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedControl.vue";
 import ToggleControl from "./ToggleControl.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import type { Theme, ThemeFamily } from "../../lib/theme";
+import { THEME_META, THEME_PAIR, THEME_TONE, themeMeta, type ThemeId } from "../../lib/theme";
 import { shortcutLabel } from "../../lib/platform";
 
 const prefs = useAppPrefsStore();
 
-const FAMILY_OPTIONS: SegmentOption<ThemeFamily>[] = [
-  { value: "mold", label: "Mold" },
-  { value: "safelight", label: "Safelight" },
-];
-
-const APPEARANCE_OPTIONS: SegmentOption<Theme>[] = [
-  { value: "system", label: "System" },
-  { value: "dark", label: "Dark" },
-  { value: "light", label: "Light" },
-];
+/** "Switches to Blueprint in daylight." — names the paired theme. */
+const matchSystemHelp = computed(() => {
+  const partner = THEME_PAIR[prefs.theme][THEME_TONE[prefs.theme] === "dark" ? "light" : "dark"];
+  const when = THEME_TONE[prefs.theme] === "dark" ? "in daylight" : "after dark";
+  return `Switches to ${themeMeta(partner).label} ${when}.`;
+});
 
 const scaleHelp = computed(
   () =>
@@ -52,38 +47,62 @@ const BEHAVIOUR_TOGGLES = [
   {
     key: "restoreLastRoute",
     label: "Reopen last view",
-    help: "Launch into the view you left instead of Generate.",
+    help: "Launch into the view you left instead of Create.",
   },
 ] as const;
 
 function toggleValue(key: (typeof BEHAVIOUR_TOGGLES)[number]["key"]): boolean {
   return prefs[key];
 }
+
+function pick(theme: ThemeId) {
+  void prefs.update({ theme });
+}
 </script>
 
 <template>
   <CardSurface>
-    <!-- Theme family -->
-    <div class="flex items-center justify-between gap-4 py-1.5">
-      <span class="text-body text-ink">Theme</span>
-      <SegmentedControl
-        class="w-44 shrink-0"
-        :model-value="prefs.themeFamily"
-        :options="FAMILY_OPTIONS"
-        label="Theme"
-        @update:model-value="(v) => prefs.update({ themeFamily: v as ThemeFamily })"
-      />
+    <!-- Theme -->
+    <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Theme">
+      <button
+        v-for="meta in THEME_META"
+        :key="meta.id"
+        type="button"
+        role="radio"
+        :aria-checked="prefs.theme === meta.id"
+        :data-test="`theme-${meta.id}`"
+        class="flex flex-col gap-1.5 rounded-control border p-2.5 text-left transition-colors duration-100"
+        :class="
+          prefs.theme === meta.id
+            ? 'border-safelight bg-sel-bg'
+            : 'border-edge hover:border-safelight'
+        "
+        @click="pick(meta.id)"
+      >
+        <span class="flex items-center gap-2">
+          <span
+            class="h-3 w-3 shrink-0 rounded-full"
+            :style="{ background: meta.accent }"
+            aria-hidden="true"
+          />
+          <span class="text-body font-semibold text-ink">{{ meta.label }}</span>
+          <span class="ml-auto font-utility text-caption text-ink-3">{{ meta.tone }}</span>
+        </span>
+        <span class="text-caption text-ink-3">{{ meta.blurb }}</span>
+        <span class="font-utility text-caption text-ink-3">{{ meta.type }}</span>
+      </button>
     </div>
 
-    <!-- Light / dark -->
-    <div class="mt-2 flex items-center justify-between gap-4 py-1.5">
-      <span class="text-body text-ink">Appearance</span>
-      <SegmentedControl
-        class="w-52 shrink-0"
-        :model-value="prefs.theme"
-        :options="APPEARANCE_OPTIONS"
-        label="Appearance"
-        @update:model-value="(v) => prefs.update({ theme: v as Theme })"
+    <!-- Match system -->
+    <div class="mt-3 flex items-center justify-between gap-4 py-1.5">
+      <div class="min-w-0">
+        <div class="text-body text-ink">Match system appearance</div>
+        <p class="mt-0.5 text-caption text-ink-3">{{ matchSystemHelp }}</p>
+      </div>
+      <ToggleControl
+        :model-value="prefs.matchSystem"
+        aria-label="Match system appearance"
+        @commit="(v) => prefs.update({ matchSystem: v })"
       />
     </div>
 
