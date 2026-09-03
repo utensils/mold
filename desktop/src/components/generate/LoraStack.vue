@@ -97,7 +97,7 @@ watch(
 <template>
   <div>
     <div class="mt-5 mb-2 flex items-center gap-2">
-      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">LoRAs</span>
+      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">Add-on looks</span>
       <span v-if="route" class="text-micro text-fg-dim">{{ route.label }}</span>
       <div class="border-border h-px flex-1 border-t" />
     </div>

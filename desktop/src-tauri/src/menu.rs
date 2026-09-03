@@ -15,11 +15,12 @@ fn accelerator(key: &str) -> String {
     format!("{modifier}+{key}")
 }
 
-const NAVIGATION_MENU_ITEMS: [(&str, &str, &str); 4] = [
-    ("nav:/create", "Create", "1"),
-    ("nav:/library", "Library", "2"),
-    ("nav:/models", "Models", "3"),
-    ("nav:/machines", "Machines", "4"),
+const NAVIGATION_MENU_ITEMS: [(&str, &str, &str); 5] = [
+    ("nav:/create", "New image", "1"),
+    ("nav:/queue", "Queue", "2"),
+    ("nav:/library", "My images", "3"),
+    ("nav:/models", "Styles", "4"),
+    ("nav:/machines", "Machines", "5"),
 ];
 
 /// macOS gets the predefined Window items; every other platform builds the same
@@ -318,14 +319,17 @@ mod tests {
     }
 
     #[test]
-    fn navigation_menu_matches_the_five_workspace_ia() {
+    fn navigation_menu_matches_the_sidebar_in_the_lexicon() {
+        // The same five destinations, words, and ⌘ digits as the sidebar
+        // (desktop/src/lib/shortcuts.ts NAV_ROUTES); Settings stays on ⌘,.
         assert_eq!(
             NAVIGATION_MENU_ITEMS,
             [
-                ("nav:/create", "Create", "1"),
-                ("nav:/library", "Library", "2"),
-                ("nav:/models", "Models", "3"),
-                ("nav:/machines", "Machines", "4"),
+                ("nav:/create", "New image", "1"),
+                ("nav:/queue", "Queue", "2"),
+                ("nav:/library", "My images", "3"),
+                ("nav:/models", "Styles", "4"),
+                ("nav:/machines", "Machines", "5"),
             ]
         );
     }

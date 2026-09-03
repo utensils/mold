@@ -48,23 +48,23 @@ async function openPalette() {
 }
 
 describe("CommandPalette command registry", () => {
-  it("navigates to Models for both 'models' and 'catalog' queries", async () => {
+  it("navigates to Styles for the old 'models' and 'catalog' queries", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");
 
     await input.setValue("models");
     let texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Go to Models"))).toBe(true);
+    expect(texts.some((t) => t.includes("Styles"))).toBe(true);
 
-    // Muscle memory: the old "catalog" name still finds the Models entry.
+    // Muscle memory: the old "catalog" name still finds the Styles entry.
     await input.setValue("catalog");
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Go to Models"))).toBe(true);
+    expect(texts.some((t) => t.includes("Styles"))).toBe(true);
     expect(texts.some((t) => t.includes("Go to Catalog"))).toBe(false);
     wrapper.unmount();
   });
 
-  it("offers Create sequence and Open history alongside the five workspaces", async () => {
+  it("offers Make a short clip and Recent settings alongside the workspaces", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");
 
@@ -72,17 +72,17 @@ describe("CommandPalette command registry", () => {
     // Create now, so the entry deep-links rather than opening a chains page).
     await input.setValue("clips");
     let texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Create sequence"))).toBe(true);
+    expect(texts.some((t) => t.includes("Make a short clip"))).toBe(true);
 
     await input.setValue("history");
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Open history"))).toBe(true);
+    expect(texts.some((t) => t.includes("Recent settings"))).toBe(true);
 
     // Picking the entry deep-links into Create's sequence output (and closes).
     await input.setValue("sequence");
     const option = wrapper
       .findAll("[role='option']")
-      .find((o) => o.text().includes("Create sequence"));
+      .find((o) => o.text().includes("Make a short clip"));
     expect(option).toBeTruthy();
     await option!.trigger("click");
     expect(routerPush).toHaveBeenCalledWith("/create?output=sequence");
@@ -125,11 +125,11 @@ describe("CommandPalette command registry", () => {
     ] as never;
     vi.spyOn(generation, "cancel").mockImplementation(async (id) => id === 1);
     const wrapper = await openPalette();
-    await wrapper.get("input").setValue("cancel all");
+    await wrapper.get("input").setValue("stop everything");
 
     await wrapper
       .findAll("[role='option']")
-      .find((option) => option.text().includes("Cancel all 2 jobs"))!
+      .find((option) => option.text().includes("Stop everything · 2 waiting"))!
       .trigger("click");
     await flushPromises();
 

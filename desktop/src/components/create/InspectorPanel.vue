@@ -1098,9 +1098,9 @@ defineExpose({ setOutputMode });
         {{ audioOutputUnavailableReason }}
       </p>
 
-      <!-- Seed -->
+      <!-- Repeat this look (the seed, in plain words) -->
       <div class="ms-field">
-        <div class="ms-field__label">Seed</div>
+        <div class="ms-field__label">Repeat this look</div>
         <div class="ms-seg" role="group" aria-label="Seed mode">
           <button
             type="button"
@@ -1110,7 +1110,7 @@ defineExpose({ setOutputMode });
             :data-on="uiSeedMode === 'random' ? 'true' : undefined"
             @click="setSeedMode('random')"
           >
-            Random
+            Surprise me
           </button>
           <button
             type="button"
@@ -1120,7 +1120,7 @@ defineExpose({ setOutputMode });
             :data-on="uiSeedMode === 'fixed' ? 'true' : undefined"
             @click="setSeedMode('fixed')"
           >
-            Fixed
+            Keep
           </button>
         </div>
         <div v-if="uiSeedMode === 'fixed'" class="ms-seed__value">

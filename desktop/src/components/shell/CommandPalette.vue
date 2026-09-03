@@ -190,53 +190,58 @@ const staticCommands = computed<Command[]>(() => {
   const cmds: Command[] = [
     {
       id: "nav-create",
-      title: "Go to Create",
-      // "generate" keeps the pre-rename muscle memory working.
-      keywords: ["generate", "compose"],
+      title: "New image",
+      // The old names keep muscle memory working.
+      keywords: ["create", "generate", "compose"],
       run: () => go("/create"),
     },
     {
+      id: "nav-queue",
+      title: "Queue",
+      keywords: ["jobs", "waiting", "line", "being made"],
+      run: () => go("/queue"),
+    },
+    {
       id: "nav-library",
-      title: "Go to Library",
-      keywords: ["gallery", "prints"],
+      title: "My images",
+      keywords: ["library", "gallery", "prints", "pictures"],
       run: () => go("/library"),
     },
     {
       id: "nav-models",
-      title: "Go to Models",
-      // "catalog" keeps the pre-rename muscle memory working.
-      keywords: ["models", "catalog"],
+      title: "Styles",
+      keywords: ["models", "catalog", "checkpoints"],
       run: () => go("/models"),
     },
     {
       id: "nav-machines",
-      title: "Go to Machines",
+      title: "Machines",
       keywords: ["hosts", "jobs", "gpu"],
       run: () => go("/machines"),
     },
     {
       id: "nav-sequence",
-      title: "Create sequence",
-      keywords: ["sequence", "clips", "video"],
+      title: "Make a short clip",
+      keywords: ["sequence", "clips", "video", "scenes"],
       run: () => go("/create?output=sequence"),
     },
     {
       id: "nav-history",
-      title: "Open history",
-      keywords: ["runs", "prompts", "recent"],
+      title: "Recent settings",
+      keywords: ["history", "runs", "prompts", "recent"],
       run: () => go("/library?panel=history"),
     },
     {
       id: "nav-runpod",
-      title: "Manage RunPod GPUs",
-      keywords: ["cloud", "gpu", "instance"],
+      title: "Rent a GPU…",
+      keywords: ["runpod", "cloud", "gpu", "instance", "pod"],
       run: () => go("/machines/runpod"),
     },
-    { id: "nav-settings", title: "Go to Settings", run: () => go("/settings") },
+    { id: "nav-settings", title: "Settings", run: () => go("/settings") },
     {
       id: "act-new",
-      title: "New generation",
-      keywords: ["clear", "compose"],
+      title: "Start a blank image",
+      keywords: ["new", "clear", "compose", "generation"],
       run: () => {
         ui.newGeneration();
         go("/create");
@@ -244,7 +249,8 @@ const staticCommands = computed<Command[]>(() => {
     },
     {
       id: "act-seed",
-      title: "Randomize seed",
+      title: "Surprise me — a new seed",
+      keywords: ["seed", "randomize", "repeat this look"],
       run: () => {
         ui.randomizeSeed();
         go("/create");
@@ -254,9 +260,9 @@ const staticCommands = computed<Command[]>(() => {
     // the primary now — recovery is covered by "Restart engine" below.
     {
       id: "act-add-host",
-      title: "Add host…",
-      keywords: ["engine", "server", "host", "remote"],
-      run: () => go("/settings?section=hosts"),
+      title: "Connect a machine…",
+      keywords: ["add", "engine", "server", "host", "remote"],
+      run: () => go("/machines"),
     },
     {
       id: "act-engine-restart",
@@ -305,7 +311,8 @@ const staticCommands = computed<Command[]>(() => {
   if (generation.pending.length > 0) {
     cmds.push({
       id: "act-cancel",
-      title: "Cancel job",
+      title: "Stop the image being made",
+      keywords: ["cancel", "job"],
       run: () => {
         void generation
           .cancel()
@@ -322,8 +329,8 @@ const staticCommands = computed<Command[]>(() => {
   if (generation.pending.length > 1) {
     cmds.push({
       id: "act-cancel-all",
-      title: `Cancel all ${generation.pending.length} jobs`,
-      keywords: ["queue", "stop"],
+      title: `Stop everything · ${generation.pending.length} waiting`,
+      keywords: ["cancel", "all", "jobs", "queue", "stop"],
       run: () => {
         const ids = generation.pending.map((j) => j.clientId);
         void Promise.all(ids.map((id) => generation.cancel(id)))
@@ -345,7 +352,7 @@ const staticCommands = computed<Command[]>(() => {
   if (generation.jobs.some((j) => j.status === "complete" || j.status === "error")) {
     cmds.push({
       id: "act-clear-finished",
-      title: "Clear finished jobs",
+      title: "Clear finished",
       keywords: ["jobs", "queue"],
       run: () => {
         generation.prune(0);
