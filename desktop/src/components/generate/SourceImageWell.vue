@@ -451,7 +451,11 @@ function setSourceFitMode(e: Event) {
       <div class="border-edge h-px flex-1 border-t" />
     </div>
 
-    <div class="flex gap-2 overflow-x-auto pb-1" data-test="attachment-strip">
+    <div
+      class="flex gap-2 overflow-x-auto pb-1"
+      data-test="attachment-strip"
+      data-drop-target="references"
+    >
       <div
         v-for="(image, index) in form.imageAttachments"
         :key="`${index}-${image.slice(0, 16)}`"
