@@ -395,7 +395,8 @@ describe("Lightbox — mesh poster", () => {
     await flushPromises();
 
     const viewer = wrapper.findComponent(MeshViewer);
-    expect(viewer.props("poster")).toBeTruthy();
+    expect(viewer.props("poster")).toBe("blob:poster");
+    expect(viewer.props("src")).toBe("blob:mesh-src");
   });
 
   it("leaves the poster undefined for a non-mesh print", async () => {
