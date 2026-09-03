@@ -64,7 +64,10 @@ function block(selector: string): string {
 function themeMap(id: ThemeId): ThemeMap & { colorScheme: string } {
   const body = block(`:root[data-theme="${id}"]`);
   const map: ThemeMap = Object.fromEntries(
-    [...body.matchAll(/--mold-([\w-]+):\s*([^;]+);/g)].map((m) => [m[1]!, m[2]!.trim()]),
+    [...body.matchAll(/--mold-([\w-]+):\s*([^;]+);/g)].map((m) => [
+      m[1]!,
+      m[2]!.replace(/\s+/g, " ").trim(),
+    ]),
   );
   const scheme = body.match(/color-scheme:\s*(\w+);/)?.[1] ?? "";
   return { ...map, colorScheme: scheme };
@@ -229,10 +232,15 @@ describe("six-theme contrast (style guide §08)", () => {
   it("inlines the default theme as the :root map, byte for byte", () => {
     // The :root block carries the default theme so a document with no
     // data-theme paints correctly; it must never drift from the named block.
-    const root = block(":root");
+    const root = Object.fromEntries(
+      [...block(":root").matchAll(/--mold-([\w-]+):\s*([^;]+);/g)].map((m) => [
+        m[1]!,
+        m[2]!.replace(/\s+/g, " ").trim(),
+      ]),
+    );
     for (const [key, value] of Object.entries(themeMap("mocha"))) {
       if (key === "colorScheme") continue;
-      expect(root, key).toContain(`--mold-${key}: ${value};`);
+      expect(root[key], key).toBe(value);
     }
   });
 

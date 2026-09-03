@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /*
- * Settings ▸ Look: the six themes as cards, the Match-system toggle, interface
- * scale, and the app-behaviour toggles beneath a divider. All of it drives
- * the existing appPrefs plumbing — nothing here blocks first use.
+ * The top Appearance card (Mold Studio Settings, spec §04/G7): the six themes
+ * as cards, the Match-system toggle, interface scale, and the remaining
+ * app-behaviour toggles beneath a divider. All of it drives the existing
+ * appPrefs plumbing — nothing here blocks first use.
  */
 import { computed } from "vue";
 import ToggleControl from "./ToggleControl.vue";
@@ -46,7 +47,7 @@ const BEHAVIOUR_TOGGLES = [
   {
     key: "restoreLastRoute",
     label: "Reopen last view",
-    help: "Launch into the view you left instead of New image.",
+    help: "Launch into the view you left instead of Create.",
   },
 ] as const;
 
@@ -73,8 +74,8 @@ function pick(theme: ThemeId) {
         class="flex flex-col gap-1.5 rounded-control border p-2.5 text-left transition-colors duration-100"
         :class="
           prefs.theme === meta.id
-            ? 'border-accent bg-accent-tint'
-            : 'border-border hover:border-border-focus'
+            ? 'border-safelight bg-sel-bg'
+            : 'border-edge hover:border-safelight'
         "
         @click="pick(meta.id)"
       >
@@ -84,19 +85,19 @@ function pick(theme: ThemeId) {
             :style="{ background: meta.accent }"
             aria-hidden="true"
           />
-          <span class="text-sm font-semibold text-fg">{{ meta.label }}</span>
-          <span class="ml-auto font-mono text-micro text-fg-dim">{{ meta.tone }}</span>
+          <span class="text-body font-semibold text-ink">{{ meta.label }}</span>
+          <span class="ml-auto font-utility text-caption text-ink-3">{{ meta.tone }}</span>
         </span>
-        <span class="text-micro text-fg-dim">{{ meta.blurb }}</span>
-        <span class="font-mono text-micro text-fg-faint">{{ meta.type }}</span>
+        <span class="text-caption text-ink-3">{{ meta.blurb }}</span>
+        <span class="font-utility text-caption text-ink-3">{{ meta.type }}</span>
       </button>
     </div>
 
     <!-- Match system -->
     <div class="mt-3 flex items-center justify-between gap-4 py-1.5">
       <div class="min-w-0">
-        <div class="text-sm text-fg">Match system appearance</div>
-        <p class="mt-0.5 text-micro text-fg-dim">{{ matchSystemHelp }}</p>
+        <div class="text-body text-ink">Match system appearance</div>
+        <p class="mt-0.5 text-caption text-ink-3">{{ matchSystemHelp }}</p>
       </div>
       <ToggleControl
         :model-value="prefs.matchSystem"
@@ -107,7 +108,7 @@ function pick(theme: ThemeId) {
 
     <!-- Interface scale -->
     <div class="mt-2 flex items-center justify-between gap-4 py-1.5">
-      <span class="text-sm text-fg" :title="scaleHelp">Interface size</span>
+      <span class="text-body text-ink" :title="scaleHelp">Interface size</span>
       <div class="flex shrink-0 items-center gap-3">
         <input
           type="range"
@@ -116,27 +117,27 @@ function pick(theme: ThemeId) {
           step="10"
           :value="prefs.uiScalePercent"
           aria-label="Interface size"
-          class="w-40 accent-accent"
+          class="w-40 accent-[var(--safelight)]"
           @input="
             (e) => prefs.update({ uiScalePercent: Number((e.target as HTMLInputElement).value) })
           "
         />
-        <span class="w-10 text-right font-mono text-micro text-fg-2">
+        <span class="data-mono w-10 text-right text-caption text-ink-2">
           {{ prefs.uiScalePercent }}%
         </span>
       </div>
     </div>
 
     <!-- App behaviour -->
-    <div class="mt-3 border-t border-border pt-1">
+    <div class="border-edge mt-3 border-t pt-1">
       <div
         v-for="toggle in BEHAVIOUR_TOGGLES"
         :key="toggle.key"
         class="flex items-center justify-between gap-4 py-2"
       >
         <div class="min-w-0">
-          <div class="text-sm text-fg">{{ toggle.label }}</div>
-          <p class="mt-0.5 text-micro text-fg-dim">{{ toggle.help }}</p>
+          <div class="text-body text-ink">{{ toggle.label }}</div>
+          <p class="mt-0.5 text-caption text-ink-3">{{ toggle.help }}</p>
         </div>
         <ToggleControl
           :model-value="toggleValue(toggle.key)"
