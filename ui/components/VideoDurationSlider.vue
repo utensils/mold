@@ -111,7 +111,9 @@ function update(frames: number): void {
       :step="videoFrameStep(contract)"
       :label="label"
       :value-label="readout"
-      :aria-value-text="generationsLabel ? `${readout}, ${generationsLabel}` : readout"
+      :aria-value-text="
+        generationsLabel ? `${readout}, ${generationsLabel}` : readout
+      "
       :marks="marks"
       :snap-threshold-ratio="touchFriendly ? 0.04 : 0.015"
       @update:model-value="update"
@@ -119,9 +121,7 @@ function update(frames: number): void {
     <p class="video-duration__hint" data-test="video-duration-detail">
       {{ displayedFrames }} frames · {{ rate }} fps · {{ readout
       }}<template v-if="generationsLabel"> · {{ generationsLabel }}</template>
-      <template v-if="(generations ?? 0) > 1">
-        · automatic sequence</template
-      >
+      <template v-if="(generations ?? 0) > 1"> · automatic sequence</template>
     </p>
   </div>
 </template>
