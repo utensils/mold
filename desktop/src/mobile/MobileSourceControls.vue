@@ -690,12 +690,12 @@ function applyMask(mask: string): void {
         {{ sourceFitHelp(editFitMode) }} Qwen conditioning limit: {{ sourceLimitLabel }} from this
         model; Output size is separate.
       </p>
-      <p class="mobile-source-note">
+      <p class="mobile-source-note" data-test="mobile-references-note">
         {{
           referencesOnly
             ? referenceMax === null
               ? "Optional ordered references. Their order is preserved."
-              : `Add up to  optional references. Their order is preserved.`
+              : `Add up to ${referenceMax} optional references. Their order is preserved.`
             : "The first picture is the edit Target. Additional pictures are References."
         }}
       </p>

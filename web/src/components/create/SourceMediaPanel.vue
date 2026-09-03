@@ -215,6 +215,46 @@ async function onWellFile(slot: SourceMediaSlot, file: File) {
 function clearReferences() {
   patch({ referenceImages: [], exclusiveWell: "source" });
 }
+
+/**
+ * The References strip is a DROP TARGET in its own right.
+ *
+ * It renders `data-drop-target="references"` so a shell that hit-tests the
+ * cursor (`elementFromPoint(...).closest(…)`) can name it, and it handles the
+ * HTML5 drop itself — which both writes through the SAME fields the strip's
+ * picker writes and marks the event handled, so `CreatePage.vue`'s
+ * window-level listener (`event.defaultPrevented`) leaves it alone. Without
+ * this a file dragged onto the strip fell through to the window and landed on
+ * the SOURCE well, which on an exclusive (Klein) recipe parks the very strip
+ * the user was adding to.
+ */
+async function onStripDrop(event: DragEvent) {
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  if (files.length === 0) return;
+  const images: SourceImageState[] = [];
+  for (const file of files) {
+    const image = await fileToSourceImage(file);
+    if (!image) return;
+    images.push(image);
+  }
+  // The ceiling is the RECIPE's, never a client constant, and the strip is
+  // APPENDED to — a drop that replaced it lost every earlier picture.
+  const max = referenceMax.value ?? undefined;
+  if (plan.value.kind === "single-or-references") {
+    patch({
+      referenceImages: [...referenceImages.value, ...images].slice(0, max),
+      // Last write wins on an exclusive recipe: the source parks, kept.
+      exclusiveWell: "references",
+    });
+    return;
+  }
+  patch({
+    imageAttachments: [...props.modelValue.imageAttachments, ...images].slice(
+      0,
+      max,
+    ),
+  });
+}
 function onWellGallery(slot: SourceMediaSlot) {
   if (slot === "source") {
     if (plan.value.kind === "attachments") emit("open-target-picker");
@@ -357,59 +397,69 @@ function clearControl() {
         @gallery="onWellGallery"
         @clear="onWellClear"
       />
-      <p
-        v-if="plan.required && plan.primary === null"
-        class="smp__required"
-        data-test="source-required-badge"
+      <!-- The strip is its own drop target: a file dragged here appends to the
+           references, and the handled event keeps the window listener off it. -->
+      <div
+        class="smp__strip"
+        data-test="reference-strip"
+        data-drop-target="references"
+        @dragover.prevent
+        @drop.prevent="onStripDrop"
       >
-        Required — this checkpoint renders from an image.
-      </p>
-      <button
-        v-if="!hasSource && plan.primary === null"
-        type="button"
-        class="smp__dropzone"
-        data-test="source-attach"
-        :aria-required="plan.required || undefined"
-        @click="emit('open-picker')"
-      >
-        {{ referencesOnly ? "Attach references or " : "Attach images or "
-        }}<span class="smp__accent">browse</span>
-      </button>
-      <div v-else-if="plan.primary === null">
-        <div class="smp__source-row">
-          <span class="smp__source-name">
-            {{ modelValue.imageAttachments[0]?.filename }}
-            <template v-if="modelValue.imageAttachments.length > 1">
-              +{{ modelValue.imageAttachments.length - 1 }} more
-            </template>
-          </span>
+        <p
+          v-if="plan.required && plan.primary === null"
+          class="smp__required"
+          data-test="source-required-badge"
+        >
+          Required — this checkpoint renders from an image.
+        </p>
+        <button
+          v-if="!hasSource && plan.primary === null"
+          type="button"
+          class="smp__dropzone"
+          data-test="source-attach"
+          :aria-required="plan.required || undefined"
+          @click="emit('open-picker')"
+        >
+          {{ referencesOnly ? "Attach references or " : "Attach images or "
+          }}<span class="smp__accent">browse</span>
+        </button>
+        <div v-else-if="plan.primary === null">
+          <div class="smp__source-row">
+            <span class="smp__source-name">
+              {{ modelValue.imageAttachments[0]?.filename }}
+              <template v-if="modelValue.imageAttachments.length > 1">
+                +{{ modelValue.imageAttachments.length - 1 }} more
+              </template>
+            </span>
+            <button
+              type="button"
+              class="smp__remove"
+              data-test="source-remove"
+              @click="emit('clear-source')"
+            >
+              Remove
+            </button>
+          </div>
           <button
             type="button"
-            class="smp__remove"
-            data-test="source-remove"
-            @click="emit('clear-source')"
+            class="smp__dropzone smp__dropzone--compact"
+            data-test="source-attach-more"
+            @click="emit('open-picker')"
           >
-            Remove
+            Add more or <span class="smp__accent">browse</span>
           </button>
         </div>
         <button
+          v-else-if="hasSource"
           type="button"
           class="smp__dropzone smp__dropzone--compact"
           data-test="source-attach-more"
           @click="emit('open-picker')"
         >
-          Add more or <span class="smp__accent">browse</span>
+          Add references or <span class="smp__accent">browse</span>
         </button>
       </div>
-      <button
-        v-else-if="hasSource"
-        type="button"
-        class="smp__dropzone smp__dropzone--compact"
-        data-test="source-attach-more"
-        @click="emit('open-picker')"
-      >
-        Add references or <span class="smp__accent">browse</span>
-      </button>
       <div v-if="plan.primary === 'target' && hasSource" class="smp__field">
         <label class="smp__label">Fit to canvas</label>
         <SegmentedControl
@@ -428,7 +478,7 @@ function clearControl() {
           referencesOnly
             ? referenceMax === null
               ? "Ordered references."
-              : `Up to  ordered references.`
+              : `Up to ${referenceMax} ordered references.`
             : "First picture is the edit Target; the rest are References."
         }}
       </p>
@@ -470,7 +520,14 @@ function clearControl() {
 
       <!-- The exclusive reference strip: the SAME picker the strip-only
            layouts use, driven by the plan. -->
-      <template v-if="plan.kind === 'single-or-references'">
+      <div
+        v-if="plan.kind === 'single-or-references'"
+        class="smp__strip"
+        data-test="reference-strip"
+        data-drop-target="references"
+        @dragover.prevent
+        @drop.prevent="onStripDrop"
+      >
         <div class="smp__subhead">References</div>
         <button
           v-if="referenceImages.length === 0"
@@ -518,10 +575,10 @@ function clearControl() {
           {{
             referenceMax === null
               ? "Ordered references."
-              : `Up to  ordered references.`
+              : `Up to ${referenceMax} ordered references.`
           }}
         </p>
-      </template>
+      </div>
 
       <template v-if="sourceRefinements && hasSource">
         <!-- A canvasless recipe (a 3-D mesh) has no canvas to fit onto, and

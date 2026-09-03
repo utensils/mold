@@ -787,6 +787,16 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     // Klein takes BOTH wells, so neither layout moves: a source image stays a
     // source image and a strip stays a strip. Whichever holds media is the
     // active one and the other parks — the request builder picks exactly one.
+    //
+    // The strip still has a CEILING though, and it is the recipe's own: a form
+    // arriving from qwen-image-edit (unbounded) with six pictures would ship
+    // six `edit_images` and be refused at admission ("supports at most 4"),
+    // which is a rule the user never saw. Truncate here, keeping order and the
+    // first N — the same clamp web applies in `modelDefaultsPatch`.
+    const referenceCeiling = caps.referenceImages?.max ?? null;
+    if (referenceCeiling !== null && form.imageAttachments.length > referenceCeiling) {
+      form.imageAttachments = form.imageAttachments.slice(0, referenceCeiling);
+    }
   } else if (caps.sourceImageMode !== "single") {
     // Entering qwen-edit/references: a single-mode source seeds the strip as
     // the Target (web parity — the attachment survives the model switch).

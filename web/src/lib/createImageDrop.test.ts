@@ -91,6 +91,62 @@ describe("routeCreateDrop", () => {
   });
 });
 
+/**
+ * A drop routed with a hard-coded `hovered = null` sent every window-level
+ * drop to the plan's default, so a file aimed at the References strip landed
+ * on the Source well. The hovered well is read from the element under the
+ * pointer, exactly as desktop's `dropTargetAtPosition` reads it — the same
+ * `data-drop-target` attribute, hit-tested in CSS pixels.
+ */
+describe("routeCreateDrop — the well under the pointer", () => {
+  function hitTest(element: Element | null): number[][] {
+    const seen: number[][] = [];
+    document.elementFromPoint = (x: number, y: number) => {
+      seen.push([x, y]);
+      return element as Element;
+    };
+    return seen;
+  }
+
+  it("routes to the labelled well under the pointer, not the plan default", () => {
+    document.body.innerHTML = `
+      <div id="strip" data-drop-target="references"><img id="tile" /></div>`;
+    const seen = hitTest(document.getElementById("tile"));
+
+    // The exclusive plan's default with an empty form is the SOURCE well; a
+    // drop aimed at the strip has to beat it.
+    const s = state();
+    expect(routeCreateDrop(s, context(klein))).toBe("source");
+    expect(
+      routeCreateDrop(s, context(klein), { clientX: 42, clientY: 84 }),
+    ).toBe("references");
+    expect(seen).toEqual([[42, 84]]);
+  });
+
+  it("falls back to the plan default for a drop on chrome", () => {
+    document.body.innerHTML = `<div id="plain"></div>`;
+    hitTest(document.getElementById("plain"));
+    expect(
+      routeCreateDrop(state(), context(klein), { clientX: 1, clientY: 1 }),
+    ).toBe("source");
+  });
+
+  it("still refuses a full strip the pointer is over", () => {
+    document.body.innerHTML = `<div data-drop-target="references"></div>`;
+    hitTest(document.querySelector("[data-drop-target]"));
+    const s = state();
+    s.referenceImages = [
+      image("a.png"),
+      image("b.png"),
+      image("c.png"),
+      image("d.png"),
+    ];
+    expect(
+      routeCreateDrop(s, context(klein), { clientX: 5, clientY: 5 }),
+    ).toMatchObject({ refused: expect.stringContaining("at most 4") });
+  });
+});
+
 describe("applyCreateDrop", () => {
   it("writes the source well and records the last write", async () => {
     const s = state();

@@ -37,6 +37,7 @@ import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 import {
+  flux2KleinRecipe,
   hunyuan3dRecipe,
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
@@ -1718,6 +1719,58 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("whole numbers");
+  });
+
+  /**
+   * On an EXCLUSIVE (FLUX.2 [klein]) recipe the mask belongs to the SOURCE
+   * well, so when the references are the active conditioning the mask is
+   * parked with the well it describes: `toRequest` already omits it, and the
+   * submit gate must not block Generate on a control the user cannot even see.
+   */
+  it("lets a Klein form with active references submit past a parked mask", async () => {
+    const klein = {
+      ...installedModelRow("flux2-klein:bf16", "flux2"),
+      default_steps: 4,
+      default_guidance: 1,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "klein",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([klein]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:bf16";
+    form.state.value.modelFamily = "flux2";
+    form.state.value.prompt = "a cat";
+    // The Source well is empty; the references are the active well, and a
+    // mask staged earlier (while a source WAS attached) is still in the form.
+    form.state.value.imageAttachments = [];
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    form.state.value.exclusiveWell = "references";
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK",
+    };
+    await nextTick();
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Mask image needs a source image.");
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    const request = submitMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(request.edit_images).toEqual(["REF"]);
+    expect(request.source_image ?? null).toBeNull();
+    expect(request.mask_image ?? null).toBeNull();
   });
 
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {

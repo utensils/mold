@@ -23,6 +23,7 @@ import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import { addTag, emptyFileUnderState, pickCollection } from "@studio/lib/fileUnder";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
+import { flux2KleinRecipe } from "@studio/lib/generationProfile.testFixtures";
 
 describe("loraHostBinding", () => {
   it("binds host-local LoRA paths to one machine and rejects mixed stacks", () => {
@@ -1346,6 +1347,57 @@ describe("applyModelDefaults — qwen-edit attachment seeding", () => {
     form.batchSize = 4;
     applyModelDefaults(form, qwenEditModel());
     expect(form.batchSize).toBe(1);
+  });
+});
+
+/**
+ * An EXCLUSIVE (FLUX.2 [klein]) recipe keeps both wells, so neither layout
+ * moves on the switch — but the strip still has an advertised CEILING. A form
+ * arriving from qwen-image-edit with six attachments used to keep all six and
+ * ship six `edit_images`, which admission refuses with "supports at most 4"
+ * long after the user could see why. Web already clamps in
+ * `modelDefaultsPatch`; this is the same clamp, from the same authority.
+ */
+describe("applyModelDefaults — an exclusive strip keeps its advertised ceiling", () => {
+  function kleinModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "flux2-klein:bf16",
+      family: "flux2",
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 4,
+      default_guidance: 1,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  it("truncates a six-picture strip to the four references Klein advertises", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwenEditModel());
+    form.imageAttachments = ["A", "B", "C", "D", "E", "F"];
+
+    applyModelDefaults(form, kleinModel());
+
+    // Order is preserved and the first N survive — the same rule the web
+    // strip's own picker and the shared drop router follow.
+    expect(form.imageAttachments).toEqual(["A", "B", "C", "D"]);
+  });
+
+  it("leaves a strip already within the ceiling exactly as it was", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwenEditModel());
+    form.imageAttachments = ["A", "B"];
+
+    applyModelDefaults(form, kleinModel());
+
+    expect(form.imageAttachments).toEqual(["A", "B"]);
   });
 });
 
