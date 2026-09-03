@@ -126,6 +126,25 @@ describe("prompt remix contract", () => {
     );
   });
 
+  it("treats an edit/reference swap as stale conditioning", () => {
+    // Reference images ARE the conditioning for an edit recipe (Qwen edit,
+    // FLUX.2 [dev]) and one half of it for an exclusive one (Klein), so
+    // swapping, reordering, adding or removing one has to stale reviewed
+    // prompt work exactly as a source-image swap does.
+    expect(conditioningFingerprint({ edit_images: ["a"] })).not.toBe(
+      conditioningFingerprint({ edit_images: ["b"] }),
+    );
+    expect(conditioningFingerprint({ edit_images: ["a", "b"] })).not.toBe(
+      conditioningFingerprint({ edit_images: ["b", "a"] }),
+    );
+    expect(conditioningFingerprint({ edit_images: ["a"] })).not.toBe(
+      conditioningFingerprint({ edit_images: ["a", "b"] }),
+    );
+    expect(conditioningFingerprint({ edit_images: ["a"] })).not.toBe(
+      conditioningFingerprint({}),
+    );
+  });
+
   it("treats ordered H3 reference reordering as stale conditioning", () => {
     const first = { kind: "image", provenance: { sha256: "a" } };
     const second = { kind: "audio", provenance: { sha256: "b" } };

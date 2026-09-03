@@ -54,6 +54,73 @@ pub(crate) fn validate_source_image_path(input: &str) -> Result<String, String> 
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Containers `edit_images` admission accepts. Narrower than the source
+/// image's list on purpose: `validation::is_valid_image_format` sniffs PNG
+/// and JPEG only, so offering WebP here would build a request the server
+/// refuses after the queue slot is paid for.
+const ACCEPTED_REFERENCE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg"];
+
+/// Longest References line the picker accepts.
+pub(crate) const REFERENCE_INPUT_MAX_BYTES: usize = 4096;
+
+/// Parse the References row's one-line syntax `a.png; b.jpg`.
+///
+/// Semicolon order is semantic — the reference group is ordered, and the
+/// engine places each image on its own time plane in the order given.
+/// Newlines are accepted too, for tests and a future multiline widget.
+pub(crate) fn parse_reference_image_input(
+    value: &str,
+    max: Option<u32>,
+) -> Result<Vec<String>, String> {
+    if value.len() > REFERENCE_INPUT_MAX_BYTES {
+        return Err("Reference list is too long.".to_string());
+    }
+    let mut paths = Vec::new();
+    for item in value
+        .split([';', '\n'])
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        paths.push(validate_reference_image_path(item)?);
+    }
+    if let Some(max) = max {
+        if paths.len() > max as usize {
+            return Err(format!(
+                "This model takes at most {max} reference images; {} given.",
+                paths.len()
+            ));
+        }
+    }
+    Ok(paths)
+}
+
+/// Render the stored group back into the row's editable syntax.
+pub(crate) fn format_reference_image_input(paths: &[String]) -> String {
+    paths.join("; ")
+}
+
+fn validate_reference_image_path(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Reference image needs a file path".to_string());
+    }
+    let path = expand_home(trimmed);
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| format!("Reference image not found: {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("Reference image is not a file: {}", path.display()));
+    }
+    if !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .is_some_and(|ext| ACCEPTED_REFERENCE_EXTENSIONS.contains(&ext.as_str()))
+    {
+        return Err("Reference images must be PNG or JPEG files (.png, .jpg, .jpeg)".to_string());
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
 fn has_accepted_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -90,6 +157,43 @@ mod tests {
         std::fs::write(&text, b"x").unwrap();
         let error = validate_source_image_path(&text.to_string_lossy()).unwrap_err();
         assert!(error.contains("PNG, JPEG, or WebP"), "{error}");
+    }
+
+    #[test]
+    fn the_reference_row_keeps_the_typed_order_and_bounds_the_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for name in ["a.png", "b.jpg", "c.jpeg"] {
+            let file = dir.path().join(name);
+            std::fs::write(&file, b"bytes").unwrap();
+            paths.push(file.to_string_lossy().into_owned());
+        }
+        let line = format!(" {} ; {} ", paths[0], paths[1]);
+        assert_eq!(
+            parse_reference_image_input(&line, Some(4)),
+            Ok(vec![paths[0].clone(), paths[1].clone()])
+        );
+        assert_eq!(
+            format_reference_image_input(&paths[..2]),
+            format!("{}; {}", paths[0], paths[1])
+        );
+        let error = parse_reference_image_input(&paths.join("; "), Some(2)).unwrap_err();
+        assert!(error.contains("at most 2"), "{error}");
+        assert!(parse_reference_image_input(&paths.join("; "), None).is_ok());
+    }
+
+    /// `edit_images` admission sniffs PNG and JPEG only, so the row refuses a
+    /// WebP the Source row would happily take.
+    #[test]
+    fn the_reference_row_refuses_a_container_admission_would_reject() {
+        let dir = tempfile::tempdir().unwrap();
+        let webp = dir.path().join("cat.webp");
+        std::fs::write(&webp, b"bytes").unwrap();
+        let error = parse_reference_image_input(&webp.to_string_lossy(), Some(4)).unwrap_err();
+        assert!(error.contains("PNG or JPEG"), "{error}");
+        let missing = dir.path().join("nope.png");
+        let error = parse_reference_image_input(&missing.to_string_lossy(), Some(4)).unwrap_err();
+        assert!(error.starts_with("Reference image not found"), "{error}");
     }
 
     #[test]

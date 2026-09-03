@@ -34,6 +34,15 @@ const props = withDefaults(
     touchTargetSize?: number;
     /** Delegates acquisition to a native shell instead of the hidden input. */
     nativePicker?: boolean;
+    /**
+     * Which well this is, for `imageDropRouting`. Rendered as
+     * `data-drop-target` on the well root so a shell that intercepts the OS
+     * drag (Tauri swallows it before any HTML5 `drop`) can name the well
+     * under the cursor with `elementFromPoint(...).closest(…)` instead of
+     * routing by model capability. Attachment STRIPS carry the attribute on
+     * their own container — they are not this component.
+     */
+    dropTarget?: string | null;
   }>(),
   {
     image: null,
@@ -51,6 +60,7 @@ const props = withDefaults(
     touchFriendly: false,
     touchTargetSize: 44,
     nativePicker: false,
+    dropTarget: null,
   },
 );
 
@@ -105,6 +115,7 @@ function onDrop(event: DragEvent): void {
   <div
     class="image-well"
     :class="{ 'image-well--touch': touchFriendly }"
+    :data-drop-target="dropTarget || undefined"
     :style="
       touchFriendly
         ? { '--image-well-touch-target': `${touchTargetSize}px` }

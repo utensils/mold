@@ -18,12 +18,14 @@
 import {
   baseGenerationCapabilities,
   isAdvancedVideoFamily,
-  isFlux2DevModel,
   isMinimaxH3Family,
   isQwenImageEditFamily,
   MAX_LORA_STACK,
+  sourceImageModeForReferences,
   type BaseGenerationCapabilities,
+  type ReferenceImagesCapabilities,
 } from "@studio/lib/generationCapabilities";
+import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import {
   recipeIsCanvasless,
   type GenerationRecipeProfile,
@@ -35,7 +37,7 @@ import { coerceOutputFormatForRecipe, type OutputFormatRecipe } from "@studio/li
 import type { GenerateRequest, OutputFormat, Scheduler } from "./api/types";
 
 export type { SourceImageMode } from "@studio/lib/generationCapabilities";
-export { isFlux2DevModel, isQwenImageEditFamily, MAX_LORA_STACK };
+export { isQwenImageEditFamily, MAX_LORA_STACK };
 
 export interface GenerationCapabilities extends Omit<
   BaseGenerationCapabilities,
@@ -95,6 +97,17 @@ export interface RecipeCapabilitiesSnapshot {
   canvasless: boolean;
   /** The recipe's 3-D controls, or `null` when `mesh` is refused. */
   mesh: MeshCapabilitiesProfile | null;
+  /**
+   * The recipe's ordered-reference contract (`GenerateRequest.edit_images`),
+   * or `null` where it takes none.
+   *
+   * Without this the request builders — which take only the form — fell
+   * through to `legacyReferenceImages`, whose answer for FLUX.2 [klein] is
+   * deliberately `null` (an older host has no Klein reference engine). The
+   * References strip rendered from the recipe and the wire never carried what
+   * the user put in it.
+   */
+  referenceImages: ReferenceImagesCapabilities | null;
 }
 
 export function recipeCapabilitiesSnapshot(
@@ -120,6 +133,46 @@ export function recipeCapabilitiesSnapshot(
     supportsStrength: caps.supportsStrength,
     canvasless: recipeIsCanvasless(recipe),
     mesh: caps.mesh ?? null,
+    referenceImages: caps.referenceImages,
+  };
+}
+
+/**
+ * The capabilities a FORM-ONLY caller reads — the request builders, the
+ * request pruner, and the submit-time source-fit preprocessors, none of which
+ * still have the model row in hand.
+ *
+ * It is `generationCapabilitiesForFamily` plus the recipe snapshot the form
+ * already carries, so those callers resolve the reference contract (and the
+ * layout it projects) from exactly what the wells rendered from. Without the
+ * snapshot — an older host that advertises no recipe — the answer is
+ * byte-identical to the family derivation, which is the whole point of the
+ * `null`.
+ *
+ * H3's two tasks own their own layouts and their own serializer, so their
+ * mode is never overridden here.
+ */
+export function generationCapabilitiesForForm(
+  family: string,
+  model = "",
+  pipeline: string | null = null,
+  advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
+  advertisedSourceImage?: string | null,
+  snapshot?: RecipeCapabilitiesSnapshot | null,
+): GenerationCapabilities {
+  const caps = generationCapabilitiesForFamily(
+    family,
+    model,
+    pipeline,
+    advertisedGuidance,
+    advertisedSourceImage,
+  );
+  if (!snapshot || isMinimaxH3Family(family)) return caps;
+  return {
+    ...caps,
+    referenceImages: snapshot.referenceImages,
+    referenceImagesReason: snapshot.referenceImages ? null : caps.referenceImagesReason,
+    sourceImageMode: sourceImageModeForReferences(snapshot.referenceImages),
   };
 }
 
@@ -210,7 +263,14 @@ export function pruneRequestForFamily(
   advertisedSourceImage?: string | null,
   recipe?: RecipeCapabilitiesSnapshot | null,
 ): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(family, model, null, null, advertisedSourceImage);
+  const caps = generationCapabilitiesForForm(
+    family,
+    model,
+    null,
+    null,
+    advertisedSourceImage,
+    recipe,
+  );
   const next: GenerateRequest = { ...req };
 
   // MiniMax H3 has its own final serializer in `minimaxH3Authoring`; do not
@@ -262,22 +322,38 @@ export function pruneRequestForFamily(
     delete next.distill_strength_low;
   }
 
-  if (
-    caps.forcesBatchSizeOne ||
-    (caps.sourceImageMode === "references" && (next.edit_images?.length ?? 0) > 0)
-  ) {
+  // qwen-edit requests carry `edit_images` (ordered: target first, then
+  // references) and NEVER `source_image`/`strength`; a single-source family is
+  // the exact inverse; an EXCLUSIVE recipe (Klein) is whichever the request
+  // itself carries, so the pruner asks the same shared question the request
+  // builder asked rather than re-deriving one from the mode. The sanitizer
+  // used to strip the image entirely for qwen-edit — keep `edit_images`
+  // intact there (P7 regression flip).
+  const conditioning = conditioningForRequest(caps.sourceImageMode, {
+    hasSource: Boolean(next.source_image),
+    referenceCount: next.edit_images?.length ?? 0,
+    // A request is already resolved: only one of the two can be on the wire,
+    // and a stale pair prefers the references the edit families ship.
+    lastWrite: (next.edit_images?.length ?? 0) > 0 ? "references" : null,
+  });
+
+  if (caps.forcesBatchSizeOne || conditioning === "references") {
     next.batch_size = 1;
   }
 
-  // qwen-edit requests carry `edit_images` (ordered: target first, then
-  // references) and NEVER `source_image`/`strength`; every other family is the
-  // exact inverse. The sanitizer used to strip the image entirely for
-  // qwen-edit — keep `edit_images` intact there (P7 regression flip).
-  if (!caps.supportsImg2img || caps.sourceImageMode !== "single") {
+  // An empty single-source request keeps its strength (it is a form value on
+  // an ordinary img2img family, not conditioning); only a request whose
+  // conditioning is REFERENCES loses the source pair.
+  if (
+    !caps.supportsImg2img ||
+    (conditioning !== "source" &&
+      caps.sourceImageMode !== "single" &&
+      !(caps.sourceImageMode === "single-or-references" && conditioning === "none"))
+  ) {
     delete next.source_image;
     delete next.strength;
   }
-  if (!caps.supportsImg2img || caps.sourceImageMode === "single") {
+  if (!caps.supportsImg2img || conditioning !== "references") {
     delete next.edit_images;
   }
   if (!caps.supportsMask) delete next.mask_image;

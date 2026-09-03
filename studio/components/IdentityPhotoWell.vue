@@ -86,6 +86,7 @@ const attached = computed(() => Boolean(props.image || props.filename));
       :native-picker="nativePicker"
       alt="Identity photo"
       test-id="identity"
+      drop-target="identity"
       @file="emit('file', $event)"
       @gallery="emit('gallery')"
       @clear="emit('clear')"

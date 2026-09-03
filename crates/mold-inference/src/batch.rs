@@ -71,7 +71,15 @@ pub enum MediaKind {
 pub struct WorkflowCapabilities {
     /// Standard source-image img2img/inpaint or image-to-video input.
     pub source: bool,
-    /// Ordered reference images consumed by a dedicated edit-family path.
+    /// Ordered reference images (`edit_images`) the family's engine conditions
+    /// on. Its ONE authority is
+    /// `mold_core::generation_profile::reference_images_for_recipe`: the
+    /// family-level flag is true when any of the family's manifest models
+    /// advertises a visible reference block, pinned by
+    /// `static_edit_references_agrees_with_the_generation_profile`. The flag
+    /// said `false` for flux2 while the engine had shipped the reference path
+    /// since [dev] landed — a table that describes the runtime has to be
+    /// pinned to the runtime, not reviewed by eye.
     pub edit_references: bool,
     pub lora: bool,
     /// Generated audio is checkpoint-specific even for a capable family.
@@ -179,7 +187,7 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         media: MediaKind::Image,
         workflows: WorkflowCapabilities {
             source: true,
-            edit_references: false,
+            edit_references: true,
             lora: true,
             generated_audio: false,
             chain: false,

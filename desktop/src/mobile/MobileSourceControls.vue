@@ -4,7 +4,7 @@ import MaskEditorModal from "../components/generate/MaskEditorModal.vue";
 import { fetchCatalogInstalled } from "../lib/api/catalog";
 import type { ApiTarget } from "../lib/api/client";
 import type { CatalogEntry, ModelEntry } from "../lib/api/types";
-import { generationCapabilitiesForFamily, isFlux2DevModel } from "../lib/capabilities";
+import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { buildControlNetOptions } from "../lib/controlNetOptions";
 import { attachmentRoleLabel, attachmentTitleLabel, moveAttachment } from "../lib/editAttachments";
 import type { GenerateForm } from "../lib/generateForm";
@@ -37,7 +37,7 @@ import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import { resolveExclusiveWells, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import {
   appendMinimaxH3PickedImageReferences,
   emptyMinimaxH3AuthoringState,
@@ -189,7 +189,41 @@ async function onH3ReferenceImagesPicked(images: MobilePickedImage[]): Promise<v
 const h3ReferencePickerMaxBytes = computed(() =>
   Math.max(0, MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - inlineGenerationMediaBytes(props.form)),
 );
-const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
+/** A strip with no Target is a pure reference strip; the ceiling and the
+ * roles come from the advertised recipe, never from a model name. */
+const referencesOnly = computed(
+  () =>
+    (plan.value.kind === "attachments" && plan.value.primary === null) ||
+    plan.value.kind === "single-or-references",
+);
+const referenceMax = computed(() =>
+  plan.value.kind === "attachments"
+    ? plan.value.max
+    : plan.value.kind === "single-or-references"
+      ? plan.value.references.max
+      : null,
+);
+/** The exclusive (Klein) parking rule — see `resolveExclusiveWells`. */
+const exclusive = computed(() =>
+  plan.value.kind === "single-or-references"
+    ? resolveExclusiveWells({
+        hasSource: Boolean(props.form.sourceImage),
+        referenceCount: props.form.imageAttachments.length,
+        lastWrite: props.form.exclusiveWell ?? null,
+      })
+    : null,
+);
+/** Klein renders both: the ordered strip AND the source well. */
+const showStrip = computed(
+  () => plan.value.kind === "attachments" || plan.value.kind === "single-or-references",
+);
+const showSourceWell = computed(
+  () => plan.value.kind === "single" || plan.value.kind === "single-or-references",
+);
+/** Fit, strength and the mask describe a SOURCE image. */
+const sourceRefinements = computed(
+  () => plan.value.kind === "single" || exclusive.value?.active !== "references",
+);
 const error = ref("");
 const maskOpen = ref(false);
 const sourcePickerOpen = ref(false);
@@ -425,6 +459,8 @@ async function onSingleSourceFile(slot: SourceMediaSlot, file: File): Promise<vo
       props.form.sourceImage = base64;
       props.form.sourceImageName = file.name;
       props.form.sourceFit = defaultSourceFitPolicy();
+      // Last write wins on an exclusive recipe: the references park, kept.
+      props.form.exclusiveWell = "source";
     } else {
       props.form.endFrame = { filename: file.name, base64 };
     }
@@ -464,7 +500,9 @@ async function pickEditImages(event: Event): Promise<void> {
     plan.value.primary === "target" &&
     props.form.imageAttachments.length === 0;
   const next = [...props.form.imageAttachments, ...picked.map((image) => image.b64)];
-  props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
+  props.form.imageAttachments =
+    referenceMax.value === null ? next : next.slice(0, referenceMax.value);
+  props.form.exclusiveWell = "references";
   if (establishesTarget) props.form.sourceFit = defaultSourceFitPolicy();
 }
 
@@ -612,13 +650,13 @@ function applyMask(mask: string): void {
     />
   </template>
 
-  <template v-else-if="plan.kind === 'attachments' || plan.kind === 'single'">
-    <fieldset
-      v-if="isAttachmentMode"
-      class="mobile-source-controls"
-      data-test="mobile-source-controls"
-    >
-      <legend class="mobile-source-legend">{{ flux2Dev ? "References" : "Pictures" }}</legend>
+  <template
+    v-else-if="
+      plan.kind === 'attachments' || plan.kind === 'single' || plan.kind === 'single-or-references'
+    "
+  >
+    <fieldset v-if="showStrip" class="mobile-source-controls" data-test="mobile-source-controls">
+      <legend class="mobile-source-legend">{{ referencesOnly ? "References" : "Pictures" }}</legend>
       <SourceMediaWells
         v-if="plan.kind === 'attachments' && plan.primary === 'target'"
         :plan="plan"
@@ -652,12 +690,21 @@ function applyMask(mask: string): void {
         {{ sourceFitHelp(editFitMode) }} Qwen conditioning limit: {{ sourceLimitLabel }} from this
         model; Output size is separate.
       </p>
-      <p class="mobile-source-note">
+      <p class="mobile-source-note" data-test="mobile-references-note">
         {{
-          flux2Dev
-            ? "Add up to four optional references. Their order is preserved."
+          referencesOnly
+            ? referenceMax === null
+              ? "Optional ordered references. Their order is preserved."
+              : `Add up to ${referenceMax} optional references. Their order is preserved.`
             : "The first picture is the edit Target. Additional pictures are References."
         }}
+      </p>
+      <p
+        v-if="exclusive?.parked === 'references'"
+        class="mobile-source-note"
+        data-test="mobile-references-parked-note"
+      >
+        {{ exclusive.note }}
       </p>
       <p
         v-if="validationError"
@@ -704,7 +751,7 @@ function applyMask(mask: string): void {
           />
           <div class="mobile-attachment-copy">
             <strong :data-test="`mobile-edit-role-${index}`">{{
-              flux2Dev ? `Reference ${index + 1}` : attachmentRoleLabel(index)
+              referencesOnly ? `Reference ${index + 1}` : attachmentRoleLabel(index)
             }}</strong>
             <span :data-test="`mobile-edit-title-${index}`">{{ attachmentTitleLabel(index) }}</span>
           </div>
@@ -746,7 +793,11 @@ function applyMask(mask: string): void {
       </div>
     </fieldset>
 
-    <fieldset v-else class="mobile-source-controls" data-test="mobile-source-controls">
+    <fieldset
+      v-if="showSourceWell"
+      class="mobile-source-controls"
+      data-test="mobile-source-controls"
+    >
       <SourceMediaWells
         :plan="plan"
         touch-friendly
@@ -762,7 +813,7 @@ function applyMask(mask: string): void {
         @gallery="openSingleSourcePicker"
         @clear="clearSingleSource"
       />
-      <template v-if="form.sourceImage">
+      <template v-if="sourceRefinements && form.sourceImage">
         <!-- Wan pins the first frame exactly and never reads strength. -->
         <label v-if="caps.supportsStrength" class="mobile-range-field">
           <span
@@ -808,7 +859,10 @@ function applyMask(mask: string): void {
         </p>
       </template>
 
-      <fieldset v-if="caps.supportsMask && form.sourceImage" class="mobile-source-subsection">
+      <fieldset
+        v-if="sourceRefinements && caps.supportsMask && form.sourceImage"
+        class="mobile-source-subsection"
+      >
         <legend>Mask</legend>
         <p class="mobile-source-note">White repaints. Black preserves the source.</p>
         <input

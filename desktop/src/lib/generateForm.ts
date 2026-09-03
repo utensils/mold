@@ -22,6 +22,7 @@ import {
   coerceFormOutputFormat,
   defaultOutputFormat,
   generationCapabilitiesForFamily,
+  generationCapabilitiesForForm,
   outputFormatsForFamily,
   pruneRequestForFamily,
   recipeCapabilitiesSnapshot,
@@ -87,6 +88,7 @@ import {
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
+import { conditioningForRequest, type ExclusiveWell } from "@studio/lib/sourceMediaPlan";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isAudioOnlyPipeline, stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import { requestVideoOnly } from "@studio/lib/videoOnly";
@@ -298,6 +300,14 @@ export interface GenerateForm {
    * index 0 is the edit Target and the rest are References. FLUX.2 Dev treats
    * every entry as an ordered Reference. Empty in single-source mode. */
   imageAttachments: string[];
+  /**
+   * Which exclusive well was written last, on a `single-or-references` recipe
+   * (FLUX.2 [klein]) whose source image and references are mutually exclusive.
+   * `resolveExclusiveWells` reads it to decide which well is active and which
+   * parks; `null` — an untouched form, or a snapshot from before the field —
+   * reads as the source well.
+   */
+  exclusiveWell: ExclusiveWell | null;
   /** How a source image that doesn't match width×height maps onto the canvas.
    * Applied client-side on submit (`sourceFitPreprocess.ts`), never wired. */
   sourceFit: SourceFitPolicy;
@@ -402,6 +412,7 @@ export function newGenerateForm(): GenerateForm {
     identityStartStep: null,
     identitySupported: null,
     imageAttachments: [],
+    exclusiveWell: null,
     sourceFit: defaultSourceFitPolicy(),
     maskImage: null,
     controlImage: null,
@@ -773,6 +784,20 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   }
   if (caps.sourceImageMode === "h3-boundaries") {
     // Boundaries are the only source authority here; nothing else moves.
+  } else if (caps.sourceImageMode === "single-or-references") {
+    // Klein takes BOTH wells, so neither layout moves: a source image stays a
+    // source image and a strip stays a strip. Whichever holds media is the
+    // active one and the other parks — the request builder picks exactly one.
+    //
+    // The strip still has a CEILING though, and it is the recipe's own: a form
+    // arriving from qwen-image-edit (unbounded) with six pictures would ship
+    // six `edit_images` and be refused at admission ("supports at most 4"),
+    // which is a rule the user never saw. Truncate here, keeping order and the
+    // first N — the same clamp web applies in `modelDefaultsPatch`.
+    const referenceCeiling = caps.referenceImages?.max ?? null;
+    if (referenceCeiling !== null && form.imageAttachments.length > referenceCeiling) {
+      form.imageAttachments = form.imageAttachments.slice(0, referenceCeiling);
+    }
   } else if (caps.sourceImageMode !== "single") {
     // Entering qwen-edit/references: a single-mode source seeds the strip as
     // the Target (web parity — the attachment survives the model switch).
@@ -986,12 +1011,16 @@ export function formExtendOverlapFrames(form: GenerateForm): number {
 }
 
 export function buildRequest(form: GenerateForm): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(
+  // The form's own recipe snapshot rides along, so the builder resolves the
+  // reference contract from the SAME authority the wells rendered from. With
+  // no snapshot (an older host) this is the plain family derivation.
+  const caps = generationCapabilitiesForForm(
     form.family,
     form.model,
     form.pipeline,
     form.guidanceCapabilities,
     form.sourceImageCapability,
+    form.recipeCapabilities,
   );
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
   let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
@@ -1015,6 +1044,15 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     );
   }
 
+  // WHICH conditioning this request carries — one shared decision, so an
+  // exclusive (Klein) recipe ships `source_image` + `strength` OR
+  // `edit_images`, never both, whatever the form is holding.
+  const conditioning = conditioningForRequest(caps.sourceImageMode, {
+    hasSource: Boolean(form.sourceImage),
+    referenceCount: form.imageAttachments.length,
+    lastWrite: form.exclusiveWell ?? null,
+  });
+
   const req: GenerateRequest = {
     prompt: form.prompt.trim(),
     model: form.model,
@@ -1022,11 +1060,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     height: form.height,
     steps: form.steps,
     guidance: effectiveGenerationGuidance(caps, form.guidance),
-    batch_size:
-      caps.forcesBatchSizeOne ||
-      (caps.sourceImageMode === "references" && form.imageAttachments.length > 0)
-        ? 1
-        : form.batchSize,
+    batch_size: caps.forcesBatchSizeOne || conditioning === "references" ? 1 : form.batchSize,
     output_format: form.outputFormat,
   };
 
@@ -1072,15 +1106,16 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // qwen-edit ships the ordered picture strip (first = Target, rest =
   // References) and never source_image/strength; batch is already locked to 1
   // by forcesBatchSizeOne + pruneRequestForFamily.
-  if (
-    caps.supportsImg2img &&
-    caps.sourceImageMode !== "single" &&
-    form.imageAttachments.length > 0
-  ) {
-    req.edit_images = [...form.imageAttachments];
+  if (caps.supportsImg2img && conditioning === "references") {
+    // Ordered, and clamped to the ceiling the recipe advertises — a stale
+    // restored strip must not ship more pictures than admission accepts.
+    // `max: null` (Qwen edit) is unbounded.
+    const max = caps.referenceImages?.max ?? null;
+    req.edit_images =
+      max === null ? [...form.imageAttachments] : form.imageAttachments.slice(0, max);
   }
 
-  if (caps.supportsImg2img && caps.sourceImageMode === "single" && form.sourceImage) {
+  if (caps.supportsImg2img && conditioning === "source" && form.sourceImage) {
     // Wan's first/last-frame render rides the keyframes contract: BOTH ends
     // travel as `keyframes` and `source_image` stays home — the engine
     // refuses a request carrying both ("first frame from either

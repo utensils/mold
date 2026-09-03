@@ -40,11 +40,11 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `cyberrealistic-pony` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/pony-v6.md` | 60 | 596 |
 | `sdxl-turbo` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/sdxl-turbo.md` | 60 | 596 |
 | `z-image-turbo` | `z-image` | `shared.md`, `families/z-image.md` | 150 | 425 |
-| `flux2-klein` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 554 |
-| `flux2-klein-9b` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 554 |
-| `flux2-dev` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 554 |
-| `flux2-klein-base` | `flux2` | `shared.md`, `families/flux2.md`, `models/flux2-klein-base.md` | 120 | 639 |
-| `flux2-klein-base-9b` | `flux2` | `shared.md`, `families/flux2.md`, `models/flux2-klein-base.md` | 120 | 639 |
+| `flux2-klein` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 614 |
+| `flux2-klein-9b` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 614 |
+| `flux2-dev` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 614 |
+| `flux2-klein-base` | `flux2` | `shared.md`, `families/flux2.md`, `models/flux2-klein-base.md` | 120 | 699 |
+| `flux2-klein-base-9b` | `flux2` | `shared.md`, `families/flux2.md`, `models/flux2-klein-base.md` | 120 | 699 |
 | `qwen-image` | `qwen-image` | `shared.md`, `families/qwen-image.md` | 180 | 484 |
 | `qwen-image-2512` | `qwen-image` | `shared.md`, `families/qwen-image.md` | 180 | 484 |
 | `qwen-image-lightning` | `qwen-image` | `shared.md`, `families/qwen-image.md`, `models/qwen-image-flash.md` | 180 | 567 |
@@ -260,7 +260,11 @@ The default canvas is 1024x1024, so match the composition clause to the
 requested aspect. Distilled Klein runs four steps at guidance 1.0, so spend the
 words on one subject and one setting. Klein Base and Dev run 50 steps at
 guidance 4.0 and reward placed elements and named materials. With a source
-image, prompt the change and name what must stay.
+image, prompt the change and name what must stay. Every tier also edits from
+references — a separate ordered input, at most four, where "image 1" is the
+first `--reference`. Klein renders from a source image OR from references,
+never both, so a reference edit has no strength or mask; Dev takes no source
+image.
 
 #### Examples
 
@@ -278,6 +282,7 @@ A negative prompt is inert on every distilled Klein and Dev tier, so rewrite an
 exclusion as a positive description. Burying the subject behind style words
 costs prompt following, because leading words weigh more. A hex code naming no
 object drifts. A four-step Klein given an 80-word brief averages it.
+An edit prompt that names the change but never what stays invites a redraw.
 
 #### CLI
 
@@ -295,8 +300,24 @@ mold run flux2-klein-base:q8 "a brass orrery on a walnut desk, low winter sun" \
 mold run flux2-dev:q6 "An empty art-deco cinema lobby at dawn, brass handrails, the marquee reading \"CLOSED\", color #C8A24B accents, wide symmetrical composition" \
   --steps 50 --guidance 4.0
 
-# Image editing: name the change and what stays
+# Image editing from a source image: name the change and what stays
 mold run flux2-klein:q8 "repaint the front door in deep teal, leave the brickwork and planters unchanged" --image house.png
+
+# Single-reference editing: --reference sends the ordered group
+mold run flux2-klein:bf16 "put sunglasses on the person, keep the pose and background" \
+  --reference person.jpg --steps 4 --seed 42
+
+# Multi-reference: name the role of each image in prompt order
+mold run flux2-klein-9b:q8 "the woman from image 1 wearing the eyeglasses from image 2, same pose and lighting" \
+  --reference person.jpg --reference glasses.jpg
+
+# Klein Base takes references with a real CFG branch
+mold run flux2-klein-base:q8 "place the kettle from image 1 on the linen table from image 2, soft window light" \
+  --reference kettle.png --reference table.png --steps 50 --guidance 4.0
+
+# Dev reads its ordered references from repeated --image
+mold run flux2-dev:q6 "the jacket from image 1 on the model from image 2, studio backdrop" \
+  --image jacket.png --image model.png
 ```
 
 #### Sources
@@ -304,6 +325,9 @@ mold run flux2-klein:q8 "repaint the front door in deep teal, leave the brickwor
 - https://docs.bfl.ai/guides/prompting_guide_flux2
 - https://docs.bfl.ai/guides/prompting_unified_basics
 - https://huggingface.co/black-forest-labs/FLUX.2-dev
+- https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
+- https://huggingface.co/black-forest-labs/FLUX.2-klein-9B
+- https://github.com/black-forest-labs/flux2 (README: every tier does single- and multi-reference editing)
 
 <!-- families/sd15.md -->
 

@@ -83,6 +83,17 @@ pushed screen opened from the header.
   masks, ControlNet, LoRA, scheduler and CFG++, post-generation upscaling,
   target-host estimates, proportional resolution choices, and explicit Random
   or Fixed seeds. Deeper options open in a full-screen **Advanced** sheet, and
+  Which image wells the source section renders is the RECIPE's answer, never a
+  model name: `sourceMediaPlan` projects `capabilities.reference_images` into
+  one source well, an ordered picture strip (its ceiling and its Target role
+  both advertised), or — for an `exclusive` recipe such as FLUX.2 [klein] —
+  BOTH, mutually exclusive. There, whichever well holds media is the active
+  one and the other parks with an inline note while keeping its media;
+  Develop stays enabled, attaching to the parked well makes it active again
+  (last write wins), and the request carries `source_image` + `strength`
+  (+ mask) OR `edit_images`, never both. iPhone and Android have no OS drag,
+  so the picker sheet is the only acquisition path and the desktop
+  drop-routing bridge does not apply here.
   prompt **style** presets compose at submit without rewriting the prompt text.
   A **Title** field above the prompt names the print: the trimmed value rides
   every mobile-built `GenerateRequest` as additive `title` (batch siblings and

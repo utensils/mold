@@ -1,7 +1,10 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import SourceMediaWells from "./SourceMediaWells.vue";
-import type { SourceMediaPlan } from "../lib/sourceMediaPlan";
+import {
+  EXCLUSIVE_WELLS_NOTE,
+  type SourceMediaPlan,
+} from "../lib/sourceMediaPlan";
 
 function factory(plan: SourceMediaPlan, extra: Record<string, unknown> = {}) {
   return mount(SourceMediaWells, { props: { plan, ...extra } });
@@ -139,5 +142,68 @@ describe("SourceMediaWells", () => {
     expect(
       wrapper.get("[data-test='source-conditioning-error']").text(),
     ).toContain("attach one");
+  });
+});
+
+describe("SourceMediaWells for an exclusive (klein) plan", () => {
+  const klein: SourceMediaPlan = {
+    kind: "single-or-references",
+    single: { required: false, endFrame: false, video: false },
+    references: { max: 4, maxPixelsSingle: null, maxPixelsMulti: null },
+  };
+
+  it("renders the same Source well the single plan does", () => {
+    const wrapper = factory(klein);
+    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.text()).toContain("Source");
+    expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='source-parked-note']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("parks with an inline note while keeping the well interactive", async () => {
+    const wrapper = factory(klein, {
+      source: { data: "QUJD", filename: "still.png" },
+      parked: true,
+      note: EXCLUSIVE_WELLS_NOTE,
+    });
+    expect(wrapper.get("[data-test='source-parked-note']").text()).toBe(
+      EXCLUSIVE_WELLS_NOTE,
+    );
+    expect(wrapper.attributes("data-parked")).toBe("true");
+    // Parked is not disabled: attaching here makes this the active well again
+    // (last write wins), and the parked media is never discarded.
+    expect(
+      wrapper.get("[data-test='source-replace']").attributes("disabled"),
+    ).toBeUndefined();
+    await wrapper.get("[data-test='source-remove']").trigger("click");
+    expect(wrapper.emitted("clear")).toEqual([["source"]]);
+  });
+
+  it("names its drop target so an OS drag can reach it", () => {
+    expect(
+      factory(klein)
+        .get("[data-test='source-well']")
+        .element.closest("[data-drop-target]")
+        ?.getAttribute("data-drop-target"),
+    ).toBe("source");
+    // H3's boundaries are their own targets, not the generic source well.
+    const h3 = factory({ kind: "h3-boundaries", requiredEndpoint: null });
+    expect(
+      h3
+        .get("[data-test='source-well']")
+        .element.closest("[data-drop-target]")
+        ?.getAttribute("data-drop-target"),
+    ).toBe("h3-first");
+    expect(
+      h3
+        .get("[data-test='end-frame-well']")
+        .element.closest("[data-drop-target]")
+        ?.getAttribute("data-drop-target"),
+    ).toBe("h3-last");
   });
 });

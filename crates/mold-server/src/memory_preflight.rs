@@ -1318,24 +1318,27 @@ pub(crate) fn select_server_load_strategy_for_device(
 /// so the subsequent LoRA transformer build either doubles the peak or fails
 /// immediately on 24 GB cards.
 ///
-/// Flux.2 source-image requests also require the sequential path. It encodes
-/// the source in a VAE-only phase and drops the VAE before loading the
-/// transformer; eager mode keeps both resident and can OOM with Klein-9B BF16
-/// on a 24 GB card. The execution plan must make these runtime constraints
-/// authoritative.
+/// Flux.2 requests that carry CONDITIONING IMAGES also require the sequential
+/// path — a source image or ordered `edit_images` references, which is the
+/// same constraint for the same reason. Either is encoded in a VAE-only phase
+/// that drops the VAE before the transformer loads
+/// (`flux2/pipeline.rs::uses_sequential_generate_path`); eager mode keeps both
+/// resident and can OOM with Klein-9B BF16 on a 24 GB card, and worse,
+/// `generate_inner` would unload the eagerly loaded transformer anyway. The
+/// execution plan must make these runtime constraints authoritative.
 pub(crate) fn request_aware_load_strategy(
     strategy: mold_inference::LoadStrategy,
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     request_has_lora: bool,
-    request_has_source_image: bool,
+    request_has_conditioning_images: bool,
 ) -> mold_inference::LoadStrategy {
     let transformer_path = transformer_path_lower(paths);
     let flux2 = transformer_path_looks_flux2(&transformer_path)
         || hint.is_some_and(|hint| hint.family == ActivationFamily::Flux2Dit);
     let zimage = transformer_path_looks_zimage(&transformer_path)
         || hint.is_some_and(|hint| hint.family == ActivationFamily::ZImageDit);
-    if (request_has_lora && (flux2 || zimage)) || (request_has_source_image && flux2) {
+    if (request_has_lora && (flux2 || zimage)) || (request_has_conditioning_images && flux2) {
         mold_inference::LoadStrategy::Sequential
     } else {
         strategy
@@ -1642,7 +1645,21 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         paths,
         hint,
         request_has_lora,
-        req.source_image.is_some() || projection.is_some_and(|projection| projection.source_image),
+        // References route exactly like a source image, and the projection is
+        // the durable-queue answer for a request whose bytes were already
+        // handed off — a reference-only Klein job that read only the inline
+        // field would be planned Eager and then unloaded.
+        req.source_image.is_some()
+            || req
+                .edit_images
+                .as_ref()
+                .is_some_and(|images| !images.is_empty())
+            || projection.is_some_and(|projection| {
+                // `edit_image_count`, not the `edit_images` dimension slots:
+                // the slots are capped at the flux2 ceiling while the count is
+                // the unbounded truth, and presence is the only question here.
+                projection.source_image || projection.edit_image_count > 0
+            }),
     );
     let eager_peak =
         mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
@@ -1868,9 +1885,9 @@ fn request_sensitive_activation_memory_with_wan_geometry(
                 .saturating_mul(u64::from(req.height))
                 .max(1);
             let per_image_cap = if image_count == 1 {
-                mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
+                mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS
             } else {
-                mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
+                mold_core::validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS
             };
             // Reference bytes are already part of the finalized request, so
             // plan against their real dimensions. Falling back to the full
@@ -1904,10 +1921,15 @@ fn request_sensitive_activation_memory_with_wan_geometry(
                         total.saturating_add(pixels)
                     })
             };
-            let token_factor = target_pixels
-                .saturating_add(reference_pixels)
-                .div_ceil(target_pixels);
-            activation = activation.saturating_mul(token_factor);
+            // The engine's own answer, so admission plans against exactly the
+            // bytes `flux2/pipeline.rs` then reserves — there the ratio is
+            // taken over real packed TOKEN counts, here over pixels, which is
+            // the same number because both sides patchify at the same rate.
+            activation = mold_inference::device::flux2_reference_scaled_activation_bytes(
+                activation,
+                target_pixels,
+                reference_pixels,
+            );
         }
     }
 
@@ -2256,6 +2278,119 @@ mod fail_closed_tests {
             ),
             mold_inference::LoadStrategy::Eager,
             "source images must not change unrelated family load policies"
+        );
+    }
+
+    /// Klein's reference protocol takes the same VAE-only encode phase a
+    /// source image does, so it takes the same plan. An Eager plan here is
+    /// worse than merely wasteful: the engine routes sequentially anyway and
+    /// `generate_inner` unloads the transformer the eager plan just loaded.
+    #[test]
+    fn klein_reference_images_force_sequential_engine_plans() {
+        assert_eq!(
+            request_aware_load_strategy(
+                mold_inference::LoadStrategy::Eager,
+                &paths("/models/cv-opaque/model.safetensors"),
+                Some(hint(ActivationFamily::Flux2Dit)),
+                false,
+                true,
+            ),
+            mold_inference::LoadStrategy::Sequential
+        );
+        assert_eq!(
+            request_aware_load_strategy(
+                mold_inference::LoadStrategy::Eager,
+                &paths("/models/cv-opaque/model.safetensors"),
+                Some(hint(ActivationFamily::FluxDit)),
+                false,
+                true,
+            ),
+            mold_inference::LoadStrategy::Eager,
+            "conditioning images must not change unrelated family load policies"
+        );
+    }
+
+    /// The request's inline bytes and the durable queue's projection are two
+    /// answers to the same question. A job whose media was already handed off
+    /// carries its references only in the projection, and planning THAT one
+    /// Eager is the half a source-image-only predicate would have missed.
+    #[test]
+    fn generation_memory_budget_carries_reference_images_into_flux2_load_policy() {
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "put sunglasses on the person",
+            "model": "cv:test-klein-9b",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let model_paths = paths("/models/cv-opaque/model.safetensors");
+        let activation = Some(hint(ActivationFamily::Flux2Dit));
+
+        let plain = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(64_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(plain.load_strategy, mold_inference::LoadStrategy::Eager);
+
+        request.edit_images = Some(vec![vec![0x89, 0x50, 0x4e, 0x47]]);
+        let inline = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(64_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(
+            inline.load_strategy,
+            mold_inference::LoadStrategy::Sequential
+        );
+
+        // An empty vector is not a reference request.
+        request.edit_images = Some(Vec::new());
+        let empty = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(64_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(empty.load_strategy, mold_inference::LoadStrategy::Eager);
+
+        request.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            edit_image_count: 1,
+            edit_images: vec![crate::queue_media_store::ProjectedImageDimensions::Known {
+                width: 1024,
+                height: 1024,
+            }],
+            ..Default::default()
+        };
+        let projected = estimate_generation_memory_for_request_with_projection(
+            &request,
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(64_000_000_000),
+            false,
+            false,
+            Some(&projection),
+        );
+        assert_eq!(
+            projected.load_strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "a durable job whose references live only in the projection plans the same way"
         );
     }
 

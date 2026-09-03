@@ -51,6 +51,7 @@ import {
   recipeIsCanvasless,
 } from "@studio/lib/generationProfile";
 import { effectiveGenerationGuidance } from "@studio/lib/generationCapabilities";
+import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import { coerceOutputFormatForRecipe } from "@studio/lib/outputFormat";
 import {
   emptyMeshForm,
@@ -180,6 +181,8 @@ function defaultForm(): GenerateFormState {
     expand: { enabled: false, variations: 1, familyOverride: null },
     sourceFitPolicy: defaultSourceFitPolicy(),
     imageAttachments: [],
+    referenceImages: [],
+    exclusiveWell: null,
     maskImage: null,
     controlImage: null,
     controlModel: "",
@@ -228,6 +231,7 @@ export function sanitizePersistedForm(
   // in memory even though those bytes were immediately stripped below.
   const {
     imageAttachments,
+    referenceImages,
     endFrame,
     identityImage,
     maskImage,
@@ -243,6 +247,7 @@ export function sanitizePersistedForm(
     ...cloneFormState(metadata),
     version: FORM_VERSION,
     imageAttachments: imageAttachments.map(stripMediaBytes),
+    referenceImages: (referenceImages ?? []).map(stripMediaBytes),
     endFrame: endFrame ? stripMediaBytes(endFrame) : null,
     // A face photo is the last payload that should sit in localStorage: the
     // descriptor is kept so the well can offer a reattach, the bytes live in
@@ -527,7 +532,10 @@ function modelDefaultsPatch(
       next.h3Authoring.lastFrame = null;
     }
   }
-  if (capabilities.sourceImageMode !== "single") {
+  if (
+    capabilities.sourceImageMode !== "single" &&
+    capabilities.sourceImageMode !== "single-or-references"
+  ) {
     if (
       capabilities.sourceImageMode !== "references" &&
       capabilities.sourceImageMode !== "h3-boundaries"
@@ -535,7 +543,11 @@ function modelDefaultsPatch(
       next.batchSize = 1;
     }
     if (capabilities.forcesBatchSizeOne) next.batchSize = 1;
+    // Leaving an exclusive layout: its references cannot ride any other
+    // recipe's request, so they park rather than leak onto the wire.
   } else if (next.imageAttachments.length > 1) {
+    // An exclusive recipe keeps ONE source in `imageAttachments`; its strip
+    // lives in `referenceImages`, so this truncation is the same as before.
     next.imageAttachments = next.imageAttachments.slice(0, 1);
   }
   if (next.cameraControl) {
@@ -845,6 +857,7 @@ function ensureDraftIds(state: GenerateFormState) {
     if (media?.base64 && !media.draftId) media.draftId = newDraftId();
   };
   state.imageAttachments.forEach(ensure);
+  (state.referenceImages ?? []).forEach(ensure);
   ensure(state.endFrame);
   ensure(state.identityImage ?? null);
   ensure(state.maskImage);
@@ -887,6 +900,7 @@ function h3MediaFromState(state: GenerateFormState): DraftMediaRecord[] {
 function mediaFromState(state: GenerateFormState): DraftMediaRecord[] {
   const ordinary = [
     ...state.imageAttachments,
+    ...(state.referenceImages ?? []),
     state.endFrame,
     state.identityImage ?? null,
     state.maskImage,
@@ -931,6 +945,23 @@ async function hydrateDraftMedia(state: GenerateFormState) {
     )
   ) {
     state.imageAttachments = attachments;
+  }
+
+  // The exclusive recipe's second store rehydrates exactly like the first —
+  // a parked reference strip must survive a reload the way the source does.
+  const referenceIds = (state.referenceImages ?? []).map(
+    (m) => m.draftId ?? "",
+  );
+  const hydratedReferences = await Promise.all(
+    (state.referenceImages ?? []).map((m) => hydrate(m)),
+  );
+  if (
+    (state.referenceImages ?? []).length === referenceIds.length &&
+    (state.referenceImages ?? []).every(
+      (m, i) => (m.draftId ?? "") === referenceIds[i],
+    )
+  ) {
+    state.referenceImages = hydratedReferences;
   }
 
   const endFrameId = state.endFrame?.draftId ?? "";
@@ -1242,8 +1273,29 @@ export function useGenerateForm(): UseGenerateForm {
         model?.source_image ?? s.sourceImageCapability,
         requestRecipe,
       );
-      const attachmentMode = capabilities.sourceImageMode !== "single";
       const attachments = s.imageAttachments ?? [];
+      const references = s.referenceImages ?? [];
+      // WHICH conditioning this request carries — one shared decision, so an
+      // exclusive (Klein) recipe ships `source_image` + `strength` (+ mask)
+      // OR `edit_images`, never both, whatever the form is holding.
+      const conditioning = conditioningForRequest(
+        capabilities.sourceImageMode,
+        {
+          hasSource: Boolean(attachments[0]?.base64),
+          referenceCount:
+            capabilities.sourceImageMode === "single-or-references"
+              ? references.length
+              : attachments.length,
+          lastWrite: s.exclusiveWell ?? null,
+        },
+      );
+      // A strip-only layout keeps `imageAttachments` as its references; the
+      // exclusive layout keeps them in their own store.
+      const editImages =
+        capabilities.sourceImageMode === "single-or-references"
+          ? references
+          : attachments;
+      const attachmentMode = conditioning === "references";
       // Wan's first/last-frame render (#779) rides the existing `keyframes`
       // contract: both stills travel there and `source_image` stays home —
       // the engine refuses a request carrying both, and admission counts
@@ -1268,9 +1320,7 @@ export function useGenerateForm(): UseGenerateForm {
             )
           : null;
       const requestForcesBatchSizeOne =
-        capabilities.forcesBatchSizeOne ||
-        (capabilities.sourceImageMode === "references" &&
-          attachments.length > 0);
+        capabilities.forcesBatchSizeOne || conditioning === "references";
       const controlModel = capabilities.supportsControlNet
         ? s.controlModel.trim()
         : "";
@@ -1356,7 +1406,7 @@ export function useGenerateForm(): UseGenerateForm {
             : undefined,
         ...(attachmentMode
           ? {
-              edit_images: attachments.map((image) => image.base64),
+              edit_images: editImages.map((image) => image.base64),
             }
           : {
               // A first/last-frame render ships BOTH stills as `keyframes`
@@ -1564,4 +1614,6 @@ export const __testing__ = {
   clearDraftsForTest() {
     clearMemoryDraftsForTest();
   },
+  /** A pristine form, for tests of pure form-shaped helpers. */
+  defaultForm,
 };

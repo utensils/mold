@@ -55,7 +55,7 @@ const RUNTIME_STAGING_CLAIM: &str = ".claim.lock";
 const RUNTIME_STAGING_SWEEP: &str = ".sweep.lock";
 const JOB_CLEANUP_LOCK: &str = ".cleanup.lock";
 pub(crate) const PROJECTED_EDIT_DIMENSION_SLOTS: usize =
-    mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES;
+    mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES;
 const PROJECTION_EDIT_SLOTS_END: usize = 20 + PROJECTED_EDIT_DIMENSION_SLOTS * 9;
 
 const _: () = assert!(PROJECTION_EDIT_SLOTS_END <= 56);

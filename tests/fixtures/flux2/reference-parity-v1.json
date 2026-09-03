@@ -1,0 +1,61 @@
+{
+  "schema": "mold.flux2.reference-parity.v1",
+  "comment": "Shared reference-image (edit_images) expectations per model tier. The Rust test `flux2_reference_parity_fixture_pins_every_surface` in crates/mold-core/src/generation_profile.rs and the browser test studio/lib/flux2ReferenceParity.test.ts both read this file, so a drift between the server's advertised `capabilities.reference_images` and any client's presentation fails CI. Additive: new tiers join as new rows; new per-row keys join without touching existing ones. Mirrors the wan surface-parity fixture precedent (#806).",
+  "source_relation_meaning": {
+    "replaces": "References replace the source image; `source_image`, `mask_image`, and ControlNet inputs are refused whether or not references are attached.",
+    "exclusive": "The recipe renders from a source image OR from references, never both in one pass; the img2img fields are refused only once references are attached.",
+    "combines": "Reserved. Nothing advertises it today."
+  },
+  "models": [
+    {
+      "model": "flux2-dev:bf16",
+      "family": "flux2",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 4,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "comment": "FLUX.2 [dev]'s reference protocol replaces img2img entirely, and its loader refuses LoRA — that refusal belongs to the checkpoint, not to this block."
+    },
+    {
+      "model": "flux2-klein:bf16",
+      "family": "flux2",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 4,
+      "primary_is_target": false,
+      "source_relation": "exclusive",
+      "comment": "Distilled Klein 4B. Same checkpoint layout and same t = 10 + 10*i reference ids as [dev] (diffusers pipeline_flux2_klein.py:318-366 is 'Copied from' pipeline_flux2.py), but Klein keeps img2img, the inpainting mask, and LoRA — so a request carries one form or the other."
+    },
+    {
+      "model": "flux2-klein-base-9b:q8",
+      "family": "flux2",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 4,
+      "primary_is_target": false,
+      "source_relation": "exclusive",
+      "comment": "Undistilled Klein base 9B: architecturally identical, sampled with real CFG. The reference contract is a family property, not a tier property."
+    },
+    {
+      "model": "qwen-image-edit-2511:q4",
+      "family": "qwen-image-edit",
+      "mode": "adjustable",
+      "required": true,
+      "max_count": null,
+      "primary_is_target": true,
+      "source_relation": "replaces",
+      "comment": "The FIRST image is the edit target, which is why this recipe's canvas is source-driven and its source ceiling is the reference ceiling. The only tier that cannot render without one. No count ceiling of its own; 1-3 images is upstream advice, not a bound."
+    },
+    {
+      "model": "flux-dev:q4",
+      "family": "flux",
+      "mode": "hidden",
+      "required": false,
+      "max_count": 0,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "comment": "FLUX.1 [dev] has no reference protocol today (Kontext is a separate checkpoint, filed as its own PR). A hidden block is the control's absence with a sentence attached, never a client-side guess."
+    }
+  ]
+}

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { isSupportedDroppedImage, reduceNativeImageDrag } from "../lib/nativeImageDrop";
+import {
+  dropTargetAtPosition,
+  isSupportedDroppedImage,
+  reduceNativeImageDrag,
+} from "../lib/nativeImageDrop";
 import { useRoute, useRouter } from "vue-router";
 import {
   filterModelsForTarget,
@@ -138,7 +142,10 @@ import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
-import { generationCapabilitiesForFamily } from "../lib/capabilities";
+import {
+  generationCapabilitiesForFamily,
+  generationCapabilitiesForForm,
+} from "../lib/capabilities";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -183,6 +190,7 @@ import {
 } from "@studio/lib/sourceFit";
 import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
+import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
@@ -265,6 +273,7 @@ import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
 import type { ApiTarget } from "../lib/api/client";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
+import type { DropTarget } from "@studio/lib/imageDropRouting";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { useGalleryStore, type MergedPrint } from "../stores/gallery";
 import { parseMissingExpandModel } from "../lib/expandErrors";
@@ -837,19 +846,46 @@ function discloseMissingRestoredModel() {
   );
 }
 
-async function importDroppedImage(path: string) {
+/** What each well calls the image it just received, for the toast. */
+const DROP_TARGET_LABELS: Record<string, string> = {
+  source: "Source image attached.",
+  references: "Reference image added.",
+  end: "End frame attached.",
+  identity: "Identity photo attached.",
+  opening: "Opening image attached.",
+  "h3-first": "First frame attached.",
+  "h3-last": "Last frame attached.",
+  "h3-reference": "Reference added.",
+};
+
+async function importDroppedImage(path: string, hovered: string | null) {
   try {
     const image = await ipc.importSourceImage(path);
-    const result = applyDesktopImageDrop(form, image, installedModels.value);
+    // The well under the cursor decides, not the model: `resolveDropTarget`
+    // takes the hovered `data-drop-target` when the plan renders it and the
+    // plan's own default otherwise.
+    const result = await applyDesktopImageDrop(
+      form,
+      image,
+      installedModels.value,
+      hovered as DropTarget | null,
+      {
+        identityVisible: !isSequence.value && form.identitySupported === true,
+        openingVisible: isSequence.value,
+        sequenceDraft: isSequence.value ? draft : null,
+      },
+    );
     if (result.metadataApplied) discloseMissingRestoredModel();
+    const attachedMessage =
+      (result.target && DROP_TARGET_LABELS[result.target]) || "Image attached.";
     if (result.metadataApplied && result.attached) {
-      toasts.push("Loaded generation settings and attached the image as source.");
+      toasts.push(`Loaded generation settings. ${attachedMessage}`);
     } else if (result.metadataApplied) {
-      toasts.push("Loaded generation settings; this model doesn't accept a source image.");
+      toasts.push(`Loaded generation settings; ${result.refused ?? "nothing was attached."}`);
     } else if (result.attached) {
-      toasts.push("Source image attached.");
+      toasts.push(attachedMessage);
     } else {
-      toasts.push("The selected model doesn't accept a source image.", "error");
+      toasts.push(result.refused ?? "The selected model doesn't accept a source image.", "error");
     }
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
@@ -874,7 +910,10 @@ async function listenForNativeImageDrops() {
     nativeImageDragOver.value = dragState.visible;
     if (payload.type !== "drop") return;
     const path = payload.paths.find(isSupportedDroppedImage);
-    if (path) void importDroppedImage(path);
+    // Hit-test BEFORE the async import: the cursor position is the only
+    // record of which well the user aimed at.
+    const hovered = dropTargetAtPosition(payload.position);
+    if (path) void importDroppedImage(path, hovered);
     else toasts.push("Drop a PNG or JPEG image.", "error");
   });
   if (nativeImageDropUnmounted) unlisten();
@@ -1065,9 +1104,19 @@ const stickyTarget = computed<string | null>(() =>
   normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
 );
 
+/** Which conditioning this form's request will carry — the same shared
+ * decision `buildRequest` makes, so the batch cap and the canvas watcher
+ * cannot disagree with the wire. */
+const requestConditioning = computed(() =>
+  conditioningForRequest(caps.value.sourceImageMode, {
+    hasSource: Boolean(form.sourceImage),
+    referenceCount: form.imageAttachments.length,
+    lastWrite: form.exclusiveWell ?? null,
+  }),
+);
+
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne ||
-  (caps.value.sourceImageMode === "references" && form.imageAttachments.length > 0)
+  caps.value.forcesBatchSizeOne || requestConditioning.value === "references"
     ? 1
     : Math.max(1, Math.floor(form.batchSize)),
 );
@@ -1294,7 +1343,14 @@ function applyDecodedSourceResolution(
     form.pipeline,
   );
   const replaced = base64 !== previous.base64;
-  if (caps.value.sourceImageMode !== "references") {
+  // A reference strip is not a canvas: the render's size comes from the model,
+  // not from whichever picture happens to sit first in the order. Qwen edit is
+  // the exception the profile names — `primary_is_target` means image 0 IS the
+  // picture being edited, so its canvas stays source-driven.
+  if (
+    requestConditioning.value !== "references" ||
+    caps.value.referenceImages?.primaryIsTarget === true
+  ) {
     const preserveReplacement = replaced && preservedSourceReplacement === base64;
     const nextResolution = resolveSourceCanvasTransition({
       source: resolution,
@@ -1324,7 +1380,7 @@ function applyDecodedSourceResolution(
 watch(
   [
     () =>
-      caps.value.sourceImageMode !== "single"
+      requestConditioning.value === "references"
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => contractEntry.value?.name ?? form.model,
@@ -3541,12 +3597,16 @@ async function preprocessSourceFit(
   draft: ReturnType<typeof cloneGenerateForm>,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const draftCaps = generationCapabilitiesForFamily(
+  // The frozen draft's own recipe snapshot decides the reference contract, so
+  // an exclusive (Klein) recipe fits the well the request will actually carry
+  // rather than the family heuristic's guess at it.
+  const draftCaps = generationCapabilitiesForForm(
     draft.family,
     draft.model,
     draft.pipeline,
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
+    draft.recipeCapabilities,
   );
   // A canvasless recipe (a 3-D mesh) has no canvas to fit onto: its own
   // advertised target is 0 × 0, so every fit below would resize the source to
@@ -3640,7 +3700,15 @@ async function preprocessSourceFit(
       preprocessingStatus.value = null;
     }
   }
-  if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
+  // Source fit applies to the image the request will actually carry — on an
+  // exclusive (Klein) recipe that is the source well only while it is the
+  // active one; a parked source is never preprocessed.
+  const draftConditioning = conditioningForRequest(draftCaps.sourceImageMode, {
+    hasSource: Boolean(draft.sourceImage),
+    referenceCount: draft.imageAttachments.length,
+    lastWrite: draft.exclusiveWell ?? null,
+  });
+  if (!draftCaps.supportsImg2img || draftConditioning !== "source") return true;
   if (!draft.sourceImage) return true;
   try {
     const result = await applySourceFitPreprocess(
@@ -3685,10 +3753,22 @@ async function preprocessSourceFit(
 }
 
 function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateForm>): boolean {
-  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
+  const draftCaps = generationCapabilitiesForForm(
+    draft.family,
+    draft.model,
+    draft.pipeline,
+    draft.guidanceCapabilities,
+    draft.sourceImageCapability,
+    draft.recipeCapabilities,
+  );
+  const conditioning = conditioningForRequest(draftCaps.sourceImageMode, {
+    hasSource: Boolean(draft.sourceImage),
+    referenceCount: draft.imageAttachments.length,
+    lastWrite: draft.exclusiveWell ?? null,
+  });
   return (
     draftCaps.supportsImg2img &&
-    ((draftCaps.sourceImageMode === "single" && Boolean(draft.sourceImage)) ||
+    ((conditioning === "source" && Boolean(draft.sourceImage)) ||
       (draftCaps.sourceImageMode === "qwen-edit" && Boolean(draft.imageAttachments[0]))) &&
     draft.sourceFit.mode === "upscale-then-fit" &&
     Boolean(draft.sourceFit.upscalerModel)
@@ -4483,7 +4563,12 @@ async function restoreRequestSource(request: GenerateRequest, epoch: number) {
 async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (!metadataReferencesSource(metadata)) return;
   if (!caps.value.supportsImg2img) return;
-  const attachmentMode = caps.value.sourceImageMode !== "single";
+  // Which well this PRINT used. An exclusive (Klein) recipe has two, so the
+  // print's own recorded conditioning decides — not the layout.
+  const attachmentMode =
+    caps.value.sourceImageMode === "single-or-references"
+      ? (metadata.edit_image_sha256s?.length ?? 0) > 0
+      : caps.value.sourceImageMode !== "single";
   if (attachmentMode ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
   const modelAtStart = form.model;
   const deps: SourceRestoreDeps = {
@@ -4563,14 +4648,14 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
   if (!caps.value.supportsImg2img) return;
   if (attachmentMode ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
-  if (attachmentMode && caps.value.sourceImageMode !== "single" && editRestore?.images.length) {
-    const restoredImages =
-      caps.value.sourceImageMode === "references"
-        ? editRestore.images.slice(0, 4)
-        : editRestore.images;
+  if (attachmentMode && editRestore?.images.length) {
+    // The strip ceiling is the RECIPE's, never a client constant.
+    const max = caps.value.referenceImages?.max ?? null;
+    const restoredImages = max === null ? editRestore.images : editRestore.images.slice(0, max);
     const omitted = editRestore.images.length - restoredImages.length;
     preserveRestoredSourceCanvas(restoredImages[0]!);
     form.imageAttachments = restoredImages;
+    form.exclusiveWell = "references";
     if (editRestore.missing > 0 || omitted > 0) {
       toasts.push(
         `Restored ${restoredImages.length} source ${
@@ -4581,12 +4666,13 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
         "error",
       );
     }
-  } else if (!attachmentMode && caps.value.sourceImageMode === "single" && restored) {
+  } else if (!attachmentMode && restored) {
     const generationWidth = metadata.generation_width ?? metadata.width;
     const generationHeight = metadata.generation_height ?? metadata.height;
     preserveRestoredSourceCanvas(restored.base64);
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
+    form.exclusiveWell = "source";
     await nextTick();
     if (
       epoch !== restoreEpoch ||

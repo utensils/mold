@@ -1,4 +1,4 @@
-import { generationCapabilitiesForFamily } from "./capabilities";
+import { generationCapabilitiesForFamily, type SourceImageMode } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { isCameraMotionPreset } from "@studio/lib/cameraMotion";
 import {
@@ -270,6 +270,19 @@ export function cameraControlValidationError(
 }
 
 /**
+ * Whether the form holds an image the request would condition on, in whichever
+ * well this layout keeps it. An EXCLUSIVE recipe (Klein) has two wells and
+ * either satisfies the contract — the request ships exactly one of them.
+ */
+function holdsConditioningImage(mode: SourceImageMode, form: GenerateForm): boolean {
+  if (mode === "single") return Boolean(form.sourceImage);
+  if (mode === "single-or-references") {
+    return Boolean(form.sourceImage) || form.imageAttachments.length > 0;
+  }
+  return form.imageAttachments.length > 0;
+}
+
+/**
  * The per-model source-image contract (#772) plus wan's first/last-frame
  * pairing (#779). H3 is excluded: its boundary images have their own
  * authoring validator, which names the missing one precisely.
@@ -302,9 +315,7 @@ export function sourceConditioningValidationError(
   // on the wire and must still satisfy/refuse the advertised contract.
   const hasSourceImage =
     (!options.ignoreUnsupportedStagedSource || caps.supportsSourceImage) &&
-    (caps.sourceImageMode === "single"
-      ? Boolean(form.sourceImage)
-      : form.imageAttachments.length > 0);
+    holdsConditioningImage(caps.sourceImageMode, form);
   // A canvasless recipe (a 3-D mesh) reconstructs its source image. It is not
   // an image-to-VIDEO checkpoint, so the shared first-frame wording would
   // misname the very thing the user has to attach. The snapshot is the
@@ -351,11 +362,7 @@ export function identityConditioningValidationError(form: GenerateForm): string 
     form.guidanceCapabilities,
     form.sourceImageCapability,
   );
-  const hasSourceImage =
-    caps.supportsImg2img &&
-    (caps.sourceImageMode === "single"
-      ? Boolean(form.sourceImage)
-      : form.imageAttachments.length > 0);
+  const hasSourceImage = caps.supportsImg2img && holdsConditioningImage(caps.sourceImageMode, form);
   return identityValidationError({
     supported: form.identitySupported === true,
     image: form.identityImage,
