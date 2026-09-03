@@ -15,7 +15,7 @@
 }
 
 .ms-shimmer {
-  background-color: var(--mold-bg);
+  background-color: var(--mold-media-bed);
   background-image: linear-gradient(
     100deg,
     transparent 30%,
@@ -71,6 +71,11 @@
 .ms-toolbar-button:disabled {
   color: var(--mold-text-faint);
   cursor: default;
+}
+.ms-toolbar-button--icon {
+  width: var(--mold-ctl-md, 26px);
+  padding: 0;
+  justify-content: center;
 }
 .ms-toolbar-button--on {
   border-color: var(--mold-blue);
@@ -134,7 +139,11 @@
   .ms-shimmer {
     animation: none;
     background-image: none;
-    background-color: color-mix(in srgb, var(--mold-blue) 8%, var(--mold-bg));
+    background-color: color-mix(
+      in srgb,
+      var(--mold-blue) 8%,
+      var(--mold-media-bed)
+    );
   }
   .ms-pulse,
   .ms-fade-up {

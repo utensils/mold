@@ -98,7 +98,7 @@ function onInput(event: Event) {
   margin-top: 3px;
   -webkit-appearance: none;
   border: 0;
-  border-radius: var(--mold-radius-2);
+  border-radius: 999px;
   background: var(--mold-text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
@@ -113,7 +113,7 @@ function onInput(event: Event) {
   width: 7px;
   height: 28px;
   border: 0;
-  border-radius: var(--mold-radius-2);
+  border-radius: 999px;
   background: var(--mold-text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }

@@ -49,7 +49,7 @@ describe("CollectionCard", () => {
     expect(wrapper.get("[data-test='collection-name']").text()).toContain("Smurfs");
     expect(wrapper.get("[data-test='collection-hidden-badge']").text()).toBe("Hidden");
     const meta = wrapper.get("[data-test='collection-meta']");
-    expect(meta.text()).toBe("9 prints · This Mac · plato");
+    expect(meta.text()).toBe("9 pictures · This Mac · plato");
     expect(meta.classes()).toContain("font-mono");
     expect(wrapper.get("[data-test='collection-updated']").text()).toBe("Updated 2h ago");
   });
@@ -60,7 +60,7 @@ describe("CollectionCard", () => {
       global: { stubs: { AuthedMedia: authedMediaStub } },
     });
     expect(wrapper.findAll("img")).toHaveLength(0);
-    expect(wrapper.get("[data-test='collection-meta']").text()).toBe("1 print · This Mac");
+    expect(wrapper.get("[data-test='collection-meta']").text()).toBe("1 picture · This Mac");
     expect(wrapper.find("[data-test='collection-updated']").exists()).toBe(false);
   });
 

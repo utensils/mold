@@ -98,7 +98,7 @@ describe("InstalledTab shelf (README §04 Styles)", () => {
     await wrapper.get("[data-test='row-menu']").trigger("click");
     const menu = useContextMenuStore();
     const labels = menu.entries.flatMap((e) => (isSeparator(e) ? [] : [e.label]));
-    expect(labels).toEqual(["Open model page", "Remove from disk…"]);
+    expect(labels).toEqual(["Open the style's page", "Remove from disk…"]);
 
     const remove = menu.entries.find((e) => !isSeparator(e) && e.label === "Remove from disk…");
     if (!remove || isSeparator(remove)) throw new Error("no remove entry");

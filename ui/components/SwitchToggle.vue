@@ -47,7 +47,7 @@ function onKeydown(event: KeyboardEvent) {
 </template>
 
 <style scoped>
-/* --mold-radius-2 clamps to fully round (13px) on the 26px track. */
+/* The track is a pill whatever the theme's box radius is. */
 .ms-switch {
   position: relative;
   width: 44px;
@@ -55,7 +55,7 @@ function onKeydown(event: KeyboardEvent) {
   flex: 0 0 auto;
   padding: 0;
   border: 1px solid var(--mold-border-control);
-  border-radius: var(--mold-radius-2);
+  border-radius: 999px;
   background: var(--mold-bg);
   cursor: pointer;
   transition:

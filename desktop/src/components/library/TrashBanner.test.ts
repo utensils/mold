@@ -19,7 +19,7 @@ describe("TrashBanner", () => {
     expect(summary.findAll("b").map((b) => b.text())).toEqual(["30 d", "7 d"]);
     expect(summary.find("b").classes()).toContain("font-mono");
     expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe(
-      "3 prints in trash · 41.6 MB",
+      "3 pictures in trash · 41.6 MB",
     );
     expect(wrapper.find("[data-test='trash-banner']").attributes("role")).toBe("status");
   });
@@ -31,7 +31,7 @@ describe("TrashBanner", () => {
     expect(wrapper.find("[data-test='trash-banner-summary']").text()).toBe(
       "Prints stay in the trash until you empty it",
     );
-    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("1 print in trash");
+    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("1 picture in trash");
     const link = wrapper.find("[data-test='trash-banner-link']");
     expect(link.text()).toBe("Change retention · Machines");
     await link.trigger("click");
@@ -44,6 +44,6 @@ describe("TrashBanner", () => {
       "No connected machine keeps a trash.",
     );
     expect(wrapper.find("[data-test='trash-banner-link']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("0 prints in trash");
+    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("0 pictures in trash");
   });
 });

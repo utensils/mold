@@ -1101,7 +1101,7 @@ defineExpose({ setOutputMode });
       <!-- Repeat this look (the seed, in plain words) -->
       <div class="ms-field">
         <div class="ms-field__label">Repeat this look</div>
-        <div class="ms-seg" role="group" aria-label="Seed mode">
+        <div class="ms-seg" role="group" aria-label="Repeat this look">
           <button
             type="button"
             data-test="seed-mode-random"
@@ -1130,7 +1130,7 @@ defineExpose({ setOutputMode });
             data-test="seed-input"
             type="text"
             inputmode="numeric"
-            aria-label="Seed value"
+            aria-label="Seed number"
             class="ms-seed__input font-mono text-xs"
           />
           <button

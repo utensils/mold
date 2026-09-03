@@ -28,6 +28,7 @@ import {
 import { isCatalogModelId, modelDisplayName } from "../../lib/models";
 import { type MediaType } from "../../lib/modelAvailability";
 import { useInfiniteScrollSentinel } from "../../lib/useInfiniteScrollSentinel";
+import Chip from "@ui/components/Chip.vue";
 import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer, { type DrawerVariant } from "./CatalogDetailDrawer.vue";
@@ -728,40 +729,28 @@ onUnmounted(() => {
     <!-- Filter chips -->
     <div class="flex flex-wrap items-center gap-2">
       <div class="flex items-center gap-1" data-test="catalog-source-chips">
-        <button
+        <Chip
           v-for="s in ['all', 'hf', 'civitai'] as const"
           :key="s"
-          type="button"
-          class="chip"
-          :class="{ 'chip--on': source === s }"
-          :aria-pressed="source === s"
+          compact
+          :active="source === s"
           @click="source = s"
         >
           {{ s === "all" ? "All" : s === "hf" ? "HuggingFace" : "Civitai" }}
-        </button>
+        </Chip>
       </div>
 
       <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Model kind">
-        <button
-          type="button"
-          class="chip"
-          :class="{ 'chip--on': kind === '' }"
-          :aria-pressed="kind === ''"
-          @click="kind = ''"
-        >
-          All
-        </button>
-        <button
+        <Chip compact :active="kind === ''" @click="kind = ''"> All </Chip>
+        <Chip
           v-for="opt in CATALOG_KIND_OPTIONS"
           :key="opt.value"
-          type="button"
-          class="chip"
-          :class="{ 'chip--on': kind === opt.value }"
-          :aria-pressed="kind === opt.value"
+          compact
+          :active="kind === opt.value"
           @click="kind = opt.value"
         >
           {{ opt.label }}
-        </button>
+        </Chip>
       </div>
 
       <select
@@ -983,30 +972,3 @@ onUnmounted(() => {
     />
   </div>
 </template>
-
-<style scoped>
-/* Filter chip (README §04): 24px, 1px border; active = accent tint + inset ring. */
-.chip {
-  display: inline-flex;
-  height: 24px;
-  align-items: center;
-  padding: 0 9px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  font-size: var(--mold-fs-micro);
-  color: var(--mold-text-2);
-  transition:
-    border-color var(--mold-dur-quick) var(--mold-ease-out),
-    color var(--mold-dur-quick) var(--mold-ease-out);
-}
-.chip:hover {
-  border-color: var(--mold-border-focus);
-  color: var(--mold-text);
-}
-.chip--on {
-  border-color: var(--mold-blue);
-  background: var(--mold-accent-tint);
-  box-shadow: inset 0 0 0 1px var(--mold-blue);
-  color: var(--mold-text);
-}
-</style>

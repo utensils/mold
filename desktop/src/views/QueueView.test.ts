@@ -8,6 +8,7 @@ import { useConnectionStore } from "../stores/connection";
 import { isSeparator, useContextMenuStore } from "../stores/contextMenu";
 import { useGenerationStore } from "../stores/generation";
 import { useHostsStore } from "../stores/hosts";
+import { useJobsStore, type HostQueueSnapshot } from "../stores/jobs";
 
 const stub = { template: "<div />" };
 let router: Router;
@@ -137,5 +138,45 @@ describe("QueueView", () => {
     await wrapper.get("[data-test='queue-stop-all']").trigger("click");
     await flushPromises();
     expect(cancel).toHaveBeenCalledWith("local", "job-1");
+  });
+  it("lets a waiting print jump the line where its host can reorder", async () => {
+    const wrapper = await mountView();
+    useGenerationStore().jobs = [
+      { clientId: 1, id: "srv-1", model: "flux-dev:q8", prompt: "first", status: "queued" },
+      { clientId: 2, id: "srv-2", model: "flux-dev:q8", prompt: "second", status: "queued" },
+    ] as never;
+    const jobs = useJobsStore();
+    const snapshot = {
+      hostId: "local",
+      entries: [
+        { id: "srv-1", state: "queued" },
+        { id: "srv-2", state: "queued" },
+      ],
+      paused: false,
+      caps: { canPause: false, canCancelAll: false, canReorder: true },
+      gpuOrdinals: [],
+      error: null,
+    } as unknown as HostQueueSnapshot;
+    jobs.queues.local = snapshot;
+    const reorder = vi.spyOn(jobs, "reorderQueued").mockResolvedValue(true);
+    await flushPromises();
+
+    const rows = wrapper.findAll("[data-test='queue-row-print']");
+    const second = rows.find((row) => row.text().includes("second"))!;
+    await second.get("[data-test='queue-row-menu']").trigger("click");
+    expect(menuLabels().slice(0, 3)).toEqual(["Jump the line", "Move earlier", "Move later"]);
+    const jump = useContextMenuStore().entries.find(
+      (e) => !isSeparator(e) && e.label === "Jump the line",
+    );
+    if (!jump || isSeparator(jump)) throw new Error("no jump entry");
+    jump.action?.();
+    await flushPromises();
+    expect(reorder).toHaveBeenCalledWith("local", "srv-2", 0);
+
+    // Without the capability the entries never appear.
+    snapshot.caps = { canPause: false, canCancelAll: false, canReorder: false };
+    await flushPromises();
+    await second.get("[data-test='queue-row-menu']").trigger("click");
+    expect(menuLabels()).not.toContain("Jump the line");
   });
 });

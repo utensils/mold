@@ -70,7 +70,7 @@ function progressPct(row: QueueRow): number | null {
 <template>
   <div data-test="queue-rail" class="flex flex-col border-t border-border pt-2">
     <div class="flex shrink-0 items-center gap-2 px-0.5 pb-2">
-      <span class="group-label">Queue</span>
+      <span class="ms-group-label uppercase">Queue</span>
       <span
         v-if="queue.liveCount.value > 0"
         data-test="queue-count"
@@ -83,7 +83,7 @@ function progressPct(row: QueueRow): number | null {
         v-if="commands.canPause.value"
         type="button"
         data-test="queue-pause"
-        class="rail-button"
+        class="ms-toolbar-button ms-toolbar-button--icon"
         :class="commands.paused.value ? 'text-accent border-accent' : ''"
         :title="commands.paused.value ? 'Resume the queue' : 'Pause the whole queue'"
         :aria-label="commands.paused.value ? 'Resume the queue' : 'Pause the whole queue'"
@@ -94,7 +94,7 @@ function progressPct(row: QueueRow): number | null {
       <button
         type="button"
         data-test="queue-stop-all"
-        class="rail-button hover:border-error hover:text-error"
+        class="ms-toolbar-button ms-toolbar-button--icon ms-toolbar-button--danger-hover"
         title="Stop everything"
         aria-label="Stop everything"
         :disabled="queue.liveCount.value === 0"
@@ -105,7 +105,7 @@ function progressPct(row: QueueRow): number | null {
       <button
         type="button"
         data-test="queue-open"
-        class="rail-button"
+        class="ms-toolbar-button ms-toolbar-button--icon"
         title="Open the full queue"
         aria-label="Open the full queue"
         @click="router.push('/queue')"
@@ -168,7 +168,7 @@ function progressPct(row: QueueRow): number | null {
                 v-if="commands.canCancel(active)"
                 type="button"
                 data-test="queue-active-stop"
-                class="rail-button h-6 w-6 hover:border-error hover:text-error"
+                class="ms-toolbar-button ms-toolbar-button--icon ms-toolbar-button--danger-hover"
                 title="Stop this image"
                 aria-label="Stop this image"
                 @click.stop="commands.cancel(active)"
@@ -252,34 +252,3 @@ function progressPct(row: QueueRow): number | null {
     </p>
   </div>
 </template>
-
-<style scoped>
-.group-label {
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
-}
-
-.rail-button {
-  display: inline-flex;
-  width: 26px;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  color: var(--mold-text-2);
-  transition:
-    border-color var(--mold-dur-quick) var(--mold-ease-out),
-    color var(--mold-dur-quick) var(--mold-ease-out);
-}
-.rail-button:hover:not(:disabled) {
-  border-color: var(--mold-border-focus);
-  color: var(--mold-text);
-}
-.rail-button:disabled {
-  color: var(--mold-text-faint);
-}
-</style>

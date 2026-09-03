@@ -139,7 +139,6 @@ async function connect() {
     :width="480"
     title="Connect a machine"
     description="Point mold at another computer running mold serve to borrow its GPU."
-    label="Connect a machine"
     @close="emit('close')"
   >
     <div class="flex flex-col gap-3.5">

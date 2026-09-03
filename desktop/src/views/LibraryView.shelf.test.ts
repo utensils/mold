@@ -312,7 +312,7 @@ describe("scopes + capability gating", () => {
       .findAll("button")
       .map((b) => `${b.find(".ms-seg__label").text()} ${b.find(".ms-seg__sub").text()}`);
     expect(labels).toEqual(["Everything 4", "Albums 2", "Trash 1"]);
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("4 prints · 4.0 MB");
+    expect(wrapper.get("[data-test='library-count']").text()).toBe("4 pictures · 4.0 MB");
     expect(wrapper.find("[data-test='library-chip-row']").exists()).toBe(true);
     wrapper.unmount();
   });
@@ -681,12 +681,12 @@ describe("bulk bar", () => {
       await tileFor(wrapper, plain.filename).trigger("click", { metaKey: true });
       const bar = wrapper.get("[data-test='bulk-action-bar']");
       expect(bar.text()).toContain("2 / 4 selected");
-      expect(bar.get("[data-test='bulk-delete']").text()).toContain("Move 2 prints to trash");
+      expect(bar.get("[data-test='bulk-delete']").text()).toContain("Move 2 pictures to trash");
       await bar.get("[data-test='bulk-delete']").trigger("click");
       await flushPromises();
       expect(gallery.filtered).toHaveLength(2);
       const toast = useToastStore().items.at(-1)!;
-      expect(toast.message).toBe("Moved 2 prints to trash");
+      expect(toast.message).toBe("Moved 2 pictures to trash");
       useToastStore().runAction(toast.id);
       await flushPromises();
       expect(gallery.filtered).toHaveLength(4);
@@ -748,7 +748,7 @@ describe("bulk bar", () => {
       filenames: [smurf04.filename, plain.filename],
       add_to_collections: ["col-halcyon"],
     });
-    expect(useToastStore().items.at(-1)?.message).toBe("Added 2 prints to “Halcyon”");
+    expect(useToastStore().items.at(-1)?.message).toBe("Added 2 pictures to “Halcyon”");
     wrapper.unmount();
   });
 });
@@ -761,8 +761,8 @@ describe("Collections scope", () => {
       "River studies",
       "Smurfs",
     ]);
-    expect(cards[1]!.find("[data-test='collection-meta']").text()).toBe("2 prints · plato");
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 collections");
+    expect(cards[1]!.find("[data-test='collection-meta']").text()).toBe("2 pictures · plato");
+    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 albums");
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(false);
 
     // The collection endpoint records membership order (when prints were
@@ -816,7 +816,7 @@ describe("Collections scope", () => {
     await flushPromises();
     const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
     expect(dialog.textContent).toContain("Delete collection “Smurfs”?");
-    expect(dialog.textContent).toContain("Its prints stay in the Library.");
+    expect(dialog.textContent).toContain("Its pictures stay in My images.");
     (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
     await flushPromises();
     expect(org.deleteCollection).toHaveBeenCalledWith(PLATO, "col-smurfs");
@@ -863,7 +863,7 @@ describe("Collections scope", () => {
 describe("Trash scope", () => {
   it("lists trashed prints with the banner, a purge chip, and hover Restore / Delete forever", async () => {
     const { wrapper } = await mountView("/library?scope=trash");
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("1 print in trash · 1.0 MB");
+    expect(wrapper.get("[data-test='library-count']").text()).toBe("1 picture in trash · 1.0 MB");
     expect(wrapper.get("[data-test='trash-banner-summary']").text()).toBe(
       "Prints stay in the trash 30 d before purge",
     );
@@ -873,7 +873,7 @@ describe("Trash scope", () => {
     await tile.get("[data-test='trash-restore']").trigger("click");
     await flushPromises();
     expect(org.restoreTrashed).toHaveBeenCalledWith(PLATO, [trashed.filename]);
-    expect(useToastStore().items.at(-1)?.message).toBe("Restored 1 print");
+    expect(useToastStore().items.at(-1)?.message).toBe("Restored 1 picture");
     wrapper.unmount();
   });
 
@@ -883,7 +883,7 @@ describe("Trash scope", () => {
     const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
     expect(dialog.textContent).toContain("Empty trash?");
     expect(dialog.textContent).toContain(
-      "Delete 1 print in the trash on plato forever? This can't be undone.",
+      "Delete 1 picture in the trash on plato forever? This can't be undone.",
     );
     expect(dialog.querySelector("input")).toBeNull();
     (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();

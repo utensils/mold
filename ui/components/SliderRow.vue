@@ -179,14 +179,14 @@ function onPointerCancel() {
   color: var(--mold-blue);
 }
 
-/* Track — 4px bar; --mold-radius-2 clamps to fully round on this height. */
+/* Track — a 4px pill whatever the theme's box radius is. */
 .ms-slider__input {
   -webkit-appearance: none;
   appearance: none;
   display: block;
   width: 100%;
   height: 4px;
-  border-radius: var(--mold-radius-2);
+  border-radius: 999px;
   background: var(--mold-border-control);
 }
 

@@ -134,7 +134,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- MAKE -->
-    <div v-if="!collapsed" class="group-label">Make</div>
+    <div v-if="!collapsed" class="ms-group-label shrink-0 px-[9px] pt-1.5 pb-1 uppercase">Make</div>
     <div class="flex flex-col gap-0.5">
       <NavItem
         v-for="d in MAKE"
@@ -160,7 +160,9 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- SETUP -->
-    <div v-if="!collapsed" class="group-label mt-3">Setup</div>
+    <div v-if="!collapsed" class="ms-group-label mt-3 shrink-0 px-[9px] pt-1.5 pb-1 uppercase">
+      Setup
+    </div>
     <div class="flex flex-col gap-0.5" :class="collapsed ? 'mt-2' : ''">
       <NavItem
         v-for="d in SETUP"
@@ -249,15 +251,5 @@ onBeforeUnmount(() => {
 <style scoped>
 .sidebar {
   transition: width var(--mold-dur-base) var(--mold-ease-out);
-}
-
-.group-label {
-  flex-shrink: 0;
-  padding: 6px 9px 4px;
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
 }
 </style>

@@ -30,7 +30,7 @@ const emit = defineEmits<{ changeRetention: [] }>();
 const summary = computed(() => trashRetentionSummary(props.hosts));
 
 const countLabel = computed(() => {
-  const noun = props.count === 1 ? "print" : "prints";
+  const noun = props.count === 1 ? "picture" : "pictures";
   const base = `${props.count} ${noun} in trash`;
   return props.bytes != null && props.bytes > 0 ? `${base} · ${formatBytes(props.bytes)}` : base;
 });

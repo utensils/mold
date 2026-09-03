@@ -89,7 +89,7 @@ defineExpose({ startCreate, isCreating: () => creating.value });
     />
     <div
       v-if="canCreate"
-      class="flex flex-col gap-0.5 rounded-card border border-dashed border-border-control bg-transparent p-2.5 text-left"
+      class="flex flex-col gap-0.5 rounded-control border border-dashed border-border-control bg-transparent p-2.5 text-left"
       data-test="new-collection-card"
     >
       <button
@@ -131,7 +131,7 @@ defineExpose({ startCreate, isCreating: () => creating.value });
           ><Keycap>{{ newCollectionChord }}</Keycap></span
         >
         <span class="text-xs text-fg-dim">
-          Name it, then add prints from the grid or a selection.
+          Name it, then add pictures from the grid or a selection.
         </span>
       </template>
     </div>

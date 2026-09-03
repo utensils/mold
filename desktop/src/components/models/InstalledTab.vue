@@ -180,7 +180,7 @@ function pageUrl(m: LibraryModelEntry): string | null {
 function openRowMenu(event: MouseEvent, m: LibraryModelEntry) {
   const url = pageUrl(m);
   const entries: MenuEntry[] = [
-    ...(url ? [{ label: "Open model page", action: () => void openExternal(url) }] : []),
+    ...(url ? [{ label: "Open the style's page", action: () => void openExternal(url) }] : []),
     { label: "Remove from disk…", danger: true, action: () => (removing.value = m) },
   ];
   contextMenu.open(event, entries);

@@ -258,7 +258,7 @@ describe("LibraryView delete keyboard handling", () => {
     const confirm = wrapper
       .get('[data-test="bulk-action-bar"]')
       .findAll("button")
-      .find((button) => button.text().includes("Delete 2 prints?"));
+      .find((button) => button.text().includes("Delete 2 pictures?"));
     expect(confirm).toBeDefined();
     await confirm!.trigger("click");
     await flushPromises();
@@ -1040,7 +1040,7 @@ describe("LibraryView Reuse settings retained source media", () => {
 describe("LibraryView header + NEW badges", () => {
   it("counts prints across all hosts in the header", async () => {
     const { wrapper } = await mountView();
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 prints");
+    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 pictures");
     wrapper.unmount();
   });
 

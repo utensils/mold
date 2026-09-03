@@ -39,7 +39,7 @@ describe("BulkBar (Prints)", () => {
     expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Tag");
     expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favorite");
     const trash = wrapper.get("[data-test='bulk-delete']");
-    expect(trash.text()).toContain("Move 5 prints to trash");
+    expect(trash.text()).toContain("Move 5 pictures to trash");
     await trash.trigger("click");
     expect(wrapper.emitted("trash")).toHaveLength(1);
     expect(wrapper.emitted("delete")).toBeUndefined();
@@ -60,7 +60,7 @@ describe("BulkBar (Prints)", () => {
     await wrapper.get("[data-test='bulk-collections']").trigger("click");
     const panel = document.body.querySelector("[data-test='bulk-collections-panel']")!;
     expect(panel).not.toBeNull();
-    expect(panel.textContent).toContain("Add 5 prints to");
+    expect(panel.textContent).toContain("Add 5 pictures to");
     expect(panel.textContent).toContain("fans out to This Mac · plato");
     const rows = panel.querySelectorAll("[data-test='collection-row']");
     expect(rows[0]!.getAttribute("aria-checked")).toBe("true");
@@ -99,7 +99,7 @@ describe("BulkBar (Prints)", () => {
     expect(wrapper.emitted("delete")).toBeUndefined();
     await wrapper.setProps({ confirming: true });
     expect(wrapper.get("[data-test='bulk-delete']").text()).toBe(
-      "Delete 2 prints? This can't be undone.",
+      "Delete 2 pictures? This can't be undone.",
     );
     await wrapper.get("[data-test='bulk-delete']").trigger("click");
     expect(wrapper.emitted("delete")).toHaveLength(1);

@@ -146,6 +146,57 @@ export function useQueueCommands(): QueueCommands {
     else await chainJobs.cancel(row.sequence.hostId, row.sequence.jobId).catch(report);
   }
 
+  /** The host a row's server queue lives on, and the row's server id. */
+  function serverRef(row: QueueRow): { hostId: string; id: string } | null {
+    if (row.kind === "print") {
+      return row.print.id ? { hostId: row.print.hostId ?? "local", id: row.print.id } : null;
+    }
+    if (row.kind === "shared" && row.shared.kind === "generation") {
+      return { hostId: row.shared.hostId, id: row.shared.id };
+    }
+    return null;
+  }
+
+  /** This row's slot among its host's QUEUED entries — the index space the
+   * reorder PATCH uses. A queue position counts running jobs too, so nudging
+   * against it is off-by-N the moment anything on the host is running. */
+  function queuedIndexOf(row: QueueRow): number {
+    const ref = serverRef(row);
+    if (!ref) return -1;
+    return (
+      jobs.queues[ref.hostId]?.entries
+        .filter((entry) => entry.state === "queued")
+        .findIndex((entry) => entry.id === ref.id) ?? -1
+    );
+  }
+
+  function canReorder(row: QueueRow): boolean {
+    const ref = serverRef(row);
+    return (
+      ref !== null && jobs.queues[ref.hostId]?.caps?.canReorder === true && queuedIndexOf(row) >= 0
+    );
+  }
+
+  /** Move a waiting row to `position` among its host's queued rows; the
+   * server clamps and re-syncs, so an out-of-range index is harmless. */
+  async function reorder(row: QueueRow, position: number) {
+    const ref = serverRef(row);
+    if (!ref) return;
+    await jobs.reorderQueued(ref.hostId, ref.id, Math.max(0, position));
+  }
+
+  /** The reorder entries for a waiting row, or nothing where the host does not offer it. */
+  function reorderEntries(row: QueueRow): MenuEntry[] {
+    if (!canReorder(row)) return [];
+    const at = queuedIndexOf(row);
+    return [
+      { label: "Jump the line", disabled: at === 0, action: () => void reorder(row, 0) },
+      { label: "Move earlier", disabled: at === 0, action: () => void reorder(row, at - 1) },
+      { label: "Move later", action: () => void reorder(row, at + 1) },
+      { separator: true },
+    ];
+  }
+
   /** A held print (a style still downloading, a machine that refused for
    * now) is retried on its own host through the store's fence. */
   function retry(job: Job) {
@@ -203,6 +254,7 @@ export function useQueueCommands(): QueueCommands {
   function menu(row: QueueRow): MenuEntry[] {
     if (row.kind === "shared") {
       return [
+        ...reorderEntries(row),
         { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
       ];
     }
@@ -215,6 +267,7 @@ export function useQueueCommands(): QueueCommands {
     const job = row.print;
     const live = job.status !== "complete" && job.status !== "error";
     return [
+      ...reorderEntries(row),
       live
         ? { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) }
         : {

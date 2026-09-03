@@ -29,7 +29,7 @@ const LEGACY_PATTERNS = [
     `${BOUND}(bg|text|border|fill|stroke|ring|from|to|via|shadow|accent|caret|divide|placeholder)-(desk|bath|bench|rebate|halide|safelight|stop|ink|ink-2|ink-3|edge|ce|control-edge|print-surface|empty-surface|card-hi)${END}`,
   ),
   new RegExp(
-    `${BOUND}(font-(display|body|utility)|text-(display|display-sm|display-lg|body|body-lg|caption|data|edge-code)|rounded-(chrome|media|pill)|shadow-raised|edge-code|data-mono|kbd-hint|grain-shimmer)${END}`,
+    `${BOUND}(font-(display|body|utility)|text-(display|display-sm|display-lg|body|body-lg|caption|data|edge-code)|rounded-(chrome|media|pill|card|card-lg)|shadow-raised|edge-code|data-mono|kbd-hint|grain-shimmer)${END}`,
   ),
 ];
 

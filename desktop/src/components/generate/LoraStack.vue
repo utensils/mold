@@ -108,8 +108,8 @@ watch(
         <button
           type="button"
           class="text-fg-dim hover:text-error"
-          title="Remove LoRA"
-          aria-label="Remove LoRA"
+          title="Remove this add-on look"
+          aria-label="Remove this add-on look"
           @click="removeLora(i)"
         >
           ✕

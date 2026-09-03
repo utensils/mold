@@ -43,7 +43,7 @@ const props = withDefaults(
 const emit = defineEmits<{ open: []; contextmenu: [event: MouseEvent] }>();
 
 const meta = computed(() => {
-  const noun = props.count === 1 ? "print" : "prints";
+  const noun = props.count === 1 ? "picture" : "pictures";
   const hosts = props.hostLabels.join(" · ");
   return hosts ? `${props.count} ${noun} · ${hosts}` : `${props.count} ${noun}`;
 });

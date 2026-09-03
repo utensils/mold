@@ -131,7 +131,7 @@ useRootFocusOnOpen(root, () => props.open);
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
-  border-radius: var(--mold-radius-2);
+  border-radius: 999px;
   border: 0;
   background: color-mix(in srgb, var(--mold-text) 9%, transparent);
   color: var(--mold-text-2);

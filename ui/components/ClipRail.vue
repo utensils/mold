@@ -453,7 +453,7 @@ const dragModel = computed({
   place-items: center;
   padding: 0;
   border: 1px solid color-mix(in srgb, white 22%, transparent);
-  border-radius: var(--mold-radius-2);
+  border-radius: 999px;
   background: color-mix(in srgb, var(--mold-media-bed) 88%, transparent);
   color: white;
   font-family: var(--mold-font-sans);

@@ -452,7 +452,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           class="flex gap-2.5"
           data-test="drawer-stat-tiles"
         >
-          <div class="border-border flex-1 rounded-card border bg-bg-deep p-3">
+          <div class="border-border flex-1 rounded-control border bg-bg-deep p-3">
             <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
               {{ weightsHeading }}
             </div>
@@ -460,7 +460,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               {{ checkpointLabel }}
             </div>
           </div>
-          <div class="border-border flex-1 rounded-card border bg-bg-deep p-3">
+          <div class="border-border flex-1 rounded-control border bg-bg-deep p-3">
             <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
               Full footprint
             </div>

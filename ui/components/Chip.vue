@@ -9,8 +9,10 @@ const props = withDefaults(
   defineProps<{
     active?: boolean;
     disabled?: boolean;
+    /** The 24px filter chip (README §04): tighter padding, micro type. */
+    compact?: boolean;
   }>(),
-  { active: false, disabled: false },
+  { active: false, disabled: false, compact: false },
 );
 
 const emit = defineEmits<{ click: [event: MouseEvent] }>();
@@ -25,6 +27,7 @@ function onClick(event: MouseEvent) {
   <button
     type="button"
     class="ms-chip"
+    :class="{ 'ms-chip--compact': compact }"
     :aria-pressed="active"
     :data-on="active ? 'true' : undefined"
     :disabled="disabled"
@@ -53,6 +56,12 @@ function onClick(event: MouseEvent) {
     color var(--mold-dur-quick) var(--mold-ease-out),
     background var(--mold-dur-quick) var(--mold-ease-out),
     box-shadow var(--mold-dur-quick) var(--mold-ease-out);
+}
+
+.ms-chip--compact {
+  height: 24px;
+  padding: 0 9px;
+  font-size: var(--mold-fs-micro);
 }
 
 .ms-chip:hover:not([data-on="true"]):not(:disabled) {

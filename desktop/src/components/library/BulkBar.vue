@@ -90,7 +90,7 @@ const emit = defineEmits<{
 }>();
 
 const none = computed(() => props.selectedCount === 0);
-const noun = computed(() => (props.selectedCount === 1 ? "print" : "prints"));
+const noun = computed(() => (props.selectedCount === 1 ? "picture" : "pictures"));
 /** Organize controls act on the selection; a blocked selection disables
  *  them with the reason as tooltip (never a silent no-op mutation). */
 const organizeBlocked = computed(() => props.organizeBlockedReason != null);

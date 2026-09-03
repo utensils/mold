@@ -256,11 +256,11 @@ const scopeCounts = computed(() => {
 const countLabel = computed(() => {
   if (showShelf.value) {
     const n = shelfCards.value.length;
-    return `${n} ${n === 1 ? "collection" : "collections"}`;
+    return `${n} ${n === 1 ? "album" : "albums"}`;
   }
   const list = entries.value;
   const n = list.length;
-  const noun = n === 1 ? "print" : "prints";
+  const noun = n === 1 ? "picture" : "pictures";
   const parts = [inTrash.value ? `${n} ${noun} in trash` : `${n} ${noun}`];
   const bytes = list.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0);
   if (bytes > 0) parts.push(formatBytes(bytes));
@@ -289,7 +289,7 @@ const selectionOrganizeBlockedReason = computed<string | null>(() => {
   if (blocked.length === 0) return null;
   const labels = [...new Set(blocked.flatMap((e) => e.availableOn.map((s) => s.label)))];
   const n = blocked.length;
-  return `${n} selected ${n === 1 ? "print lives" : "prints live"} only on ${joinNames(labels)}, which can't organize prints.`;
+  return `${n} selected ${n === 1 ? "picture lives" : "pictures live"} only on ${joinNames(labels)}, which can't organize pictures.`;
 });
 
 /** Reveal works for files on this Mac: the IPC bucket, or a local-kind
@@ -759,7 +759,7 @@ async function toggleCollection(
   // Zero addable copies would "add" nothing (and create-on-demand would
   // leave an empty collection) — refuse honestly instead.
   if (change.checked && gallery.organizeTargetsFor(targets).length === 0) {
-    toasts.push("None of the selected prints are on a machine that can organize.", "error");
+    toasts.push("None of the selected pictures are on a machine that can organize.", "error");
     return;
   }
   if (!change.checked) {
@@ -778,7 +778,7 @@ async function toggleCollection(
     change.slug ? { slug: change.slug, name } : { name },
   );
   const n = targets.length;
-  reportFanout(result, `Added ${n} ${n === 1 ? "print" : "prints"} to “${name}”`);
+  reportFanout(result, `Added ${n} ${n === 1 ? "picture" : "pictures"} to “${name}”`);
 }
 
 async function renamePrint(entry: MergedPrint, raw: string | null) {
@@ -832,7 +832,7 @@ async function createCollection(name: string, targets: MergedPrint[] = []) {
   if (targets.length > 0 && gallery.organizeTargetsFor(targets).length === 0) {
     const n = targets.length;
     toasts.push(
-      `None of the ${n === 1 ? "selected print's copies live" : `${n} selected prints' copies live`} on a machine that can organize — no collection was created.`,
+      `None of the ${n === 1 ? "selected picture's copies live" : `${n} selected pictures' copies live`} on a machine that can organize — no collection was created.`,
       "error",
     );
     return;
@@ -844,7 +844,7 @@ async function createCollection(name: string, targets: MergedPrint[] = []) {
     if (targets.length > 0) {
       const added = await gallery.addToCollection(targets, { slug: result.slug, name });
       const n = targets.length;
-      reportFanout(added, `Added ${n} ${n === 1 ? "print" : "prints"} to “${name}”`);
+      reportFanout(added, `Added ${n} ${n === 1 ? "picture" : "pictures"} to “${name}”`);
     } else {
       toasts.push(`Created collection “${name}”`);
     }
@@ -900,7 +900,7 @@ async function removeFromOpenCollection(targets: MergedPrint[]) {
   const n = targets.length;
   reportFanout(
     await gallery.removeFromCollection(targets, slug),
-    `Removed ${n} ${n === 1 ? "print" : "prints"} from “${collectionNamed(slug)}”`,
+    `Removed ${n} ${n === 1 ? "picture" : "pictures"} from “${collectionNamed(slug)}”`,
   );
   pruneSelection();
 }
@@ -912,7 +912,7 @@ async function restorePrints(targets: MergedPrint[]) {
   try {
     const result = await gallery.restore(targets);
     const n = result.restored;
-    reportFanout(result, `Restored ${n} ${n === 1 ? "print" : "prints"}`);
+    reportFanout(result, `Restored ${n} ${n === 1 ? "picture" : "pictures"}`);
   } finally {
     organizeBusy.value = false;
   }
@@ -926,7 +926,7 @@ function askDeleteForever(targets: MergedPrint[]) {
 const deleteForeverTitle = computed(() => {
   const targets = deleteForeverTargets.value ?? [];
   if (targets.length === 1) return `Delete “${tileTitle(targets[0]!)}” forever?`;
-  return `Delete ${targets.length} prints forever?`;
+  return `Delete ${targets.length} pictures forever?`;
 });
 async function confirmDeleteForever() {
   const targets = deleteForeverTargets.value ?? [];
@@ -938,12 +938,12 @@ async function confirmDeleteForever() {
     if (result.failedPrints > 0) {
       toasts.push(
         result.error ??
-          `${result.failedPrints} ${result.failedPrints === 1 ? "print" : "prints"} could not be deleted.`,
+          `${result.failedPrints} ${result.failedPrints === 1 ? "picture" : "pictures"} could not be deleted.`,
         "error",
       );
     } else {
       const n = result.deletedPrints;
-      toasts.push(`Deleted ${n} ${n === 1 ? "print" : "prints"} forever`);
+      toasts.push(`Deleted ${n} ${n === 1 ? "picture" : "pictures"} forever`);
     }
   } finally {
     organizeBusy.value = false;
@@ -963,7 +963,7 @@ function joinNames(names: string[]): string {
 const emptyTrashMessage = computed(() => {
   const n = gallery.trashCount;
   const where = joinNames(trashHostLabels.value);
-  return `Delete ${n} ${n === 1 ? "print" : "prints"} in the trash${where ? ` on ${where}` : ""} forever? This can't be undone.`;
+  return `Delete ${n} ${n === 1 ? "picture" : "pictures"} in the trash${where ? ` on ${where}` : ""} forever? This can't be undone.`;
 });
 async function confirmEmptyTrash() {
   emptyTrashOpen.value = false;
@@ -972,7 +972,7 @@ async function confirmEmptyTrash() {
     const result = await gallery.emptyTrash();
     reportFanout(
       result,
-      `Deleted ${result.purged} ${result.purged === 1 ? "print" : "prints"} forever`,
+      `Deleted ${result.purged} ${result.purged === 1 ? "picture" : "pictures"} forever`,
     );
   } finally {
     organizeBusy.value = false;
@@ -1112,7 +1112,7 @@ function openEditMenu(event: MouseEvent) {
   contextMenu.open(event, [
     { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
     {
-      label: "Remove prints…",
+      label: "Remove pictures…",
       action: () => setSelectMode(true),
     },
     { separator: true },
@@ -2259,7 +2259,7 @@ function trashPrints(targets: MergedPrint[]) {
   scheduleDelete(
     `bulk-${++bulkDeleteSeq}`,
     locations,
-    `Moved ${n} ${n === 1 ? "print" : "prints"} to trash`,
+    `Moved ${n} ${n === 1 ? "picture" : "pictures"} to trash`,
   );
   pruneSelection();
 }
@@ -2659,26 +2659,26 @@ onUnmounted(() => {
       <EmptyState
         v-else-if="inCollections && gallery.loaded && entries.length === 0"
         headline="Nothing in this collection yet"
-        detail="Select prints in the Library and choose Add to collection."
-        action="Go to prints"
+        detail="Select pictures in My images and choose Add to album."
+        action="Go to pictures"
         @action="setScope('prints')"
       />
 
       <!-- Prints empty states -->
       <EmptyState
         v-else-if="gallery.loaded && entries.length === 0 && gallery.hostFiltered.length > 0"
-        headline="No matching prints"
+        headline="No matching pictures"
         detail="Nothing here matches the current search or filters."
       />
       <EmptyState
         v-else-if="gallery.loaded && entries.length === 0"
-        headline="No prints here yet"
+        headline="No pictures here yet"
         :detail="
           gallery.filter === 'local'
             ? 'Generations saved on this Mac will appear here.'
             : 'Generate one and it lands here.'
         "
-        action="Go to Create"
+        action="Go to New image"
         @action="router.push('/create')"
       />
       <div v-else class="ms-lib-tile-layer" :style="{ height: `${virtualizer.getTotalSize()}px` }">
@@ -2966,7 +2966,7 @@ onUnmounted(() => {
     <ConfirmDialog
       :open="collectionDeleteSlug !== null"
       :title="`Delete collection “${collectionNamed(collectionDeleteSlug)}”?`"
-      message="Its prints stay in the Library."
+      message="Its pictures stay in My images."
       confirm-label="Delete"
       danger
       @confirm="confirmDeleteCollection"

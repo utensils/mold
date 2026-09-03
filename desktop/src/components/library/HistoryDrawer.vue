@@ -728,7 +728,7 @@ async function cleanUpDiskConfirmed() {
           data-test="sequences-empty"
           headline="No sequences yet"
           detail="A sequence you develop keeps its job here — watch it, edit its clips, or clear it out."
-          action="Go to Create"
+          action="Go to New image"
           @action="
             emit('close');
             router.push('/create');
