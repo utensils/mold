@@ -288,6 +288,28 @@
       margin: 0 auto;
       break-inside: avoid;
     }
+    /* Monolithic at print: Blink slices a transform-scaled child at
+     * fragmentainer boundaries mapped in UNSCALED layout coordinates
+     * (transforms are paint-time), so the .fit box (authored size, e.g.
+     * 1400x990) gets cut at the page's free block space and spills onto
+     * a second sheet even though its SCALED footprint fits the page by
+     * construction. overflow:hidden makes .fit-box a scroll container —
+     * monolithic under fragmentation (css-break-3) — so the scaled
+     * content prints atomically on one sheet. No clipping for content
+     * within the authored box: .fit-box is calc-sized to exactly the
+     * scaled footprint. (Content that bleeds past content-width/height
+     * is clipped at the footprint — fit mode's contract; it previously
+     * painted beyond it at print.) Print-only, so the screen rendering
+     * keeps visible overflow for editor affordances.
+     * The export path injects the same rule into frozen copies
+     * (print-eval.ts om-print-fit-contain). The .fit-mode scope is
+     * load-bearing: .fit-box wraps slotted content in EVERY mode, and an
+     * unscoped overflow:hidden would make whole flowing documents
+     * monolithic (one truncated sheet). overflow:hidden, never clip —
+     * clip is not a scroll container, so not monolithic. */
+    @media print {
+      .fit-mode .fit-box { overflow: hidden; }
+    }
     .fit-mode .fit {
       width: var(--doc-fit-w);
       height: var(--doc-fit-h);

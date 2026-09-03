@@ -1,0 +1,76 @@
+/*
+ * The mocks' faces, served from the app bundle (../../ui/fonts) instead of
+ * Google Fonts, so the design documents render offline exactly as the app does.
+ */
+@font-face {
+  font-family: "Inter";
+  src: url("../../ui/fonts/inter/Inter[opsz,wght].ttf") format("truetype");
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../../ui/fonts/jetbrains-mono/JetBrainsMono[wght].ttf")
+    format("truetype");
+  font-weight: 100 800;
+}
+@font-face {
+  font-family: "Archivo";
+  src: url("../../ui/fonts/archivo/Archivo[wdth,wght].ttf") format("truetype");
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: "Azeret Mono";
+  src: url("../../ui/fonts/azeret-mono/AzeretMono[wght].ttf") format("truetype");
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../../ui/fonts/ibm-plex-sans/IBMPlexSans[wdth,wght].ttf")
+    format("truetype");
+  font-weight: 100 700;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../../ui/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf")
+    format("truetype");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../../ui/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf")
+    format("truetype");
+  font-weight: 500;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../../ui/fonts/ibm-plex-mono/IBMPlexMono-SemiBold.ttf")
+    format("truetype");
+  font-weight: 600;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../../ui/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf")
+    format("truetype");
+  font-weight: 700;
+}
+@font-face {
+  font-family: "Manrope";
+  src: url("../../ui/fonts/manrope/Manrope[wght].ttf") format("truetype");
+  font-weight: 200 800;
+}
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("../../ui/fonts/schibsted-grotesk/SchibstedGrotesk-VF.ttf")
+    format("truetype");
+  font-weight: 400 900;
+}
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../../ui/fonts/martian-mono/MartianMono-VF.ttf") format("truetype");
+  font-weight: 100 800;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("../../ui/fonts/geist-mono/GeistMono[wght].ttf") format("truetype");
+  font-weight: 100 900;
+}

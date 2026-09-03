@@ -1,0 +1,1797 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="./mold-tokens.css">
+<link rel="stylesheet" href="./fonts.css">
+<style>
+  body { margin: 0; background: var(--mold-bg-crust); font-family: var(--mold-font-sans); -webkit-font-smoothing: antialiased; }
+  a { color: var(--mold-blue); text-decoration: none; }
+  a:hover { color: var(--mold-lavender); }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--mold-surface-2); }
+  @keyframes moldspin { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+</style>
+</helmet>
+
+<div style="width:1480px;margin:0 auto;padding:40px 40px 72px;display:flex;flex-direction:column;gap:20px">
+
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:940px">
+    <div style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);text-transform:uppercase;letter-spacing:.08em;color:var(--mold-text-dim)">appearance · six themes</div>
+    <h1 style="margin:0;font-size:var(--mold-fs-xl);font-weight:600;letter-spacing:-.01em;line-height:var(--mold-lh-snug);color:var(--mold-text)">Six looks for mold studio</h1>
+    <p style="margin:0;font-size:var(--mold-fs-sm);line-height:var(--mold-lh-body);color:var(--mold-text-2);text-wrap:pretty">Shell, lexicon, icon set and every screen stay fixed — only colour, type and surface treatment move. <strong style="color:var(--mold-text)">Mocha</strong> is the palette mold ships today and <strong style="color:var(--mold-text)">Blueprint</strong> is the light counterpart you kept; <strong style="color:var(--mold-text)">Safelight</strong> is the warm darkroom family the desktop app already ships (amber accent, cold halide blue for telemetry, softer radii); <strong style="color:var(--mold-text)">Graphite</strong> and <strong style="color:var(--mold-text)">Porcelain</strong> are two further options drawn from native app chrome rather than web convention; <strong style="color:var(--mold-text)">Nebula</strong> is your own site’s palette, tokens and all. Pick one and the full app underneath switches to it.</p>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px">
+    <sc-for list="{{ themeCards }}" as="tm" hint-placeholder-count="4">
+      <div onClick="{{ tm.pick }}" style="display:flex;flex-direction:column;gap:0;border-radius:var(--mold-radius-3);overflow:hidden;cursor:pointer;{{ tm.cardStyle }}">
+        <div style="display:flex;height:186px;{{ tm.vars }}background:var(--mold-bg);font-family:var(--mold-font-sans);border-top:var(--mold-bw) solid var(--mold-border)">
+          <div style="width:70px;flex-shrink:0;display:flex;flex-direction:column;gap:5px;padding:8px 6px;background:var(--mold-bg-deep);border-right:var(--mold-bw) solid var(--mold-border)">
+            <span style="font-family:var(--mold-font-mono);font-size:9px;font-weight:700;color:var(--mold-text);padding:0 3px 3px">mold</span>
+            <span style="display:flex;align-items:center;gap:5px;height:17px;padding:0 4px;border-radius:var(--mold-radius-1);font-size:9px;font-weight:600;color:var(--mold-text);{{ tm.navOn }}">New image</span>
+            <span style="display:flex;align-items:center;gap:5px;height:17px;padding:0 4px;font-size:9px;color:var(--mold-text-dim)">Queue</span>
+            <span style="display:flex;align-items:center;gap:5px;height:17px;padding:0 4px;font-size:9px;color:var(--mold-text-dim)">My images</span>
+            <span style="display:flex;align-items:center;gap:5px;height:17px;padding:0 4px;font-size:9px;color:var(--mold-text-dim)">Styles</span>
+            <span style="flex:1"></span>
+            <div style="display:flex;flex-direction:column;gap:4px;padding:6px;border-radius:var(--mold-radius-1);background:var(--mold-surface);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="font-family:var(--mold-font-mono);font-size:8px;font-weight:700;white-space:nowrap;color:var(--mold-text)">studio</span>
+              <span style="height:3px;background:var(--mold-bg-crust);display:block"><span style="display:block;width:62%;height:100%;background:var(--mold-blue)"></span></span>
+            </div>
+          </div>
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:4px;height:20px;padding:0 7px;background:var(--mold-bg-deep);border-bottom:var(--mold-bw) solid var(--mold-border)">
+              <span style="font-size:8px;font-weight:600;color:var(--mold-text)">Rain on brass</span>
+              <span style="flex:1"></span>
+              <span style="padding:2px 6px;border-radius:var(--mold-radius-1);font-size:8px;font-weight:600;color:var(--mold-text);{{ tm.navOn }}">Still</span>
+              <span style="padding:2px 6px;font-size:8px;color:var(--mold-text-dim)">Clip</span>
+            </div>
+            <div style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px;background:var(--mold-bg-crust)">
+              <span style="height:100%;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover;display:block"></span>
+            </div>
+            <div style="flex-shrink:0;display:flex;flex-direction:column;gap:6px;padding:7px;background:var(--mold-bg);border-top:var(--mold-bw) solid var(--mold-border)">
+              <span style="font-size:9px;color:var(--mold-text-faint)">a brass teapot on a rainy windowsill…</span>
+              <div style="display:flex;align-items:center;gap:4px">
+                <span style="flex-shrink:0;display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:var(--mold-radius-1);background:var(--mold-surface);font-size:8px;font-weight:500;color:var(--mold-text);white-space:nowrap">Photoreal ▼</span>
+                <span style="flex:1;min-width:4px"></span>
+                <span style="flex-shrink:0;display:inline-flex;align-items:center;height:18px;padding:0 9px;border-radius:var(--mold-radius-1);font-size:9px;font-weight:600;white-space:nowrap;color:var(--mold-bg-deep);background:var(--mold-blue)">Generate</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px;padding:11px 13px 12px;{{ tm.vars }}background:var(--mold-bg-deep);font-family:var(--mold-font-sans);border-top:var(--mold-bw) solid var(--mold-border)">
+          <div style="display:flex;align-items:center;gap:9px">
+            <span style="width:14px;height:14px;flex-shrink:0;border-radius:50%;{{ tm.radio }}"></span>
+            <span style="font-size:var(--mold-fs-sm);font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-text)">{{ tm.name }}</span>
+            <span style="flex:1;min-width:8px"></span>
+            <span style="display:flex;gap:3px;flex-shrink:0">
+              <span style="width:9px;height:9px;border-radius:50%;background:var(--mold-blue)"></span>
+              <span style="width:9px;height:9px;border-radius:50%;background:var(--mold-text)"></span>
+              <span style="width:9px;height:9px;border-radius:50%;background:var(--mold-surface-2)"></span>
+            </span>
+          </div>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mold-text-dim)">{{ tm.tone }}</span>
+          <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-snug);color:var(--mold-text-2);text-wrap:pretty;min-height:92px">{{ tm.blurb }}</span>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mold-text-dim)">{{ tm.type }}</span>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="position:relative;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-3);overflow:hidden;background:var(--mold-bg);box-shadow:var(--mold-shadow-md);font-family:var(--mold-font-sans);{{ themeStyle }}">
+
+    <!-- ─────────── unified toolbar ─────────── -->
+    <div style="flex-shrink:0;display:flex;align-items:center;gap:14px;height:44px;padding:0 12px 0 16px;background:var(--mold-bg-deep);border-bottom:var(--mold-bw) solid var(--mold-border)">
+      <div style="display:flex;gap:8px">
+        <span style="width:12px;height:12px;border-radius:50%;background:var(--mold-error)"></span>
+        <span style="width:12px;height:12px;border-radius:50%;background:var(--mold-warning)"></span>
+        <span style="width:12px;height:12px;border-radius:50%;background:var(--mold-success)"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:2px;margin-left:10px">
+        <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)" style-hover="background:var(--mold-surface);color:var(--mold-text)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="9.5" y1="4" x2="9.5" y2="20"></line></svg></span>
+        <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--mold-radius-2);color:var(--mold-text-dim)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="14 6 8 12 14 18"></polyline></svg></span>
+        <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--mold-radius-2);color:var(--mold-text-faint)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="10 6 16 12 10 18"></polyline></svg></span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:10px;margin-left:6px">
+        <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-base);font-weight:700;color:var(--mold-text)">{{ title }}</span>
+        <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ subtitle }}</span>
+      </div>
+      <div style="flex:1"></div>
+      <div onClick="{{ openPalette }}" style="display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg);min-width:220px;color:var(--mold-text-dim);cursor:pointer" style-hover="border-color:var(--mold-border-focus)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>
+        <span style="flex:1;font-size:var(--mold-fs-xs)">Search or run a command…</span>
+        <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:700;color:var(--mold-blue)">⌘K</span>
+      </div>
+      <span onClick="{{ openToast }}" style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--mold-radius-2);color:var(--mold-text-2);position:relative;cursor:pointer" style-hover="background:var(--mold-surface);color:var(--mold-text)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.7 21a2 2 0 01-3.4 0"></path></svg><span style="position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--mold-blue)"></span></span>
+    </div>
+
+    <div style="display:flex;height:900px">
+
+      <!-- ─────────── sidebar ─────────── -->
+      <div style="width:270px;flex-shrink:0;display:flex;flex-direction:column;gap:2px;padding:12px 10px;background:var(--mold-bg-deep);border-right:var(--mold-bw) solid var(--mold-border);min-height:0">
+        <div style="flex-shrink:0;display:flex;align-items:center;gap:9px;padding:4px 8px 14px">
+          <img src="assets/logo.png" alt="mold" style="width:22px;height:22px;object-fit:contain">
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-base);font-weight:700;color:var(--mold-text)">mold</span>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-faint)">studio</span>
+        </div>
+
+        <div style="flex-shrink:0;padding:6px 9px 4px;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Make</div>
+        <div onClick="{{ goCreate }}" style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:var(--mold-radius-2);cursor:pointer;font-size:var(--mold-fs-sm);font-weight:500;min-height:36px;{{ nav0 }}" style-hover="background:var(--mold-surface)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg>
+          <span>New image</span>
+          <span style="flex:1"></span>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);opacity:.7">⌘N</span>
+        </div>
+        <div onClick="{{ goQueue }}" style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:var(--mold-radius-2);cursor:pointer;font-size:var(--mold-fs-sm);font-weight:500;min-height:36px;{{ nav1 }}" style-hover="background:var(--mold-surface)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+          <span>Queue</span>
+          <span style="flex:1"></span>
+          <span style="display:inline-flex;align-items:center;justify-content:center;min-width:19px;height:17px;padding:0 6px;border-radius:var(--mold-radius-2);background:{{ accent }};color:var(--mold-bg-deep);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:700">3</span>
+        </div>
+        <div onClick="{{ goLibrary }}" style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:var(--mold-radius-2);cursor:pointer;font-size:var(--mold-fs-sm);font-weight:500;min-height:36px;{{ nav4 }}" style-hover="background:var(--mold-surface)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+          <span>My images</span>
+          <span style="flex:1"></span>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">312</span>
+        </div>
+
+        <div style="flex-shrink:0;padding:16px 9px 4px;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Setup</div>
+        <div onClick="{{ goModels }}" style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:var(--mold-radius-2);cursor:pointer;font-size:var(--mold-fs-sm);font-weight:500;min-height:36px;{{ nav2 }}" style-hover="background:var(--mold-surface)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+          <span>Styles</span>
+          <span style="flex:1"></span>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-warning)">1↓</span>
+        </div>
+        <div onClick="{{ goMachines }}" style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:var(--mold-radius-2);cursor:pointer;font-size:var(--mold-fs-sm);font-weight:500;min-height:36px;{{ nav3 }}" style-hover="background:var(--mold-surface)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+          <span>Machines</span>
+          <span style="flex:1"></span>
+          <span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>
+        </div>
+
+        <div style="height:10px;flex-shrink:0"></div>
+
+        <div onClick="{{ goMachines }}" style="flex-shrink:0;display:flex;flex-direction:column;gap:6px;padding:9px 10px;border-radius:var(--mold-radius-2);background:var(--mold-surface);border:var(--mold-bw) solid var(--mold-border);cursor:pointer">
+          <div style="display:flex;align-items:center;gap:7px">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>
+            <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);font-weight:700;color:var(--mold-text)">studio-rack</span>
+            <span style="flex:1"></span>
+            <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">62%</span>
+          </div>
+          <div style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">Your fastest machine. Making images now.</div>
+          <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:62%;height:100%;background:{{ accent }}"></div></div>
+        </div>
+
+        <!-- queue lives here, under the machines -->
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;margin-top:10px;border-top:var(--mold-bw) solid var(--mold-border);padding-top:9px">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 3px 8px">
+            <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Queue</span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:16px;padding:0 5px;border-radius:var(--mold-radius-2);background:var(--mold-surface-2);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text)">3</span>
+            <span style="flex:1"></span>
+            <span onClick="{{ togglePause }}" title="Pause the whole queue" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:24px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);cursor:pointer;{{ pauseStyle }}" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
+              <sc-if value="{{ paused }}" hint-placeholder-val="{{ false }}">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+              </sc-if>
+              <sc-if value="{{ running }}" hint-placeholder-val="{{ true }}">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="4" x2="9" y2="20"></line><line x1="15" y1="4" x2="15" y2="20"></line></svg>
+              </sc-if>
+            </span>
+            <span title="Stop everything" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:24px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-error);color:var(--mold-error)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg></span>
+            <span onClick="{{ goQueue }}" title="Open the full queue" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:24px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg></span>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:2px">
+            <div style="flex-shrink:0;display:flex;flex-direction:column;gap:9px;padding:10px;border-radius:var(--mold-radius-2);background:var(--mold-surface);box-shadow:inset 0 0 0 1px {{ accent }}">
+              <div style="display:flex;gap:10px">
+                <span style="width:52px;height:52px;flex-shrink:0;border:var(--mold-bw) solid {{ accent }};background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                  <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                  <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-2)">{{ sidebarActive }}</span>
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <div style="flex:1;height:6px;background:var(--mold-bg-crust);overflow:hidden"><div style="height:100%;background:{{ accent }};{{ progressWidth }}"></div></div>
+                    <span title="Pause this image" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="4" x2="9" y2="20"></line><line x1="15" y1="4" x2="15" y2="20"></line></svg></span>
+                    <span title="Stop this image" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-error);color:var(--mold-error)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></span>
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">image 2 of 4</span>
+                <span style="flex:1"></span>
+                <span onClick="{{ toggleExplain }}" style="font-size:var(--mold-fs-micro);font-weight:500;color:var(--mold-blue);cursor:pointer">What's this?</span>
+              </div>
+              <sc-if value="{{ explainOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="font-size:var(--mold-fs-micro);line-height:var(--mold-lh-body);color:var(--mold-text-2);text-wrap:pretty">Your picture starts as random static and gets cleared up in 28 passes — big shapes first, fine detail last. That's why the thumbnail looks soft until the end.</div>
+              </sc-if>
+            </div>
+
+            <sc-for list="{{ queue }}" as="q" hint-placeholder-count="3">
+              <div style="flex-shrink:0;display:flex;align-items:center;gap:9px;padding:8px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);cursor:pointer" style-hover="background:var(--mold-surface)">
+                <span style="width:38px;height:38px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);display:flex;align-items:center;justify-content:center;font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);{{ q.thumbStyle }}{{ q.thumbBg }}">
+                  <sc-if value="{{ q.showGlyph }}" hint-placeholder-val="{{ true }}">
+                    <span>{{ q.glyph }}</span>
+                  </sc-if>
+                </span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:2px">
+                  <span style="font-size:var(--mold-fs-micro);font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ q.title }}</span>
+                  <span style="font-size:var(--mold-fs-micro);{{ q.statusStyle }};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ q.shortStatus }}</span>
+                </div>
+                <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--mold-radius-2);color:var(--mold-text-dim);cursor:pointer" style-hover="background:var(--mold-surface-2);color:var(--mold-text)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="flex-shrink:0;padding:8px 3px 0;font-size:var(--mold-fs-micro);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">Finished images go to <strong style="color:var(--mold-text-2);font-weight:600">My images</strong>. Closing the window keeps the queue running.</div>
+        </div>
+
+        <div onClick="{{ goSettings }}" style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 9px;margin-top:12px;border-radius:var(--mold-radius-2);cursor:pointer;font-size:var(--mold-fs-sm);font-weight:500;min-height:36px;{{ nav5 }}" style-hover="background:var(--mold-surface)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg>
+          <span>Settings</span>
+        </div>
+      </div>
+
+      <!-- ═══════════ NEW IMAGE ═══════════ -->
+      <sc-if value="{{ isCreate }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Rain on brass, 35mm</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--mold-text-faint)"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+            <span style="flex:1"></span>
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
+              <span onClick="{{ setStill }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabStill }}">Still picture</span>
+              <span onClick="{{ setClip }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabClip }}">Short clip</span>
+              <span onClick="{{ setMesh }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabMesh }}">3-D object</span>
+            </div>
+            <span style="width:var(--mold-bw);height:20px;background:var(--mold-border)"></span>
+            <span style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+              Starting points
+            </span>
+            <span style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.5 15a9 9 0 102.1-9.4L1 10"></path></svg>
+              Use these settings again
+            </span>
+          </div>
+
+          <div style="flex:1;min-height:320px;display:flex;align-items:center;justify-content:center;padding:28px;background:var(--mold-bg-crust);overflow:hidden">
+            <div onClick="{{ openLightbox }}" style="position:relative;height:100%;max-width:100%;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:zoom-in">
+              <img src="assets/gallery/flux-dev-teahouse.jpg" alt="Generated result" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:12px;padding:6px 6px 6px 10px;background:var(--mold-bg-crust);border-top:var(--mold-bw) solid var(--mold-border)">
+                <span style="min-width:0;flex:1;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">mold-flux-dev-1775108462891.png</span>
+                <span style="flex-shrink:0;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">1024² · 4.0s</span>
+                <span style="flex-shrink:0;width:var(--mold-bw);height:16px;background:var(--mold-border)"></span>
+                <div style="flex-shrink:0;display:flex;align-items:center;gap:2px">
+                  <span style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text);cursor:pointer" style-hover="background:var(--mold-surface)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Save</span>
+                  <span style="display:inline-flex;align-items:center;height:26px;padding:0 10px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text);cursor:pointer" style-hover="background:var(--mold-surface)">Make 4 variations</span>
+                  <span style="display:inline-flex;align-items:center;height:26px;padding:0 10px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text);cursor:pointer" style-hover="background:var(--mold-surface)">Make bigger</span>
+                  <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:26px;border-radius:var(--mold-radius-1);color:var(--mold-text-2);cursor:pointer" style-hover="background:var(--mold-surface)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <sc-if value="{{ isClip }}" hint-placeholder-val="{{ false }}">
+            <div style="flex-shrink:0;display:flex;flex-direction:column;background:var(--mold-bg-deep);border-top:var(--mold-bw) solid var(--mold-border)">
+
+              <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;height:36px;padding:0 12px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+                <span onClick="{{ togglePlay }}" title="Play the whole clip" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--mold-radius-2);cursor:pointer;color:var(--mold-bg-deep);background:{{ accent }}">
+                  <sc-if value="{{ playing }}" hint-placeholder-val="{{ false }}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="9" y1="4" x2="9" y2="20"></line><line x1="15" y1="4" x2="15" y2="20"></line></svg></sc-if>
+                  <sc-if value="{{ stopped }}" hint-placeholder-val="{{ true }}"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="7 4 19 12 7 20"></polygon></svg></sc-if>
+                </span>
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text);white-space:nowrap">{{ playhead }}<span style="color:var(--mold-text-dim)"> / {{ totalTime }}</span></span>
+                <span style="width:var(--mold-bw);height:16px;background:var(--mold-border)"></span>
+                <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-2);white-space:nowrap">{{ sceneCount }} scenes, played end to end</span>
+                <span style="flex:1;min-width:12px"></span>
+                <span onClick="{{ toggleTimelineHelp }}" style="font-size:var(--mold-fs-micro);font-weight:500;color:var(--mold-blue);cursor:pointer;white-space:nowrap">How does this work?</span>
+                <span onClick="{{ addScene }}" style="display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-micro);font-weight:500;color:var(--mold-text-2);cursor:pointer;white-space:nowrap" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>Add a scene</span>
+              </div>
+
+              <sc-if value="{{ timelineHelpOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="flex-shrink:0;display:flex;gap:10px;padding:10px 12px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-surface)">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-blue)">•</span>
+                  <span style="font-size:var(--mold-fs-micro);line-height:var(--mold-lh-body);color:var(--mold-text-2);text-wrap:pretty">Each block is one scene, written in your own words. Drag a block's right edge to make that scene longer, drag the block itself to reorder, and click the little marker between two blocks to say how they should meet. The whole thing is made as one continuous clip.</span>
+                </div>
+              </sc-if>
+
+              <div style="flex-shrink:0;display:flex;height:18px;padding:0 12px 0 94px;align-items:flex-end;border-bottom:var(--mold-bw) solid var(--mold-border)">
+                <div style="position:relative;flex:1;height:100%">
+                  <sc-for list="{{ ticks }}" as="tk" hint-placeholder-count="6">
+                    <span style="position:absolute;bottom:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px;{{ tk.pos }}">
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);line-height:1;color:var(--mold-text-dim)">{{ tk.label }}</span>
+                      <span style="width:var(--mold-bw);height:4px;background:var(--mold-surface-3);display:block"></span>
+                    </span>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="flex-shrink:0;position:relative;display:flex;flex-direction:column;gap:6px;padding:24px 12px 11px">
+
+                <div style="display:flex;align-items:stretch;gap:8px;height:62px">
+                  <div style="width:74px;flex-shrink:0;display:flex;flex-direction:column;justify-content:center;gap:2px">
+                    <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text);white-space:nowrap">Scenes</span>
+                    <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">drag to trim</span>
+                  </div>
+                  <div style="flex:1;min-width:0;display:flex;align-items:stretch;gap:0">
+                    <sc-for list="{{ scenes }}" as="sc" hint-placeholder-count="3">
+                      <div style="display:flex;align-items:stretch;{{ sc.flex }}">
+                        <sc-if value="{{ sc.hasSeam }}" hint-placeholder-val="{{ false }}">
+                          <span onClick="{{ sc.pickSeam }}" title="{{ sc.seamTitle }}" style="position:relative;z-index:2;flex-shrink:0;width:0;cursor:pointer">
+                            <span style="position:absolute;left:0;top:-22px;transform:translateX(-50%);display:flex;align-items:center;gap:4px;height:19px;padding:0 7px;border-radius:var(--mold-radius-2);white-space:nowrap;{{ sc.seamStyle }}">
+                              <span style="font-family:var(--mold-font-mono);font-size:9px;line-height:1;color:var(--mold-bg-deep)">{{ sc.seamGlyph }}</span>
+                              <span style="font-size:9px;font-weight:600;line-height:1;color:var(--mold-bg-deep)">{{ sc.seamLabel }}</span>
+                            </span>
+                          </span>
+                        </sc-if>
+                        <div onClick="{{ sc.pick }}" style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between;padding:6px 8px;border-radius:var(--mold-radius-2);cursor:pointer;overflow:hidden;{{ sc.style }}">
+                          <span style="position:absolute;inset:0;opacity:.34;{{ sc.thumb }}"></span>
+                          <span style="position:absolute;left:0;right:0;top:0;height:60%;background:linear-gradient(to bottom, var(--mold-surface), transparent);pointer-events:none"></span>
+                          <sc-if value="{{ sc.selected }}" hint-placeholder-val="{{ false }}">
+                            <span title="Drag to change how long this scene runs" style="position:absolute;right:0;top:0;bottom:0;width:9px;display:flex;align-items:center;justify-content:center;cursor:ew-resize;background:{{ accent }}"><span style="width:1px;height:14px;background:var(--mold-bg-deep);display:block"></span></span>
+                          </sc-if>
+                          <span style="position:relative;font-size:var(--mold-fs-micro);font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ sc.title }}</span>
+                          <span style="position:relative;display:flex;align-items:baseline;gap:6px">
+                            <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2);white-space:nowrap">{{ sc.length }}</span>
+                            <span style="flex:1"></span>
+                          </span>
+                        </div>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+
+                <div style="display:flex;align-items:stretch;gap:8px;height:26px">
+                  <div style="width:74px;flex-shrink:0;display:flex;align-items:center">
+                    <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text-2);white-space:nowrap">Sound</span>
+                  </div>
+                  <div style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:0 9px;border-radius:var(--mold-radius-2);border:var(--mold-bw) dashed var(--mold-surface-3);cursor:pointer" style-hover="border-color:var(--mold-border-focus)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--mold-text-dim);flex-shrink:0"><path d="M11 5L6 9H3v6h3l5 4V5z"></path><path d="M15.5 8.5a5 5 0 010 7"></path></svg>
+                    <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Let mold make sound for this clip, or drop in your own</span>
+                  </div>
+                </div>
+
+                <span style="position:absolute;top:24px;bottom:11px;width:2px;background:{{ accent }};pointer-events:none;{{ playheadPos }}"><span style="position:absolute;top:-3px;left:-4px;width:10px;height:7px;border-radius:2px;background:{{ accent }};display:block"></span></span>
+              </div>
+            </div>
+          </sc-if>
+
+          <div style="flex-shrink:0;padding:12px 14px 14px;background:var(--mold-bg);border-top:var(--mold-bw) solid var(--mold-border)">
+            <div style="border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <div style="display:flex;align-items:baseline;gap:16px;padding:12px 14px 6px">
+                <span style="min-width:0;flex:1;font-size:var(--mold-fs-base);line-height:var(--mold-lh-body);color:var(--mold-text-dim)">{{ promptPlaceholder }}</span>
+                <span style="flex-shrink:0;white-space:nowrap;font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ estimate }}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 10px 10px 12px">
+                <span style="display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);background:var(--mold-surface);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text);cursor:pointer">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                  {{ styleChip }} <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ styleId }}</span> ▼
+                </span>
+                <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">Square · 1024 ▼</span>
+                <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">{{ countChip }} ▼</span>
+                <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.4 3.8L17 8.2l-3.6 1.4L12 13.4 10.6 9.6 7 8.2l3.6-1.4L12 3z"></path><path d="M18.5 14l.7 1.9 1.8.6-1.8.6-.7 1.9-.7-1.9-1.8-.6 1.8-.6.7-1.9z"></path><path d="M5.5 15l.6 1.5 1.4.5-1.4.5L5.5 19l-.6-1.5-1.4-.5 1.4-.5.6-1.5z"></path></svg>
+                  Write more for me
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">⌘E</span>
+                </span>
+                <span style="flex:1;min-width:16px"></span>
+                <span style="display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;white-space:nowrap;gap:9px;height:32px;padding:0 16px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-sm);font-weight:600;letter-spacing:-.005em;color:var(--mold-bg-deep);cursor:pointer;background:{{ accent }}">
+                  Generate
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);opacity:.7">⌘↩</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- inspector -->
+        <div style="width:300px;flex-shrink:0;display:flex;flex-direction:column;background:var(--mold-bg-deep);border-left:var(--mold-bw) solid var(--mold-border)">
+          <div style="flex-shrink:0;display:flex;padding:8px 10px;gap:2px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg)">
+            <span onClick="{{ setTabSettings }}" style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insSettings }}">Settings</span>
+            <span onClick="{{ setTabStarters }}" style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insStarters }}">Starters</span>
+            <span onClick="{{ setTabHistory }}" style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insHistory }}">Recent</span>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:18px">
+            <sc-if value="{{ tabIsSettings }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:18px">
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <div style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Start from a photo</div>
+                  <div style="display:flex;gap:9px;padding:9px;border:var(--mold-bw) dashed var(--mold-surface-3);border-radius:var(--mold-radius-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus)">
+                    <span style="width:46px;height:46px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/flux2-klein-zen.jpg) center/cover"></span>
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                      <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">zen-garden.jpg</span>
+                      <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Drop a photo to redraw it, or paste from the clipboard</span>
+                    </div>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:6px">
+                    <div style="display:flex;align-items:baseline;justify-content:space-between">
+                      <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">How much to change it</span>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">0.55</span>
+                    </div>
+                    <div style="position:relative;height:4px;background:var(--mold-surface)"><div style="width:55%;height:100%;background:{{ accent }}"></div><span style="position:absolute;top:-5px;left:calc(55% - 7px);width:14px;height:14px;border-radius:var(--mold-radius-1);background:var(--mold-text)"></span></div>
+                    <div style="display:flex;justify-content:space-between;font-size:var(--mold-fs-micro);color:var(--mold-text-dim)"><span>Keep the photo</span><span>Start fresh</span></div>
+                  </div>
+                  <div style="display:flex;gap:6px">
+                    <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:28px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">Paint a mask</span>
+                    <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:28px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">Use a face</span>
+                  </div>
+                </div>
+
+                <div style="height:var(--mold-bw);background:var(--mold-border)"></div>
+
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <div style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Quality</div>
+                  <div style="display:flex;flex-direction:column;gap:5px">
+                    <sc-for list="{{ presets }}" as="p" hint-placeholder-count="3">
+                      <div onClick="{{ p.pick }}" style="display:flex;align-items:center;gap:10px;min-height:34px;padding:0 11px;border-radius:var(--mold-radius-2);cursor:pointer;{{ p.style }}">
+                        <span style="font-size:var(--mold-fs-sm);font-weight:600;white-space:nowrap">{{ p.label }}</span>
+                        <span style="flex:1"></span>
+                        <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);white-space:nowrap;opacity:.75">{{ p.meta }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+
+                <sc-for list="{{ sliders }}" as="s" hint-placeholder-count="3">
+                  <div style="display:flex;flex-direction:column;gap:7px">
+                    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+                      <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">{{ s.label }}</span>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ s.value }}</span>
+                    </div>
+                    <div style="position:relative;height:4px;background:var(--mold-surface)">
+                      <div style="height:100%;{{ s.fill }}"></div>
+                      <span style="position:absolute;top:-5px;width:14px;height:14px;border-radius:var(--mold-radius-1);background:var(--mold-text);{{ s.knob }}"></span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:var(--mold-fs-micro);color:var(--mold-text-dim)"><span>{{ s.low }}</span><span>{{ s.high }}</span></div>
+                  </div>
+                </sc-for>
+
+                <div style="height:var(--mold-bw);background:var(--mold-border)"></div>
+
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Add-on looks</span>
+                    <span style="flex:1"></span>
+                    <span style="font-size:var(--mold-fs-micro);color:var(--mold-blue);cursor:pointer">Add</span>
+                  </div>
+                  <sc-for list="{{ loras }}" as="l" hint-placeholder-count="2">
+                    <div style="display:flex;align-items:center;gap:9px;padding:8px 9px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2)">
+                      <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:4px">
+                        <span style="font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ l.label }}</span>
+                        <div style="height:4px;background:var(--mold-surface)"><div style="height:100%;{{ l.fill }}"></div></div>
+                      </div>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ l.weight }}</span>
+                      <span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:var(--mold-radius-1);color:var(--mold-text-dim);cursor:pointer" style-hover="color:var(--mold-error)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></span>
+                    </div>
+                  </sc-for>
+                </div>
+
+                <sc-if value="{{ isMesh }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;flex-direction:column;gap:12px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-surface)">
+                    <div style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">3-D object</div>
+                    <div style="display:flex;flex-direction:column;gap:7px">
+                      <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">Surface detail</span>
+                      <div style="display:flex;gap:5px">
+                        <span style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">Rough</span>
+                        <span style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);background:{{ accent }}22;box-shadow:inset 0 0 0 1px {{ accent }};font-size:var(--mold-fs-micro);font-weight:600;color:var(--mold-text)">Normal</span>
+                        <span style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">Fine</span>
+                      </div>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">octree 384 · more detail is slower</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:7px">
+                      <div style="display:flex;align-items:baseline;justify-content:space-between">
+                        <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">How tight to the photo</span>
+                        <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">0.50</span>
+                      </div>
+                      <div style="position:relative;height:4px;background:var(--mold-bg-crust)"><div style="width:50%;height:100%;background:{{ accent }}"></div><span style="position:absolute;top:-5px;left:calc(50% - 7px);width:14px;height:14px;border-radius:var(--mold-radius-1);background:var(--mold-text)"></span></div>
+                      <div style="display:flex;justify-content:space-between;font-size:var(--mold-fs-micro);color:var(--mold-text-dim)"><span>Puffier</span><span>Sharper edges</span></div>
+                    </div>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+                      <div style="display:flex;flex-direction:column;gap:2px">
+                        <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">Simplify to</span>
+                        <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Fewer faces load faster in other apps</span>
+                      </div>
+                      <span style="height:28px;display:flex;align-items:center;padding:0 9px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-faint)">keep every detail</span>
+                    </div>
+                    <span style="font-size:var(--mold-fs-micro);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">Start from a photo of one object. You'll get a turntable preview and can export .obj or .glb.</span>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ isClip }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;flex-direction:column;gap:10px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-surface)">
+                    <div style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Clip</div>
+                    <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Length</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">5s · 96 frames ▼</span></div>
+                    <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Smoothness</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">24 fps ▼</span></div>
+                    <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Add sound</span><span style="width:34px;height:19px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;background:var(--mold-surface-2)"><span style="width:15px;height:15px;border-radius:var(--mold-radius-1);background:var(--mold-text-dim)"></span></span></div>
+                    <span style="font-size:var(--mold-fs-micro);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">Clips take a few minutes. You'll get a still preview first.</span>
+                  </div>
+                </sc-if>
+
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <div style="display:flex;align-items:baseline;justify-content:space-between">
+                    <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">Repeat this look</span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">seed 4821</span>
+                  </div>
+                  <div style="display:flex;gap:6px;align-items:center">
+                    <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
+                      <span style="padding:5px 10px;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:var(--mold-fs-micro);font-weight:600;color:var(--mold-text)">Keep</span>
+                      <span style="padding:5px 10px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-micro);font-weight:500;color:var(--mold-text-dim)">Surprise me</span>
+                    </div>
+                    <span style="flex:1;height:28px;display:flex;align-items:center;padding:0 9px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg);font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text)">4821</span>
+                  </div>
+                  <span style="font-size:var(--mold-fs-micro);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">Keeping this number reproduces the same look when you tweak the words.</span>
+                </div>
+
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">Save every result</span>
+                  <span style="width:36px;height:20px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;justify-content:flex-end;background:{{ accent }}"><span style="width:16px;height:16px;border-radius:var(--mold-radius-1);background:var(--mold-bg-deep)"></span></span>
+                </div>
+
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <div style="display:flex;flex-direction:column;gap:2px">
+                    <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">Where it runs</span>
+                    <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Auto picks whichever machine has the style</span>
+                  </div>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2);text-align:right">Auto ▼<br>studio-rack now</span>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ tabIsStarters }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:10px">
+                <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-body);color:var(--mold-text-2)">Pick a starting point and change the words — every setting comes with it.</span>
+                <sc-for list="{{ starters }}" as="st" hint-placeholder-count="4">
+                  <div style="display:flex;gap:10px;padding:9px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);background:var(--mold-surface)">
+                    <span style="width:52px;height:52px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);{{ st.bg }}"></span>
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                      <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">{{ st.label }}</span>
+                      <span style="font-size:var(--mold-fs-micro);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">{{ st.note }}</span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ tabIsHistory }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ recents }}" as="r" hint-placeholder-count="5">
+                  <div style="display:flex;align-items:center;gap:9px;padding:8px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);cursor:pointer" style-hover="background:var(--mold-surface)">
+                    <span style="width:36px;height:36px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);{{ r.bg }}"></span>
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:2px">
+                      <span style="font-size:var(--mold-fs-micro);font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.title }}</span>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ r.meta }}</span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ═══════════ QUEUE ═══════════ -->
+      <sc-if value="{{ isQueue }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:12px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">1 being made · 3 waiting</span>
+            <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">about 1 minute left in total</span>
+            <span style="flex:1"></span>
+            <span onClick="{{ togglePause }}" style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">{{ pauseLabel }}</span>
+            <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim);cursor:pointer" style-hover="color:var(--mold-text)">Clear finished</span>
+            <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-error);color:var(--mold-error)">Stop everything</span>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:14px">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+              <sc-for list="{{ queueStats }}" as="qs" hint-placeholder-count="3">
+                <div style="display:flex;flex-direction:column;gap:6px;padding:14px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">{{ qs.label }}</span>
+                  <span style="font-size:var(--mold-fs-lg);font-weight:600;color:var(--mold-text)">{{ qs.value }}</span>
+                  <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ qs.note }}</span>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="display:flex;gap:12px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-surface)">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-blue)">•</span>
+              <div style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-body);color:var(--mold-text-2);text-wrap:pretty">One image is made at a time so each gets your machine's full attention. Drag a row to reorder, or hit <strong style="color:var(--mold-text)">Jump the line</strong> on the one you need first. Closing the window keeps the queue running.</div>
+            </div>
+
+            <div style="border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+              <div style="display:grid;grid-template-columns:1fr 250px 150px 128px 34px;padding:9px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">
+                <span>Image</span><span>What's happening</span><span>Style</span><span style="text-align:right">Machine</span><span></span>
+              </div>
+              <sc-for list="{{ fullQueue }}" as="f" hint-placeholder-count="5">
+                <div style="display:grid;grid-template-columns:1fr 250px 150px 128px 34px;align-items:center;padding:12px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);min-height:56px" style-hover="background:var(--mold-surface)">
+                  <div style="display:flex;align-items:center;gap:11px;min-width:0">
+                    <span style="width:34px;height:34px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);display:flex;align-items:center;justify-content:center;font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);{{ f.thumbStyle }}{{ f.thumbBg }}">
+                      <sc-if value="{{ f.showGlyph }}" hint-placeholder-val="{{ true }}">
+                        <span>{{ f.glyph }}</span>
+                      </sc-if>
+                    </span>
+                    <span style="font-size:var(--mold-fs-sm);color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ f.title }}</span>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:4px;padding-right:16px">
+                    <span style="font-size:var(--mold-fs-xs);{{ f.statusStyle }}">{{ f.status }}</span>
+                    <sc-if value="{{ f.showBar }}" hint-placeholder-val="{{ false }}">
+                      <div style="height:5px;background:var(--mold-surface);overflow:hidden"><div style="height:100%;{{ f.bar }}"></div></div>
+                    </sc-if>
+                  </div>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ f.model }}</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-dim);text-align:right">{{ f.host }}</span>
+                  <span title="Jump the line, pause, remove…" style="justify-self:end;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--mold-radius-2);color:var(--mold-text-dim);cursor:pointer" style-hover="background:var(--mold-surface-2);color:var(--mold-text)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ═══════════ MY IMAGES ═══════════ -->
+      <sc-if value="{{ isLibrary }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
+              <sc-for list="{{ libScopes }}" as="sc" hint-placeholder-count="4">
+                <span onClick="{{ sc.pick }}" style="padding:5px 12px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;cursor:pointer;{{ sc.style }}">{{ sc.label }} <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);opacity:.7">{{ sc.count }}</span></span>
+              </sc-for>
+            </div>
+            <span style="display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);width:170px;font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Search words or tags…</span>
+            <div style="display:flex;gap:2px">
+              <span style="padding:5px 9px;border-radius:var(--mold-radius-2);background:var(--mold-surface-2);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">All</span>
+              <span style="padding:5px 9px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Pictures</span>
+              <span style="padding:5px 9px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Clips</span>
+              <span style="padding:5px 9px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">3-D</span>
+            </div>
+            <span style="flex:1"></span>
+            <div style="display:flex;align-items:center;gap:7px">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--mold-text-dim)"><rect x="4" y="4" width="7" height="7" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect></svg>
+              <div style="position:relative;width:74px;height:4px;background:var(--mold-surface)"><div style="width:52%;height:100%;background:{{ accent }}"></div><span style="position:absolute;top:-5px;left:calc(52% - 7px);width:14px;height:14px;border-radius:var(--mold-radius-1);background:var(--mold-text)"></span></div>
+            </div>
+            <span onClick="{{ toggleSelect }}" style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;cursor:pointer;{{ selectStyle }}">Select</span>
+            <span onClick="{{ toggleHistory }}" style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">History</span>
+          </div>
+
+          <!-- chip row: favourites + tags + machines -->
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:7px;padding:9px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <span style="display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-micro);color:var(--mold-star);cursor:pointer">★ Favourites <span style="font-family:var(--mold-font-mono);opacity:.7">18</span></span>
+            <sc-for list="{{ tags }}" as="t" hint-placeholder-count="5">
+              <span style="display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-micro);cursor:pointer;{{ t.style }}">{{ t.label }} <span style="font-family:var(--mold-font-mono);opacity:.7">{{ t.count }}</span></span>
+            </sc-for>
+            <span style="flex:1"></span>
+            <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Made on</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">studio-rack 214</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">this mac 98</span>
+          </div>
+
+          <sc-if value="{{ isTrash }}" hint-placeholder-val="{{ false }}">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:color-mix(in srgb, var(--mold-error) 10%, transparent)">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--mold-error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Deleted pictures are kept for <strong>30 days</strong>, then removed for good.</span>
+              <span style="flex:1"></span>
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Keep for 30 days ▼</span>
+              <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-error);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-error);cursor:pointer">Empty now</span>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isCollections }}" hint-placeholder-val="{{ false }}">
+            <div style="flex-shrink:0;display:flex;gap:10px;padding:12px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);overflow-x:auto">
+              <sc-for list="{{ collections }}" as="c" hint-placeholder-count="4">
+                <div style="width:150px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;padding:10px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);background:var(--mold-surface)">
+                  <span style="height:74px;border:var(--mold-bw) solid var(--mold-border);{{ c.bg }}"></span>
+                  <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">{{ c.label }}</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ c.count }}</span>
+                </div>
+              </sc-for>
+              <div style="width:150px;flex-shrink:0;display:flex;align-items:center;justify-content:center;gap:7px;border:var(--mold-bw) dashed var(--mold-surface-3);border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);color:var(--mold-text-dim);cursor:pointer">＋ New album</div>
+            </div>
+          </sc-if>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:14px">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(176px,1fr));gap:10px">
+              <sc-for list="{{ tiles }}" as="t" hint-placeholder-count="12">
+                <div onClick="{{ openLightbox }}" style="position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);cursor:pointer;{{ t.bg }}" style-hover="border-color:var(--mold-border-focus)">
+                  <sc-if value="{{ selectMode }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;top:7px;left:7px;width:17px;height:17px;border-radius:var(--mold-radius-1);border:var(--mold-bw) solid var(--mold-text);background:var(--mold-bg-crust)"></span>
+                  </sc-if>
+                  <sc-if value="{{ t.fav }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;top:6px;right:7px;font-family:var(--mold-font-mono);font-size:var(--mold-fs-sm);color:var(--mold-star)">★</span>
+                  </sc-if>
+                  <sc-if value="{{ t.kindBadge }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;bottom:7px;left:7px;padding:2px 6px;background:var(--mold-bg-crust);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">{{ t.kindBadge }}</span>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <sc-if value="{{ selectMode }}" hint-placeholder-val="{{ false }}">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+              <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">3 selected</span>
+              <span style="flex:1"></span>
+              <span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">★ Favourite</span>
+              <span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Add tag</span>
+              <span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Add to album</span>
+              <span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Export…</span>
+              <span style="display:inline-flex;align-items:center;height:28px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-error);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-error);cursor:pointer">Delete</span>
+            </div>
+          </sc-if>
+        </div>
+
+        <sc-if value="{{ historyOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="width:290px;flex-shrink:0;display:flex;flex-direction:column;background:var(--mold-bg-deep);border-left:var(--mold-bw) solid var(--mold-border)">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg)">
+              <span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">History</span>
+              <span style="flex:1"></span>
+              <span onClick="{{ toggleHistory }}" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--mold-radius-2);color:var(--mold-text-dim);cursor:pointer" style-hover="color:var(--mold-text)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></span>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ history }}" as="h" hint-placeholder-count="6">
+                <div style="display:flex;flex-direction:column;gap:5px;padding:10px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);cursor:pointer" style-hover="background:var(--mold-surface)">
+                  <span style="font-size:var(--mold-fs-xs);color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ h.prompt }}</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ h.meta }}</span>
+                  <span style="font-size:var(--mold-fs-micro);font-weight:600;color:var(--mold-blue)">Use these settings</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+      </sc-if>
+
+      <!-- ═══════════ STYLES ═══════════ -->
+      <sc-if value="{{ isModels }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
+              <span onClick="{{ setInstalled }}" style="padding:5px 14px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;cursor:pointer;{{ tabInstalled }}">Ready to use</span>
+              <span onClick="{{ setDiscover }}" style="padding:5px 14px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;cursor:pointer;{{ tabDiscover }}">Browse more</span>
+            </div>
+            <span style="flex:1"></span>
+            <span style="display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);width:190px;font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Filter…</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-bg-deep);cursor:pointer;background:{{ accent }}">Add from file</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:12px;margin:14px 14px 0;padding:12px;border:var(--mold-bw) solid var(--mold-warning);background:var(--mold-bg-deep)">
+            <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-warning)">↓</span>
+            <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+              <div style="display:flex;align-items:baseline;gap:10px">
+                <span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">Getting a video style ready</span>
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">ltx-video-0.9.6-distilled:bf16 · [1.2G/6.8G, 12.4MiB/s, eta 8m12s]</span>
+              </div>
+              <div style="height:6px;background:var(--mold-surface);overflow:hidden"><div style="width:18%;height:100%;background:var(--mold-warning)"></div></div>
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">You can keep making images while this downloads. Going to studio-rack.</span>
+            </div>
+            <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Pause</span>
+            <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-error);color:var(--mold-error)">Cancel</span>
+          </div>
+
+          <sc-if value="{{ modelsInstalled }}" hint-placeholder-val="{{ true }}">
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:14px">
+              <div style="display:flex;align-items:center;gap:10px;padding:0 12px 8px">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Disk used by styles</span>
+                <div style="flex:1;display:flex;height:8px;border:var(--mold-bw) solid var(--mold-border)">
+                  <span style="width:34%;background:{{ accent }}"></span>
+                  <span style="width:22%;background:var(--mold-sapphire)"></span>
+                  <span style="width:12%;background:var(--mold-mauve)"></span>
+                </div>
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">37.9 GB of 512 GB</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 130px 110px 96px 140px 34px;padding:0 12px 8px;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;color:var(--mold-text-dim)">
+                <span>NAME</span><span>GOOD FOR</span><span>SPEED</span><span>SIZE</span><span>MACHINE</span><span></span>
+              </div>
+              <div style="border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+                <sc-for list="{{ models }}" as="m" hint-placeholder-count="6">
+                  <div style="display:grid;grid-template-columns:1fr 130px 110px 96px 140px 34px;align-items:center;padding:12px;border-bottom:var(--mold-bw) solid var(--mold-border);min-height:52px" style-hover="background:var(--mold-surface)">
+                    <div style="display:flex;align-items:center;gap:10px;min-width:0">
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);width:12px;text-align:center;{{ m.starStyle }}">{{ m.star }}</span>
+                      <div style="display:flex;flex-direction:column;min-width:0">
+                        <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.friendly }}</span>
+                        <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.id }}</span>
+                      </div>
+                    </div>
+                    <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-2)">{{ m.goodFor }}</span>
+                    <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-2)">{{ m.speed }}</span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ m.size }}</span>
+                    <div style="display:flex;align-items:center;gap:7px">
+                      <span style="width:6px;height:6px;border-radius:50%;{{ m.dot }}"></span>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ m.host }}</span>
+                    </div>
+                    <span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--mold-radius-2);color:var(--mold-text-dim);cursor:pointer" style-hover="background:var(--mold-surface-2);color:var(--mold-text)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ modelsDiscover }}" hint-placeholder-val="{{ false }}">
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;align-content:start">
+              <sc-for list="{{ catalog }}" as="c" hint-placeholder-count="6">
+                <div style="display:flex;flex-direction:column;gap:10px;padding:13px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)" style-hover="border-color:var(--mold-border-focus)">
+                  <div style="display:flex;align-items:center;gap:9px">
+                    <span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">{{ c.friendly }}</span>
+                    <span style="flex:1"></span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ c.size }}</span>
+                  </div>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ c.id }}</span>
+                  <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-body);color:var(--mold-text-2)">{{ c.note }}</span>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);{{ c.fitStyle }}">{{ c.fit }}</span>
+                    <span style="flex:1"></span>
+                    <span style="display:inline-flex;align-items:center;height:26px;padding:0 12px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;cursor:pointer;{{ c.btnStyle }}">{{ c.btn }}</span>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <!-- ═══════════ MACHINES ═══════════ -->
+      <sc-if value="{{ isMachines }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;min-width:0;display:flex;background:var(--mold-bg)">
+          <div style="width:326px;flex-shrink:0;display:flex;flex-direction:column;border-right:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Connected · 3</span>
+              <span style="flex:1"></span>
+              <span onClick="{{ openConnect }}" style="display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">Connect a machine</span>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:10px">
+              <sc-for list="{{ machines }}" as="h" hint-placeholder-count="3">
+                <div style="display:flex;flex-direction:column;gap:9px;padding:13px;margin-bottom:8px;border-radius:var(--mold-radius-2);cursor:pointer;{{ h.card }}">
+                  <div style="display:flex;align-items:center;gap:9px">
+                    <span style="width:8px;height:8px;border-radius:50%;{{ h.dot }}"></span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);font-weight:700;color:var(--mold-text)">{{ h.label }}</span>
+                    <span style="flex:1"></span>
+                    <sc-if value="{{ h.target }}" hint-placeholder-val="{{ false }}">
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 6px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">making images here</span>
+                    </sc-if>
+                  </div>
+                  <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-snug);color:var(--mold-text-2)">{{ h.blurb }}</span>
+                  <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="height:100%;{{ h.bar }}"></div></div>
+                  <div style="display:flex;justify-content:space-between;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)"><span>{{ h.mem }}</span><span>{{ h.queueLabel }}</span></div>
+                </div>
+              </sc-for>
+              <div style="display:flex;flex-direction:column;gap:10px;padding:13px;border:var(--mold-bw) dashed var(--mold-surface-3);border-radius:var(--mold-radius-2)">
+                <div style="display:flex;align-items:center;gap:9px">
+                  <img src="assets/icons/runpod.svg" alt="" style="width:15px;height:15px;filter:invert(1);opacity:.75">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);font-weight:700;color:var(--mold-text-2)">runpod cloud</span>
+                </div>
+                <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-snug);color:var(--mold-text-dim)">Rent a fast GPU by the minute when your own machine is busy. You pay only while it runs.</span>
+                <span onClick="{{ openRunpod }}" style="display:inline-flex;align-self:flex-start;align-items:center;height:26px;padding:0 12px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-bg-deep);cursor:pointer;background:{{ accent }}">Rent a GPU</span>
+              </div>
+            </div>
+          </div>
+
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+              <span style="width:8px;height:8px;border-radius:50%;background:var(--mold-success)"></span>
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-base);font-weight:700;color:var(--mold-text)">studio-rack</span>
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">RTX 4090 · on your network · up 6 days</span>
+              <span style="flex:1"></span>
+              <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Rename</span>
+              <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Open web UI</span>
+              <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-error);color:var(--mold-error)">Forget…</span>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:16px">
+              <div style="display:flex;flex-direction:column;gap:9px">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Right now</span>
+                  <span style="display:inline-flex;align-items:center;gap:5px;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-success)"><span style="width:5px;height:5px;border-radius:50%;background:var(--mold-success);animation:moldspin 1.6s ease-in-out infinite"></span>LIVE</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+                  <sc-for list="{{ telemetry }}" as="t" hint-placeholder-count="4">
+                    <div style="display:flex;flex-direction:column;gap:7px;padding:13px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">{{ t.label }}</span>
+                      <span style="font-size:var(--mold-fs-lg);font-weight:600;color:var(--mold-text)">{{ t.value }}</span>
+                      <div style="height:5px;background:var(--mold-surface);overflow:hidden"><div style="height:100%;{{ t.bar }}"></div></div>
+                      <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ t.note }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Loaded and ready</span>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <span style="display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);font-size:var(--mold-fs-xs);color:var(--mold-text)"><span style="color:var(--mold-star);font-family:var(--mold-font-mono)">★</span>Photoreal — best quality<span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">flux-dev:q4</span><span style="color:var(--mold-text-dim);cursor:pointer">Unload</span></span>
+                  <span style="display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);font-size:var(--mold-fs-xs);color:var(--mold-text)"><span style="color:var(--mold-star);font-family:var(--mold-font-mono)">★</span>Illustration &amp; art<span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">flux2-klein:bf16</span><span style="color:var(--mold-text-dim);cursor:pointer">Unload</span></span>
+                </div>
+              </div>
+
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Waiting on this machine</span>
+                <div style="border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+                  <sc-for list="{{ fullQueue }}" as="f" hint-placeholder-count="4">
+                    <div style="display:flex;align-items:center;gap:11px;padding:12px;border-bottom:var(--mold-bw) solid var(--mold-border);min-height:48px">
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);width:12px;text-align:center;{{ f.thumbStyle }}">{{ f.glyph }}</span>
+                      <span style="font-size:var(--mold-fs-sm);color:var(--mold-text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ f.title }}</span>
+                      <span style="font-size:var(--mold-fs-xs);{{ f.statusStyle }}">{{ f.status }}</span>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);width:150px;text-align:right">{{ f.model }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:12px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:8px;padding:13px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Storage</span>
+                  <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-2)">Styles take 37.9 GB · pictures take 12.4 GB</span>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Keep deleted pictures for</span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">30 days ▼</span>
+                    <span style="flex:1"></span>
+                    <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-error);font-size:var(--mold-fs-xs);color:var(--mold-error);cursor:pointer">Empty trash</span>
+                  </div>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;gap:8px;padding:13px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Downloads here</span>
+                  <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Short video clips</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-warning)">18% · eta 8m12s</span></div>
+                  <div style="height:5px;background:var(--mold-surface);overflow:hidden"><div style="width:18%;height:100%;background:var(--mold-warning)"></div></div>
+                  <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Nothing else queued to download.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ═══════════ SETTINGS ═══════════ -->
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1;min-width:0;display:flex;background:var(--mold-bg)">
+          <div style="width:200px;flex-shrink:0;display:flex;flex-direction:column;gap:1px;padding:12px 8px;border-right:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <span style="display:flex;align-items:center;gap:6px;height:26px;margin-bottom:8px;padding:0 9px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Search settings…</span>
+            <sc-for list="{{ settingsNav }}" as="n" hint-placeholder-count="7">
+              <div style="display:flex;align-items:center;padding:7px 9px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);min-height:32px;cursor:pointer;{{ n.style }}" style-hover="background:var(--mold-surface)">{{ n.label }}</div>
+            </sc-for>
+          </div>
+
+          <div style="flex:1;min-width:0;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:18px">
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Look</span>
+              <div style="display:flex;gap:12px;padding:14px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                <sc-for list="{{ themeCards }}" as="tm" hint-placeholder-count="3">
+                  <div style="flex:1;display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:var(--mold-radius-2);cursor:pointer;{{ tm.style }}">
+                    <span style="height:44px;border:var(--mold-bw) solid var(--mold-border);{{ tm.swatch }}"></span>
+                    <span style="font-size:var(--mold-fs-xs);font-weight:600">{{ tm.label }}</span>
+                    <span style="font-size:var(--mold-fs-micro);opacity:.75">{{ tm.note }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Defaults for new images</span>
+              <div style="border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                <sc-for list="{{ settingRows }}" as="r" hint-placeholder-count="6">
+                  <div style="display:flex;align-items:center;gap:14px;padding:13px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);min-height:52px">
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                      <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">{{ r.label }}</span>
+                      <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ r.note }}</span>
+                    </div>
+                    <sc-if value="{{ r.isToggle }}" hint-placeholder-val="{{ false }}">
+                      <span style="width:36px;height:20px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;{{ r.toggleStyle }}"><span style="width:16px;height:16px;border-radius:var(--mold-radius-1);{{ r.knobStyle }}"></span></span>
+                    </sc-if>
+                    <sc-if value="{{ r.isValue }}" hint-placeholder-val="{{ true }}">
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-2)">{{ r.value }}</span>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Style licences</span>
+              <div style="border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                <div style="display:flex;align-items:center;gap:14px;padding:13px 14px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+                  <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                    <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">Some styles need you to accept their terms</span>
+                    <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Accepted once per machine, before the download starts.</span>
+                  </div>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">studio-rack ▼</span>
+                </div>
+                <sc-for list="{{ licences }}" as="lic" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:14px;padding:12px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);min-height:48px">
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:2px">
+                      <span style="font-size:var(--mold-fs-sm);color:var(--mold-text)">{{ lic.friendly }}</span>
+                      <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ lic.id }} · {{ lic.terms }}</span>
+                    </div>
+                    <span style="font-size:var(--mold-fs-xs);font-weight:600;{{ lic.stateStyle }}">{{ lic.state }}</span>
+                    <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">{{ lic.action }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:12px">
+              <div style="flex:1;display:flex;flex-direction:column;gap:10px;padding:14px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Use mold on your phone</span>
+                <div style="display:flex;gap:12px;align-items:center">
+                  <span style="width:76px;height:76px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-surface);display:flex;align-items:center;justify-content:center;font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">QR</span>
+                  <div style="display:flex;flex-direction:column;gap:6px">
+                    <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-body);color:var(--mold-text-2)">Scan this with your phone to send prompts from the couch. Both devices must be on the same network.</span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">this mac · 192.168.1.24:7860</span>
+                  </div>
+                </div>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:10px;padding:14px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Updates &amp; about</span>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">mold studio 0.9.4</span>
+                  <span style="display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:var(--mold-radius-1);background:var(--mold-success);color:var(--mold-bg-deep);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:700">up to date</span>
+                  <span style="flex:1"></span>
+                  <span style="display:inline-flex;align-items:center;height:26px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Check now</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Install updates automatically</span><span style="width:36px;height:20px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;justify-content:flex-end;background:{{ accent }}"><span style="width:16px;height:16px;border-radius:var(--mold-radius-1);background:var(--mold-bg-deep)"></span></span></div>
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">files in ~/mold · rust 1.83 · metal + cuda</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+
+    <!-- ─────────── status bar ─────────── -->
+    <div style="flex-shrink:0;display:flex;align-items:center;gap:14px;height:26px;padding:0 12px;background:var(--mold-bg-deep);border-top:var(--mold-bw) solid var(--mold-border);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:var(--mold-success)"></span>studio-rack</span>
+      <span style="width:var(--mold-bw);height:12px;background:var(--mold-border)"></span>
+      <span>{{ statusLeft }}</span>
+      <span style="width:var(--mold-bw);height:12px;background:var(--mold-border)"></span>
+      <span>1 style downloading</span>
+      <span style="flex:1"></span>
+      <span style="color:var(--mold-blue);font-weight:700">⌘↩</span><span>Generate</span>
+      <span style="color:var(--mold-blue);font-weight:700">⌘K</span><span>Search</span>
+      <span style="color:var(--mold-blue);font-weight:700">Space</span><span>Pause queue</span>
+    </div>
+
+    <!-- ═══════════ OVERLAYS ═══════════ -->
+    <sc-if value="{{ paletteOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeOverlay }}" style="position:absolute;inset:0;background:color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);display:flex;align-items:flex-start;justify-content:center;padding-top:110px">
+        <div style="width:560px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-3);background:var(--mold-surface);box-shadow:var(--mold-shadow-md);overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--mold-text-dim)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>
+            <span style="flex:1;font-size:var(--mold-fs-base);color:var(--mold-text-dim)">Type what you want to do…</span>
+            <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:700;color:var(--mold-blue)">esc</span>
+          </div>
+          <div style="max-height:340px;overflow-y:auto">
+            <sc-for list="{{ commands }}" as="c" hint-placeholder-count="7">
+              <div style="display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:var(--mold-bw) solid var(--mold-border);cursor:pointer;{{ c.style }}" style-hover="background:var(--mold-surface-2)">
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);width:60px;letter-spacing:.06em;text-transform:uppercase;color:var(--mold-text-dim)">{{ c.group }}</span>
+                <span style="flex:1;font-size:var(--mold-fs-sm);color:var(--mold-text)">{{ c.label }}</span>
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ c.key }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ lightboxOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;background:color-mix(in srgb, var(--mold-bg-crust) 92%, transparent);display:flex;flex-direction:column">
+        <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-2)">mold-flux-dev-1775108462891.png</span>
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">1024² · 4.0s · flux-dev:q4</span>
+          <span style="flex:1"></span>
+          <span style="display:inline-flex;align-items:center;height:28px;padding:0 12px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">★ Favourite</span>
+          <span style="display:inline-flex;align-items:center;height:28px;padding:0 12px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Save a copy</span>
+          <span style="display:inline-flex;align-items:center;height:28px;padding:0 12px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-bg-deep);cursor:pointer;background:{{ accent }}">Use these settings</span>
+          <span onClick="{{ closeOverlay }}" style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--mold-radius-2);color:var(--mold-text-2);cursor:pointer" style-hover="background:var(--mold-surface)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></span>
+        </div>
+        <div style="flex:1;min-height:0;display:flex">
+          <div style="flex:1;min-width:0;display:flex;align-items:center;justify-content:center;padding:24px">
+            <img src="assets/gallery/flux-dev-teahouse.jpg" alt="" style="max-width:100%;max-height:100%;object-fit:contain;border:var(--mold-bw) solid var(--mold-border)">
+          </div>
+          <div style="width:300px;flex-shrink:0;display:flex;flex-direction:column;gap:14px;padding:16px;border-left:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);overflow-y:auto">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Words used</span>
+              <span style="font-size:var(--mold-fs-sm);line-height:var(--mold-lh-body);color:var(--mold-text)">A tea house at dusk, paper lanterns, rain on the stones, 35mm</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">How it was made</span>
+              <sc-for list="{{ meta }}" as="m" hint-placeholder-count="6">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
+                  <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ m.label }}</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-2)">{{ m.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Tags</span>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">warm</span>
+                <span style="display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-micro);color:var(--mold-text-2)">night</span>
+                <span style="display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) dashed var(--mold-surface-3);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);cursor:pointer">＋ tag</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ connectOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeOverlay }}" style="position:absolute;inset:0;background:color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);display:flex;align-items:center;justify-content:center">
+        <div style="width:480px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-3);background:var(--mold-surface);box-shadow:var(--mold-shadow-md);overflow:hidden">
+          <div style="padding:16px;border-bottom:var(--mold-bw) solid var(--mold-border);display:flex;flex-direction:column;gap:5px">
+            <span style="font-size:var(--mold-fs-md);font-weight:600;color:var(--mold-text)">Connect a machine</span>
+            <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Point mold at another computer running <span style="font-family:var(--mold-font-mono)">mold serve</span> to borrow its GPU.</span>
+          </div>
+          <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Found on your network</span>
+              <div style="display:flex;align-items:center;gap:10px;padding:11px;border:var(--mold-bw) solid {{ accent }};border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);cursor:pointer">
+                <span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>
+                <div style="flex:1;display:flex;flex-direction:column;gap:2px">
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text)">workshop-pc</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">192.168.1.31:7860 · RTX 3090 · 24 GB</span>
+                </div>
+                <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:{{ accent }}">selected</span>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Or type an address</span>
+              <span style="height:32px;display:flex;align-items:center;padding:0 10px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg);font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text-faint)">http://192.168.1.31:7860</span>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Make images here from now on</span>
+              <span style="width:36px;height:20px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;background:var(--mold-surface-2)"><span style="width:16px;height:16px;border-radius:var(--mold-radius-1);background:var(--mold-text-dim)"></span></span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 16px;border-top:var(--mold-bw) solid var(--mold-border)">
+            <span onClick="{{ closeOverlay }}" style="display:inline-flex;align-items:center;height:30px;padding:0 13px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Cancel</span>
+            <span onClick="{{ closeOverlay }}" style="display:inline-flex;align-items:center;height:30px;padding:0 14px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-bg-deep);cursor:pointer;background:{{ accent }}">Connect</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ runpodOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeOverlay }}" style="position:absolute;inset:0;background:color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);display:flex;align-items:center;justify-content:center">
+        <div style="width:560px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-3);background:var(--mold-surface);box-shadow:var(--mold-shadow-md);overflow:hidden">
+          <div style="padding:16px;border-bottom:var(--mold-bw) solid var(--mold-border);display:flex;align-items:center;gap:10px">
+            <img src="assets/icons/runpod.svg" alt="" style="width:16px;height:16px;filter:invert(1);opacity:.8">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <span style="font-size:var(--mold-fs-md);font-weight:600;color:var(--mold-text)">Rent a GPU</span>
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">Billing starts the moment it boots and stops when you stop it.</span>
+            </div>
+          </div>
+          <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+            <sc-for list="{{ podFields }}" as="pf" hint-placeholder-count="5">
+              <div style="display:flex;align-items:center;gap:12px">
+                <span style="width:150px;flex-shrink:0;font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">{{ pf.label }}</span>
+                <span style="flex:1;height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg);font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-text)">{{ pf.value }} <span style="color:var(--mold-text-dim)">▼</span></span>
+              </div>
+            </sc-for>
+            <div style="display:flex;align-items:center;gap:12px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:var(--mold-fs-xs);color:var(--mold-text)">Running cost</span>
+                <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">roughly 3¢ per picture at this speed</span>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-md);font-weight:700;color:var(--mold-warning)">$1.44/hr</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 16px;border-top:var(--mold-bw) solid var(--mold-border)">
+            <span onClick="{{ closeOverlay }}" style="display:inline-flex;align-items:center;height:30px;padding:0 13px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer">Cancel</span>
+            <span onClick="{{ closeOverlay }}" style="display:inline-flex;align-items:center;height:30px;padding:0 14px;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-bg-deep);cursor:pointer;background:var(--mold-warning)">Start it — billing begins now</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ toastOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;right:16px;bottom:44px;display:flex;flex-direction:column;gap:8px;width:320px">
+        <div style="display:flex;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-surface);box-shadow:var(--mold-shadow-md)">
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-success)">✓</span>
+          <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+            <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">Brass teapot is done</span>
+            <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Saved to My images · 14s</span>
+          </div>
+          <span onClick="{{ closeOverlay }}" style="font-size:var(--mold-fs-micro);color:var(--mold-blue);cursor:pointer">Show</span>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-warning);border-radius:var(--mold-radius-2);background:var(--mold-surface);box-shadow:var(--mold-shadow-md)">
+          <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);color:var(--mold-warning)">!</span>
+          <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+            <span style="font-size:var(--mold-fs-xs);font-weight:600;color:var(--mold-text)">One image needs a style downloaded</span>
+            <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Short video clips · 8m12s left</span>
+          </div>
+          <span onClick="{{ closeOverlay }}" style="font-size:var(--mold-fs-micro);color:var(--mold-blue);cursor:pointer">View</span>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1480,&quot;height&quot;:1100}}">
+class Component extends DCLogic {
+  state = {
+    view: "create",
+    explainOpen: false,
+    paused: false,
+    output: "still",
+    insTab: "settings",
+    quality: "good",
+    modelsTab: "installed",
+    libScope: "all",
+    selectMode: false,
+    historyOpen: false,
+    overlay: null,
+    theme: "mocha",
+    scene: 1,
+    playing: false,
+    timelineHelp: false,
+  };
+
+  set(patch) {
+    this.setState(patch);
+  }
+
+  themeList() {
+    return [
+      {
+        id: "mocha", name: "Mocha", type: "Inter · JetBrains Mono", tone: "Dark · the original",
+        blurb: "The palette mold ships with today, carried straight onto the desktop. Violet-leaning charcoal, one blue accent, nothing else raises its voice.",
+        accent: "#89b4fa",
+        t: {
+          "bg": "#1E1E2E", "bg-deep": "#181825", "bg-crust": "#11111B",
+          "surface": "#313244", "surface-2": "#45475A", "surface-3": "#585B70",
+          "text": "#CDD6F4", "text-2": "#BAC2DE", "text-dim": "#979DB2", "text-faint": "#585B70",
+          "border": "#45475A", "border-focus": "#89B4FA", "blue": "#89B4FA",
+          "success": "#A6E3A1", "warning": "#F9E2AF", "error": "#F38BA8", "star": "#F9E2AF",
+          "sapphire": "#74C7EC", "mauve": "#CBA6F7", "teal": "#94E2D5", "lavender": "#B4BEFE",
+          "font-sans": "'Inter', -apple-system, sans-serif", "font-mono": "'JetBrains Mono', ui-monospace, monospace",
+          "fs-micro": "11px", "fs-xs": "12px", "fs-sm": "13px", "fs-base": "14px",
+          "fs-md": "16px", "fs-lg": "20px", "fs-xl": "28px",
+          "lh-snug": "1.3", "lh-body": "1.5",
+          "radius-1": "2px", "radius-2": "4px", "radius-3": "6px",
+        },
+      },
+      {
+        id: "safelight", name: "Safelight", type: "Schibsted · Martian Mono", tone: "Dark · the app's own",
+        blurb: "The darkroom family the app ships with — desk, bath, bench and surface stepped in warm brown, amber for anything you press, cold halide blue reserved for telemetry. Softer radii throughout.",
+        accent: "#F79433",
+        t: {
+          "bg": "#241C15", "bg-deep": "#171210", "bg-crust": "#0A0805",
+          "surface": "#332619", "surface-2": "#453424", "surface-3": "#574430",
+          "text": "#F1E8DA", "text-2": "#C4B7AB", "text-dim": "#A29888", "text-faint": "#6A6158",
+          "border": "#3F372F", "border-focus": "#F79433", "blue": "#F79433",
+          "success": "#8FD39A", "warning": "#F5A623", "error": "#E5715A", "star": "#F5A623",
+          "sapphire": "#8FB4C4", "mauve": "#D96B8F", "teal": "#8FB4C4", "lavender": "#B9CDD8",
+          "font-sans": "'Schibsted Grotesk', system-ui, sans-serif", "font-mono": "'Martian Mono', ui-monospace, monospace",
+          "fs-micro": "10px", "fs-xs": "11px", "fs-sm": "13px", "fs-base": "14px",
+          "fs-md": "16px", "fs-lg": "20px", "fs-xl": "28px",
+          "lh-snug": "1.3", "lh-body": "1.5",
+          "radius-1": "6px", "radius-2": "9px", "radius-3": "16px",
+        },
+      },
+      {
+        id: "blueprint", name: "Blueprint", type: "Archivo · Azeret Mono", tone: "Light · drafting table",
+        blurb: "Cool daylight and drafting-table blue, set one notch tighter and smaller. The densest of the four — meant to disappear behind the picture.",
+        accent: "#1D4ED8",
+        t: {
+          "bg": "#F4F7FB", "bg-deep": "#E9EFF7", "bg-crust": "#DDE6F2",
+          "surface": "#FFFFFF", "surface-2": "#DCE6F4", "surface-3": "#C6D5EA",
+          "text": "#0D1B2E", "text-2": "#33465F", "text-dim": "#52627A", "text-faint": "#94A5BB",
+          "border": "#CFDCEC", "border-focus": "#1D4ED8", "blue": "#1D4ED8",
+          "success": "#0F7B5F", "warning": "#8A5200", "error": "#C02B34", "star": "#8A5200",
+          "sapphire": "#1D4ED8", "mauve": "#6C4CD1", "teal": "#0F7B8F", "lavender": "#5B6EE1",
+          "font-sans": "'Archivo', sans-serif", "font-mono": "'Azeret Mono', monospace",
+          "fs-micro": "10.5px", "fs-xs": "11.5px", "fs-sm": "12.5px", "fs-base": "13.5px",
+          "fs-md": "15.5px", "fs-lg": "19px", "fs-xl": "27px",
+          "lh-snug": "1.25", "lh-body": "1.45",
+          "radius-1": "2px", "radius-2": "4px", "radius-3": "6px",
+        },
+      },
+      {
+        id: "graphite", name: "Graphite", type: "IBM Plex Sans · Plex Mono", tone: "Dark · neutral, warm signal",
+        blurb: "No colour cast at all in the chrome — true neutral greys, hairline separators, and a single amber signal for anything live. Reads like a pro audio or video tool.",
+        accent: "#F0A22E",
+        t: {
+          "bg": "#1B1C1E", "bg-deep": "#141517", "bg-crust": "#0E0F10",
+          "surface": "#232528", "surface-2": "#2E3134", "surface-3": "#3B3E42",
+          "text": "#ECEDEF", "text-2": "#C0C3C7", "text-dim": "#8A8E93", "text-faint": "#676B70",
+          "border": "#2C2E32", "border-focus": "#F0A22E", "blue": "#F0A22E",
+          "success": "#58C08A", "warning": "#E8C34A", "error": "#E5654B", "star": "#F0A22E",
+          "sapphire": "#6BA8E5", "mauve": "#A98BE0", "teal": "#4FBFAE", "lavender": "#93A6E8",
+          "font-sans": "'IBM Plex Sans', sans-serif", "font-mono": "'IBM Plex Mono', monospace",
+          "fs-micro": "11px", "fs-xs": "12px", "fs-sm": "13px", "fs-base": "14px",
+          "fs-md": "16px", "fs-lg": "20px", "fs-xl": "28px",
+          "lh-snug": "1.3", "lh-body": "1.45",
+          "radius-1": "2px", "radius-2": "4px", "radius-3": "6px",
+        },
+      },
+      {
+        id: "porcelain", name: "Porcelain", type: "Manrope · IBM Plex Mono", tone: "Light · high-key, compact",
+        blurb: "Near-white panels on a soft grey desk, hairline rules instead of boxes, deep teal for anything you can press. The most system-native of the four.",
+        accent: "#0F766E",
+        t: {
+          "bg": "#FBFBFD", "bg-deep": "#F3F3F6", "bg-crust": "#E9E9EE",
+          "surface": "#FFFFFF", "surface-2": "#E6E6EB", "surface-3": "#D5D5DC",
+          "text": "#16171A", "text-2": "#45474D", "text-dim": "#63666D", "text-faint": "#A0A3AB",
+          "border": "#E1E1E7", "border-focus": "#0F766E", "blue": "#0F766E",
+          "success": "#17795A", "warning": "#8A5200", "error": "#C0392B", "star": "#8A5200",
+          "sapphire": "#2563A8", "mauve": "#7A4FB0", "teal": "#0F766E", "lavender": "#5B62C7",
+          "font-sans": "'Manrope', sans-serif", "font-mono": "'IBM Plex Mono', monospace",
+          "fs-micro": "10.5px", "fs-xs": "11.5px", "fs-sm": "12.5px", "fs-base": "13.5px",
+          "fs-md": "15.5px", "fs-lg": "19px", "fs-xl": "27px",
+          "lh-snug": "1.25", "lh-body": "1.45",
+          "radius-1": "2px", "radius-2": "4px", "radius-3": "6px",
+        },
+      },
+      {
+        id: "nebula", name: "Nebula", type: "Georgia · Geist Mono", tone: "Dark · oxblood & crimson",
+        blurb: "Lifted straight from jamesbrink.me — oxblood panels over near-black, hot crimson #FF315D for anything you press, Georgia for words and mono for data. Square corners throughout.",
+        accent: "#FF315D",
+        t: {
+          "bg": "#1B0C12",
+          "bg-deep": "#11090D",
+          "bg-crust": "#090407",
+          "surface": "#241018",
+          "surface-2": "#33161F",
+          "surface-3": "#45202B",
+          "text": "#FFF8EE",
+          "text-2": "#C6ACA7",
+          "text-dim": "#A98D8F",
+          "text-faint": "#7A6266",
+          "border": "#352D2F",
+          "border-focus": "#FF315D",
+          "blue": "#FF315D",
+          "success": "#86C79A",
+          "warning": "#FFB05C",
+          "error": "#FF6C76",
+          "star": "#FFB05C",
+          "sapphire": "#D08F92",
+          "mauve": "#FF6C76",
+          "teal": "#E0A090",
+          "lavender": "#FF6C76",
+          "font-sans": "Georgia, 'Times New Roman', serif",
+          "font-mono": "'Geist Mono', 'SFMono-Regular', ui-monospace, monospace",
+          "fs-micro": "11px",
+          "fs-xs": "12px",
+          "fs-sm": "13.5px",
+          "fs-base": "14.5px",
+          "fs-md": "17px",
+          "fs-lg": "21px",
+          "fs-xl": "30px",
+          "lh-snug": "1.35",
+          "lh-body": "1.6",
+          "radius-1": "0px",
+          "radius-2": "2px",
+          "radius-3": "6px",
+        },
+      },
+    ];
+  }
+
+  renderVals() {
+    const all = this.themeList();
+    const active = all.find((x) => x.id === this.state.theme) ?? all[0];
+    const vars = (th) => Object.entries(th.t).map(([k, v2]) => `--mold-${k}:${v2}`).join(";") + ";";
+    const accent = active.accent;
+    const s = this.state;
+    const v = s.view;
+    const dim = "color:var(--mold-text-dim)";
+    const on = (a) => (a ? `background:${accent}22;color:var(--mold-text);box-shadow:inset 0 0 0 1px ${accent}` : "color:var(--mold-text-2)");
+    const seg = (a) => (a ? "background:var(--mold-surface-2);color:var(--mold-text)" : "color:var(--mold-text-dim)");
+    const img = (f) => `background:var(--mold-bg-crust) url(assets/gallery/${f}) center/cover`;
+
+    const sceneData = [
+      { title: "A paper boat sets off", secs: 5, img: "flux-dev-teahouse.png", seam: null },
+      { title: "Rain picks up, camera drifts left", secs: 8, img: "sd35-clocktower.png", seam: "Smooth" },
+      { title: "It slips under the bridge", secs: 7, img: "flux2-klein-zen.png", seam: "Fade" },
+    ];
+
+    const queue = [
+      { title: "Rain on brass, 35mm", status: "Waiting — starts in ~20s", glyph: "2" },
+      { title: "Ferry at dusk, watercolour", status: "Waiting — starts in ~40s", glyph: "3" },
+      {
+        title: "Brass teapot on a windowsill",
+        status: "Finished — saved to My images",
+        glyph: "✓",
+        thumbImg: "assets/gallery/sdxl-turbo-market.jpg",
+        done: true,
+      },
+    ].map((q) => ({
+      ...q,
+      thumbStyle: q.done ? "color:var(--mold-success)" : dim,
+      statusStyle: q.done ? "color:var(--mold-success)" : dim,
+      showGlyph: !q.thumbImg,
+      shortStatus: q.status.replace(" — ", " · "),
+      thumbBg: q.thumbImg
+        ? `;background:var(--mold-bg-crust) url(${q.thumbImg}) center/cover`
+        : ";background:var(--mold-bg-crust)",
+    }));
+
+    const fullQueue = [
+      { title: "Neon arcade, long exposure", status: "Adding detail — about 12s left", showBar: true, bar: `width:64%;background:${accent}`, model: "flux-dev:q4", host: "studio-rack", glyph: "⠂", thumbImg: "assets/gallery/sd35-clocktower.jpg", tone: "color:var(--mold-text)", tStyle: `color:${accent}` },
+      { title: "Rain on brass, 35mm", status: "Waiting — starts in ~20s", model: "flux-dev:q4", host: "studio-rack", glyph: "2" },
+      { title: "Ferry at dusk, watercolour", status: "Waiting — starts in ~40s", model: "flux-dev:q4", host: "studio-rack", glyph: "3" },
+      { title: "Aurora over pine, 5s clip", status: "Needs a download first — 8m12s left", showBar: true, bar: "width:18%;background:var(--mold-warning)", model: "ltx-video:bf16", host: "pod-8x4090", glyph: "↓", tone: "color:var(--mold-warning)", tStyle: "color:var(--mold-warning)" },
+      { title: "Brass teapot on a windowsill", status: "Finished in 14s", model: "flux-dev:q4", host: "studio-rack", glyph: "✓", thumbImg: "assets/gallery/sdxl-turbo-market.jpg", tone: "color:var(--mold-success)", tStyle: "color:var(--mold-success)" },
+    ].map((f) => ({
+      ...f,
+      showBar: !!f.showBar,
+      statusStyle: f.tone ?? dim,
+      thumbStyle: f.tStyle ?? dim,
+      showGlyph: !f.thumbImg,
+      thumbBg: f.thumbImg
+        ? `;background:var(--mold-bg-crust) url(${f.thumbImg}) center/cover`
+        : ";background:var(--mold-bg-crust)",
+    }));
+
+    const qual = { draft: { steps: "8 passes", pct: 20 }, good: { steps: "28 passes", pct: 56 }, best: { steps: "50 passes", pct: 92 } }[s.quality];
+
+    const sliders = [
+      { label: "Detail", value: qual.steps, pct: qual.pct, low: "Faster", high: "More detail" },
+      { label: "Stick to my words", value: "7.5", pct: 62, low: "Loose", high: "Literal" },
+      { label: "Image size", value: "1024 × 1024", pct: 48, low: "512", high: "1536" },
+    ].map((x) => ({ ...x, fill: `width:${x.pct}%;background:${accent}`, knob: `left:calc(${x.pct}% - 7px)` }));
+
+    const models = [
+      { friendly: "Photoreal — best quality", id: "flux-dev:q4", goodFor: "Photos, scenes", speed: "~20s", size: "6.8 GB", host: "studio-rack", loaded: true },
+      { friendly: "Photoreal — fast draft", id: "sdxl-turbo:fp16", goodFor: "Quick tries", speed: "~3s", size: "6.9 GB", host: "this mac" },
+      { friendly: "Illustration & art", id: "flux2-klein:bf16", goodFor: "Art, posters", speed: "~25s", size: "9.4 GB", host: "studio-rack", loaded: true },
+      { friendly: "Text in images", id: "qwen-image:q8", goodFor: "Signs, labels", speed: "~18s", size: "8.2 GB", host: "this mac" },
+      { friendly: "Short video clips", id: "ltx-video-0.9.6-distilled:bf16", goodFor: "5s clips", speed: "~3m", size: "6.8 GB", host: "downloading", pulling: true },
+      { friendly: "Older / lightweight", id: "sd15:q8", goodFor: "Low VRAM", speed: "~6s", size: "1.7 GB", host: "this mac" },
+    ].map((m) => ({
+      ...m,
+      star: m.loaded ? "★" : "",
+      starStyle: m.loaded ? "color:var(--mold-star)" : "color:transparent",
+      dot: m.pulling ? "background:var(--mold-warning)" : "background:var(--mold-success)",
+    }));
+
+    const catalog = [
+      { friendly: "Photoreal — newest", id: "flux2-klein:bf16", size: "9.4 GB", note: "Sharper faces and text than flux-dev. A good default if you have the disk.", fit: "fits studio-rack", ok: true, btn: "Get it" },
+      { friendly: "Fast everyday pictures", id: "z-image:q8", size: "4.2 GB", note: "Two seconds a picture on Apple Silicon. Great for trying ideas out.", fit: "fits this mac", ok: true, btn: "Get it" },
+      { friendly: "Painterly / storybook", id: "wuerstchen:bf16", size: "3.1 GB", note: "Soft illustration look, cheap to run.", fit: "fits this mac", ok: true, btn: "Get it" },
+      { friendly: "Photoreal — heavyweight", id: "sd35-large:bf16", size: "16.4 GB", note: "Best fidelity available, needs a big card.", fit: "too big for this mac", ok: false, btn: "Get it" },
+      { friendly: "3-D objects from a photo", id: "hunyuan3d-2:q8", size: "4.1 GB", note: "Turns one picture into a rotatable mesh you can export.", fit: "fits studio-rack", ok: true, btn: "Get it" },
+      { friendly: "Short video clips", id: "ltx-video:bf16", size: "6.8 GB", note: "Five-second clips at 24fps.", fit: "downloading now", ok: true, btn: "Downloading", busy: true },
+    ].map((c) => ({
+      ...c,
+      fitStyle: c.ok ? "color:var(--mold-success)" : "color:var(--mold-warning)",
+      btnStyle: c.busy
+        ? "border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-dim)"
+        : `background:${accent};color:var(--mold-bg-deep)`,
+    }));
+
+    const machines = [
+      { label: "this mac", blurb: "M3 Max, 36 GB — good for quick drafts. Works without a network.", mem: "12.1 / 36 GB", queueLabel: "nothing waiting", pct: 34, tone: "var(--mold-sapphire)" },
+      { label: "studio-rack", blurb: "RTX 4090, 24 GB — your fastest machine. Handling everything right now.", mem: "14.9 / 24 GB", queueLabel: "3 waiting", pct: 62, tone: accent, target: true },
+      { label: "pod-8x4090", blurb: "Rented cloud GPU, $1.44/hr — running 14 minutes. Stop it to stop paying.", mem: "3.2 / 24 GB", queueLabel: "1 waiting", pct: 13, tone: "var(--mold-teal)" },
+    ].map((h) => ({
+      ...h,
+      target: !!h.target,
+      dot: `background:${h.label === "pod-8x4090" ? "var(--mold-teal)" : "var(--mold-success)"}`,
+      bar: `width:${h.pct}%;background:${h.tone}`,
+      card: h.target
+        ? `background:var(--mold-surface);border:var(--mold-bw) solid ${accent}`
+        : "background:var(--mold-surface);border:var(--mold-bw) solid var(--mold-border)",
+    }));
+
+    const libScopes = [
+      { key: "all", label: "Everything", count: "312" },
+      { key: "fav", label: "Favourites", count: "18" },
+      { key: "collections", label: "Albums", count: "6" },
+      { key: "trash", label: "Trash", count: "9" },
+    ].map((x) => ({ ...x, style: seg(s.libScope === x.key), pick: () => this.set({ libScope: x.key }) }));
+
+    const gal = ["flux-dev-teahouse.png", "sd35-clocktower.png", "sdxl-turbo-market.png", "qwen-image-balloon.png", "zimage-astronaut.png", "flux2-klein-owl.png", "wuerstchen-lighthouse.png", "flux2-klein-zen.png"];
+    const tiles = Array.from({ length: 16 }, (_, i) => ({
+      bg: img(gal[i % gal.length]),
+      fav: i % 5 === 0,
+      kindBadge: i % 7 === 3 ? "clip 5s" : i % 11 === 6 ? "3-D" : "",
+    }));
+
+    return {
+      accent,
+      themeStyle: vars(active),
+      themeCards: all.map((th) => ({
+        name: th.name,
+        blurb: th.blurb,
+        type: th.type,
+        tone: th.tone,
+        vars: vars(th),
+        navOn: `background:${th.accent}22;box-shadow:inset 0 0 0 1px ${th.accent}`,
+        radio:
+          th.id === this.state.theme
+            ? `background:${th.accent};box-shadow:inset 0 0 0 3px var(--mold-bg-deep), 0 0 0 1.5px ${th.accent}`
+            : "box-shadow:inset 0 0 0 1.5px var(--mold-surface-3)",
+        cardStyle:
+          th.id === this.state.theme
+            ? `box-shadow:0 0 0 2px ${th.accent}, var(--mold-shadow-md)`
+            : "box-shadow:inset 0 0 0 1px var(--mold-border)",
+        pick: () => this.set({ theme: th.id }),
+      })),
+      title: { create: "New image", queue: "Queue", library: "My images", models: "Styles", machines: "Machines", settings: "Settings" }[v],
+      subtitle: {
+        create: { still: "Still picture · 3 waiting", clip: "Short clip · 3 waiting", mesh: "3-D object · 3 waiting" }[s.output],
+        queue: "3 waiting · 1 being made",
+        library: "312 pictures · 6 albums",
+        models: "6 ready · 1 downloading",
+        machines: "3 machines connected",
+        settings: "this mac",
+      }[v],
+      isCreate: v === "create",
+      isQueue: v === "queue",
+      isLibrary: v === "library",
+      isModels: v === "models",
+      isMachines: v === "machines",
+      isSettings: v === "settings",
+      goCreate: () => this.set({ view: "create" }),
+      goQueue: () => this.set({ view: "queue" }),
+      goLibrary: () => this.set({ view: "library" }),
+      goModels: () => this.set({ view: "models" }),
+      goMachines: () => this.set({ view: "machines" }),
+      goSettings: () => this.set({ view: "settings" }),
+      nav0: on(v === "create"),
+      nav1: on(v === "queue"),
+      nav2: on(v === "models"),
+      nav3: on(v === "machines"),
+      nav4: on(v === "library"),
+      nav5: on(v === "settings"),
+
+      explainOpen: s.explainOpen,
+      toggleExplain: () => this.set({ explainOpen: !s.explainOpen }),
+      paused: s.paused,
+      running: !s.paused,
+      togglePause: () => this.set({ paused: !s.paused }),
+      pauseStyle: s.paused ? `color:${accent};border-color:${accent}` : "color:var(--mold-text-2)",
+      pauseLabel: s.paused ? "Resume queue" : "Pause queue",
+      progressWidth: s.paused ? "width:64%;opacity:.5" : "width:64%",
+      sidebarActive: s.paused ? "Paused at pass 18 of 28" : "Adding detail — about 12s left",
+      statusLeft: s.paused ? "queue paused · 3 waiting" : "1 image being made · 3 waiting",
+
+      isClip: s.output === "clip",
+      playing: s.playing,
+      stopped: !s.playing,
+      togglePlay: () => this.set({ playing: !s.playing }),
+      timelineHelpOpen: s.timelineHelp,
+      toggleTimelineHelp: () => this.set({ timelineHelp: !s.timelineHelp }),
+      addScene: () => {},
+      playhead: "0:06",
+      totalTime: "0:20",
+      sceneCount: sceneData.length,
+      playheadPos: "left:calc(94px + (100% - 106px) * 0.30)",
+      ticks: [0, 4, 8, 12, 16, 20].map((secN) => ({
+        label: `0:${String(secN).padStart(2, "0")}`,
+        pos: secN >= 20 ? "right:0;align-items:flex-end" : `left:${(secN / 20) * 100}%`,
+      })),
+      scenes: sceneData.map((sc, i) => {
+        const on = i === s.scene;
+        return {
+          title: sc.title,
+          length: sc.secs + "s",
+          flex: `flex:${sc.secs} 1 0;min-width:0`,
+          hasSeam: i > 0,
+          seamGlyph: sc.seam === "Cut" ? "▮" : sc.seam === "Fade" ? "◐" : "≈",
+          seamLabel: sc.seam,
+          seamTitle:
+            sc.seam === "Cut"
+              ? "Cut — a hard change of shot"
+              : sc.seam === "Fade"
+                ? "Fade — the two scenes blend across"
+                : "Smooth — the motion carries through",
+          seamStyle: `background:${accent}`,
+          pickSeam: () => this.set({ scene: i }),
+          pick: () => this.set({ scene: i }),
+          selected: on,
+          thumb: `background:var(--mold-bg-crust) url(assets/gallery/${sc.img}) center/cover`,
+          style: on
+            ? `background:var(--mold-surface);box-shadow:inset 0 0 0 2px ${accent}`
+            : "background:var(--mold-surface);box-shadow:inset 0 0 0 1px var(--mold-border)",
+        };
+      }),
+
+      isMesh: s.output === "mesh",
+      setStill: () => this.set({ output: "still" }),
+      setClip: () => this.set({ output: "clip" }),
+      setMesh: () => this.set({ output: "mesh" }),
+      tabStill: seg(s.output === "still"),
+      tabClip: seg(s.output === "clip"),
+      tabMesh: seg(s.output === "mesh"),
+      promptPlaceholder: {
+        still: "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
+        clip: s.scene === 0 ? "Scene 1 — describe how the clip opens — “a paper boat sets off down a rainy gutter”" : `Scene ${s.scene + 1} — describe what happens next — “rain picks up, the camera drifts left”`,
+        mesh: "Attach a photo of one object, then name it — “a brass teapot, handle intact”",
+      }[s.output],
+      countChip: { still: "Make 4", clip: "Make 1 clip", mesh: "Make 1 object" }[s.output],
+      estimate: {
+        still: "about 20s each on studio-rack",
+        clip: "about 3 minutes on studio-rack",
+        mesh: "about 40s on studio-rack",
+      }[s.output],
+      styleChip: { still: "Photoreal", clip: "Short video clips", mesh: "3-D from a photo" }[s.output],
+      styleId: { still: "flux-dev:q4", clip: "ltx-video:bf16", mesh: "hunyuan3d-2:q8" }[s.output],
+
+      setTabSettings: () => this.set({ insTab: "settings" }),
+      setTabStarters: () => this.set({ insTab: "starters" }),
+      setTabHistory: () => this.set({ insTab: "history" }),
+      insSettings: seg(s.insTab === "settings"),
+      insStarters: seg(s.insTab === "starters"),
+      insHistory: seg(s.insTab === "history"),
+      tabIsSettings: s.insTab === "settings",
+      tabIsStarters: s.insTab === "starters",
+      tabIsHistory: s.insTab === "history",
+
+      presets: [
+        { key: "draft", label: "Draft", meta: "~3s · 8 passes" },
+        { key: "good", label: "Good", meta: "~20s · 28 passes" },
+        { key: "best", label: "Best", meta: "~50s · 50 passes" },
+      ].map((p) => ({
+        ...p,
+        style: s.quality === p.key
+          ? `background:${accent}22;box-shadow:inset 0 0 0 1px ${accent};color:var(--mold-text)`
+          : "border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)",
+        pick: () => this.set({ quality: p.key }),
+      })),
+      sliders,
+      loras: [
+        { label: "Film grain (35mm)", weight: "0.7", pct: 70 },
+        { label: "Wet streets", weight: "0.4", pct: 40 },
+      ].map((l) => ({ ...l, fill: `width:${l.pct}%;background:${accent}` })),
+      starters: [
+        { label: "Portrait, soft window light", note: "Photoreal · square · keeps faces steady", bg: img("flux2-klein-owl.png") },
+        { label: "Product on a plain backdrop", note: "Photoreal · sharp detail · white sweep", bg: img("sdxl-turbo-market.png") },
+        { label: "Storybook illustration", note: "Painterly · warm palette", bg: img("flux2-klein-zen.png") },
+        { label: "Wide landscape", note: "16:9 · long depth of field", bg: img("wuerstchen-lighthouse.png") },
+      ],
+      recents: [
+        { title: "A tea house at dusk, lanterns", meta: "flux-dev:q4 · 4.0s", bg: img("flux-dev-teahouse.png") },
+        { title: "Neon arcade, long exposure", meta: "flux-dev:q4 · 21s", bg: img("sd35-clocktower.png") },
+        { title: "Market at golden hour", meta: "sdxl-turbo · 3.1s", bg: img("sdxl-turbo-market.png") },
+        { title: "Balloon over the valley", meta: "qwen-image:q8 · 18s", bg: img("qwen-image-balloon.png") },
+        { title: "Astronaut underwater", meta: "z-image:q8 · 6s", bg: img("zimage-astronaut.png") },
+      ],
+
+      queue,
+      fullQueue,
+      queueStats: [
+        { label: "Being made", value: "1", note: "about 12s left" },
+        { label: "Waiting", value: "3", note: "about 1 minute in total" },
+        { label: "Done today", value: "27", note: "all saved to My images" },
+      ],
+
+      libScopes,
+      isTrash: s.libScope === "trash",
+      isCollections: s.libScope === "collections",
+      selectMode: s.selectMode,
+      toggleSelect: () => this.set({ selectMode: !s.selectMode }),
+      selectStyle: s.selectMode ? `background:${accent};color:var(--mold-bg-deep);border-color:${accent}` : "color:var(--mold-text-2)",
+      historyOpen: s.historyOpen,
+      toggleHistory: () => this.set({ historyOpen: !s.historyOpen }),
+      tiles,
+      tags: [
+        { label: "warm", count: "42" },
+        { label: "night", count: "31" },
+        { label: "product", count: "27" },
+        { label: "portrait", count: "19" },
+        { label: "＋ tag", count: "" },
+      ].map((t, i) => ({
+        ...t,
+        style: i === 0
+          ? `background:${accent}22;box-shadow:inset 0 0 0 1px ${accent};color:var(--mold-text)`
+          : "border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)",
+      })),
+      collections: [
+        { label: "Client — Aurora", count: "42 pictures", bg: img("zimage-astronaut.png") },
+        { label: "Teahouse series", count: "18 pictures", bg: img("flux-dev-teahouse.png") },
+        { label: "Product shots", count: "36 pictures", bg: img("sdxl-turbo-market.png") },
+        { label: "Clips", count: "7 clips", bg: img("sd35-clocktower.png") },
+      ],
+      history: [
+        { prompt: "A tea house at dusk, paper lanterns, rain", meta: "flux-dev:q4 · 1024² · seed 4821 · 12:41" },
+        { prompt: "Neon arcade, long exposure", meta: "flux-dev:q4 · 1024² · seed 9930 · 12:28" },
+        { prompt: "Brass teapot on a windowsill", meta: "sdxl-turbo · 768² · seed 118 · 11:59" },
+        { prompt: "Ferry at dusk, watercolour", meta: "flux2-klein · 1024² · seed 4400 · 11:32" },
+        { prompt: "Balloon over the valley", meta: "qwen-image:q8 · 1024² · seed 77 · 10:04" },
+        { prompt: "Astronaut underwater, cold light", meta: "z-image:q8 · 1024² · seed 512 · 09:47" },
+      ],
+      meta: [
+        { label: "Style", value: "flux-dev:q4" },
+        { label: "Size", value: "1024 × 1024" },
+        { label: "Detail", value: "28 passes" },
+        { label: "Stick to words", value: "7.5" },
+        { label: "Repeat this look", value: "seed 4821" },
+        { label: "Made on", value: "studio-rack" },
+        { label: "Took", value: "4.0s" },
+      ],
+
+      modelsInstalled: s.modelsTab === "installed",
+      modelsDiscover: s.modelsTab === "discover",
+      setInstalled: () => this.set({ modelsTab: "installed" }),
+      setDiscover: () => this.set({ modelsTab: "discover" }),
+      tabInstalled: seg(s.modelsTab === "installed"),
+      tabDiscover: seg(s.modelsTab === "discover"),
+      models,
+      catalog,
+
+      machines,
+      telemetry: [
+        { label: "Graphics memory", value: "62%", note: "14.9 / 24 GB", bar: `width:62%;background:${accent}` },
+        { label: "Processor", value: "38%", note: "16 cores", bar: "width:38%;background:var(--mold-sapphire)" },
+        { label: "System memory", value: "44%", note: "28 / 64 GB", bar: "width:44%;background:var(--mold-teal)" },
+        { label: "Disk for styles", value: "7%", note: "37.9 / 512 GB", bar: "width:7%;background:var(--mold-mauve)" },
+      ],
+
+      licences: [
+        { friendly: "Photoreal — best quality", id: "flux-dev:q4", terms: "non-commercial", state: "Accepted", action: "View terms", ok: true },
+        { friendly: "3-D objects from a photo", id: "hunyuan3d-2:q8", terms: "research only", state: "Accepted", action: "View terms", ok: true },
+        { friendly: "Short video clips", id: "ltx-video:bf16", terms: "commercial ok", state: "Needs your OK", action: "Read & accept", ok: false },
+      ].map((l) => ({ ...l, stateStyle: l.ok ? "color:var(--mold-success)" : "color:var(--mold-warning)" })),
+      settingsNav: [
+        { label: "Look", on: true },
+        { label: "Defaults for new images" },
+        { label: "Machines" },
+        { label: "Styles & disk" },
+        { label: "Style licences" },
+        { label: "My images & trash" },
+        { label: "Phone pairing" },
+        { label: "Speed & memory" },
+        { label: "Updates & about" },
+      ].map((n) => ({ ...n, style: n.on ? `background:${accent}22;color:var(--mold-text)` : "color:var(--mold-text-2)" })),
+      themes: [
+        { label: "Dark", note: "Easy on the eyes", swatch: "background:var(--mold-bg)", on: true },
+        { label: "Light", note: "For bright rooms", swatch: "background:var(--mold-text)" },
+        { label: "Match system", note: "Follows macOS", swatch: "background:linear-gradient(90deg,var(--mold-bg) 50%,var(--mold-text) 50%)" },
+      ].map((t) => ({
+        ...t,
+        style: t.on
+          ? `background:${accent}22;box-shadow:inset 0 0 0 1px ${accent};color:var(--mold-text)`
+          : "border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)",
+      })),
+      settingRows: [
+        { label: "Style to start with", note: "Used whenever you open a new image", value: "Photoreal — best quality" },
+        { label: "Where new work runs", note: "Auto picks whichever machine has the style", value: "Auto" },
+        { label: "Quality", note: "Draft is fast, Best takes longer", value: "Good · 28 passes" },
+        { label: "Size", note: "Bigger uses more graphics memory", value: "1024 × 1024" },
+        { label: "How many at once", note: "Each one is queued separately", value: "4" },
+        { label: "Save every result", note: "Off means you pick what to keep", toggle: true, isOn: true },
+        { label: "Name pictures from the words", note: "Otherwise files are numbered", toggle: true, isOn: true },
+        { label: "Warn before renting a GPU", note: "Cloud machines bill by the minute", toggle: true, isOn: true },
+      ].map((r) => ({
+        ...r,
+        isToggle: !!r.toggle,
+        isValue: !r.toggle,
+        toggleStyle: r.isOn ? `justify-content:flex-end;background:${accent}` : "background:var(--mold-surface-2)",
+        knobStyle: r.isOn ? "background:var(--mold-bg-deep)" : "background:var(--mold-text-dim)",
+      })),
+
+      podFields: [
+        { label: "Graphics card", value: "RTX 4090 · 24 GB · $1.44/hr" },
+        { label: "Where", value: "EU-RO-1 · Romania" },
+        { label: "Kind", value: "Community cloud" },
+        { label: "Style to preload", value: "flux-dev:q8" },
+        { label: "Keep files on", value: "mold-volume · 100 GB" },
+      ],
+
+      paletteOpen: s.overlay === "palette",
+      lightboxOpen: s.overlay === "lightbox",
+      connectOpen: s.overlay === "connect",
+      runpodOpen: s.overlay === "runpod",
+      toastOpen: s.overlay === "toast",
+      openPalette: () => this.set({ overlay: "palette" }),
+      openLightbox: () => this.set({ overlay: "lightbox" }),
+      openConnect: () => this.set({ overlay: "connect" }),
+      openRunpod: () => this.set({ overlay: "runpod" }),
+      openToast: () => this.set({ overlay: "toast" }),
+      closeOverlay: () => this.set({ overlay: null }),
+      commands: [
+        { group: "make", label: "New image", key: "⌘N", sel: true },
+        { group: "make", label: "Generate from these words", key: "⌘↩" },
+        { group: "make", label: "Make 4 variations of the last picture", key: "⌥↩" },
+        { group: "queue", label: "Pause the queue", key: "Space" },
+        { group: "queue", label: "Stop everything", key: "" },
+        { group: "go", label: "My images", key: "⌘3" },
+        { group: "go", label: "Machines", key: "⌘5" },
+        { group: "styles", label: "Download a style…", key: "" },
+        { group: "machines", label: "Connect a machine…", key: "" },
+        { group: "machines", label: "Rent a GPU…", key: "" },
+      ].map((c) => ({ ...c, style: c.sel ? "background:var(--mold-surface-2)" : "" })),
+    };
+  }
+}
+</script>
+</body>
+</html>

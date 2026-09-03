@@ -18,7 +18,7 @@ to a remote `mold serve` machine.
 
 ![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)
 
-_Mold Studio's Create workspace keeps the canvas, prompt, model-aware controls,
+_Mold Studio's New image workspace keeps the canvas, prompt, model-aware controls,
 machine status, and live generation progress in one native window._
 
 ## Download
@@ -70,6 +70,17 @@ absent.
 A single native window that puts the full mold workflow behind a keyboard-driven
 UI, instead of the CLI or the browser SPA. The same `mold-ai-server` HTTP + SSE
 surface powers it, so anything the app does maps to a documented endpoint.
+
+The window is one unified toolbar, a sidebar, the view, and a status bar. The
+sidebar names its destinations in plain words — **New image**, **Queue**, **My
+images**, **Styles**, **Machines** (⌘1–⌘5) and **Settings** (⌘,) — and keeps
+the queue under the machine that is making images, so work in progress is
+always in view without leaving the picture. Technical truth stays beside every
+plain label in mono (`flux-dev:q4`, `28 passes`, `14.9 / 24 GB`), the status bar
+always says which machine, how full, and how deep the queue is, and every
+overlay — the ⌘K palette, the lightbox, dialogs, toasts — is built on the same
+six-theme design system. The guide below uses those names; the web studio and
+the phone keep Create / Library / Models until their own redesign.
 
 ## Features
 
@@ -371,32 +382,32 @@ release is published.
 
 ### Keyboard map
 
-| Shortcut            | Action                                          |
-| ------------------- | ----------------------------------------------- |
-| Cmd/Ctrl+1–4, comma | Create / Library / Models / Machines / Settings |
-| Cmd/Ctrl+K          | Command palette                                 |
-| Cmd/Ctrl+N          | New generation (clear composer, focus)          |
-| Cmd/Ctrl+Enter      | Generate                                        |
-| Cmd/Ctrl+E          | Expand prompt                                   |
-| Cmd/Ctrl+R          | Randomize seed                                  |
-| Cmd/Ctrl+.          | Cancel the running job                          |
-| Cmd/Ctrl+\          | Toggle sidebar                                  |
-| Space               | Quick Look in Library                           |
-| ←/→                 | Library navigate                                |
-| ⌫                   | Library: move to trash (Undo for 6 s)           |
-| Cmd/Ctrl+⌫          | Library: delete forever (confirm)               |
-| F                   | Library: favorite / unfavorite                  |
-| T                   | Library: tag the selected print                 |
-| Shift+Cmd/Ctrl+N    | Library: new collection                         |
-| Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                            |
-| Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller             |
+| Shortcut            | Action                                                       |
+| ------------------- | ------------------------------------------------------------ |
+| Cmd/Ctrl+1–5, comma | New image / Queue / My images / Styles / Machines / Settings |
+| Cmd/Ctrl+K          | Command palette                                              |
+| Cmd/Ctrl+N          | New image (clear composer, focus)                            |
+| Cmd/Ctrl+Enter      | Generate                                                     |
+| Cmd/Ctrl+E          | Expand prompt                                                |
+| Cmd/Ctrl+R          | Surprise me (a new seed)                                     |
+| Cmd/Ctrl+.          | Stop the image being made                                    |
+| Cmd/Ctrl+\          | Toggle sidebar                                               |
+| Space               | Quick Look in Library                                        |
+| ←/→                 | Library navigate                                             |
+| ⌫                   | Library: move to trash (Undo for 6 s)                        |
+| Cmd/Ctrl+⌫          | Library: delete forever (confirm)                            |
+| F                   | Library: favorite / unfavorite                               |
+| T                   | Library: tag the selected print                              |
+| Shift+Cmd/Ctrl+N    | Library: new collection                                      |
+| Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                                         |
+| Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller                          |
 
 Interface scaling applies to the complete app, including fixed overlays and
-right-click menus. Choose 80–130% from **Settings → Appearance & app → Interface size**, or
+right-click menus. Choose 80–130% from **Settings → Look → Interface size**, or
 use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
-Appearance offers six Mold Studio themes: Mocha (the default), Safelight,
+**Look** offers six Mold Studio themes: Mocha (the default), Safelight,
 Graphite, and Nebula are dark; Blueprint and Porcelain are light. Each theme
 brings its own type pairing and corner radius, and **Match system appearance**
 swaps a pick for its light or dark partner when macOS changes. Saved choices
@@ -460,7 +471,8 @@ wire types as the CLI and web UI:
 - **Existing server**: auto-detects a running `mold serve` on
   `localhost:7680`.
 - **Machines** (remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
-  added in the **Machines** workspace: an **Add machine** row with Test connection, a
+  added in the **Machines** workspace: **Connect a machine** (the machines found
+  on your network, or a typed address, plus "Make images here from now on"), a
   **Connected** list, **Remembered** hosts for one-click reconnect (each with
   its own API key, stored in an owner-only file under the app's data
   directory) never the macOS Keychain, so connecting never triggers Keychain
@@ -522,8 +534,8 @@ wire types as the CLI and web UI:
   elsewhere. The Library's right-click menu adds **Save to this Mac** for
   pulling any older remote print down on demand.
 - **Several hosts at once**: alongside this device, any number of remote
-  hosts can be live simultaneously (**Add machine** in the Machines workspace, or
-  the **+** next to a detected server in Machines). With more than one live
+  hosts can be live simultaneously (**Connect a machine** in Machines, or
+  **Connect** beside a machine found on your network). With more than one live
   host, the Create inspector grows a
   **Host** selector: pick one explicitly, leave it on **Auto** to route
   each batch to the least-busy host by live queue depth, or choose **Most

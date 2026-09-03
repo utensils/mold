@@ -1,8 +1,8 @@
 /*
- * Unified style presets (spec §03 — Create style row), shared by web, desktop,
- * and iOS. This replaces the two divergent per-surface tables; the canonical
- * ids and fragments come from the prototype's STYLE_EXTRAS / STYLE_ANGLES
- * (docs/design/mold-studio-proposed-ui.html).
+ * Unified style presets (the Create style row), shared by web, desktop, and
+ * iOS. This replaces the two divergent per-surface tables; the canonical ids
+ * and fragments came from the retired prototype's STYLE_EXTRAS / STYLE_ANGLES
+ * and are now their own source of truth here.
  *
  * Composition follows the bake-and-clear decision: the style is baked into the
  * outgoing request at submit time (A1111 semantics — a "{prompt}" placeholder

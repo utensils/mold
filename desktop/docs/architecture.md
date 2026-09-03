@@ -8,10 +8,12 @@ shared frontend logic stay platform-neutral; Tauri platform configs and thin nat
 bridges own window chrome, device capabilities, and bundle details. The six Mold
 Studio themes are shared without changing generated-media color.
 
-Design system: [`../../docs/design/mold-studio-spec.html`](../../docs/design/mold-studio-spec.html)
-— the Mold Studio interface spec these surfaces implement. Its information
-architecture is five workspaces on every surface: Create, Library, Models,
-Machines, and Settings.
+Design system: [`../../docs/design/README.md`](../../docs/design/README.md) —
+the Mold Studio package (lexicon, shell anatomy, component vocabulary, the six
+themes) with `mold-studio-desktop.dc.html` as the desktop reference
+implementation. The desktop's destinations are New image, Queue, My images,
+Styles, and Machines (⌘1–⌘5), plus Settings (⌘,); web and the phone keep the
+five-workspace names until their own redesign.
 
 ## Android foundation
 
@@ -350,12 +352,12 @@ desktop/
 │   │   ├── capabilities.ts                  # ported from web/src/lib/generateCapabilities.ts
 │   │   └── ipc.ts                           # invoke() wrappers for all Tauri commands
 │   ├── stores/  connection.ts generation.ts queue.ts composer.ts settings.ts
-│   ├── views/   GenerateView.vue LibraryView.vue ModelsView.vue MachinesView.vue SettingsView.vue
+│   ├── views/   GenerateView.vue QueueView.vue LibraryView.vue ModelsView.vue MachinesView.vue HostDetailView.vue RunPodView.vue SettingsView.vue
 │   └── components/
-│       ├── shell/   TitleBar.vue NavRail.vue Inspector.vue StatusPopover.vue
+│       ├── shell/   TitleBar.vue Sidebar.vue QueueRail.vue StatusBar.vue CommandPalette.vue Toasts.vue ContextMenu.vue
 │       ├── generate/ ParamPanel.vue LoraStack.vue SourceImageWell.vue ExpandSheet.vue EstimateBadge.vue VideoParams.vue PlacementPanel.vue
 │       ├── gallery/ AuthedMedia.vue Lightbox.vue           # (planned: VirtualGrid/MediaCard/DetailPane/MetadataTable; the justified grid lives in LibraryView.vue)
-│       ├── library/ HistoryDrawer.vue LibraryHeader.vue LibraryChipRow.vue CollectionsShelf.vue CollectionDrillIn.vue TrashBanner.vue TagEditor.vue CollectionPicker.vue RetentionSelect.vue
+│       ├── library/ HistoryDrawer.vue LibraryHeader.vue LibraryChipRow.vue CollectionsShelf.vue CollectionDrillIn.vue TrashBanner.vue TagEditor.vue CollectionPicker.vue
 │       ├── create/  CreateHeader.vue (editable print title) HostChip.vue InspectorPanel.vue …
 │       ├── settings/ LibrarySection.vue (trash retention for This device) GenerationSection.vue MediaSection.vue …
 │       ├── jobs/    QueueStrip.vue JobCard.vue ChainComposer.vue StageCard.vue ChainJobDetail.vue DownloadsDrawer.vue
