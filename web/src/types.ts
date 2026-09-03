@@ -1224,8 +1224,11 @@ export interface GenerateFormState {
    * need two stores: `imageAttachments[0]` stays the source well, these are
    * the references. Every other layout keeps its single list — a `replaces`
    * strip (Qwen edit, FLUX.2 [dev]) is `imageAttachments`.
+   *
+   * Optional because a draft persisted before this field existed has none,
+   * and every read spells that `?? []` rather than assuming an array.
    */
-  referenceImages: SourceImageState[];
+  referenceImages?: SourceImageState[];
   /**
    * Which exclusive well was written last. `resolveExclusiveWells` reads it
    * to decide which one ships and which parks; `null` — an untouched form or
