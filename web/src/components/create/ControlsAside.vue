@@ -9,6 +9,7 @@
  */
 import { computed } from "vue";
 import { useRouter } from "vue-router";
+import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -234,8 +235,14 @@ function setGenerateAudio(value: boolean) {
 const batchLocked = computed(
   () =>
     capabilities.value.forcesBatchSizeOne ||
-    (capabilities.value.sourceImageMode === "references" &&
-      props.modelValue.imageAttachments.length > 0) ||
+    conditioningForRequest(capabilities.value.sourceImageMode, {
+      hasSource: Boolean(props.modelValue.imageAttachments[0]?.base64),
+      referenceCount:
+        capabilities.value.sourceImageMode === "single-or-references"
+          ? (props.modelValue.referenceImages?.length ?? 0)
+          : props.modelValue.imageAttachments.length,
+      lastWrite: props.modelValue.exclusiveWell ?? null,
+    }) === "references" ||
     sequenceMode.value,
 );
 

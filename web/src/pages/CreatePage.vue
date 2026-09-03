@@ -186,7 +186,6 @@ import {
   isQwenImageEditFamily,
   useGenerateForm,
 } from "../composables/useGenerateForm";
-import { isFlux2DevModel } from "../lib/generateCapabilities";
 import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   activeCanvasJob,
@@ -225,6 +224,14 @@ import {
   parseSourceFitPolicy,
   resolveSourceFitTransform,
 } from "@studio/lib/sourceFit";
+import {
+  conditioningForRequest,
+  sourceMediaPlan,
+} from "@studio/lib/sourceMediaPlan";
+import {
+  resolveDropTarget,
+  type DropTarget,
+} from "@studio/lib/imageDropRouting";
 import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
@@ -270,6 +277,7 @@ import { meshStatsLabel } from "@studio/lib/meshControls";
 import {
   appendMinimaxH3PickedImageReferences,
   appendMinimaxH3GalleryImageReference,
+  MINIMAX_H3_MAX_REFERENCES,
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
@@ -368,6 +376,24 @@ function openTargetPicker() {
 // One picker serves both FL2VA boundaries; the target names the slot.
 const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3ReferencePickerOpen = ref(false);
+/** The EXCLUSIVE recipe's reference-strip picker (FLUX.2 [klein]). */
+const showReferencePicker = ref(false);
+
+/**
+ * Attach references on an exclusive recipe. The source image is PARKED, not
+ * discarded: it comes back the moment the strip is cleared, and only the
+ * active well reaches the wire.
+ */
+function onPickReferences(picked: SourceImageState[]): void {
+  if (picked.length === 0) return;
+  const max = capabilities.value.referenceImages?.max ?? undefined;
+  form.state.value.referenceImages = [
+    ...(form.state.value.referenceImages ?? []),
+    ...picked,
+  ].slice(0, max);
+  form.state.value.exclusiveWell = "references";
+  composerError.value = null;
+}
 /** Which ordered H3 reference the crop dialog is editing; null when closed. */
 const h3CropIndex = ref<number | null>(null);
 const h3CropTarget = computed(() =>
@@ -1549,9 +1575,9 @@ function syncSourceCanvas(
     form.state.value.pipeline,
   );
   const replaced = image.base64 !== previous.base64;
-  const isReferenceConditioning = isFlux2DevModel(
-    currentModel.value?.name ?? form.state.value.model,
-  );
+  // A reference strip is not a canvas: the size comes from the model, never
+  // from whichever picture sits first in the order.
+  const isReferenceConditioning = requestConditioning.value === "references";
   // A canvasless recipe (a 3-D mesh) has no canvas for the source to steer:
   // its zero size is the recipe's own default and must stay on the wire.
   const canvasless = recipeIsCanvasless(
@@ -1681,6 +1707,33 @@ const capabilities = computed(() =>
     activeRecipe.value,
   ),
 );
+/** The model's image-attachment shape — the one shared policy. */
+const sourcePlan = computed(() => sourceMediaPlan(capabilities.value));
+/**
+ * Whether references REPLACE the source image (Qwen edit, FLUX.2 [dev]) — the
+ * advertised `source_relation`, never a model name. An EXCLUSIVE recipe
+ * (Klein) answers false: it keeps img2img, the repaint mask, and strength for
+ * whichever well is active.
+ */
+const referencesReplaceSource = computed(
+  () => capabilities.value.referenceImages?.sourceRelation === "replaces",
+);
+/** The picker acquires several pictures only for a strip-only layout. */
+const attachmentPicker = computed(
+  () => sourcePlan.value.kind === "attachments",
+);
+/** Which conditioning the request will carry — the shared decision. */
+const requestConditioning = computed(() =>
+  conditioningForRequest(capabilities.value.sourceImageMode, {
+    hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
+    referenceCount:
+      capabilities.value.sourceImageMode === "single-or-references"
+        ? (form.state.value.referenceImages?.length ?? 0)
+        : form.state.value.imageAttachments.length,
+    lastWrite: form.state.value.exclusiveWell ?? null,
+  }),
+);
+
 // ── Face identity (PuLID, #1224) ──────────────────────────────────────
 // The gate mirrors `toRequest`: the resolved catalog row's server-authored
 // recipe first, its additive `supports_identity` next, and the snapshot taken
@@ -3504,8 +3557,7 @@ function validateSubmit(): boolean {
     composerError.value = "Qwen image edit needs a target image.";
     return false;
   }
-  const referenceEdit =
-    qwenImageEdit || isFlux2DevModel(form.state.value.model);
+  const referenceEdit = referencesReplaceSource.value;
   if (
     !referenceEdit &&
     form.state.value.maskImage &&
@@ -4934,8 +4986,7 @@ async function onPickSource(v: SourceImageState[]) {
     isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
     ) || form.state.value.model.startsWith("qwen-image-edit:");
-  const flux2Dev = isFlux2DevModel(form.state.value.model);
-  const referenceEdit = qwenEdit || flux2Dev;
+  const referenceEdit = referencesReplaceSource.value;
   const establishesTarget =
     qwenEdit &&
     !replaceTargetOnPick.value &&
@@ -4954,11 +5005,13 @@ async function onPickSource(v: SourceImageState[]) {
     qwenEdit && replaceTargetOnPick.value && v[0]
       ? [v[0], ...form.state.value.imageAttachments.slice(1)]
       : referenceEdit
-        ? [...form.state.value.imageAttachments, ...v].slice(
+        ? // The strip ceiling is the RECIPE's, never a client constant.
+          [...form.state.value.imageAttachments, ...v].slice(
             0,
-            flux2Dev ? 4 : undefined,
+            capabilities.value.referenceImages?.max ?? undefined,
           )
         : v.slice(0, 1);
+  if (!referenceEdit && v.length > 0) form.state.value.exclusiveWell = "source";
   if (
     (!referenceEdit ||
       (qwenEdit && replaceTargetOnPick.value) ||
@@ -5552,6 +5605,137 @@ function openAdvanced() {
   showAdvanced.value = true;
 }
 
+// ── Window-level image drop ───────────────────────────────────────────
+// Without these, a file dropped a pixel outside a well NAVIGATES the browser
+// to the image and takes the SPA with it. The window handler preventDefaults
+// every drag, and routes only the drops no well already handled — a well's
+// own `@drop.prevent` marks the event first, which is exactly what
+// `defaultPrevented` reports here in the bubble phase.
+
+/** Read a dropped file the same way every well does: PNG/JPEG only, and the
+ * header decoded for the dimensions a gallery pick would have carried. */
+async function droppedSourceImage(
+  file: File,
+): Promise<SourceImageState | null> {
+  const base64 = await blobToBase64(file);
+  const dimensions = imageDimensionsFromBase64(base64);
+  if (!dimensions) {
+    composerError.value = "Only PNG or JPEG images can be used here.";
+    return null;
+  }
+  return {
+    kind: "upload",
+    filename: file.name,
+    base64,
+    width: dimensions.width,
+    height: dimensions.height,
+    mime: file.type || null,
+  };
+}
+
+/** Write the dropped image into the SAME form field the well's own picker
+ * writes, so a drag and a click produce identical facts. */
+function applyDropToForm(target: DropTarget, image: SourceImageState): void {
+  const s = form.state.value;
+  switch (target) {
+    case "source":
+      s.imageAttachments =
+        sourcePlan.value.kind === "attachments"
+          ? [image, ...s.imageAttachments.slice(1)]
+          : [image];
+      s.sourceFitPolicy = defaultSourceFitPolicy();
+      s.exclusiveWell = "source";
+      return;
+    case "references": {
+      // APPEND, never replace — the click path appends too.
+      const max = capabilities.value.referenceImages?.max ?? undefined;
+      if (sourcePlan.value.kind === "single-or-references") {
+        s.referenceImages = [...(s.referenceImages ?? []), image].slice(0, max);
+      } else {
+        s.imageAttachments = [...s.imageAttachments, image].slice(0, max);
+      }
+      s.exclusiveWell = "references";
+      return;
+    }
+    case "end":
+      s.endFrame = image;
+      return;
+    case "identity":
+      s.identityImage = image;
+      return;
+    case "opening":
+      draft.openingImage = { filename: image.filename, base64: image.base64 };
+      return;
+    case "h3-first":
+    case "h3-last": {
+      const result = setMinimaxH3PickedImageBoundary(
+        s.h3Authoring,
+        target === "h3-first" ? "firstFrame" : "lastFrame",
+        {
+          filename: image.filename,
+          base64: image.base64,
+          width: image.width ?? undefined,
+          height: image.height ?? undefined,
+          mimeType: image.mime ?? undefined,
+        },
+      );
+      if (result.ok) s.h3Authoring = result.state;
+      else composerError.value = result.error;
+      return;
+    }
+    case "h3-reference":
+      void appendMinimaxH3PickedImageReferences(s.h3Authoring, [
+        {
+          filename: image.filename,
+          base64: image.base64,
+          width: image.width ?? undefined,
+          height: image.height ?? undefined,
+          mimeType: image.mime ?? undefined,
+        },
+      ]).then((result) => {
+        if (result.ok) s.h3Authoring = result.state;
+        else composerError.value = result.error;
+      });
+      return;
+  }
+}
+
+function onWindowDragOver(event: DragEvent): void {
+  if (!event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault();
+}
+
+async function onWindowDrop(event: DragEvent): Promise<void> {
+  // A well already took it: its own `@drop.prevent` ran first.
+  if (event.defaultPrevented) return;
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  event.preventDefault();
+  if (sequenceMode.value && !showSequenceOpeningImage.value) return;
+  const routed = resolveDropTarget(sourcePlan.value, null, {
+    hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
+    referenceCount:
+      sourcePlan.value.kind === "single-or-references"
+        ? (form.state.value.referenceImages?.length ?? 0)
+        : form.state.value.imageAttachments.length,
+    identityVisible: identitySupported.value === true,
+    openingVisible: sequenceMode.value && showSequenceOpeningImage.value,
+    h3FirstPresent: Boolean(form.state.value.h3Authoring?.firstFrame),
+    h3ReferenceCount: form.state.value.h3Authoring?.references.length ?? 0,
+    h3ReferenceMax: MINIMAX_H3_MAX_REFERENCES,
+    lastWrite: form.state.value.exclusiveWell ?? null,
+    refusalReason: capabilities.value.referenceImagesReason,
+  });
+  if (typeof routed !== "string") {
+    composerError.value = routed.refused;
+    return;
+  }
+  const image = await droppedSourceImage(file);
+  if (!image) return;
+  composerError.value = null;
+  applyDropToForm(routed, image);
+}
+
 onMounted(async () => {
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
@@ -5574,12 +5758,16 @@ onMounted(async () => {
   }
   void refreshHistory();
   window.addEventListener("mold:new-print", onNewPrint);
+  window.addEventListener("dragover", onWindowDragOver);
+  window.addEventListener("drop", onWindowDrop);
   document.addEventListener("pointerdown", onTemplatesPointerDown);
   document.addEventListener("keydown", onTemplatesKeydown);
   startAutoRefresh();
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("dragover", onWindowDragOver);
+  window.removeEventListener("drop", onWindowDrop);
   clearSelectedQueueRender();
   submitAttempt += 1;
   submitController?.abort(new Error("unmounted"));
@@ -6014,6 +6202,7 @@ onBeforeUnmount(() => {
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
                   @open-h3-reference-picker="h3ReferencePickerOpen = true"
+                  @open-reference-picker="showReferencePicker = true"
                   @crop-h3-reference="h3CropIndex = $event"
                 />
                 <IdentityPanel
@@ -6271,6 +6460,7 @@ onBeforeUnmount(() => {
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
           @open-h3-reference-picker="h3ReferencePickerOpen = true"
+          @open-reference-picker="showReferencePicker = true"
           @crop-h3-reference="h3CropIndex = $event"
         />
         <!-- The identity photo is media the user attaches, not a setting, so
@@ -6383,22 +6573,13 @@ onBeforeUnmount(() => {
           ? 'Opening sequence image'
           : replaceTargetOnPick
             ? 'Edit target'
-            : currentFamily === 'qwen-image-edit' ||
-                isFlux2DevModel(form.state.value.model)
+            : attachmentPicker
               ? 'Edit images'
               : 'Source image'
       "
-      :multiple="
-        !sequenceMode &&
-        !replaceTargetOnPick &&
-        (currentFamily === 'qwen-image-edit' ||
-          isFlux2DevModel(form.state.value.model))
-      "
+      :multiple="!sequenceMode && !replaceTargetOnPick && attachmentPicker"
       :gallery-only="
-        replaceTargetOnPick ||
-        (!sequenceMode &&
-          currentFamily !== 'qwen-image-edit' &&
-          !isFlux2DevModel(form.state.value.model))
+        replaceTargetOnPick || (!sequenceMode && !attachmentPicker)
       "
       @pick="onPickSource"
       @close="
@@ -6422,6 +6603,15 @@ onBeforeUnmount(() => {
       :multiple="true"
       @pick="onPickH3References"
       @close="h3ReferencePickerOpen = false"
+    />
+    <!-- The EXCLUSIVE recipe's reference strip (FLUX.2 [klein]): the same
+         picker every other strip uses, writing the second store. -->
+    <ImagePickerModal
+      :open="showReferencePicker"
+      title="Add reference images"
+      :multiple="true"
+      @pick="onPickReferences"
+      @close="showReferencePicker = false"
     />
     <ReferenceCropModal
       :open="h3CropTarget !== null"
