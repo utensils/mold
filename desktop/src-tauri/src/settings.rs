@@ -75,9 +75,16 @@ fn migrate_theme_keys(value: &mut serde_json::Value) {
         return;
     };
     let family = object.remove("themeFamily");
-    let theme = object.get("theme").and_then(|v| v.as_str()).map(str::to_owned);
-    let (id, match_system) = migrate_theme(theme.as_deref(), family.as_ref().and_then(|v| v.as_str()));
-    object.insert("theme".into(), serde_json::to_value(id).expect("ThemeId serializes"));
+    let theme = object
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let (id, match_system) =
+        migrate_theme(theme.as_deref(), family.as_ref().and_then(|v| v.as_str()));
+    object.insert(
+        "theme".into(),
+        serde_json::to_value(id).expect("ThemeId serializes"),
+    );
     if let Some(flag) = match_system {
         object
             .entry("matchSystem")
@@ -665,20 +672,28 @@ mod tests {
         assert_eq!(loaded.theme, ThemeId::Blueprint);
         assert_eq!(loaded.update_channel, UpdateChannel::Nightly);
         assert_eq!(loaded.nav_rail_width, Some(240));
-        assert_eq!(loaded.engine_env.get("MOLD_VAE_TILED").map(String::as_str), Some("force"));
+        assert_eq!(
+            loaded.engine_env.get("MOLD_VAE_TILED").map(String::as_str),
+            Some("force")
+        );
         assert_eq!(loaded.saved_hosts.len(), 1);
         assert_eq!(loaded.connected_host_ids, vec!["hal9000-7680"]);
         // The first save completes the migration on disk.
         save(&path, &loaded).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("themeFamily"));
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("themeFamily"));
     }
 
     #[test]
     fn unknown_theme_falls_back_without_discarding_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
-        std::fs::write(&path, r#"{"mode":"local","theme":"chartreuse","uiScalePercent":120}"#)
-            .unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mode":"local","theme":"chartreuse","uiScalePercent":120}"#,
+        )
+        .unwrap();
         let loaded = load(&path);
         assert_eq!(loaded.theme, ThemeId::Mocha);
         assert_eq!(loaded.ui_scale_percent, 120);
