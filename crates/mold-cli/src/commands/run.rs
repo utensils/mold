@@ -360,34 +360,104 @@ fn is_virtual_lora_alias(value: &str) -> bool {
         .is_some_and(|preset| !preset.trim().is_empty())
 }
 
-fn is_flux2_dev_model(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    model.contains("flux2-dev") || model.contains("flux.2-dev")
+/// Whether `--image` on this recipe means "the ordered reference group"
+/// rather than "one source image".
+///
+/// Derived from the recipe's own `reference_images` block — the single
+/// authority — never from a model-name sniff. Two kinds of recipe swallow
+/// `--image` into `edit_images`: one whose FIRST image is the edit target
+/// (Qwen-Image-Edit), and one whose references REPLACE the source image
+/// entirely (FLUX.2 [dev], which advertises no strength and no mask and whose
+/// admission refuses `source_image` outright — so routing `--image` to the
+/// source there would build a request the server can only reject).
+///
+/// FLUX.2 [klein] is `Exclusive`, not `Replaces`: it renders from a source
+/// image OR from references, so `--image` keeps meaning img2img and
+/// `--reference` is how a Klein user attaches the reference group.
+fn image_args_are_ordered_references(
+    profile: &mold_core::generation_profile::ReferenceImagesProfile,
+) -> bool {
+    profile.mode != mold_core::ControlMode::Hidden
+        && (profile.primary_is_target
+            || profile.source_relation
+                == mold_core::generation_profile::ReferenceSourceRelation::Replaces)
 }
 
 fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) -> Result<()> {
-    let flux2_dev = is_flux2_dev_model(model);
-    let ordered_images = family == "qwen-image-edit" || flux2_dev;
-    if family == "qwen-image-edit" && image.iter().any(|img| img == "-") {
-        anyhow::bail!("qwen-image-edit does not support --image -; pass file paths instead");
+    let profile = mold_core::generation_profile::reference_images_for_recipe(family, model);
+    let subject = mold_core::generation_profile::reference_subject_label(family, model);
+    if !image_args_are_ordered_references(&profile) {
+        if image.len() > 1 {
+            anyhow::bail!(
+                "multiple --image values are only supported by models that take ordered reference images"
+            );
+        }
+        return Ok(());
     }
-    if flux2_dev && image.iter().any(|img| img == "-") {
-        anyhow::bail!(
-            "FLUX.2 Dev ordered references do not support --image -; pass file paths instead"
-        );
+    if image.iter().any(|img| img == "-") {
+        anyhow::bail!("{subject} does not support --image -; pass file paths instead");
     }
-    if !ordered_images && image.len() > 1 {
-        anyhow::bail!(
-            "multiple --image values are only supported for Qwen-Image-Edit and FLUX.2 Dev models"
-        );
-    }
-    if flux2_dev && image.len() > mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES {
-        anyhow::bail!(
-            "FLUX.2 Dev supports at most {} ordered --image references",
-            mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES
-        );
+    if let Some(max) = profile.max_count {
+        if image.len() > max as usize {
+            anyhow::bail!("{subject} supports at most {max} ordered --image references");
+        }
     }
     Ok(())
+}
+
+/// Route `--reference` for a non-H3 model onto the ordered reference group.
+///
+/// `--reference` is one flag with two destinations, chosen by the recipe and
+/// never by the model name: MiniMax H3 reads it as Ref2VA authoring (handled
+/// by `h3::prepare_authoring`, which owns the upload session), and a recipe
+/// whose profile advertises `reference_images` reads it as `edit_images`.
+/// Anything else is refused with the profile's own sentence, so the CLI and
+/// the server say the same thing about the same model.
+fn reference_edit_image_paths(
+    family: &str,
+    model: &str,
+    references: &[ReferenceArg],
+    image: &[String],
+) -> Result<Vec<String>> {
+    let profile = mold_core::generation_profile::reference_images_for_recipe(family, model);
+    let subject = mold_core::generation_profile::reference_subject_label(family, model);
+    if profile.mode == mold_core::ControlMode::Hidden {
+        anyhow::bail!(
+            "{}",
+            profile.reason.unwrap_or_else(|| {
+                mold_core::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()
+            })
+        );
+    }
+    let mut paths = Vec::with_capacity(references.len());
+    for reference in references {
+        if reference.kind != crate::commands::h3::ReferenceKind::Image {
+            anyhow::bail!(
+                "{subject} takes image references only; video= and audio= references are MiniMax H3 authoring"
+            );
+        }
+        paths.push(reference.path.to_string_lossy().into_owned());
+    }
+    if let Some(max) = profile.max_count {
+        if paths.len() > max as usize {
+            anyhow::bail!("{subject} supports at most {max} ordered reference images");
+        }
+    }
+    if !image.is_empty() {
+        // The `Exclusive` refusal is the server's own sentence, byte for
+        // byte (`generation_profile::validate_edit_images_against`), so a
+        // Klein user reads the same rule whichever door they walk into.
+        match profile.source_relation {
+            mold_core::generation_profile::ReferenceSourceRelation::Exclusive => {
+                anyhow::bail!("{subject} uses edit_images instead of source_image")
+            }
+            mold_core::generation_profile::ReferenceSourceRelation::Replaces => anyhow::bail!(
+                "{subject} takes its ordered references from either --image or --reference, not both"
+            ),
+            mold_core::generation_profile::ReferenceSourceRelation::Combines => {}
+        }
+    }
+    Ok(paths)
 }
 
 /// Reject a request the selected checkpoint's source-image contract (#772)
@@ -1092,6 +1162,17 @@ pub async fn run(
         );
     }
 
+    // One flag, two destinations. On H3 `--reference` is Ref2VA authoring and
+    // stays with `prepare_authoring`, which owns the upload session; on every
+    // other model it is the ordered reference group and is resolved here,
+    // before H3's authoring gate can refuse it as an H3-only option.
+    let reference_edit_paths = if is_h3 || references.is_empty() {
+        Vec::new()
+    } else {
+        reference_edit_image_paths(&family, &model, &references, &image)?
+    };
+    let h3_references: &[ReferenceArg] = if is_h3 { &references } else { &[] };
+
     let reference_client =
         (is_h3 && !references.is_empty()).then(|| crate::control::client_for_host(host.as_deref()));
     let mut h3_authoring = h3::prepare_authoring(
@@ -1105,7 +1186,7 @@ pub async fn run(
         first_frame.as_deref(),
         image.first().map(String::as_str),
         last_frame.as_deref(),
-        &references,
+        h3_references,
         reference_client.as_ref(),
     )?;
     let frames = h3_authoring.frames.or(frames);
@@ -1149,6 +1230,12 @@ pub async fn run(
     for extra_image in image.iter().skip(1) {
         validate_file_args_full(FileArgRefs {
             image: Some(extra_image.as_str()),
+            ..FileArgRefs::default()
+        })?;
+    }
+    for reference_path in &reference_edit_paths {
+        validate_file_args_full(FileArgRefs {
+            image: Some(reference_path.as_str()),
             ..FileArgRefs::default()
         })?;
     }
@@ -1224,17 +1311,33 @@ pub async fn run(
             })
             .collect::<Result<Vec<_>>>()?
     };
-    let ordered_images = family == "qwen-image-edit" || is_flux2_dev_model(&model);
+    let reference_profile =
+        mold_core::generation_profile::reference_images_for_recipe(&family, &model);
+    let ordered_images = image_args_are_ordered_references(&reference_profile);
     let source_image = if ordered_images {
         None
     } else {
         loaded_images.first().cloned()
     };
-    let edit_images = if ordered_images && !loaded_images.is_empty() {
+    let mut edit_images = if ordered_images && !loaded_images.is_empty() {
         Some(loaded_images)
     } else {
         None
     };
+    // `--reference` on a reference-capable recipe. Never mixed with `--image`
+    // on today's recipes — `reference_edit_image_paths` refuses that pairing
+    // for both `Replaces` and `Exclusive` — so the append is the whole
+    // contract a future `Combines` recipe would need.
+    if !reference_edit_paths.is_empty() {
+        let mut references = Vec::with_capacity(reference_edit_paths.len());
+        for path in &reference_edit_paths {
+            references
+                .push(std::fs::read(path).map_err(|e| {
+                    anyhow::anyhow!("failed to read reference image '{path}': {e}")
+                })?);
+        }
+        edit_images.get_or_insert_with(Vec::new).extend(references);
+    }
 
     // Read the identity reference. Secure-open, bound, and validate against
     // the request contract's decode limits BEFORE any request bytes exist —
@@ -2078,6 +2181,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::ENV_LOCK;
+    use std::str::FromStr;
 
     /// An extend carries its source frames in the clip it continues (#783),
     /// so the preflight has to count it — the same rule admission applies
@@ -2806,7 +2910,139 @@ mod tests {
     fn flux2_dev_rejects_stdin_reference_arg() {
         let error = validate_image_args_for_model("flux2", "flux2-dev:bf16", &[String::from("-")])
             .unwrap_err();
-        assert!(error.to_string().contains("do not support --image -"));
+        assert!(error.to_string().contains("does not support --image -"));
+    }
+
+    /// Klein renders from a source image OR from references, so `--image`
+    /// keeps meaning img2img there — the one behavioural difference from
+    /// [dev], and the reason `--reference` exists on this family at all.
+    #[test]
+    fn klein_keeps_image_as_a_single_source_image() {
+        assert!(
+            !image_args_are_ordered_references(
+                &mold_core::generation_profile::reference_images_for_recipe(
+                    "flux2",
+                    "flux2-klein:bf16",
+                )
+            ),
+            "Klein's --image is a source image, not the ordered group"
+        );
+        assert!(
+            validate_image_args_for_model("flux2", "flux2-klein:bf16", &[String::from("-")])
+                .is_ok(),
+            "an img2img source may still be piped in"
+        );
+        let error = validate_image_args_for_model(
+            "flux2",
+            "flux2-klein:bf16",
+            &[String::from("one.png"), String::from("two.png")],
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("multiple --image values"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reference_routes_to_ordered_edit_images_on_a_reference_capable_recipe() {
+        let references = vec![
+            ReferenceArg::from_str("person.png").unwrap(),
+            ReferenceArg::from_str("image=glasses.png").unwrap(),
+        ];
+        let paths =
+            reference_edit_image_paths("flux2", "flux2-klein:bf16", &references, &[]).unwrap();
+        assert_eq!(paths, vec!["person.png", "glasses.png"]);
+    }
+
+    #[test]
+    fn reference_is_refused_by_name_on_a_model_without_the_protocol() {
+        let references = vec![ReferenceArg::from_str("person.png").unwrap()];
+        let error =
+            reference_edit_image_paths("flux", "flux-dev:q4", &references, &[]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            mold_core::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON
+        );
+    }
+
+    #[test]
+    fn reference_bounds_the_group_at_the_family_ceiling() {
+        let references = vec![ReferenceArg::from_str("ref.png").unwrap(); 5];
+        let error =
+            reference_edit_image_paths("flux2", "flux2-klein:bf16", &references, &[]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "flux2-klein supports at most 4 ordered reference images"
+        );
+    }
+
+    #[test]
+    fn reference_refuses_a_non_image_kind_on_an_edit_recipe() {
+        let references = vec![ReferenceArg::from_str("video=clip.mp4").unwrap()];
+        let error =
+            reference_edit_image_paths("flux2", "flux2-klein:bf16", &references, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("takes image references only"),
+            "{error}"
+        );
+    }
+
+    /// The CLI refusal for `--reference` + `--image` on an `Exclusive` recipe
+    /// is the server validator's own sentence, byte for byte. Pinned against
+    /// `validate_edit_images_against` rather than against a literal, so the
+    /// two can never drift apart.
+    #[test]
+    fn klein_refuses_a_source_image_and_references_together_in_the_servers_words() {
+        let references = vec![ReferenceArg::from_str("ref.png").unwrap()];
+        let cli = reference_edit_image_paths(
+            "flux2",
+            "flux2-klein:bf16",
+            &references,
+            &[String::from("source.png")],
+        )
+        .unwrap_err()
+        .to_string();
+        let profile =
+            mold_core::generation_profile::reference_images_for_recipe("flux2", "flux2-klein:bf16");
+        // `GenerateRequest` has no `Default`; a JSON literal is the minimal
+        // builder every other CLI test uses.
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt":"a cat",
+                "model":"flux2-klein:bf16",
+                "width":1024,
+                "height":1024,
+                "steps":4,
+                "guidance":1.0
+            }"#,
+        )
+        .unwrap();
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        request.source_image = Some(png.clone());
+        request.edit_images = Some(vec![png]);
+        let server = mold_core::generation_profile::validate_edit_images_against(
+            &profile,
+            &mold_core::generation_profile::reference_subject_label("flux2", "flux2-klein:bf16"),
+            &request,
+        )
+        .unwrap_err();
+        assert_eq!(cli, server);
+    }
+
+    /// A `Replaces` recipe reads `--image` as the ordered group already, so
+    /// the two flags would be two names for one field.
+    #[test]
+    fn flux2_dev_refuses_image_and_reference_together() {
+        let references = vec![ReferenceArg::from_str("ref.png").unwrap()];
+        let error = reference_edit_image_paths(
+            "flux2",
+            "flux2-dev:bf16",
+            &references,
+            &[String::from("other.png")],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not both"), "{error}");
     }
 
     #[test]

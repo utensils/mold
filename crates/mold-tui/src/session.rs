@@ -698,6 +698,7 @@ mod tests {
             source_image_path: None,
             source_image_recall: None,
             reference_paths: Vec::new(),
+            edit_image_paths: Vec::new(),
             identity_image_path: None,
             id_weight: mold_core::identity::ID_WEIGHT_DEFAULT,
             id_start_step: mold_core::identity::ID_START_STEP_DEFAULT,

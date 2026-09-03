@@ -1379,10 +1379,11 @@ Examples:
         #[arg(long, help_heading = "MiniMax H3", value_hint = ValueHint::FilePath)]
         last_frame: Option<std::path::PathBuf>,
 
-        /// Ordered MiniMax H3 Ref2VA input as KIND=PATH, where KIND is image,
-        /// video, or audio. Repeat in semantic order. Files use authenticated,
-        /// request-bound streaming upload and are never placed inline in JSON.
-        #[arg(long, value_name = "KIND=PATH", help_heading = "MiniMax H3")]
+        /// Ordered reference image, repeatable in semantic order. A bare PATH
+        /// is an image; MiniMax H3 Ref2VA also takes video=PATH and
+        /// audio=PATH, whose files use authenticated, request-bound streaming
+        /// upload and are never placed inline in JSON.
+        #[arg(long, value_name = "PATH", help_heading = "Reference images")]
         reference: Vec<commands::h3::ReferenceArg>,
 
         /// LTX-2 pipeline mode.

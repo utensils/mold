@@ -51,6 +51,10 @@ mold run flux-dev:q4 "a sunset over mountains" --seed 42
 # Edit an image
 mold run qwen-image-edit-2511:q4 "make the chair red" --image chair.png
 
+# Edit from reference images (repeat --reference; order is semantic)
+mold run flux2-klein:bf16 "the woman from image 1 wearing the glasses from image 2" \
+  --reference person.jpg --reference glasses.jpg
+
 # Generate video
 mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 

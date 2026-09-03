@@ -47,6 +47,13 @@ pub struct ModelCapabilities {
     /// family-only catalog (no profile) offers no mesh rows at all rather
     /// than inventing bounds the server might not honour.
     pub mesh: Option<mold_core::MeshCapabilitiesProfile>,
+    /// The ordered reference-image contract the selected recipe advertises
+    /// (`capabilities.reference_images`), copied verbatim. `Some` is what
+    /// shows the References row; `None` means this model has no reference
+    /// protocol and `GenerateRequest.edit_images` is refused here. Distinct
+    /// from `supports_references`, which is MiniMax H3's uploaded Ref2VA
+    /// group — a different field on a different wire.
+    pub reference_images: Option<mold_core::generation_profile::ReferenceImagesProfile>,
     /// Default scheduler for UNet-based models.
     pub default_scheduler: Option<Scheduler>,
 }
@@ -75,6 +82,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         };
     }
@@ -97,6 +105,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sdxl" => ModelCapabilities {
@@ -117,6 +126,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sd3" | "sd3.5" | "stable-diffusion-3" => ModelCapabilities {
@@ -137,6 +147,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "wuerstchen" | "wuerstchen-v2" => ModelCapabilities {
@@ -157,6 +168,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "flux" => ModelCapabilities {
@@ -177,6 +189,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
@@ -197,6 +210,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "z-image" => ModelCapabilities {
@@ -217,6 +231,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "qwen-image" | "qwen_image" => ModelCapabilities {
@@ -237,6 +252,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "qwen-image-edit" => ModelCapabilities {
@@ -257,6 +273,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "ltx-video" => ModelCapabilities {
@@ -277,6 +294,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         "ltx2" => ModelCapabilities {
@@ -297,6 +315,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: true,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         // Wan differs from both LTX entries on three axes, and the catch-all
@@ -325,6 +344,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: true,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         // A source image is REQUIRED here, not optional: it is the family's
@@ -352,6 +372,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
         _ => ModelCapabilities {
@@ -372,6 +393,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            reference_images: None,
             default_scheduler: None,
         },
     }
@@ -405,6 +427,15 @@ pub fn capabilities_for_model(
     caps.supports_references = mold_core::minimax_h3::is_family(family)
         && mold_core::minimax_h3::task_for_model(model)
             == Some(mold_core::minimax_h3::Task::Ref2va);
+    // The static answer, from the same core function the server builds its
+    // recipe from. `apply_recipe_capabilities` replaces it with the selected
+    // recipe's own block when one is available — a remote host is the
+    // authority on what it will accept — but a catalog with no profile still
+    // offers the row on a family that has the protocol, rather than hiding a
+    // control the host would honour.
+    caps.reference_images = visible_reference_images(
+        mold_core::generation_profile::reference_images_for_recipe(family, model),
+    );
     // H3 has no unconditional/CFG branch. Contradictory checkpoint metadata
     // may not expose an editor for conditioning the model cannot consume.
     if !mold_core::minimax_h3::is_family(family) {
@@ -443,6 +474,17 @@ pub fn capabilities_for_model(
     caps
 }
 
+/// Keep a reference block only while it describes a protocol this model
+/// actually has. A `Hidden` block is the contract's way of saying "no
+/// reference editing here, and here is the sentence to show instead"; the
+/// form has nowhere to put that sentence, so it becomes `None` and the row
+/// simply does not exist.
+fn visible_reference_images(
+    profile: mold_core::generation_profile::ReferenceImagesProfile,
+) -> Option<mold_core::generation_profile::ReferenceImagesProfile> {
+    (profile.mode != mold_core::ControlMode::Hidden).then_some(profile)
+}
+
 /// Layer the resolved generation profile's capability block over
 /// [`capabilities_for_model`]'s answer. Applied LAST, so the profile outranks
 /// every family and guidance fallback.
@@ -462,6 +504,14 @@ pub fn apply_recipe_capabilities(
     recipe: Option<&mold_core::GenerationCapabilitiesProfile>,
 ) {
     caps.mesh = recipe.and_then(|recipe| recipe.mesh.clone());
+    // `reference_images` is `Option` on the wire and its ABSENCE means an
+    // older server — one whose flux2-dev and qwen-image-edit references still
+    // work. So a profile that does not carry the block leaves
+    // `capabilities_for_model`'s static answer standing; only a profile that
+    // does carry one outranks it.
+    if let Some(reference_images) = recipe.and_then(|recipe| recipe.reference_images.clone()) {
+        caps.reference_images = visible_reference_images(reference_images);
+    }
     if let Some(recipe) = recipe.filter(|recipe| recipe.mesh.is_some()) {
         caps.supports_strength = recipe.supports_strength;
         // Two capabilities in the family table, one signal in the profile:
@@ -1076,5 +1126,101 @@ mod tests {
         apply_recipe_capabilities(&mut no_profile, None);
         assert!(no_profile.mesh.is_none());
         assert!(no_profile.supports_strength);
+    }
+
+    /// The References row is the recipe's `reference_images` block and
+    /// nothing else. Klein and [dev] both have the protocol and differ only
+    /// in what it does to the Source row; a family without it has no row at
+    /// all; and H3's own uploaded group stays a separate capability.
+    #[test]
+    fn the_reference_row_follows_the_recipes_reference_block() {
+        let klein = capabilities_for_model("flux2", "flux2-klein:bf16", None, None, None, None);
+        let profile = klein
+            .reference_images
+            .as_ref()
+            .expect("Klein advertises the reference protocol");
+        assert_eq!(
+            profile.source_relation,
+            mold_core::generation_profile::ReferenceSourceRelation::Exclusive
+        );
+        assert!(!profile.primary_is_target);
+        assert!(
+            crate::ui::create_form::section_fields(
+                crate::ui::create_form::AdvSection::Source,
+                &klein
+            )
+            .contains(&crate::app::ParamField::ReferenceImages),
+            "the block is what puts the row on the form"
+        );
+
+        let dev = capabilities_for_model("flux2", "flux2-dev:bf16", None, None, None, None);
+        assert_eq!(
+            dev.reference_images
+                .as_ref()
+                .expect("flux2-dev advertises it too")
+                .source_relation,
+            mold_core::generation_profile::ReferenceSourceRelation::Replaces
+        );
+
+        let qwen = capabilities_for_model(
+            "qwen-image-edit",
+            "qwen-image-edit-2511:q4",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            qwen.reference_images
+                .as_ref()
+                .expect("the edit family advertises it")
+                .primary_is_target,
+            "the first image is the edit target"
+        );
+
+        let flux = capabilities_for_model("flux", "flux-dev:q4", None, None, None, None);
+        assert!(
+            flux.reference_images.is_none(),
+            "a Hidden block is no row, not an empty one"
+        );
+        assert!(
+            !flux.supports_references,
+            "H3's uploaded group is a different capability"
+        );
+    }
+
+    /// A profile that carries the block outranks the static answer; one that
+    /// does NOT carry it is an older server whose reference support still
+    /// works, so the static answer stands rather than being read as a
+    /// refusal.
+    #[test]
+    fn a_profile_without_the_block_leaves_the_static_reference_answer_standing() {
+        let mut recipe = mesh_recipe();
+        recipe.reference_images = None;
+        let mut caps = capabilities_for_model("flux2", "flux2-klein:bf16", None, None, None, None);
+        apply_recipe_capabilities(&mut caps, Some(&recipe));
+        assert!(
+            caps.reference_images.is_some(),
+            "absence is an older server, never a refusal"
+        );
+
+        recipe.reference_images = Some(mold_core::generation_profile::ReferenceImagesProfile {
+            mode: mold_core::ControlMode::Hidden,
+            required: false,
+            max_count: Some(0),
+            primary_is_target: false,
+            source_relation: mold_core::generation_profile::ReferenceSourceRelation::Replaces,
+            max_pixels_single: None,
+            max_pixels_multi: None,
+            reason: Some(
+                mold_core::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string(),
+            ),
+        });
+        let mut caps = capabilities_for_model("flux2", "flux2-klein:bf16", None, None, None, None);
+        apply_recipe_capabilities(&mut caps, Some(&recipe));
+        assert!(
+            caps.reference_images.is_none(),
+            "a host that says it cannot take references is believed"
+        );
     }
 }
