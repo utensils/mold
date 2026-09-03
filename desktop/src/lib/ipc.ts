@@ -10,9 +10,9 @@ import type { GalleryImage, OutputMetadata } from "./api/types";
 import type { ApiTarget } from "./api/client";
 import type { DesktopImageImport } from "./desktopImageDrop";
 import type { NotificationAction } from "./notificationAction";
-import type { Theme, ThemeFamily } from "./theme";
+import type { ThemeId } from "./theme";
 
-export type { Theme, ThemeFamily } from "./theme";
+export type { ThemeId } from "./theme";
 
 /**
  * Typed wrappers around Tauri IPC. In a plain browser (`bun run dev` /
@@ -97,9 +97,9 @@ export interface AppSettings {
   lastRoute: string | null;
   /** Env applied to the embedded engine at start (Performance knobs). */
   engineEnv: Record<string, string>;
-  theme: Theme;
-  /** Visual palette. Appearance remains independent so every family supports system/dark/light. */
-  themeFamily: ThemeFamily;
+  theme: ThemeId;
+  /** Follow the OS appearance: paint `theme` or its light/dark partner. */
+  matchSystem: boolean;
   notifications: boolean;
   dockBadge: boolean;
   restoreLastRoute: boolean;
@@ -172,8 +172,8 @@ const browserFallbackSettings = (): AppSettings => ({
   remoteApiKey: null,
   lastRoute: null,
   engineEnv: {},
-  theme: "dark",
-  themeFamily: "safelight",
+  theme: "mocha",
+  matchSystem: false,
   notifications: true,
   dockBadge: true,
   restoreLastRoute: false,

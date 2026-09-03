@@ -762,7 +762,6 @@ afterEach(() => {
   wrapper = null;
   document.body.innerHTML = "";
   delete document.documentElement.dataset.theme;
-  delete document.documentElement.dataset.themeFamily;
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
   Reflect.deleteProperty(globalThis, "indexedDB");
@@ -6343,8 +6342,8 @@ describe("MobileApp generation queue", () => {
     localStorage.setItem(
       "mold.mobile.settings.v1",
       JSON.stringify({
-        theme: "system",
-        themeFamily: "safelight",
+        theme: "safelight",
+        matchSystem: true,
         autoSavePhotos: false,
       }),
     );
@@ -8067,21 +8066,21 @@ describe("MobileApp settings", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
 
-    await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
-    await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);
+    await wrapper.get('input[name="mobile-theme"][value="porcelain"]').setValue(true);
     await flushPromises();
 
-    expect(document.documentElement.dataset.themeFamily).toBe("safelight");
-    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("porcelain");
     expect(JSON.parse(localStorage.getItem("mold.mobile.settings.v1") ?? "{}")).toEqual({
-      theme: "light",
-      themeFamily: "safelight",
+      theme: "porcelain",
+      matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
     });
 
-    await wrapper.get('input[name="mobile-theme-appearance"][value="system"]').setValue(true);
-    expect(document.documentElement.dataset.theme).toBeUndefined();
+    await wrapper.get('input[name="mobile-theme-match-system"]').setValue(true);
+    expect(JSON.parse(localStorage.getItem("mold.mobile.settings.v1") ?? "{}").matchSystem).toBe(
+      true,
+    );
   });
 
   it("opens host management from Settings", async () => {
@@ -13293,7 +13292,7 @@ describe("MobileApp Create File under", () => {
   it("drops the ghost tag when the Settings auto-tag preference is off", async () => {
     localStorage.setItem(
       "mold.mobile.settings.v1",
-      JSON.stringify({ theme: "system", themeFamily: "safelight", autoTagTitle: false }),
+      JSON.stringify({ theme: "safelight", matchSystem: true, autoTagTitle: false }),
     );
     await openCreateWithFiling();
 

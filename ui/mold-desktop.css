@@ -1,0 +1,55 @@
+/*
+ * Mold Studio — desktop GUI additions. ADDITIVE ONLY: loads after tokens.css
+ * and invents no colour. Every value is either a layout metric measured off
+ * the mold studio desktop mock or a semantic alias onto a token that already
+ * exists. See docs/design/README.md §04 (shell anatomy) and §06 (components).
+ *
+ * Rules the GUI keeps:
+ *   · Radius: --mold-radius-1 inner rows, --mold-radius-2 controls, chips and
+ *     cards, --mold-radius-3 window and dialog. Never a pill. Knobs and dots
+ *     are the ONLY circles.
+ *   · Every panel keeps a 1px --mold-border. Focus changes border COLOUR to
+ *     --mold-border-focus; no glow, no second ring.
+ *   · Elevation: --mold-shadow-md on the window and dialogs only. Inside the
+ *     window, depth is surface value alone.
+ *   · Accent: one. --mold-state-* are status, not accents.
+ *   · Icons: 24×24, fill:none, stroke:currentColor, stroke-width:2, round
+ *     caps/joins (ui/icons.ts). Glyphs ✓ ★ ⠂ • ! ↓ ▼ are typed in mono, never
+ *     redrawn as SVG.
+ *   · Numbers are mono with tabular figures; prose is sans. A row shows plain
+ *     words first and the mono value second.
+ */
+
+:root {
+  /* ── Shell metrics ─────────────────────────────────────────────── */
+  --mold-shell-toolbar-h: 44px; /* unified titlebar, traffic lights inline */
+  --mold-shell-viewbar-h: 40px; /* per-view toolbar under the titlebar     */
+  --mold-shell-statusbar-h: 26px; /* mono readouts + key hints             */
+  --mold-shell-sidebar-w: 270px; /* nav + machine card + queue             */
+  --mold-shell-inspector-w: 300px; /* right pane, tabbed                   */
+  --mold-shell-secondary-w: 326px; /* master list in master/detail views   */
+  --mold-shell-settingsnav-w: 200px;
+
+  /* ── Control heights (only three) ──────────────────────────────── */
+  --mold-ctl-sm: 24px; /* icon buttons in dense rows, chips */
+  --mold-ctl-md: 26px; /* toolbar buttons, segmented items  */
+  --mold-ctl-lg: 32px; /* primary action, form fields       */
+  --mold-row-h: 36px; /* nav row / list row minimum hit target */
+  --mold-row-h-table: 52px;
+
+  /* ── Semantic surface roles (aliases, no new colour) ───────────── */
+  --mold-chrome: var(--mold-bg-deep); /* toolbars, sidebar, status bar */
+  --mold-canvas: var(--mold-bg-crust); /* image bed only               */
+  --mold-panel: var(--mold-bg-deep); /* cards inside a view            */
+  --mold-panel-raised: var(--mold-surface); /* dialogs, active queue card */
+  --mold-row-hover: var(--mold-surface);
+  --mold-row-selected: var(--mold-surface-2);
+
+  /* ── Job / queue state colour (aliases) ────────────────────────── */
+  --mold-state-active: var(--mold-blue); /* being made now       */
+  --mold-state-waiting: var(--mold-text-dim); /* queued           */
+  --mold-state-done: var(--mold-success); /* finished             */
+  --mold-state-blocked: var(--mold-warning); /* needs a download  */
+  --mold-state-failed: var(--mold-error);
+  --mold-state-cost: var(--mold-warning); /* anything that bills  */
+}

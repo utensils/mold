@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsPage from "./SettingsPage.vue";
 import settingsPageSource from "./SettingsPage.vue?raw";
-import { theme, themeFamily } from "../lib/theme";
+import { matchSystem, theme } from "../lib/theme";
 import { resetNotifications, useNotifications } from "../lib/toasts";
 import { originHost } from "../lib/hostRegistry";
 import type { ServerStatus } from "../types";
@@ -117,8 +117,8 @@ describe("SettingsPage", () => {
   });
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    theme.value = "system";
-    themeFamily.value = "mold";
+    theme.value = "safelight";
+    matchSystem.value = false;
     vi.restoreAllMocks();
   });
 
@@ -225,26 +225,18 @@ describe("SettingsPage", () => {
     expect(wrapper.text()).toContain("disabled");
   });
 
-  it("persists the theme family through the shared lib/theme refs", async () => {
+  it("persists the theme through the shared lib/theme refs", async () => {
     const wrapper = mount(SettingsPage);
-    const button = wrapper
-      .get('[data-test="seg-theme"]')
-      .findAll("button")
-      .find((b) => b.text() === "Safelight");
-    await button?.trigger("click");
+    await wrapper.get('[data-test="theme-select"]').setValue("graphite");
     await flushPromises();
-    expect(themeFamily.value).toBe("safelight");
+    expect(theme.value).toBe("graphite");
   });
 
-  it("persists the appearance through the shared lib/theme refs", async () => {
+  it("persists match-system through the shared lib/theme refs", async () => {
     const wrapper = mount(SettingsPage);
-    const button = wrapper
-      .get('[data-test="seg-appearance"]')
-      .findAll("button")
-      .find((b) => b.text() === "Dark");
-    await button?.trigger("click");
+    await wrapper.get('[data-test="theme-match-system"]').trigger("click");
     await flushPromises();
-    expect(theme.value).toBe("dark");
+    expect(matchSystem.value).toBe(true);
   });
 
   it("stores the Hugging Face token on the server and shows a masked state", async () => {
