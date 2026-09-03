@@ -1576,8 +1576,12 @@ function syncSourceCanvas(
   );
   const replaced = image.base64 !== previous.base64;
   // A reference strip is not a canvas: the size comes from the model, never
-  // from whichever picture sits first in the order.
-  const isReferenceConditioning = requestConditioning.value === "references";
+  // from whichever picture sits first in the order. Qwen edit is the
+  // exception the profile itself names — `primary_is_target` means image 0 IS
+  // the picture being edited, so its canvas is source-driven.
+  const isReferenceConditioning =
+    requestConditioning.value === "references" &&
+    !capabilities.value.referenceImages?.primaryIsTarget;
   // A canvasless recipe (a 3-D mesh) has no canvas for the source to steer:
   // its zero size is the recipe's own default and must stay on the wire.
   const canvasless = recipeIsCanvasless(

@@ -1984,8 +1984,12 @@ function applyMobileSourceResolution(
     form.pipeline,
   );
   const replaced = base64 !== previous.base64;
-  // A reference strip is not a canvas: the size comes from the model.
-  if (requestConditioning.value !== "references") {
+  // A reference strip is not a canvas: the size comes from the model. Qwen
+  // edit is the exception the profile names (`primary_is_target`).
+  if (
+    requestConditioning.value !== "references" ||
+    caps.value.referenceImages?.primaryIsTarget === true
+  ) {
     const preserveReplacement = replaced && preservedSourceReplacement === base64;
     const nextResolution = resolveSourceCanvasTransition({
       source: resolution,
