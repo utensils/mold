@@ -20,4 +20,5 @@
   opening image, end frame, or a MiniMax H3 slot) instead of always overwriting
   the source or attachment slot; a drop onto a references strip appends rather
   than replacing it, and H3 drops reach the H3 authoring fields. On web, a file
-  dropped outside a well no longer navigates the browser away from Studio.
+  dropped outside a well no longer navigates the browser away from Studio, and a
+  drop lands on the well you aimed at, the References strip included.
