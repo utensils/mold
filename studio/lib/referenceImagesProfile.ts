@@ -14,30 +14,20 @@
  * `tests/fixtures/flux2/reference-parity-v1.json`, read by both a mold-core
  * test and `flux2ReferenceParity.test.ts`.
  *
- * INTERIM: the two WIRE types below are hand-written to the field names of
- * `ReferenceImagesProfile` / `ReferenceSourceRelation` in
- * `crates/mold-core/src/generation_profile.rs`. When the Rust workstream
- * lands, `studio/lib/generated/generationProfileV1.ts` gains both and the two
- * declarations here become re-exports of the generated ones — this file stays
- * the import site so nothing else has to change.
+ * The two WIRE types are the GENERATED ones (`ts-rs` from
+ * `crates/mold-core/src/generation_profile.rs`); this module re-exports them
+ * so every surface has one import site for the block and its projection.
  */
 
-/** How `edit_images` relates to `source_image` on the same request. */
-export type ReferenceSourceRelation = "replaces" | "exclusive" | "combines";
+export type {
+  ReferenceImagesProfile,
+  ReferenceSourceRelation,
+} from "./generated/generationProfileV1";
 
-/** The wire block, kebab-case exactly as `mold-core` serializes it. */
-export interface ReferenceImagesProfile {
-  mode: "adjustable" | "fixed" | "hidden";
-  required: boolean;
-  /** Absent means no count bound (Qwen edit); `0` accompanies `hidden`. */
-  max_count?: number | null;
-  /** The first image is the edit target rather than a peer reference. */
-  primary_is_target: boolean;
-  source_relation: ReferenceSourceRelation;
-  max_pixels_single?: number | null;
-  max_pixels_multi?: number | null;
-  reason?: string | null;
-}
+import type {
+  ReferenceImagesProfile,
+  ReferenceSourceRelation,
+} from "./generated/generationProfileV1";
 
 /** The client-side projection every surface reads. `null` where the recipe
  * (or the legacy rule standing in for an older host) offers no references. */
@@ -77,14 +67,12 @@ export function referenceImagesFromProfile(
 
 /**
  * Read `capabilities.reference_images` off an advertised recipe's capability
- * block. INTERIM: the cast disappears with the generated type; the ONE read
- * site is here so the swap is a one-line edit.
+ * block. `null` is an OLDER SERVER, which is why this is a separate question
+ * from a `hidden` block above.
  */
 export function advertisedReferenceImages(
-  capabilities: object | null | undefined,
+  capabilities:
+    { reference_images?: ReferenceImagesProfile | null } | null | undefined,
 ): ReferenceImagesProfile | null {
-  const block = (
-    capabilities as { reference_images?: ReferenceImagesProfile | null } | null
-  )?.reference_images;
-  return block ?? null;
+  return capabilities?.reference_images ?? null;
 }

@@ -154,7 +154,9 @@ describe("SourceMediaWells for an exclusive (klein) plan", () => {
 
   it("renders the same Source well the single plan does", () => {
     const wrapper = factory(klein);
-    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(
+      true,
+    );
     expect(wrapper.text()).toContain("Source");
     expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
     expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
