@@ -33,10 +33,19 @@ vi.mock("../../lib/api/client", () => ({
   apiJson: vi.fn(),
   apiJsonTo,
 }));
+// Only the mesh-poster describe block below mounts AuthedMedia unstubbed;
+// every other test in this file stubs it out, so these mocks never fire.
+vi.mock("../../lib/gallery/media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/gallery/media")>()),
+  authedMediaUrl: vi.fn().mockResolvedValue("blob:poster"),
+  fullSizeMediaUrl: vi.fn().mockResolvedValue("blob:mesh-src"),
+  prepareNativeThumbnail: vi.fn().mockResolvedValue(null),
+}));
 
 import Lightbox from "./Lightbox.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 import type { GalleryImage } from "../../lib/api/types";
 
@@ -359,5 +368,48 @@ describe("Lightbox — mesh export geometry", () => {
   it("still never offers the stored GLB", () => {
     const wrapper = mountMesh(["glb", "obj"], geometry);
     expect(wrapper.find("[data-test='mesh-export-glb']").exists()).toBe(false);
+  });
+});
+
+/**
+ * The desktop Lightbox promises a poster while a mesh loads (and keeps it on
+ * failure); this guards that the print's thumbnail actually reaches
+ * `MeshViewer`, not just that `AuthedMedia` accepts a `poster` prop. Every
+ * test above stubs `AuthedMedia` out entirely, so it never exercises this —
+ * these two mount the real component tree instead.
+ */
+describe("Lightbox — mesh poster", () => {
+  it("passes a resolved poster to the mesh viewer", async () => {
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: meshItem,
+        index: 0,
+        count: 1,
+        video: false,
+        mesh: true,
+        target,
+        meshExportFormats: [],
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.findComponent(MeshViewer).exists()).toBe(true));
+    await flushPromises();
+
+    const viewer = wrapper.findComponent(MeshViewer);
+    expect(viewer.props("poster")).toBeTruthy();
+  });
+
+  it("leaves the poster undefined for a non-mesh print", async () => {
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: { ...meshItem, filename: "print-0001.png", format: "png" },
+        index: 0,
+        count: 1,
+        video: false,
+        target,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.findComponent(MeshViewer).exists()).toBe(false);
   });
 });

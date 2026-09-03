@@ -582,6 +582,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :cache-key="cacheKey"
             :video="video"
             :mesh="mesh"
+            :poster-path="galleryMediaPath(item.filename, source, true, fromTrash)"
             :controls="video"
             :alt="meta.prompt"
             class="!object-contain"

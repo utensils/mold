@@ -3,6 +3,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseGlb } from "../lib/glb";
 import { assemble, buildDocument, triangleGlb } from "../lib/glbFixture";
 import { meshStatsLabel } from "../lib/meshControls";
+import {
+  homeCamera,
+  multiply,
+  orthographicScale,
+  POSTER_MARGIN,
+  rotationX,
+  rotationY,
+  sweepExtent,
+  translation,
+} from "../lib/meshViewerCamera";
 import MeshViewer from "./MeshViewer.vue";
 
 /*
@@ -204,12 +214,14 @@ const GL_NAMES = new Map(
 interface GlRecorder {
   log: string[];
   modelViews: number[][];
+  projections: number[][];
   restore: () => void;
 }
 
 function stubWebgl(extra: Record<string, unknown> = {}): GlRecorder {
   const log: string[] = [];
   const modelViews: number[][] = [];
+  const projections: number[][] = [];
   const named = new Map<object, string>();
   const overrides: Record<string, unknown> = {
     deleteBuffer: () => {
@@ -235,7 +247,10 @@ function stubWebgl(extra: Record<string, unknown> = {}): GlRecorder {
       _transpose: boolean,
       value: Float32Array,
     ) => {
+      // `getUniformLocation` below hands back the uniform's own name, so the
+      // two matrices are told apart by the name the component asked for.
       if (location === "uModelView") modelViews.push(Array.from(value));
+      if (location === "uProjection") projections.push(Array.from(value));
     },
     uniform1f: (location: string, value: number) => {
       log.push(`uniform1f:${location}:${value}`);
@@ -283,7 +298,12 @@ function stubWebgl(extra: Record<string, unknown> = {}): GlRecorder {
     .mockImplementation(((kind: string) =>
       kind === "webgl2" ? gl : null) as never);
 
-  return { log, modelViews, restore: () => getContext.mockRestore() };
+  return {
+    log,
+    modelViews,
+    projections,
+    restore: () => getContext.mockRestore(),
+  };
 }
 
 interface RafHarness {
@@ -746,5 +766,180 @@ describe("MeshViewer auto-rotation", () => {
     expect(raf.cancelled.length).toBeGreaterThan(0);
     expect(raf.pending()).toBe(0);
     gl.restore();
+  });
+});
+
+/*
+ * The home view is a CONTRACT, not a preference: the gallery thumbnail is the
+ * server's poster, turntable frame 0 is the same pixels, and this viewer's
+ * first frame has to be that picture too. These assertions read the matrices
+ * the component actually hands the GPU and rebuild them from the shared
+ * `meshViewerCamera` definitions the server's `poster.rs` is pinned against.
+ */
+describe("MeshViewer camera parity", () => {
+  const HOME = homeCamera();
+
+  /** The fixture's bounding-box centre, radius and sweep extent. */
+  function fixtureFrame(): {
+    center: [number, number, number];
+    radius: number;
+    extent: number;
+  } {
+    const mesh = parseGlb(triangleGlb());
+    const { min, max } = mesh.bounds;
+    const center: [number, number, number] = [
+      (min[0] + max[0]) / 2,
+      (min[1] + max[1]) / 2,
+      (min[2] + max[2]) / 2,
+    ];
+    const radius = Math.max(
+      Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2,
+      1e-4,
+    );
+    return {
+      center,
+      radius,
+      extent: sweepExtent(mesh.positions, center, HOME.pitch),
+    };
+  }
+
+  /** `T(0,0,-d) · Rx(pitch) · Ry(yaw) · T(-centre)`, the viewer's modelView. */
+  function expectedModelView(
+    yaw: number,
+    pitch: number,
+    distance: number,
+    center: [number, number, number],
+  ): Float32Array {
+    return multiply(
+      multiply(
+        translation(0, 0, -distance),
+        multiply(rotationX(pitch), rotationY(yaw)),
+      ),
+      translation(-center[0], -center[1], -center[2]),
+    );
+  }
+
+  function expectMatrix(actual: number[] | undefined, expected: Float32Array) {
+    expect(actual).toBeDefined();
+    for (let i = 0; i < 16; i += 1) {
+      expect(actual?.[i]).toBeCloseTo(expected[i] ?? 0, 5);
+    }
+  }
+
+  it("projects orthographically, framed to the sweep extent at the poster margin", async () => {
+    const gl = stubWebgl();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+
+    const canvas = wrapper.get("[data-test=mesh-viewer-canvas]")
+      .element as HTMLCanvasElement;
+    const { extent } = fixtureFrame();
+    const scale = orthographicScale(
+      extent,
+      canvas.width,
+      canvas.height,
+      POSTER_MARGIN,
+    );
+    expect(scale).toBeGreaterThan(0);
+
+    const projection = gl.projections[0];
+    expect(projection).toBeDefined();
+    // No perspective divide anywhere in the matrix.
+    expect(projection?.[11]).toBe(0);
+    expect(projection?.[15]).toBe(1);
+    // The half-extents ARE the fit: `1 / halfWidth` down the diagonal.
+    expect(projection?.[0]).toBeCloseTo(1 / (canvas.width / 2 / scale), 5);
+    expect(projection?.[5]).toBeCloseTo(1 / (canvas.height / 2 / scale), 5);
+    // The margin the server leaves is the margin drawn here: the mesh's
+    // extent lands at `1 - POSTER_MARGIN` of the half-frame.
+    expect(extent * scale).toBeCloseTo(
+      (Math.min(canvas.width, canvas.height) / 2) * (1 - POSTER_MARGIN),
+      5,
+    );
+
+    gl.restore();
+    wrapper.unmount();
+  });
+
+  it("opens on the poster's own camera", async () => {
+    const gl = stubWebgl();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+
+    const { center, radius } = fixtureFrame();
+    expectMatrix(
+      gl.modelViews[0],
+      expectedModelView(HOME.yaw, HOME.pitch, radius * 3, center),
+    );
+
+    gl.restore();
+    wrapper.unmount();
+  });
+
+  it("turns the mesh by the drag distance and comes back home on 0", async () => {
+    const gl = stubWebgl();
+    const raf = stubRaf();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+
+    const { center, radius } = fixtureFrame();
+    const canvas = wrapper.get("[data-test=mesh-viewer-canvas]");
+    await canvas.trigger("pointerdown", {
+      pointerId: 1,
+      clientX: 0,
+      clientY: 0,
+    });
+    await canvas.trigger("pointermove", {
+      pointerId: 1,
+      clientX: 50,
+      clientY: 0,
+    });
+    raf.run(16);
+    // +50 px to the right at 0.008 rad/px: the yaw rises by 0.4, which lowers
+    // the server-frame azimuth — the direction the turntable now sweeps.
+    expectMatrix(
+      gl.modelViews.at(-1),
+      expectedModelView(HOME.yaw + 0.4, HOME.pitch, radius * 3, center),
+    );
+
+    await canvas.trigger("keydown", { key: "0" });
+    raf.run(32);
+    expectMatrix(
+      gl.modelViews.at(-1),
+      expectedModelView(HOME.yaw, HOME.pitch, radius * 3, center),
+    );
+
+    gl.restore();
+    wrapper.unmount();
+  });
+
+  it("keeps the zoom keys pointing the way they always did", async () => {
+    const gl = stubWebgl();
+    const raf = stubRaf();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+
+    const canvas = wrapper.get("[data-test=mesh-viewer-canvas]");
+    const homeHalfWidth = 1 / (gl.projections[0]?.[0] ?? 1);
+
+    await canvas.trigger("keydown", { key: "+" });
+    raf.run(16);
+    const zoomedIn = 1 / (gl.projections.at(-1)?.[0] ?? 1);
+    // Zooming in shows LESS of the world, so the half-extent shrinks.
+    expect(zoomedIn).toBeLessThan(homeHalfWidth);
+
+    await canvas.trigger("keydown", { key: "-" });
+    await canvas.trigger("keydown", { key: "-" });
+    raf.run(32);
+    expect(1 / (gl.projections.at(-1)?.[0] ?? 1)).toBeGreaterThan(
+      homeHalfWidth,
+    );
+
+    gl.restore();
+    wrapper.unmount();
   });
 });
