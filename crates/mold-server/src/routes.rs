@@ -8870,7 +8870,11 @@ async fn import_gallery_file(
                         backend: None,
                     },
                 )
-                .map(|record| Box::new(record.to_gallery_image()))
+                .map(|record| {
+                    let mut image = record.to_gallery_image();
+                    crate::thumbnails::stamp_poster_revision(&mut image);
+                    Box::new(image)
+                })
             });
             events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename_for_task.clone(),
@@ -8945,7 +8949,11 @@ async fn import_gallery_file(
                 .as_ref()
                 .as_ref()
                 .and_then(|db| db.get(&output_dir, &filename).ok().flatten())
-                .map(|record| Box::new(record.to_gallery_image()));
+                .map(|record| {
+                    let mut image = record.to_gallery_image();
+                    crate::thumbnails::stamp_poster_revision(&mut image);
+                    Box::new(image)
+                });
             state.events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename.clone(),
                 image,
@@ -9980,6 +9988,13 @@ fn gallery_list_response(
     images: Vec<mold_core::GalleryImage>,
     only: Option<&str>,
 ) -> Result<Response, ApiError> {
+    // Every LISTING exit is here; the row-building helpers
+    // (`queue::gallery_image_with_filing`,
+    // `gallery_organization::enriched_gallery_image`) stamp their own
+    // single-row exits. The stamp is idempotent, so a row that passes through
+    // both is still correct.
+    let mut images = images;
+    crate::thumbnails::stamp_poster_revision_all(&mut images);
     let images = match only {
         Some(filename) => images
             .into_iter()
@@ -10268,7 +10283,11 @@ async fn render_gallery_thumbnail(
     let source_metadata = tokio::fs::metadata(&source_path)
         .await
         .map_err(|error| ApiError::internal(format!("failed to stat gallery media: {error}")))?;
-    let media_version = file_media_version(&source_metadata);
+    // Revision-suffixed for a mesh, whose tile is RENDERED from the geometry
+    // rather than decoded out of the file, so the poster changes while the
+    // file's mtime and size do not. Every client cache downstream is keyed on
+    // this opaque value.
+    let media_version = media_version_for(&clean_name, &source_metadata);
     let etag = format!("\"thumb-{media_version}{}\"", variant.etag_suffix());
     // A placeholder is not the print's tile — it is what this server could
     // answer right now. Tagging it apart from the real poster is what lets a
@@ -10289,13 +10308,18 @@ async fn render_gallery_thumbnail(
     // save time — there is nothing in a WAV for a raster decoder to read, so
     // a missing cache entry goes straight to the placeholder.
     let is_audio = lower.ends_with(".wav");
-    // A mesh keeps audio's sidecar NAME (`<file>.png`, not the versioned
-    // cache path) because both are written at save time by whichever process
-    // generated the print. Where they part company is the fallback: a WAV
-    // holds no picture, but a glTF buffer holds the geometry, so a missing
-    // mesh sidecar is rendered here rather than answered with a cube.
+    // A mesh keeps a sidecar NAME rather than the versioned cache path,
+    // because it is written at save time by whichever process generated the
+    // print, exactly as audio's waveform is. Two things part it from audio:
+    // a WAV holds no picture while a glTF buffer holds the geometry, so a
+    // missing mesh sidecar is RENDERED here rather than answered with a cube;
+    // and because it is a render, its name carries the poster renderer's
+    // revision (`mesh_poster_sidecar`), so a poster drawn by an older mold is
+    // an ordinary miss and is redrawn.
     let is_mesh = crate::thumbnails::is_mesh_filename(&clean_name);
-    let thumb_path = if is_audio || is_mesh {
+    let thumb_path = if is_mesh {
+        crate::thumbnails::mesh_poster_sidecar(&thumb_dir, &clean_name)
+    } else if is_audio {
         thumb_dir.join(format!("{clean_name}.png"))
     } else {
         variant.cache_path(&thumb_dir, &clean_name, &media_version)
@@ -10459,7 +10483,7 @@ async fn render_gallery_thumbnail(
 // desktop app's offline tiles share them; these names stay as thin aliases
 // for the route, the warmup, and the trash sweeper.
 use crate::thumbnails::{
-    file_media_version, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, MESH_PLACEHOLDER_SVG,
+    media_version_for, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, MESH_PLACEHOLDER_SVG,
     VIDEO_PLACEHOLDER_SVG,
 };
 
@@ -10760,13 +10784,17 @@ fn collect_thumbnail_misses(
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let metadata = entry.metadata().ok();
+                    // Through the same helper as the route and the orphan
+                    // sweeper, so the three cannot disagree about a name. It
+                    // is the raster/video arm today (`.glb` never reaches
+                    // here), and it stays right if that changes.
                     let thumb_path = metadata
                         .as_ref()
                         .map(|metadata| {
                             versioned_thumbnail_path(
                                 thumb_dir,
                                 &filename,
-                                &file_media_version(metadata),
+                                &media_version_for(&filename, metadata),
                             )
                         })
                         .unwrap_or_else(|| thumb_dir.join(format!("{filename}.png")));
@@ -12868,6 +12896,86 @@ mod tests {
         let second = versioned_thumbnail_path(dir, "cat.png", "2-100");
         assert_ne!(first, second);
         assert_eq!(first, versioned_thumbnail_path(dir, "cat.png", "1-100"));
+    }
+
+    /// A mesh row's wire `media_version` carries the poster renderer's
+    /// revision, so a client whose tile cache is keyed on it refetches when
+    /// the poster changes and the `.glb` does not. A raster row is untouched.
+    ///
+    /// Asserted on the listing RESPONSE, not on one row builder: every view
+    /// (the DB list, the archive overlay, the filesystem fallback) exits
+    /// through `gallery_list_response`, and stamping anywhere else is how two
+    /// of them would come to disagree.
+    #[tokio::test]
+    async fn a_mesh_gallery_row_carries_the_poster_revision() {
+        fn row(filename: &str, format: mold_core::OutputFormat) -> mold_core::GalleryImage {
+            mold_core::GalleryImage {
+                filename: filename.to_string(),
+                metadata: mold_db::metadata_io::synthesize_from_filename(filename, 1_700_000_000),
+                timestamp: 1_700_000_000,
+                format: Some(format),
+                size_bytes: Some(4096),
+                media_version: Some("1700000000000:4096".into()),
+                metadata_synthetic: false,
+                title: None,
+                tags: Vec::new(),
+                favorite: false,
+                collections: Vec::new(),
+                trashed_at: None,
+                purge_at: None,
+            }
+        }
+
+        let images = vec![
+            row("mold-hunyuan3d-1.glb", mold_core::OutputFormat::Glb),
+            row("mold-flux-1.png", mold_core::OutputFormat::Png),
+        ];
+        let response = gallery_list_response(&HeaderMap::new(), images, None).unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let listed: Vec<mold_core::GalleryImage> = serde_json::from_slice(&bytes).unwrap();
+
+        let version_of = |name: &str| {
+            listed
+                .iter()
+                .find(|image| image.filename == name)
+                .unwrap_or_else(|| panic!("{name} was not listed"))
+                .media_version
+                .clone()
+                .expect("a media version")
+        };
+        assert_eq!(
+            version_of("mold-hunyuan3d-1.glb"),
+            format!(
+                "1700000000000:4096{}",
+                crate::thumbnails::MESH_POSTER_REVISION_SUFFIX
+            )
+        );
+        // A raster keeps its historical value, so no existing tile cache is
+        // invalidated by this change.
+        assert_eq!(version_of("mold-flux-1.png"), "1700000000000:4096");
+
+        // Stamping is idempotent per response, not per row builder: a row
+        // that arrives with no version at all stays that way rather than
+        // becoming a bare suffix.
+        let mut versionless = row("mold-hunyuan3d-2.glb", mold_core::OutputFormat::Glb);
+        versionless.media_version = None;
+        let mut rows = vec![versionless];
+        crate::thumbnails::stamp_poster_revision_all(&mut rows);
+        assert_eq!(rows[0].media_version, None);
+
+        // And the stamp is idempotent, which is what lets the row-building
+        // helpers stamp their own single-row exits without any of them
+        // having to know whether this listing funnel already did.
+        let mut twice = vec![row("mold-hunyuan3d-3.glb", mold_core::OutputFormat::Glb)];
+        crate::thumbnails::stamp_poster_revision_all(&mut twice);
+        let once = twice[0].media_version.clone();
+        crate::thumbnails::stamp_poster_revision_all(&mut twice);
+        assert_eq!(
+            twice[0].media_version, once,
+            "the revision was appended twice"
+        );
     }
 
     #[test]

@@ -22,13 +22,32 @@ use anyhow::{bail, Context};
 use image::{ImageFormat, RgbImage};
 
 use crate::hunyuan3d::mesh::Mesh;
-use crate::hunyuan3d::raster::{render_gbuffers, Camera, GBuffers};
+use crate::hunyuan3d::raster::{render_gbuffers, sweep_fit_for, Camera, GBuffers};
 
 /// A three-quarter view: a straight-on render of a symmetric object shows one
 /// flat face and reads as a rectangle, which is exactly the failure the poster
 /// exists to avoid.
 pub const POSTER_AZIMUTH_DEG: f32 = 30.0;
 pub const POSTER_ELEVATION_DEG: f32 = 20.0;
+/// Fraction of the frame left empty around the mesh's swept extent.
+///
+/// Wider than the rasterizer's own
+/// [`DEFAULT_MARGIN`](crate::hunyuan3d::raster::DEFAULT_MARGIN) because the
+/// poster's fit is the rotation-invariant sweep bound: the silhouette that
+/// actually touches this margin is the one at the widest azimuth, not this
+/// frame's.
+pub const POSTER_MARGIN: f32 = 0.08;
+
+/// Direction the turntable's azimuth steps, per frame.
+///
+/// The object spins the way a rightward drag turns it in `MeshViewer.vue` and
+/// the way auto-rotate tours it; negative orbits the eye toward `-X`. The
+/// viewer rotates the MODEL by `yaw` where the server orbits the EYE by
+/// `azimuth` (`yaw = -azimuth`), so a positive step here would play the GIF
+/// backwards relative to every interactive surface. Mirrored in
+/// `studio/lib/meshViewerCamera.ts` and pinned by
+/// `the_viewer_mirrors_the_poster_camera`.
+pub const TURNTABLE_AZIMUTH_STEP_SIGN: f32 = -1.0;
 
 /// Supersampling factor. The rasterizer's coverage is a hard in/out test, so
 /// silhouette edges alias badly at 1x; a 2x render box-filtered down is the
@@ -48,10 +67,31 @@ const BG_BOTTOM: [u8; 3] = [0x0f, 0x17, 0x2a];
 /// Surface colour, sRGB. `#e2e8f0`, the placeholder's stroke colour.
 const ALBEDO_SRGB: [f32; 3] = [0.886, 0.910, 0.941];
 
-/// The camera the poster renders from. Public so a caller rendering its own
-/// variant (a turntable, say) starts from the framing the gallery uses.
+/// The camera the poster renders from, before it is framed to a mesh. Public
+/// so a caller rendering its own variant (a turntable, say) starts from the
+/// eye position the gallery uses.
+///
+/// It carries [`FrameFit::Auto`](crate::hunyuan3d::raster::FrameFit::Auto):
+/// this is a statement about where the eye goes, not about how big the mesh
+/// is drawn. [`poster_camera_for`] is the framed one.
 pub fn poster_camera() -> Camera {
-    Camera::orthographic(POSTER_AZIMUTH_DEG, POSTER_ELEVATION_DEG).with_margin(0.08)
+    Camera::orthographic(POSTER_AZIMUTH_DEG, POSTER_ELEVATION_DEG).with_margin(POSTER_MARGIN)
+}
+
+/// [`poster_camera`] framed to `mesh` by the shared sweep bound.
+///
+/// The ONE framing of this mesh: the same value frames every turntable frame
+/// ([`crate::hunyuan3d::turntable::turntable_frame_cameras`]) and the
+/// interactive viewer's home view (`studio/lib/meshViewerCamera.ts`), so the
+/// gallery tile, a GIF's first frame, and the 3-D view a client opens are the
+/// same picture at the same size. A mesh with nothing to frame keeps the
+/// per-frame auto-fit, which draws nothing either way.
+pub fn poster_camera_for(mesh: &Mesh) -> Camera {
+    let camera = poster_camera();
+    match sweep_fit_for(mesh, POSTER_ELEVATION_DEG) {
+        Some(fit) => camera.with_fit(fit),
+        None => camera,
+    }
 }
 
 /// Render `mesh` to a `size x size` PNG.
@@ -60,7 +100,7 @@ pub fn poster_camera() -> Camera {
 /// the caller's fallback is the placeholder SVG, and a flat slate square would
 /// be indistinguishable from a successful render of nothing.
 pub fn render_poster(mesh: &Mesh, size: u32) -> anyhow::Result<Vec<u8>> {
-    render_poster_from(mesh, &poster_camera(), size)
+    render_poster_from(mesh, &poster_camera_for(mesh), size)
 }
 
 /// [`render_poster`] from an arbitrary view.
@@ -77,9 +117,9 @@ pub fn render_poster_from(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Re
 ///
 /// This is the unit a turntable stacks — one call per camera from
 /// [`turntable_cameras`], handed to the animation encoders in
-/// `ltx_video::video_enc`. A turntable is framed ONCE for the whole sweep, so
-/// the mesh keeps one size as it turns; frame 0 is the poster's camera at
-/// that sweep's scale rather than the poster's exact pixels.
+/// `ltx_video::video_enc`. A turntable is framed ONCE for the whole sweep by
+/// the same rotation-invariant bound the poster uses, so the mesh keeps one
+/// size as it turns and frame 0 IS the poster, pixel for pixel.
 pub fn render_frame_rgb(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Result<RgbImage> {
     render_frame(mesh, camera, size, false)
 }
@@ -128,12 +168,15 @@ fn render_frame(
 ///
 /// Every frame keeps the poster's elevation, margin and projection and only
 /// the azimuth moves, so the animation reads as that poster set spinning. A
-/// turntable is framed ONCE for the whole sweep, so the mesh keeps one size
-/// as it turns; frame 0 is the poster's camera at that sweep's scale rather
-/// than the poster's exact pixels. The cameras returned here still carry
+/// turntable is framed ONCE for the whole sweep by the bound the poster
+/// itself uses, so frame 0 IS the poster, pixel for pixel. The cameras
+/// returned here still carry
 /// [`crate::hunyuan3d::raster::FrameFit::Auto`] — stamping the shared fit is
 /// [`crate::hunyuan3d::turntable::turntable_frame_cameras`]'s job, so this
 /// function stays a pure statement about where the eye goes.
+///
+/// The azimuth steps by [`TURNTABLE_AZIMUTH_STEP_SIGN`], so the object turns
+/// the way a rightward drag turns it in the interactive viewer.
 ///
 /// Two sweeps, chosen to match how the animation encoders play them back:
 ///
@@ -145,8 +188,11 @@ fn render_frame(
 /// * **Bounce** (`bounce = true`): a half turn, first frame to last
 ///   inclusive, in steps of `180 / (frames - 1)`. The GIF encoder's bounce
 ///   (`encode_gif_with_options`) appends the interior frames in reverse, so
-///   the playback swings 0° -> 180° -> 0°: the far side is seen once on the
-///   way out, and the reversal reads as a deliberate to-and-fro. A full
+///   the playback swings the poster azimuth out half a turn and back —
+///   30° -> -150° -> 30° at the shipped [`POSTER_AZIMUTH_DEG`], the azimuth
+///   DECREASING on the way out per
+///   [`TURNTABLE_AZIMUTH_STEP_SIGN`]: the far side is seen once on the way
+///   out, and the reversal reads as a deliberate to-and-fro. A full
 ///   turn played forward then backward would show the object snap into
 ///   reverse at the very frame it had come round to the front again.
 pub fn turntable_cameras(frames: usize, bounce: bool) -> Vec<Camera> {
@@ -161,7 +207,7 @@ pub fn turntable_cameras(frames: usize, bounce: bool) -> Vec<Camera> {
     };
     (0..frames)
         .map(|index| Camera {
-            azimuth_deg: start.azimuth_deg + step * index as f32,
+            azimuth_deg: start.azimuth_deg + TURNTABLE_AZIMUTH_STEP_SIGN * step * index as f32,
             ..start
         })
         .collect()
@@ -498,9 +544,7 @@ mod tests {
     }
 
     /// The RGB frame is the poster before PNG encoding: the same renderer a
-    /// turntable stacks into an animation. A sweep is framed once for the
-    /// whole turn, so a GIF's first frame is this camera at the sweep's own
-    /// scale rather than these exact pixels.
+    /// turntable stacks into an animation.
     #[test]
     fn render_frame_rgb_is_the_decoded_poster() {
         let mesh = cube(0.5);
@@ -548,7 +592,8 @@ mod tests {
     /// A looping turntable is ONE full turn whose last frame stops one step
     /// short of the first, so the loop point is a step like any other rather
     /// than a held duplicate. Every frame keeps the poster's elevation and
-    /// margin, and frame 0 is the poster itself.
+    /// margin, frame 0 is the poster itself, and the azimuth DECREASES so the
+    /// object spins like a rightward drag.
     #[test]
     fn turntable_cameras_loop_is_a_seamless_full_turn() {
         let cameras = turntable_cameras(36, false);
@@ -556,7 +601,7 @@ mod tests {
         let poster = poster_camera();
         assert_eq!(cameras[0], poster);
         for (index, camera) in cameras.iter().enumerate() {
-            let expected = POSTER_AZIMUTH_DEG + 10.0 * index as f32;
+            let expected = POSTER_AZIMUTH_DEG - 10.0 * index as f32;
             assert!(
                 (camera.azimuth_deg - expected).abs() < 1e-3,
                 "frame {index}: azimuth {} != {expected}",
@@ -568,7 +613,7 @@ mod tests {
         }
         let last = cameras.last().unwrap();
         assert!(
-            (last.azimuth_deg - (POSTER_AZIMUTH_DEG + 350.0)).abs() < 1e-3,
+            (last.azimuth_deg - (POSTER_AZIMUTH_DEG - 350.0)).abs() < 1e-3,
             "the last frame must stop one step short of a full turn, got {}",
             last.azimuth_deg
         );
@@ -586,7 +631,7 @@ mod tests {
         assert_eq!(cameras.len(), 9);
         assert_eq!(cameras[0], poster_camera());
         for (index, camera) in cameras.iter().enumerate() {
-            let expected = POSTER_AZIMUTH_DEG + 22.5 * index as f32;
+            let expected = POSTER_AZIMUTH_DEG - 22.5 * index as f32;
             assert!(
                 (camera.azimuth_deg - expected).abs() < 1e-3,
                 "frame {index}: azimuth {} != {expected}",
@@ -595,11 +640,246 @@ mod tests {
         }
         let last = cameras.last().unwrap();
         assert!(
-            (last.azimuth_deg - (POSTER_AZIMUTH_DEG + 180.0)).abs() < 1e-3,
+            (last.azimuth_deg - (POSTER_AZIMUTH_DEG - 180.0)).abs() < 1e-3,
             "a bounce ends exactly half a turn from the poster, got {}",
             last.azimuth_deg
         );
         assert_eq!(turntable_cameras(1, true), vec![poster_camera()]);
+    }
+
+    /// A wide, thin, off-centre plate: asymmetric on every axis, so a frame
+    /// rendered from the wrong azimuth or at the wrong scale cannot
+    /// accidentally match one rendered correctly.
+    fn plate() -> Mesh {
+        let (min, max) = ([-1.5f32, -0.1, -0.3], [1.0f32, 0.15, 0.4]);
+        let v = [
+            [min[0], min[1], max[2]],
+            [max[0], min[1], max[2]],
+            [max[0], max[1], max[2]],
+            [min[0], max[1], max[2]],
+            [min[0], min[1], min[2]],
+            [max[0], min[1], min[2]],
+            [max[0], max[1], min[2]],
+            [min[0], max[1], min[2]],
+        ];
+        let quads = [
+            [0, 1, 2, 3],
+            [5, 4, 7, 6],
+            [1, 5, 6, 2],
+            [4, 0, 3, 7],
+            [3, 2, 6, 7],
+            [4, 5, 1, 0],
+        ];
+        let mut faces = Vec::new();
+        for q in quads {
+            faces.push([q[0] as u32, q[1] as u32, q[2] as u32]);
+            faces.push([q[0] as u32, q[2] as u32, q[3] as u32]);
+        }
+        Mesh {
+            vertices: v.to_vec(),
+            faces,
+            ..Default::default()
+        }
+    }
+
+    /// The gallery tile and the first frame of a turntable are the SAME
+    /// picture — not the same camera at a different scale, the same bytes.
+    ///
+    /// This is what the shared rotation-invariant framing buys: a client can
+    /// show the poster while the GIF or the interactive viewer loads and
+    /// nothing jumps when it arrives. A per-sweep discrete fit made frame 0
+    /// slightly smaller than the poster and made the difference depend on the
+    /// frame count.
+    #[test]
+    fn the_poster_is_turntable_frame_zero_pixel_for_pixel() {
+        use crate::hunyuan3d::turntable::turntable_frame_cameras;
+
+        let mesh = plate();
+        let poster = render_frame_rgb(&mesh, &poster_camera_for(&mesh), 64).expect("poster");
+        // The gallery tile is this render, so `render_poster` must take the
+        // framed camera and not the bare eye position.
+        assert_eq!(
+            decode(&render_poster(&mesh, 64).expect("poster png")),
+            poster,
+            "the stored poster is not rendered from the shared sweep framing"
+        );
+        for frames in [8usize, 36, 72] {
+            let cameras = turntable_frame_cameras(&mesh, frames, false);
+            let frame_zero = render_frame_rgb(&mesh, &cameras[0], 64).expect("frame 0");
+            assert_eq!(
+                frame_zero, poster,
+                "a {frames}-frame turntable does not open on the poster"
+            );
+        }
+        let bounce = turntable_frame_cameras(&mesh, 36, true);
+        assert_eq!(
+            render_frame_rgb(&mesh, &bounce[0], 64).expect("frame 0"),
+            poster,
+            "a bounce does not open on the poster"
+        );
+
+        // Non-vacuity: the very next frame is a different picture, so the
+        // comparison above is not passing because everything renders alike.
+        let cameras = turntable_frame_cameras(&mesh, 36, false);
+        assert_ne!(
+            render_frame_rgb(&mesh, &cameras[1], 64).expect("frame 1"),
+            poster
+        );
+    }
+
+    /// The framing is a property of the mesh and the elevation alone, so two
+    /// GIFs of one mesh at different frame counts draw it the same size, and
+    /// a bounce is framed exactly like a loop.
+    ///
+    /// The discrete pre-pass this replaced took the max over the cameras it
+    /// was GIVEN, so 8, 36 and 72 frames each landed on their own scale and a
+    /// half-turn bounce landed on a fourth.
+    #[test]
+    fn sweep_fit_is_frame_count_independent() {
+        use crate::hunyuan3d::turntable::turntable_frame_cameras;
+
+        let mesh = plate();
+        let expected = poster_camera_for(&mesh).fit;
+        assert!(
+            matches!(expected, crate::hunyuan3d::raster::FrameFit::Extent(e) if e > 0.0),
+            "the poster must pin an extent, got {expected:?}"
+        );
+        for (frames, bounce) in [(8, false), (36, false), (72, false), (36, true)] {
+            for (index, camera) in turntable_frame_cameras(&mesh, frames, bounce)
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    camera.fit, expected,
+                    "frame {index} of a {frames}-frame sweep (bounce {bounce}) is framed apart"
+                );
+            }
+        }
+    }
+
+    /// The viewer's four literals are the poster's, or the 3-D view opens on
+    /// a camera the gallery tile never used.
+    ///
+    /// `studio/lib/meshViewerCamera.ts` is the TS half of ONE camera
+    /// convention; there is no build step that could keep the two in step, so
+    /// this test reads that file and compares. The same read-the-source guard
+    /// the prompting corpus uses on its own bash fences.
+    #[test]
+    fn the_viewer_mirrors_the_poster_camera() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../studio/lib/meshViewerCamera.ts"
+        );
+        let source = std::fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!("cannot read the viewer's camera module at {path}: {error}")
+        });
+
+        for (name, rust) in [
+            ("POSTER_AZIMUTH_DEG", POSTER_AZIMUTH_DEG),
+            ("POSTER_ELEVATION_DEG", POSTER_ELEVATION_DEG),
+            ("POSTER_MARGIN", POSTER_MARGIN),
+            ("TURNTABLE_AZIMUTH_STEP_SIGN", TURNTABLE_AZIMUTH_STEP_SIGN),
+        ] {
+            let ts = ts_export_const(&source, name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{path} does not export `{name}`. It and \
+                         crates/mold-inference/src/hunyuan3d/poster.rs are ONE camera \
+                         convention: change both files together."
+                    )
+                })
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{path}: {error}. The export is there but its value is not a \
+                         plain number this test can compare against \
+                         crates/mold-inference/src/hunyuan3d/poster.rs."
+                    )
+                });
+            assert!(
+                (ts - rust).abs() < 1e-6,
+                "{name} is {ts} in studio/lib/meshViewerCamera.ts and {rust} in \
+                 crates/mold-inference/src/hunyuan3d/poster.rs. The viewer, the poster \
+                 and the turntable are ONE camera convention: change both files \
+                 together, and re-run the studio tests as well as this one."
+            );
+        }
+    }
+
+    /// `export const NAME = <number>;` from a TypeScript source, with an
+    /// optional trailing `// comment`.
+    ///
+    /// A hand parser rather than a regex: `regex` is not a dependency of this
+    /// crate, and the shape being matched is fixed by the file this test
+    /// exists to police.
+    ///
+    /// The two failures are kept APART. `None` means the export is not in the
+    /// file at all; `Some(Err)` means it is there and its value did not
+    /// parse. Collapsing them told a reader whose only mistake was writing
+    /// `= 0.08 // note` that the constant was missing, and sent them looking
+    /// for a line that is right in front of them.
+    #[cfg(test)]
+    fn ts_export_const(source: &str, name: &str) -> Option<Result<f32, String>> {
+        for line in source.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("export const ") else {
+                continue;
+            };
+            let Some((declared, value)) = rest.split_once('=') else {
+                continue;
+            };
+            // `NAME` or `NAME: number`, either way the identifier comes first.
+            let declared = declared.split(':').next().unwrap_or_default().trim();
+            if declared != name {
+                continue;
+            }
+            // `30; // a comment` -> `30`. The statement ends at the `;`, so a
+            // trailing comment is dropped with everything after it; a
+            // comment on a line of its own never reaches here, because it
+            // does not start with `export const`.
+            let value = value.split("//").next().unwrap_or_default();
+            let value = value.trim().trim_end_matches(';').trim();
+            return Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("could not parse the value of {name}: `{value}`")),
+            );
+        }
+        None
+    }
+
+    /// The parser is only as good as its own pin: a renamed export, a typed
+    /// declaration, a trailing comment and a different number must each be
+    /// visible to it, and a missing export must not look like an unparseable
+    /// one.
+    #[test]
+    fn the_typescript_parser_reads_what_it_claims_to() {
+        let source = "export const A = 30;\nexport const B: number = -1;\nconst C = 5;\n\
+                      export const LONG_NAME_A = 7;\n\
+                      export const COMMENTED = 0.08; // the poster's margin\n\
+                      export const NO_SEMI = 20 // trailing\n\
+                      export const NOT_A_NUMBER = Math.PI / 6;\n";
+        let value = |name| ts_export_const(source, name).map(|parsed| parsed.expect("a number"));
+        assert_eq!(value("A"), Some(30.0));
+        assert_eq!(value("B"), Some(-1.0));
+        assert_eq!(value("LONG_NAME_A"), Some(7.0));
+        // A trailing comment is part of the line, not part of the value.
+        assert_eq!(value("COMMENTED"), Some(0.08));
+        assert_eq!(value("NO_SEMI"), Some(20.0));
+
+        // Not exported, and not present at all: `None`, never a parse error.
+        assert_eq!(ts_export_const(source, "C"), None);
+        assert_eq!(ts_export_const(source, "MISSING"), None);
+
+        // Present but not a number a comparison can use: a DISTINCT answer,
+        // so the caller reports the value rather than claiming the export is
+        // missing.
+        let error = ts_export_const(source, "NOT_A_NUMBER")
+            .expect("the export is present")
+            .expect_err("`Math.PI / 6` is not a plain number");
+        assert!(
+            error.contains("could not parse the value of NOT_A_NUMBER"),
+            "{error}"
+        );
     }
 
     /// Guards the save path: the poster runs inline when a mesh print is

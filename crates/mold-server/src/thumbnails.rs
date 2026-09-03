@@ -55,6 +55,75 @@ pub fn file_media_version(metadata: &std::fs::Metadata) -> String {
     format!("{modified}-{}", metadata.len())
 }
 
+/// The wire spelling of [`mold_core::media_paths::MESH_POSTER_REVISION`]:
+/// that same revision with the separator a `media_version` uses.
+///
+/// The revision has to appear in two places because two different caches
+/// would otherwise miss it. The sidecar is addressed by NAME, which
+/// `mesh_poster_thumbnail_paths` handles; the desktop's `mold-thumb://` store
+/// and the studio's persistent cache key on the opaque `media_version`, which
+/// is this. `the_two_spellings_of_the_poster_revision_agree` pins them
+/// together, so bumping the constant in `mold-core` is the whole edit.
+pub const MESH_POSTER_REVISION_SUFFIX: &str = ":p2";
+
+/// The poster-revision suffix for `filename`, or `""`.
+///
+/// The one decision behind [`media_version_for`] and the gallery row's wire
+/// `media_version`, so the cache path, the ETag, and what a client keys its
+/// own cache on can never disagree about which prints are revisioned. Reads
+/// [`is_mesh_filename`] rather than testing for `.glb` itself: a mesh is
+/// exactly the kind of print whose tile is derived rather than decoded.
+pub fn poster_revision_suffix(filename: &str) -> &'static str {
+    if is_mesh_filename(filename) {
+        MESH_POSTER_REVISION_SUFFIX
+    } else {
+        ""
+    }
+}
+
+/// Append [`poster_revision_suffix`] to one gallery row's wire
+/// `media_version`.
+///
+/// IDEMPOTENT: a row already carrying the suffix is left alone. That is what
+/// lets every wire exit call this without any of them having to know whether
+/// an earlier layer already did — a listing stamps at its one funnel, and the
+/// row-building helpers stamp at theirs, and a path running through both is
+/// still correct.
+///
+/// A row with no `media_version` at all keeps none: a bare suffix would be a
+/// cache key for nothing.
+pub fn stamp_poster_revision(image: &mut mold_core::GalleryImage) {
+    let revision = poster_revision_suffix(&image.filename);
+    if revision.is_empty() {
+        return;
+    }
+    if let Some(version) = image.media_version.as_mut() {
+        if !version.ends_with(revision) {
+            version.push_str(revision);
+        }
+    }
+}
+
+/// [`stamp_poster_revision`] over a listing.
+pub fn stamp_poster_revision_all(images: &mut [mold_core::GalleryImage]) {
+    for image in images {
+        stamp_poster_revision(image);
+    }
+}
+
+/// The cache identity of a print: [`file_media_version`] for a raster,
+/// byte for byte, plus [`poster_revision_suffix`] for a mesh.
+///
+/// Prefer this over [`file_media_version`] wherever the answer reaches a
+/// cache key, an ETag, or a client.
+pub fn media_version_for(filename: &str, metadata: &std::fs::Metadata) -> String {
+    let base = file_media_version(metadata);
+    match poster_revision_suffix(filename) {
+        "" => base,
+        suffix => format!("{base}{suffix}"),
+    }
+}
+
 /// Where the 256 px PNG tile for (`filename`, `media_version`) lives.
 pub fn versioned_thumbnail_path(thumb_dir: &Path, filename: &str, media_version: &str) -> PathBuf {
     let key = Sha256::digest(format!("{filename}:{media_version}").as_bytes());
@@ -242,12 +311,23 @@ pub fn write_bytes_atomically(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The sidecar name the server route and the desktop's offline tiles read.
+///
+/// The first of `mold_core::media_paths::mesh_poster_thumbnail_paths`, named
+/// here so the route and [`ensure_mesh_poster`] cannot spell it two ways.
+pub fn mesh_poster_sidecar(thumb_dir: &Path, filename: &str) -> PathBuf {
+    let [server, _tui] = mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename);
+    server
+}
+
 /// Write a mesh poster to BOTH sidecar names.
 ///
-/// The server route reads `<file>.png` and the TUI reads `<file>.thumb.png`,
-/// so a writer that guesses one leaves the other surface on the placeholder —
-/// see `mold_core::media_paths::mesh_poster_thumbnail_paths`. A failure on
-/// either name is reported; the first is kept so a caller can log one cause.
+/// The server route reads `<file>.<revision>.png` ([`mesh_poster_sidecar`])
+/// and the TUI reads `<file>.thumb.png`, so a writer that guesses one leaves
+/// the other surface on the placeholder — see
+/// `mold_core::media_paths::mesh_poster_thumbnail_paths`, which is the only
+/// place either name is spelled. A failure on either name is reported; the
+/// first is kept so a caller can log one cause.
 pub fn write_mesh_poster_sidecars(
     thumb_dir: &Path,
     filename: &str,
@@ -269,6 +349,12 @@ pub fn write_mesh_poster_sidecars(
 /// The poster bytes for a stored mesh: the sidecar when one is already
 /// there, otherwise a fresh render written back to both sidecar names.
 ///
+/// The sidecar it looks for is [`mesh_poster_sidecar`], which carries the
+/// poster renderer's revision. A print whose poster was drawn by an older
+/// renderer therefore MISSES here and is re-rendered, and the write puts the
+/// fresh pixels under both names — which is how the TUI's unrevisioned copy
+/// catches up too.
+///
 /// The write is best effort. A read-only or full cache directory must still
 /// yield a tile for this request — only a mesh that cannot be READ or RENDERED
 /// is a placeholder.
@@ -277,7 +363,7 @@ pub fn ensure_mesh_poster(
     thumb_dir: &Path,
     filename: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let sidecar = thumb_dir.join(format!("{filename}.png"));
+    let sidecar = mesh_poster_sidecar(thumb_dir, filename);
     if let Ok(bytes) = std::fs::read(&sidecar) {
         if sniff_content_type(&bytes).is_some() {
             return Ok(bytes);
@@ -428,7 +514,10 @@ pub fn sweep_orphans(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            let version = file_media_version(&metadata);
+            // The same identity the thumbnail route computes, revision suffix
+            // included: a name this sweeper cannot reproduce is a tile it
+            // deletes out from under a live print.
+            let version = media_version_for(&name, &metadata);
             for variant in ThumbnailVariant::all() {
                 if let Some(file) = variant.cache_path(thumb_dir, &name, &version).file_name() {
                     expected.insert(file.to_string_lossy().into_owned());
@@ -654,7 +743,7 @@ mod tests {
         let name = "quad.glb";
         let source = output.path().join(name);
         std::fs::write(&source, glb_fixture()).unwrap();
-        let sidecar = cache.path().join(format!("{name}.png"));
+        let sidecar = mesh_poster_sidecar(cache.path(), name);
         std::fs::write(&sidecar, b"truncated garbage").unwrap();
         let png = ensure_mesh_poster(&source, cache.path(), name).expect("re-render");
         assert_eq!(sniff_content_type(&png), Some("image/png"));
@@ -757,6 +846,180 @@ mod tests {
             foreign.exists() && waveform.exists(),
             "other layouts are never touched"
         );
+    }
+
+    /// A mesh tile is rendered from geometry, so it must carry the poster
+    /// renderer's own revision: two prints with identical mtime and size,
+    /// one `.glb` and one `.png`, cannot share a cache identity.
+    #[test]
+    fn a_mesh_and_a_raster_with_identical_metadata_get_different_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let raster = dir.path().join("chair.png");
+        let mesh = dir.path().join("chair.glb");
+        let shouty = dir.path().join("CHAIR.GLB");
+        for path in [&raster, &mesh, &shouty] {
+            std::fs::write(path, b"same length!").unwrap();
+        }
+        let stamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        for path in [&raster, &mesh, &shouty] {
+            filetime::set_file_mtime(path, stamp).unwrap();
+        }
+
+        let raster_meta = std::fs::metadata(&raster).unwrap();
+        let mesh_meta = std::fs::metadata(&mesh).unwrap();
+        assert_eq!(
+            file_media_version(&raster_meta),
+            file_media_version(&mesh_meta),
+            "the fixture must differ only in its name"
+        );
+
+        let raster_version = media_version_for("chair.png", &raster_meta);
+        let mesh_version = media_version_for("chair.glb", &mesh_meta);
+        assert_ne!(raster_version, mesh_version);
+
+        // A raster is untouched: existing tiles and existing client caches
+        // must stay valid.
+        assert_eq!(raster_version, file_media_version(&raster_meta));
+        assert_eq!(poster_revision_suffix("chair.png"), "");
+        assert_eq!(poster_revision_suffix("clip.mp4"), "");
+        assert_eq!(poster_revision_suffix("take.wav"), "");
+
+        // The extension test is case-insensitive, so a `.GLB` print is
+        // revisioned like any other.
+        assert_eq!(
+            poster_revision_suffix("CHAIR.GLB"),
+            MESH_POSTER_REVISION_SUFFIX
+        );
+        assert_eq!(
+            media_version_for("CHAIR.GLB", &std::fs::metadata(&shouty).unwrap()),
+            mesh_version
+        );
+
+        // And the suffix is exactly what separates them.
+        assert_eq!(
+            mesh_version,
+            format!(
+                "{}{MESH_POSTER_REVISION_SUFFIX}",
+                file_media_version(&mesh_meta)
+            )
+        );
+    }
+
+    /// The two spellings of the revision are one constant. The name carries
+    /// it as `.p2`, the wire as `:p2`, and a bump that touched only one would
+    /// leave half the caches serving the old poster.
+    #[test]
+    fn the_two_spellings_of_the_poster_revision_agree() {
+        assert_eq!(
+            MESH_POSTER_REVISION_SUFFIX,
+            format!(":{}", mold_core::media_paths::MESH_POSTER_REVISION),
+            "bump mold_core::media_paths::MESH_POSTER_REVISION and this suffix together"
+        );
+        // And the name really is built from it, so the sidecar a route reads
+        // moves when the constant does.
+        assert!(mesh_poster_sidecar(Path::new("/cache"), "chair.glb")
+            .to_string_lossy()
+            .ends_with(&format!(
+                ".{}.png",
+                mold_core::media_paths::MESH_POSTER_REVISION
+            )));
+    }
+
+    /// A poster drawn by an OLDER renderer is a cache miss, not a tile served
+    /// verbatim forever. This is the whole point of putting the revision in
+    /// the sidecar name: nothing has to detect staleness, the old name simply
+    /// stops being read.
+    #[test]
+    fn a_pre_revision_sidecar_is_re_rendered_rather_than_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mesh = dir.path().join("chair.glb");
+        std::fs::write(&mesh, glb_fixture()).unwrap();
+
+        // What a pre-p2 mold left behind: a real PNG at the old name.
+        let stale_name = cache.path().join("chair.glb.png");
+        let stale = {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3]))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        std::fs::write(&stale_name, &stale).unwrap();
+
+        let poster = ensure_mesh_poster(&mesh, cache.path(), "chair.glb").expect("a poster");
+        assert_ne!(
+            poster, stale,
+            "the pre-revision sidecar was served verbatim"
+        );
+        assert_eq!(
+            sniff_content_type(&poster),
+            Some("image/png"),
+            "the re-render must be a real raster"
+        );
+
+        // Both current names now hold the fresh render, so the TUI's
+        // unrevisioned copy caught up as well.
+        let [server, tui] =
+            mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), "chair.glb");
+        assert!(server.exists(), "the revisioned sidecar was not written");
+        assert_eq!(std::fs::read(&server).unwrap(), poster);
+        assert_eq!(std::fs::read(&tui).unwrap(), poster);
+
+        // The stale file is left where it is: the sweeper's rule is the
+        // versioned-cache NAME shape, and `<file>.png` is also how an audio
+        // waveform is spelled, so deleting it here would be a rule about a
+        // name this module does not own.
+        assert!(stale_name.exists());
+        assert_eq!(std::fs::read(&stale_name).unwrap(), stale);
+
+        // A second call is a hit on the revisioned name, byte for byte.
+        assert_eq!(
+            ensure_mesh_poster(&mesh, cache.path(), "chair.glb").expect("a poster"),
+            poster
+        );
+    }
+
+    /// The sweeper deletes only names it minted. A mesh sidecar under either
+    /// spelling is not one of those, so a live poster is never swept out from
+    /// under a print.
+    #[test]
+    fn the_sweeper_never_touches_a_mesh_sidecar() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(output.path().join("chair.glb"), glb_fixture()).unwrap();
+
+        let [server, tui] =
+            mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), "chair.glb");
+        let pre_revision = cache.path().join("chair.glb.png");
+        for path in [&server, &tui, &pre_revision] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        for path in [&server, &tui, &pre_revision] {
+            filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+
+        let removed = sweep_orphans(
+            output.path(),
+            cache.path(),
+            std::time::Duration::from_secs(24 * 3600),
+        )
+        .unwrap();
+        assert_eq!(removed, 0, "a sidecar is not a versioned cache name");
+        assert!(server.exists() && tui.exists());
+        assert!(
+            pre_revision.exists(),
+            "the pre-revision sidecar is left alone rather than swept: `<file>.png` \
+             is also how an audio waveform is spelled"
+        );
+        for name in [
+            server.file_name().unwrap().to_str().unwrap(),
+            tui.file_name().unwrap().to_str().unwrap(),
+            "chair.glb.png",
+        ] {
+            assert!(!is_versioned_cache_name(name), "{name}");
+        }
     }
 
     #[test]

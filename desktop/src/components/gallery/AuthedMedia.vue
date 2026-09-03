@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MeshViewer from "@studio/components/MeshViewer.vue";
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   galleryThumbnailScheduler,
   type ThumbnailHandle,
@@ -22,8 +22,15 @@ const props = withDefaults(
     mesh?: boolean;
     /** Audio-only print: renders a transport instead of a raster element. */
     audio?: boolean;
-    /** Poster shown while a mesh loads, and kept on failure. */
+    /** Poster shown while a mesh loads, and kept on failure. Callers that
+     *  already hold a resolved URL (blob/http/native) pass it here; `mesh`
+     *  callers that only know the print's path pass `posterPath` instead and
+     *  this component resolves it the same way a tile resolves its
+     *  thumbnail. When both are given, this explicit URL wins. */
     poster?: string;
+    /** The print's thumbnail path (`galleryMediaPath(..., true)`), resolved
+     *  internally into the mesh poster URL. Ignored unless `mesh` is set. */
+    posterPath?: string;
     alt?: string;
     controls?: boolean;
     /** Explicit host to fetch from; defaults to the primary connection. */
@@ -53,6 +60,38 @@ const src = ref<string | null>(null);
 const failed = ref(false);
 let loadEpoch = 0;
 let thumbnailHandle: ThumbnailHandle<string> | null = null;
+
+/** The mesh poster resolved from `posterPath`; `undefined` while pending or
+ *  on a failed resolve, in which case the viewer just keeps its own
+ *  "loading" state until `src` itself is ready. */
+const resolvedPoster = ref<string | undefined>(undefined);
+let posterHandle: ThumbnailHandle<string> | null = null;
+let posterEpoch = 0;
+
+/** Shared with `load()`: schedule a path through the same native-thumbnail
+ *  cache the gallery tiles use, falling back to the blob route. Factored out
+ *  so the mesh poster resolves through the identical path as a real
+ *  thumbnail rather than carrying a second, divergent implementation. */
+function scheduleThumbnail(path: string, priority: ThumbnailPriority): ThumbnailHandle<string> {
+  const options = {
+    ...(props.target ? { target: props.target } : {}),
+    ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
+    ...(props.mediaVersion ? { mediaVersion: props.mediaVersion } : {}),
+  };
+  return galleryThumbnailScheduler.schedule({
+    key: `${props.cacheKey ?? "primary"}|${path}|${props.mediaVersion ?? "legacy"}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
+    hostKey: props.cacheKey ?? props.target?.baseUrl ?? "primary",
+    priority,
+    run: async (signal) =>
+      (await prepareNativeThumbnail({
+        path,
+        target: props.target,
+        cacheKey: props.cacheKey,
+        mediaVersion: props.mediaVersion,
+        signal,
+      })) ?? authedMediaUrl(path, { ...options, signal }),
+  });
+}
 
 const retryDelaysMs = [0, 250, 1_000] as const;
 
@@ -84,19 +123,7 @@ async function load() {
       const thumbnail = isThumbnailPath(props.path);
       const url = thumbnail
         ? await (() => {
-            const handle = galleryThumbnailScheduler.schedule({
-              key: `${props.cacheKey ?? "primary"}|${props.path}|${props.mediaVersion ?? "legacy"}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
-              hostKey: props.cacheKey ?? props.target?.baseUrl ?? "primary",
-              priority: props.priority,
-              run: async (signal) =>
-                (await prepareNativeThumbnail({
-                  path: props.path,
-                  target: props.target,
-                  cacheKey: props.cacheKey,
-                  mediaVersion: props.mediaVersion,
-                  signal,
-                })) ?? authedMediaUrl(props.path, { ...options, signal }),
-            });
+            const handle = scheduleThumbnail(props.path, props.priority);
             thumbnailHandle = handle;
             return handle.promise;
           })()
@@ -115,6 +142,41 @@ async function load() {
     }
   }
   if (epoch === loadEpoch) failed.value = true;
+}
+
+/** Best-effort: a mesh poster is a nicety while the geometry streams in, not
+ *  the primary content, so a failed resolve just leaves it undefined rather
+ *  than flipping `failed`. */
+async function loadPoster() {
+  posterHandle?.cancel();
+  posterHandle = null;
+  const epoch = ++posterEpoch;
+  if (!props.mesh || !props.posterPath) {
+    resolvedPoster.value = undefined;
+    return;
+  }
+  try {
+    const handle = scheduleThumbnail(props.posterPath, "background");
+    posterHandle = handle;
+    const url = await handle.promise;
+    if (epoch === posterEpoch) resolvedPoster.value = url;
+  } catch {
+    if (epoch === posterEpoch) resolvedPoster.value = undefined;
+  }
+}
+
+const posterForViewer = computed(() => props.poster ?? resolvedPoster.value);
+
+/** The next silent "3-D view couldn't start" needs the scheme that failed
+ *  (blob/http/mold-local) to tell a CSP refusal from a parse/GL failure. */
+function onMeshFail(message: string) {
+  let scheme = "unknown";
+  try {
+    scheme = src.value ? new URL(src.value).protocol : "unknown";
+  } catch {
+    // src.value was not resolvable to an absolute URL; leave "unknown".
+  }
+  console.warn("[mesh] viewer failed", { scheme, message });
 }
 
 // Watch the route's VALUES, never a freshly built array: a getter returning
@@ -140,11 +202,28 @@ watch(
   () => props.priority,
   (priority) => thumbnailHandle?.setPriority(priority),
 );
-onMounted(load);
+watch(
+  [
+    () => props.mesh,
+    () => props.posterPath,
+    () => props.cacheKey,
+    () => props.mediaVersion,
+    () => props.target?.baseUrl,
+    () => props.target?.apiKey,
+  ],
+  loadPoster,
+);
+onMounted(() => {
+  load();
+  loadPoster();
+});
 onUnmounted(() => {
   loadEpoch += 1;
   thumbnailHandle?.cancel();
   thumbnailHandle = null;
+  posterEpoch += 1;
+  posterHandle?.cancel();
+  posterHandle = null;
 });
 </script>
 
@@ -161,9 +240,10 @@ onUnmounted(() => {
   <MeshViewer
     v-else-if="mesh && src"
     :src="src"
-    v-bind="poster ? { poster } : {}"
+    v-bind="posterForViewer ? { poster: posterForViewer } : {}"
     :alt="alt"
     class="h-full w-full"
+    @fail="onMeshFail"
   />
   <audio v-else-if="audio && src" :src="src" class="w-full" controls />
   <img

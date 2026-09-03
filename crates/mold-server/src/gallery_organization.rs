@@ -171,6 +171,13 @@ pub(crate) fn enriched_gallery_image(
         .print_organization(dir, filename)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     apply_organization(&mut image, org.as_ref(), retention_days);
+    // The single-row wire exit: the `PATCH /api/gallery/:filename` body and
+    // its `gallery_updated` event, and the row a trash restore answers with.
+    // A mesh tile is a RENDER of the geometry, so its `media_version` carries
+    // the poster renderer's revision here exactly as `/api/gallery` stamps it
+    // on a listing. The stamp is idempotent, so a row that has already been
+    // through another exit is unchanged.
+    crate::thumbnails::stamp_poster_revision(&mut image);
     Ok(Some(image))
 }
 
@@ -876,4 +883,66 @@ pub(crate) async fn delete_tag(
         });
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(filename: &str, format: mold_core::OutputFormat) -> mold_db::GenerationRecord {
+        let mut record = mold_db::GenerationRecord::from_save(
+            std::path::Path::new("/prints"),
+            filename,
+            format,
+            mold_db::metadata_io::synthesize_from_filename(filename, 1_700_000_000),
+            mold_db::RecordSource::Server,
+            1_700_000_000_000,
+        );
+        record.file_mtime_ms = Some(1_700_000_000_000);
+        record.file_size_bytes = Some(4096);
+        record
+    }
+
+    /// The single-row wire exit stamps the poster revision, so the `PATCH
+    /// /api/gallery/:filename` body, its `gallery_updated` event, and the row
+    /// a trash restore answers with all agree with `/api/gallery`'s listing
+    /// about a mesh print's `media_version`.
+    ///
+    /// A client keys its tile cache on that value. Two exits disagreeing is
+    /// not a cosmetic difference — it makes a favourite-toggle discard the
+    /// tile it had just cached, or keep a pre-revision poster the listing had
+    /// already replaced.
+    #[test]
+    fn the_single_row_exit_stamps_the_poster_revision() {
+        let db = MetadataDb::open_in_memory().expect("open the metadata db");
+        let dir = std::path::Path::new("/prints");
+        db.upsert(&record("chair.glb", mold_core::OutputFormat::Glb))
+            .expect("insert the mesh row");
+        db.upsert(&record("cat.png", mold_core::OutputFormat::Png))
+            .expect("insert the raster row");
+
+        let mesh = enriched_gallery_image(&db, None, dir, "chair.glb", 30)
+            .expect("enrich")
+            .expect("the mesh row");
+        let raster = enriched_gallery_image(&db, None, dir, "cat.png", 30)
+            .expect("enrich")
+            .expect("the raster row");
+
+        assert_eq!(
+            mesh.media_version.as_deref(),
+            Some("1700000000000:4096:p2"),
+            "the mesh row does not carry the poster revision"
+        );
+        // A raster tile is decoded from bytes that do not change, so its
+        // media version is untouched and no existing cache is invalidated.
+        assert_eq!(raster.media_version.as_deref(), Some("1700000000000:4096"));
+        assert_eq!(
+            mesh.media_version.as_deref(),
+            Some(&*format!(
+                "{}{}",
+                raster.media_version.as_deref().unwrap(),
+                crate::thumbnails::MESH_POSTER_REVISION_SUFFIX
+            ))
+        );
+    }
 }

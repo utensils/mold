@@ -18,6 +18,19 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { GlbParseError, parseGlb, type ParsedMesh } from "../lib/glb";
 import { meshStatsLabel } from "../lib/meshControls";
 import {
+  homeCamera,
+  multiply,
+  orthographic,
+  orthographicScale,
+  POSTER_MARGIN,
+  rotationX,
+  rotationY,
+  sweepExtentOfProfile,
+  sweepProfile,
+  translation,
+  upper3x3,
+} from "../lib/meshViewerCamera";
+import {
   advanceAutoRotate,
   edgeIndices,
   meshHasEdges,
@@ -80,93 +93,11 @@ const summary = computed(() => {
   return meshStatsLabel(value.vertexCount, value.triangleCount, value.bounds);
 });
 
-// ── Matrices (column-major, the order WebGL uniforms want) ─────────────────
-
-type Mat4 = Float32Array;
-
-function identity(): Mat4 {
-  const m = new Float32Array(16);
-  m[0] = 1;
-  m[5] = 1;
-  m[10] = 1;
-  m[15] = 1;
-  return m;
-}
-
-function multiply(a: Mat4, b: Mat4): Mat4 {
-  const out = new Float32Array(16);
-  for (let column = 0; column < 4; column += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      let sum = 0;
-      for (let k = 0; k < 4; k += 1) {
-        sum += (a[k * 4 + row] ?? 0) * (b[column * 4 + k] ?? 0);
-      }
-      out[column * 4 + row] = sum;
-    }
-  }
-  return out;
-}
-
-function translation(x: number, y: number, z: number): Mat4 {
-  const m = identity();
-  m[12] = x;
-  m[13] = y;
-  m[14] = z;
-  return m;
-}
-
-function rotationX(angle: number): Mat4 {
-  const m = identity();
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  m[5] = c;
-  m[6] = s;
-  m[9] = -s;
-  m[10] = c;
-  return m;
-}
-
-function rotationY(angle: number): Mat4 {
-  const m = identity();
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  m[0] = c;
-  m[2] = -s;
-  m[8] = s;
-  m[10] = c;
-  return m;
-}
-
-function perspective(
-  fovy: number,
-  aspect: number,
-  near: number,
-  far: number,
-): Mat4 {
-  const m = new Float32Array(16);
-  const f = 1 / Math.tan(fovy / 2);
-  m[0] = f / (aspect || 1);
-  m[5] = f;
-  m[10] = (far + near) / (near - far);
-  m[11] = -1;
-  m[14] = (2 * far * near) / (near - far);
-  return m;
-}
-
-/** Upper-left 3×3. The camera only rotates, so this IS the normal matrix. */
-function upper3x3(m: Mat4): Float32Array {
-  return new Float32Array([
-    m[0] ?? 0,
-    m[1] ?? 0,
-    m[2] ?? 0,
-    m[4] ?? 0,
-    m[5] ?? 0,
-    m[6] ?? 0,
-    m[8] ?? 0,
-    m[9] ?? 0,
-    m[10] ?? 0,
-  ]);
-}
+/*
+ * The matrix helpers, the poster camera and the orthographic fit all live in
+ * `@studio/lib/meshViewerCamera`, which mirrors the server's `poster.rs` under
+ * a Rust contract test. This component owns GL state and event wiring only.
+ */
 
 // ── Shaders ────────────────────────────────────────────────────────────────
 // GLSL ES 1.00 so one source compiles on both WebGL2 and a WebGL1 fallback.
@@ -243,9 +174,18 @@ interface Scene {
   /** Built on the first wireframe toggle and never rebuilt. */
   edgeBuffer: WebGLBuffer | null;
   edgeCount: number;
-  /** World-space centre and radius, for framing and near/far planes. */
+  /** World-space bounding-box centre: the point every camera orbits. */
   center: [number, number, number];
+  /** Half the bounding-box diagonal. The depth range only — never the fit. */
   radius: number;
+  /**
+   * The half-extent the poster and the turntable frame to, at the poster's own
+   * elevation, so this viewer's home view IS the thumbnail and IS turntable
+   * frame 0. Never recomputed: it is the parity value.
+   */
+  extent: number;
+  /** `(radial, |dy|)` per vertex, so a tilt can re-frame without the mesh. */
+  profile: Float32Array;
   uniforms: {
     modelView: WebGLUniformLocation | null;
     projection: WebGLUniformLocation | null;
@@ -257,6 +197,17 @@ interface Scene {
 }
 
 let scene: Scene | null = null;
+/**
+ * The last pitch the framing was solved for, and its answer.
+ *
+ * The sweep bound is invariant in AZIMUTH, not in elevation, so a viewer
+ * tilted away from the poster's 20° needs its own extent or the silhouette
+ * runs off the top and bottom of the frame. Solving it per drag frame is one
+ * pass over `Scene.profile`; caching on the pitch means a yaw drag, the
+ * auto-rotate tour, a zoom and a resize never pay for it at all.
+ */
+let framedPitch = Number.NaN;
+let framedExtent = 0;
 let controller: AbortController | null = null;
 let frame = 0;
 let intersection: IntersectionObserver | null = null;
@@ -265,11 +216,11 @@ let resize: ResizeObserver | null = null;
 let onScreen = true;
 let pageVisible = true;
 
-const camera = { yaw: 0.6, pitch: 0.35, zoom: 1 };
-const HOME = { ...camera };
+/** The poster's camera. `resetView` and every fresh mount start here. */
+const HOME = homeCamera();
+const camera = { ...HOME };
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 6;
-const FOV = (38 * Math.PI) / 180;
 /** A mesh larger than this is refused rather than allowed to wedge the tab. */
 const MAX_BYTES = 256 * 1024 * 1024;
 
@@ -304,14 +255,55 @@ function resizeCanvas(gl: GL): void {
   gl.viewport(0, 0, element.width, element.height);
 }
 
+/**
+ * The half-extent to frame this mesh to at `pitch`.
+ *
+ * Never below the poster's own extent, so the home view is the poster's exact
+ * framing (at `HOME.pitch` the two agree by construction and the max is a
+ * no-op) and a tilt only ever pulls back — a mesh cannot grow past the
+ * thumbnail's size as it is turned.
+ */
+function framedExtentFor(current: Scene, pitch: number): number {
+  if (pitch !== framedPitch) {
+    framedPitch = pitch;
+    framedExtent = Math.max(
+      current.extent,
+      sweepExtentOfProfile(current.profile, pitch),
+    );
+  }
+  return framedExtent;
+}
+
 function draw(): void {
   if (!scene) return;
   const { gl, program, uniforms } = scene;
   resizeCanvas(gl);
   const element = canvas.value;
-  const aspect = element ? element.width / Math.max(1, element.height) : 1;
+  // Backing-store pixels, not CSS pixels: the devicePixelRatio cancels between
+  // the fit and the half-extents, so a retina canvas frames the mesh exactly
+  // as the server's poster does.
+  const width = element?.width ?? 0;
+  const height = element?.height ?? 0;
+  // `camera.zoom` is the pull-back factor the wheel, the pinch and the +/-
+  // keys have always spoken — larger means further away — so it DIVIDES the
+  // fit here exactly as it multiplied the eye distance under perspective.
+  const scale =
+    orthographicScale(
+      framedExtentFor(scene, camera.pitch),
+      width,
+      height,
+      POSTER_MARGIN,
+    ) / camera.zoom;
+  // A mesh with no extent, or a canvas with no area, has nothing to frame:
+  // clear rather than build a projection out of a division by zero.
+  if (!(scale > 0)) {
+    gl.useProgram(program);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    return;
+  }
 
-  const distance = (scene.radius / Math.sin(FOV / 2)) * 1.35 * camera.zoom;
+  const distance = scene.radius * 3;
   const modelView = multiply(
     multiply(
       translation(0, 0, -distance),
@@ -319,12 +311,13 @@ function draw(): void {
     ),
     translation(-scene.center[0], -scene.center[1], -scene.center[2]),
   );
-  const span = scene.radius * 4 + distance;
-  const projection = perspective(
-    FOV,
-    aspect,
-    Math.max(distance - scene.radius * 2, scene.radius * 0.01),
-    span,
+  // The mesh sits within `radius` of the eye axis' centre, so these planes
+  // bracket it whatever the orbit angle.
+  const projection = orthographic(
+    width / 2 / scale,
+    height / 2 / scale,
+    distance - scene.radius * 2,
+    distance + scene.radius * 2,
   );
 
   gl.useProgram(program);
@@ -609,6 +602,8 @@ async function upload(mesh: ParsedMesh): Promise<void> {
       Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2,
       1e-4,
     ) || 1;
+  const profile = sweepProfile(mesh.positions, center);
+  framedPitch = Number.NaN;
 
   scene = {
     gl,
@@ -623,6 +618,8 @@ async function upload(mesh: ParsedMesh): Promise<void> {
     edgeCount: 0,
     center,
     radius,
+    extent: sweepExtentOfProfile(profile, HOME.pitch),
+    profile,
     uniforms,
   };
   hasEdges.value = meshHasEdges(mesh.indices);
@@ -792,6 +789,7 @@ function releaseGl(): void {
     frame = 0;
   }
   wireframe.value = false;
+  framedPitch = Number.NaN;
   const current = scene;
   scene = null;
   if (!current) return;

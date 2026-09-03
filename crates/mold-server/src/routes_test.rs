@@ -16125,10 +16125,14 @@ mod tests {
             "public, max-age=300"
         );
         let thumb_dir = mold_home.path().join("cache").join("thumbnails");
-        assert!(
-            !thumb_dir.join("broken.glb.png").exists(),
-            "a failed render must not leave a sidecar behind"
-        );
+        for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "broken.glb")
+        {
+            assert!(
+                !sidecar.exists(),
+                "a failed render must not leave {} behind",
+                sidecar.display()
+            );
+        }
     }
 
     /// The import envelope carries bytes and metadata, never the origin's

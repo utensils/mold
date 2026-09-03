@@ -91,6 +91,16 @@ fn remove_cached_sidecars(name: &str) {
     let thumb_dir = crate::routes::server_thumbnail_dir();
     let _ = std::fs::remove_file(thumb_dir.join(name));
     let _ = std::fs::remove_file(thumb_dir.join(format!("{name}.png")));
+    // A mesh poster is not at `<name>.png`: its server-side name carries the
+    // poster renderer's revision, and the TUI reads a third name. Purging
+    // through the one place those names are defined is what keeps a purge
+    // from leaving a poster behind for every 3-D print ever deleted. The
+    // second of the pair is `<name>.thumb.png`, which also collects an audio
+    // print's TUI waveform — likewise dead once the print is gone. A raster
+    // has neither name, so the two removals are no-ops for one.
+    for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, name) {
+        let _ = std::fs::remove_file(sidecar);
+    }
     let _ = std::fs::remove_file(
         crate::routes::server_preview_gif_dir()
             .join(mold_core::media_paths::preview_gif_filename(name)),

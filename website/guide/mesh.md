@@ -165,10 +165,14 @@ Nothing outside a 3-D tool opens a `.glb`, and the gallery poster shows one
 view. A **turntable** is that poster set spinning: the same camera, lighting
 and slate background, swept a full turn around the mesh and written as an
 animated GIF, APNG or WebP you can drop into a chat, a README or a browser.
-The sweep's scale is fitted once, before the first frame renders, so the
-mesh holds one size for the whole turn instead of breathing and popping as
-it comes round. Frame 0 keeps the poster's own camera and lighting, but it is
-fit to that sweep-wide scale rather than the poster's exact pixels.
+The sweep's scale is fitted once, before the first frame renders, to the
+mesh's own rotation-invariant extent — so the mesh holds one size for the
+whole turn instead of breathing and popping as it comes round, and a 36- or
+72-frame turntable frames identically. Frame 0 is the poster's exact pixels:
+poster, turntable, and the interactive 3-D viewer's home view all share that
+one camera and framing. The sweep turns the mesh the same direction a
+rightward drag turns it in the viewer, and the viewer's "reset view" returns
+to that same poster view.
 
 ```bash
 mold library export chair.glb --format gif                       # chair.gif: 36 frames, 10 fps, 512 px, loops

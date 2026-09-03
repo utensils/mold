@@ -226,7 +226,7 @@ fn scan(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 &file.filename,
                 timestamp,
             );
-            mold_core::GalleryImage {
+            let mut image = mold_core::GalleryImage {
                 filename: file.filename,
                 metadata,
                 timestamp,
@@ -240,7 +240,15 @@ fn scan(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 collections: Vec::new(),
                 trashed_at: None,
                 purge_at: None,
-            }
+            };
+            // These rows feed the offline "This device" tiles, whose
+            // `mold-thumb://` cache is keyed on `media_version`. A mesh tile
+            // is RENDERED from the geometry, so the poster changes while the
+            // `.glb`'s timestamp and size do not — the same stamp the server
+            // puts on every `/api/gallery` row, so a print looks identical
+            // whether this Mac is serving it or reading it.
+            mold_server::thumbnails::stamp_poster_revision(&mut image);
+            image
         })
         .collect();
     images.sort_by_key(|image| std::cmp::Reverse(image.timestamp));
@@ -3014,7 +3022,13 @@ mod tests {
             crate::thumbnail_cache::sniff_content_type(&tile),
             Some("image/svg+xml")
         );
-        assert!(!cache.path().join(format!("{name}.png")).exists());
+        for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), name) {
+            assert!(
+                !sidecar.exists(),
+                "a failed render must not leave {} behind",
+                sidecar.display()
+            );
+        }
     }
 
     #[test]

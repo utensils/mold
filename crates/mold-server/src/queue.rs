@@ -307,6 +307,13 @@ fn gallery_image_with_filing(
         image.tags = seeded.tags.clone();
         image.collections = seeded.collection_id.clone().into_iter().collect();
     }
+    // Every `gallery_added` / `gallery_updated` row this module publishes is
+    // built here, so this is where a mesh row picks up the poster renderer's
+    // revision — the same value `/api/gallery` stamps at its listing exit. A
+    // client keys its tile cache on `media_version`, and an event row that
+    // disagreed with the listing would make it refetch the tile a moment
+    // after inserting it.
+    crate::thumbnails::stamp_poster_revision(&mut image);
     image
 }
 
@@ -4250,6 +4257,47 @@ pub fn estimate_model_vram(model_name: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Every `gallery_added` / `gallery_updated` row this module publishes is
+    /// built by `gallery_image_with_filing`, so that is where a mesh row
+    /// picks up the poster renderer's revision.
+    ///
+    /// A client inserts the event row in place and keys its tile cache on
+    /// `media_version`. If the event disagreed with `/api/gallery`'s listing,
+    /// a freshly generated mesh print would cache one tile on the event and
+    /// then discard it on the next listing refresh.
+    #[test]
+    fn an_announced_mesh_row_carries_the_poster_revision() {
+        fn record(filename: &str, format: mold_core::OutputFormat) -> mold_db::GenerationRecord {
+            let mut record = mold_db::GenerationRecord::from_save(
+                std::path::Path::new("/prints"),
+                filename,
+                format,
+                mold_db::metadata_io::synthesize_from_filename(filename, 1_700_000_000),
+                mold_db::RecordSource::Server,
+                1_700_000_000_000,
+            );
+            record.file_mtime_ms = Some(1_700_000_000_000);
+            record.file_size_bytes = Some(4096);
+            record
+        }
+
+        let mesh = super::gallery_image_with_filing(
+            &record("chair.glb", mold_core::OutputFormat::Glb),
+            None,
+        );
+        let raster = super::gallery_image_with_filing(
+            &record("cat.png", mold_core::OutputFormat::Png),
+            None,
+        );
+
+        assert_eq!(
+            mesh.media_version.as_deref(),
+            Some("1700000000000:4096:p2"),
+            "the announced mesh row does not carry the poster revision"
+        );
+        assert_eq!(raster.media_version.as_deref(), Some("1700000000000:4096"));
+    }
+
     #[test]
     fn durable_media_hydrates_only_after_the_single_worker_slot_and_cancel_fences() {
         let source = include_str!("queue.rs");
