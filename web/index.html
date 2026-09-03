@@ -17,28 +17,41 @@
     <script>
       // Apply the persisted Mold Studio theme before first paint so the app
       // never flashes the wrong palette. Mirrors web/src/lib/theme.ts and the
-      // shared pairing table in ui/theme.ts (match-system resolves there
-      // after mount; the pre-paint pass stamps the pick itself).
+      // shared pairing table in ui/theme.ts (Match system resolves against
+      // the OS appearance here too, so a light desk never flashes dark).
       (function () {
-        var ids = [
-          "mocha",
-          "safelight",
-          "blueprint",
-          "graphite",
-          "porcelain",
-          "nebula",
-        ];
+        var pair = {
+          mocha: ["mocha", "blueprint"],
+          blueprint: ["mocha", "blueprint"],
+          graphite: ["graphite", "porcelain"],
+          porcelain: ["graphite", "porcelain"],
+          safelight: ["safelight", "porcelain"],
+          nebula: ["nebula", "porcelain"],
+        };
         var theme = "safelight";
+        var matchSystem = false;
         try {
           var raw = localStorage.getItem("mold.web.theme.v1");
           if (raw) {
             var parsed = JSON.parse(raw);
-            if (ids.indexOf(parsed.theme) >= 0) theme = parsed.theme;
-            else if (parsed.family === "mold")
+            if (pair[parsed.theme]) {
+              theme = parsed.theme;
+              matchSystem = parsed.matchSystem === true;
+            } else if (parsed.family === "mold") {
               theme = parsed.theme === "light" ? "blueprint" : "mocha";
-            else if (parsed.theme === "light") theme = "porcelain";
+              matchSystem = parsed.theme === "system";
+            } else {
+              if (parsed.theme === "light") theme = "porcelain";
+              matchSystem = parsed.theme === "system";
+            }
           }
         } catch (e) {}
+        if (matchSystem && window.matchMedia) {
+          var light = window.matchMedia(
+            "(prefers-color-scheme: light)",
+          ).matches;
+          theme = pair[theme][light ? 1 : 0];
+        }
         document.documentElement.dataset.theme = theme;
       })();
     </script>

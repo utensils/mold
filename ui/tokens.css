@@ -401,7 +401,9 @@
   --print: var(--mold-media-bed);
   --on-media: var(--mold-on-media);
   --grad: var(--mold-ink-gradient);
-  --card-hi: transparent;
+  /* Inset card highlight: the raised surface, which is lighter than the
+     content plane in every tone, so it still reads as a highlight. */
+  --card-hi: color-mix(in srgb, var(--mold-surface) 60%, transparent);
   --sel-ink: var(--mold-blue);
   --sel-border: var(--mold-blue);
   --sel-bg: var(--mold-accent-tint);
