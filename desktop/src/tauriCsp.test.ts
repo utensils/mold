@@ -67,3 +67,33 @@ describe("desktop tauri.conf.json CSP", () => {
     expect(mediaSrc).toContain("blob:");
   });
 });
+
+/**
+ * `desktop-dev` applies NO policy unless `devCsp` is set, which is exactly
+ * how the missing `blob:` on `connect-src` hid for months: every UAT ran in
+ * dev and only a packaged build ever refused the mesh viewer's fetch. The dev
+ * policy is therefore the shipped one plus the single allowance Vite's
+ * hot-reload client needs — its WebSocket back to the dev server — so a
+ * directive that would break the packaged app breaks `desktop-dev` first.
+ */
+describe("desktop tauri.conf.json devCsp", () => {
+  const raw = readFileSync(configPath, "utf-8");
+  const config = JSON.parse(raw) as { app: { security: { csp: string; devCsp?: string } } };
+  const devCsp = config.app.security.devCsp;
+
+  it("is set, so desktop-dev enforces a policy at all", () => {
+    expect(devCsp).toBeTruthy();
+  });
+
+  it("is the shipped policy plus only Vite's hot-reload WebSocket", () => {
+    const shipped = parseCsp(config.app.security.csp);
+    const dev = parseCsp(devCsp ?? "");
+    expect([...dev.keys()].sort()).toEqual([...shipped.keys()].sort());
+    for (const [name, sources] of shipped) {
+      const devSources = new Set(dev.get(name));
+      devSources.delete("ws://localhost:1430");
+      expect([...devSources].sort(), name).toEqual([...sources].sort());
+    }
+    expect(dev.get("connect-src")).toContain("ws://localhost:1430");
+  });
+});
