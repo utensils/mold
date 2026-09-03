@@ -18,6 +18,7 @@
 
 import type { PromptRequirement } from "./generated/generationProfileV1";
 import { isMinimaxH3Identity } from "./minimaxH3Identity";
+import type { ReferenceImagesCapabilities } from "./referenceImagesProfile";
 
 /** Families whose engines could render from visual conditioning alone. */
 const PROMPT_OPTIONAL_FAMILIES: ReadonlySet<string> = new Set([
@@ -77,6 +78,54 @@ export function legacySupportsStrength(family: string, model = ""): boolean {
     !isWanFamily(normalized) &&
     !isMeshFamily(normalized)
   );
+}
+
+/** FLUX.2 Dev's reference ceiling before the profile advertised one; mirrors
+ * `mold_core::validation::FLUX2_MAX_REFERENCE_IMAGES`. */
+const LEGACY_FLUX2_MAX_REFERENCE_IMAGES = 4;
+
+/**
+ * The pre-profile reference-image rule.
+ *
+ * It answers ONLY for a host that advertises no `capabilities.reference_images`
+ * block at all — such a host is an OLDER SERVER, and this is exactly what
+ * every client sniffed by name before the contract existed: Qwen-Image-Edit
+ * takes a target-first strip, FLUX.2 [dev] takes up to four references that
+ * replace the source image.
+ *
+ * FLUX.2 [klein] deliberately answers `null`. Klein's reference protocol
+ * shipped WITH the wire contract, so a host old enough to omit the block has
+ * no Klein reference engine — offering the wells there would promise a render
+ * the server refuses at admission.
+ */
+export function legacyReferenceImages(
+  family: string,
+  model = "",
+): ReferenceImagesCapabilities | null {
+  const normalized = family.trim().toLowerCase();
+  if (isQwenImageEditFamily(normalized)) {
+    return {
+      required: true,
+      max: null,
+      primaryIsTarget: true,
+      sourceRelation: "replaces",
+      maxPixelsSingle: null,
+      maxPixelsMulti: null,
+      reason: null,
+    };
+  }
+  if (isFlux2DevModel(model)) {
+    return {
+      required: false,
+      max: LEGACY_FLUX2_MAX_REFERENCE_IMAGES,
+      primaryIsTarget: false,
+      sourceRelation: "replaces",
+      maxPixelsSingle: null,
+      maxPixelsMulti: null,
+      reason: null,
+    };
+  }
+  return null;
 }
 
 /**

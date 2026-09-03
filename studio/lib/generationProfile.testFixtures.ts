@@ -5,6 +5,7 @@
  * hand-trimmed approximation of it.
  */
 import type { GenerationRecipeProfile } from "./generationProfile";
+import type { ReferenceImagesProfile } from "./referenceImagesProfile";
 
 /** The canvasless GLB mesh recipe: prompt ignored, no strength, mesh block. */
 export function hunyuan3dRecipe(): GenerationRecipeProfile {
@@ -223,4 +224,101 @@ export function sdxlRecipe(): GenerationRecipeProfile {
       },
     ],
   };
+}
+
+/**
+ * The three reference-image recipes.
+ *
+ * INTERIM: hand-authored to the field names of
+ * `mold_core::generation_profile::ReferenceImagesProfile`. Re-copy these three
+ * capability blocks verbatim from `docs/generated/generation-profiles-v1.json`
+ * once the Rust workstream regenerates it — the point of a fixture is that it
+ * is the wire, not an approximation of it.
+ */
+function referenceRecipe(
+  reference_images: ReferenceImagesProfile,
+  overrides: Partial<GenerationRecipeProfile["capabilities"]> = {},
+): GenerationRecipeProfile {
+  const recipe = sdxlRecipe();
+  return {
+    ...recipe,
+    capabilities: {
+      ...recipe.capabilities,
+      // FLUX.2 and Qwen edit have no unconditional branch to steer.
+      negative_prompt: {
+        mode: "hidden",
+        required: false,
+        reason: "This recipe does not encode a negative prompt.",
+      },
+      schedulers: [],
+      ...overrides,
+      reference_images,
+    },
+  } as GenerationRecipeProfile;
+}
+
+/** FLUX.2 [dev]: references REPLACE the source image (and the mask). */
+export function flux2DevRecipe(): GenerationRecipeProfile {
+  return referenceRecipe(
+    {
+      mode: "adjustable",
+      required: false,
+      max_count: 4,
+      primary_is_target: false,
+      source_relation: "replaces",
+      max_pixels_single: 4_096_576,
+      max_pixels_multi: 1_048_576,
+    },
+    {
+      mask: {
+        mode: "hidden",
+        required: false,
+        reason: "flux2-dev uses edit_images instead of source_image.",
+      },
+      supports_strength: false,
+      supports_lora: false,
+      lora: {
+        mode: "hidden",
+        max_count: 0,
+        reason: "flux2-dev does not support LoRA.",
+      },
+    },
+  );
+}
+
+/** FLUX.2 [klein]: a source image OR references, never both — and it keeps
+ * img2img strength, the repaint mask, and LoRA when no reference is attached. */
+export function flux2KleinRecipe(): GenerationRecipeProfile {
+  return referenceRecipe({
+    mode: "adjustable",
+    required: false,
+    max_count: 4,
+    primary_is_target: false,
+    source_relation: "exclusive",
+    max_pixels_single: 4_096_576,
+    max_pixels_multi: 1_048_576,
+  });
+}
+
+/** Qwen-Image-Edit: the first image is the edit TARGET, count unbounded. */
+export function qwenImageEditRecipe(): GenerationRecipeProfile {
+  return referenceRecipe(
+    {
+      mode: "adjustable",
+      required: true,
+      max_count: null,
+      primary_is_target: true,
+      source_relation: "replaces",
+      max_pixels_single: 1_048_576,
+      max_pixels_multi: 1_048_576,
+    },
+    {
+      mask: {
+        mode: "hidden",
+        required: false,
+        reason: "qwen-image-edit uses edit_images instead of source_image.",
+      },
+      supports_strength: false,
+    },
+  );
 }

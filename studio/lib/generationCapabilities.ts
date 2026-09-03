@@ -20,8 +20,14 @@ import {
   isWanFamily,
   LEGACY_MESH_OUTPUT_FORMATS,
   legacyPromptRequirementForFamily,
+  legacyReferenceImages,
   legacySupportsStrength,
 } from "./legacyRecipeRules";
+import {
+  advertisedReferenceImages,
+  referenceImagesFromProfile,
+  type ReferenceImagesCapabilities,
+} from "./referenceImagesProfile";
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
 export {
@@ -48,10 +54,25 @@ export type GenerationScheduler =
   | "euler"
   | "dpm-pp";
 
+export type {
+  ReferenceImagesCapabilities,
+  ReferenceSourceRelation,
+} from "./referenceImagesProfile";
+
+/**
+ * How the primary form lays out image conditioning. Derived from
+ * `referenceImages` (the advertised block, or the legacy sniff standing in
+ * for an older host) — never from a model name at a call site.
+ *
+ * `single-or-references` is the EXCLUSIVE relation: the checkpoint renders
+ * from a source image OR from ordered references, never both in one pass, so
+ * both wells render and whichever holds media parks the other.
+ */
 export type SourceImageMode =
   | "single"
   | "qwen-edit"
   | "references"
+  | "single-or-references"
   | "h3-boundaries"
   | "ordered-references";
 
@@ -92,6 +113,19 @@ export interface BaseGenerationCapabilities {
   supportsAudioInput: boolean;
   requiresAudioInput: boolean;
   sourceImageMode: SourceImageMode;
+  /**
+   * The checkpoint's ordered-reference contract (`GenerateRequest.edit_images`),
+   * or `null` where it takes none.
+   *
+   * The recipe's `capabilities.reference_images` is the authority; a `hidden`
+   * block is the server saying no. Only the ABSENCE of the block falls back
+   * to `legacyReferenceImages` — absence means an older host, exactly as it
+   * does for `supports_strength`. Everything about references (the strip
+   * ceiling, requiredness, whether image 0 is the edit target, and how
+   * references relate to `source_image`) is read from here, never from a
+   * model name.
+   */
+  referenceImages: ReferenceImagesCapabilities | null;
   /**
    * The effective per-model source-image contract (#772): the model's own
    * advertised mode when it has one, this family's heuristic otherwise.
@@ -372,6 +406,16 @@ export function baseGenerationCapabilities(
     advertisedSourceImage,
     familySourceImage,
   );
+  // The reference contract, resolved ONCE: the advertised block decides (a
+  // `hidden` block is a NO, not silence), and only its absence — an older
+  // host — falls through to the pre-profile family sniff.
+  const advertisedReferences = profileCaps
+    ? advertisedReferenceImages(profileCaps)
+    : null;
+  const referenceImages: ReferenceImagesCapabilities | null =
+    advertisedReferences
+      ? referenceImagesFromProfile(advertisedReferences)
+      : legacyReferenceImages(normalized, model);
   const advertisedDefault = !pipeline ? advertisedGuidance : null;
   const fixedGuidance = h3
     ? true
@@ -453,15 +497,22 @@ export function baseGenerationCapabilities(
       ? profileControlVisible(profileCaps.audio.mode)
       : ltx,
     requiresAudioInput: profileCaps?.audio.required ?? false,
+    // H3's two tasks own their own layouts; every other family's layout is a
+    // projection of the reference contract. `combines` has no shipped recipe
+    // and renders as the two-well layout, whose parking rule is the
+    // conservative reading until a family actually takes both at once.
     sourceImageMode: h3Ref2va
       ? "ordered-references"
       : h3
         ? "h3-boundaries"
-        : flux2Dev
-          ? "references"
-          : qwenEdit
+        : referenceImages
+          ? referenceImages.primaryIsTarget
             ? "qwen-edit"
-            : "single",
+            : referenceImages.sourceRelation === "replaces"
+              ? "references"
+              : "single-or-references"
+          : "single",
+    referenceImages,
     sourceImageCapability,
     supportsSourceImage: sourceImageCapability !== "unsupported",
     requiresSourceImage: sourceImageCapability === "required",

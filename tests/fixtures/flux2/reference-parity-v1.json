@@ -1,0 +1,61 @@
+{
+  "schema": "mold.flux2.reference-parity.v1",
+  "comment": "Cross-surface reference-image capability expectations. `capabilities.reference_images` on the generation profile is the SINGLE authority for whether a checkpoint takes ordered reference images, how many, whether the first one is the edit target, and how references relate to `source_image`. `mold_core::generation_profile::reference_images_for_recipe` answers it once; the Rust test in mold-core and the vitest `studio/lib/flux2ReferenceParity.test.ts` both read this file, so a drift on either side fails CI. Absence of the block on the wire means an OLDER SERVER, never a refusal — clients fall back to their pre-profile family sniff (`legacyReferenceImages`), which knows FLUX.2 [dev] and Qwen-Image-Edit and deliberately does NOT know FLUX.2 [klein]: a host that predates this contract has no Klein reference engine.",
+  "relations": {
+    "replaces": "The references ARE the conditioning: `source_image`, `mask_image` and ControlNet inputs are refused alongside them (qwen-image-edit, flux2-dev).",
+    "exclusive": "The checkpoint renders from a source image OR from references, never both in one pass. Both wells are offered; whichever holds media parks the other (flux2 klein).",
+    "combines": "References and a source image travel together. No shipped recipe uses this today."
+  },
+  "models": [
+    {
+      "model": "flux2-dev:bf16",
+      "family": "flux2",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 4,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "comment": "FLUX.2 [dev] multi-reference editing, the pre-contract behaviour every client used to sniff by name."
+    },
+    {
+      "model": "flux2-klein:bf16",
+      "family": "flux2",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 4,
+      "primary_is_target": false,
+      "source_relation": "exclusive",
+      "comment": "The distilled Klein tier takes the identical reference protocol upstream and keeps img2img, the repaint mask, and LoRA — hence `exclusive` rather than `replaces`."
+    },
+    {
+      "model": "flux2-klein-base-9b:q8",
+      "family": "flux2",
+      "mode": "adjustable",
+      "required": false,
+      "max_count": 4,
+      "primary_is_target": false,
+      "source_relation": "exclusive",
+      "comment": "The undistilled 9B base tier samples with a real unconditional branch; its reference contract is the same."
+    },
+    {
+      "model": "qwen-image-edit-2511:q4",
+      "family": "qwen-image-edit",
+      "mode": "adjustable",
+      "required": true,
+      "max_count": null,
+      "primary_is_target": true,
+      "source_relation": "replaces",
+      "comment": "The first image is the edit TARGET, which is why the shared Target well renders above the strip. No server-side count bound."
+    },
+    {
+      "model": "flux-dev:q4",
+      "family": "flux",
+      "mode": "hidden",
+      "required": false,
+      "max_count": 0,
+      "primary_is_target": false,
+      "source_relation": "replaces",
+      "comment": "FLUX.1 takes no reference images (Kontext is a separate checkpoint, filed as its own PR). Hidden with `max_count: 0` — the block is present and says no."
+    }
+  ]
+}
