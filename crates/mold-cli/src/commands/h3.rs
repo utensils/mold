@@ -47,26 +47,39 @@ impl std::fmt::Debug for ReferenceArg {
 impl FromStr for ReferenceArg {
     type Err = String;
 
+    /// `KIND=PATH` or a bare `PATH`.
+    ///
+    /// The bare form means `image=PATH`, because `--reference` is no longer
+    /// H3's alone: a recipe that advertises `reference_images` reads the flag
+    /// as its ordered reference group, and there every reference is an image.
+    /// `video=` and `audio=` still parse here — the ROUTER refuses them by
+    /// name on a recipe that cannot consume them, so the error names the
+    /// model rather than the syntax.
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let (kind, path) = value.split_once('=').ok_or_else(|| {
-            "reference must use KIND=PATH (image=..., video=..., or audio=...)".to_string()
-        })?;
-        let kind = match kind.trim().to_ascii_lowercase().as_str() {
-            "image" => ReferenceKind::Image,
-            "video" => ReferenceKind::Video,
-            "audio" => ReferenceKind::Audio,
-            other => {
-                return Err(format!(
-                    "unknown reference kind '{other}'; expected image, video, or audio"
-                ));
-            }
+        let (kind, path) = match value.split_once('=') {
+            Some((kind, path)) => (Some(kind), path),
+            None => (None, value),
+        };
+        let kind = match kind.map(|kind| kind.trim().to_ascii_lowercase()) {
+            None => ReferenceKind::Image,
+            Some(kind) => match kind.as_str() {
+                "image" => ReferenceKind::Image,
+                "video" => ReferenceKind::Video,
+                "audio" => ReferenceKind::Audio,
+                other => {
+                    return Err(format!(
+                        "unknown reference kind '{other}'; expected image, video, or audio"
+                    ));
+                }
+            },
         };
         if path.trim().is_empty() {
             return Err("reference path must not be empty".to_string());
         }
         if path == "-" {
             return Err(
-                "H3 references require file paths so they can use authenticated streaming upload"
+                "--reference requires a file path: an H3 reference streams through an \
+                 authenticated upload session, and an ordered reference group is read from disk"
                     .to_string(),
             );
         }
@@ -148,8 +161,12 @@ pub(crate) fn prepare_authoring(
         || !references.is_empty();
     if !is_h3 {
         if has_h3_authoring {
+            // `--reference` is deliberately absent from this list: the run
+            // router resolves it against the recipe's `reference_images`
+            // block before authoring is prepared, and hands this function an
+            // empty slice on every non-H3 model.
             anyhow::bail!(
-                "--duration, --first-frame, --last-frame, and --reference are MiniMax H3-only options"
+                "--duration, --first-frame, and --last-frame are MiniMax H3-only options"
             );
         }
         return Ok(PreparedAuthoring::default());
@@ -732,11 +749,23 @@ mod tests {
         assert!(!format!("{parsed:?}").contains("clip=final"));
     }
 
+    /// A bare path is the ordered-reference form of the flag, and an image is
+    /// the only kind an `edit_images` recipe consumes — so `image=` is what
+    /// it means. A NAMED kind that is not one of the three is still a typo,
+    /// and stdin still has no place in either destination.
     #[test]
-    fn reference_arg_rejects_implicit_or_stdin_media() {
-        assert!("/tmp/a.png".parse::<ReferenceArg>().is_err());
+    fn reference_arg_reads_a_bare_path_as_an_image() {
+        let parsed: ReferenceArg = "/tmp/a.png".parse().unwrap();
+        assert_eq!(parsed.kind, ReferenceKind::Image);
+        assert_eq!(parsed.path, PathBuf::from("/tmp/a.png"));
+    }
+
+    #[test]
+    fn reference_arg_rejects_unknown_kinds_and_stdin_media() {
         assert!("audio=-".parse::<ReferenceArg>().is_err());
+        assert!("-".parse::<ReferenceArg>().is_err());
         assert!("document=/tmp/a.pdf".parse::<ReferenceArg>().is_err());
+        assert!("".parse::<ReferenceArg>().is_err());
     }
 
     #[test]
