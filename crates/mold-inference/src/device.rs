@@ -926,6 +926,33 @@ pub fn activation_bytes(
     raw.max(ACTIVATION_FLOOR_BYTES)
 }
 
+/// How much longer a FLUX.2 sequence becomes once reference tokens are
+/// appended, as a whole-number multiplier on [`activation_bytes`].
+///
+/// The transformer sees ONE sequence: the noisy target tokens followed by
+/// every reference group (`pipeline_flux2_klein.py:845-846`), and both CFG
+/// branches see the same input (`:862-873`). Attention therefore scales with
+/// the packed length, not with the canvas — which is why the budget cannot be
+/// derived from `width × height` alone.
+///
+/// Reference tokens are counted in image PIXELS on purpose: both sides
+/// patchify at the same rate, so the pixel ratio is the token ratio and the
+/// caller does not have to reach for latent dimensions. The result is rounded
+/// UP (`div_ceil`) and floored at 1 so a request with no references costs
+/// exactly what it did before, and a degenerate zero-pixel target never
+/// divides by zero.
+///
+/// This is the server's admission gate and the engine's own preflight sharing
+/// one answer — the server plans against the same multiplier the pipeline
+/// then reserves.
+pub fn flux2_reference_token_factor(target_pixels: u64, reference_pixels: u64) -> u64 {
+    let target = target_pixels.max(1);
+    target
+        .saturating_add(reference_pixels)
+        .div_ceil(target)
+        .max(1)
+}
+
 /// Bytes per element for a given candle dtype, used to feed
 /// [`activation_bytes`] from a runtime `DType`. Returns `2` for bf16/fp16 and
 /// `4` for f32; integer / quantized weights still flow as bf16/fp16

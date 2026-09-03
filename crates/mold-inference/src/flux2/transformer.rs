@@ -1519,6 +1519,17 @@ pub(crate) enum Flux2TransformerWrapper {
 /// `pipeline_flux2_klein.py:747-753,862-875` is the contract — the negative
 /// prompt defaults to `""`, both branches see the identical latent and ids,
 /// and the combination is `neg + scale * (pos - neg)`.
+///
+/// "Identical latent and ids" now also covers REFERENCE tokens, and that is
+/// load-bearing rather than incidental: upstream builds `latent_model_input`
+/// once per step, with the references already concatenated, and passes the
+/// same tensor to both the conditional and the unconditional forward
+/// (`:862-873`). The two branches differ ONLY in text. Below, `model_img` /
+/// `model_img_ids` are likewise built once per step and both `forward_once`
+/// calls take them, so a Klein-base reference render guides between two
+/// predictions that saw the same references — never between one that saw them
+/// and one that did not, which would push the render away from the very
+/// images the user attached.
 pub(crate) struct Flux2CfgBranch<'a> {
     /// `guidance_scale`; the branch is constructed only when it exceeds 1.
     pub scale: f64,
@@ -1601,6 +1612,13 @@ impl Flux2TransformerWrapper {
                 }
                 None => pred,
             };
+            // Drop the reference tokens back off the prediction. The model
+            // was handed target + references as one sequence and returns a
+            // velocity for all of it; only the target's slice is integrated
+            // (`pipeline_flux2_klein.py:860`). This narrow is also what keeps
+            // the latent preview and the inpaint blend below on the TARGET
+            // grid — both index `img`'s shape, and a reference-extended `pred`
+            // would silently mis-shape them.
             let pred = pred.narrow(1, 0, img.dim(1)?)?;
             img = (img + &pred * (t_prev - t_curr))?;
 
@@ -1687,6 +1705,42 @@ mod tests {
         txt_ids: &Tensor,
         cfg: Option<(&Tensor, &Tensor, f64)>,
     ) -> Vec<f32> {
+        denoise_once_with_reference(wrapper, guidance, txt, txt_ids, cfg, None)
+    }
+
+    /// A pair of reference tokens and their ids in the shape
+    /// `sampling::pack_reference_group` produces for this tiny config: two
+    /// tokens on time plane 10, `in_channels`-wide, ids rank 3.
+    fn tiny_reference() -> (Tensor, Tensor) {
+        use crate::flux2::quantized_transformer::test_support::spread;
+        let device = candle_core::Device::Cpu;
+        // Deliberately far from the target tokens' scale: the tiny synthetic
+        // transformer damps everything through 0.1-magnitude weights, so
+        // reference values in the target's own range would move the
+        // prediction by only ~1e-6 and leave the assertions below chasing
+        // f32 noise.
+        let tokens = (spread((2, 4), 7.7) * 40.0)
+            .unwrap()
+            .reshape((1, 2, 4))
+            .unwrap();
+        let ids = Tensor::from_vec(
+            vec![10.0f32, 0.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0],
+            (1, 2, 4),
+            &device,
+        )
+        .unwrap();
+        (tokens, ids)
+    }
+
+    /// As `denoise_once_with_text`, optionally appending reference tokens.
+    fn denoise_once_with_reference(
+        wrapper: &Flux2TransformerWrapper,
+        guidance: f64,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        cfg: Option<(&Tensor, &Tensor, f64)>,
+        reference: Option<(&Tensor, &Tensor)>,
+    ) -> Vec<f32> {
         use crate::flux2::quantized_transformer::test_support::spread;
         let device = candle_core::Device::Cpu;
         let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
@@ -1702,7 +1756,7 @@ mod tests {
             .denoise(
                 &img,
                 &img_ids,
-                None,
+                reference,
                 txt,
                 txt_ids,
                 &vec_,
@@ -1795,6 +1849,123 @@ mod tests {
             .iter()
             .zip(neg_txt.flatten_all().unwrap().to_vec1::<f32>().unwrap())
             .any(|(a, b)| (a - b).abs() > 1e-6),);
+    }
+
+    /// References lengthen the sequence the transformer attends over, but the
+    /// latent that gets integrated is still only the TARGET's — the model's
+    /// prediction is narrowed back to `img.dim(1)` before the flow-matching
+    /// update (`pipeline_flux2_klein.py:860`). So the render must come back
+    /// the target's length, and it must actually have been conditioned:
+    /// a build that appended the tokens and then ignored them would return
+    /// the same numbers as a plain render.
+    #[test]
+    fn a_reference_extended_sequence_returns_a_target_length_prediction() {
+        use crate::flux2::quantized_transformer::test_support::{tiny_cfg, tiny_transformer};
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+        let txt = crate::flux2::quantized_transformer::test_support::spread((2, 6), 3.2)
+            .reshape((1, 2, 6))
+            .unwrap();
+        let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+
+        let plain = denoise_once_with_reference(&wrapper, 1.0, &txt, &txt_ids, None, None);
+        let (ref_tokens, ref_ids) = tiny_reference();
+        let referenced = denoise_once_with_reference(
+            &wrapper,
+            1.0,
+            &txt,
+            &txt_ids,
+            None,
+            Some((&ref_tokens, &ref_ids)),
+        );
+
+        assert_eq!(
+            plain.len(),
+            referenced.len(),
+            "a reference-extended sequence must still integrate only the target tokens"
+        );
+        assert!(
+            plain
+                .iter()
+                .zip(&referenced)
+                .any(|(a, b)| (a - b).abs() > 1e-6),
+            "the references must reach the model — an ignored group renders identically"
+        );
+    }
+
+    /// A Klein-base render guides between two forwards that must see the SAME
+    /// reference tokens: upstream builds `latent_model_input` once with the
+    /// references already concatenated and hands it to both branches
+    /// (`pipeline_flux2_klein.py:862-873`). Over one step the update is
+    /// `img - pred`, so the same lerp identity that pins the plain CFG
+    /// combination pins this one — and it only holds if both branches were
+    /// conditioned on the references. Feed them to the positive branch alone
+    /// and the guided result stops being a lerp of the two.
+    #[test]
+    fn both_cfg_branches_see_the_same_reference_tokens() {
+        use crate::flux2::quantized_transformer::test_support::{
+            spread, tiny_cfg, tiny_transformer,
+        };
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+        let pos_txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let neg_txt = spread((2, 6), 4.9).reshape((1, 2, 6)).unwrap();
+        let ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let (ref_tokens, ref_ids) = tiny_reference();
+        let reference = Some((&ref_tokens, &ref_ids));
+
+        let scale = 3.0_f32;
+        let conditional =
+            denoise_once_with_reference(&wrapper, 1.0, &pos_txt, &ids, None, reference);
+        let unconditional =
+            denoise_once_with_reference(&wrapper, 1.0, &neg_txt, &ids, None, reference);
+        let guided = denoise_once_with_reference(
+            &wrapper,
+            1.0,
+            &pos_txt,
+            &ids,
+            Some((&neg_txt, &ids, scale as f64)),
+            reference,
+        );
+
+        // The bug this guards against is feeding the references to the
+        // positive forward only. That render would combine a
+        // reference-conditioned positive with a reference-BLIND negative, so
+        // compare the guided result against both candidate lerps and require
+        // it to sit on the reference-conditioned one by a wide margin. Stated
+        // as a ratio rather than an absolute tolerance because the tiny
+        // synthetic transformer damps every conditioning term to ~1e-6.
+        let blind_unconditional =
+            denoise_once_with_reference(&wrapper, 1.0, &neg_txt, &ids, None, None);
+        let worst = |uncond: &[f32]| {
+            guided
+                .iter()
+                .zip(uncond)
+                .zip(&conditional)
+                .map(|((got, u), c)| (got - (u + scale * (c - u))).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let on_shared_references = worst(&unconditional);
+        let on_blind_negative = worst(&blind_unconditional);
+
+        assert!(
+            on_blind_references_is_distinguishable(on_blind_negative),
+            "the references must actually move the unconditional branch, or the check is vacuous"
+        );
+        assert!(
+            on_blind_negative > 10.0 * on_shared_references,
+            "guided render matches the reference-blind combination ({on_blind_negative:e}) as well \
+             as the shared-reference one ({on_shared_references:e}) — both branches must see the \
+             same reference tokens"
+        );
+    }
+
+    /// The reference-blind combination has to be far enough from zero that the
+    /// ratio above is measuring conditioning rather than f32 rounding.
+    fn on_blind_references_is_distinguishable(residual: f32) -> bool {
+        residual > 1e-7
     }
 
     #[test]

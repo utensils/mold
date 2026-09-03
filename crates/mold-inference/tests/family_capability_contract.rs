@@ -172,7 +172,7 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             MediaKind::Image,
             WorkflowCapabilities {
                 source: true,
-                edit_references: false,
+                edit_references: true,
                 lora: true,
                 generated_audio: false,
                 chain: false,
@@ -349,6 +349,37 @@ fn static_chain_capability_agrees_with_the_chain_registry() {
             capability.workflows.chain,
             mold_inference::chain::capability_for_family(capability.family).is_some(),
             "{} chain",
+            capability.family
+        );
+    }
+}
+
+/// `edit_references` is the same kind of claim as `chain`: a pre-load
+/// DESCRIPTION whose one authority is
+/// `mold_core::generation_profile::reference_images_for_recipe`. flux2's entry
+/// said `false` while the engine had conditioned on `edit_images` since [dev]
+/// landed, which is exactly the drift `static_chain_capability_agrees_with_the_chain_registry`
+/// exists to catch — so the flag is pinned to the profile rather than reviewed
+/// by eye. The question is asked at FAMILY level (`any` over the family's
+/// manifest models) because the table has one row per family while the profile
+/// answers per model.
+#[test]
+fn static_edit_references_agrees_with_the_generation_profile() {
+    for capability in production_family_capabilities() {
+        let advertised = mold_core::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.family == capability.family)
+            .any(|manifest| {
+                mold_core::generation_profile::reference_images_for_recipe(
+                    &manifest.family,
+                    &manifest.name,
+                )
+                .mode
+                    != mold_core::ControlMode::Hidden
+            });
+        assert_eq!(
+            capability.workflows.edit_references, advertised,
+            "{} edit_references",
             capability.family
         );
     }

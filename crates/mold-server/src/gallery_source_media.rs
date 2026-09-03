@@ -963,6 +963,39 @@ mod tests {
         assert!(request.extend_video_path.is_none());
     }
 
+    /// Reuse settings on a Klein reference print restores the whole ORDERED
+    /// set. Order is not cosmetic here: the engine numbers references by
+    /// position (`sampling::pack_reference_group`, t = 10, 20, ...), so a
+    /// restore that dropped or reordered them would re-render a different
+    /// image from settings the user was told were the same. The role is
+    /// `edit_images` for every family that speaks the reference protocol —
+    /// nothing about this path is keyed on the model, which is why Klein needed
+    /// no server change to become reusable.
+    #[test]
+    fn klein_reuse_restores_every_ordered_reference_image() {
+        let mut request = request();
+        request.model = "flux2-klein:bf16".to_string();
+        hydrate_selected_members(
+            &mut request,
+            vec![
+                (selected("edit_images", 0), vec![11]),
+                (selected("edit_images", 1), vec![22]),
+                (selected("edit_images", 2), vec![33]),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.edit_images,
+            Some(vec![vec![11], vec![22], vec![33]]),
+            "the restored references must keep the order the print was made with"
+        );
+        // Klein's source relation is exclusive, so a reference restore must not
+        // invent a source image beside them.
+        assert!(request.source_image.is_none());
+        assert!(request.mask_image.is_none());
+    }
+
     #[test]
     fn hydration_refuses_to_override_client_media() {
         let mut request = request();
