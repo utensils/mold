@@ -8,8 +8,8 @@
  * does not match `blob:` against `'self'`, and `connect-src` never carried
  * `blob:`, so a packaged build's Library lightbox and Create canvas mesh
  * viewer always fell through to "The 3-D view couldn't start, so here's the
- * poster." `desktop-dev` applies no CSP at all (`beforeDevCommand` has no
- * `devCsp`), so this was invisible outside a real bundle — this test reads
+ * poster." `desktop-dev` applied no CSP at all before `devCsp` was set below,
+ * so this was invisible outside a real bundle — this test reads
  * the shipped policy directly rather than relying on a packaged-build UAT.
  */
 import { describe, expect, it } from "vitest";
