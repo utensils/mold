@@ -511,7 +511,7 @@ describe("HostDetailView header", () => {
     const wrapper = await mountView("/hosts/no-such-host");
     expect(wrapper.find("[data-test='host-title']").exists()).toBe(false);
     const missing = wrapper.get("[data-test='host-missing']");
-    expect(missing.text()).toContain("Host not found");
+    expect(missing.text()).toContain("Machine not found");
     expect(missing.find("[data-test='back-to-hosts']").attributes("href")).toBe("/machines");
     // No stream is opened for a host that doesn't exist.
     expect(sseCalls).toHaveLength(0);
@@ -590,8 +590,8 @@ describe("HostDetailView telemetry", () => {
     await flushPromises();
 
     const gpuCard = wrapper.get("[data-test='gpu-card']");
-    expect(gpuCard.text()).toContain("MEMORY");
-    expect(gpuCard.text()).not.toContain("VRAM");
+    expect(gpuCard.text()).toContain("Memory");
+    expect(gpuCard.text()).not.toContain("Graphics memory");
     expect(gpuCard.text()).toContain("46.9 GB/51.5 GB");
     // The standalone RAM row would repeat the same numbers — it stays hidden,
     // while CPU keeps its own row.
@@ -618,8 +618,10 @@ describe("HostDetailView H3 placement", () => {
     const html = wrapper.html();
     const h3At = html.indexOf('data-test="h3-inventory"');
     expect(h3At).toBeGreaterThan(-1);
-    expect(html.indexOf("TELEMETRY")).toBeLessThan(h3At);
-    expect(html.indexOf("INSTALLED MODELS")).toBeLessThan(h3At);
+    for (const label of ["Right now", "Styles on this machine"]) {
+      expect(html.indexOf(label)).toBeGreaterThan(-1);
+      expect(html.indexOf(label)).toBeLessThan(h3At);
+    }
   });
 });
 
@@ -1092,7 +1094,7 @@ describe("HostDetailView layout", () => {
   it("shows uptime from /api/status in the telemetry header", async () => {
     installApi({ uptime_secs: 200_000 });
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='host-uptime']").text()).toBe("UP 2d 7h");
+    expect(wrapper.get("[data-test='host-uptime']").text()).toBe("· up 2d 7h");
   });
 
   it("renders the models-disk meter inside the telemetry panel, not a separate section", async () => {
@@ -1103,9 +1105,9 @@ describe("HostDetailView layout", () => {
     expect(panel.find("[data-test='gpu-card']").exists()).toBe(true);
   });
 
-  it("labels resident models LOADED so they can't read as queued jobs", async () => {
+  it("labels resident models Loaded and ready so they can't read as queued jobs", async () => {
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='loaded-label']").text()).toBe("LOADED");
+    expect(wrapper.get("[data-test='loaded-label']").text()).toBe("Loaded and ready");
     const chips = wrapper.findAll("[data-test='loaded-model-name']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
@@ -1169,8 +1171,8 @@ describe("HostDetailView forget", () => {
 
     // The confirm dialog teleports to <body>; it carries the §11 copy.
     const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Forget studio?");
-    expect(dialog?.textContent).toContain("Its API key is discarded.");
+    expect(dialog?.textContent).toContain("Forget hal9000?");
+    expect(dialog?.textContent).toContain("Its saved API key is discarded.");
 
     (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
     await flushPromises();

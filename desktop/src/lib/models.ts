@@ -5,14 +5,15 @@
  */
 import type { ModelEntry } from "./api/types";
 import { formatGB } from "./format";
-import {
+import { isCatalogModelId, isOpaqueModelId, modelDisplayName, modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
+
+export {
   isCatalogModelId,
+  isOpaqueModelId,
   modelDisplayName,
   modelDisplayNameForId,
   type DisplayableModel,
-} from "@studio/lib/modelDisplay";
-
-export { isCatalogModelId, modelDisplayName, modelDisplayNameForId, type DisplayableModel };
+};
 
 /** Families that aren't image/video generators — grouped separately at the
  * bottom of the Installed tab. Mirrors `stores/models.ts`'s exclusion set. */

@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
-import CardSurface from "@ui/components/CardSurface.vue";
-import Chip from "@ui/components/Chip.vue";
 import Tooltip from "@ui/components/Tooltip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
@@ -33,6 +31,7 @@ import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
+  isOpaqueModelId,
   modelDiskBytes,
   modelDisplayName,
   modelDisplayNameForId,
@@ -575,13 +574,24 @@ async function repairFromDrawer() {
 function statusDot(s: "connecting" | "ready" | "error"): string {
   switch (s) {
     case "ready":
-      return "bg-accent";
+      return "bg-success";
     case "connecting":
-      return "bg-sapphire animate-pulse";
+      return "bg-sapphire ms-pulse";
     default:
       return "bg-error";
   }
 }
+
+/** "RTX 4090 · CUDA" for the toolbar sentence; empty before any reading. */
+const hardwareLine = computed(() => {
+  const first = gpus.value[0];
+  return first ? `${first.name} · ${backendLabel(first)}` : "";
+});
+
+/** Whether the Downloads-here card has anything to show under its tray. */
+const hostDownloading = computed(() =>
+  downloads.hostedInFlight.some((row) => row.hostId === hostId.value),
+);
 
 // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -643,543 +653,515 @@ async function forget() {
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-6">
-    <div class="w-full" data-test="host-detail-content">
-      <template v-if="host">
-        <!-- Header: back to Machines · status · name · address · target chip -->
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <span
-            class="h-2 w-2 shrink-0 rounded-full"
-            :class="statusDot(host.status)"
-            data-test="host-status-dot"
-          />
-          <h1
-            class="min-w-0 truncate font-sans font-semibold text-md font-bold text-fg"
-            style="font-stretch: 90%"
-            data-test="host-title"
+  <div class="flex h-full min-h-0 w-full flex-col" data-test="host-detail-content">
+    <template v-if="host">
+      <!-- toolbar: dot · mono name · one sentence · the machine's actions -->
+      <div
+        class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
+      >
+        <span
+          class="h-2 w-2 shrink-0 rounded-full"
+          :class="statusDot(host.status)"
+          data-test="host-status-dot"
+        />
+        <h1 class="shrink-0 font-mono text-base font-bold text-fg" data-test="host-title">
+          {{ host.label }}
+        </h1>
+        <span class="shrink-0 font-mono text-micro text-fg-dim">
+          {{ host.kind === "local" ? "THIS DEVICE" : "REMOTE" }}
+        </span>
+        <span class="flex min-w-0 items-center gap-1.5 truncate text-xs text-fg-dim">
+          <span v-if="hardwareLine" class="shrink-0">{{ hardwareLine }} ·</span>
+          <span class="truncate font-mono" data-selectable data-test="host-url">{{
+            host.baseUrl
+          }}</span>
+          <span v-if="host.version" class="shrink-0 font-mono" data-test="host-version"
+            >· v{{ host.version }}</span
           >
-            {{ host.label }}
-          </h1>
-          <span class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0">
-            {{ host.kind === "local" ? "THIS DEVICE" : "REMOTE" }}
-          </span>
-          <span
-            v-if="host.version"
-            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
-            data-test="host-version"
+          <span v-if="uptime !== null" class="shrink-0" data-test="host-uptime"
+            >· up {{ formatUptime(uptime) }}</span
           >
-            v{{ host.version }}
-          </span>
-          <span
-            class="font-mono text-xs truncate text-micro text-fg-dim"
-            data-selectable
-            data-test="host-url"
-            >{{ host.baseUrl }}</span
-          >
-          <div class="flex-1" />
-          <Chip
-            :active="isTarget"
-            :disabled="!isTarget && host.status !== 'ready'"
-            data-test="target-toggle"
-            @click="toggleTarget"
-          >
-            <Icon v-if="isTarget" name="check" :size="14" :stroke-width="2.4" />
-            {{ isTarget ? "Generation target" : "Set as generation target" }}
-          </Chip>
-        </div>
-        <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-7">
           <Tooltip v-if="host.instanceId" :text="`${host.instanceId} — click to copy`">
             <button
               type="button"
-              class="font-mono text-micro text-fg-dim whitespace-nowrap max-w-40 truncate hover:text-fg"
+              class="max-w-28 truncate font-mono text-micro text-fg-faint hover:text-fg"
               data-test="host-instance-id"
               @click="copyInstanceId"
             >
-              {{ host.instanceId }}
+              · {{ host.instanceId }}
             </button>
           </Tooltip>
+        </span>
+        <span class="flex-1" />
+        <button
+          type="button"
+          class="ms-toolbar-button"
+          :class="{ 'ms-toolbar-button--on': isTarget }"
+          :aria-pressed="isTarget"
+          :disabled="!isTarget && host.status !== 'ready'"
+          data-test="target-toggle"
+          @click="toggleTarget"
+        >
+          <Icon v-if="isTarget" name="check" :size="13" :stroke-width="2.4" />
+          {{ isTarget ? "Making images here" : "Make images here" }}
+        </button>
+        <button
+          v-if="host.kind === 'remote'"
+          type="button"
+          data-test="rename-host"
+          class="ms-toolbar-button"
+          @click="renameOpen = true"
+        >
+          Rename
+        </button>
+        <button
+          type="button"
+          data-test="open-web-ui"
+          class="ms-toolbar-button"
+          :disabled="!host.baseUrl"
+          @click="openHostUrl(host.baseUrl ?? '')"
+        >
+          Open web UI
+        </button>
+        <template v-if="host.kind === 'remote'">
           <button
-            v-if="host.kind === 'remote'"
-            type="button"
-            data-test="rename-host"
-            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg"
-            @click="renameOpen = true"
-          >
-            Rename…
-          </button>
-          <button
-            type="button"
-            data-test="open-web-ui"
-            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg disabled:opacity-40"
-            :disabled="!host.baseUrl"
-            @click="openHostUrl(host.baseUrl ?? '')"
-          >
-            Open web UI
-          </button>
-          <button
-            v-if="host.kind === 'remote'"
             type="button"
             data-test="disconnect-host"
-            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-error"
+            class="ms-toolbar-button"
             @click="disconnect"
           >
             Disconnect
           </button>
-        </div>
-        <p v-if="host.status === 'error'" class="mt-2 pl-7 text-micro text-error">
-          Unreachable — reconnect below or check the server.
+          <button
+            type="button"
+            data-test="forget-host"
+            class="ms-toolbar-button ms-toolbar-button--danger-hover"
+            @click="forgetOpen = true"
+          >
+            Forget…
+          </button>
+        </template>
+      </div>
+
+      <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+        <p
+          v-if="host.status === 'error'"
+          class="flex items-center gap-3 rounded-control border border-error/50 bg-panel px-3 py-2 text-xs text-error"
+        >
+          Unreachable — it keeps retrying on its own, or check the server.
+          <button
+            v-if="host.kind === 'remote'"
+            type="button"
+            data-test="reconnect-host"
+            class="ms-toolbar-button ml-auto"
+            @click="hosts.reconnect(host.id)"
+          >
+            Try now
+          </button>
         </p>
 
-        <!-- Two-column instrument layout (stacks below on narrow widths). -->
-        <div class="mt-6 flex flex-col gap-5 lg:flex-row lg:items-start">
-          <!-- Left: telemetry, downloads, queue -->
-          <div class="flex min-w-0 flex-1 flex-col gap-5">
-            <!-- Telemetry — one instrument panel: GPU(s), CPU, RAM, models disk.
-                 A shared grid keeps every meter's label, bar, and value in the
-                 same column tracks, so the panel reads as one machine. -->
-            <CardSurface large>
-              <div class="mb-3 flex items-center gap-2">
-                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">TELEMETRY</h2>
-                <div class="border-border h-px flex-1 border-t" />
-                <span
-                  v-if="uptime !== null"
-                  class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase"
-                  data-test="host-uptime"
-                >
-                  UP {{ formatUptime(uptime) }}
-                </span>
-                <span
-                  v-if="snapshot"
-                  class="font-mono text-micro text-fg-dim whitespace-nowrap flex items-center gap-1.5"
-                  ><span class="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />LIVE</span
-                >
-              </div>
-              <div
-                v-if="hasTelemetry"
-                data-test="telemetry-panel"
-                class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2.5"
-              >
-                <template v-for="gpu in gpus" :key="gpu.ordinal">
-                  <div class="contents" data-test="gpu-card">
-                    <div class="col-span-full flex min-w-0 items-baseline gap-2">
-                      <span
-                        v-if="gpus.length > 1"
-                        class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                        >GPU {{ gpu.ordinal }}</span
-                      >
-                      <span class="min-w-0 truncate text-sm font-medium text-fg">{{
-                        gpu.name
-                      }}</span>
-                      <span class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0">{{
-                        backendLabel(gpu)
-                      }}</span>
-                      <div class="flex-1" />
-                      <span
-                        v-if="gpu.gpu_utilization !== null && gpu.gpu_utilization !== undefined"
-                        class="font-mono text-xs shrink-0 text-fg-dim"
-                      >
-                        <span class="text-fg-2" data-test="gpu-utilization"
-                          >{{ gpu.gpu_utilization }}%</span
-                        >
-                        util
-                      </span>
-                    </div>
-                    <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
-                      unifiedMemory ? "MEMORY" : "VRAM"
-                    }}</span>
-                    <div
-                      class="h-1.5 overflow-hidden bg-bg-deep"
-                      role="meter"
-                      aria-valuemin="0"
-                      aria-valuemax="100"
-                      :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
-                      :aria-label="
-                        unifiedMemory
-                          ? `Unified memory used on ${gpu.name}`
-                          : `VRAM used on ${gpu.name}`
-                      "
-                    >
-                      <div
-                        class="h-full transition-[width] duration-300"
-                        :class="vramFill(gpu)"
-                        :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
-                      />
-                    </div>
-                    <span class="font-mono text-xs text-right text-fg-dim">
-                      {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }}
-                    </span>
-                  </div>
-                </template>
-                <div v-if="cpu" class="contents" data-test="cpu-card">
-                  <span class="font-mono text-micro text-fg-dim whitespace-nowrap">CPU</span>
-                  <div
-                    class="h-1.5 overflow-hidden bg-bg-deep"
-                    role="meter"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    :aria-valuenow="Math.round(cpu.usage_percent)"
-                    aria-label="CPU usage"
-                  >
-                    <div
-                      class="h-full bg-sapphire transition-[width] duration-300"
-                      :style="{ width: `${cpu.usage_percent}%` }"
-                    />
-                  </div>
-                  <span class="font-mono text-xs text-right text-fg-dim">
-                    {{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} CORES
-                  </span>
-                </div>
-                <div v-if="ram && !unifiedMemory" class="contents" data-test="ram-card">
-                  <span class="font-mono text-micro text-fg-dim whitespace-nowrap">RAM</span>
-                  <div
-                    class="h-1.5 overflow-hidden bg-bg-deep"
-                    role="meter"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    :aria-valuenow="Math.round(percent(ram.used, ram.total))"
-                    aria-label="System RAM used"
-                    :title="ramPressureLabel ?? undefined"
-                    :data-pressure="hostMemoryPressure ?? undefined"
-                  >
-                    <div
-                      class="h-full transition-[width] duration-300"
-                      :class="ramFill"
-                      :style="{ width: `${percent(ram.used, ram.total)}%` }"
-                    />
-                  </div>
-                  <span class="font-mono text-xs text-right text-fg-dim">
-                    {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
-                  </span>
-                </div>
-                <div v-if="modelsDisk" class="contents" data-test="storage-card">
-                  <span
-                    class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                    title="Models disk"
-                    >DISK</span
-                  >
-                  <div
-                    class="h-1.5 overflow-hidden bg-bg-deep"
-                    role="meter"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    :aria-valuenow="Math.round(diskUsedPct)"
-                    aria-label="Models disk used"
-                  >
-                    <div
-                      class="h-full transition-[width] duration-300"
-                      :class="diskUsedPct >= 92 ? 'bg-error' : 'bg-sapphire'"
-                      :style="{ width: `${diskUsedPct}%` }"
-                    />
-                  </div>
-                  <span class="font-mono text-xs text-right text-fg-dim">
-                    {{ formatGB(modelsDisk.free_bytes) }} free of
-                    {{ formatGB(modelsDisk.total_bytes) }}
-                  </span>
-                </div>
-              </div>
-              <p v-else class="text-micro text-fg-dim">No live telemetry from this host yet.</p>
-            </CardSurface>
-
-            <!-- Downloads on this host -->
-            <CardSurface large :padded="false">
-              <div class="flex items-center gap-2 px-4 pt-4">
-                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">DOWNLOADS</h2>
-                <div class="border-border h-px flex-1 border-t" />
-                <RouterLink to="/models" class="text-micro text-fg-dim hover:text-fg">
-                  Catalog →
-                </RouterLink>
-              </div>
-              <DownloadsTray :host-id="hostId" data-test="host-downloads" class="mt-2" />
-            </CardSurface>
-
-            <CardSurface large>
-              <DevicePanel
-                :devices="queueSnapshot?.devices ?? []"
-                :plan="queueSnapshot?.plan ?? null"
-                :mutable="
-                  queueSnapshot?.devices !== null &&
-                  hosts.capabilities[hostId]?.devices?.lifecycle === true &&
-                  hosts.capabilities[hostId]?.dispatch?.v2_authoritative === true
-                "
-                :restart-enable="hosts.capabilities[hostId]?.devices?.restart_enable === true"
-                show-controls
-                :busy-device-ids="[...mutatingDeviceIds]"
-                @unpin="unpinWork"
-                @toggle="toggleDeviceById"
-              />
-            </CardSurface>
-
-            <!-- Queue — the whole server queue (other clients' jobs included),
-                 with full management absorbed from the Jobs view. -->
-            <CardSurface large>
-              <div class="mb-2 flex items-center gap-2">
-                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">QUEUE</h2>
-                <div class="border-border h-px flex-1 border-t" />
-                <span
-                  v-if="queuePaused"
-                  class="font-mono text-xs text-micro text-error"
-                  data-test="queue-paused"
-                >
-                  PAUSED
-                </span>
-                <span
-                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                  data-test="queue-depth"
-                >
-                  <template v-if="scheduledWorkCount"> {{ scheduledWorkCount }} work · </template>
-                  {{ queueDepth ?? "—"
-                  }}<template v-if="queueCapacity">/{{ queueCapacity }}</template
-                  ><template v-if="scheduledWorkCount"> queued</template>
-                </span>
-              </div>
-              <HostQueuePanel
-                :host="host"
-                row-test-id="host-queue-row"
-                empty-label="Queue is empty."
-                :thumbnails="false"
-              />
-            </CardSurface>
+        <!-- Right now: one tile per meter, a shared shape so the row reads as one machine -->
+        <section class="flex flex-col gap-2.5">
+          <div class="flex items-center gap-2">
+            <span class="ms-group-label uppercase">Right now</span>
+            <span
+              v-if="snapshot"
+              class="flex items-center gap-1.5 font-mono text-micro text-success"
+              ><span class="h-[5px] w-[5px] rounded-full bg-success ms-pulse" aria-hidden="true" />
+              LIVE</span
+            >
           </div>
-
-          <!-- Right: loaded models, installed models, connection actions.
-               Fluid on wide windows so long model names and size labels
-               un-truncate instead of pinning to a fixed 320px column. -->
           <div
-            class="flex min-w-0 flex-col gap-4 lg:min-w-80 lg:flex-1"
-            data-test="host-model-column"
+            v-if="hasTelemetry"
+            data-test="telemetry-panel"
+            class="grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-2.5"
           >
-            <CardSurface large>
-              <h2
-                class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                data-test="loaded-label"
+            <div v-for="gpu in gpus" :key="gpu.ordinal" class="tile" data-test="gpu-card">
+              <span class="ms-group-label uppercase">
+                {{ unifiedMemory ? "Memory" : "Graphics memory"
+                }}<template v-if="gpus.length > 1"> · GPU {{ gpu.ordinal }}</template>
+              </span>
+              <span class="text-lg font-semibold text-fg">
+                {{ Math.round(percent(gpu.vram_used, gpu.vram_total)) }}%
+              </span>
+              <span
+                class="block h-[5px] overflow-hidden bg-surface"
+                role="meter"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
+                :aria-label="
+                  unifiedMemory ? `Unified memory used on ${gpu.name}` : `VRAM used on ${gpu.name}`
+                "
               >
-                LOADED
-              </h2>
-              <div v-if="loadedChips.length" class="mt-3 flex flex-col gap-2">
-                <div
-                  v-for="m in loadedChips"
-                  :key="m"
-                  data-test="loaded-model-chip"
-                  class="flex items-center gap-2"
-                >
-                  <span class="shrink-0 text-accent" aria-hidden="true">★</span>
-                  <span
-                    class="font-mono text-xs min-w-0 flex-1 truncate text-micro text-fg-2"
-                    data-test="loaded-model-name"
-                    >{{ modelLabel(m) }}</span
-                  >
-                  <button
-                    type="button"
-                    data-test="unload-chip"
-                    class="shrink-0 text-micro transition-colors hover:text-error disabled:opacity-40"
-                    :class="unloadPending === m ? 'font-semibold text-error' : 'text-fg-dim'"
-                    :aria-label="`Unload ${modelLabel(m)}`"
-                    :title="`Unload ${modelLabel(m)} from this host's GPU`"
-                    :disabled="unloading.has(m)"
-                    @click="unloadChip(m)"
-                    @blur="unloadPending = null"
-                  >
-                    {{ unloading.has(m) ? "…" : unloadPending === m ? "Unload?" : "Unload" }}
-                  </button>
-                </div>
-              </div>
-              <p v-else class="mt-2 text-micro text-fg-dim">
-                No models loaded — the next generation loads one first.
-              </p>
-            </CardSurface>
-
-            <CardSurface large :padded="false">
-              <div class="flex items-center gap-2 px-4 pt-4">
-                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">INSTALLED MODELS</h2>
-                <div class="flex-1" />
                 <span
-                  v-if="installedModels.length"
-                  class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                  data-test="models-summary"
+                  class="block h-full transition-[width] duration-300"
+                  :class="vramFill(gpu)"
+                  :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
+                />
+              </span>
+              <span class="truncate font-mono text-micro text-fg-dim" :title="gpu.name">
+                {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }} · {{ gpu.name }} ·
+                {{ backendLabel(gpu)
+                }}<template
+                  v-if="gpu.gpu_utilization !== null && gpu.gpu_utilization !== undefined"
                 >
-                  {{ installedModels.length
-                  }}<template v-if="installedTotalLabel"> · {{ installedTotalLabel }}</template>
-                </span>
-              </div>
-              <ul v-if="installedModels.length" class="divide-border mt-2 divide-y">
-                <li v-for="m in installedModels" :key="m.name" data-test="model-row">
-                  <ModelTableRow
-                    :name="modelDisplayName(m)"
-                    :source="modelSource(m)"
-                    :loaded="m.is_loaded"
-                    :family="m.family"
-                    :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
-                    :size-primary="
-                      modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
-                    "
-                    :size-secondary="
-                      modelSizeLabels(m).weights && modelSizeLabels(m).runtime
-                        ? modelSizeLabels(m).runtime
-                        : null
-                    "
-                    :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
-                    :accessibility-label="modelAccessibilityLabel(m)"
-                    clickable
-                    class="px-4 py-2"
-                    @open="detailModel = m"
-                  >
-                    <template #meta>
-                      <ModelMetadataBadges
-                        :kind="m.kind ?? null"
-                        :family="m.family"
-                        :nsfw="m.nsfw ?? null"
-                        :show-modality="false"
-                      />
-                    </template>
-                  </ModelTableRow>
-                </li>
-              </ul>
-              <p v-else class="px-4 pb-4 pt-2 text-micro text-fg-dim">
-                No installed models reported
-              </p>
-            </CardSurface>
-
-            <!-- Storage — this host's Library trash. Per-host retention (the
-                 host's own gallery.trash_retention_days) and the trash count
-                 with Empty trash behind the shared confirm (no typed phrase). -->
-            <CardSurface v-if="storageAvailable" large data-test="host-storage">
-              <div class="mb-3 flex items-center gap-2">
-                <h2 class="font-mono text-micro text-fg-dim whitespace-nowrap">STORAGE</h2>
-                <div class="border-border h-px flex-1 border-t" />
-              </div>
-              <div class="flex flex-col gap-3">
-                <div class="flex items-center gap-3">
-                  <label for="host-trash-retention" class="min-w-0 flex-1 text-sm text-fg">
-                    Trash retention
-                    <span class="block text-micro text-fg-dim">
-                      Deleted prints are purged after this long on {{ host.label }}.
-                    </span>
-                  </label>
-                  <select
-                    id="host-trash-retention"
-                    data-test="host-trash-retention"
-                    class="border-border h-8 shrink-0 rounded-control border bg-bg px-2 text-sm text-fg disabled:opacity-50"
-                    :value="String(retentionDays)"
-                    :disabled="retentionLocked || retentionSaving || host.status !== 'ready'"
-                    :title="
-                      retentionLocked
-                        ? `Set by ${retentionRow?.env_var ?? 'the environment'} on ${host.label}`
-                        : undefined
-                    "
-                    aria-label="Trash retention"
-                    @change="onRetentionChange"
-                  >
-                    <option
-                      v-for="option in retentionOptions"
-                      :key="option.value"
-                      :value="String(option.value)"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </div>
-                <div class="flex items-center gap-3">
-                  <span class="min-w-0 flex-1 text-sm text-fg" data-test="host-trash-count">
-                    Prints in trash:
-                    <span class="font-mono text-xs">{{ trashCount ?? "—" }}</span>
-                    <span v-if="trashLoadError" class="block text-micro text-error">
-                      {{ trashLoadError }}
-                    </span>
-                  </span>
-                  <button
-                    type="button"
-                    data-test="host-empty-trash"
-                    class="border-border h-8 shrink-0 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-error disabled:opacity-40"
-                    :disabled="!trashCount || emptyingTrash || host.status !== 'ready'"
-                    @click="emptyTrashOpen = true"
-                  >
-                    Empty trash
-                  </button>
-                </div>
-              </div>
-            </CardSurface>
-
-            <div v-if="host.kind === 'remote'" class="flex gap-2">
-              <button
-                type="button"
-                data-test="reconnect-host"
-                class="border-border-control h-9 flex-1 rounded-control border text-sm font-semibold text-fg-2 transition-colors hover:text-fg active:translate-y-px"
-                @click="hosts.reconnect(host.id)"
+                  ·
+                  <span data-test="gpu-utilization">{{ gpu.gpu_utilization }}%</span> util</template
+                >
+              </span>
+            </div>
+            <div v-if="cpu" class="tile" data-test="cpu-card">
+              <span class="ms-group-label uppercase">Processor</span>
+              <span class="text-lg font-semibold text-fg">{{ cpu.usage_percent.toFixed(0) }}%</span>
+              <span
+                class="block h-[5px] overflow-hidden bg-surface"
+                role="meter"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-valuenow="Math.round(cpu.usage_percent)"
+                aria-label="CPU usage"
               >
-                Reconnect
-              </button>
-              <button
-                type="button"
-                data-test="forget-host"
-                class="h-9 flex-1 rounded-control border border-error/50 text-sm font-semibold text-error transition-colors hover:bg-error/10 active:translate-y-px"
-                @click="forgetOpen = true"
+                <span
+                  class="block h-full bg-sapphire transition-[width] duration-300"
+                  :style="{ width: `${cpu.usage_percent}%` }"
+                />
+              </span>
+              <span class="font-mono text-micro text-fg-dim">{{ cpu.cores }} CORES</span>
+            </div>
+            <div v-if="ram && !unifiedMemory" class="tile" data-test="ram-card">
+              <span class="ms-group-label uppercase">System memory</span>
+              <span class="text-lg font-semibold text-fg">
+                {{ Math.round(percent(ram.used, ram.total)) }}%
+              </span>
+              <span
+                class="block h-[5px] overflow-hidden bg-surface"
+                role="meter"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-valuenow="Math.round(percent(ram.used, ram.total))"
+                aria-label="System RAM used"
+                :title="ramPressureLabel ?? undefined"
+                :data-pressure="hostMemoryPressure ?? undefined"
               >
-                Forget
-              </button>
+                <span
+                  class="block h-full transition-[width] duration-300"
+                  :class="ramFill"
+                  :style="{ width: `${percent(ram.used, ram.total)}%` }"
+                />
+              </span>
+              <span class="font-mono text-micro text-fg-dim">
+                {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
+              </span>
+            </div>
+            <div v-if="modelsDisk" class="tile" data-test="storage-card">
+              <span class="ms-group-label uppercase">Disk for styles</span>
+              <span class="text-lg font-semibold text-fg">{{ Math.round(diskUsedPct) }}%</span>
+              <span
+                class="block h-[5px] overflow-hidden bg-surface"
+                role="meter"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-valuenow="Math.round(diskUsedPct)"
+                aria-label="Models disk used"
+              >
+                <span
+                  class="block h-full transition-[width] duration-300"
+                  :class="diskUsedPct >= 92 ? 'bg-error' : 'bg-mauve'"
+                  :style="{ width: `${diskUsedPct}%` }"
+                />
+              </span>
+              <span class="font-mono text-micro text-fg-dim">
+                {{ formatGB(modelsDisk.free_bytes) }} free of {{ formatGB(modelsDisk.total_bytes) }}
+              </span>
             </div>
           </div>
+          <p v-else class="text-xs text-fg-dim">No live readings from this machine yet.</p>
+        </section>
+
+        <!-- Loaded and ready -->
+        <section class="flex flex-col gap-2">
+          <span class="ms-group-label uppercase" data-test="loaded-label">Loaded and ready</span>
+          <div v-if="loadedChips.length" class="flex flex-wrap gap-2">
+            <span
+              v-for="m in loadedChips"
+              :key="m"
+              data-test="loaded-model-chip"
+              class="inline-flex h-[30px] max-w-full items-center gap-2 rounded-control border border-border bg-panel px-2.5 text-xs text-fg"
+            >
+              <span class="font-mono text-star" aria-hidden="true">★</span>
+              <span class="min-w-0 truncate" data-test="loaded-model-name">{{
+                modelLabel(m)
+              }}</span>
+              <span
+                v-if="modelLabel(m) !== m && !isOpaqueModelId(m)"
+                class="font-mono text-micro text-fg-dim"
+                >{{ m }}</span
+              >
+              <button
+                type="button"
+                data-test="unload-chip"
+                class="shrink-0 text-micro transition-colors hover:text-error disabled:opacity-40"
+                :class="unloadPending === m ? 'font-semibold text-error' : 'text-fg-dim'"
+                :aria-label="`Unload ${modelLabel(m)}`"
+                :title="`Unload ${modelLabel(m)} from this machine's GPU`"
+                :disabled="unloading.has(m)"
+                @click="unloadChip(m)"
+                @blur="unloadPending = null"
+              >
+                {{ unloading.has(m) ? "…" : unloadPending === m ? "Unload?" : "Unload" }}
+              </button>
+            </span>
+          </div>
+          <p v-else class="text-xs text-fg-dim">
+            Nothing loaded — the next image loads its style first.
+          </p>
+        </section>
+
+        <!-- Waiting on this machine: the whole server queue, other clients included -->
+        <section class="flex flex-col gap-2">
+          <div class="flex items-center gap-2">
+            <span class="ms-group-label uppercase">Waiting on this machine</span>
+            <span
+              v-if="queuePaused"
+              class="font-mono text-micro text-error"
+              data-test="queue-paused"
+              >PAUSED</span
+            >
+            <span class="flex-1" />
+            <span class="font-mono text-micro text-fg-dim" data-test="queue-depth">
+              <template v-if="scheduledWorkCount"> {{ scheduledWorkCount }} work · </template>
+              {{ queueDepth ?? "—" }}<template v-if="queueCapacity">/{{ queueCapacity }}</template
+              ><template v-if="scheduledWorkCount"> queued</template>
+            </span>
+          </div>
+          <div class="border border-border bg-panel px-3">
+            <HostQueuePanel
+              :host="host"
+              row-test-id="host-queue-row"
+              empty-label="Queue is empty."
+              :thumbnails="false"
+            />
+          </div>
+        </section>
+
+        <div class="rounded-control border border-border bg-panel p-3.5">
+          <DevicePanel
+            :devices="queueSnapshot?.devices ?? []"
+            :plan="queueSnapshot?.plan ?? null"
+            :mutable="
+              queueSnapshot?.devices !== null &&
+              hosts.capabilities[hostId]?.devices?.lifecycle === true &&
+              hosts.capabilities[hostId]?.dispatch?.v2_authoritative === true
+            "
+            :restart-enable="hosts.capabilities[hostId]?.devices?.restart_enable === true"
+            show-controls
+            :busy-device-ids="[...mutatingDeviceIds]"
+            @unpin="unpinWork"
+            @toggle="toggleDeviceById"
+          />
         </div>
+
+        <!-- Storage · Downloads here -->
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <!-- Storage — this machine's own trash retention and count, behind the
+               shared plain confirm (never a typed phrase). -->
+          <section
+            v-if="storageAvailable"
+            class="flex flex-col gap-2.5 rounded-control border border-border bg-panel p-3.5"
+            data-test="host-storage"
+          >
+            <span class="ms-group-label uppercase">Storage</span>
+            <span v-if="installedTotalLabel" class="text-xs text-fg-2">
+              Styles take {{ installedTotalLabel }}
+            </span>
+            <div class="flex items-center gap-2">
+              <label for="host-trash-retention" class="text-xs text-fg">
+                Keep deleted pictures for
+              </label>
+              <select
+                id="host-trash-retention"
+                data-test="host-trash-retention"
+                class="h-[26px] rounded-control border border-border bg-bg px-1.5 font-mono text-micro text-fg-2 disabled:opacity-50"
+                :value="String(retentionDays)"
+                :disabled="retentionLocked || retentionSaving || host.status !== 'ready'"
+                :title="
+                  retentionLocked
+                    ? `Set by ${retentionRow?.env_var ?? 'the environment'} on ${host.label}`
+                    : undefined
+                "
+                aria-label="Trash retention"
+                @change="onRetentionChange"
+              >
+                <option
+                  v-for="option in retentionOptions"
+                  :key="option.value"
+                  :value="String(option.value)"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <span class="flex-1" />
+              <button
+                type="button"
+                data-test="host-empty-trash"
+                class="ms-toolbar-button ms-toolbar-button--danger"
+                :disabled="!trashCount || emptyingTrash || host.status !== 'ready'"
+                @click="emptyTrashOpen = true"
+              >
+                Empty trash
+              </button>
+            </div>
+            <span class="text-micro text-fg-dim" data-test="host-trash-count">
+              Pictures in trash: <span class="font-mono">{{ trashCount ?? "—" }}</span>
+              <span v-if="trashLoadError" class="block text-error">{{ trashLoadError }}</span>
+            </span>
+          </section>
+
+          <section
+            class="flex flex-col gap-2.5 rounded-control border border-border bg-panel p-3.5"
+          >
+            <span class="flex items-center gap-2">
+              <span class="ms-group-label uppercase">Downloads here</span>
+              <span class="flex-1" />
+              <RouterLink to="/models" class="text-micro text-fg-dim hover:text-fg">
+                Browse more styles →
+              </RouterLink>
+            </span>
+            <DownloadsTray :host-id="hostId" data-test="host-downloads" class="-mx-3.5" />
+            <span v-if="!hostDownloading" class="text-micro text-fg-dim">
+              Nothing on its way to this machine.
+            </span>
+          </section>
+        </div>
+
+        <!-- Styles on this machine -->
+        <section class="flex flex-col gap-2" data-test="host-model-column">
+          <div class="flex items-center gap-2">
+            <span class="ms-group-label uppercase">Styles on this machine</span>
+            <span class="flex-1" />
+            <span
+              v-if="installedModels.length"
+              class="font-mono text-micro text-fg-dim"
+              data-test="models-summary"
+            >
+              {{ installedModels.length
+              }}<template v-if="installedTotalLabel"> · {{ installedTotalLabel }}</template>
+            </span>
+          </div>
+          <ul
+            v-if="installedModels.length"
+            class="divide-y divide-border border border-border bg-panel"
+          >
+            <li v-for="m in installedModels" :key="m.name" data-test="model-row">
+              <ModelTableRow
+                :name="modelDisplayName(m)"
+                :id="m.name"
+                :source="modelSource(m)"
+                :loaded="m.is_loaded"
+                :family="m.family"
+                :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
+                :note="m.description || null"
+                :size-primary="
+                  modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
+                "
+                :size-secondary="
+                  modelSizeLabels(m).weights && modelSizeLabels(m).runtime
+                    ? modelSizeLabels(m).runtime
+                    : null
+                "
+                :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
+                :accessibility-label="modelAccessibilityLabel(m)"
+                clickable
+                class="px-3"
+                @open="detailModel = m"
+              >
+                <template #meta>
+                  <ModelMetadataBadges
+                    :kind="m.kind ?? null"
+                    :family="m.family"
+                    :nsfw="m.nsfw ?? null"
+                    :show-modality="false"
+                  />
+                </template>
+              </ModelTableRow>
+            </li>
+          </ul>
+          <p v-else class="text-xs text-fg-dim">No styles reported</p>
+        </section>
 
         <!-- Specialized capability detail reads below the live instruments. -->
         <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
-
-        <!-- One consistent model-detail drawer, shared with the catalog. -->
-        <CatalogDetailDrawer
-          v-if="detailModel"
-          :entry="installedModelToEntry(detailModel)"
-          :pulling="drawerRepairing"
-          :target="hostTarget() ?? undefined"
-          :forward-credentials="host.kind === 'remote'"
-          @close="detailModel = null"
-          @pull="repairFromDrawer"
-        />
-
-        <RenameDialog
-          :open="renameOpen"
-          title="Rename host"
-          :initial="host.label"
-          @save="onRenameSave"
-          @cancel="renameOpen = false"
-        />
-
-        <ConfirmDialog
-          :open="emptyTrashOpen"
-          title="Empty trash?"
-          :message="emptyTrashMessage"
-          confirm-label="Delete forever"
-          danger
-          :busy="emptyingTrash"
-          @confirm="confirmEmptyTrash"
-          @cancel="emptyTrashOpen = false"
-        />
-
-        <ConfirmDialog
-          :open="forgetOpen"
-          title="Forget studio?"
-          message="Its API key is discarded."
-          confirm-label="Forget"
-          danger
-          @confirm="forget"
-          @cancel="forgetOpen = false"
-        />
-      </template>
-
-      <!-- Unknown id — quiet empty state -->
-      <div v-else class="mt-16 text-center" data-test="host-missing">
-        <h1 class="font-sans font-semibold text-lg font-bold text-fg" style="font-stretch: 90%">
-          Host not found
-        </h1>
-        <p class="mt-2 text-sm text-fg-2">
-          This host isn't connected. It may have been disconnected or forgotten.
-        </p>
-        <RouterLink
-          to="/machines"
-          data-test="back-to-hosts"
-          class="mt-4 inline-block text-sm text-accent hover:brightness-110"
-        >
-          Back to Machines
-        </RouterLink>
       </div>
+
+      <!-- One consistent model-detail drawer, shared with the catalog. -->
+      <CatalogDetailDrawer
+        v-if="detailModel"
+        :entry="installedModelToEntry(detailModel)"
+        :pulling="drawerRepairing"
+        :target="hostTarget() ?? undefined"
+        :forward-credentials="host.kind === 'remote'"
+        @close="detailModel = null"
+        @pull="repairFromDrawer"
+      />
+
+      <RenameDialog
+        :open="renameOpen"
+        title="Rename machine"
+        :initial="host.label"
+        @save="onRenameSave"
+        @cancel="renameOpen = false"
+      />
+
+      <ConfirmDialog
+        :open="emptyTrashOpen"
+        title="Empty trash?"
+        :message="emptyTrashMessage"
+        confirm-label="Delete forever"
+        danger
+        :busy="emptyingTrash"
+        @confirm="confirmEmptyTrash"
+        @cancel="emptyTrashOpen = false"
+      />
+
+      <ConfirmDialog
+        :open="forgetOpen"
+        :title="`Forget ${host.label}?`"
+        message="Its saved API key is discarded."
+        confirm-label="Forget"
+        danger
+        @confirm="forget"
+        @cancel="forgetOpen = false"
+      />
+    </template>
+
+    <!-- Unknown id — quiet empty state -->
+    <div v-else class="mt-16 text-center" data-test="host-missing">
+      <h1 class="text-lg font-semibold text-fg">Machine not found</h1>
+      <p class="mt-2 text-sm text-fg-2">
+        This machine isn't connected. It may have been disconnected or forgotten.
+      </p>
+      <RouterLink
+        to="/machines"
+        data-test="back-to-hosts"
+        class="mt-4 inline-block text-sm text-accent hover:brightness-110"
+      >
+        Back to Machines
+      </RouterLink>
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Right-now tile (README §04 telemetry): label · value · meter · note. */
+.tile {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-panel);
+}
+</style>

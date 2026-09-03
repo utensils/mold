@@ -7,6 +7,7 @@ import Tooltip from "@ui/components/Tooltip.vue";
 
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFootprintBar from "./ModelFootprintBar.vue";
+import { isOpaqueModelId } from "../../lib/models";
 import { openExternal } from "../../lib/openExternal";
 import type { ModelSource } from "../../lib/modelSource";
 
@@ -78,8 +79,11 @@ const footprintDescriptionId = `model-footprint-${useId()}`;
  * "wan" here while web read "Wan Video".
  */
 const familyChip = computed(() => (props.family ? familyLabel(props.family) : ""));
-/** A manifest model's display name IS its id — one line, never two copies. */
-const showId = computed(() => Boolean(props.id && props.id !== props.name));
+/** A manifest model's display name IS its id — one line, never two copies —
+ * and an opaque install id is a number nobody recognises, so it stays off. */
+const showId = computed(
+  () => Boolean(props.id && props.id !== props.name && !isOpaqueModelId(props.id)),
+);
 
 /**
  * Enter/Space on a clickable row opens it, but keydown bubbles — a keypress

@@ -47,6 +47,10 @@ describe("ModelTableRow", () => {
     expect(
       mountRow({ name: "flux-dev:q4", id: "flux-dev:q4" }).find("[data-test='row-id']").exists(),
     ).toBe(false);
+    // A Civitai install id is a bare number: the title alone.
+    expect(
+      mountRow({ name: "Juggernaut XL", id: "cv:1759168" }).find("[data-test='row-id']").exists(),
+    ).toBe(false);
   });
 
   it("carries a one-line note in plain words", () => {
