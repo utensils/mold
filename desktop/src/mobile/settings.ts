@@ -1,11 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
-import { applyTheme, isTheme, isThemeFamily, type Theme, type ThemeFamily } from "../lib/theme";
+import { THEME_TONE, applyTheme, isThemeId, migrateLegacyTheme, type ThemeId } from "../lib/theme";
+
+/** What UIKit is told: follow the phone, or pin one trait. */
+export type NativeAppearance = "system" | "dark" | "light";
 
 export const MOBILE_SETTINGS_STORAGE_KEY = "mold.mobile.settings.v1";
 
 export interface MobileSettings {
-  theme: Theme;
-  themeFamily: ThemeFamily;
+  theme: ThemeId;
+  /** Follow the phone's appearance: paint `theme` or its light/dark partner. */
+  matchSystem: boolean;
   autoSavePhotos: boolean;
   /** Settings ▸ Library "Tag new prints with their title" — the mirror the
    * Create form reads into `GenerateForm.fileUnderAutoTag`. On by default,
@@ -15,16 +19,19 @@ export interface MobileSettings {
 }
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
-  theme: "dark",
-  themeFamily: "safelight",
+  theme: "safelight",
+  matchSystem: false,
   autoSavePhotos: true,
   autoTagTitle: true,
 };
 
 type SettingsStorage = Pick<Storage, "getItem" | "setItem">;
-type MobileAppearanceInvoker = (command: string, args: { appearance: Theme }) => Promise<unknown>;
+type MobileAppearanceInvoker = (
+  command: string,
+  args: { appearance: NativeAppearance },
+) => Promise<unknown>;
 type NativeAppearanceRequest = {
-  appearance: Theme;
+  appearance: NativeAppearance;
   bridge: MobileAppearanceInvoker;
 };
 
@@ -64,11 +71,20 @@ export function loadMobileSettings(
       string,
       unknown
     >;
+    // A pre-redesign file carries `theme: system|dark|light` + `themeFamily`;
+    // the shared table maps that pair onto a named theme.
+    const migrated =
+      isThemeId(parsed.theme) || parsed.theme === undefined
+        ? null
+        : migrateLegacyTheme(parsed.theme, parsed.themeFamily);
     return {
-      theme: isTheme(parsed.theme) ? parsed.theme : DEFAULT_MOBILE_SETTINGS.theme,
-      themeFamily: isThemeFamily(parsed.themeFamily)
-        ? parsed.themeFamily
-        : DEFAULT_MOBILE_SETTINGS.themeFamily,
+      theme:
+        migrated?.theme ?? (isThemeId(parsed.theme) ? parsed.theme : DEFAULT_MOBILE_SETTINGS.theme),
+      matchSystem:
+        migrated?.matchSystem ??
+        (typeof parsed.matchSystem === "boolean"
+          ? parsed.matchSystem
+          : DEFAULT_MOBILE_SETTINGS.matchSystem),
       autoSavePhotos:
         typeof parsed.autoSavePhotos === "boolean"
           ? parsed.autoSavePhotos
@@ -99,13 +115,13 @@ export function saveMobileSettings(
 
 /** Synchronize UIKit's trait so iOS chooses readable status-bar glyphs. */
 export async function syncMobileNativeAppearance(
-  appearance: Theme,
+  appearance: NativeAppearance,
   nativeInvoke?: MobileAppearanceInvoker,
 ): Promise<void> {
   const bridge =
     nativeInvoke ??
     ("__TAURI_INTERNALS__" in globalThis
-      ? (command: string, args: { appearance: Theme }) => invoke(command, args)
+      ? (command: string, args: { appearance: NativeAppearance }) => invoke(command, args)
       : null);
   if (!bridge) return;
 
@@ -121,8 +137,11 @@ export function applyMobileSettings(
   settings: MobileSettings,
   nativeInvoke?: MobileAppearanceInvoker,
 ): void {
-  applyTheme(settings.theme, settings.themeFamily);
-  void syncMobileNativeAppearance(settings.theme, nativeInvoke);
+  applyTheme(settings.theme, settings.matchSystem);
+  void syncMobileNativeAppearance(
+    settings.matchSystem ? "system" : THEME_TONE[settings.theme],
+    nativeInvoke,
+  );
 }
 
 export function updateMobileSettings(
@@ -132,8 +151,8 @@ export function updateMobileSettings(
   nativeInvoke?: MobileAppearanceInvoker,
 ): MobileSettings {
   const next: MobileSettings = {
-    theme: isTheme(patch.theme) ? patch.theme : current.theme,
-    themeFamily: isThemeFamily(patch.themeFamily) ? patch.themeFamily : current.themeFamily,
+    theme: isThemeId(patch.theme) ? patch.theme : current.theme,
+    matchSystem: typeof patch.matchSystem === "boolean" ? patch.matchSystem : current.matchSystem,
     autoSavePhotos:
       typeof patch.autoSavePhotos === "boolean" ? patch.autoSavePhotos : current.autoSavePhotos,
     autoTagTitle:

@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @import "../../ui/tokens.css";
-@import "../../ui/fonts/fonts.css";
+@import "../../ui/fonts/fonts.legacy.css";
 @import "../../ui/kit.css";
 
 /*

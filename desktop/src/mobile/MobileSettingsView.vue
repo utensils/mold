@@ -14,7 +14,7 @@ import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities, ServerStatus } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
 import { openExternal } from "../lib/openExternal";
-import type { Theme, ThemeFamily } from "../lib/theme";
+import { THEME_META } from "../lib/theme";
 import { mobileHostTarget, type MobileHost } from "./hosts";
 import { MOBILE_AUTO_ROUTING_HINT, MOBILE_CAPABLE_ROUTING_HINT } from "./generateTarget";
 import type { MobileSettings } from "./settings";
@@ -35,21 +35,6 @@ const emit = defineEmits<{
   update: [patch: Partial<MobileSettings>];
   "manage-hosts": [];
 }>();
-
-const families: Array<{
-  value: ThemeFamily;
-  label: string;
-  description: string;
-}> = [
-  { value: "mold", label: "Mold", description: "Cyan and magenta studio color." },
-  { value: "safelight", label: "Safelight", description: "Warm, classic darkroom color." },
-];
-
-const appearances: Array<{ value: Theme; label: string; description: string }> = [
-  { value: "system", label: "System", description: "Match phone" },
-  { value: "dark", label: "Dark", description: "Lights off" },
-  { value: "light", label: "Light", description: "Lights on" },
-];
 
 function openPrivacyPolicy(): void {
   void openExternal(PRIVACY_POLICY_URL);
@@ -262,30 +247,30 @@ onBeforeUnmount(() => {
       </div>
 
       <fieldset class="mobile-settings-fieldset">
-        <legend>Color family</legend>
+        <legend>Look</legend>
         <div class="mobile-theme-options">
           <label
-            v-for="family in families"
-            :key="family.value"
+            v-for="meta in THEME_META"
+            :key="meta.id"
             class="mobile-theme-option"
-            :data-selected="settings.themeFamily === family.value"
+            :data-selected="settings.theme === meta.id"
           >
             <input
               class="sr-only"
               type="radio"
-              name="mobile-theme-family"
-              :value="family.value"
-              :checked="settings.themeFamily === family.value"
-              @change="emit('update', { themeFamily: family.value })"
+              name="mobile-theme"
+              :value="meta.id"
+              :checked="settings.theme === meta.id"
+              @change="emit('update', { theme: meta.id })"
             />
-            <span class="mobile-theme-preview" :data-theme-family="family.value" aria-hidden="true">
+            <span class="mobile-theme-preview" :data-theme="meta.id" aria-hidden="true">
               <span />
               <span />
               <span />
             </span>
             <span class="mobile-theme-option-copy">
-              <strong>{{ family.label }}</strong>
-              <small>{{ family.description }}</small>
+              <strong>{{ meta.label }}</strong>
+              <small>{{ meta.tone }} · {{ meta.type }}</small>
             </span>
             <span class="mobile-settings-check" aria-hidden="true">✓</span>
           </label>
@@ -294,25 +279,17 @@ onBeforeUnmount(() => {
 
       <fieldset class="mobile-settings-fieldset">
         <legend>Appearance</legend>
-        <div class="mobile-appearance-options">
-          <label
-            v-for="appearance in appearances"
-            :key="appearance.value"
-            class="mobile-appearance-option"
-            :data-selected="settings.theme === appearance.value"
-          >
-            <input
-              class="sr-only"
-              type="radio"
-              name="mobile-theme-appearance"
-              :value="appearance.value"
-              :checked="settings.theme === appearance.value"
-              @change="emit('update', { theme: appearance.value })"
-            />
-            <strong>{{ appearance.label }}</strong>
-            <small>{{ appearance.description }}</small>
-          </label>
-        </div>
+        <label class="mobile-appearance-option" :data-selected="settings.matchSystem">
+          <input
+            class="sr-only"
+            type="checkbox"
+            name="mobile-theme-match-system"
+            :checked="settings.matchSystem"
+            @change="emit('update', { matchSystem: ($event.target as HTMLInputElement).checked })"
+          />
+          <strong>Match phone</strong>
+          <small>Swap to the paired light or dark look with iOS</small>
+        </label>
       </fieldset>
     </section>
 

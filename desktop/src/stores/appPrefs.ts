@@ -2,9 +2,8 @@ import { defineStore } from "pinia";
 import { ipc, type AppSettings, type UpdateChannel } from "../lib/ipc";
 import { applyUiScale, nextUiScale, type UiScaleDirection } from "../lib/uiScale";
 import { normalizePanelWidth } from "../lib/panelResize";
-import { applyTheme, type Theme, type ThemeFamily } from "../lib/theme";
+import { DEFAULT_THEME, applyTheme, installSystemThemeSync, type ThemeId } from "../lib/theme";
 
-export { resolveThemeAttributes } from "../lib/theme";
 /**
  * App-side preferences (settings.json via IPC): theme, notifications, dock
  * badge, engine env knobs. Loaded once at boot; every update persists and
@@ -15,8 +14,8 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     settings: null as AppSettings | null,
   }),
   getters: {
-    theme: (s): Theme => s.settings?.theme ?? "dark",
-    themeFamily: (s): ThemeFamily => s.settings?.themeFamily ?? "safelight",
+    theme: (s): ThemeId => s.settings?.theme ?? DEFAULT_THEME,
+    matchSystem: (s) => s.settings?.matchSystem ?? false,
     notifications: (s) => s.settings?.notifications ?? true,
     dockBadge: (s) => s.settings?.dockBadge ?? true,
     restoreLastRoute: (s) => s.settings?.restoreLastRoute ?? false,
@@ -36,7 +35,9 @@ export const useAppPrefsStore = defineStore("appPrefs", {
   actions: {
     async init(): Promise<AppSettings> {
       this.settings = await ipc.appSettingsGet();
-      applyTheme(this.settings.theme, this.settings.themeFamily);
+      applyTheme(this.settings.theme, this.settings.matchSystem);
+      // A system appearance flip re-resolves the pick without a settings write.
+      installSystemThemeSync(() => ({ theme: this.theme, matchSystem: this.matchSystem }));
       const normalizedScale = await applyUiScale(this.settings.uiScalePercent);
       if (normalizedScale !== this.settings.uiScalePercent) {
         this.settings = { ...this.settings, uiScalePercent: normalizedScale };
@@ -52,7 +53,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
       // (saved hosts, reconnect list) on the next theme toggle or route change.
       const current = await ipc.appSettingsGet();
       this.settings = { ...current, ...patch };
-      applyTheme(this.settings.theme, this.settings.themeFamily);
+      applyTheme(this.settings.theme, this.settings.matchSystem);
       const normalizedScale = await applyUiScale(this.settings.uiScalePercent);
       this.settings = { ...this.settings, uiScalePercent: normalizedScale };
       await ipc.appSettingsSet(this.settings);

@@ -1,4 +1,5 @@
-import { theme, themeFamily } from "./theme";
+import { matchSystem, theme } from "./theme";
+import { THEME_META } from "@ui/theme";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "./hostRouting";
 import {
   buildInstallModelCommands,
@@ -198,44 +199,22 @@ export function baseCommands(ctx: CommandContext): Command[] {
   ];
 
   const themes: Command[] = [
-    {
-      id: "theme-family-mold",
+    ...THEME_META.map((meta) => ({
+      id: `theme-${meta.id}`,
       section: "Theme",
-      label: "Mold theme",
+      label: `${meta.label} theme`,
       run: () => {
-        themeFamily.value = "mold";
+        theme.value = meta.id;
       },
-    },
+    })),
     {
-      id: "theme-family-safelight",
+      id: "theme-match-system",
       section: "Theme",
-      label: "Safelight theme",
+      label: matchSystem.value
+        ? "Stop matching system appearance"
+        : "Match system appearance",
       run: () => {
-        themeFamily.value = "safelight";
-      },
-    },
-    {
-      id: "theme-appearance-dark",
-      section: "Theme",
-      label: "Dark appearance",
-      run: () => {
-        theme.value = "dark";
-      },
-    },
-    {
-      id: "theme-appearance-light",
-      section: "Theme",
-      label: "Light appearance",
-      run: () => {
-        theme.value = "light";
-      },
-    },
-    {
-      id: "theme-appearance-system",
-      section: "Theme",
-      label: "System appearance",
-      run: () => {
-        theme.value = "system";
+        matchSystem.value = !matchSystem.value;
       },
     },
   ];

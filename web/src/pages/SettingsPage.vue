@@ -14,10 +14,9 @@ import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import type { DeviceInfo } from "@studio/api/devices";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
-import SegmentedControl, {
-  type SegmentOption,
-} from "@ui/components/SegmentedControl.vue";
-import { theme, themeFamily, type Theme, type ThemeFamily } from "../lib/theme";
+import { matchSystem, theme, type ThemeId } from "../lib/theme";
+import { THEME_META } from "@ui/theme";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
@@ -42,25 +41,13 @@ import {
   type CatalogCredentialStatus,
 } from "../api";
 
-const familyOptions: SegmentOption<ThemeFamily>[] = [
-  { value: "mold", label: "Mold" },
-  { value: "safelight", label: "Safelight" },
-];
-const appearanceOptions: SegmentOption<Theme>[] = [
-  { value: "system", label: "System" },
-  { value: "dark", label: "Dark" },
-  { value: "light", label: "Light" },
-];
 const pairingHost = computed(() => originHost());
 const pairingTarget = computed(() => ({
   baseUrl: pairingHost.value.url,
   apiKey: pairingHost.value.apiKey ?? null,
 }));
 
-function setFamily(value: ThemeFamily) {
-  themeFamily.value = value;
-}
-function setAppearance(value: Theme) {
+function setTheme(value: ThemeId) {
   theme.value = value;
 }
 
@@ -244,22 +231,27 @@ onBeforeUnmount(() => {
     <CardSurface class="settings__card">
       <div class="row">
         <span class="row__label">Theme</span>
-        <SegmentedControl
-          data-test="seg-theme"
-          :model-value="themeFamily"
-          :options="familyOptions"
-          label="Theme family"
-          @update:model-value="setFamily"
-        />
+        <select
+          data-test="theme-select"
+          class="theme-select"
+          aria-label="Theme"
+          :value="theme"
+          @change="
+            setTheme(($event.target as HTMLSelectElement).value as ThemeId)
+          "
+        >
+          <option v-for="meta in THEME_META" :key="meta.id" :value="meta.id">
+            {{ meta.label }} · {{ meta.tone }}
+          </option>
+        </select>
       </div>
       <div class="row">
-        <span class="row__label">Appearance</span>
-        <SegmentedControl
-          data-test="seg-appearance"
-          :model-value="theme"
-          :options="appearanceOptions"
-          label="Appearance"
-          @update:model-value="setAppearance"
+        <span class="row__label">Match system appearance</span>
+        <SwitchToggle
+          data-test="theme-match-system"
+          :model-value="matchSystem"
+          label="Match system appearance"
+          @update:model-value="(v) => (matchSystem = v)"
         />
       </div>
     </CardSurface>

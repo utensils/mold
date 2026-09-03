@@ -66,8 +66,6 @@ export interface InstallModelCommand extends ModelCommandBase {
   displayName: string;
 }
 
-export type ModelCommand = UseModelCommand | InstallModelCommand;
-
 export interface HostResolution {
   switchToHostId: string | null;
   /** The machine a job for this model would land on, or null if nobody has it. */

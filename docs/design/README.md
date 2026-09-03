@@ -25,12 +25,12 @@ content is carried forward as §10–§12 of the HTML spec.
 
 Implementation mapping:
 
-| Spec concept | Code |
-| --- | --- |
-| Tokens (`--desk/--bath/--bench/--surface/…`, 2 families × dark/light) | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`) |
-| Theme switching contract | `desktop/src/lib/theme.ts` (desktop + iOS), `web/src/lib/theme.ts` (web) |
-| Shared component kit | `ui/components/` (Vue primitives, token-var styled) |
-| Fonts (Bricolage Grotesque, Schibsted Grotesk, Martian Mono — OFL) | `ui/fonts/` (app-bundled), `docs/design/fonts/` (spec-local copies) |
+| Spec concept                                                                                                                                                                                                             | Code                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Tokens (`--mold-*`: six complete theme maps — Mocha, Safelight, Blueprint, Graphite, Porcelain, Nebula — selected by `data-theme`; a fenced legacy bridge keeps the `--desk/--bath/…` names alive for web and the phone) | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`)                                              |
+| Theme switching contract (`ThemeId` + `matchSystem`, `THEME_PAIR`, `migrateLegacyTheme`)                                                                                                                                 | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` (desktop + iOS) and consumed by `web/src/lib/theme.ts` |
+| Shared component kit                                                                                                                                                                                                     | `ui/components/` (Vue primitives, token-var styled)                                                             |
+| Fonts (one sans + one mono per theme: Inter, JetBrains Mono, Schibsted Grotesk, Martian Mono, Archivo, Azeret Mono, IBM Plex Sans, IBM Plex Mono, Manrope, Geist Mono — OFL)                                             | `ui/fonts/` (app-bundled; `fonts.legacy.css` carries only the Safelight pair for the embedded web bundle)       |
 
 Rules that gate any new UI (see the spec's adherence checklist): compose only
 from the shared kit, reference tokens (never hard-coded hex), keep the default

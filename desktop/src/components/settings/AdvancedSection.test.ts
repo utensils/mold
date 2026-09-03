@@ -273,7 +273,6 @@ describe("AdvancedSection device snapshots", () => {
           ConfigRowItem: true,
           ConfigSettingRow: true,
           PlacementSection: true,
-          DeviceSettingsPanel: true,
         },
       },
     });

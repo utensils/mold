@@ -97,12 +97,12 @@ describe("CommandPalette command registry", () => {
     await wrapper.get("input").setValue("theme");
     const options = wrapper.findAll("[role='option']");
     const texts = options.map((o) => o.text());
-    expect(texts.some((t) => t.includes("Theme: Mold"))).toBe(true);
+    expect(texts.some((t) => t.includes("Theme: Mocha"))).toBe(true);
     expect(texts.some((t) => t.includes("Theme: Safelight"))).toBe(true);
-    expect(texts.some((t) => t.includes("Appearance: Dark"))).toBe(true);
+    expect(texts.some((t) => t.includes("Match the system appearance"))).toBe(true);
 
     await options.find((o) => o.text().includes("Theme: Safelight"))!.trigger("click");
-    expect(update).toHaveBeenCalledWith({ themeFamily: "safelight" });
+    expect(update).toHaveBeenCalledWith({ theme: "safelight" });
     wrapper.unmount();
   });
 

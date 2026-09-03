@@ -74,8 +74,8 @@ describe("MobileSettingsView", () => {
     mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -101,8 +101,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -119,14 +119,15 @@ describe("MobileSettingsView", () => {
     expect(wrapper.text()).toContain("Jeffrey Dilley");
     expect(wrapper.text()).not.toMatch(/equal (project )?owners/i);
 
-    await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
-    await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);
+    expect(wrapper.findAll('input[name="mobile-theme"]')).toHaveLength(6);
+    await wrapper.get('input[name="mobile-theme"][value="porcelain"]').setValue(true);
+    await wrapper.get('input[name="mobile-theme-match-system"]').setValue(false);
     await wrapper.get('input[name="mobile-auto-save-photos"]').setValue(false);
     await wrapper.get('input[name="mobile-auto-tag-title"]').setValue(false);
 
     expect(wrapper.emitted("update")).toEqual([
-      [{ themeFamily: "safelight" }],
-      [{ theme: "light" }],
+      [{ theme: "porcelain" }],
+      [{ matchSystem: false }],
       [{ autoSavePhotos: false }],
       [{ autoTagTitle: false }],
     ]);
@@ -136,8 +137,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: false,
         },
@@ -159,7 +160,7 @@ describe("MobileSettingsView", () => {
   it("routes host management through an explicit action", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "dark", themeFamily: "mold", autoSavePhotos: true, autoTagTitle: true },
+        settings: { theme: "mocha", matchSystem: false, autoSavePhotos: true, autoTagTitle: true },
         hostCount: 0,
         appVersion: "Development build",
       },
@@ -218,8 +219,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -280,8 +281,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -301,8 +302,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "safelight",
+          theme: "safelight",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -388,8 +389,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -463,8 +464,8 @@ describe("MobileSettingsView", () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
         settings: {
-          theme: "system",
-          themeFamily: "mold",
+          theme: "mocha",
+          matchSystem: true,
           autoSavePhotos: true,
           autoTagTitle: true,
         },
@@ -758,7 +759,7 @@ function mobileHost(id: string) {
 function mountSettings(host: ReturnType<typeof mobileHost>) {
   return mount(MobileSettingsView, {
     props: {
-      settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true, autoTagTitle: true },
+      settings: { theme: "mocha", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
       hostCount: 1,
       appVersion: "0.20.2",
       host,
