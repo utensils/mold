@@ -38,5 +38,52 @@
     "non_distill_models": ["wan22-t2v-a14b:q8", "wan21-t2v-1.3b:bf16"],
     "solvers": ["default", "uni-pc", "euler", "dpm-pp"],
     "comment": "Distill strengths are (0, 4], offered only on the Lightning tiers; the solver row cycles wan's flow solvers (wire: the existing scheduler slot), never the SD UNet schedulers."
+  },
+  "auto_chain": {
+    "text_only_refusal": {
+      "template": "'{model}' is text-to-video and cannot continue motion across a clip boundary, so rendering {total_frames} frames would repeat the same ~{clip_frames}-frame clip rather than extend it. Reduce the frame count to {clip_frames} or fewer for one continuous clip, or use an image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which seeds each continuation with the previous clip's final frame.",
+      "total_frames": 259,
+      "refused": [
+        {
+          "model": "wan21-t2v-1.3b:turbo",
+          "source_image": "unsupported",
+          "tier_default_frames": 81,
+          "clip_frames": 121
+        },
+        {
+          "model": "wan21-t2v-1.3b:bf16",
+          "source_image": "unsupported",
+          "tier_default_frames": 81,
+          "clip_frames": 121
+        },
+        {
+          "model": "wan22-ti2v-5b:dmd",
+          "source_image": "unsupported",
+          "tier_default_frames": 121,
+          "clip_frames": 121
+        },
+        {
+          "model": "wan22-t2v-a14b:q8",
+          "source_image": "unsupported",
+          "tier_default_frames": 73,
+          "clip_frames": 73
+        }
+      ],
+      "chained": [
+        {
+          "model": "wan22-ti2v-5b:turbo",
+          "source_image": "optional",
+          "tier_default_frames": 121,
+          "clip_frames": 121
+        },
+        {
+          "model": "wan22-ti2v-5b:fp16",
+          "source_image": "optional",
+          "tier_default_frames": 121,
+          "clip_frames": 121
+        }
+      ],
+      "comment": "A ONE-SHOT (ephemeral) auto-chain past the tier's routing clip size is refused at every door for a wan tier whose source_image contract is `unsupported`: it has nothing to hand across a clip boundary, so every stage re-derives the scene from the same prompt and seed and the long video is the same clip repeated with a visible reset. `mold_core::chain::text_only_wan_auto_chain_refusal` is the single authority; the CLI router, the server's POST /api/chain-jobs admission, and studio/lib/chainRouting.ts all call or mirror it and render `template` byte-identically. `clip_frames` is `mold_core::chain::routing_clip_frames` - the family floor raised by the tier's own `tier_default_frames`. AUTHORED sequences (ephemeral false) are untouched: repeated stages there are what the author asked for."
+    }
   }
 }

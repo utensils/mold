@@ -80,6 +80,8 @@ mold run wan22-ti2v-5b:dmd "waves on a black sand beach" --width 1280 --height 7
 # Sequences: past the per-clip envelope this auto-chains and stitches one MP4
 # delivering exactly the requested total (keep --frames on the 4k+1 grid).
 # The seam continues only on an image-conditioned checkpoint; clips are 4k+1.
+# A text-to-video tier refuses the split instead: it carries nothing across a
+# seam, so a longer --frames would repeat the clip. Stay inside its clip size.
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 97 --clip-frames 49
 # Single-frame text-to-image: --frames 1 renders a still (png default, jpeg allowed)
 mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" --frames 1 -o still.png

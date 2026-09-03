@@ -7508,7 +7508,21 @@ describe("MobileApp wan source conditioning", () => {
   });
 
   it("hides the source well for an advertised text-to-video checkpoint", async () => {
-    serveWan({ ...wanModel, name: "wan22-t2v-a14b", source_image: "unsupported" });
+    // `default_frames` is on the row because every real `/api/models` row
+    // carries it, and here it is load-bearing: the form arrives holding the
+    // generic 97, which is on wan's `4k+1` grid and so used to survive model
+    // selection onto a tier whose clip is 73. A text-to-video tier past its
+    // clip size is refused (it hands nothing across a seam, so the split
+    // would repeat the clip), and Develop came up disabled with that refusal
+    // as its reason before the user touched anything.
+    // `videoFramesForModelSelection` now enters the tier on its own clip, and
+    // `applyModelDefaults` only consults it for a row that advertises one.
+    serveWan({
+      ...wanModel,
+      name: "wan22-t2v-a14b",
+      source_image: "unsupported",
+      default_frames: 73,
+    });
     wrapper = mountMobileApp();
     await flushPromises();
 

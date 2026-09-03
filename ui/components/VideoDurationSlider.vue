@@ -41,6 +41,8 @@ const sliderValue = computed(() =>
   clampVideoFrames(props.frames, rate.value, contract.value),
 );
 const maximum = computed(() => maxVideoFrames(contract.value, rate.value));
+/** An intentional above-ceiling count. Drives the readout only: whether it is
+ * a sequence is `generations`' answer, and a refused count is not one. */
 const isLongVideo = computed(() => props.frames > maximum.value);
 const displayedFrames = computed(() =>
   isLongVideo.value ? props.frames : sliderValue.value,
@@ -48,6 +50,12 @@ const displayedFrames = computed(() =>
 const readout = computed(() =>
   formatVideoDuration(displayedFrames.value, rate.value),
 );
+// `null` when the routing authority REFUSES this duration outright — a
+// text-to-video wan tier past its clip size, say, which cannot be split into a
+// sequence. It is not "1 generation": saying so advertised a single render for
+// a frame count submit answers 422 to. The ceiling above normally keeps the
+// slider out of that range; this is what keeps the readout honest if anything
+// else puts a refused count in the field.
 const generations = computed(() =>
   videoGenerationCount(
     displayedFrames.value,
@@ -55,6 +63,11 @@ const generations = computed(() =>
     contract.value,
     props.routingRequest ?? {},
   ),
+);
+const generationsLabel = computed(() =>
+  generations.value === null
+    ? null
+    : `${generations.value} ${generations.value === 1 ? "generation" : "generations"}`,
 );
 const marks = computed(() =>
   videoGenerationMarks(
@@ -98,15 +111,15 @@ function update(frames: number): void {
       :step="videoFrameStep(contract)"
       :label="label"
       :value-label="readout"
-      :aria-value-text="`${readout}, ${generations} ${generations === 1 ? 'generation' : 'generations'}`"
+      :aria-value-text="generationsLabel ? `${readout}, ${generationsLabel}` : readout"
       :marks="marks"
       :snap-threshold-ratio="touchFriendly ? 0.04 : 0.015"
       @update:model-value="update"
     />
     <p class="video-duration__hint" data-test="video-duration-detail">
-      {{ displayedFrames }} frames · {{ rate }} fps · {{ readout }} ·
-      {{ generations }} {{ generations === 1 ? "generation" : "generations" }}
-      <template v-if="generations > 1 || isLongVideo">
+      {{ displayedFrames }} frames · {{ rate }} fps · {{ readout
+      }}<template v-if="generationsLabel"> · {{ generationsLabel }}</template>
+      <template v-if="(generations ?? 0) > 1">
         · automatic sequence</template
       >
     </p>

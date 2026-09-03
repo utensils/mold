@@ -27,6 +27,12 @@ Crossfade). Clip lengths sit on wan's `4k+1` grid, and `--frames` past the
 per-clip envelope auto-chains instead of failing — the last clip is sized so
 the stitched video delivers exactly the frames you asked for.
 
+A **text-to-video** tier is the exception: it hands nothing across a seam, so
+an automatic split would render the same clip again rather than extend it.
+`mold run`, the Studio, and `POST /api/chain-jobs` all refuse a one-shot past
+that tier's clip size with the same sentence. An authored sequence still
+composes those clips deliberately.
+
 ```bash
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
   --frames 97 --clip-frames 49
