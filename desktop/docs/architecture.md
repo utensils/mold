@@ -5,9 +5,8 @@ Windows desktop apps plus a remote-only iPhone companion and an Android
 foundation (`website/guide/desktop.md` and `website/guide/android.md` are the
 canonical user-facing statements of what each platform ships). The backend and
 shared frontend logic stay platform-neutral; Tauri platform configs and thin native
-bridges own window chrome, device capabilities, and bundle details. The Mold
-Studio Mold and Safelight theme families are shared without changing
-generated-media color.
+bridges own window chrome, device capabilities, and bundle details. The six Mold
+Studio themes are shared without changing generated-media color.
 
 Design system: [`../../docs/design/mold-studio-spec.html`](../../docs/design/mold-studio-spec.html)
 — the Mold Studio interface spec these surfaces implement. Its information
@@ -90,10 +89,11 @@ snapshot-before-POST reconciliation and duplicate prevention.
 The shell is iPhone-first with safe areas, 44pt controls, 16px editable text,
 document zoom disabled, and overscroll bounce suppressed. The Library viewer
 keeps a narrowly scoped horizontal swipe gesture. Settings persists the Mold
-Studio families (Mold or Safelight) with System/Dark/Light, host management,
+Studio theme (one of six, plus Match phone), host management,
 version, the TestFlight update channel, and an external-browser link to the
-public Mold privacy policy. Fresh installs start with Safelight + Dark; valid
-persisted theme choices remain authoritative.
+public Mold privacy policy. Fresh installs start on Safelight; valid
+persisted theme choices remain authoritative and a pre-redesign family +
+appearance pair migrates to the nearest theme.
 
 `.github/workflows/ios.yml` gates mobile-relevant pull requests and `main`
 changes. A successful eligible `main` run triggers

@@ -414,8 +414,10 @@ it. Running inference is revoked cooperatively at its next safe point.
 Open Settings from the sliders button in the header. Mobile settings currently
 cover:
 
-- **Color family:** the Mold Studio theme families, Mold or Safelight
-- **Appearance:** System, Dark, or Light
+- **Look:** the six Mold Studio themes — Mocha, Safelight, Blueprint,
+  Graphite, Porcelain, Nebula
+- **Appearance:** **Match phone**, which swaps to the theme's light or dark
+  partner with iOS
 - **Photos:** automatically save newly generated stills to the iPhone photo
   library (on by default)
 - **Model licenses:** review and accept the selected host's model licenses
@@ -428,7 +430,7 @@ cover:
   project-owner credit for core contributors James Brink and Jeffrey Dilley,
   plus an external link to the [Mold privacy policy](/privacy)
 
-Fresh installs start with the Safelight color family, Dark appearance, and
+Fresh installs start on the Safelight theme with Match phone off, and with
 Photos auto-save and title tagging enabled. Existing users keep any valid saved
 choices, with auto-save and title tagging enabled when upgrading from a
 settings record that predates either option.
