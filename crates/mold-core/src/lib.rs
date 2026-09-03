@@ -78,15 +78,17 @@ pub use generation_profile::{
     generation_profile_default_output_format, generation_profile_for_manifest,
     generation_profile_for_manifest_with_defaults, materialize_generation_profile_output_default,
     off_bucket_resolution_warning, prompt_requirement_for_family,
-    qualify_generation_profile_delivery, resolution_advisory, resolve_generation_profile,
-    validate_dimensions_against_recipe, validate_mesh_against_recipe,
+    qualify_generation_profile_delivery, reference_images_for_recipe, reference_subject_label,
+    resolution_advisory, resolve_generation_profile, validate_dimensions_against_recipe,
+    validate_edit_images_against, validate_mesh_against_recipe,
     validate_output_format_against_generation_profile, validate_request_against_generation_profile,
     validate_request_against_recipe, AspectGroup, ControlMode, FloatControl, FpsControl,
     GenerationCapabilitiesProfile, GenerationDefaultsProfile, GenerationDeliveryCapabilities,
     GenerationProfileInput, GenerationProfileSet, GenerationRecipeProfile, IntegerControl,
     MeshCapabilitiesProfile, ProfileProvenance, PromptCapabilitiesProfile, PromptRequirement,
-    ProvenanceKind, RecipeSelector, ResolutionDomain, ResolutionPreset, ResolutionProfile,
-    TemporalProfile, GENERATION_PROFILE_SCHEMA_VERSION,
+    ProvenanceKind, RecipeSelector, ReferenceImagesProfile, ReferenceSourceRelation,
+    ResolutionDomain, ResolutionPreset, ResolutionProfile, TemporalProfile,
+    GENERATION_PROFILE_SCHEMA_VERSION, REFERENCE_IMAGES_UNSUPPORTED_REASON,
 };
 pub use install_error::InstallError;
 pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};

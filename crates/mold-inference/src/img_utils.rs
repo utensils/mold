@@ -378,7 +378,7 @@ mod normalization_tests {
         let bytes = encode_solid_png(513, 527);
         let tensor = decode_flux2_reference_image(
             &bytes,
-            mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS,
+            mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS,
             &Device::Cpu,
             DType::F32,
         )
@@ -391,7 +391,7 @@ mod normalization_tests {
         let bytes = encode_solid_png(4096, 1024);
         let tensor = decode_flux2_reference_image(
             &bytes,
-            mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS,
+            mold_core::validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS,
             &Device::Cpu,
             DType::F32,
         )
@@ -404,7 +404,7 @@ mod normalization_tests {
         let small = encode_solid_png(512, 63);
         assert!(decode_flux2_reference_image(
             &small,
-            mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS,
+            mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS,
             &Device::Cpu,
             DType::F32,
         )
@@ -415,7 +415,7 @@ mod normalization_tests {
         let wide = encode_solid_png(1024, 64);
         assert!(decode_flux2_reference_image(
             &wide,
-            mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS,
+            mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS,
             &Device::Cpu,
             DType::F32,
         )

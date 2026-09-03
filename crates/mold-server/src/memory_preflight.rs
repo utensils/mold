@@ -1868,9 +1868,9 @@ fn request_sensitive_activation_memory_with_wan_geometry(
                 .saturating_mul(u64::from(req.height))
                 .max(1);
             let per_image_cap = if image_count == 1 {
-                mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
+                mold_core::validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS
             } else {
-                mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
+                mold_core::validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS
             };
             // Reference bytes are already part of the finalized request, so
             // plan against their real dimensions. Falling back to the full
