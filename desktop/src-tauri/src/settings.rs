@@ -35,8 +35,10 @@ impl ThemeId {
         serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
     }
 
-    /// The theme a dark pick becomes when the system appearance turns light.
-    /// Mirrors `THEME_PAIR` in ui/theme.ts; keep the two in step.
+    /// The theme a dark pick becomes when the system appearance turns light —
+    /// the `light` half of `THEME_PAIR` in ui/theme.ts (a light pick never
+    /// reaches here, because migration only ever produces a dark pick first);
+    /// keep the two in step.
     fn light_partner(self) -> Self {
         match self {
             ThemeId::Mocha | ThemeId::Blueprint => ThemeId::Blueprint,
@@ -60,8 +62,10 @@ fn migrate_theme(theme: Option<&str>, family: Option<&str>) -> (ThemeId, Option<
     match theme {
         Some("light") => (dark.light_partner(), Some(false)),
         Some("system") => (dark, Some(true)),
-        Some("dark") => (dark, Some(false)),
-        _ => (ThemeId::default(), None),
+        // Absent or unrecognised: the family's dark theme, exactly like
+        // `migrateLegacyTheme` in ui/theme.ts. A settings file that predates
+        // the theme preference belongs to a Safelight-only install.
+        _ => (dark, None),
     }
 }
 
@@ -582,7 +586,7 @@ mod tests {
         let loaded = load(&path);
         assert!(loaded.notifications);
         assert!(loaded.dock_badge);
-        assert_eq!(loaded.theme, ThemeId::Mocha);
+        assert_eq!(loaded.theme, ThemeId::Safelight);
         assert!(!loaded.match_system);
         assert!(loaded.engine_env.is_empty());
         assert!(!loaded.runpod_include_hf_token);
@@ -628,7 +632,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"local","futureField":42}"#).unwrap();
-        assert_eq!(load(&path), AppSettings::default());
+        // A file with no theme key predates the preference: a Safelight install.
+        let expected = AppSettings {
+            theme: ThemeId::Safelight,
+            ..AppSettings::default()
+        };
+        assert_eq!(load(&path), expected);
     }
 
     #[test]
@@ -686,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_theme_falls_back_without_discarding_the_file() {
+    fn unknown_theme_falls_back_to_the_legacy_family_without_discarding_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(
@@ -695,7 +704,7 @@ mod tests {
         )
         .unwrap();
         let loaded = load(&path);
-        assert_eq!(loaded.theme, ThemeId::Mocha);
+        assert_eq!(loaded.theme, ThemeId::Safelight);
         assert_eq!(loaded.ui_scale_percent, 120);
     }
 

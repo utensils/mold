@@ -15,13 +15,35 @@ const liveActivityComponent = readFileSync("../ui/components/LiveActivityList.vu
 const swipeActionRowComponent = readFileSync("../studio/components/SwipeActionRow.vue", "utf8");
 const galleryViewerComponent = readFileSync("src/mobile/MobileGalleryViewer.vue", "utf8");
 
+const tokens = readFileSync("../ui/tokens.css", "utf8");
+
+describe("mobile theme swatches", () => {
+  it("copy each theme's chrome, content, telemetry, and accent hexes from ui/tokens.css", () => {
+    for (const [, id, body] of tokens.matchAll(/:root\[data-theme="([\w-]+)"\] \{([^}]*)\}/g)) {
+      const token = (key: string) => body!.match(new RegExp(`--mold-${key}: (#[0-9a-f]{6});`))?.[1];
+      const swatch = css.match(
+        new RegExp(`\\.mobile-theme-preview\\[data-theme="${id}"\\] \\{([^}]*)\\}`),
+      )?.[1];
+      expect(swatch, id).toBeDefined();
+      const preview = (key: string) =>
+        swatch!.match(new RegExp(`--preview-${key}: (#[0-9a-f]{6});`))?.[1];
+      expect(preview("bath"), `${id} chrome`).toBe(token("bg-deep"));
+      expect(preview("bench"), `${id} content`).toBe(token("bg"));
+      expect(preview("halide"), `${id} telemetry`).toBe(token("sapphire"));
+      expect(preview("safelight"), `${id} accent`).toBe(token("blue"));
+    }
+  });
+});
+
 describe("mobile theme bootstrap", () => {
   it("paints fresh installs as Safelight before Vue mounts", () => {
     expect(mobileHtml).toMatch(/<html[^>]*data-theme="safelight"/);
     expect(mobileHtml).toContain('var theme = "safelight"');
     expect(mobileHtml).toContain('localStorage.getItem("mold.mobile.settings.v1")');
-    // The pre-redesign family + appearance pair still migrates before paint.
+    // The pre-redesign family + appearance pair still migrates before paint,
+    // and Match phone resolves to the partner theme before the first frame.
     expect(mobileHtml).toContain('parsed.themeFamily === "mold"');
+    expect(mobileHtml).toContain('matchMedia("(prefers-color-scheme: light)")');
   });
 });
 

@@ -4,10 +4,11 @@
 @import "../../ui/kit.css";
 
 /*
- * Mold Studio web surface. All color flows from ui/tokens.css (two theme
- * families × dark/light selected via data-theme / data-theme-family on the
- * root element). The @theme block only maps token custom properties onto
- * Tailwind utility names — never introduce raw values here.
+ * Mold Studio web surface. All color flows from ui/tokens.css (six themes
+ * selected via data-theme on the root element; this surface still reads the
+ * pre-redesign names through that file's legacy bridge). The @theme block only
+ * maps token custom properties onto Tailwind utility names — never introduce
+ * raw values here.
  */
 @theme {
   --font-display: var(--f-display);

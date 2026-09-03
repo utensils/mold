@@ -44,10 +44,11 @@
   /* Empty work areas follow the active chrome theme. */
   --color-empty-surface: var(--empty-surface);
 
-  /* Type */
-  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
-  --font-body: "Schibsted Grotesk", system-ui, sans-serif;
-  --font-utility: "Martian Mono", ui-monospace, monospace;
+  /* Type — each theme names its own sans and mono (ui/tokens.css); the
+     legacy display role is the theme's sans, set heavier where it is used. */
+  --font-display: var(--f-display);
+  --font-body: var(--f-body);
+  --font-utility: var(--f-mono);
 
   /* Type scale (the only sizes): display 34/22/18, body 15/13/11, utility 12/10.5 */
   --text-display-lg: 2.125rem;
