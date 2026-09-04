@@ -139,7 +139,7 @@ async function panelContract(wrapper: ReturnType<typeof mount>) {
     .findAllComponents({ name: "SegmentedControl" })
     .find((row) => row.props("label") === "File format");
   return {
-    strength: wrapper.text().includes("Denoise strength"),
+    strength: wrapper.text().includes("How much to change it"),
     mask: wrapper.find("[data-test='source-edit-mask']").exists(),
     negative: wrapper.find("[data-test='section-negative']").exists(),
     formats: (formatControl?.props("options") as { value: string }[] | undefined)?.map(
@@ -333,7 +333,7 @@ describe("InspectorPanel — Mesh group", () => {
     await flushPromises();
     const threshold = wrapper
       .findAllComponents(SliderRow)
-      .find((row) => row.props("label") === "Iso threshold")!;
+      .find((row) => row.props("label") === "How tight to the photo")!;
     expect(threshold.props()).toMatchObject({
       min: 0,
       max: 1,
@@ -361,14 +361,14 @@ describe("InspectorPanel — Mesh group", () => {
     await flushPromises();
     const threshold = wrapper
       .findAllComponents(SliderRow)
-      .find((row) => row.props("label") === "Iso threshold")!;
+      .find((row) => row.props("label") === "How tight to the photo")!;
     expect(threshold.props("disabled")).toBe(true);
     expect(wrapper.get("[data-test='mesh-threshold-note']").text()).toBe(
       "This build pins the iso surface.",
     );
   });
 
-  it("bounds Target faces by the recipe and treats blank as the raw surface", async () => {
+  it("bounds Simplify to by the recipe and treats blank as every detail", async () => {
     const { form, wrapper } = mountFor(meshModel());
     await flushPromises();
     const faces = wrapper.get("[data-test='mesh-target-faces']");
@@ -385,7 +385,7 @@ describe("InspectorPanel — Mesh group", () => {
   // A budget outside the advertised bounds is a 422 at admission; the
   // inspector names the bounds inline (as it does for Steps) instead of
   // letting Generate learn it from the host.
-  it("names the advertised bounds beside a Target faces value outside them", async () => {
+  it("names the advertised bounds beside a Simplify to value outside them", async () => {
     const { form, wrapper } = mountFor(meshModel());
     await flushPromises();
     const faces = wrapper.get("[data-test='mesh-target-faces']");
@@ -395,7 +395,7 @@ describe("InspectorPanel — Mesh group", () => {
     // The typed value stands — it is not snapped behind the user's back.
     expect(form.mesh.targetFaces).toBe(10);
     expect(wrapper.get("[data-test='mesh-target-faces-error']").text()).toBe(
-      "Target faces must be a whole number from 100 to 2000000.",
+      "Use a whole number of faces from 100 to 2000000.",
     );
     expect(faces.attributes("aria-invalid")).toBe("true");
 

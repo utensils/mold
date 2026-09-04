@@ -74,7 +74,7 @@ describe("GenerateView layout", () => {
   it("renders an instructive brand blank-canvas placeholder before the first print", () => {
     expect(viewSource).toContain('data-test="empty-canvas"');
     expect(tagFor(viewSource, "preview-frame")).toContain("bg-media-bed");
-    expect(viewSource).toContain("Your print develops here");
+    expect(viewSource).toContain("Your picture appears here");
     expect(viewSource).toContain("Describe an image below, pick a look, and press Generate.");
   });
 

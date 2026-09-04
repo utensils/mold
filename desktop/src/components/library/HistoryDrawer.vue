@@ -207,7 +207,7 @@ async function useRunAsSource(entry: MergedPrint) {
 function runMenu(entry: MergedPrint): MenuEntry[] {
   const img = entry.item;
   return [
-    { label: "Reuse settings", action: () => useRun(img) },
+    { label: "Use these settings", action: () => useRun(img) },
     {
       label: "Use as source",
       disabled: !canUseGalleryEntryAsSource(img),
@@ -653,7 +653,7 @@ async function cleanUpDiskConfirmed() {
         <EmptyState
           v-if="gallery.loaded && runs.length === 0 && !query"
           headline="No runs yet"
-          detail="Every print you develop shows up here with its settings and seed."
+          detail="Every picture you make shows up here with its settings and seed."
         />
         <p v-else-if="query && runs.length === 0" class="mt-6 text-center text-sm text-fg-2">
           No runs match “{{ query }}”.
@@ -699,7 +699,7 @@ async function cleanUpDiskConfirmed() {
                 {{ entry.item.metadata.model }} · {{ entry.item.metadata.width }}×{{
                   entry.item.metadata.height
                 }}
-                · S {{ entry.item.metadata.seed }} · {{ entry.item.metadata.steps }} steps
+                · seed {{ entry.item.metadata.seed }} · {{ entry.item.metadata.steps }} passes
               </div>
             </div>
             <span
@@ -758,7 +758,7 @@ async function cleanUpDiskConfirmed() {
                   class="border-border-control shrink-0 rounded-control border px-2 py-0.5 text-micro text-fg-2 hover:text-fg"
                   @click.stop="showPrint(vm)"
                 >
-                  Show print
+                  Show the picture
                 </button>
               </template>
             </SequenceJobRow>

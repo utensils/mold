@@ -280,7 +280,7 @@ describe("LibraryView delete keyboard handling", () => {
     apiFetchTo.mockResolvedValueOnce(new Response(new Uint8Array([65, 66, 67])));
     const { wrapper, router } = await mountView(remotePrint);
 
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
     expect(tile).toBeDefined();
     await tile!.trigger("contextmenu");
 
@@ -317,7 +317,7 @@ describe("LibraryView delete keyboard handling", () => {
     form.model = "minimax-h3-ref2va:comfy-pruned-int8";
     form.family = "minimax-h3";
 
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
     expect(tile).toBeDefined();
     await tile!.trigger("contextmenu");
     const menu = useContextMenuStore();
@@ -441,7 +441,7 @@ describe("LibraryView delete keyboard handling", () => {
     const { wrapper, gallery } = await mountView(remotePrint);
     vi.useFakeTimers();
     try {
-      const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+      const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
       expect(tile).toBeDefined();
       await tile!.trigger("contextmenu");
 
@@ -482,7 +482,7 @@ describe("LibraryView delete keyboard handling", () => {
     const { wrapper, gallery } = await mountView(remotePrint);
     vi.useFakeTimers();
     try {
-      const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+      const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
       await tile!.trigger("contextmenu");
       const menu = useContextMenuStore();
       const deleteEntry = menu.entries.find(
@@ -526,7 +526,7 @@ describe("LibraryView source reuse", () => {
       }),
     );
     const { wrapper, router } = await mountView();
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 1"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 1"));
     expect(tile).toBeDefined();
     await tile!.trigger("dblclick");
     await wrapper.get("[data-test='lightbox-use-source']").trigger("click");
@@ -845,16 +845,16 @@ describe("LibraryView source reuse", () => {
   });
 });
 
-describe("LibraryView Reuse settings retained source media", () => {
+describe("LibraryView Use these settings retained source media", () => {
   const plato = { baseUrl: "http://plato:7680", apiKey: "secret" };
 
   async function reuseFromContextMenu(wrapper: ReturnType<typeof mount>) {
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
     expect(tile).toBeDefined();
     await tile!.trigger("contextmenu");
     const menu = useContextMenuStore();
     const entry = menu.entries.find(
-      (candidate) => !("separator" in candidate) && candidate.label === "Reuse settings",
+      (candidate) => !("separator" in candidate) && candidate.label === "Use these settings",
     )!;
     expect(entry).toBeDefined();
     menu.activate(entry);
@@ -1079,9 +1079,9 @@ describe("LibraryView header + NEW badges", () => {
       g.seenFilenames = new Set(["second.png"]);
     });
 
-    const tiles = wrapper.findAll("button").filter((b) => b.text().includes("· S "));
-    const fresh = tiles.find((b) => b.text().includes("S 1"));
-    const stale = tiles.find((b) => b.text().includes("S 2"));
+    const tiles = wrapper.findAll("button").filter((b) => b.text().includes("· seed "));
+    const fresh = tiles.find((b) => b.text().includes("seed 1"));
+    const stale = tiles.find((b) => b.text().includes("seed 2"));
     expect(fresh!.find('[data-test="new-badge"]').exists()).toBe(true);
     expect(stale!.find('[data-test="new-badge"]').exists()).toBe(false);
 

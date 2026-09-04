@@ -928,7 +928,7 @@ defineExpose({ setOutputMode });
           :step="activeRecipe?.steps.step ?? 1"
           :disabled="activeRecipe?.steps.mode === 'fixed'"
           label="Detail"
-          :value-label="`${form.steps} steps`"
+          :value-label="`${form.steps} passes`"
           @update:model-value="form.steps = $event"
         />
         <p v-if="stepsError" class="ms-field__error" role="alert">{{ stepsError }}</p>
@@ -941,16 +941,16 @@ defineExpose({ setOutputMode });
         </p>
       </div>
 
-      <!-- Mesh — 3-D geometry, built entirely from the recipe's advertised
-           `mesh` block, so a host that widens the octree ladder or the face
-           bounds widens this group with no client release. -->
+      <!-- 3-D object, built entirely from the recipe's advertised `mesh`
+           block, so a host that widens the octree ladder or the face bounds
+           widens this group with no client release. -->
       <div v-if="meshProfile" class="ms-field" data-test="mesh-controls">
-        <div class="ms-field__label">Mesh</div>
+        <div class="ms-field__label">3-D object</div>
         <SegmentedControl
           v-if="octreeOptions.length > 0"
           :model-value="octreeValue"
           :options="octreeOptions"
-          label="Octree detail"
+          label="Surface detail"
           wrap
           data-test="mesh-octree"
           @update:model-value="form.mesh.octreeResolution = $event"
@@ -963,7 +963,7 @@ defineExpose({ setOutputMode });
           :max="thresholdControl.max"
           :step="thresholdControl.step"
           :disabled="thresholdControl.mode === 'fixed'"
-          label="Iso threshold"
+          label="How tight to the photo"
           :value-label="thresholdValue.toFixed(2)"
           @update:model-value="form.mesh.threshold = $event"
         />
@@ -976,7 +976,7 @@ defineExpose({ setOutputMode });
         </p>
         <div class="ms-field ms-field--row mt-3">
           <label class="ms-field__label ms-field__label--inline" for="mesh-target-faces">
-            Target faces
+            Simplify to
           </label>
           <input
             id="mesh-target-faces"
@@ -986,7 +986,7 @@ defineExpose({ setOutputMode });
             inputmode="numeric"
             :min="meshProfile.target_faces_min"
             :max="meshProfile.target_faces_max"
-            placeholder="keep raw surface"
+            placeholder="keep every detail"
             :value="form.mesh.targetFaces ?? ''"
             :aria-invalid="targetFacesError ? 'true' : undefined"
             class="ms-seed__input font-mono text-xs"
@@ -1009,14 +1009,14 @@ defineExpose({ setOutputMode });
         </p>
       </div>
 
-      <!-- Prompt strength (guidance) -->
+      <!-- Stick to my words (guidance) -->
       <div class="ms-field">
         <SliderRow
           :model-value="caps.fixedGuidance ?? form.guidance"
           :min="activeRecipe?.guidance.min ?? 0"
           :max="activeRecipe?.guidance.max ?? 100"
           :step="activeRecipe?.guidance.step ?? 0.1"
-          label="Prompt strength"
+          label="Stick to my words"
           :value-label="(caps.fixedGuidance ?? form.guidance).toFixed(1)"
           :disabled="activeRecipe?.guidance.mode === 'fixed' || !caps.guidanceAdjustable"
           @update:model-value="form.guidance = $event"

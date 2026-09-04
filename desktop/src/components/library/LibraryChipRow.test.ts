@@ -28,10 +28,10 @@ afterEach(() => {
 });
 
 describe("LibraryChipRow", () => {
-  it("shows ♥ Favorites, the top 8 tags with mono counts, More tags… (+N), and host chips", () => {
+  it("shows ♥ Favourites, the top 8 tags with mono counts, More tags… (+N), and machine chips", () => {
     const wrapper = mountRow();
     const fav = wrapper.get("[data-test='favorites-chip']");
-    expect(fav.text()).toContain("Favorites");
+    expect(fav.text()).toContain("Favourites");
     expect(fav.text()).toContain("6");
     expect(fav.attributes("aria-pressed")).toBe("false");
     const chips = wrapper.findAll("[data-test='tag-chip']");

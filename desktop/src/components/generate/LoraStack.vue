@@ -147,7 +147,7 @@ watch(
         :disabled="form.loras.length >= MAX_LORA_STACK"
         @click="openPicker"
       >
-        + Add LoRA
+        + Add a look
       </button>
       <div
         v-if="pickerOpen"
@@ -157,7 +157,7 @@ watch(
         <p v-if="loading" class="px-2 py-2 text-micro text-fg-dim">Loading…</p>
         <p v-else-if="error" class="px-2 py-2 text-micro text-error">{{ error }}</p>
         <p v-else-if="available.length === 0" class="px-2 py-2 text-micro text-fg-dim">
-          No LoRAs installed for this family.
+          No add-on looks here yet for this family.
         </p>
         <button
           v-for="l in available"

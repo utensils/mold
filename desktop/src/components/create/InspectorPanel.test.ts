@@ -96,7 +96,9 @@ describe("InspectorPanel — layout", () => {
     ];
     const wrapper = mount(InspectorPanel, { props: { form } });
     const guidance = () =>
-      wrapper.findAllComponents(SliderRow).find((row) => row.props("label") === "Prompt strength")!;
+      wrapper
+        .findAllComponents(SliderRow)
+        .find((row) => row.props("label") === "Stick to my words")!;
     expect(guidance().props("disabled")).toBe(true);
     expect(guidance().props("modelValue")).toBe(1);
     // The sentence is the profile's own note, not inspector copy.
@@ -168,7 +170,7 @@ describe("InspectorPanel — layout", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
-    // Detail + Prompt strength sliders.
+    // Detail + Stick to my words sliders.
     expect(wrapper.findAllComponents(SliderRow)).toHaveLength(2);
     // "Make N" moved to the composer's control row — the inspector must not
     // carry a second copy of it.

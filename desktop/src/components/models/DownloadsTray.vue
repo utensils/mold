@@ -66,8 +66,19 @@ function isRetrying(row: HostedDownloadJob): boolean {
   return retrying.value.includes(rowKey(row));
 }
 
+/** Plain words for the wire's own status vocabulary (docs/design/README.md
+ *  §2), so no surface ever prints `active` or `queued` at a person. */
+const STATUS_WORD: Record<DownloadJobStatus, string> = {
+  active: "Downloading",
+  queued: "Waiting",
+  completed: "Finished",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
 function statusLabel(row: HostedDownloadJob): string {
-  return row.job.status === "active" && row.job.bytes_total === 0 ? "preparing" : row.job.status;
+  if (row.job.status === "active" && row.job.bytes_total === 0) return "Getting ready";
+  return STATUS_WORD[row.job.status];
 }
 
 function headline(row: HostedDownloadJob): string {
@@ -212,7 +223,7 @@ async function retry(row: HostedDownloadJob) {
             :class="STATUS_INK[row.job.status]"
             data-test="history-status"
           >
-            {{ row.job.status }}
+            {{ statusLabel(row) }}
           </span>
           <span class="flex min-w-0 items-center gap-1.5">
             <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-fg-dim" />

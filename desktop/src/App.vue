@@ -107,7 +107,7 @@ watch(
 );
 
 // Cross-surface notifications (§08 G11). A generation finishing while the user
-// is somewhere other than Create raises a toast that jumps to Library; the
+// is somewhere other than Create raises a toast that jumps to My images; the
 // native notification (dispatched by the generation store) covers the
 // backgrounded case, so the foreground toast bows out then.
 const notifiedComplete = new Set<number>();
@@ -123,7 +123,7 @@ watch(
     if (done.length === 0) return;
     if (!shouldToastGenerationComplete(router.currentRoute.value.path)) return;
     if (appIsBackground()) return;
-    toasts.push("Generated — saved to Library", "info", {
+    toasts.push("Generated — saved to My images", "info", {
       onClick: () => void router.push("/library"),
     });
   },

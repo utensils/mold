@@ -41,7 +41,7 @@ describe("LoraStack host routing", () => {
 
     const addButton = wrapper
       .findAll("button")
-      .find((button) => button.text().includes("Add LoRA"));
+      .find((button) => button.text().includes("Add a look"));
     expect(addButton).toBeDefined();
     await addButton!.trigger("click");
     await flushPromises();
@@ -72,7 +72,7 @@ describe("LoraStack host routing", () => {
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("Add LoRA"))!
+      .find((button) => button.text().includes("Add a look"))!
       .trigger("click");
     const halRoute = {
       ...route,
@@ -84,7 +84,7 @@ describe("LoraStack host routing", () => {
     await wrapper.setProps({ route: halRoute });
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("Add LoRA"))!
+      .find((button) => button.text().includes("Add a look"))!
       .trigger("click");
     second.resolve([
       {
@@ -131,13 +131,13 @@ describe("LoraStack host routing", () => {
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("Add LoRA"))!
+      .find((button) => button.text().includes("Add a look"))!
       .trigger("click");
     const replacementRoute = { ...route, instanceId: "replacement-instance" };
     await wrapper.setProps({ route: replacementRoute });
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("Add LoRA"))!
+      .find((button) => button.text().includes("Add a look"))!
       .trigger("click");
     second.resolve([
       {

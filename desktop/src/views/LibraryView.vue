@@ -281,7 +281,7 @@ const organizeHostNote = computed(() => {
 });
 
 /** Every SELECTED logical print has at least one copy on an
- *  organize-capable host — the bulk bar's Favorite / Tag / Collection
+ *  organize-capable host — the bulk bar's Favourite / Tag / Album
  *  controls act on nothing otherwise. Empty selections stay enabled (the
  *  buttons already disable on `none`) so the bar reads normally. */
 const selectionOrganizeBlockedReason = computed<string | null>(() => {
@@ -832,7 +832,7 @@ async function createCollection(name: string, targets: MergedPrint[] = []) {
   if (targets.length > 0 && gallery.organizeTargetsFor(targets).length === 0) {
     const n = targets.length;
     toasts.push(
-      `None of the ${n === 1 ? "selected picture's copies live" : `${n} selected pictures' copies live`} on a machine that can organize — no collection was created.`,
+      `None of the ${n === 1 ? "selected picture's copies live" : `${n} selected pictures' copies live`} on a machine that can organize — no album was created.`,
       "error",
     );
     return;
@@ -846,7 +846,7 @@ async function createCollection(name: string, targets: MergedPrint[] = []) {
       const n = targets.length;
       reportFanout(added, `Added ${n} ${n === 1 ? "picture" : "pictures"} to “${name}”`);
     } else {
-      toasts.push(`Created collection “${name}”`);
+      toasts.push(`Created album “${name}”`);
     }
   } finally {
     organizeBusy.value = false;
@@ -869,7 +869,7 @@ async function setCollectionHidden(slug: string, hidden: boolean) {
   const name = collectionNamed(slug);
   reportFanout(
     await gallery.setCollectionHidden(slug, hidden),
-    hidden ? `Hidden collection “${name}”` : `Showing collection “${name}”`,
+    hidden ? `Hid album “${name}”` : `Showing album “${name}”`,
   );
 }
 
@@ -880,7 +880,7 @@ async function confirmDeleteCollection() {
   const name = collectionNamed(slug);
   organizeBusy.value = true;
   try {
-    if (reportFanout(await gallery.deleteCollection(slug), `Deleted collection “${name}”`)) {
+    if (reportFanout(await gallery.deleteCollection(slug), `Deleted album “${name}”`)) {
       if (gallery.collectionSlug === slug) gallery.collectionSlug = null;
     }
   } finally {
@@ -1098,7 +1098,7 @@ function collectionMenu(slug: string): MenuEntry[] {
     { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
     { separator: true },
     {
-      label: "Delete collection…",
+      label: "Delete album…",
       danger: true,
       action: () => (collectionDeleteSlug.value = slug),
     },
@@ -1117,7 +1117,7 @@ function openEditMenu(event: MouseEvent) {
     },
     { separator: true },
     {
-      label: "Delete collection…",
+      label: "Delete album…",
       danger: true,
       action: () => (collectionDeleteSlug.value = slug),
     },
@@ -1164,7 +1164,7 @@ function collectionSubmenu(entry: MergedPrint): MenuEntry[] {
     };
   });
   if (items.length > 0) items.push({ separator: true });
-  items.push({ label: "New collection…", action: () => openNewCollection(targets) });
+  items.push({ label: "New album…", action: () => openNewCollection(targets) });
   return items;
 }
 
@@ -1209,25 +1209,25 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   const trashable = entryTrashCapable(entry);
   if (selectedForBulk) {
     const targets = selectedEntries.value;
-    const allFavorite = targets.every(isFavorite);
+    const allFavourite = targets.every(isFavorite);
     const allOrganizable = targets.every(canOrganizeEntry);
     const allTrashable = targets.every(entryTrashCapable);
     return [
       ...(allOrganizable
         ? [
             {
-              label: allFavorite
-                ? `Unfavorite ${bulkCount} selected`
-                : `Favorite ${bulkCount} selected`,
-              checked: allFavorite,
-              action: () => void setFavorite(targets, !allFavorite),
+              label: allFavourite
+                ? `Unfavourite ${bulkCount} selected`
+                : `Favourite ${bulkCount} selected`,
+              checked: allFavourite,
+              action: () => void setFavorite(targets, !allFavourite),
             },
             { label: "Tags", children: tagSubmenu(entry) },
-            { label: "Add to collection", children: collectionSubmenu(entry) },
+            { label: "Add to album", children: collectionSubmenu(entry) },
             ...(gallery.collectionSlug && inCollections.value
               ? [
                   {
-                    label: `Remove ${bulkCount} selected from collection`,
+                    label: `Remove ${bulkCount} selected from album`,
                     action: () => void removeFromOpenCollection(targets),
                   },
                 ]
@@ -1252,25 +1252,25 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
             : []),
           { label: "Duplicate as new", action: () => reuseSequence(entry) },
         ]
-      : [{ label: "Reuse settings", action: () => reuseSettings(entry) }]),
+      : [{ label: "Use these settings", action: () => reuseSettings(entry) }]),
     ...(organize
       ? [
           { separator: true } as MenuEntry,
           {
-            label: favorite ? "Unfavorite" : "Favorite",
+            label: favorite ? "Unfavourite" : "Favourite",
             checked: favorite,
             action: () => toggleFavorite(entry),
           },
           { label: "Rename…", action: () => openRename(entry) },
           { label: "Tags", children: tagSubmenu(entry) },
-          { label: "Add to collection", children: collectionSubmenu(entry) },
+          { label: "Add to album", children: collectionSubmenu(entry) },
           ...(gallery.collectionSlug && inCollections.value
             ? [
                 { label: "Use as cover", action: () => void useAsCover(entry) },
                 {
                   label: selectedForBulk
-                    ? `Remove ${bulkCount} selected from collection`
-                    : "Remove from collection",
+                    ? `Remove ${bulkCount} selected from album`
+                    : "Remove from album",
                   action: () => void removeFromOpenCollection(actionTargets(entry)),
                 },
               ]
@@ -1313,7 +1313,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       action: () => void saveToThisMac(entry),
     },
     {
-      label: "Reveal in file manager",
+      label: "Show the file",
       disabled: !canReveal(entry),
       action: () =>
         void ipc.revealOutputFile(item.filename).catch((e) => {
@@ -1404,7 +1404,7 @@ const kindOptions = computed(() => [
   { value: "image" as GalleryKindFilter, label: "Pictures" },
   { value: "video" as GalleryKindFilter, label: "Clips" },
   { value: "audio" as GalleryKindFilter, label: "Audio" },
-  { value: "mesh" as GalleryKindFilter, label: "3D" },
+  { value: "mesh" as GalleryKindFilter, label: "3-D" },
 ]);
 const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
@@ -2590,7 +2590,7 @@ onUnmounted(() => {
         @click="exitCollection"
       >
         <Icon name="chevron-left" :size="14" />
-        Collections
+        Albums
       </button>
       <span class="text-fg-dim" aria-hidden="true">›</span>
       <span class="font-sans font-semibold text-base font-semibold text-fg" data-test="crumb-here">
@@ -2626,14 +2626,14 @@ onUnmounted(() => {
       <template v-if="showShelf">
         <EmptyState
           v-if="gallery.mergedCollections.length === 0"
-          headline="No collections yet"
-          detail="Group prints however you like — a collection lives on every machine that holds a copy."
-          action="New collection"
+          headline="No albums yet"
+          detail="Group pictures however you like — an album lives on every machine that holds a copy."
+          action="New album"
           @action="openNewCollection()"
         />
         <EmptyState
           v-else-if="shelfCards.length === 0"
-          headline="No matching collections"
+          headline="No matching albums"
           detail="Nothing here matches the current search."
         />
         <CollectionsShelf
@@ -2658,7 +2658,7 @@ onUnmounted(() => {
       <!-- Drill-in empty state -->
       <EmptyState
         v-else-if="inCollections && gallery.loaded && entries.length === 0"
-        headline="Nothing in this collection yet"
+        headline="Nothing in this album yet"
         detail="Select pictures in My images and choose Add to album."
         action="Go to pictures"
         @action="setScope('prints')"
@@ -2794,7 +2794,7 @@ onUnmounted(() => {
               data-test="edge-strip"
               class="font-mono text-micro text-fg-dim whitespace-nowrap absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
             >
-              {{ tile.model.title }} · {{ tile.model.modelLabel }} · S
+              {{ tile.model.title }} · {{ tile.model.modelLabel }} · seed
               {{ tile.model.item.metadata.seed }}
             </span>
           </button>
@@ -2811,8 +2811,8 @@ onUnmounted(() => {
                 : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
             "
             :aria-pressed="tile.model.favorite"
-            :aria-label="tile.model.favorite ? 'Unfavorite' : 'Favorite'"
-            :title="tile.model.favorite ? 'Unfavorite' : 'Favorite'"
+            :aria-label="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
+            :title="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
             @click.stop="toggleFavorite(tile.model.entry)"
             @dblclick.stop
           >
@@ -2949,14 +2949,14 @@ onUnmounted(() => {
     />
     <RenameDialog
       :open="newCollectionTargets !== null"
-      title="New collection"
+      title="New album"
       initial=""
       @save="onNewCollectionSave"
       @cancel="newCollectionTargets = null"
     />
     <RenameDialog
       :open="collectionRenameSlug !== null"
-      title="Rename collection"
+      title="Rename album"
       :initial="collectionNamed(collectionRenameSlug)"
       @save="onCollectionRenameSave"
       @cancel="collectionRenameSlug = null"
@@ -2965,7 +2965,7 @@ onUnmounted(() => {
     <!-- Destructive confirms (plain shared ConfirmDialog — no typed phrase) -->
     <ConfirmDialog
       :open="collectionDeleteSlug !== null"
-      :title="`Delete collection “${collectionNamed(collectionDeleteSlug)}”?`"
+      :title="`Delete album “${collectionNamed(collectionDeleteSlug)}”?`"
       message="Its pictures stay in My images."
       confirm-label="Delete"
       danger

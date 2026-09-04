@@ -342,7 +342,7 @@ describe("MachinesView overview", () => {
       "Disconnect",
       "Forget…",
       "Manage RunPod",
-      "Stop pod",
+      "Stop it",
     ]);
   });
 
@@ -361,7 +361,7 @@ describe("MachinesView overview", () => {
     await wrapper.get("[data-test='runpod-running']").trigger("contextmenu");
     expect(
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
-    ).not.toContain("Stop pod");
+    ).not.toContain("Stop it");
   });
 
   it("stops a pod without also opening its machine detail", async () => {

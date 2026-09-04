@@ -206,9 +206,7 @@ describe("meshTargetFacesError", () => {
   });
 
   it("names the advertised bounds for a budget outside them", () => {
-    expect(meshTargetFacesError(10, mesh)).toBe(
-      "Target faces must be a whole number from 100 to 2000000.",
-    );
+    expect(meshTargetFacesError(10, mesh)).toBe("Use a whole number of faces from 100 to 2000000.");
     expect(meshTargetFacesError(9_000_000, mesh)).toMatch(/from 100 to 2000000/);
     expect(meshTargetFacesError(150.5, mesh)).toMatch(/whole number/);
   });

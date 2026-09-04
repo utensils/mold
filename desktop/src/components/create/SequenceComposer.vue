@@ -77,7 +77,7 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  /** Generate sequence / Update sequence (create vs amend is the parent's call). */
+  /** Generate the clip (create vs amend is the parent's call). */
   submit: [];
   /** Stop source preparation / placement before the sequence is queued. */
   cancel: [];
@@ -347,7 +347,7 @@ const editBanner = computed(() => {
   const cached = current.perClip.filter((p) => p === "cached").length;
   const rerender = current.perClip.length - cached;
   const host = hosts.all.find((h) => h.id === editing.hostId);
-  return `Editing sequence ${editing.jobId.slice(0, 8)} on ${host?.label ?? editing.hostId} · ${cached} cached · ${rerender} will re-render`;
+  return `Editing clip ${editing.jobId.slice(0, 8)} on ${host?.label ?? editing.hostId} · ${cached} cached · ${rerender} will re-render`;
 });
 
 function discardEdit() {
@@ -364,18 +364,18 @@ function submit() {
   emit("submit");
 }
 
-// ── Clear sequence ───────────────────────────────────────────────────────────
+// ── Clear the clip ───────────────────────────────────────────────────────────
 const clearConfirmOpen = ref(false);
 const clearMessage = computed(() => {
   const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
-  return `Removes all ${draft.clips.length} clips and their prompts.${edit} Model and shared settings stay.`;
+  return `Removes all ${draft.clips.length} scenes and their words.${edit} The style and shared settings stay.`;
 });
 
 function clearSequence() {
   clearConfirmOpen.value = false;
   openSeamId.value = null;
   draft.clearSequence(newClipFrames.value);
-  toasts.push("Sequence cleared");
+  toasts.push("Clip cleared");
 }
 
 // ── File tools ───────────────────────────────────────────────────────────────
@@ -770,7 +770,7 @@ function onBenchContextMenu(event: MouseEvent) {
         :disabled="disabledReason !== null || submitting || validating || !target"
         @click="validatePlan"
       >
-        {{ validating ? "Validating…" : "Validate plan" }}
+        {{ validating ? "Checking…" : "Check the plan" }}
       </button>
 
       <button
@@ -779,7 +779,7 @@ function onBenchContextMenu(event: MouseEvent) {
         class="ms-toolbar-button ms-toolbar-button--danger-hover"
         @click="clearConfirmOpen = true"
       >
-        Clear sequence
+        Clear the clip
       </button>
 
       <ActionBlocker
@@ -802,21 +802,15 @@ function onBenchContextMenu(event: MouseEvent) {
         :disabled="disabledReason !== null && !submitting"
         @click="submitOrCancel"
       >
-        {{
-          submitting
-            ? "Cancel · Preparing sequence…"
-            : draft.editing
-              ? "Update sequence"
-              : "Generate sequence"
-        }}
+        {{ submitting ? "Cancel" : "Generate" }}
       </button>
     </div>
 
     <ConfirmDialog
       :open="clearConfirmOpen"
-      title="Clear sequence?"
+      title="Clear the clip?"
       :message="clearMessage"
-      confirm-label="Clear sequence"
+      confirm-label="Clear the clip"
       danger
       @confirm="clearSequence"
       @cancel="clearConfirmOpen = false"

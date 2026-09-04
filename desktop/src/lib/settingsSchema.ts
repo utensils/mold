@@ -183,15 +183,15 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_model",
     section: "generation",
-    label: "Default model",
-    help: "Model preselected in a fresh composer.",
+    label: "Style to start with",
+    help: "Used whenever you open a new image.",
     editor: "select",
   },
   {
     key: "default_width",
     section: "generation",
-    label: "Default width",
-    help: "Print width for new generations.",
+    label: "Width",
+    help: "How wide a new picture starts. Bigger uses more graphics memory.",
     editor: "number",
     min: 64,
     max: 4096,
@@ -200,8 +200,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_height",
     section: "generation",
-    label: "Default height",
-    help: "Print height for new generations.",
+    label: "Height",
+    help: "How tall a new picture starts. Bigger uses more graphics memory.",
     editor: "number",
     min: 64,
     max: 4096,
@@ -210,8 +210,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_steps",
     section: "generation",
-    label: "Default steps",
-    help: "Denoise steps for new generations (models override with their own defaults).",
+    label: "Detail",
+    help: "How many passes a new picture starts with. A style with its own default wins.",
     editor: "number",
     min: 1,
     max: 150,
@@ -219,22 +219,22 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_negative_prompt",
     section: "generation",
-    label: "Default negative prompt",
-    help: "Applied when the composer's negative prompt is empty (families that support it).",
+    label: "Words to avoid",
+    help: "Used when you have not typed any yourself, on styles that read them.",
     editor: "text",
   },
   {
     key: "embed_metadata",
     section: "generation",
-    label: "Embed metadata in prints",
-    help: "Write prompt, seed, and parameters into PNG/JPEG files so any print can be reproduced.",
+    label: "Keep the recipe in the file",
+    help: "Writes the words, the seed, and every setting into the PNG or JPEG so the same picture can be made again.",
     editor: "toggle",
   },
   {
     key: "t5_variant",
     section: "generation",
-    label: "T5 encoder variant",
-    help: "Quantization for the FLUX T5 text encoder. Smaller variants trade fidelity for VRAM.",
+    label: "How FLUX reads your words",
+    help: "The size of its T5 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
       { value: "", label: "auto" },
@@ -247,8 +247,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "qwen3_variant",
     section: "generation",
-    label: "Qwen3 encoder variant",
-    help: "Quantization for the Flux.2/Z-Image Qwen3 text encoder.",
+    label: "How Flux.2 and Z-Image read your words",
+    help: "The size of their Qwen3 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
       { value: "", label: "auto" },
@@ -261,8 +261,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "gallery.trash_retention_days",
     section: "library",
-    label: "Keep deleted prints for",
-    help: "Prints moved to the trash are deleted forever after this long. 0 keeps them until you empty the trash.",
+    label: "Keep deleted pictures for",
+    help: "Pictures in the trash are deleted forever after this long. 0 keeps them until you empty the trash.",
     editor: "select",
     options: RETENTION_OPTIONS.map((days) => ({
       value: String(days),

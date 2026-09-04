@@ -1,14 +1,14 @@
 <script setup lang="ts">
 /*
- * BulkBar — the floating selection toolbar at the foot of the Library grid
- * (V3 "Shelf"). Prints: N / M selected · Select all · Clear · Add to
- * collection ▾ (CollectionPicker popover, mixed state over the selection) ·
- * Tag ▾ (TagEditor popover; chips = the tags every selected print carries;
- * add / remove apply to the whole selection) · ♥ Favorite (toggle) · Trash
- * (6 s undo) — or, on hosts without a trash, the old two-press
- * "Delete N prints? This can't be undone." arming button. Inside a
- * collection drill-in: Remove from collection. Trash scope: Restore /
- * Delete forever. Pure props/emits; the view runs the store calls.
+ * BulkBar — the floating selection toolbar at the foot of the My images
+ * grid. Everything: N / M selected · Select all · Clear · Add to album ▾
+ * (CollectionPicker popover, mixed state over the selection) · Tag ▾
+ * (TagEditor popover; chips = the tags every selected picture carries;
+ * add / remove apply to the whole selection) · ♥ Favourite (toggle) · Trash
+ * (6 s undo) — or, on machines without a trash, the old two-press
+ * "Delete N pictures? This can't be undone." arming button. Inside an album
+ * drill-in: Remove from album. Trash scope: Restore / Delete forever. Pure
+ * props/emits; the view runs the store calls.
  */
 import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -25,7 +25,7 @@ const props = withDefaults(
     selectedCount: number;
     total: number;
     scope: LibraryScope;
-    /** Organization affordances (collections / tags / ♥) are available. */
+    /** Organization affordances (albums / tags / ♥) are available. */
     organize?: boolean;
     /** Why the CURRENT selection can't be organized (some selected print has
      *  no copy on an organize-capable host); null when it can. Disables the
@@ -46,9 +46,9 @@ const props = withDefaults(
     /** Tags every selected print carries (intersection). */
     tags?: readonly string[];
     tagSuggestions?: readonly TagCount[];
-    /** Every selected print is already a favorite ⇒ the toggle unfavorites. */
+    /** Every selected picture is already a favourite ⇒ the toggle unfavourites. */
     allFavorite?: boolean;
-    /** Open collection (drill-in) ⇒ offer Remove from collection. */
+    /** Open album (drill-in) ⇒ offer Remove from album. */
     collectionName?: string | null;
     /** Host labels the fan-out reaches ("This Mac · plato"). */
     hostNote?: string | null;
@@ -189,7 +189,7 @@ defineExpose({ openCollections, openTags, closePopovers });
         <Popover
           :open="collectionsOpen"
           placement="top-start"
-          label="Add to collection"
+          label="Add to album"
           @update:open="collectionsOpen = $event"
         >
           <template #trigger>
@@ -204,7 +204,7 @@ defineExpose({ openCollections, openTags, closePopovers });
               @click="collectionsOpen ? closePopovers() : openCollections()"
             >
               <Icon name="collection" :size="13" />
-              Add to collection
+              Add to album
               <Icon name="chevron-down" :size="11" />
             </button>
           </template>
@@ -217,7 +217,7 @@ defineExpose({ openCollections, openTags, closePopovers });
               :counts="collectionCounts"
               :disabled="busy"
               :host-note="hostNote ? `fans out to ${hostNote}` : null"
-              aria-label="Add to collection"
+              aria-label="Add to album"
               @toggle="(slug, checked) => emit('toggleCollection', slug, checked)"
               @create="(name) => emit('createCollection', name)"
             />
@@ -256,7 +256,7 @@ defineExpose({ openCollections, openTags, closePopovers });
               @remove="(name) => emit('removeTags', [name])"
             />
             <p class="mt-1 px-0.5 font-mono text-micro text-fg-dim">
-              Adding or removing a tag applies to every selected print.
+              Adding or removing a tag applies to every selected picture.
             </p>
           </div>
         </Popover>
@@ -271,7 +271,7 @@ defineExpose({ openCollections, openTags, closePopovers });
           @click="emit('favorite', !allFavorite)"
         >
           <span aria-hidden="true">♥</span>
-          {{ allFavorite && !none ? "Unfavorite" : "Favorite" }}
+          {{ allFavorite && !none ? "Unfavourite" : "Favourite" }}
         </button>
         <button
           v-if="collectionName"
@@ -283,7 +283,7 @@ defineExpose({ openCollections, openTags, closePopovers });
           @click="emit('removeFromCollection')"
         >
           <Icon name="close" :size="12" />
-          Remove from collection
+          Remove from album
         </button>
       </template>
       <span class="ms-bb-vr" aria-hidden="true" />

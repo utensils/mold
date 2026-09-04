@@ -181,7 +181,7 @@ function onLaneDrop(laneKey: LaneKey) {
   const action = resolveDropAction(dragged.value, props.host.id, laneKey);
   dragged.value = null;
   if (action.kind === "reject-cross-host") {
-    toasts.push("Jobs can't move between hosts.", "error");
+    toasts.push("Work can't move between machines.", "error");
     return;
   }
   if (action.kind === "reassign") {

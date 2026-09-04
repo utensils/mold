@@ -172,11 +172,11 @@ function onRowKeydown(event: KeyboardEvent): void {
         <span class="h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
         {{ label }}
       </span>
-      <Tooltip v-if="pageUrl" text="Open model page" class="shrink-0">
+      <Tooltip v-if="pageUrl" text="Open the style's page" class="shrink-0">
         <button
           type="button"
           class="text-fg-dim transition-colors duration-100 hover:text-fg"
-          :aria-label="`Open ${name} model page`"
+          :aria-label="`Open ${name}'s page`"
           data-test="model-page-link"
           @click.stop="pageUrl && void openExternal(pageUrl)"
         >

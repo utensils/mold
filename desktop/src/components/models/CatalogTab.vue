@@ -635,8 +635,12 @@ function selectDrawerVariant(id: string): void {
 }
 
 /** Pull vs Repair in the drawer follows the fleet, not this one row's flag. */
-const detailAction = computed(() =>
-  detailEntry.value ? installPlan(detailEntry.value).label : undefined,
+const detailMode = computed<"fresh" | "repair" | undefined>(() =>
+  detailEntry.value
+    ? installPlan(detailEntry.value).label === "Repair"
+      ? "repair"
+      : "fresh"
+    : undefined,
 );
 
 /** Pull (or Repair — same endpoint, missing files only) from the drawer. */
@@ -740,7 +744,7 @@ onUnmounted(() => {
         </Chip>
       </div>
 
-      <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Model kind">
+      <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Kind">
         <Chip compact :active="kind === ''" @click="kind = ''"> All </Chip>
         <Chip
           v-for="opt in CATALOG_KIND_OPTIONS"
@@ -755,7 +759,7 @@ onUnmounted(() => {
 
       <select
         v-model="family"
-        aria-label="Model family"
+        aria-label="Family"
         class="border-border h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg"
       >
         <option value="">All families</option>
@@ -859,7 +863,7 @@ onUnmounted(() => {
         </button>
       </template>
       <span v-else class="ml-auto text-micro text-error">
-        No machine can receive every selected model.
+        No machine can receive every selected style.
       </span>
       <button
         type="button"
@@ -964,7 +968,7 @@ onUnmounted(() => {
       :target="detailTarget.target"
       :forward-credentials="detailTarget.forward"
       :variants="detailVariants"
-      :action="detailAction"
+      :mode="detailMode"
       :runtime-notice="runtimeNoticeFor(detailEntry.id)"
       @close="detailEntry = null"
       @pull="pullFromDrawer"

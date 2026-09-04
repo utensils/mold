@@ -100,7 +100,7 @@ describe("Settings sections", () => {
     expect(sectionForConfigKey("gallery.trash_retention_days")).toBe("library");
     const schema = schemaFor("gallery.trash_retention_days")!;
     expect(schema.editor).toBe("select");
-    expect(schema.label).toBe("Keep deleted prints for");
+    expect(schema.label).toBe("Keep deleted pictures for");
     expect(schema.options?.map((o) => o.value)).toEqual(["1", "7", "30", "90", "365", "0"]);
     expect(schema.options?.find((o) => o.value === "0")?.label).toBe("Forever");
     expect(schema.options?.find((o) => o.value === "30")?.label).toBe("30 days");

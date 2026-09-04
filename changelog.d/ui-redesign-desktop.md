@@ -18,3 +18,10 @@
   scenes under the canvas, and the inspector says Repeat this look, Keep |
   Surprise me, and Add-on looks. Saved appearance settings migrate to the
   nearest theme. `docs/design/` is the new package.
+- **The lexicon reaches web and the phone where the policy is shared.** The
+  img2img strength control is now "How much to change it" on every surface —
+  the one label policy already served web, desktop, and iPhone, and it kept
+  saying "Denoise strength". The machine-detail utility card reads "Machine
+  utility", and the phone-pairing panels now paint from the theme's own tokens
+  instead of falling back to hard-coded greys, so they follow the six themes
+  and stop failing contrast on the light ones.

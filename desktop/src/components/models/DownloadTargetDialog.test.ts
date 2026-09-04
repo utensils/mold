@@ -55,7 +55,7 @@ describe("DownloadTargetDialog", () => {
 
     const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
     expect(dialog.getAttribute("aria-modal")).toBe("true");
-    expect(dialog.textContent).toContain("Choose where to install Flux Dev");
+    expect(dialog.textContent).toContain("Where should Flux Dev go?");
     expect(dialog.textContent).toContain("This Mac");
     expect(dialog.textContent).toContain("Studio GPU");
 
@@ -81,13 +81,13 @@ describe("DownloadTargetDialog", () => {
     });
 
     const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
-    expect(dialog.textContent).toContain("Choose where to install Flux Dev");
+    expect(dialog.textContent).toContain("Where should Flux Dev go?");
     expect(
       document.body.querySelector('[data-test="download-target-local"]')?.textContent,
-    ).toContain("Install");
+    ).toContain("Get it");
     expect(
       document.body.querySelector('[data-test="download-target-studio-7680"]')?.textContent,
-    ).toContain("Already installed");
+    ).toContain("Already here · repair");
     // The body copy must not promise a fresh install for the whole list when
     // one of the machines on it can only be repaired.
     expect(dialog.textContent).toContain("machines that already have it are repaired instead");
@@ -102,7 +102,7 @@ describe("DownloadTargetDialog", () => {
 
     const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
     expect(dialog.textContent).toContain(
-      "The model and its required components will be stored on the machine you pick.",
+      "The style and everything it needs are kept on the machine you pick.",
     );
     expect(dialog.textContent).not.toContain("repaired instead");
     wrapper.unmount();
@@ -131,9 +131,9 @@ describe("DownloadTargetDialog", () => {
     });
 
     const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
-    expect(dialog.textContent).toContain("Choose where to repair Flux Dev");
+    expect(dialog.textContent).toContain("Which machine should repair Flux Dev?");
     expect(dialog.textContent).toContain(
-      "Only missing or damaged files will be fetched on the selected host.",
+      "Only the missing or damaged files are fetched on the machine you pick.",
     );
     expect(
       document.body

@@ -117,7 +117,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
         @click="emit('update:favoritesOnly', !favoritesOnly)"
       >
         <span class="ms-lib-heart" aria-hidden="true">♥</span>
-        Favorites
+        Favourites
         <span class="ms-lib-chip__n">{{ favoritesCount }}</span>
       </Chip>
       <span class="ms-lib-vr" aria-hidden="true" />

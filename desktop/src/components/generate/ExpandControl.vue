@@ -30,13 +30,13 @@ const emit = defineEmits<{
 
 const isPreparedBatch = computed(() => props.batchSize > 1);
 const actionLabel = computed(() =>
-  isPreparedBatch.value ? `Prepare ${props.batchSize} variations` : "Expand",
+  isPreparedBatch.value ? `Prepare ${props.batchSize} variations` : "Write more for me",
 );
 const progressLabel = computed(() => {
-  const host = props.hostLabel ?? "the selected host";
+  const machine = props.hostLabel ?? "the selected machine";
   return isPreparedBatch.value
-    ? `Expanding ${props.batchSize} prompts on ${host}…`
-    : `Expanding on ${host}…`;
+    ? `Writing ${props.batchSize} versions on ${machine}…`
+    : `Writing more on ${machine}…`;
 });
 
 function expand() {
@@ -61,7 +61,7 @@ defineExpose({ expand });
             ? 'Refresh or discard the preserved prepared batch first'
             : isPreparedBatch
               ? `Prepare ${batchSize} prompt variations`
-              : 'Expand prompt'
+              : 'Write more for me'
       "
       @click="expand"
     >

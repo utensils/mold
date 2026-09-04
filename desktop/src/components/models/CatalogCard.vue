@@ -135,7 +135,7 @@ function openPage(): void {
   >
     <label
       class="catalog-card-checkbox absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-control border border-border bg-bg/95"
-      :title="selectable ? 'Select style to get in a batch' : 'No machine can receive it'"
+      :title="selectable ? 'Select style to get in a batch' : 'No machine can take it'"
       @click.stop
     >
       <input
@@ -187,8 +187,8 @@ function openPage(): void {
             v-if="pageUrl"
             type="button"
             class="text-fg-dim transition-colors duration-100 hover:text-fg"
-            :aria-label="`Open ${displayName} model page`"
-            title="Open model page"
+            :aria-label="`Open ${displayName}'s page`"
+            title="Open the style's page"
             data-test="page-link"
             @click.stop="openPage"
           >

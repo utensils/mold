@@ -133,13 +133,13 @@ the phone keep Create / Library / Models until their own redesign.
   For LTX-2, Advanced also exposes optional STG scale/blocks, CFG rescale,
   audio/video modality scale, and guidance skip stride. Empty fields preserve
   the selected pipeline's constants; invalid values block Develop inline, and
-  templates plus Library **Reuse settings** restore recorded overrides.
+  templates plus Library **Use these settings** restore recorded overrides.
 - **Library**: a justified, virtualized contact-sheet grid (the renamed
   gallery), with a Lightroom-style small-to-large slider in the top toolbar
   that resizes the contact sheet continuously and remembers its setting, NEW
   badges on fresh prints, a two-pane lightbox, and a History drawer holding
   Runs and Prompts. **Space** opens
-  Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Create with
+  Quick Look, ←/→ navigate, and **Use these settings** jumps back to Create with
   every parameter restored. On a print a sequence produced, **Edit sequence**
   is the primary action and re-enters the original job on the machine that made
   it so already-rendered clips stay cached. **Duplicate as new** loads the
@@ -156,7 +156,7 @@ the phone keep Create / Library / Models until their own redesign.
   reference on those models), a clip becomes the source video, while audio and
   3-D meshes are refused because neither is conditioning. The Library header is segmented **Prints |
   Collections | Trash**: Prints keeps the grid plus a filter-chip row
-  (♥ Favorites · tag chips · host chips); Collections is a shelf of cards you
+  (♥ Favourites · tag chips · machine chips); Collections is a shelf of cards you
   can drill into and edit; Trash holds deleted prints with a retention banner,
   a per-tile "Purges in N d" countdown, **Restore** / **Delete forever**, and
   a header **Empty trash** behind a plain confirm. Titles, ♥, tags, and
@@ -165,23 +165,23 @@ the phone keep Create / Library / Models until their own redesign.
   (its `mold.db`) and is merged across machines (collections by name, tags
   case-insensitively) and every change is applied to every copy of a print.
   Deleting moves a print to that machine's trash (the 6 s Undo stays); prints
-  are purged after **Settings ▸ Library ▸ Keep deleted prints for** on this
+  are purged after **Settings ▸ Library ▸ Keep deleted pictures for** on this
   device (1 day … 1 year, or Forever) and after each remote machine's own
   setting in **Machines ▸ machine ▸ Storage**, which also shows "Prints in
   trash: N" and an **Empty trash** action. Naming a print starts in Create: the
   header's "Untitled print" is editable (click, Enter/blur commits, Escape
   reverts); the name travels with every sibling of that print, is restored by
-  **Reuse settings**, and leads the name suggested when you save or export
+  **Use these settings**, and leads the name suggested when you save or export
   (`{title-slug}__{model}__s{seed}.{ext}`; the file in the Library is never
   renamed). Filing starts in Create too: a **File under** group sits in the
   inspector between the essentials and **Advanced**, offering the print's own
   title as a removable tag chip, typed tags with suggestions drawn from every
   connected machine, and a collection row that pre-selects, but never creates,
   the collection whose name matches the title, with a picker for the fleet's
-  collections and an inline **New collection…**. A line beneath previews the
+  collections and an inline **New album…**. A line beneath previews the
   filename the print will land as. The choice rides the one shot, every
   sibling of a batch, every prepared variation, and the single print a
-  sequence stitches; **Reuse settings** restores it, and
+  sequence stitches; **Use these settings** restores it, and
   **Settings ▸ Library ▸ Tag new prints with their title** turns the title
   chip off without touching prints you already made. Older servers without
   organization simply hide these controls and keep the previous delete
@@ -228,8 +228,8 @@ the phone keep Create / Library / Models until their own redesign.
   joins say **Join**); with a click opening the seam editor's teaching
   rows and fade-length stepper. Right-click a clip pill for Play (when a
   cached render exists), Duplicate, Insert before/after, Move, and Remove, or
-  the rail background for Add clip, Validate plan, the TOML file tools, and
-  Clear sequence. A live fits/duration forecast runs against
+  the rail background for Add clip, Check the plan, the TOML file tools, and
+  Clear the clip. A live fits/duration forecast runs against
   `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
   and running sequence jobs appear in the same activity strip as prints with
   watch and cancel. A finished sequence leaves the strip: its video lands on
@@ -398,7 +398,7 @@ release is published.
 | Cmd/Ctrl+⌫          | Library: delete forever (confirm)                            |
 | F                   | Library: favorite / unfavorite                               |
 | T                   | Library: tag the selected print                              |
-| Shift+Cmd/Ctrl+N    | Library: new collection                                      |
+| Shift+Cmd/Ctrl+N    | Library: new album                                           |
 | Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                                         |
 | Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller                          |
 
@@ -421,10 +421,10 @@ generated media remains on a color-stable viewing surface.
 ## Generation templates
 
 Save the current Create form as a named, recallable preset. Open the
-**Templates** panel below the LoRA stack, give the current settings a name, and
+**Templates** panel below Add-on looks, give the current settings a name, and
 it is stored as a template you can load, rename, or delete later. Loading a
 template restores every parameter (model, prompt, dimensions, steps, guidance,
-scheduler, LoRA stack, and the rest) in one click.
+scheduler, add-on looks, and the rest) in one click.
 
 Templates capture _parameters_, not media: source, mask, and control images
 (and LTX-2 source video / keyframes) are referenced but never stored, so after
@@ -499,7 +499,7 @@ wire types as the CLI and web UI:
   print as it develops (the engine pulls the model on first use and retains
   both the original and `-upscaled` result), or
   right-click any Library image → **Upscale**; the result lands in this Mac's
-  Library. **Reuse settings** always restores the generation canvas, not the
+  Library. **Use these settings** always restores the generation canvas, not the
   upscaled file's physical dimensions.
 - **Queue (in Machines)**: a queue console for every connected host: the full
   server-side queue (other clients' jobs included), live thumbnails and step
@@ -514,7 +514,7 @@ wire types as the CLI and web UI:
   submitted with, where it sits in line, when it was submitted, whether it
   survives a restart, and (for a job the machine has parked) the full reason
   and error with a **Copy details** button. A running job shows its live
-  denoise preview there too. From the panel you can **Reuse settings** (which
+  denoise preview there too. From the panel you can **Use these settings** (which
   opens Create with everything restored), **Cancel** the job, or **Retry** one
   this app submitted that the machine parked. A job that has only just been
   accepted may not show its settings yet (the machine lists it before it loads

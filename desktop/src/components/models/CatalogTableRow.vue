@@ -123,7 +123,7 @@ const counts = computed(() => {
     <template #meta>
       <label
         class="flex h-6 w-6 shrink-0 items-center justify-center"
-        :title="selectable ? 'Select model for batch download' : 'No download target available'"
+        :title="selectable ? 'Select style to get in a batch' : 'No machine can take it'"
         @click.stop
       >
         <input

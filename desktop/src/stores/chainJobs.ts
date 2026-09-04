@@ -175,11 +175,11 @@ export const useChainJobsStore = defineStore("chainJobs", {
       if (state === "completed") {
         const frames =
           this.live.detail?.stages.reduce((n, s) => n + (s.frames_emitted ?? 0), 0) ?? 0;
-        // Verb→noun (§11): the sequence is a thing now, and it has a home.
-        useToastStore().push("Sequence ready — saved to Library");
+        // Verb→noun (§11): the clip is a thing now, and it has a home.
+        useToastStore().push("Clip ready — saved to My images");
         notifyChainFinished(frames);
       } else if (state === "failed") {
-        useToastStore().push("Sequence failed", "error");
+        useToastStore().push("Clip failed", "error");
       }
     },
     async resume(hostId: string, jobId: string) {

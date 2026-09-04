@@ -350,7 +350,7 @@ onBeforeUnmount(() => {
         data-test="cpu-utility-lane"
       >
         <div class="device-card__title">
-          <span class="device-card__name">Host utility</span>
+          <span class="device-card__name">Machine utility</span>
           <span class="device-card__badge">CPU</span>
         </div>
         <div class="device-card__meta">

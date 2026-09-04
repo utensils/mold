@@ -15,12 +15,16 @@ const emit = defineEmits<{
   (e: "close"): void;
 }>();
 const closeBtn = ref<HTMLButtonElement | null>(null);
-/** One verb for the whole dialog: an install is on offer, or it is a repair. */
+/** One verb for the whole dialog: the style is on offer, or it is a repair. */
 const action = computed<"install" | "repair">(() =>
   props.targets.some((target) => target.action === "install") ? "install" : "repair",
 );
-const title = computed(() => `Choose where to ${action.value} ${props.modelName}`);
-/** Install and repair targets in the same list — the copy has to cover both. */
+const title = computed(() =>
+  action.value === "repair"
+    ? `Which machine should repair ${props.modelName}?`
+    : `Where should ${props.modelName} go?`,
+);
+/** Fresh and repair targets in the same list — the copy has to cover both. */
 const mixed = computed(
   () =>
     props.targets.some((target) => target.action === "install") &&
@@ -61,16 +65,16 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
             </h2>
             <p class="mt-1 text-micro text-fg-2">
               <template v-if="action === 'repair'">
-                Only missing or damaged files will be fetched on the selected host.
+                Only the missing or damaged files are fetched on the machine you pick.
               </template>
-              <!-- A mixed list must not promise a fresh install for a machine
+              <!-- A mixed list must not promise a fresh copy for a machine
                    that can only be repaired. -->
               <template v-else-if="mixed">
-                The model and its required components will be stored on the machine you pick;
-                machines that already have it are repaired instead.
+                The style and everything it needs are kept on the machine you pick; machines that
+                already have it are repaired instead.
               </template>
               <template v-else>
-                The model and its required components will be stored on the machine you pick.
+                The style and everything it needs are kept on the machine you pick.
               </template>
             </p>
           </div>
@@ -114,7 +118,7 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
               class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
               :class="target.action === 'install' ? 'text-accent' : 'text-fg-dim'"
             >
-              {{ target.action === "install" ? "Install" : "Already installed · repair" }}
+              {{ target.action === "install" ? "Get it" : "Already here · repair" }}
             </span>
             <span v-if="target.host.queueDepth != null" class="font-mono text-micro text-fg-dim">
               {{ target.host.queueDepth }} queued

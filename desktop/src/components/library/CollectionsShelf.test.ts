@@ -84,11 +84,11 @@ describe("CollectionsShelf", () => {
     });
   }
 
-  it("lists one card per collection and a dashed New collection card", async () => {
+  it("lists one card per album and a dashed New album card", async () => {
     const wrapper = mountShelf();
     const items = wrapper.findAll("[data-test='collection-card']");
     expect(items.map((c) => c.attributes("data-slug"))).toEqual(["smurfs", "river-studies"]);
-    expect(wrapper.get("[data-test='new-collection-card']").text()).toContain("New collection");
+    expect(wrapper.get("[data-test='new-collection-card']").text()).toContain("New album");
     await items[0]!.trigger("click");
     expect(wrapper.emitted("open")).toEqual([["smurfs"]]);
     await items[1]!.trigger("contextmenu");
@@ -104,11 +104,11 @@ describe("CollectionsShelf", () => {
     expect(wrapper.emitted("create")).toEqual([["Film grain tests"]]);
     expect(wrapper.find("[data-test='new-collection-input']").exists()).toBe(false);
 
-    await wrapper.get("[aria-label='New collection']").trigger("click");
+    await wrapper.get("[aria-label='New album']").trigger("click");
     await wrapper.get("[data-test='new-collection-input']").trigger("keydown", { key: "Escape" });
     expect(wrapper.find("[data-test='new-collection-input']").exists()).toBe(false);
 
-    await wrapper.get("[aria-label='New collection']").trigger("click");
+    await wrapper.get("[aria-label='New album']").trigger("click");
     await wrapper.get("[data-test='new-collection-input']").trigger("keydown", { key: "Enter" });
     expect(wrapper.emitted("create")).toHaveLength(1);
   });

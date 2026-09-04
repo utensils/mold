@@ -15,6 +15,21 @@ fn accelerator(key: &str) -> String {
     format!("{modifier}+{key}")
 }
 
+/// File and Generate items, in the binding lexicon (docs/design/README.md §2):
+/// plain words, never the engine word. Ids and accelerators are the contract
+/// the frontend maps onto its own shortcut actions, so only the labels move.
+const FILE_MENU_ITEMS: [(&str, &str, Option<&str>); 2] = [
+    ("new-generation", "New Image", Some("N")),
+    ("new-sequence", "New Clip", None),
+];
+
+const GENERATE_MENU_ITEMS: [(&str, &str, &str); 4] = [
+    ("generate", "Generate", "Return"),
+    ("expand-prompt", "Write More For Me", "E"),
+    ("randomize-seed", "Surprise Me", "R"),
+    ("cancel-job", "Stop", "."),
+];
+
 const NAVIGATION_MENU_ITEMS: [(&str, &str, &str); 5] = [
     ("nav:/create", "New image", "1"),
     ("nav:/queue", "Queue", "2"),
@@ -100,13 +115,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         .separator();
     let app_menu = app_menu.quit().build()?;
 
-    let file = SubmenuBuilder::new(app, "File")
-        .item(
-            &MenuItemBuilder::with_id("new-generation", "New Generation")
-                .accelerator(accelerator("N"))
-                .build(app)?,
-        )
-        .item(&MenuItemBuilder::with_id("new-sequence", "New Sequence").build(app)?)
+    let mut file = SubmenuBuilder::new(app, "File");
+    for (id, label, key) in FILE_MENU_ITEMS {
+        let mut item = MenuItemBuilder::with_id(id, label);
+        if let Some(key) = key {
+            item = item.accelerator(accelerator(key));
+        }
+        file = file.item(&item.build(app)?);
+    }
+    let file = file
         .separator()
         .item(&PredefinedMenuItem::close_window(app, None)?)
         .build()?;
@@ -121,29 +138,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         .select_all()
         .build()?;
 
-    let generate = SubmenuBuilder::new(app, "Generate")
-        .item(
-            &MenuItemBuilder::with_id("generate", "Generate")
-                .accelerator(accelerator("Return"))
+    let mut generate = SubmenuBuilder::new(app, "Generate");
+    for (id, label, key) in GENERATE_MENU_ITEMS {
+        // Stop is destructive, so it sits below a separator.
+        if id == "cancel-job" {
+            generate = generate.separator();
+        }
+        generate = generate.item(
+            &MenuItemBuilder::with_id(id, label)
+                .accelerator(accelerator(key))
                 .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("expand-prompt", "Expand Prompt")
-                .accelerator(accelerator("E"))
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("randomize-seed", "Randomize Seed")
-                .accelerator(accelerator("R"))
-                .build(app)?,
-        )
-        .separator()
-        .item(
-            &MenuItemBuilder::with_id("cancel-job", "Cancel Job")
-                .accelerator(accelerator("."))
-                .build(app)?,
-        )
-        .build()?;
+        );
+    }
+    let generate = generate.build()?;
 
     let mut view = SubmenuBuilder::new(app, "View");
     for (id, label, key) in NAVIGATION_MENU_ITEMS {
@@ -286,7 +293,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
 mod tests {
     #[cfg(not(target_os = "macos"))]
     use super::WINDOW_MENU_ITEMS;
-    use super::{about_metadata, accelerator, app_name, NAVIGATION_MENU_ITEMS};
+    use super::{
+        about_metadata, accelerator, app_name, FILE_MENU_ITEMS, GENERATE_MENU_ITEMS,
+        NAVIGATION_MENU_ITEMS,
+    };
 
     #[test]
     fn about_metadata_credits_both_core_contributors() {
@@ -330,6 +340,28 @@ mod tests {
                 ("nav:/library", "My images", "3"),
                 ("nav:/models", "Styles", "4"),
                 ("nav:/machines", "Machines", "5"),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_and_generate_menus_speak_the_binding_lexicon() {
+        // docs/design/README.md §2: New image / Short clip / Write more for me
+        // / Surprise me / Stop. The ids stay put — the frontend maps them.
+        assert_eq!(
+            FILE_MENU_ITEMS,
+            [
+                ("new-generation", "New Image", Some("N")),
+                ("new-sequence", "New Clip", None),
+            ]
+        );
+        assert_eq!(
+            GENERATE_MENU_ITEMS,
+            [
+                ("generate", "Generate", "Return"),
+                ("expand-prompt", "Write More For Me", "E"),
+                ("randomize-seed", "Surprise Me", "R"),
+                ("cancel-job", "Stop", "."),
             ]
         );
     }

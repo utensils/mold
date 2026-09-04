@@ -147,8 +147,9 @@ function previewSrc(row: QueueRow): string | null {
       <div class="flex gap-3 rounded-control border border-border bg-panel-raised p-3">
         <span class="font-mono text-xs text-accent">•</span>
         <p class="text-xs leading-relaxed text-fg-2" style="text-wrap: pretty">
-          One image is made at a time so each gets your machine's full attention. Right-click a row
-          to stop it or reuse its words. Closing the window keeps the queue running.
+          One image is made at a time so each gets your machine's full attention. Drag a row to
+          reorder, or hit Jump the line on the one you need first. Closing the window keeps the
+          queue running.
         </p>
       </div>
 

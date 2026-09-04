@@ -37,7 +37,7 @@ describe("LibraryHeader", () => {
     expect(wrapper.get("[data-test='library-count']").text()).toBe("24 prints · 3.1 GB");
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(true);
     expect(wrapper.find("[aria-label='Media kind']").exists()).toBe(true);
-    expect(wrapper.find("[aria-label='Refresh library']").exists()).toBe(true);
+    expect(wrapper.find("[aria-label='Refresh my images']").exists()).toBe(true);
     expect(wrapper.find("[data-test='empty-trash']").exists()).toBe(false);
   });
 
@@ -50,7 +50,7 @@ describe("LibraryHeader", () => {
     expect(wrapper.emitted("update:scope")?.at(-1)).toEqual(["collections"]);
   });
 
-  it("hides the slider and kind control in Collections", () => {
+  it("hides the slider and kind control in Albums", () => {
     const wrapper = mountHeader({ scope: "collections", countLabel: "4 collections" });
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(false);
     expect(wrapper.find("[aria-label='Media kind']").exists()).toBe(false);
@@ -66,7 +66,7 @@ describe("LibraryHeader", () => {
     });
     expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(true);
     expect(wrapper.find("[aria-label='Media kind']").exists()).toBe(false);
-    expect(wrapper.find("[aria-label='Refresh library']").exists()).toBe(false);
+    expect(wrapper.find("[aria-label='Refresh my images']").exists()).toBe(false);
     const empty = wrapper.get("[data-test='empty-trash']");
     expect(empty.text()).toBe("Empty trash");
     expect(empty.classes()).toContain("ms-toolbar-button--danger");
@@ -94,7 +94,7 @@ describe("LibraryHeader", () => {
     expect(wrapper.emitted("toggleSelect")).toHaveLength(1);
     await wrapper.get("[aria-label='Open history']").trigger("click");
     expect(wrapper.emitted("openHistory")).toHaveLength(1);
-    await wrapper.get("[aria-label='Refresh library']").trigger("click");
+    await wrapper.get("[aria-label='Refresh my images']").trigger("click");
     expect(wrapper.emitted("refresh")).toHaveLength(1);
   });
 });

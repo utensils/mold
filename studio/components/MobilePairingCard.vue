@@ -183,9 +183,9 @@ onBeforeUnmount(() => {
   gap: 24px;
   align-items: center;
   padding: 20px;
-  border: 1px solid var(--color-edge, rgba(128, 128, 128, 0.25));
+  border: 1px solid var(--mold-border);
   border-radius: 14px;
-  background: var(--color-bench, rgba(128, 128, 128, 0.06));
+  background: var(--mold-bg-deep);
 }
 .pairing-copy {
   min-width: 0;
@@ -202,19 +202,19 @@ onBeforeUnmount(() => {
   height: 36px;
   flex: 0 0 auto;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--color-accent, #de6d2f) 18%, transparent);
-  color: var(--color-accent, #de6d2f);
+  background: color-mix(in srgb, var(--mold-blue) 18%, transparent);
+  color: var(--mold-blue);
   font-size: 22px;
 }
 h3 {
   margin: 0;
-  color: var(--color-ink, inherit);
+  color: var(--mold-text);
   font-size: 15px;
   font-weight: 650;
 }
 p {
   margin: 4px 0 0;
-  color: var(--color-ink-3, #888);
+  color: var(--mold-text-dim);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -222,7 +222,7 @@ p {
   display: grid;
   gap: 6px;
   margin-top: 16px;
-  color: var(--color-ink-2, inherit);
+  color: var(--mold-text-2);
   font-size: 11px;
   font-weight: 600;
 }
@@ -230,20 +230,20 @@ p {
   min-width: 0;
   height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--color-edge, #555);
+  border: 1px solid var(--mold-border);
   border-radius: 8px;
-  background: var(--color-surface, transparent);
-  color: var(--color-ink, inherit);
+  background: var(--mold-surface);
+  color: var(--mold-text);
   font:
     500 12px ui-monospace,
     SFMono-Regular,
     monospace;
 }
 .pairing-hint code {
-  color: var(--color-ink-2, inherit);
+  color: var(--mold-text-2);
 }
 .pairing-error {
-  color: var(--color-danger, #d44);
+  color: var(--mold-error);
 }
 .pairing-button {
   min-height: 36px;
@@ -251,8 +251,8 @@ p {
   padding: 0 14px;
   border: 0;
   border-radius: 8px;
-  background: var(--color-accent, #de6d2f);
-  color: white;
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   font-weight: 650;
   cursor: pointer;
 }

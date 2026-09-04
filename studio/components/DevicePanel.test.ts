@@ -309,7 +309,7 @@ describe("DevicePanel", () => {
         wrapper.get('[data-test="device-panel"]').attributes("data-lane-count"),
       ).toBe(String(count + 1));
       const utility = wrapper.get('[data-test="cpu-utility-lane"]');
-      expect(utility.text()).toContain("Host utility");
+      expect(utility.text()).toContain("Machine utility");
       expect(utility.text()).toContain("CPU");
       expect(utility.find("button").exists()).toBe(false);
       if (count === 0) {

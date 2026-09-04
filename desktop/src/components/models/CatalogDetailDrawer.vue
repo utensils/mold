@@ -9,7 +9,7 @@ import { fetchModelComponents } from "../../lib/api/models";
 import {
   buildDownloadContents,
   canDownloadEntry,
-  catalogActionLabel,
+  catalogNeedsRepair,
   downloadContentsTotalBytes,
   mergeCatalogSummaryDetail,
 } from "../../lib/catalogDetail";
@@ -24,8 +24,8 @@ import type { ModelSource } from "../../lib/modelSource";
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { CatalogEntry, ModelComponentStatus } from "../../lib/api/types";
 
-/** A selectable pull variant (e.g. quantization); selecting one sets the exact
- *  id a Pull targets, honoring the manifest-variant precedence the list built. */
+/** A selectable variant (e.g. quantization); selecting one sets the exact id
+ *  Get it targets, honoring the manifest-variant precedence the list built. */
 export interface DrawerVariant {
   id: string;
   label: string;
@@ -33,10 +33,10 @@ export interface DrawerVariant {
 }
 
 /**
- * In-app catalog detail: description, license, tags, modality/format, and
+ * In-app style detail: description, license, tags, modality/format, and
  * the itemized download contents (primary weights + shared companions with
- * per-file sizes and a computed total) — so a pull is an informed decision
- * without leaving for huggingface.co / civitai.com. Search-summary rows
+ * per-file sizes and a computed total) — so getting one is an informed
+ * decision without leaving for huggingface.co / civitai.com. Search-summary rows
  * arrive without the descriptive fields, so the drawer enriches its entry
  * via `GET /api/catalog/:id` on the same host the catalog list came from,
  * falling back to the summary when the detail fetch fails (older servers,
@@ -51,11 +51,14 @@ const props = defineProps<{
   /** Selectable pull variants; the chosen chip is the exact pull target. */
   variants?: DrawerVariant[] | undefined;
   /**
-   * Pull or Repair, decided by the owner of the host list: a model installed
-   * on one machine is still a Pull for every machine that lacks it. Omitted
-   * (single-machine callers) falls back to this entry's own install flag.
+   * Whether picking this machine is a fresh download or a repair, decided by
+   * the owner of the machine list: a style already on one machine is still a
+   * fresh download for every machine that lacks it. Omitted (single-machine
+   * callers) falls back to this entry's own install flag. Not a boolean —
+   * Vue casts an absent boolean prop to `false`, which would read as "fresh"
+   * for every caller that does not pass it.
    */
-  action?: "Pull" | "Repair" | undefined;
+  mode?: "fresh" | "repair" | undefined;
   /** This machine's own runtime answer for the model, resolved by the parent
    *  through `@studio/lib/modelRuntimeAvailability`. Rendered as an inline
    *  note above the action — before the pull, never as a toast after it —
@@ -184,7 +187,9 @@ const showHero = computed(() => thumbnailUrl.value !== null && !thumbFailed.valu
 
 const downloadItems = computed(() => buildDownloadContents(merged.value));
 const downloadTotal = computed(() => downloadContentsTotalBytes(downloadItems.value));
-const actionLabel = computed(() => props.action ?? catalogActionLabel(merged.value));
+const isRepair = computed(() =>
+  props.mode ? props.mode === "repair" : catalogNeedsRepair(merged.value),
+);
 const downloadable = computed(() => canDownloadEntry(merged.value));
 const unsupported = computed(() => !downloadable.value);
 
@@ -199,7 +204,7 @@ const downloadTotalLabel = computed(() => {
 });
 
 const pullLabel = computed(() => {
-  if (props.pulling) return "Pulling…";
+  if (props.pulling) return "Getting it…";
   return downloadTotal.value.bytes != null ? `Get it · ${downloadTotalLabel.value}` : "Get it";
 });
 
@@ -365,9 +370,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <span
             v-if="merged.installed"
             class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-sapphire"
-            title="Files are present under this host's models directory"
           >
-            ● installed
+            ● ready
           </span>
           <span
             v-if="unsupported"
@@ -431,7 +435,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <dd class="text-sm text-fg-2">{{ catalogDate.value }}</dd>
           </div>
           <div v-if="detailPageUrl" class="col-span-2 min-w-0">
-            <dt class="text-micro text-fg-dim">Model page</dt>
+            <dt class="text-micro text-fg-dim">Style page</dt>
             <dd>
               <button
                 type="button"
@@ -533,7 +537,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           data-test="component-list"
         >
           <div class="mb-1.5 flex items-baseline justify-between">
-            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">ON THIS HOST</span>
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">ON THIS MACHINE</span>
             <span class="font-mono text-micro text-fg">
               {{ componentsPresent }}/{{ componentList.length }} present
             </span>
@@ -614,12 +618,12 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         {{ props.runtimeNotice.message }}
       </p>
       <button
-        v-if="actionLabel === 'Repair'"
+        v-if="isRepair"
         type="button"
         data-test="drawer-repair"
         class="border-border h-8 w-full rounded-control border text-sm text-fg-2 transition-colors duration-150 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
         :disabled="pulling || !downloadable"
-        title="Re-fetch any missing or incomplete files for this model"
+        title="Re-fetch any missing or incomplete files for this style"
         @click="emit('pull', pullEntry)"
       >
         {{ pulling ? "Repairing…" : "Repair" }}
@@ -630,7 +634,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         data-test="drawer-pull"
         class="border-border h-8 w-full rounded-control border text-sm text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
         :disabled="pulling || !downloadable"
-        :title="downloadable ? 'Download this model' : 'Unsupported catalog package'"
+        :title="downloadable ? 'Download this style' : 'Unsupported catalog package'"
         @click="emit('pull', pullEntry)"
       >
         {{ pullLabel }}

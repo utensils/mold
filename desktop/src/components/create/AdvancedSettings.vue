@@ -752,12 +752,12 @@ function reset() {
         </p>
       </AccordionSection>
 
-      <!-- 4 · LoRA stack -->
+      <!-- 4 · Add-on looks -->
       <AccordionSection
         v-if="caps.supportsLora"
         icon="layers"
-        title="LoRA stack"
-        summary="Style adapters"
+        title="Add-on looks"
+        summary="Extra looks layered on the style"
         :open="true"
         :header-interactive="false"
         data-test="section-lora"

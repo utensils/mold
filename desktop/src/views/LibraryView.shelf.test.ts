@@ -1,5 +1,5 @@
 /**
- * Library V3 "Shelf": the Prints | Collections | Trash scopes, the filter
+ * My images: the Everything | Albums | Trash scopes, the filter
  * chip row, the collections shelf + drill-in, the trash grid, the bulk bar's
  * organization actions, the tile menu, the keyboard map, and URL sync. One
  * remote host (plato) advertises organize + trash; the local engine is off.
@@ -305,7 +305,7 @@ afterEach(() => {
 });
 
 describe("scopes + capability gating", () => {
-  it("shows Prints | Collections | Trash with counts when a host can organize and trash", async () => {
+  it("shows Everything | Albums | Trash with counts when a machine can organize and trash", async () => {
     const { wrapper } = await mountView();
     const control = wrapper.get("[data-test='library-scope']");
     const labels = control
@@ -325,7 +325,7 @@ describe("scopes + capability gating", () => {
     expect(wrapper.findAll("[data-test='tag-chip']")).toHaveLength(0);
     expect(wrapper.findAll("[data-test='tile-favorite']")).toHaveLength(0);
     await tileFor(wrapper, smurf04.filename).trigger("contextmenu");
-    expect(menuEntry("Favorite")).toBeUndefined();
+    expect(menuEntry("Favourite")).toBeUndefined();
     expect(menuEntry("Delete")).toBeDefined();
     wrapper.unmount();
   });
@@ -335,7 +335,7 @@ describe("Prints tiles + chip row", () => {
   it("reads title · model · seed on the edge strip and ♥ on favorites", async () => {
     const { wrapper } = await mountView();
     const strip = tileFor(wrapper, smurf04.filename).get("[data-test='edge-strip']");
-    expect(strip.text().replace(/\s+/g, " ")).toBe("smurf 04 · flux-dev:q8 · S 4");
+    expect(strip.text().replace(/\s+/g, " ")).toBe("smurf 04 · flux-dev:q8 · seed 4");
     expect(
       tileFor(wrapper, smurf04.filename)
         .get("[data-test='tile-favorite']")
@@ -361,7 +361,7 @@ describe("Prints tiles + chip row", () => {
     wrapper.unmount();
   });
 
-  it("♥ Favorites and tag chips filter the grid (AND) and sync to ?fav / ?tag", async () => {
+  it("♥ Favourites and tag chips filter the grid (AND) and sync to ?fav / ?tag", async () => {
     const { wrapper, router } = await mountView();
     await wrapper.get("[data-test='favorites-chip']").trigger("click");
     await flushPromises();
@@ -395,10 +395,10 @@ describe("Prints tiles + chip row", () => {
 });
 
 describe("tile context menu", () => {
-  it("adds Favorite, Rename…, Tags ▸, Add to collection ▸, and Move to trash", async () => {
+  it("adds Favourite, Rename…, Tags ▸, Add to album ▸, and Move to trash", async () => {
     const { wrapper } = await mountView();
     await tileFor(wrapper, smurf03.filename).trigger("contextmenu");
-    expect(menuEntry("Favorite")).toMatchObject({ checked: false });
+    expect(menuEntry("Favourite")).toMatchObject({ checked: false });
     expect(menuEntry("Rename…")).toBeDefined();
     const tags = menuEntry("Tags")!;
     expect(tags.children!.map((c) => ("separator" in c ? "—" : c.label))).toEqual([
@@ -409,16 +409,16 @@ describe("tile context menu", () => {
       "New tag…",
     ]);
     expect(tags.children![0]).toMatchObject({ checked: true });
-    const collections = menuEntry("Add to collection")!;
+    const collections = menuEntry("Add to album")!;
     expect(collections.children!.map((c) => ("separator" in c ? "—" : c.label))).toEqual([
       "River studies",
       "Smurfs",
       "—",
-      "New collection…",
+      "New album…",
     ]);
     expect(collections.children![1]).toMatchObject({ checked: true });
     expect(menuEntry("Move to trash")).toMatchObject({ danger: true });
-    expect(menuEntry("Reuse settings")).toBeDefined();
+    expect(menuEntry("Use these settings")).toBeDefined();
     expect(menuEntry("Copy prompt")).toBeDefined();
 
     // Checking a tag adds it to the print on its host.
@@ -599,7 +599,7 @@ describe("bulk bar", () => {
     await tileFor(wrapper, plain.filename).trigger("click", { metaKey: true });
 
     await tileFor(wrapper, smurf04.filename).trigger("contextmenu");
-    expect(menuEntry("Favorite 2 selected")).toBeDefined();
+    expect(menuEntry("Favourite 2 selected")).toBeDefined();
     expect(menuEntry("Move 2 selected to trash")).toBeDefined();
     expect(menuEntry("Rename…")).toBeUndefined();
 
@@ -625,7 +625,7 @@ describe("bulk bar", () => {
     await tileFor(wrapper, smurf04.filename).trigger("contextmenu", { ctrlKey: true });
 
     expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 4 selected");
-    expect(menuEntry("Favorite 2 selected")).toBeDefined();
+    expect(menuEntry("Favourite 2 selected")).toBeDefined();
     expect(menuEntry("Move 2 selected to trash")).toBeDefined();
     wrapper.unmount();
   });
@@ -699,7 +699,7 @@ describe("bulk bar", () => {
     }
   });
 
-  it("♥ Favorite favorites all when any is unfavorited; Tag applies to the selection", async () => {
+  it("♥ Favourite favourites all when any is unfavourited; Tag applies to the selection", async () => {
     const { wrapper } = await mountView();
     await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
     await tileFor(wrapper, smurf04.filename).trigger("click");
@@ -728,7 +728,7 @@ describe("bulk bar", () => {
     wrapper.unmount();
   });
 
-  it("Add to collection shows mixed state and creating a new one adds the selection", async () => {
+  it("Add to album shows mixed state and creating a new one adds the selection", async () => {
     const { wrapper } = await mountView();
     await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
     await tileFor(wrapper, smurf04.filename).trigger("click");
@@ -753,7 +753,7 @@ describe("bulk bar", () => {
   });
 });
 
-describe("Collections scope", () => {
+describe("Albums scope", () => {
   it("lists a card per merged collection with logical counts, and drills in via ?c=", async () => {
     const { wrapper, router } = await mountView("/library?scope=collections");
     const cards = wrapper.findAll("[data-test='collection-card']");
@@ -787,7 +787,7 @@ describe("Collections scope", () => {
     // Inside the collection the tile menu offers Use as cover / Remove.
     await tileFor(wrapper, smurf03.filename).trigger("contextmenu");
     expect(menuEntry("Use as cover")).toBeDefined();
-    useContextMenuStore().activate(menuEntry("Remove from collection")!);
+    useContextMenuStore().activate(menuEntry("Remove from album")!);
     await flushPromises();
     expect(org.organizeGallery).toHaveBeenCalledWith(PLATO, {
       filenames: [smurf03.filename],
@@ -801,7 +801,7 @@ describe("Collections scope", () => {
     wrapper.unmount();
   });
 
-  it("creates from the New collection card and deletes via a plain confirm", async () => {
+  it("creates from the New album card and deletes via a plain confirm", async () => {
     const { wrapper, gallery } = await mountView("/library?scope=collections");
     await wrapper.get("[data-test='new-collection-label']").trigger("click");
     const input = wrapper.get("[data-test='new-collection-input']");
@@ -812,10 +812,10 @@ describe("Collections scope", () => {
     expect(gallery.mergedCollections.map((c) => c.name)).toContain("Film grain tests");
 
     await wrapper.get("[data-test='collection-card'][data-slug='smurfs']").trigger("contextmenu");
-    useContextMenuStore().activate(menuEntry("Delete collection…")!);
+    useContextMenuStore().activate(menuEntry("Delete album…")!);
     await flushPromises();
     const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
-    expect(dialog.textContent).toContain("Delete collection “Smurfs”?");
+    expect(dialog.textContent).toContain("Delete album “Smurfs”?");
     expect(dialog.textContent).toContain("Its pictures stay in My images.");
     (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
     await flushPromises();
@@ -850,12 +850,12 @@ describe("Collections scope", () => {
     wrapper.unmount();
   });
 
-  it("⌘⇧N opens the New collection dialog from Prints", async () => {
+  it("⌘⇧N opens the New album dialog from Everything", async () => {
     const { wrapper } = await mountView();
     key("N", { ctrlKey: true, shiftKey: true });
     await flushPromises();
     const dialog = document.body.querySelector("[data-test='rename-dialog']")!;
-    expect(dialog.textContent).toContain("New collection");
+    expect(dialog.textContent).toContain("New album");
     wrapper.unmount();
   });
 });
@@ -1168,7 +1168,7 @@ describe("selection-derived organize gating", () => {
 
   const legacyOnly = base("mold-flux-okra-1.png", 35, 77);
 
-  it("disables Favorite / Tag / Collection for selections holding a print with no organize-capable copy", async () => {
+  it("disables Favourite / Tag / Album for selections holding a picture with no organize-capable copy", async () => {
     const mounted = await mountView();
     const { wrapper } = mounted;
     addLegacyHost(mounted, legacyOnly);
@@ -1206,14 +1206,14 @@ describe("selection-derived organize gating", () => {
     key("N", { ctrlKey: true, shiftKey: true });
     await flushPromises();
     const dialog = document.body.querySelector("[data-test='rename-dialog']")!;
-    expect(dialog.textContent).toContain("New collection");
+    expect(dialog.textContent).toContain("New album");
     const input = dialog.querySelector("input") as HTMLInputElement;
     input.value = "Ghost shelf";
     input.dispatchEvent(new Event("input"));
     (dialog.querySelector("[data-test='rename-save']") as HTMLButtonElement).click();
     await flushPromises();
     expect(org.createCollection).not.toHaveBeenCalled();
-    expect(useToastStore().items.at(-1)?.message).toContain("no collection was created");
+    expect(useToastStore().items.at(-1)?.message).toContain("no album was created");
     wrapper.unmount();
   });
 });

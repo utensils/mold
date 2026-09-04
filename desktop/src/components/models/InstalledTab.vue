@@ -426,7 +426,7 @@ async function unload(m: LibraryModelEntry) {
     :pulling="drawerRepairing"
     :target="targetFor(detailModel)"
     :forward-credentials="!!targetFor(detailModel)"
-    :action="installPlan(detailModel).label"
+    :mode="installPlan(detailModel).label === 'Repair' ? 'repair' : 'fresh'"
     :runtime-notice="modelRuntimeNotice(detailModel)"
     @close="detailModel = null"
     @pull="detailModel && requestDownload(detailModel)"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
- * CollectionsShelf — the Collections scope's grid of cover cards plus the
- * dashed "New collection" card (V3 "Shelf"). The new card turns into an
+ * CollectionsShelf — the Albums scope's grid of cover cards plus the
+ * dashed "New album" card. The new card turns into an
  * inline name input; Enter creates (emit), Escape / empty cancels. Pure:
  * the parent resolves covers and runs the store calls.
  */
@@ -95,7 +95,7 @@ defineExpose({ startCreate, isCreating: () => creating.value });
       <button
         type="button"
         class="mb-2 flex aspect-[4/3] w-full items-center justify-center rounded-control border border-dashed border-border-control text-fg-dim transition-colors duration-100 hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
-        aria-label="New collection"
+        aria-label="New album"
         :disabled="busy"
         @click="startCreate"
       >
@@ -107,8 +107,8 @@ defineExpose({ startCreate, isCreating: () => creating.value });
           v-model="draft"
           data-selectable
           type="text"
-          placeholder="Collection name"
-          aria-label="New collection name"
+          placeholder="Album name"
+          aria-label="New album name"
           class="border-border h-7 w-full rounded-control border bg-bg-deep px-2 font-sans font-semibold text-base font-semibold text-fg outline-none focus:border-accent"
           data-test="new-collection-input"
           @keydown.enter.prevent="commitCreate"
@@ -125,7 +125,7 @@ defineExpose({ startCreate, isCreating: () => creating.value });
           :disabled="busy"
           @click="startCreate"
         >
-          New collection
+          New album
         </button>
         <span class="font-mono text-micro text-fg-dim"
           ><Keycap>{{ newCollectionChord }}</Keycap></span

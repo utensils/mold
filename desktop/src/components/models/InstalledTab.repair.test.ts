@@ -179,7 +179,7 @@ describe("InstalledTab model info drawer", () => {
     const dialog = document.body.querySelector<HTMLElement>(
       "[data-test='download-target-dialog']",
     )!;
-    expect(dialog.textContent).toContain("Choose where to repair");
+    expect(dialog.textContent).toContain("Which machine should repair");
     expect(dialog.textContent).toContain("This device");
     expect(dialog.textContent).toContain("Studio GPU");
     expect(startCatalogDownload).not.toHaveBeenCalled();
@@ -233,7 +233,7 @@ describe("InstalledTab model info drawer", () => {
     const dialog = document.body.querySelector<HTMLElement>(
       "[data-test='download-target-dialog']",
     )!;
-    expect(dialog.textContent).toContain("Choose where to install");
+    expect(dialog.textContent).toContain("Where should");
     dialog.querySelector<HTMLButtonElement>("[data-test='download-target-local']")!.click();
     await flushPromises();
 

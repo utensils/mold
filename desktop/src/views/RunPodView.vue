@@ -314,7 +314,7 @@ onBeforeUnmount(() => {
           Add cloud GPUs to your bench
         </h1>
         <p class="mt-2 max-w-md text-sm text-fg-2">
-          Paste a RunPod API key to launch, stop, and connect to Mold instances from this app. The
+          Paste a RunPod API key to launch, stop, and connect to mold instances from this app. The
           key is stored only on this device.
         </p>
         <label class="mt-5 block text-micro font-medium text-fg" for="runpod-api-key">
@@ -358,7 +358,7 @@ onBeforeUnmount(() => {
           Billing starts the moment it boots and stops when you stop it.
         </p>
 
-        <label class="mt-4 block text-micro text-fg-dim" for="runpod-gpu">GPU</label>
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-gpu">Graphics card</label>
         <select
           id="runpod-gpu"
           v-model="form.gpuTypeId"
@@ -376,7 +376,7 @@ onBeforeUnmount(() => {
           </option>
         </select>
 
-        <span class="mt-4 block text-micro text-fg-dim">Cloud</span>
+        <span class="mt-4 block text-micro text-fg-dim">Kind</span>
         <div
           class="mt-1 flex rounded-control border border-border-control bg-bg-deep p-0.5"
           role="group"
@@ -399,7 +399,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <label class="mt-4 block text-micro text-fg-dim" for="runpod-dc">Datacenter</label>
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-dc">Where</label>
         <select
           id="runpod-dc"
           v-model="form.datacenterId"
@@ -413,7 +413,7 @@ onBeforeUnmount(() => {
         </select>
 
         <label class="mt-4 block text-micro text-fg-dim" for="runpod-model"
-          >Default model (optional)</label
+          >Style to preload (optional)</label
         >
         <input
           id="runpod-model"
@@ -460,7 +460,7 @@ onBeforeUnmount(() => {
           </label>
         </div>
 
-        <label class="mt-4 block text-micro text-fg-dim" for="runpod-volume">Network volume</label>
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-volume">Keep files on</label>
         <select
           id="runpod-volume"
           v-model="form.networkVolumeId"
@@ -500,7 +500,7 @@ onBeforeUnmount(() => {
           {{ runpod.mutating === "create" ? "Requesting GPU…" : "Rent a GPU" }}
         </button>
         <p class="mt-2 text-micro text-fg-dim">
-          Uses the Mold CUDA image matched to the selected GPU and exposes the server on port 7680.
+          Uses the mold CUDA image matched to the selected GPU and exposes the server on port 7680.
         </p>
         <button
           v-if="runpod.overview.credentialSource === 'app'"
@@ -753,7 +753,7 @@ onBeforeUnmount(() => {
                 class="h-7 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent hover:brightness-105"
                 @click="useInMold(pod)"
               >
-                Use in Mold
+                Use in mold
               </button>
               <button
                 v-if="!pod.networkVolume && pod.desiredStatus === 'RUNNING'"
@@ -827,7 +827,7 @@ onBeforeUnmount(() => {
 
     <ConfirmDialog
       :open="!!confirmStartPod"
-      title="Resume pod?"
+      title="Start it again?"
       :confirm-label="
         confirmStartPod ? `Resume · ${money(confirmStartPod.costPerHr)}/hr` : 'Resume'
       "

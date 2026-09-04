@@ -1503,7 +1503,7 @@ let sequenceAmendInFlight = false;
 let sequenceCancellationRequest: (() => Promise<void>) | null = null;
 /** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
 const editSharedBaseline = ref<string | null>(null);
-/** What a Library reuse could NOT restore, said once and quietly beneath the
+/** What a My images reuse could NOT restore, said once and quietly beneath the
  *  rail. Cleared the moment the user submits or leaves Sequence — it describes
  *  one handoff, not a standing property of the draft. */
 const sequenceReuseNotice = ref<string | null>(null);
@@ -1874,7 +1874,7 @@ function returnToLiveSequence() {
 /**
  * The watched job once it has settled. The Create strip no longer keeps a
  * settled row, so the canvas is what holds the result: the finished video with
- * Edit sequence / Show in library, or the failure with Resume. Settling must
+ * Edit clip / Show in My images, or the failure with Resume. Settling must
  * never drop the canvas back to the empty state.
  */
 const settledSequence = computed(() => {
@@ -2259,12 +2259,11 @@ watch(
   { immediate: true },
 );
 
-const buttonLabel = computed(() => {
-  if (submissionPlanning.value) return "Cancel";
-  return generation.pending.length > 0
-    ? `Generate (+${generation.pending.length} queued)`
-    : "Generate";
-});
+const buttonLabel = computed(() => (submissionPlanning.value ? "Cancel" : "Generate"));
+/** The queue depth rides beside the button, never inside its one word. */
+const queuedNote = computed(() =>
+  generation.pending.length > 0 ? `+${generation.pending.length} queued` : null,
+);
 const submissionStatus = computed(() =>
   submissionPlanning.value
     ? (preprocessingStatus.value ?? "Checking machine fit and generation route…")
@@ -2804,9 +2803,9 @@ function canvasMenu(): MenuEntry[] {
     },
     { separator: true },
     {
-      label: "Show in Gallery",
+      label: "Show in My images",
       disabled: j.status !== "complete",
-      action: () => void router.push("/gallery"),
+      action: () => void router.push("/library"),
     },
   ];
 }
@@ -4333,12 +4332,14 @@ async function generate() {
       if (ok > 0) {
         if (failedCount > 0) {
           toasts.push(
-            `Generated ${ok} of ${done.length} variations. ${failedCount} failed; successful prints were saved to Gallery.`,
+            `Generated ${ok} of ${done.length} variations. ${failedCount} failed; the rest were saved to My images.`,
             "error",
           );
         } else {
           toasts.push(
-            ok === 1 ? "Generated, saved to Gallery" : `Generated ${ok} prints, saved to Gallery`,
+            ok === 1
+              ? "Generated — saved to My images"
+              : `Generated ${ok} pictures — saved to My images`,
           );
         }
         // Gallery refresh is handled by the generation store's complete hook
@@ -5227,7 +5228,7 @@ onBeforeUnmount(() => {
             />
             <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
               <span class="font-mono text-micro text-fg-dim whitespace-nowrap text-fg-dim"
-                >saved to Library</span
+                >saved to My images</span
               >
             </div>
 
@@ -5253,7 +5254,7 @@ onBeforeUnmount(() => {
                 class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
                 @click="editSettledSequence"
               >
-                Edit sequence
+                Edit clip
               </button>
               <button
                 type="button"
@@ -5261,7 +5262,7 @@ onBeforeUnmount(() => {
                 class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
                 @click="showSettledSequenceInLibrary"
               >
-                Show in library
+                Show in My images
               </button>
             </div>
           </div>
@@ -5272,7 +5273,7 @@ onBeforeUnmount(() => {
             data-test="empty-canvas"
             brand
             icon="image"
-            headline="Your print develops here"
+            headline="Your picture appears here"
             :guidance="emptyCanvasGuidance"
           />
         </div>
@@ -5442,6 +5443,7 @@ onBeforeUnmount(() => {
           :warning-reason="composerWarningReason"
           :submitting="submissionPlanning"
           :button-label="buttonLabel"
+          :queued-note="queuedNote"
           :estimate-request="estimateRequest"
           :estimate-target="estimateTarget"
           :preprocessing-status="submissionStatus"

@@ -152,7 +152,7 @@ describe("SequenceComposer — footer", () => {
     const wrapper = mountComposer({ submitting: true });
     const button = wrapper.get("[data-test='generate-sequence']");
     expect(button.attributes("disabled")).toBeUndefined();
-    expect(button.text()).toContain("Cancel · Preparing sequence");
+    expect(button.text()).toContain("Cancel");
     await button.trigger("click");
     expect(wrapper.emitted("cancel")).toHaveLength(1);
     expect(wrapper.emitted("submit")).toBeUndefined();
@@ -362,11 +362,11 @@ describe("SequenceComposer — edit sessions", () => {
   it("banners the edit with cached/re-render counts and relabels the button", async () => {
     const draft = startEditing();
     const wrapper = mountComposer();
-    expect(wrapper.get("[data-test='edit-banner']").text()).toContain("Editing sequence abcdef12");
+    expect(wrapper.get("[data-test='edit-banner']").text()).toContain("Editing clip abcdef12");
     expect(wrapper.get("[data-test='edit-banner']").text()).toContain(
       "2 cached · 0 will re-render",
     );
-    expect(wrapper.get("[data-test='generate-sequence']").text()).toContain("Update sequence");
+    expect(wrapper.get("[data-test='generate-sequence']").text()).toContain("Generate");
 
     draft.clips[1]!.prompt = "changed beat";
     await flushPromises();
@@ -416,8 +416,8 @@ describe("SequenceComposer — clear sequence", () => {
     await wrapper.get("[data-test='sequence-clear']").trigger("click");
     // The confirm dialog teleports to <body>; blunt copy names the count.
     const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Clear sequence?");
-    expect(dialog?.textContent).toContain("Removes all 3 clips");
+    expect(dialog?.textContent).toContain("Clear the clip?");
+    expect(dialog?.textContent).toContain("Removes all 3 scenes");
 
     (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
     await flushPromises();

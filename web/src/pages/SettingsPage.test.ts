@@ -506,7 +506,7 @@ describe("SettingsPage", () => {
     }) as typeof fetch;
 
     const wrapper = mount(SettingsPage);
-    await vi.waitFor(() => expect(wrapper.text()).toContain("Host utility"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Machine utility"));
 
     expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
     expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain(
@@ -644,12 +644,12 @@ describe("SettingsPage", () => {
     }) as typeof fetch;
 
     const wrapper = mount(SettingsPage);
-    await vi.waitFor(() => expect(wrapper.text()).toContain("Host utility"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Machine utility"));
     failPanel = true;
     const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
     refresh();
     await vi.waitFor(() =>
-      expect(wrapper.text()).not.toContain("Host utility"),
+      expect(wrapper.text()).not.toContain("Machine utility"),
     );
   });
 

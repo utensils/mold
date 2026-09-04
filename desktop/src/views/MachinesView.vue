@@ -228,7 +228,7 @@ function podMenu(pod: RunPodPod): MenuEntry[] {
   );
   if (!pod.networkVolume) {
     entries.push({
-      label: "Stop pod",
+      label: "Stop it",
       danger: true,
       disabled: runpod.mutating === `stop:${pod.id}`,
       action: () => void stopPod(pod),

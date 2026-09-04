@@ -133,7 +133,7 @@ defineExpose({ focusSearch });
         data-selectable
         type="search"
         :placeholder="searchPlaceholder"
-        aria-label="Search prints"
+        aria-label="Search pictures"
         class="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-dim"
         @input="emit('update:search', ($event.target as HTMLInputElement).value)"
       />
@@ -175,7 +175,7 @@ defineExpose({ focusSearch });
       type="button"
       class="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-control border border-border text-fg-2 transition-colors duration-100 hover:border-border-focus hover:text-fg"
       title="Refresh"
-      aria-label="Refresh library"
+      aria-label="Refresh my images"
       @click="emit('refresh')"
     >
       <Icon name="refresh" :size="14" />

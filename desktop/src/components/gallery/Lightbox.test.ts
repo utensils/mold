@@ -297,14 +297,14 @@ describe("Lightbox a11y", () => {
     const wrapper = mountLightbox();
     const dialog = wrapper.get("[role='dialog']");
     expect(dialog.attributes("aria-modal")).toBe("true");
-    expect(dialog.attributes("aria-label")).toBe("Print 1 of 3");
+    expect(dialog.attributes("aria-label")).toBe("Picture 1 of 3");
   });
 
   it("labels the close and navigation controls", () => {
     const wrapper = mountLightbox();
     expect(wrapper.find("[aria-label='Close']").exists()).toBe(true);
-    expect(wrapper.find("[aria-label='Previous print']").exists()).toBe(true);
-    expect(wrapper.find("[aria-label='Next print']").exists()).toBe(true);
+    expect(wrapper.find("[aria-label='Previous picture']").exists()).toBe(true);
+    expect(wrapper.find("[aria-label='Next picture']").exists()).toBe(true);
   });
 
   it("offers full image copy from the still-image context menu", async () => {
@@ -333,10 +333,10 @@ describe("Lightbox a11y", () => {
 
 describe("Lightbox save action", () => {
   it("uses native save language for images and videos", () => {
-    expect(mountLightbox().get("[data-test='save-media']").text()).toBe("Save image");
+    expect(mountLightbox().get("[data-test='save-media']").text()).toBe("Save a copy");
     const video: GalleryImage = { ...item, filename: "print-0001.mp4", format: "mp4" };
     const wrapper = mountLightbox(video, true);
-    expect(wrapper.get("[data-test='save-media']").text()).toBe("Save video");
+    expect(wrapper.get("[data-test='save-media']").text()).toBe("Save a copy");
     expect(wrapper.get("[data-test='export-video']").text()).toContain("Export format");
   });
 

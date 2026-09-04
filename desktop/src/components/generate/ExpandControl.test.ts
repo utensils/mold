@@ -36,7 +36,7 @@ afterEach(() => {
 describe("ExpandControl", () => {
   it("preserves the Batch 1 quick-expand and undo interaction", async () => {
     const wrapper = mountControl({ canUndo: true });
-    await wrapper.get('button[title="Expand prompt"]').trigger("click");
+    await wrapper.get('button[title="Write more for me"]').trigger("click");
     expect(wrapper.emitted("expand")).toHaveLength(1);
 
     await wrapper.get('button[aria-label="Restore original prompt"]').trigger("click");
@@ -54,7 +54,7 @@ describe("ExpandControl", () => {
 
   it("announces progress with the frozen host and requested count", () => {
     const wrapper = mountControl({ batchSize: 5, running: true });
-    expect(wrapper.get('[role="status"]').text()).toBe("Expanding 5 prompts on Studio 4090…");
+    expect(wrapper.get('[role="status"]').text()).toBe("Writing 5 versions on Studio 4090…");
     expect(wrapper.get('[data-test="expand-action"]').attributes("disabled")).toBeDefined();
   });
 

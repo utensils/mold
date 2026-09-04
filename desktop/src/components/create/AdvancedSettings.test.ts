@@ -85,7 +85,7 @@ describe("AdvancedSettings — capability matrix", () => {
     expect(titles).toEqual([
       "Scheduler & sampling",
       "Negative prompt",
-      "LoRA stack",
+      "Add-on looks",
       "Output & seed",
     ]);
   });
@@ -106,7 +106,7 @@ describe("AdvancedSettings — capability matrix", () => {
 
   it("keeps qwen-edit free of scheduler, negative, and video", () => {
     const titles = accordionTitles(mountSettings(formFor("qwen-image-edit")));
-    expect(titles).toEqual(["LoRA stack", "Output & seed"]);
+    expect(titles).toEqual(["Add-on looks", "Output & seed"]);
   });
 
   it("gives wan a sampler recipe instead of a second scheduler picker", async () => {

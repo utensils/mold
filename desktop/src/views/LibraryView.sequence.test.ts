@@ -203,20 +203,20 @@ describe("Library — sequence print actions", () => {
   it("offers Edit sequence on a sequence print but not on a legacy one", async () => {
     const { wrapper } = await mountView();
 
-    expect(entryNamed(await menuFor(wrapper, "S 7"), "Edit sequence")).toBeDefined();
+    expect(entryNamed(await menuFor(wrapper, "seed 7"), "Edit sequence")).toBeDefined();
     useContextMenuStore().close();
-    expect(entryNamed(await menuFor(wrapper, "S 42"), "Edit sequence")).toBeUndefined();
+    expect(entryNamed(await menuFor(wrapper, "seed 42"), "Edit sequence")).toBeUndefined();
   });
 
   it("hides Edit sequence once the host's loaded listing proves the job is gone", async () => {
     // Positive knowledge only: an unloaded listing keeps the action visible.
     const { wrapper } = await mountView({ knownJobIds: ["job-other"] });
-    expect(entryNamed(await menuFor(wrapper, "S 7"), "Edit sequence")).toBeUndefined();
+    expect(entryNamed(await menuFor(wrapper, "seed 7"), "Edit sequence")).toBeUndefined();
   });
 
   it("duplicates a sequence print's clips as a NEW draft on the Create sequence route", async () => {
     const { wrapper, router } = await mountView();
-    const menu = await menuFor(wrapper, "S 7");
+    const menu = await menuFor(wrapper, "seed 7");
     menu.activate(entryNamed(menu, "Duplicate as new")!);
     await flushPromises();
 
@@ -231,8 +231,8 @@ describe("Library — sequence print actions", () => {
 
   it("keeps single-print reuse untouched for a legacy print", async () => {
     const { wrapper, router } = await mountView();
-    const menu = await menuFor(wrapper, "S 42");
-    menu.activate(entryNamed(menu, "Reuse settings")!);
+    const menu = await menuFor(wrapper, "seed 42");
+    menu.activate(entryNamed(menu, "Use these settings")!);
     await flushPromises();
 
     expect(useComposerStore().pendingSequence).toBeNull();
@@ -253,7 +253,7 @@ describe("Library — sequence print actions", () => {
       stages: [],
     } as unknown as ChainJobDetail);
 
-    const menu = await menuFor(wrapper, "S 7");
+    const menu = await menuFor(wrapper, "seed 7");
     menu.activate(entryNamed(menu, "Edit sequence")!);
     await flushPromises();
 
@@ -270,7 +270,7 @@ describe("Library — sequence print actions", () => {
     const { wrapper, chains, router } = await mountView();
     vi.spyOn(chains, "fetchDetail").mockRejectedValue(new ApiError("gone", 404));
 
-    const menu = await menuFor(wrapper, "S 7");
+    const menu = await menuFor(wrapper, "seed 7");
     menu.activate(entryNamed(menu, "Edit sequence")!);
     await flushPromises();
 
@@ -291,7 +291,7 @@ describe("Library — sequence print actions", () => {
     const { wrapper, chains, router } = await mountView();
     vi.spyOn(chains, "fetchDetail").mockRejectedValue(new Error("network down"));
 
-    const menu = await menuFor(wrapper, "S 7");
+    const menu = await menuFor(wrapper, "seed 7");
     menu.activate(entryNamed(menu, "Edit sequence")!);
     await flushPromises();
 
@@ -308,7 +308,7 @@ describe("Library — sequence print actions", () => {
     // `hostFor("local")` is null while the built-in engine isn't ready, and
     // an unresolved origin must never guess a sibling host's job.
     const { wrapper } = await mountView({ localOrigin: true });
-    const menu = await menuFor(wrapper, "S 7");
+    const menu = await menuFor(wrapper, "seed 7");
     expect(entryNamed(menu, "Duplicate as new")).toBeDefined();
     expect(entryNamed(menu, "Edit sequence")).toBeUndefined();
   });

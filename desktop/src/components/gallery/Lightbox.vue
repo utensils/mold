@@ -545,7 +545,7 @@ async function performVideoExport(options: VideoExportOptions) {
     class="lightbox-scrim fixed inset-0 z-40 flex flex-col"
     role="dialog"
     aria-modal="true"
-    :aria-label="`Print ${index + 1} of ${count}`"
+    :aria-label="`Picture ${index + 1} of ${count}`"
   >
     <!-- header: filename · how it was made, in mono · the print's actions -->
     <div
@@ -584,7 +584,7 @@ async function performVideoExport(options: VideoExportOptions) {
         :disabled="saveBusy"
         @click="saveMedia"
       >
-        {{ saveBusy ? "Saving…" : audio ? "Save audio" : video ? "Save video" : "Save image" }}
+        {{ saveBusy ? "Saving…" : "Save a copy" }}
       </button>
       <button
         type="button"
@@ -665,7 +665,7 @@ async function performVideoExport(options: VideoExportOptions) {
           type="button"
           class="absolute top-1/2 left-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control border border-border bg-surface text-fg-2 transition-colors duration-100 hover:text-fg disabled:opacity-30"
           :disabled="index === 0"
-          aria-label="Previous print"
+          aria-label="Previous picture"
           @click="emit('prev')"
         >
           <Icon name="chevron-left" :size="20" />
@@ -674,7 +674,7 @@ async function performVideoExport(options: VideoExportOptions) {
           type="button"
           class="absolute top-1/2 right-3.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-control border border-border bg-surface text-fg-2 transition-colors duration-100 hover:text-fg disabled:opacity-30"
           :disabled="index === count - 1"
-          aria-label="Next print"
+          aria-label="Next picture"
           @click="emit('next')"
         >
           <Icon name="chevron-right" :size="20" />
@@ -700,7 +700,7 @@ async function performVideoExport(options: VideoExportOptions) {
               :class="{ 'lightbox-title--editing': titleEditing }"
               :placeholder="titlePlaceholder"
               :aria-invalid="titleError !== null"
-              aria-label="Print title"
+              aria-label="Picture title"
               :title="currentTitle ?? titlePlaceholder"
               @focus="startTitleEdit"
               @blur="commitTitle"
@@ -905,7 +905,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <TagEditor
               :model-value="tags"
               :suggestions="tagSuggestions"
-              aria-label="Print tags"
+              aria-label="Picture tags"
               data-test="lightbox-tags"
               @add="(name) => emit('tags', { add: [name], remove: [] })"
               @remove="(name) => emit('tags', { add: [], remove: [name] })"
@@ -917,7 +917,7 @@ async function performVideoExport(options: VideoExportOptions) {
               :collections="collections"
               :selected="inCollections"
               :counts="collectionCounts"
-              aria-label="In collections"
+              aria-label="In albums"
               data-test="lightbox-collections"
               @toggle="(slug, checked) => emit('collections', { slug, checked })"
               @create="(name) => emit('collections', { name, checked: true })"

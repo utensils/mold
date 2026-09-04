@@ -32,12 +32,12 @@ afterEach(() => {
 });
 
 describe("BulkBar (Prints)", () => {
-  it("offers Add to collection · Tag · ♥ Favorite · Move to trash with the count", async () => {
+  it("offers Add to album · Tag · ♥ Favourite · Move to trash with the count", async () => {
     const wrapper = mountBar();
     expect(wrapper.text()).toContain("5 / 24 selected");
-    expect(wrapper.get("[data-test='bulk-collections']").text()).toContain("Add to collection");
+    expect(wrapper.get("[data-test='bulk-collections']").text()).toContain("Add to album");
     expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Tag");
-    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favorite");
+    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favourite");
     const trash = wrapper.get("[data-test='bulk-delete']");
     expect(trash.text()).toContain("Move 5 pictures to trash");
     await trash.trigger("click");
@@ -50,7 +50,7 @@ describe("BulkBar (Prints)", () => {
     await wrapper.get("[data-test='bulk-favorite']").trigger("click");
     expect(wrapper.emitted("favorite")).toEqual([[true]]);
     await wrapper.setProps({ allFavorite: true });
-    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Unfavorite");
+    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Unfavourite");
     await wrapper.get("[data-test='bulk-favorite']").trigger("click");
     expect(wrapper.emitted("favorite")?.at(-1)).toEqual([false]);
   });
@@ -113,7 +113,7 @@ describe("BulkBar (Prints)", () => {
     expect(wrapper.find("[data-test='bulk-delete']").exists()).toBe(true);
   });
 
-  it("offers Remove from collection inside a drill-in", async () => {
+  it("offers Remove from album inside a drill-in", async () => {
     const wrapper = mountBar({ collectionName: "Smurfs" });
     await wrapper.get("[data-test='bulk-remove-from-collection']").trigger("click");
     expect(wrapper.emitted("removeFromCollection")).toHaveLength(1);

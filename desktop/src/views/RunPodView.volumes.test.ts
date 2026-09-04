@@ -22,8 +22,8 @@ describe("RunPod network volume UX", () => {
       expect(labelAt).toBeGreaterThan(0);
       return source.slice(source.lastIndexOf("<button", labelAt), labelAt);
     };
-    expect(button("Use in Mold")).toContain("v-if=\"pod.desiredStatus === 'RUNNING'\"");
-    expect(button("Use in Mold")).not.toContain("!pod.networkVolume");
+    expect(button("Use in mold")).toContain("v-if=\"pod.desiredStatus === 'RUNNING'\"");
+    expect(button("Use in mold")).not.toContain("!pod.networkVolume");
     expect(button("Stop")).toContain(
       "v-if=\"!pod.networkVolume && pod.desiredStatus === 'RUNNING'\"",
     );

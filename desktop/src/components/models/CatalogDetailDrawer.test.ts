@@ -303,7 +303,7 @@ describe("CatalogDetailDrawer", () => {
     expect(fetchCatalogDetail).toHaveBeenCalledWith("cv:8001", true, target);
   });
 
-  it("shows Pull for available entries and emits pull with the detailed entry", async () => {
+  it("offers Get it for available entries and emits pull with the detailed entry", async () => {
     const wrapper = await mountDrawer(summary());
     expect(wrapper.find("[data-test='drawer-repair']").exists()).toBe(false);
     const pull = wrapper.get("[data-test='drawer-pull']");
@@ -311,7 +311,7 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
   });
 
-  it("swaps Pull for Repair when the entry is installed", async () => {
+  it("swaps Get it for Repair when the style is already here", async () => {
     fetchCatalogDetail.mockResolvedValue(detail({ installed: true }));
     const wrapper = await mountDrawer(summary({ installed: true }));
     expect(wrapper.find("[data-test='drawer-pull']").exists()).toBe(false);

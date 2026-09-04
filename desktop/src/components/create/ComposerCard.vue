@@ -45,6 +45,8 @@ const props = withDefaults(
     warningReason?: string | null;
     submitting: boolean;
     buttonLabel: string;
+    /** Queue depth, said beside the one-word button rather than inside it. */
+    queuedNote?: string | null;
     estimateRequest: GenerateRequest | null;
     estimateTarget: ApiTarget | null;
     preprocessingStatus: string | null;
@@ -267,6 +269,9 @@ defineExpose({ focus, expand, record });
           data-test="preprocessing-status"
           >{{ preprocessingStatus }}</span
         >
+        <span v-if="queuedNote" class="ms-composer__queued" data-test="generate-queued-note">{{
+          queuedNote
+        }}</span>
         <button
           type="button"
           data-test="generate-button"
@@ -404,6 +409,13 @@ defineExpose({ focus, expand, record });
   color: var(--mold-text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ms-composer__queued {
+  flex-shrink: 0;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
   white-space: nowrap;
 }
 .ms-composer__blocker {

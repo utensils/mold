@@ -216,7 +216,7 @@ describe("DownloadsTray a11y", () => {
     ];
     const wrapper = mount(DownloadsTray);
 
-    expect(wrapper.get('[data-test="download-status"]').text()).toBe("active");
+    expect(wrapper.get('[data-test="download-status"]').text()).toBe("Downloading");
     expect(wrapper.get('[data-test="download-current-file"]').text()).toBe("unet.safetensors");
     expect(wrapper.get('[data-test="download-files"]').text()).toContain("1/4");
     expect(wrapper.get('[data-test="download-eta"]').text()).toContain("1m 30s");
@@ -244,7 +244,7 @@ describe("DownloadsTray a11y", () => {
     ];
     const wrapper = mount(DownloadsTray);
 
-    expect(wrapper.get('[data-test="download-status"]').text()).toBe("preparing");
+    expect(wrapper.get('[data-test="download-status"]').text()).toBe("Getting ready");
     expect(wrapper.get('[data-test="download-current-file"]').text()).toContain("Verifying file");
     expect(wrapper.find('[data-test="download-files"]').exists()).toBe(false);
   });
@@ -262,7 +262,7 @@ describe("DownloadsTray a11y", () => {
     await toggle.trigger("click");
     const list = wrapper.get('[data-test="history-list"]');
     expect(list.text()).toContain("flux-dev:q4");
-    expect(list.text()).toContain("failed");
+    expect(list.text()).toContain("Failed");
     expect(list.text()).toContain("connection reset");
   });
 
@@ -279,7 +279,7 @@ describe("DownloadsTray a11y", () => {
     expect(wrapper.get('[data-test="history-toggle"]').text()).toContain("History (1)");
     await wrapper.get('[data-test="history-toggle"]').trigger("click");
     const statuses = wrapper.findAll('[data-test="history-status"]');
-    expect(statuses.map((status) => status.text())).toEqual(["completed"]);
+    expect(statuses.map((status) => status.text())).toEqual(["Finished"]);
     expect(wrapper.text()).not.toContain("permission denied");
   });
 

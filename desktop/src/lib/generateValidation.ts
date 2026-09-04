@@ -52,7 +52,7 @@ export function meshTargetFacesError(
     targetFaces < mesh.target_faces_min ||
     targetFaces > mesh.target_faces_max
   ) {
-    return `Target faces must be a whole number from ${mesh.target_faces_min} to ${mesh.target_faces_max}.`;
+    return `Use a whole number of faces from ${mesh.target_faces_min} to ${mesh.target_faces_max}.`;
   }
   return null;
 }

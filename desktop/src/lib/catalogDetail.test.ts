@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDownloadContents,
   canDownloadEntry,
-  catalogActionLabel,
+  catalogNeedsRepair,
   downloadContentsTotalBytes,
   installedModelToEntry,
   mergeCatalogSummaryDetail,
@@ -321,10 +321,10 @@ describe("downloadContentsTotalBytes", () => {
   });
 });
 
-describe("catalogActionLabel", () => {
+describe("catalogNeedsRepair", () => {
   it("is Pull for available entries and Repair for installed ones", () => {
-    expect(catalogActionLabel(entry())).toBe("Pull");
-    expect(catalogActionLabel(entry({ installed: true }))).toBe("Repair");
+    expect(catalogNeedsRepair(entry())).toBe(false);
+    expect(catalogNeedsRepair(entry({ installed: true }))).toBe(true);
   });
 });
 

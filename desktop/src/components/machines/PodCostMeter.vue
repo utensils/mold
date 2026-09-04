@@ -64,7 +64,7 @@ onBeforeUnmount(() => {
       :disabled="busy"
       @click.stop="emit('stop')"
     >
-      Stop pod
+      Stop it
     </button>
   </div>
 </template>

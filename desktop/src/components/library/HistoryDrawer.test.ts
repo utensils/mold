@@ -176,8 +176,8 @@ describe("HistoryDrawer runs", () => {
     expect(rows[0]!.text()).toContain("a lighthouse at dusk");
     expect(rows[0]!.text()).toContain("flux2-klein");
     expect(rows[0]!.text()).toContain("1024×768");
-    expect(rows[0]!.text()).toContain("S 42");
-    expect(rows[0]!.text()).toContain("4 steps");
+    expect(rows[0]!.text()).toContain("seed 42");
+    expect(rows[0]!.text()).toContain("4 passes");
   });
 
   it("reuses a run's full settings including the seed", async () => {

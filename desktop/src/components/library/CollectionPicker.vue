@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /*
- * CollectionPicker — the "In collections" checklist (Lightbox aside) and the
- * bulk bar's "Add to collection" popover share this one shape (V3 "Shelf").
- * Pure props/emits: rows are the host-merged collections, `selected` holds
- * the slugs the print(s) are in, `mixed` the slugs only some of a
- * multi-selection are in (rendered indeterminate). "New collection…" turns
+ * CollectionPicker — the "In albums" checklist (Lightbox aside) and the
+ * bulk bar's "Add to album" popover share this one shape. Pure
+ * props/emits: rows are the machine-merged albums, `selected` holds the
+ * slugs the picture(s) are in, `mixed` the slugs only some of a
+ * multi-selection are in (rendered indeterminate). "New album…" turns
  * into an inline name input; Enter creates, Escape / empty cancels.
  */
 import { computed, nextTick, ref } from "vue";
@@ -14,9 +14,9 @@ import type { MergedCollection } from "@studio/lib/libraryOrganization";
 const props = withDefaults(
   defineProps<{
     collections: MergedCollection[];
-    /** Slugs every selected print is in. */
+    /** Slugs every selected picture is in. */
     selected: string[];
-    /** Slugs only some selected prints are in (indeterminate). */
+    /** Slugs only some selected pictures are in (indeterminate). */
     mixed?: string[];
     allowCreate?: boolean;
     disabled?: boolean;
@@ -24,7 +24,7 @@ const props = withDefaults(
     hostNote?: string | null;
     /** Accessible name for the group. */
     ariaLabel?: string;
-    /** Optional per-slug count override (logical prints). */
+    /** Optional per-slug count override (logical pictures). */
     counts?: ((slug: string) => number) | null;
   }>(),
   {
@@ -32,7 +32,7 @@ const props = withDefaults(
     allowCreate: true,
     disabled: false,
     hostNote: null,
-    ariaLabel: "Collections",
+    ariaLabel: "Albums",
     counts: null,
   },
 );
@@ -99,7 +99,7 @@ defineExpose({ startCreate });
       class="px-0.5 py-1 text-micro text-fg-dim"
       data-test="collection-picker-empty"
     >
-      No collections yet.
+      No albums yet.
     </p>
     <button
       v-for="collection in collections"
@@ -144,7 +144,7 @@ defineExpose({ startCreate });
         @click="startCreate"
       >
         <Icon name="plus" :size="14" class="shrink-0" />
-        <span>New collection…</span>
+        <span>New album…</span>
       </button>
       <div v-else class="flex h-7 items-center gap-2 px-0.5" data-test="collection-new-form">
         <Icon name="plus" :size="14" class="shrink-0 text-fg-dim" />
@@ -153,8 +153,8 @@ defineExpose({ startCreate });
           v-model="draft"
           data-selectable
           type="text"
-          placeholder="Collection name"
-          aria-label="New collection name"
+          placeholder="Album name"
+          aria-label="New album name"
           class="border-border h-6 min-w-0 flex-1 rounded-control border bg-transparent px-1.5 text-sm text-fg outline-none focus:border-accent"
           data-test="collection-new-input"
           @keydown.enter.prevent="commitCreate"

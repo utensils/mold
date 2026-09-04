@@ -115,7 +115,7 @@ describe("AdvancedSection device snapshots", () => {
     });
     await vi.waitFor(() => expect(wrapper.text()).toContain("Prompt expansion"));
 
-    expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain("Host utility");
+    expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain("Machine utility");
     expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
   });
 

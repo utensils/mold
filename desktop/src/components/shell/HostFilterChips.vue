@@ -28,7 +28,7 @@ const options = computed(() => [{ key: "all", label: "All", count: total.value }
   <div
     class="flex rounded-control border border-border-control bg-bg-deep p-0.5"
     role="tablist"
-    :aria-label="ariaLabel ?? 'Gallery source'"
+    :aria-label="ariaLabel ?? 'Made on'"
   >
     <button
       v-for="option in options"
