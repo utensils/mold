@@ -24,10 +24,15 @@ function baseForm(): GenerateForm {
   return form;
 }
 
-function mountComposer(form: GenerateForm, overrides: Record<string, unknown> = {}) {
+function mountComposer(
+  form: GenerateForm,
+  overrides: Record<string, unknown> = {},
+  slots: Record<string, string> = {},
+) {
   return mount(ComposerCard, {
     attachTo: document.body,
     global: { stubs: { EstimateBadge: true } },
+    slots,
     props: {
       form,
       effectiveBatchSize: 1,
@@ -377,15 +382,29 @@ describe("ComposerCard — shape and style chips", () => {
     expect(wrapper.text()).not.toContain("0×0");
   });
 
-  it("opens the inspector's settings from the Style and Shape chips", async () => {
-    const wrapper = mountComposer(baseForm(), { styleLabel: "FLUX Dev", styleId: "flux-dev:q8" });
-    const style = wrapper.get("[data-test='style-chip']");
-    expect(style.text()).toContain("FLUX Dev");
-    expect(style.text()).toContain("flux-dev:q8");
-    await style.trigger("click");
+  it("opens the inspector's settings from the Shape chip", async () => {
+    const wrapper = mountComposer(baseForm());
     await wrapper.get("[data-test='shape-chip']").trigger("click");
-    expect(wrapper.emitted("open-style")).toHaveLength(1);
     expect(wrapper.emitted("open-shape")).toHaveLength(1);
+  });
+
+  /*
+   * Style is no longer a door. Its chip IS the picker (StylePicker.vue), so
+   * the composer stops carrying a `styleLabel`/`styleId` pair and an
+   * `open-style` emit and takes the whole control through a slot — one
+   * selector, opened where the user is looking. The chip's own behaviour is
+   * covered by StylePicker.test.ts; what this component owes is the seat.
+   */
+  it("seats the style picker in the control row rather than a door of its own", () => {
+    const wrapper = mountComposer(baseForm(), undefined, {
+      style: '<button data-test="fake-style-chip">Style</button>',
+    });
+    const controls = wrapper.get(".ms-composer__controls");
+    expect(controls.find("[data-test='fake-style-chip']").exists()).toBe(true);
+    // The seat comes first, ahead of Shape — the mock's control row order.
+    const order = [...controls.element.children].map((el) => el.getAttribute("data-test"));
+    expect(order.indexOf("fake-style-chip")).toBeLessThan(order.indexOf("shape-chip"));
+    expect(wrapper.emitted("open-style")).toBeUndefined();
   });
 });
 

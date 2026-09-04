@@ -11,12 +11,6 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
-import { filterRestrictedModels } from "@studio/lib/modelAccess";
-import {
-  isModelRuntimeUnavailable,
-  modelRuntimeNotice,
-  RUNTIME_UNAVAILABLE_BADGE,
-} from "@studio/lib/modelRuntimeAvailability";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import {
@@ -26,20 +20,15 @@ import {
   resetFormToModelDefaults,
   seedMode,
 } from "../../lib/generateForm";
-import type {
-  Ltx2CameraControlInfo,
-  Ltx2ControlAdapterInfo,
-  ModelEntry,
-} from "../../lib/api/types";
+import type { Ltx2CameraControlInfo, Ltx2ControlAdapterInfo } from "../../lib/api/types";
 import {
   isCameraMotionPreset,
   parseCameraControlAvailability,
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
-import { findInstalledModel, mergeInstalledModels } from "../../lib/generateModels";
+import { findInstalledModel } from "../../lib/generateModels";
 import { normalizeTargetHost } from "../../lib/hosts";
-import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
@@ -81,11 +70,10 @@ import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
 import { fileUnderAvailable, matchCollection, type FileUnderState } from "@studio/lib/fileUnder";
 import FileUnderGroup from "./FileUnderGroup.vue";
 import { dragWidth } from "../../lib/panelResize";
-import ModelPicker from "./ModelPicker.vue";
+import { useStylePicker } from "../../composables/useStylePicker";
 import AdvancedSettings from "./AdvancedSettings.vue";
 import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
 import SequenceOpeningImageWell from "./SequenceOpeningImageWell.vue";
-import { formatGB } from "../../lib/format";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
 const props = withDefaults(
@@ -115,8 +103,6 @@ const emit = defineEmits<{
   "append-word": [word: string];
   "canvas-intent": [intent: CanvasIntent];
   "reset-settings": [];
-  /** The picker's "Not installed" row: offer the pull for this exact id. */
-  "pull-missing-model": [model: string];
   "update:tab": [tab: InspectorTab];
   "load-template": [template: GenerationTemplate];
   /** Recent tab: restore a past print's whole recipe, exactly as the Lightbox
@@ -392,110 +378,12 @@ const advancedExpanded = ref(false);
 /** Starters shows pictures; the save/search/sort manager is behind Edit…. */
 const managingStarters = ref(false);
 
-// ── Model picker (the shared ModelPicker; chains uses the same control) ──────
-const installedModels = computed(() =>
-  mergeInstalledModels(
-    filterRestrictedModels(models.installed, hosts.capabilities.local),
-    hostModels.unionInstalled,
-  ),
-);
-/** Keep downloaded-but-unrunnable rows visible in Create. They remain outside
- * `installedModels`, so routing and submission cannot select them; the picker
- * only discloses what is already on disk and why generation is unavailable. */
-const downloadOnlyModels = computed(() =>
-  mergeInstalledModels(
-    models.installed.filter(isModelRuntimeUnavailable),
-    hostModels.unionDownloaded.filter(isModelRuntimeUnavailable),
-  ),
-);
-const stickyTarget = computed<string | null>(() =>
-  normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
-);
-
-const selectedModel = computed<ModelEntry | null>(() =>
-  hostModels.installedEntryForTarget(props.form.model, stickyTarget.value),
-);
-
-const pickerCandidates = computed<ModelEntry[]>(() => {
-  const byName = new Map(installedModels.value.map((model) => [model.name, model]));
-  for (const model of downloadOnlyModels.value) {
-    if (!byName.has(model.name)) byName.set(model.name, model);
-  }
-  return [...byName.values()];
-});
-
-const selectedPickerModel = computed<ModelEntry | null>(
-  () =>
-    selectedModel.value ??
-    pickerCandidates.value.find((model) => model.name === props.form.model) ??
-    null,
-);
-
-/**
- * The row that answers for the CHECKPOINT'S CONTRACT — the advertised recipe
- * behind the canvas, the prompt mode, the source-image shape and the mesh
- * block.
- *
- * That contract belongs to the checkpoint, not to the machine holding the
- * file: `generation_profile::prompt_requirement_for_family` and the recipe's
- * own `mesh` / `resolution` blocks are the same wherever it runs, and the
- * target host will advertise exactly them once it has downloaded it. Reading
- * only the target's inventory therefore lost the whole contract the moment
- * Create was aimed at a machine that would have to pull the model: a
- * Hunyuan3D form silently fell back to raster controls with a Resolution
- * bound to the canvasless recipe's own 0 × 0, showing `NaN×NaN px` under an
- * uncorrectable "Width and height must be whole numbers".
- *
- * The target's own row still WINS wherever it exists — two machines may
- * advertise corrected or aliased metadata, and the one that will run the job
- * is the authority on it. This only decides who answers when it has none.
- * `selectedModel` remains the answer for questions that really are about the
- * holding machine (its runtime readiness, its on-disk size, its LoRAs).
- *
- * EVERY contract question reads this one row, including the ones the child
- * panels ask. Handing `SourceImageWell` and `AdvancedSettings` the target's
- * row instead is what left a Denoise slider, an Edit-mask control, a
- * Negative-prompt field and a `png`/`jpeg`/`webp` picker on a 3-D print after
- * the canvas itself had already been fixed.
- */
-const contractModel = computed<ModelEntry | null>(() =>
-  hostModels.contractEntryForTarget(props.form.model, stickyTarget.value),
-);
-
-/**
- * The form's model when no machine has it installed. Restoring a print whose
- * checkpoint is gone must keep the id visible with a Not installed tag rather
- * than reading "Choose a model" — the raw id stays in `form.model` and in the
- * request either way.
- */
-const missingModelId = computed<string | null>(() =>
-  props.form.model && !selectedPickerModel.value ? props.form.model : null,
-);
-
-const pickerModels = computed<ModelEntry[]>(() => {
-  const target = stickyTarget.value;
-  const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-  const forTarget = fetched
-    ? hostModels.downloadedOn(target).filter((model) => {
-        const runnable = hostModels
-          .installedOn(target)
-          .some((candidate) => candidate.name === model.name);
-        return runnable || isModelRuntimeUnavailable(model);
-      })
-    : pickerCandidates.value;
-  // Sequence output narrows the picker to chain-capable video models.
-  return modelsForOutput(forTarget, draft.output);
-});
-
-function pickerDisabledReason(model: ModelEntry): string | null {
-  if (isModelRuntimeUnavailable(model)) {
-    const reason = modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
-    return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;
-  }
-  if (installedModels.value.some((candidate) => candidate.name === model.name)) return null;
-  const reason = modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
-  return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;
-}
+// ── Style rows (the ONE style picker lives on the composer's chip) ──────────
+// The Settings tab has no style field: the mock puts the picker on the
+// composer and nowhere else. These rows are still read here for the Output
+// switch, the quality presets, the canvas, and the mesh block.
+const { installedModels, stickyTarget, selectedModel, contractModel, pickerModels } =
+  useStylePicker(() => props.form);
 
 // ── Output (One shot | Sequence) — a setting, not a place ────────────────────
 const draft = useSequenceDraftStore();
@@ -556,30 +444,6 @@ function setOutputMode(mode: string | number) {
     },
     defaultFrames.value,
   );
-}
-
-const stickyHostMissingModel = computed<string | null>(() => {
-  const sel = stickyTarget.value;
-  if (!sel || sel === "capable" || !props.form.model) return null;
-  const host = hosts.all.find((h) => h.id === sel);
-  if (!host) return null;
-  const ids = hostModels.hostsFor(props.form.model);
-  if (ids.length === 0 || ids.includes(sel)) return null;
-  return host.label;
-});
-
-const modelDescription = computed(() => {
-  const m = selectedModel.value;
-  if (!m) return null;
-  const parts: string[] = [];
-  if (m.description && modelDisplayName(m) === m.name) parts.push(m.description);
-  if (m.disk_usage_bytes) parts.push(formatGB(m.disk_usage_bytes));
-  if (m.is_loaded) parts.push("loaded");
-  return parts.length ? parts.join(" · ") : null;
-});
-
-function pickModel(m: ModelEntry) {
-  formStore.applyModel(m);
 }
 
 // ── Shape + resolution projection ────────────────────────────────────────────
@@ -851,8 +715,11 @@ defineExpose({ setOutputMode });
       />
     </div>
     <div v-else class="ms-inspector__scroll">
-      <div class="ms-inspector__head">
-        <span class="ms-group-label uppercase">Style</span>
+      <!-- The mock's Settings tab starts at "Start from a photo": the style
+           lives on the composer's chip and has NO field here. The one thing
+           this row keeps is the way back to the style's own defaults, which
+           the mock has nowhere else. -->
+      <div class="ms-inspector__head ms-inspector__head--bare">
         <button
           type="button"
           class="ms-inspector__reset"
@@ -864,24 +731,6 @@ defineExpose({ setOutputMode });
           <Icon name="refresh" :size="12" />
           Reset
         </button>
-      </div>
-
-      <!-- Style (the model) -->
-      <div class="ms-field" data-test="inspector-style">
-        <ModelPicker
-          :models="pickerModels"
-          :selected="selectedPickerModel"
-          :missing-model="missingModelId"
-          :disabled-reason="pickerDisabledReason"
-          :show-availability="!stickyTarget || stickyTarget === 'capable'"
-          :browse-target="caps.supportsVideo ? '/models?type=video' : '/models'"
-          @pick="pickModel"
-          @pick-missing="emit('pull-missing-model', $event)"
-        />
-        <p v-if="modelDescription" class="ms-field__hint">{{ modelDescription }}</p>
-        <p v-if="stickyHostMissingModel" class="ms-field__hint">
-          Not on {{ stickyHostMissingModel }} — will download there.
-        </p>
       </div>
 
       <!-- Start from a photo — primary-form image conditioning; the model
@@ -1387,6 +1236,11 @@ defineExpose({ setOutputMode });
 }
 .ms-inspector__head .ms-inspector__lead {
   margin-bottom: 0;
+}
+/* Reset alone, right-aligned over the first group. */
+.ms-inspector__head--bare {
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 .ms-inspector__reset {
   display: inline-flex;

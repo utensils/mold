@@ -77,16 +77,23 @@ function pick(theme: ThemeId) {
         @click="pick(meta.id)"
       >
         <!-- The theme's own surfaces, painted by its own map: the band carries
-             `data-theme`, so ui/tokens.css stays the only place a hex lives. -->
+             `data-theme`, so ui/tokens.css stays the only place a hex lives.
+             The cells read `var(--mold-*)` DIRECTLY — a Tailwind `bg-*` alias
+             is substituted at the root and would paint the current theme on
+             every card. See the note in AppearanceCard.test.ts.
+
+             Order and widths echo the mock's theme preview: the deep rail on
+             the left, the wide canvas beside it, a surface card, an accent
+             stripe. -->
         <span
           :data-theme="meta.id"
           class="flex h-11 overflow-hidden rounded-inner border border-border"
           aria-hidden="true"
         >
-          <span class="flex-1 bg-bg" />
-          <span class="flex-1 bg-bg-deep" />
-          <span class="flex-1 bg-surface" />
-          <span class="flex-1 bg-accent" />
+          <span class="ms-band__rail" />
+          <span class="ms-band__field" />
+          <span class="ms-band__card" />
+          <span class="ms-band__accent" />
         </span>
         <span class="text-sm font-semibold text-fg">{{ meta.label }}</span>
         <span class="truncate font-mono text-micro text-fg-dim">{{ meta.toneLabel }}</span>
@@ -150,3 +157,26 @@ function pick(theme: ThemeId) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* The swatch band. Each cell reads the theme map the band itself carries, so
+ * a nested `[data-theme]` actually reaches it. Tailwind's colour utilities
+ * resolve through `--color-*`, which is defined (and therefore substituted)
+ * at the root — see AppearanceCard.test.ts for the full substitution rule. */
+.ms-band__rail {
+  flex: 0 0 22%;
+  background: var(--mold-bg-deep);
+}
+.ms-band__field {
+  flex: 1 1 auto;
+  background: var(--mold-bg);
+}
+.ms-band__card {
+  flex: 0 0 22%;
+  background: var(--mold-surface);
+}
+.ms-band__accent {
+  flex: 0 0 16%;
+  background: var(--mold-blue);
+}
+</style>

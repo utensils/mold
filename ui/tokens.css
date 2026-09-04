@@ -13,6 +13,13 @@
  * repeating a hex in TypeScript. Nothing else may stamp `data-theme` inside
  * the app — a themed island is a bug everywhere else.
  *
+ * A consumer of a NESTED map must read `--mold-*` DIRECTLY, never a Tailwind
+ * alias such as `bg-bg` or `text-fg`. Those resolve `--color-*`, which is
+ * defined in each shell's `@theme` block at the ROOT: a custom property's
+ * `var()` is substituted where the property is DEFINED, and the substituted
+ * value is what inherits, so an alias reaches the subtree already frozen to
+ * the theme the app is wearing and the nested map never paints.
+ *
  * A theme is a COMPLETE token map: surfaces, four text ranks, borders, the
  * single accent (`--mold-blue` — read it as "accent": amber in Safelight,
  * crimson in Nebula), status hues, four data-series hues, two font families,

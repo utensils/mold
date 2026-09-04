@@ -20,7 +20,7 @@ import { useHostsStore } from "../../stores/hosts";
 import { useHostStatusStore } from "../../stores/hostStatus";
 import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useQueueActivity } from "../../composables/useQueueActivity";
-import { formatGB } from "../../lib/format";
+import { formatGraphicsMemory, formatPercent } from "../../lib/format";
 
 const route = useRoute();
 const router = useRouter();
@@ -205,8 +205,14 @@ onBeforeUnmount(() => {
         <span class="h-[7px] w-[7px] shrink-0 rounded-full" :class="machineTone" />
         <span class="truncate font-mono text-xs font-bold text-fg">{{ machine.label }}</span>
         <span class="flex-1" />
-        <span v-if="hostStatus.gpus.length" class="font-mono text-micro text-fg-dim">
-          {{ hostStatus.vramPct }}%
+        <!-- A whole number for the reader; the meter below keeps the float. -->
+        <span
+          v-if="hostStatus.gpus.length"
+          data-test="machine-vram-percent"
+          class="font-mono text-micro text-fg-dim"
+          title="Graphics memory in use"
+        >
+          {{ formatPercent(hostStatus.vramPct) }}
         </span>
       </span>
       <span class="text-xs leading-snug text-fg-dim">{{ hostStatus.sentence }}</span>
@@ -217,9 +223,15 @@ onBeforeUnmount(() => {
           :style="{ width: `${hostStatus.vramPct}%` }"
         />
       </span>
-      <span v-if="hostStatus.gpus.length" class="sr-only">
-        {{ formatGB(hostStatus.vramUsed) }} of {{ formatGB(hostStatus.vramTotal) }} graphics memory
-        in use
+      <!-- The mock's Machines cards say the memory under the bar; the sidebar
+           card says the same thing rather than hiding it from sighted readers
+           in an sr-only line. -->
+      <span
+        v-if="hostStatus.gpus.length"
+        data-test="machine-memory"
+        class="font-mono text-micro text-fg-dim"
+      >
+        {{ formatGraphicsMemory(hostStatus.vramUsed, hostStatus.vramTotal) }}
       </span>
     </button>
 

@@ -104,12 +104,18 @@ function onKeydown(event: KeyboardEvent) {
   border-radius: var(--mold-radius-2);
 }
 
+/* `nowrap` is load-bearing, not cosmetic. `flex: 1` is `flex: 1 1 0%`, so a
+ * segment's floor is its MIN-CONTENT width — with wrappable text that is only
+ * its longest word, and a tight row silently broke "Still picture" onto two
+ * lines and doubled the control's height. Nowrap raises the floor to the whole
+ * label, so the row's other flex children yield instead. */
 .ms-seg__btn {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 1px;
+  white-space: nowrap;
   border: 0;
   background: transparent;
   color: var(--mold-text-2);

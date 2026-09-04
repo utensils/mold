@@ -39,6 +39,7 @@ import {
 import CreateHeader from "../components/create/CreateHeader.vue";
 import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
+import StylePicker from "../components/create/StylePicker.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
 import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
@@ -5684,13 +5685,10 @@ onBeforeUnmount(() => {
           :history="isSequence ? [] : promptHistory"
           :remix-source="remixSource"
           :batch-locked="batchLocked"
-          :style-label="modelLabels.get(form.model) ?? form.model"
-          :style-id="form.model"
           :prompt-value="composerPrompt"
           :placeholder="composerPlaceholder"
           :count-label="isSequence ? 'Make 1 clip' : null"
           :show-expand="!isSequence"
-          @open-style="inspectorTab = 'settings'"
           @open-shape="inspectorTab = 'settings'"
           @prompt-authored="onPromptAuthored"
           @update:prompt-value="writeScenePrompt"
@@ -5700,7 +5698,12 @@ onBeforeUnmount(() => {
           @remix="remixForCurrentPrompt()"
           @update:remix-source="remixSource = $event"
           @restore="restoreQuickExpansion"
-        />
+        >
+          <!-- The one style selector in the app. -->
+          <template #style>
+            <StylePicker :form="form" @pull-missing-model="offerPullForSelectedModel" />
+          </template>
+        </ComposerCard>
 
         <ConfirmDialog
           :open="sequenceConfirmation !== null"
@@ -5726,7 +5729,6 @@ onBeforeUnmount(() => {
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"
       @reset-settings="invalidateRetainedRestore"
-      @pull-missing-model="offerPullForSelectedModel"
       @update:tab="inspectorTab = $event"
       @load-template="loadTemplate"
       @reuse-print="reuseRecentPrint"

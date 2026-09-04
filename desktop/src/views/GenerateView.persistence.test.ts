@@ -37,9 +37,10 @@ const model: ModelEntry = {
 } as ModelEntry;
 
 function mountView() {
-  // The composer textarea lives in ComposerCard and the model picker in
-  // InspectorPanel → ModelPicker — keep all three real so the persisted form
-  // + picker close-on outside-click still resolve through the view's DOM.
+  // The composer textarea lives in ComposerCard and the style picker on its
+  // chip (ComposerCard's `style` slot → StylePicker → ModelPicker) — keep all
+  // four real so the persisted form and the picker's close-on-outside-click
+  // still resolve through the view's DOM.
   return mount(GenerateView, {
     shallow: true,
     attachTo: document.body,
@@ -47,6 +48,7 @@ function mountView() {
       stubs: {
         ComposerCard: false,
         InspectorPanel: false,
+        StylePicker: false,
         ModelPicker: false,
         ActionBlocker: false,
       },

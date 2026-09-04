@@ -11,12 +11,17 @@
   bundled open-licence fonts and no flash of the wrong one at launch. Each card
   in Settings ▸ Look shows a band of that theme's own surfaces, and **Match
   system appearance** swaps a pick for its light or dark partner when macOS
-  changes. Appearance settings saved by earlier releases migrate to the nearest
-  theme. Text and control borders keep WCAG AA contrast on all six.
+  changes. Each card's band paints from its own theme's colours rather than the
+  one the app is currently wearing. Appearance settings saved by earlier
+  releases migrate to the nearest theme. Text and control borders keep WCAG AA
+  contrast on all six.
 - **A new window: toolbar, sidebar, view, status bar.** The queue lives in the
   sidebar under the machine that is making pictures, so work in progress is
-  context rather than a place you have to go. The status bar always answers
-  which machine, how deep the queue is, and how full the memory is, with the
+  context rather than a place you have to go. That machine's card reads its
+  memory as a whole percent with the amounts under the meter — "31.6 / 51.5 GB
+  graphics memory" — instead of a bare unrounded number. The status bar always
+  answers which machine, how deep the queue is, and how full the memory is,
+  with the
   shortcuts you need on the right. The Queue is also its own view (⌘2) with
   Being made, Waiting and Done today — counted from the day's pictures rather
   than the session, so relaunching no longer resets the tally — one row per
@@ -33,7 +38,14 @@
   predicts a finish the queue says how long is left.
 - **New image reads as groups, and a finished picture offers the next step.**
   What to make — Still picture, Short clip or 3-D object — is one control in
-  the view toolbar; the duplicate switch in the settings panel is gone. Quality
+  the view toolbar that holds its one row at every window width; the duplicate
+  switch in the settings panel is gone. There is now one style picker, not two:
+  the Style chip beside the words opens the list of styles in place, above the
+  composer, grouped by family with each entry's plain name, its id, its size
+  and whether it is on the graphics card. Type to narrow a long list, walk it
+  with the arrow keys, and the chip says before you press Generate when the
+  style is not on the machine you are aiming at. The settings panel no longer
+  carries a style field of its own. Quality
   offers Draft, Good and Best built from the style's own range. Add-on looks
   moved out of Advanced into the settings column, each look a card whose
   strength is a meter you drag. A 3-D style's surface detail reads Rough,

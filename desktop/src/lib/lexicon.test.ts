@@ -321,6 +321,7 @@ describe("lexicon — view copy and assistive labels", () => {
 
   const starterCards = read("../components/generate/StarterCards.vue");
   const modelPicker = read("../components/create/ModelPicker.vue");
+  const stylePicker = read("../components/create/StylePicker.vue");
   const sequenceComposer = read("../components/create/SequenceComposer.vue");
   const sequenceTimeline = read("./sequenceTimeline.ts");
   const librarySource = read("../views/LibraryView.vue");
@@ -353,6 +354,21 @@ describe("lexicon — view copy and assistive labels", () => {
     expect(modelPicker).toContain('browseLabel: "Browse more →"');
     expect(modelPicker).not.toContain("Browse all models");
     expect(templateText(modelPicker)).not.toContain("Not installed");
+    expect(templateText(modelPicker)).not.toContain("Find a model");
+  });
+
+  // The composer's Style chip is that same field's trigger now, so it owes
+  // the same words — including its own not-here tag.
+  it("says the same words on the Style chip that opens it", () => {
+    const text = templateText(stylePicker);
+    // The empty-state label is an interpolated fallback, so it is read from
+    // the source rather than the rendered template text.
+    expect(stylePicker).toContain('"Choose a style"');
+    expect(text).toContain("Not on this machine");
+    expect(text).not.toContain("Not installed");
+    for (const banned of [/\bmodel\b/i, /\bcheckpoint\b/i]) {
+      expect(banned.test(text), String(banned)).toBe(false);
+    }
   });
 
   it("refuses a clip in the words of a style, on both sides of the seam", () => {

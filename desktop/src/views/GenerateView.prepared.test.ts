@@ -97,10 +97,10 @@ function mountView() {
     shallow: true,
     attachTo: document.body,
     global: {
-      // The composer textarea + Generate button now live in ComposerCard and
-      // the model picker in InspectorPanel → ModelPicker; keep them real so
-      // the view's DOM hooks and focus targets resolve. Prepared/pull
-      // surfaces stay real too.
+      // The composer textarea + Generate button live in ComposerCard and the
+      // style picker on its chip (ComposerCard's `style` slot → StylePicker →
+      // ModelPicker); keep them real so the view's DOM hooks and focus targets
+      // resolve. Prepared/pull surfaces stay real too.
       stubs: {
         ExpandControl: false,
         PreparedExpansionBatch: false,
@@ -109,6 +109,7 @@ function mountView() {
         ErrorNotice: false,
         ComposerCard: false,
         InspectorPanel: false,
+        StylePicker: false,
         ModelPicker: false,
       },
     },

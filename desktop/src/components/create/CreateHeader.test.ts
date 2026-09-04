@@ -3,6 +3,8 @@ import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import CreateHeader from "./CreateHeader.vue";
+import createHeaderSource from "./CreateHeader.vue?raw";
+import segmentedControlSource from "@ui/components/SegmentedControl.vue?raw";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
@@ -64,6 +66,55 @@ const stillModel = {
 function outputSegments(wrapper: ReturnType<typeof mount>) {
   return wrapper.get("[data-test='output-kind']").findAll("button");
 }
+
+/*
+ * The toolbar must hold one row at every width the window can reach
+ * (`minWidth: 1080` in src-tauri/tauri.conf.json, minus the sidebar and a
+ * dragged-wide inspector). "Still picture" wrapped onto two lines and doubled
+ * the toolbar's height: `.ms-seg__btn` is `flex: 1` with wrappable text, so
+ * its min-content width is only its longest WORD and the flex line let it
+ * shrink there. The order of yielding is title first, then the doors' labels;
+ * the segments never wrap.
+ */
+describe("CreateHeader — the toolbar holds one row", () => {
+  it("keeps every segment on one line", () => {
+    expect(segmentedControlSource).toMatch(/\.ms-seg__btn\s*\{[^}]*white-space:\s*nowrap/s);
+  });
+
+  it("never lets the segmented control shrink below its own segments", () => {
+    expect(createHeaderSource).toMatch(/\.ms-header__seg\s*\{[^}]*flex:\s*0\s+0\s+auto/s);
+    expect(createHeaderSource).toMatch(/<SegmentedControl[^>]*class="ms-header__seg"/s);
+  });
+
+  it("truncates the title first", () => {
+    expect(createHeaderSource).toMatch(/\.ms-header__title\s*\{[^}]*min-width:\s*0/s);
+    expect(createHeaderSource).toMatch(
+      /\.ms-header__title-text\s*\{[^}]*text-overflow:\s*ellipsis/s,
+    );
+    expect(createHeaderSource).toMatch(/\.ms-header__title-text\s*\{[^}]*white-space:\s*nowrap/s);
+  });
+
+  it("drops the doors' labels to icons before anything wraps", () => {
+    // A container query, not a viewport one: the toolbar's width is the
+    // window minus the sidebar and a user-dragged inspector.
+    expect(createHeaderSource).toMatch(/\.ms-header\s*\{[^}]*container-type:\s*inline-size/s);
+    expect(createHeaderSource).toMatch(/container-name:\s*create-header/s);
+    expect(createHeaderSource).toMatch(
+      /@container create-header \(max-width:[^)]*\)\s*\{[\s\S]*?\.ms-header__door-label\s*\{[^}]*display:\s*none/s,
+    );
+  });
+
+  it("names an icon-only door for the reader who cannot see the icon", () => {
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    for (const id of ["open-starters", "open-recent"]) {
+      const door = wrapper.get(`[data-test='${id}']`);
+      expect(door.attributes("aria-label"), id).toBeTruthy();
+      expect(door.attributes("title"), id).toBe(door.attributes("aria-label"));
+      expect(door.find(".ms-header__door-label").exists(), id).toBe(true);
+    }
+  });
+});
 
 describe("CreateHeader", () => {
   it("no longer renders the retired Single | Sequence switch", () => {

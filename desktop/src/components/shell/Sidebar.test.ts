@@ -6,6 +6,7 @@ import Sidebar from "./Sidebar.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
+import { useHostStatusStore } from "../../stores/hostStatus";
 import { useGalleryStore } from "../../stores/gallery";
 import { useGenerationStore } from "../../stores/generation";
 import { useChainJobsStore } from "../../stores/chainJobs";
@@ -923,5 +924,61 @@ describe("Sidebar row titles", () => {
     const rail = wrapper.get("[data-test='queue-rail']");
     expect(rail.text()).toContain("portrait");
     expect(rail.text()).not.toContain("cv:1759168");
+  });
+});
+
+describe("Sidebar machine card", () => {
+  /** Two GPUs whose used/total ratio is an ugly float: 31.6 of 51.5 GB. */
+  function attachTelemetry() {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const hostStatus = useHostStatusStore();
+    hostStatus.snapshot = {
+      hostname: "studio-rack",
+      timestamp: 0,
+      gpus: [
+        {
+          ordinal: 0,
+          name: "L40S",
+          backend: "cuda",
+          vram_total: 25_750_000_000,
+          vram_used: 15_800_000_000,
+        },
+        {
+          ordinal: 1,
+          name: "L40S",
+          backend: "cuda",
+          vram_total: 25_750_000_000,
+          vram_used: 15_800_000_000,
+        },
+      ],
+      system_ram: { total: 0, used: 0, used_by_mold: 0, used_by_other: 0 },
+    } as never;
+    return hostStatus;
+  }
+
+  it("reads the percent as a whole number, never a raw float", async () => {
+    const wrapper = await mountAt("/create");
+    const hostStatus = attachTelemetry();
+    await flushPromises();
+
+    const card = wrapper.get("[data-test='machine-card']");
+    // The float is what the meter's width uses; the readout is for a person.
+    expect(hostStatus.vramPct).not.toBe(Math.round(hostStatus.vramPct));
+    expect(card.text()).not.toMatch(/\d\.\d+%/);
+    expect(card.get("[data-test='machine-vram-percent']").text()).toBe("61%");
+  });
+
+  it("says what the percent measures, under the meter, in memory", async () => {
+    const wrapper = await mountAt("/create");
+    attachTelemetry();
+    await flushPromises();
+
+    const card = wrapper.get("[data-test='machine-card']");
+    expect(card.get("[data-test='machine-vram-percent']").attributes("title")).toBe(
+      "Graphics memory in use",
+    );
+    expect(card.get("[data-test='machine-memory']").text()).toBe("31.6 / 51.5 GB graphics memory");
   });
 });

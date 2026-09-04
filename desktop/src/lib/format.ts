@@ -52,6 +52,21 @@ export function percent(used: number, total: number): number {
   return Math.min(100, Math.max(0, (used / total) * 100));
 }
 
+/**
+ * The READOUT for a `percent()` value: one whole number and the sign. The
+ * float belongs to the meter's width, never to a person — a machine card that
+ * printed the raw getter read "59.10320281982422%". Round here and only here.
+ */
+export function formatPercent(value: number): string {
+  return `${Math.round(value)}%`;
+}
+
+/** The mono line under a VRAM meter: `31.6 / 51.5 GB graphics memory`. Says
+ *  what the percent beside the meter is measuring, without decimals of its own. */
+export function formatGraphicsMemory(used: number, total: number): string {
+  return `${formatGBPair(used, total)} graphics memory`;
+}
+
 /** Transfer rate for the download banner's mono line: 12_400_000 → "12.4 MB/s". */
 export function formatRate(bytesPerSecond: number | null): string {
   if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) return "—";

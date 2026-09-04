@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import GenerateView from "./GenerateView.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import DownloadTargetDialog from "../components/models/DownloadTargetDialog.vue";
-import InspectorPanel from "../components/create/InspectorPanel.vue";
+import StylePicker from "../components/create/StylePicker.vue";
 import { useComposerStore } from "../stores/composer";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useConnectionStore } from "../stores/connection";
@@ -104,6 +104,7 @@ function mountView() {
       stubs: {
         ComposerCard: false,
         InspectorPanel: false,
+        StylePicker: false,
         ModelPicker: false,
         GenerateErrorNotice: false,
         ErrorNotice: false,
@@ -416,7 +417,8 @@ describe("GenerateView missing-model pull before submit", () => {
     const wrapper = mountView();
     await flushPromises();
 
-    wrapper.findComponent(InspectorPanel).vm.$emit("pull-missing-model", model.name);
+    // The picker is the composer's Style chip now, not an inspector field.
+    wrapper.findComponent(StylePicker).vm.$emit("pull-missing-model", model.name);
     await flushPromises();
 
     expect(submit).not.toHaveBeenCalled();

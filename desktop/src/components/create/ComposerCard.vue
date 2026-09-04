@@ -22,8 +22,9 @@ import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 /**
  * The composer (README §04): the prompt line carries the estimate on its
  * right; the control row below carries the chips — Style, Shape, Make N,
- * Write more for me — then Generate. Advisory text never shares a row with
- * controls. Owns the prompt textarea and its editing affordances — ⌘↵
+ * Write more for me — then Generate. Style is the ONE style picker and is
+ * supplied through the `style` slot, so this component stays presentational.
+ * Advisory text never shares a row with controls. Owns the prompt textarea and its editing affordances — ⌘↵
  * generate, ⌘E expand, ↑/↓ shell-style prompt history, autogrow. The view
  * keeps all orchestration; this component only surfaces intent.
  */
@@ -52,9 +53,6 @@ const props = withDefaults(
     remixSource?: "original" | "current";
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
-    /** The Style chip: plain name first, the mono id second. */
-    styleLabel?: string;
-    styleId?: string;
     /** Clip mode: the composer writes the SELECTED SCENE's words rather than
      * the form's prompt. Null keeps the one-shot binding. */
     promptValue?: string | null;
@@ -71,8 +69,6 @@ const props = withDefaults(
     remixSource: "original",
     warningReason: null,
     batchLocked: false,
-    styleLabel: "",
-    styleId: "",
     promptValue: null,
     placeholder: null,
     countLabel: null,
@@ -92,8 +88,8 @@ const emit = defineEmits<{
   /** Clip mode: the selected scene's new words. */
   "update:promptValue": [value: string];
   "update:remixSource": [value: "original" | "current"];
-  /** The Style and Shape chips are doors to the inspector's Settings tab. */
-  "open-style": [];
+  /** The Shape chip is a door to the inspector's Settings tab. Style is not:
+   *  its chip opens the picker itself, in the `style` slot. */
   "open-shape": [];
 }>();
 
@@ -231,18 +227,10 @@ defineExpose({ focus, expand, record });
         />
       </div>
       <div class="ms-composer__controls">
-        <button
-          type="button"
-          data-test="style-chip"
-          class="ms-chip ms-chip--style"
-          title="Style"
-          @click="emit('open-style')"
-        >
-          <Icon name="models" :size="13" />
-          <span class="ms-chip__label">{{ styleLabel || "Choose a style" }}</span>
-          <span v-if="styleId && styleId !== styleLabel" class="ms-chip__id">{{ styleId }}</span>
-          <span class="ms-chip__caret">▼</span>
-        </button>
+        <!-- The Style chip IS the picker (StylePicker.vue, filled by the view);
+             it opens its menu in place rather than being a door to a second
+             selector in the inspector. Shape keeps its door. -->
+        <slot name="style" />
         <button
           v-if="shapeLabel"
           type="button"

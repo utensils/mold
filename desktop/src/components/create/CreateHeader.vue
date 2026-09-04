@@ -174,6 +174,7 @@ function onBlur() {
 
     <SegmentedControl
       data-test="output-kind"
+      class="ms-header__seg"
       :model-value="outputKind"
       :options="outputOptions"
       label="What to make"
@@ -186,24 +187,33 @@ function onBlur() {
       type="button"
       data-test="open-starters"
       class="ms-header__door"
+      title="Starting points"
+      aria-label="Starting points"
       @click="emit('open-tab', 'starters')"
     >
       <Icon name="grid" :size="14" />
-      Starting points
+      <span class="ms-header__door-label">Starting points</span>
     </button>
     <button
       type="button"
       data-test="open-recent"
       class="ms-header__door"
+      title="Use these settings again"
+      aria-label="Use these settings again"
       @click="emit('open-tab', 'recent')"
     >
       <Icon name="reuse" :size="14" />
-      Use these settings again
+      <span class="ms-header__door-label">Use these settings again</span>
     </button>
   </header>
 </template>
 
 <style scoped>
+/* The toolbar is a size container: what it can fit is the window minus the
+ * sidebar and a user-dragged inspector, so a viewport media query would be
+ * measuring the wrong box. One row at every width, yielding in this order —
+ * the title truncates, then the doors drop to icons; the segments never
+ * wrap. */
 .ms-header {
   height: var(--mold-shell-viewbar-h);
   flex: 0 0 var(--mold-shell-viewbar-h);
@@ -213,6 +223,8 @@ function onBlur() {
   padding: 0 14px;
   border-bottom: var(--mold-bw) solid var(--mold-border);
   background: var(--mold-chrome);
+  container-type: inline-size;
+  container-name: create-header;
 }
 .ms-header__title {
   display: flex;
@@ -284,9 +296,15 @@ function onBlur() {
   white-space: nowrap;
 }
 .ms-header__spacer {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* Never shrink: its segments are nowrap, so shrinking it only overflows. */
+.ms-header__seg {
+  flex: 0 0 auto;
 }
 .ms-header__divider {
+  flex: 0 0 auto;
   width: var(--mold-bw);
   height: 20px;
   background: var(--mold-border);
@@ -307,8 +325,22 @@ function onBlur() {
     border-color var(--mold-dur-quick) var(--mold-ease-out),
     color var(--mold-dur-quick) var(--mold-ease-out);
 }
+.ms-header__door {
+  flex: 0 0 auto;
+}
 .ms-header__door:hover {
   border-color: var(--mold-border-focus);
   color: var(--mold-text);
+}
+
+/* The last thing to yield. Both doors keep their icon, their tooltip and
+ * their accessible name; only the visible words go. */
+@container create-header (max-width: 620px) {
+  .ms-header__door-label {
+    display: none;
+  }
+  .ms-header__door {
+    padding: 0 8px;
+  }
 }
 </style>
