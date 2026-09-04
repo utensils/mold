@@ -504,8 +504,8 @@ fn preserve_invalid_document(path: &Path, raw: &str, reason: &str) {
     }
 }
 
-/// Owner-only permissions for the backup (Unix); Windows keeps the app-data
-/// directory's inherited ACL, which is already per-user.
+/// Owner-only permissions for the backup (Unix); elsewhere the app-data
+/// directory's inherited per-user ACL is what protects it.
 #[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -925,6 +925,23 @@ mod tests {
             loaded.notifications,
             "untouched defaults keep their defaults"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_invalid_backup_is_owner_only() {
+        // The original may still carry the legacy plaintext `remoteApiKey`,
+        // so the backup gets the same mode as `secrets.json`.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, "not json {").unwrap();
+        load(&path);
+        let mode = std::fs::metadata(invalid_backup_path(&path))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
