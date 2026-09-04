@@ -142,7 +142,11 @@ pub fn run() {
             // Retire remote-primary installs: re-home the ex-primary as a
             // connected host so the built-in engine is always the internal
             // primary. Runs once (idempotent) before anything reads settings.
-            {
+            if !settings::migration_premise_intact(&settings_store.recovered_keys) {
+                tracing::warn!(
+                    "settings.json: mode or remoteUrl fell back on load; skipping the remote-primary migration this launch"
+                );
+            } else {
                 let mut current = settings_store.current.lock().expect("settings mutex");
                 if settings::migrate_remote_primary(&mut current, &secrets) {
                     if let Err(e) = settings::save(&settings_store.path, &current) {
