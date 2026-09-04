@@ -23,6 +23,7 @@ export type ShellAction =
   | { kind: "new-generation" }
   | { kind: "randomize-seed" }
   | { kind: "copy-seed" }
+  | { kind: "toggle-queue-pause" }
   | { kind: "ui-scale"; direction: "reset" | "in" | "out" };
 
 export interface KeyLike {
@@ -31,6 +32,17 @@ export interface KeyLike {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  repeat?: boolean;
+}
+
+/** What the shell knows when a key arrives with no modifier on it. */
+export interface BareKeyContext {
+  /** The element with focus, which may be entitled to the key itself. */
+  target: Element | null;
+  /** Whether a modal overlay owns the keyboard. */
+  overlayOpen: boolean;
+  /** The current route path. */
+  route: string;
 }
 
 /**
@@ -113,4 +125,38 @@ export function resolveShellShortcut(
   if (e.key === "=") return { kind: "ui-scale", direction: "in" };
   if (e.key === "-" || e.key === "_") return { kind: "ui-scale", direction: "out" };
   return null;
+}
+
+/**
+ * Whether a bare key belongs to the focused element rather than the shell: a
+ * field takes the character, and a button takes Space as its own activation.
+ */
+export function ownsBareKey(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (tag === "button" || tag === "a" || tag === "summary") return true;
+  if ((el as HTMLElement).isContentEditable) return true;
+  return el.getAttribute?.("role") === "button";
+}
+
+/**
+ * Whether a modal overlay owns the keyboard. Every kit panel that traps focus
+ * marks itself `aria-modal`, so one query answers for all of them.
+ */
+export function overlayOwnsKeyboard(root: ParentNode = document): boolean {
+  return root.querySelector('[aria-modal="true"]') !== null;
+}
+
+/**
+ * The shell's one un-modified chord: Space pauses and resumes the queue
+ * (status bar hint, README §3). It resolves only where a bare key is a
+ * command — never inside a field or on a focused control, never under an
+ * overlay, and never in My images, which spends Space on Quick Look.
+ */
+export function resolveBareShellShortcut(e: KeyLike, ctx: BareKeyContext): ShellAction | null {
+  if (e.key !== " " || e.repeat) return null;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
+  if (ctx.overlayOpen || ctx.route.startsWith("/library")) return null;
+  return ownsBareKey(ctx.target) ? null : { kind: "toggle-queue-pause" };
 }

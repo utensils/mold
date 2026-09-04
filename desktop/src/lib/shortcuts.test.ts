@@ -4,7 +4,10 @@ import {
   allowsNativeContextMenu,
   allowsNativeSelectAll,
   isSelectAllChord,
+  overlayOwnsKeyboard,
+  resolveBareShellShortcut,
   resolveShellShortcut,
+  type BareKeyContext,
 } from "./shortcuts";
 
 const key = (k: string, mods: Partial<Parameters<typeof resolveShellShortcut>[0]> = {}) => ({
@@ -85,6 +88,70 @@ describe("resolveShellShortcut", () => {
     expect(new Set(Object.values(NAV_ROUTES))).toEqual(
       new Set(["/create", "/queue", "/library", "/models", "/machines", "/settings"]),
     );
+  });
+});
+
+describe("resolveBareShellShortcut", () => {
+  const space = (over: Partial<Parameters<typeof resolveBareShellShortcut>[0]> = {}) => ({
+    key: " ",
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...over,
+  });
+  const context = (over: Partial<BareKeyContext> = {}): BareKeyContext => ({
+    target: null,
+    overlayOpen: false,
+    route: "/create",
+    ...over,
+  });
+
+  it("pauses the queue on a bare Space outside a field", () => {
+    expect(resolveBareShellShortcut(space(), context())).toEqual({ kind: "toggle-queue-pause" });
+  });
+
+  it("leaves Space to the field being typed in", () => {
+    for (const tag of ["input", "textarea", "select"]) {
+      const el = document.createElement(tag);
+      expect(resolveBareShellShortcut(space(), context({ target: el })), tag).toBeNull();
+    }
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    document.body.appendChild(editable);
+    expect(resolveBareShellShortcut(space(), context({ target: editable }))).toBeNull();
+  });
+
+  it("leaves Space to a focused button, which owns it as its own activation", () => {
+    expect(
+      resolveBareShellShortcut(space(), context({ target: document.createElement("button") })),
+    ).toBeNull();
+    const row = document.createElement("div");
+    row.setAttribute("role", "button");
+    expect(resolveBareShellShortcut(space(), context({ target: row }))).toBeNull();
+  });
+
+  it("stands down under an overlay, and in My images where Space is Quick Look", () => {
+    expect(resolveBareShellShortcut(space(), context({ overlayOpen: true }))).toBeNull();
+    expect(resolveBareShellShortcut(space(), context({ route: "/library" }))).toBeNull();
+  });
+
+  it("ignores a modified or repeating Space, and every other bare key", () => {
+    expect(resolveBareShellShortcut(space({ metaKey: true }), context())).toBeNull();
+    expect(resolveBareShellShortcut(space({ shiftKey: true }), context())).toBeNull();
+    expect(resolveBareShellShortcut(space({ repeat: true }), context())).toBeNull();
+    expect(resolveBareShellShortcut(space({ key: "p" }), context())).toBeNull();
+  });
+});
+
+describe("overlayOwnsKeyboard", () => {
+  it("reads the aria-modal marker every kit panel sets", () => {
+    const root = document.createElement("div");
+    expect(overlayOwnsKeyboard(root)).toBe(false);
+    const panel = document.createElement("div");
+    panel.setAttribute("aria-modal", "true");
+    root.appendChild(panel);
+    expect(overlayOwnsKeyboard(root)).toBe(true);
   });
 });
 

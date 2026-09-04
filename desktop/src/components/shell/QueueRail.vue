@@ -13,7 +13,14 @@ import AuthedMedia from "../gallery/AuthedMedia.vue";
 import QueueRowMenu from "./QueueRowMenu.vue";
 import { useQueueActivity, type QueueRow } from "../../composables/useQueueActivity";
 import { useQueueCommands } from "../../composables/useQueueCommands";
-import { rowGlyph, rowStatusLine, rowTitle, rowTone } from "../../lib/queueRows";
+import { useQueueRowContext } from "../../composables/useQueueRowContext";
+import {
+  batchPositionLabel,
+  railStatusLine,
+  rowGlyph,
+  rowTitle,
+  rowTone,
+} from "../../lib/queueRows";
 import { thumbnailPath } from "../../lib/gallery/media";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
 import { useGenerationStore } from "../../stores/generation";
@@ -27,6 +34,9 @@ const hosts = useHostsStore();
 const title = (row: QueueRow) => rowTitle(row, hostModels.unionInstalled);
 const queue = useQueueActivity();
 const commands = useQueueCommands();
+const rowContext = useQueueRowContext();
+const status = (row: QueueRow) => railStatusLine(row, rowContext.contextFor.value(row));
+const batchPosition = (row: QueueRow) => batchPositionLabel(row, generation.jobs);
 
 const explainOpen = ref(false);
 
@@ -158,15 +168,35 @@ function progressPct(row: QueueRow): number | null {
           </span>
           <div class="flex min-w-0 flex-1 flex-col gap-1">
             <span class="truncate text-xs font-semibold text-fg">{{ title(active) }}</span>
-            <span class="truncate text-micro text-fg-2">{{ rowStatusLine(active) }}</span>
+            <span class="truncate text-micro text-fg-2">{{ status(active) }}</span>
             <div class="flex items-center gap-1.5">
-              <span class="block h-1.5 flex-1 overflow-hidden bg-bg-crust" aria-hidden="true">
+              <span
+                class="block h-1.5 flex-1 overflow-hidden bg-bg-crust"
+                :class="commands.paused.value ? 'opacity-50' : ''"
+                aria-hidden="true"
+              >
                 <span
                   class="block h-full bg-accent"
                   :style="{ width: `${progressPct(active) ?? 8}%` }"
-                  :class="progressPct(active) === null ? 'ms-pulse' : ''"
+                  :class="progressPct(active) === null && !commands.paused.value ? 'ms-pulse' : ''"
                 />
               </span>
+              <button
+                v-if="commands.canPause.value"
+                type="button"
+                data-test="queue-active-pause"
+                class="ms-toolbar-button ms-toolbar-button--icon"
+                :class="commands.paused.value ? 'border-accent text-accent' : ''"
+                :title="
+                  commands.paused.value ? 'Resume the queue' : 'Pause the queue after this image'
+                "
+                :aria-label="
+                  commands.paused.value ? 'Resume the queue' : 'Pause the queue after this image'
+                "
+                @click.stop="commands.togglePause()"
+              >
+                <Icon :name="commands.paused.value ? 'play' : 'pause'" :size="11" />
+              </button>
               <button
                 v-if="commands.canCancel(active)"
                 type="button"
@@ -182,7 +212,13 @@ function progressPct(row: QueueRow): number | null {
           </div>
         </div>
         <div class="flex items-center gap-1.5">
-          <span class="font-mono text-micro text-fg-dim">{{ rowGlyph(active) }}</span>
+          <span
+            v-if="batchPosition(active)"
+            data-test="queue-active-batch"
+            class="font-mono text-micro text-fg-dim"
+          >
+            {{ batchPosition(active) }}
+          </span>
           <span class="flex-1" />
           <button
             type="button"
@@ -239,7 +275,7 @@ function progressPct(row: QueueRow): number | null {
         </span>
         <div class="flex min-w-0 flex-1 flex-col gap-0.5">
           <span class="truncate text-micro font-medium text-fg">{{ title(row) }}</span>
-          <span class="truncate text-micro" :class="rowTone(row)">{{ rowStatusLine(row) }}</span>
+          <span class="truncate text-micro" :class="rowTone(row)">{{ status(row) }}</span>
         </div>
         <QueueRowMenu :row="row" />
       </div>

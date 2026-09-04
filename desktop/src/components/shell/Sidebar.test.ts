@@ -771,6 +771,47 @@ describe("Sidebar queue controls", () => {
     await flushPromises();
     expect(pause).toHaveBeenCalledWith("local");
   });
+
+  it("offers the active card its own pause beside its stop, on the same capability", async () => {
+    const wrapper = await mountAt("/create");
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    connection.status = "ready";
+    useGenerationStore().jobs = [
+      {
+        clientId: 1,
+        batchId: 1,
+        model: "flux-dev:q8",
+        prompt: "being made",
+        status: "denoising",
+        step: 18,
+        total: 28,
+      },
+      { clientId: 2, batchId: 1, model: "flux-dev:q8", prompt: "sibling", status: "queued" },
+    ] as never;
+    await flushPromises();
+    expect(wrapper.find("[data-test='queue-active-pause']").exists()).toBe(false);
+    // The mono line states the batch position, never the spinner glyph again.
+    expect(wrapper.get("[data-test='queue-active-batch']").text()).toBe("image 1 of 2");
+
+    const jobs = useJobsStore();
+    jobs.queues.local = { entries: [], caps: { canPause: true }, paused: false } as never;
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-active-pause']").trigger("click");
+    await flushPromises();
+    expect(pause).toHaveBeenCalledWith("local");
+  });
+
+  it("shortens the rail's status to a middot the full Queue view keeps as a dash", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      { clientId: 3, model: "flux-dev:q8", prompt: "waiting", status: "queued", queuePosition: 2 },
+    ] as never;
+    await flushPromises();
+    expect(wrapper.get("[data-test='queue-row-print']").text()).toContain("Waiting · #2 in line");
+  });
 });
 
 describe("Sidebar destination badges", () => {

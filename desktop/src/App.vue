@@ -26,8 +26,11 @@ import {
   allowsNativeContextMenu,
   allowsNativeSelectAll,
   isSelectAllChord,
+  overlayOwnsKeyboard,
+  resolveBareShellShortcut,
   resolveShellShortcut,
 } from "./lib/shortcuts";
+import { useQueueCommands } from "./composables/useQueueCommands";
 import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
@@ -62,6 +65,7 @@ const generation = useGenerationStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const updater = useUpdaterStore();
+const queueCommands = useQueueCommands();
 
 // The machine card and the status bar read one telemetry authority. Its
 // status poll follows the primary connection (the embedded-engine recovery
@@ -176,10 +180,16 @@ function onKeydown(e: KeyboardEvent) {
     }
     return;
   }
-  const action = resolveShellShortcut(e);
+  const route = router.currentRoute.value.path;
+  const action =
+    resolveShellShortcut(e) ??
+    resolveBareShellShortcut(e, {
+      target: document.activeElement,
+      overlayOpen: ui.paletteOpen || contextMenu.visible || overlayOwnsKeyboard(),
+      route,
+    });
   if (!action) return;
   e.preventDefault();
-  const route = router.currentRoute.value.path;
   switch (action.kind) {
     case "navigate":
       void router.push(action.route);
@@ -213,6 +223,9 @@ function onKeydown(e: KeyboardEvent) {
       break;
     case "copy-seed":
       ui.copySeed();
+      break;
+    case "toggle-queue-pause":
+      void queueCommands.togglePause();
       break;
     case "ui-scale":
       contextMenu.close();

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { queueSentence, rowGlyph, rowStatusLine, rowTitle, rowTone } from "./queueRows";
+import {
+  batchPositionLabel,
+  madeTodayCount,
+  queueSentence,
+  railStatusLine,
+  rowGlyph,
+  rowStatusLine,
+  rowTitle,
+  rowTone,
+} from "./queueRows";
 import type { QueueRow } from "../composables/useQueueActivity";
 import type { Job } from "./generationJob";
 
@@ -70,6 +79,78 @@ describe("queue rows speak the lexicon", () => {
     expect(rowStatusLine(parked)).toBe("Held — no free GPU");
     expect(rowTone(parked)).toBe("text-state-blocked");
     expect(rowGlyph(parked)).toBe("·");
+  });
+
+  it("says how long is left only where the host predicted a finish", () => {
+    const making = print({ status: "denoising", step: 18 });
+    expect(rowStatusLine(making, { etaSeconds: 12 })).toBe("Adding detail — about 12s left");
+    expect(rowStatusLine(making, { etaSeconds: null })).toBe("Adding detail — pass 18 of 28");
+  });
+
+  it("says what a parked row is parked on, not a bare Waiting", () => {
+    const waiting = print({ status: "queued", queuePosition: 2 });
+    expect(rowStatusLine(waiting)).toBe("Waiting — #2 in line");
+    expect(
+      rowStatusLine(waiting, {
+        wait: { state: "paused", position: 2, blockedReason: null, preparation: null },
+      }),
+    ).toBe("Paused after restart");
+    expect(
+      rowStatusLine(waiting, {
+        wait: { state: "held", position: 2, blockedReason: null, preparation: null },
+      }),
+    ).toBe("Held");
+    expect(
+      rowStatusLine(waiting, {
+        wait: {
+          state: "queued",
+          position: 2,
+          blockedReason: "preparing",
+          preparation: { component: "flux weights", fraction: 0.42, elapsedMs: null },
+        },
+      }),
+    ).toBe("Getting a style ready · 42%");
+    expect(
+      rowStatusLine(waiting, {
+        wait: {
+          state: "queued",
+          position: 2,
+          blockedReason: "model_not_installed",
+          preparation: null,
+        },
+      }),
+    ).toBe("Waiting — model not installed");
+  });
+
+  it("says a print being made under a paused queue is paused, at the pass it reached", () => {
+    expect(rowStatusLine(print({ status: "denoising", step: 18 }), { queuePaused: true })).toBe(
+      "Paused at pass 18 of 28",
+    );
+  });
+
+  it("shortens the rail's dash to a middot while the full view keeps it", () => {
+    const making = print({ status: "denoising", step: 18 });
+    expect(railStatusLine(making)).toBe("Adding detail · pass 18 of 28");
+    expect(rowStatusLine(making)).toBe("Adding detail — pass 18 of 28");
+  });
+
+  it("states a batch sibling's place, and says nothing for a lone print", () => {
+    const jobs = [1, 2, 3, 4].map((clientId) => job({ clientId, batchId: 7 }));
+    expect(batchPositionLabel(print({ clientId: 2, batchId: 7 }), jobs)).toBe("image 2 of 4");
+    expect(
+      batchPositionLabel(print({ clientId: 1, batchId: 9 }), [job({ batchId: 9 })]),
+    ).toBeNull();
+  });
+
+  it("counts today's prints from midnight, not from the session", () => {
+    const now = new Date("2026-09-03T14:00:00");
+    const at = (iso: string) => ({ item: { timestamp: new Date(iso).getTime() / 1000 } });
+    expect(
+      madeTodayCount(
+        [at("2026-09-03T13:59:00"), at("2026-09-03T00:00:00"), at("2026-09-02T23:59:59")],
+        now,
+      ),
+    ).toBe(2);
   });
 
   it("writes the status bar's queue clause", () => {

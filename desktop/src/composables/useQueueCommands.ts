@@ -184,6 +184,32 @@ export function useQueueCommands(): QueueCommands {
     await jobs.reorderQueued(ref.hostId, ref.id, Math.max(0, position));
   }
 
+  /** This row's entry in its host's live queue listing, when it has one. */
+  function queueEntryOf(row: QueueRow) {
+    const ref = serverRef(row);
+    if (!ref) return null;
+    return jobs.queues[ref.hostId]?.entries.find((entry) => entry.id === ref.id) ?? null;
+  }
+
+  /**
+   * Pause or resume ONE waiting row, where the host offers per-job pause.
+   * Only queued and already-paused rows have an API: a running job cannot be
+   * suspended, so the entry is absent rather than disabled.
+   */
+  function pauseEntries(row: QueueRow): MenuEntry[] {
+    const ref = serverRef(row);
+    if (!ref || jobs.queues[ref.hostId]?.caps?.canPauseJob !== true) return [];
+    const entry = queueEntryOf(row);
+    if (!entry || (entry.state !== "queued" && entry.state !== "paused")) return [];
+    const paused = entry.state === "paused";
+    return [
+      {
+        label: paused ? "Resume" : "Pause",
+        action: () => void jobs.setJobPaused(ref.hostId, ref.id, !paused).catch(report),
+      },
+    ];
+  }
+
   /** The reorder entries for a waiting row, or nothing where the host does not offer it. */
   function reorderEntries(row: QueueRow): MenuEntry[] {
     if (!canReorder(row)) return [];
@@ -254,6 +280,7 @@ export function useQueueCommands(): QueueCommands {
     if (row.kind === "shared") {
       return [
         ...reorderEntries(row),
+        ...pauseEntries(row),
         { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
       ];
     }
@@ -267,6 +294,7 @@ export function useQueueCommands(): QueueCommands {
     const live = job.status !== "complete" && job.status !== "error";
     return [
       ...reorderEntries(row),
+      ...pauseEntries(row),
       live
         ? { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) }
         : {

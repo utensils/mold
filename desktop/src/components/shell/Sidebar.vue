@@ -121,7 +121,7 @@ onBeforeUnmount(() => {
 
     <!-- wordmark -->
     <div
-      class="mb-3 flex shrink-0 items-center gap-2 px-2 pb-1"
+      class="flex shrink-0 items-center gap-2 px-2 pt-1 pb-3.5"
       :class="collapsed ? 'justify-center' : ''"
     >
       <img :src="logoUrl" alt="mold" class="h-[22px] w-[22px] shrink-0 object-contain" />
@@ -228,18 +228,14 @@ onBeforeUnmount(() => {
     <div v-else class="flex-1" />
 
     <!-- settings -->
-    <div class="mt-2 shrink-0">
+    <div class="mt-3 shrink-0">
       <NavItem
         icon="settings"
         label="Settings"
         :collapsed="collapsed"
         :active="isActive('/settings')"
         @select="router.push('/settings')"
-      >
-        <template #trailing>
-          <span class="opacity-70">{{ shortcutLabel(",") }}</span>
-        </template>
-      </NavItem>
+      />
     </div>
   </nav>
 </template>

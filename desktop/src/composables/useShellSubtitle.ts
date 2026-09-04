@@ -1,8 +1,10 @@
 import { computed, type ComputedRef } from "vue";
 import { useRoute } from "vue-router";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useDownloadsStore } from "../stores/downloads";
 import { useGalleryStore } from "../stores/gallery";
+import { useGenerateFormStore } from "../stores/generateForm";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useQueueActivity } from "./useQueueActivity";
@@ -22,6 +24,7 @@ export function useShellSubtitle(): ComputedRef<string> {
   const draft = useSequenceDraftStore();
   const downloads = useDownloadsStore();
   const gallery = useGalleryStore();
+  const generateForm = useGenerateFormStore();
   const hosts = useHostsStore();
   const models = useModelStore();
   const activity = useQueueActivity();
@@ -35,7 +38,14 @@ export function useShellSubtitle(): ComputedRef<string> {
     }
     switch (route.path) {
       case "/create": {
-        const output = draft.output === "sequence" ? "Short clip" : "Still picture";
+        // The same three-way control CreateHeader draws: a clip is the
+        // authored output kind, and 3-D is a property of the chosen style.
+        const output =
+          draft.output === "sequence"
+            ? "Short clip"
+            : isMeshFamily(generateForm.form.family)
+              ? "3-D object"
+              : "Still picture";
         return `${output} · ${countPhrase(waiting, "waiting", "waiting")}`;
       }
       case "/queue":

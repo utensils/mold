@@ -51,8 +51,6 @@ export interface QueueActivity {
   rows: ComputedRef<QueueRow[]>;
   /** The row being made now, if any (the sidebar's active card). */
   active: ComputedRef<QueueRow | null>;
-  /** Finished and failed prints kept for the rail. */
-  settled: ComputedRef<QueueRow[]>;
   activeCount: ComputedRef<number>;
   waitingCount: ComputedRef<number>;
   /** Everything in flight — the badge on the Queue destination. */
@@ -133,12 +131,10 @@ export function useQueueActivity(): QueueActivity {
   const running = computed(() => rows.value.filter(rowRunning));
   const active = computed(() => running.value[0] ?? null);
   const waiting = computed(() => rows.value.filter((row) => !rowRunning(row) && !rowSettled(row)));
-  const settled = computed(() => rows.value.filter(rowSettled));
 
   return {
     rows,
     active,
-    settled,
     activeCount: computed(() => running.value.length),
     waitingCount: computed(() => waiting.value.length),
     liveCount: computed(() => running.value.length + waiting.value.length),

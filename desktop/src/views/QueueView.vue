@@ -10,26 +10,32 @@ import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import QueueRowMenu from "../components/shell/QueueRowMenu.vue";
 import { useQueueActivity, type QueueRow } from "../composables/useQueueActivity";
 import { useQueueCommands } from "../composables/useQueueCommands";
-import { rowGlyph, rowStatusLine, rowTitle, rowTone } from "../lib/queueRows";
+import { useQueueRowContext } from "../composables/useQueueRowContext";
+import { madeTodayCount, rowGlyph, rowStatusLine, rowTitle, rowTone } from "../lib/queueRows";
+import { formatEta } from "../lib/format";
 import { thumbnailPath } from "../lib/gallery/media";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
 import { modelDisplayNameForId } from "../lib/models";
+import { useGalleryStore } from "../stores/gallery";
 import { useGenerationStore } from "../stores/generation";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 
+const gallery = useGalleryStore();
 const generation = useGenerationStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const queue = useQueueActivity();
 const commands = useQueueCommands();
+const rowContext = useQueueRowContext();
 const title = (row: QueueRow) => rowTitle(row, hostModels.unionInstalled);
+const status = (row: QueueRow) => rowStatusLine(row, rowContext.contextFor.value(row));
 
-const doneToday = computed(
-  () =>
-    queue.settled.value.filter((row) => row.kind === "print" && row.print.status === "complete")
-      .length,
-);
+const doneToday = computed(() => madeTodayCount(gallery.merged));
+const totalEta = computed(() => {
+  const seconds = rowContext.totalEtaSeconds.value;
+  return seconds === null || seconds <= 0 ? null : `about ${formatEta(seconds)} left in total`;
+});
 const hasFinished = computed(() =>
   generation.jobs.some((j) => j.status === "complete" || j.status === "error"),
 );
@@ -56,7 +62,15 @@ function progress(row: QueueRow): number | null {
   if (row.kind === "sequence" && row.sequence.stageCount > 0 && row.sequence.phase !== "queued") {
     return Math.round((row.sequence.currentStage / row.sequence.stageCount) * 100);
   }
-  return null;
+  // A row waiting on its style has a meter too: the download it is waiting on.
+  const preparation = rowContext.contextFor.value(row).wait?.preparation?.fraction;
+  return preparation == null ? null : Math.round(preparation * 100);
+}
+/** A meter fills in the accent, or in the blocked tone when it measures a wait. */
+function meterFill(row: QueueRow): string {
+  return rowContext.contextFor.value(row).wait?.blockedReason === "preparing"
+    ? "bg-state-blocked"
+    : "bg-accent";
 }
 /** A mesh print's saved file is binary glTF, so its rendered poster is its
  * only still — checked before every raster arm. */
@@ -86,6 +100,9 @@ function previewSrc(row: QueueRow): string | null {
     >
       <span data-test="queue-headline" class="text-sm font-semibold text-fg">
         {{ queue.activeCount.value }} being made · {{ queue.waitingCount.value }} waiting
+      </span>
+      <span v-if="totalEta" data-test="queue-total-eta" class="text-xs text-fg-dim">
+        {{ totalEta }}
       </span>
       <span class="flex-1" />
       <button
@@ -132,9 +149,10 @@ function previewSrc(row: QueueRow): string | null {
               value: queue.waitingCount.value,
               note: queue.waitingCount.value ? 'in the order you asked' : 'the line is empty',
             },
-            { label: 'Done this session', value: doneToday, note: 'all saved to My images' },
+            { label: 'Done today', value: doneToday, note: 'all saved to My images' },
           ]"
           :key="stat.label"
+          data-test="queue-stat"
           class="flex flex-col gap-1.5 rounded-control border border-border bg-panel p-3.5"
         >
           <span class="ms-group-label uppercase">{{ stat.label }}</span>
@@ -207,13 +225,17 @@ function previewSrc(row: QueueRow): string | null {
             <span class="truncate text-sm text-fg">{{ title(row) }}</span>
           </div>
           <div class="flex flex-col gap-1 pr-4">
-            <span class="text-xs" :class="rowTone(row)">{{ rowStatusLine(row) }}</span>
+            <span class="text-xs" :class="rowTone(row)">{{ status(row) }}</span>
             <span
               v-if="progress(row) !== null"
               class="block h-[5px] overflow-hidden bg-surface"
               aria-hidden="true"
             >
-              <span class="block h-full bg-accent" :style="{ width: `${progress(row)}%` }" />
+              <span
+                class="block h-full"
+                :class="meterFill(row)"
+                :style="{ width: `${progress(row)}%` }"
+              />
             </span>
           </div>
           <span class="truncate font-mono text-xs text-fg-dim">{{ model(row) }}</span>

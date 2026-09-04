@@ -6,6 +6,7 @@ import QueueView from "./QueueView.vue";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useConnectionStore } from "../stores/connection";
 import { isSeparator, useContextMenuStore } from "../stores/contextMenu";
+import { useGalleryStore } from "../stores/gallery";
 import { useGenerationStore } from "../stores/generation";
 import { useHostsStore } from "../stores/hosts";
 import { useJobsStore, type HostQueueSnapshot } from "../stores/jobs";
@@ -178,5 +179,80 @@ describe("QueueView", () => {
     await flushPromises();
     await second.get("[data-test='queue-row-menu']").trigger("click");
     expect(menuLabels()).not.toContain("Jump the line");
+  });
+
+  it("pauses and resumes one waiting print only where the host offers it", async () => {
+    const wrapper = await mountView();
+    useGenerationStore().jobs = [
+      { clientId: 1, id: "srv-1", model: "flux-dev:q8", prompt: "waiting", status: "queued" },
+    ] as never;
+    const jobs = useJobsStore();
+    const snapshot = {
+      hostId: "local",
+      entries: [{ id: "srv-1", state: "queued" }],
+      paused: false,
+      caps: { canPause: false, canPauseJob: false, canCancelAll: false, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    } as unknown as HostQueueSnapshot;
+    jobs.queues.local = snapshot;
+    const setPaused = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined);
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='queue-row-print']");
+    await row.get("[data-test='queue-row-menu']").trigger("click");
+    expect(menuLabels()).not.toContain("Pause");
+
+    snapshot.caps = {
+      canPause: false,
+      canPauseJob: true,
+      canCancelAll: false,
+      canReorder: false,
+    } as never;
+    await flushPromises();
+    await row.get("[data-test='queue-row-menu']").trigger("click");
+    expect(menuLabels()).toContain("Pause");
+    const pause = useContextMenuStore().entries.find(
+      (entry) => !isSeparator(entry) && entry.label === "Pause",
+    );
+    if (!pause || isSeparator(pause)) throw new Error("no pause entry");
+    pause.action?.();
+    await flushPromises();
+    expect(setPaused).toHaveBeenCalledWith("local", "srv-1", true);
+
+    snapshot.entries[0]!.state = "paused";
+    await flushPromises();
+    await row.get("[data-test='queue-row-menu']").trigger("click");
+    expect(menuLabels()).toContain("Resume");
+  });
+
+  it("counts today's prints from the gallery and states the fleet's time left", async () => {
+    const wrapper = await mountView();
+    const gallery = useGalleryStore();
+    const now = Date.now();
+    gallery.buckets.local = {
+      items: [
+        { filename: "today.png", timestamp: Math.floor(now / 1000) },
+        { filename: "yesterday.png", timestamp: Math.floor(now / 1000) - 86_400 * 2 },
+      ],
+      error: null,
+    } as never;
+    const jobs = useJobsStore();
+    jobs.queues.local = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: null,
+      gpuOrdinals: [],
+      plan: { work_items: [{ work_id: "srv-1", estimated_finish_unix_ms: now + 45_000 }] },
+      error: null,
+    } as unknown as HostQueueSnapshot;
+    await flushPromises();
+
+    const stats = wrapper.findAll("[data-test='queue-stat']");
+    expect(stats[2]!.text()).toContain("Done today");
+    expect(stats[2]!.text()).toContain("all saved to My images");
+    expect(stats[2]!.text()).toContain("1");
+    expect(wrapper.get("[data-test='queue-total-eta']").text()).toBe("about 45s left in total");
   });
 });
