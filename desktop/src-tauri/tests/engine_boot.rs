@@ -2,12 +2,22 @@
 //! on an ephemeral port and exercises the wire contract the webview relies
 //! on: health, capabilities, API-key auth, and graceful shutdown.
 
+use std::io::Write;
 use std::time::Duration;
 
 use mold_desktop_lib::server;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_boots_authenticates_and_shuts_down() {
+    // The server's own log, straight to stderr. Shutdown awaits a dozen
+    // background owners in sequence; when one stalls, this is what names it.
+    // `writeln!` rather than the print macros because libtest's capture hook
+    // only intercepts those, and a passing-but-slow run must stay readable.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter("mold_server=debug,warn")
+        .try_init();
+
     let models_dir = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     // Isolate from the user's real database and gallery. The server waits for
@@ -68,9 +78,28 @@ async fn engine_boots_authenticates_and_shuts_down() {
 
     // …and reported dead once the thread exits, so the connection state
     // machine knows to restart instead of handing out a dead base URL.
+    //
+    // Embedded shutdown has no enforced deadline of its own: the hard-exit
+    // deadline is off for an embedded server (it would take the whole app
+    // down), so this bound is the only thing that catches a stalled phase.
+    // It is the app's own stop budget with headroom for a loaded runner —
+    // `stop_local_engine` gives the engine 10 s before it tells the user
+    // gallery authority is stuck with the server, so a shutdown anywhere near
+    // this bound is already broken for users, not merely slow here.
+    let budget = Duration::from_secs(60);
+    let started = std::time::Instant::now();
+    let exited = engine.join(budget);
+    let elapsed = started.elapsed();
+    // Not `eprintln!`: libtest captures the print macros and shows them only
+    // for a FAILING test, so a run drifting toward the bound would say
+    // nothing. Writing to the stderr handle bypasses that capture.
+    let _ = writeln!(
+        std::io::stderr(),
+        "engine shutdown took {elapsed:.1?} (bound {budget:?}, app stop budget 10s)"
+    );
     assert!(
-        engine.join(Duration::from_secs(15)),
-        "engine thread did not exit"
+        exited,
+        "engine thread did not exit within {budget:?} (waited {elapsed:.1?})"
     );
     assert!(!engine.is_alive(), "engine thread did not exit");
 }
