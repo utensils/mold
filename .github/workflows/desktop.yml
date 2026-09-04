@@ -224,7 +224,7 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       # `pulid` is in every shipped desktop recipe, so its lints must compile
       # here rather than first on a release runner.
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
 
   desktop-windows:
     name: Windows (clippy, test; main NSIS installer)
@@ -303,7 +303,7 @@ jobs:
       # because fdk-aac-sys cannot compile with MSVC (see the crate's own
       # target-conditional entry in src-tauri/Cargo.toml).
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
       - name: Check the Windows CLI release recipe
         working-directory: .
         run: >-
@@ -326,7 +326,7 @@ jobs:
       - name: Build the self-signed NSIS installer
         if: github.event_name == 'push'
         run: >-
-          bunx tauri build --features pulid --bundles nsis --ci -v
+          bunx tauri build --features pulid,webp --bundles nsis --ci -v
           --config src-tauri/tauri.windows-self-signed.conf.json
       - name: Re-sign the final standalone desktop executable
         if: github.event_name == 'push'
@@ -430,9 +430,9 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
       - if: github.event_name == 'push'
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,cudnn,pulid -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,cudnn,pulid,webp -- -D warnings
       - name: Prepare linuxdeploy and the CI driver stub
         if: github.event_name == 'push'
         shell: bash
@@ -462,7 +462,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bunx tauri build --features h3-cuda,cudnn,pulid --bundles appimage --ci -v
+          bunx tauri build --features h3-cuda,cudnn,pulid,webp --bundles appimage --ci -v
       - name: Verify bundled CUDA libraries
         if: github.event_name == 'push'
         shell: bash

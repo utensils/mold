@@ -84,7 +84,7 @@ jobs:
       - name: Build the self-signed Windows desktop installer
         working-directory: desktop
         run: >-
-          bunx tauri build --features pulid --bundles nsis --ci -v
+          bunx tauri build --features pulid,webp --bundles nsis --ci -v
           --config src-tauri/tauri.windows-self-signed.conf.json
 
       # Tauri signs while bundling, then may rewrite the standalone executable.

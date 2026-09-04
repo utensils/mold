@@ -129,6 +129,13 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+# The mDNS browse receiver is `flume::Receiver` through mdns-sd's re-export;
+# the bounded-shutdown tests build a channel of the same 0.12 line so the two
+# `Receiver` types unify. `default-features = false` mirrors how mdns-sd
+# depends on it, so the test channel behaves like the daemon's (flume's
+# default `eventual-fairness` changes receiver wake selection) and the
+# lockfile is untouched.
+flume = { version = "0.12", default-features = false }
 # Test-only feature unification lets the server prove its frozen H3 authority
 # against the private loader without exposing that loader on a runnable feature.
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.26.0", features = ["h3-private-uat"] }

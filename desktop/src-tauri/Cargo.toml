@@ -142,6 +142,10 @@ metal = ["mold-server/metal"]
 # `mold_core::identity::identity_runtime_available()` is `cfg!(feature =
 # "pulid")` inside mold-core's own compilation.
 pulid = ["mold-core/pulid", "mold-server/pulid"]
+# Animated WebP export for clips and mesh turntables. This must be forwarded
+# explicitly: the `image` crate's decode feature above is unrelated to the
+# embedded server's statically linked encoder.
+webp = ["mold-server/webp"]
 
 [profile.release]
 lto = "thin"
@@ -149,6 +153,9 @@ codegen-units = 16
 strip = true
 
 [dev-dependencies]
+# Test-only: the engine-boot test prints the server's own shutdown log so a
+# stalled phase names itself in CI instead of only reporting elapsed time.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Test-only: builds the two-triangle GLB the offline mesh-poster tests render.
 # `default = []` and the crate is already in this root's graph through
 # mold-server, so this edge adds no features and no extra compilation.

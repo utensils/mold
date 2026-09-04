@@ -637,6 +637,16 @@ jobs:
           cargo test -p mold-ai-core --features pulid --lib identity
           cargo test -p mold-ai-inference --features pulid --lib identity
           cargo test -p mold-ai-server --features pulid --lib identity
+      # `mdns` is not a default feature and nothing in the workspace turns it
+      # on, so `cargo test/clippy --workspace` never COMPILES mdns.rs — the
+      # module's tests, including the guard against reintroducing the blocking
+      # `recv()` that hung server shutdown (#1581), were dark. The desktop app
+      # enables the feature but is a separate cargo root.
+      - name: Clippy and test the mDNS surface
+        if: env.RUN_RUST_SUITE == 'true'
+        run: |
+          cargo clippy -p mold-ai-server --features mdns --all-targets -- -D warnings
+          cargo test -p mold-ai-server --features mdns --lib mdns
       - name: Record protected gate success
         run: echo "Required Rust and release routes completed successfully."
 

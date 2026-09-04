@@ -283,6 +283,7 @@
             [
               (desktopFeatureFor computeCap)
               "pulid"
+              "webp"
             ]
             # The desktop app embeds the same server, so it takes the same
             # convolution backend on Linux CUDA (#1483).
@@ -1620,9 +1621,9 @@
                   ${desktopSetup}
                   cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
                   cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-                  # `pulid` is in every shipped desktop recipe, so its lints
-                  # belong in the gate rather than first on a release runner.
-                  cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
+                  # `pulid` and `webp` are in every shipped desktop recipe, so
+                  # their lints belong here rather than first on a release runner.
+                  cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --features pulid,webp -- -D warnings
                   bun install --frozen-lockfile
                   cd desktop
                   bunx vue-tsc -b

@@ -3452,6 +3452,7 @@ dependencies = [
  "cudarc 0.19.8",
  "dirs 5.0.1",
  "filetime",
+ "flume",
  "fs2",
  "futures",
  "futures-core",

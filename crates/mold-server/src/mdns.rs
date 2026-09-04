@@ -48,7 +48,15 @@ pub struct MdnsGuard {
 pub struct MdnsBrowserGuard {
     daemon: ServiceDaemon,
     thread: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// How often the browse loop looks up from the channel to notice a stop
+/// request. The browse receiver's sender belongs to the mDNS daemon, so a
+/// blocking `recv()` is only woken by the daemon choosing to close it; on a
+/// host where multicast never works that never happens and the join below
+/// waits forever. Shutdown must be bounded by mold, not by the daemon.
+const BROWSE_STOP_POLL: Duration = Duration::from_millis(250);
 
 impl MdnsGuard {
     /// Unregister the service and shut the daemon down. Best-effort: errors are
@@ -68,6 +76,12 @@ impl MdnsBrowserGuard {
     /// Stop browsing and join the cache updater thread. Best-effort on the
     /// server shutdown path, matching [`MdnsGuard::shutdown`].
     pub fn shutdown(mut self) {
+        // Set BEFORE asking the daemon to stop: the join below is unbounded,
+        // and the flag is the only wake-up that does not depend on the daemon
+        // answering. `stop_browse`/`shutdown` remain the fast path — they
+        // close the channel and the loop leaves immediately — but a daemon
+        // that never answers now costs `BROWSE_STOP_POLL`, not the process.
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.daemon.stop_browse(SERVICE_TYPE);
         let _ = self.daemon.shutdown();
         if let Some(thread) = self.thread.take() {
@@ -387,6 +401,71 @@ pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<Mdn
     Ok(MdnsGuard { daemon, fullname })
 }
 
+/// Drain browse events into the shared peer cache until the channel closes,
+/// the daemon reports `SearchStopped`, or `stop` is set. Split out of the
+/// thread body so a test can prove the loop leaves on the flag alone, with a
+/// live sender and no events — the shape a daemon that never closes its
+/// channel presents on shutdown.
+fn browse_until_stopped(
+    receiver: &mdns_sd::Receiver<ServiceEvent>,
+    discovery: &crate::state::DiscoveryState,
+    own_instance_id: &str,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    let mut found: BTreeMap<String, mold_core::DiscoveryPeer> = BTreeMap::new();
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        // `is_disconnected` rather than matching flume's error type: the
+        // receiver reaches us through mdns-sd's re-export, and mold does not
+        // otherwise depend on flume.
+        let event = match receiver.recv_timeout(BROWSE_STOP_POLL) {
+            Ok(event) => event,
+            Err(_) if receiver.is_disconnected() && receiver.is_empty() => return,
+            Err(_) => continue,
+        };
+        match event {
+            ServiceEvent::ServiceResolved(info) => {
+                let addresses: Vec<IpAddr> =
+                    info.addresses.iter().map(|a| a.to_ip_addr()).collect();
+                let txt = info
+                    .txt_properties
+                    .iter()
+                    .map(|p| (p.key().to_string(), p.val_str().to_string()))
+                    .collect();
+                let server =
+                    from_service_parts(&info.fullname, &info.host, info.port, addresses, txt);
+                let is_this_machine = server.instance_id.as_deref() == Some(own_instance_id);
+                found.insert(
+                    info.fullname.clone(),
+                    mold_core::DiscoveryPeer {
+                        name: server.name,
+                        url: server.url,
+                        host: server.host,
+                        port: server.port,
+                        version: server.version,
+                        auth_required: server.auth_required,
+                        instance_id: server.instance_id,
+                        is_this_machine,
+                    },
+                );
+            }
+            ServiceEvent::ServiceRemoved(_, fullname) => {
+                found.remove(&fullname);
+            }
+            ServiceEvent::SearchStopped(_) => break,
+            _ => continue,
+        }
+
+        let peers = found.values().cloned().collect();
+        *discovery
+            .peers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = peers;
+    }
+}
+
 /// Start the server's long-lived DNS-SD browser and cache updater.
 ///
 /// The background thread tracks resolved and removed services by fullname.
@@ -401,56 +480,19 @@ pub fn start_browser(
         .context("failed to start mDNS discovery browse")?;
 
     discovery.set_can_browse(true);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let thread_discovery = discovery.clone();
+    let thread_instance_id = own_instance_id;
+    let thread_stop = stop.clone();
     let thread = std::thread::Builder::new()
         .name("mold-mdns-browser".to_string())
         .spawn(move || {
-            let mut found: BTreeMap<String, mold_core::DiscoveryPeer> = BTreeMap::new();
-            while let Ok(event) = receiver.recv() {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        let addresses: Vec<IpAddr> =
-                            info.addresses.iter().map(|a| a.to_ip_addr()).collect();
-                        let txt = info
-                            .txt_properties
-                            .iter()
-                            .map(|p| (p.key().to_string(), p.val_str().to_string()))
-                            .collect();
-                        let server = from_service_parts(
-                            &info.fullname,
-                            &info.host,
-                            info.port,
-                            addresses,
-                            txt,
-                        );
-                        let is_this_machine =
-                            server.instance_id.as_deref() == Some(own_instance_id.as_str());
-                        found.insert(
-                            info.fullname.clone(),
-                            mold_core::DiscoveryPeer {
-                                name: server.name,
-                                url: server.url,
-                                host: server.host,
-                                port: server.port,
-                                version: server.version,
-                                auth_required: server.auth_required,
-                                instance_id: server.instance_id,
-                                is_this_machine,
-                            },
-                        );
-                    }
-                    ServiceEvent::ServiceRemoved(_, fullname) => {
-                        found.remove(&fullname);
-                    }
-                    ServiceEvent::SearchStopped(_) => break,
-                    _ => continue,
-                }
-                let peers = found.values().cloned().collect();
-                *thread_discovery
-                    .peers
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = peers;
-            }
+            browse_until_stopped(
+                &receiver,
+                &thread_discovery,
+                &thread_instance_id,
+                &thread_stop,
+            );
             thread_discovery.mark_unavailable();
         });
     let thread = match thread {
@@ -468,6 +510,7 @@ pub fn start_browser(
     Ok(MdnsBrowserGuard {
         daemon,
         thread: Some(thread),
+        stop,
     })
 }
 
@@ -513,6 +556,69 @@ pub fn discover(timeout: Duration) -> Result<Vec<DiscoveredServer>> {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The browse channel's sender belongs to the mDNS daemon. On a host where
+    /// multicast never works the daemon can fail to close it during shutdown,
+    /// and the old blocking `recv()` then parked the browser thread forever —
+    /// `MdnsBrowserGuard::shutdown`'s join never returned, so an embedded
+    /// server never finished stopping. Prove the loop leaves on the flag with
+    /// a LIVE sender and no events.
+    #[test]
+    fn the_browse_loop_stops_on_the_flag_even_when_the_channel_stays_open() {
+        let (sender, receiver) = flume_channel();
+        let discovery = crate::state::DiscoveryState::default();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let loop_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            browse_until_stopped(&receiver, &discovery, "self-id", &loop_stop);
+        });
+
+        // Nothing is ever sent and the sender stays alive for the whole test.
+        std::thread::sleep(BROWSE_STOP_POLL / 2);
+        assert!(!worker.is_finished(), "the loop waits while it may browse");
+        stop.store(true, Ordering::SeqCst);
+
+        let deadline = Instant::now() + BROWSE_STOP_POLL * 8;
+        while !worker.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            worker.is_finished(),
+            "the browse loop must leave within a poll of the stop flag"
+        );
+        worker.join().expect("browse loop thread");
+        drop(sender);
+    }
+
+    /// A daemon that DOES close the channel still ends the loop immediately;
+    /// the flag is the fallback, not the only exit.
+    #[test]
+    fn the_browse_loop_stops_when_the_daemon_closes_the_channel() {
+        let (sender, receiver) = flume_channel();
+        let discovery = crate::state::DiscoveryState::default();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let worker = std::thread::spawn(move || {
+            browse_until_stopped(&receiver, &discovery, "self-id", &stop);
+        });
+        drop(sender);
+
+        let deadline = Instant::now() + BROWSE_STOP_POLL * 8;
+        while !worker.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker.is_finished(), "a closed channel ends the loop");
+        worker.join().expect("browse loop thread");
+    }
+
+    /// `mdns_sd::Receiver` IS `flume::Receiver` (mdns-sd re-exports it), so a
+    /// test channel comes from flume directly — pinned to the same 0.12 line
+    /// mdns-sd depends on, or the two `Receiver` types would not unify.
+    fn flume_channel() -> (flume::Sender<ServiceEvent>, flume::Receiver<ServiceEvent>) {
+        flume::bounded(8)
+    }
 
     #[test]
     fn is_advertisable_rejects_loopback_and_localhost() {

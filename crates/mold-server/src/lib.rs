@@ -1349,34 +1349,67 @@ pub async fn run_server(
 
     let fatal_cuda_journal = queue_journal.clone();
     let fatal_cuda_deadline = fatal_cuda_error.clone();
-    let server = std::future::IntoFuture::into_future(
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = http_shutdown_rx.await;
-            tracing::info!("shutting down");
-        }),
-    );
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => result?,
-        _ = fatal_cuda_shutdown.notified() => {
-            // Before anything discards: this path ends in `anyhow::bail!` and a
-            // supervised restart, so the queue must survive it. Missing this
-            // fence would make the one restart mold performs on its own behalf
-            // the one that deletes every queued job.
-            fatal_cuda_journal.retain_all();
-            // Same bound as the operator-initiated path: this restart is the
-            // one mold performs on its own behalf, and it must not hang.
-            arm_shutdown_deadline(fatal_cuda_deadline);
-            tracing::error!("fatal CUDA context error; stopping server for process restart");
-            // Give the triggering request a brief window to receive its explicit
-            // fatal-context error, then drop the server future. A normal graceful
-            // shutdown could wait forever on queued SSE requests assigned to the
-            // now-quarantined worker and prevent the service manager from restarting.
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let (drain_started_tx, drain_started_rx) = tokio::sync::oneshot::channel::<()>();
+    // A block, so the serve future — and with it the listener — is dropped
+    // before the shutdown steps below run, on every arm. (On the fatal-CUDA
+    // arm this is what that arm's own comment always described; the
+    // listener used to stay open, backlogging connects, until `run_server`
+    // returned.)
+    {
+        let server = std::future::IntoFuture::into_future(
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = http_shutdown_rx.await;
+                tracing::info!("shutting down");
+                let _ = drain_started_tx.send(());
+            }),
+        );
+        tokio::pin!(server);
+        let drain_grace = http_drain_grace();
+        tokio::select! {
+            // Biased: a drain that completes on the same tick its grace
+            // elapses is a completed drain, and its result is not swallowed.
+            biased;
+            result = &mut server => result?,
+            _ = drain_grace_elapsed(drain_started_rx, drain_grace) => {
+                // Graceful shutdown waits for every in-flight request, and a
+                // client the host does not control can keep one in flight for
+                // as long as it likes: a webview that stops draining a paused
+                // video, a request whose body never arrives. The host asked for
+                // a stop with a budget it cannot enforce by ending the process,
+                // so the drain is bounded here. Dropping the serve future closes
+                // the listener; the connections themselves end with the runtime
+                // the host tears down once this returns. Until then a handler
+                // this arm abandoned may still be running against the
+                // subsystems the steps below tear down — `begin_runtime_shutdown`
+                // fenced scheduling before the drain began, and by definition
+                // that request is stuck, so the steps do not wait for it.
+                if let Some(grace) = drain_grace {
+                    tracing::warn!(
+                        ?grace,
+                        "in-flight HTTP requests outlived the drain grace; giving up on them"
+                    );
+                }
+            }
+            _ = fatal_cuda_shutdown.notified() => {
+                // Before anything discards: this path ends in `anyhow::bail!` and a
+                // supervised restart, so the queue must survive it. Missing this
+                // fence would make the one restart mold performs on its own behalf
+                // the one that deletes every queued job.
+                fatal_cuda_journal.retain_all();
+                // Same bound as the operator-initiated path: this restart is the
+                // one mold performs on its own behalf, and it must not hang.
+                arm_shutdown_deadline(fatal_cuda_deadline);
+                tracing::error!("fatal CUDA context error; stopping server for process restart");
+                // Give the triggering request a brief window to receive its explicit
+                // fatal-context error, then drop the server future. A normal graceful
+                // shutdown could wait forever on queued SSE requests assigned to the
+                // now-quarantined worker and prevent the service manager from restarting.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         }
     }
 
@@ -1384,49 +1417,62 @@ pub async fn run_server(
     // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
     // the task is cleaned up on the same shutdown path as the HTTP server.
     // Matches the aggregator handle pattern from commit 5e43886.
+    tracing::debug!(step = "mdns-advertise", "awaiting shutdown step");
     #[cfg(feature = "mdns")]
     if let Some(guard) = mdns_guard {
         guard.shutdown();
     }
+    tracing::debug!(step = "mdns-browse", "awaiting shutdown step");
     #[cfg(feature = "mdns")]
     if let Some(guard) = mdns_browser_guard {
         guard.shutdown();
     }
+    tracing::debug!(step = "downloads", "awaiting shutdown step");
     downloads_shutdown.cancel();
     downloads_driver.abort();
     let _ = downloads_driver.await;
+    tracing::debug!(step = "video-upscale", "awaiting shutdown step");
     if let Some(runtime) = video_upscale_dispatcher {
         runtime.shutdown().await;
     }
+    tracing::debug!(step = "idle-evict", "awaiting shutdown step");
     if let Some(handle) = idle_evict_handle {
         handle.abort();
         let _ = handle.await;
     }
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
+    tracing::debug!(step = "resources-aggregator", "awaiting shutdown step");
     resources_aggregator.abort();
     let _ = resources_aggregator.await;
 
     // These tasks may be inside spawn_blocking and therefore cannot be safely
     // detached or cancelled. Await their actual completion before returning
     // server authority to an in-process lifecycle owner.
+    tracing::debug!(step = "thumbnail-warmup", "awaiting shutdown step");
     if let Some(handle) = thumbnail_warmup_handle {
         let _ = handle.await;
     }
+    tracing::debug!(step = "gallery-reconcile", "awaiting shutdown step");
     if let Some(handle) = gallery_reconcile_handle {
         let _ = handle.await;
     }
+    tracing::debug!(step = "scheduler-cancel", "awaiting shutdown step");
     scheduler_shutdown.cancel();
+    tracing::debug!(step = "durable-feeder", "awaiting shutdown step");
     if let Some(handle) = durable_feeder_handle {
         let _ = handle.await;
     }
+    tracing::debug!(step = "trash-sweeper", "awaiting shutdown step");
     if let Some(handle) = trash_sweeper_handle {
         // Its token is a child of `scheduler_shutdown`, so the loop exits on
         // the cancel above; a pass already inside `spawn_blocking` finishes.
         let _ = handle.await;
     }
+    tracing::debug!(step = "queue-sweeper", "awaiting shutdown step");
     // Same child-token contract as the trash sweeper.
     let _ = queue_sweeper_handle.await;
+    tracing::debug!(step = "generation-worker", "awaiting shutdown step");
     if let Some(generation_worker_handle) = generation_worker_handle {
         if !uses_cooperative_gpu_dispatch {
             // The CPU/legacy worker predates the coordinator cancellation
@@ -1442,6 +1488,7 @@ pub async fn run_server(
     // and sets the shared flag for any owner finishing a current lease.
     // Joining here makes an in-process server restart incapable of inheriting
     // detached CUDA owner threads or contexts.
+    tracing::debug!(step = "gpu-owners", "awaiting shutdown step");
     let shutdown_pool = gpu_pool.clone();
     let join = tokio::task::spawn_blocking(move || {
         shutdown_pool.workers.shutdown_and_join_all();
@@ -1465,6 +1512,8 @@ pub async fn run_server(
             );
         }
     }
+
+    tracing::debug!("shutdown sequence complete");
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");
@@ -1528,6 +1577,50 @@ pub fn allow_hard_shutdown_exit() {
 
 fn hard_shutdown_exit_allowed() -> bool {
     HARD_SHUTDOWN_EXIT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// How long in-flight HTTP requests get once shutdown begins before the
+/// server gives up on them, in milliseconds; zero means the drain is
+/// unbounded, which is the standalone server's contract (its hard deadline
+/// ends the process instead).
+static HTTP_DRAIN_GRACE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bound the HTTP drain for a host that owns the process and cannot end it.
+///
+/// Axum's graceful shutdown waits for every in-flight request, and a client
+/// the host does not control can keep one in flight indefinitely: a webview
+/// that stops draining a paused video, a request whose body never arrives, a
+/// reader that simply stopped reading a megabyte-sized response. The
+/// standalone server bounds that with a deadline that ends the process; an
+/// embedded server cannot, so it gives in-flight requests `grace` after the
+/// shutdown signal and then stops waiting for them. Call once, before
+/// `run_server`, from the host that has a stop budget to keep. A zero grace
+/// is treated as one millisecond: zero is how "never set" is stored, and a
+/// host that calls this has asked for a bound.
+pub fn bound_http_drain(grace: std::time::Duration) {
+    let millis = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX).max(1);
+    HTTP_DRAIN_GRACE_MS.store(millis, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn http_drain_grace() -> Option<std::time::Duration> {
+    match HTTP_DRAIN_GRACE_MS.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        millis => Some(std::time::Duration::from_millis(millis)),
+    }
+}
+
+/// Resolves `grace` after the HTTP drain has begun — never before the
+/// shutdown signal, and never at all when the drain is unbounded.
+async fn drain_grace_elapsed(
+    drain_started: tokio::sync::oneshot::Receiver<()>,
+    grace: Option<std::time::Duration>,
+) {
+    let Some(grace) = grace else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let _ = drain_started.await;
+    tokio::time::sleep(grace).await;
 }
 
 /// What expiry of the shutdown budget should do.
@@ -1937,6 +2030,37 @@ mod tests {
             ),)
             .is_none()
         );
+    }
+
+    /// The standalone server keeps its contract: the drain waits for every
+    /// in-flight request, and only the process-ending deadline bounds it.
+    #[tokio::test(start_paused = true)]
+    async fn an_unbounded_drain_grace_never_elapses() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let _ = started_tx.send(());
+        let elapsed = tokio::time::timeout(
+            Duration::from_secs(60 * 60),
+            super::drain_grace_elapsed(started_rx, None),
+        )
+        .await;
+        assert!(elapsed.is_err(), "an unbounded drain must never give up");
+    }
+
+    /// The grace is measured from the moment the drain begins, not from
+    /// boot: a server that ran for an hour still gives its in-flight
+    /// requests the whole grace once it is asked to stop.
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_grace_counts_from_the_drain_not_from_boot() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let boot = tokio::time::Instant::now();
+        let waiter = tokio::spawn(async move {
+            super::drain_grace_elapsed(started_rx, Some(Duration::from_secs(3))).await;
+            boot.elapsed()
+        });
+        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+        let _ = started_tx.send(());
+        let elapsed = waiter.await.unwrap();
+        assert_eq!(elapsed, Duration::from_secs(60 * 60 + 3));
     }
 
     /// Shutdown must abort the running render, not just stop admitting new

@@ -1783,8 +1783,62 @@ pub async fn fetch_hf_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Condvar, Mutex as StdMutex};
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Default)]
+    struct OverlapState {
+        active: usize,
+        observed: bool,
+        timed_out: bool,
+    }
+
+    #[derive(Default)]
+    struct OverlapProbe {
+        state: StdMutex<OverlapState>,
+        changed: Condvar,
+    }
+
+    impl OverlapProbe {
+        fn enter(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.active += 1;
+            if state.active == 2 {
+                state.observed = true;
+                self.changed.notify_all();
+            } else {
+                let (next, timeout) = self
+                    .changed
+                    .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                        !state.observed && !state.timed_out
+                    })
+                    .unwrap();
+                state = next;
+                if timeout.timed_out() && !state.observed {
+                    state.timed_out = true;
+                    self.changed.notify_all();
+                }
+            }
+            state.active -= 1;
+        }
+
+        fn observed(&self) -> bool {
+            self.state.lock().unwrap().observed
+        }
+    }
+
+    struct OverlapResponder {
+        probe: Arc<OverlapProbe>,
+        response: ResponseTemplate,
+    }
+
+    impl Respond for OverlapResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            self.probe.enter();
+            self.response.clone()
+        }
+    }
 
     fn test_cache() -> LiveCache {
         LiveCache::new(Duration::from_secs(300), 256)
@@ -2440,41 +2494,44 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn merged_search_fetches_civitai_and_hf_in_parallel() {
-        let server = MockServer::start().await;
+        let civitai = MockServer::start().await;
+        let hf = MockServer::start().await;
+        let overlap = Arc::new(OverlapProbe::default());
         Mock::given(method("GET"))
             .and(path("/api/v1/models"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(civitai_body(101..=102, Some("c1")))
-                    .set_delay(Duration::from_millis(300)),
-            )
-            .mount(&server)
+            .respond_with(OverlapResponder {
+                probe: Arc::clone(&overlap),
+                response: ResponseTemplate::new(200)
+                    .set_body_json(civitai_body(101..=102, Some("c1"))),
+            })
+            .mount(&civitai)
             .await;
         Mock::given(method("GET"))
             .and(path("/api/models"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(vec![hf_hit(1), hf_hit(2)])
-                    .set_delay(Duration::from_millis(300)),
-            )
-            .mount(&server)
+            .respond_with(OverlapResponder {
+                probe: Arc::clone(&overlap),
+                response: ResponseTemplate::new(200).set_body_json(vec![hf_hit(1), hf_hit(2)]),
+            })
+            .mount(&hf)
             .await;
 
-        let started = std::time::Instant::now();
-        let result = search_page(
-            &server.uri(),
-            &server.uri(),
-            &test_cache(),
-            &LiveSearchOpts {
-                page_size: 4,
-                ..Default::default()
-            },
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            search_page(
+                &civitai.uri(),
+                &hf.uri(),
+                &test_cache(),
+                &LiveSearchOpts {
+                    page_size: 4,
+                    ..Default::default()
+                },
+            ),
         )
         .await
+        .expect("merged search deadlocked")
         .expect("merged page");
-        let elapsed = started.elapsed();
 
         assert!(
             result.entries.iter().any(|e| e.id.0.starts_with("cv:")),
@@ -2485,8 +2542,8 @@ mod tests {
             "hf rows present"
         );
         assert!(
-            elapsed < Duration::from_millis(500),
-            "two 300ms upstreams must overlap, took {elapsed:?}"
+            overlap.observed(),
+            "the two upstream requests never overlapped"
         );
     }
 

@@ -252,6 +252,10 @@ if wants rust; then
   step "rust: test (full main suite)" cargo test --workspace
   step "rust: optional feature check" \
     cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
+  step "rust: mDNS clippy" \
+    cargo clippy -p mold-ai-server --features mdns --all-targets -- -D warnings
+  step "rust: mDNS tests" \
+    cargo test -p mold-ai-server --features mdns --lib mdns
   step "rust: MiniMax H3 private foundations" \
     cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
   for bin in h3_artifact_qualification h3_qwen_layer50_capture \
