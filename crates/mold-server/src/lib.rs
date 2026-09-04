@@ -1384,49 +1384,62 @@ pub async fn run_server(
     // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
     // the task is cleaned up on the same shutdown path as the HTTP server.
     // Matches the aggregator handle pattern from commit 5e43886.
+    tracing::debug!(step = "mdns-advertise", "awaiting shutdown step");
     #[cfg(feature = "mdns")]
     if let Some(guard) = mdns_guard {
         guard.shutdown();
     }
+    tracing::debug!(step = "mdns-browse", "awaiting shutdown step");
     #[cfg(feature = "mdns")]
     if let Some(guard) = mdns_browser_guard {
         guard.shutdown();
     }
+    tracing::debug!(step = "downloads", "awaiting shutdown step");
     downloads_shutdown.cancel();
     downloads_driver.abort();
     let _ = downloads_driver.await;
+    tracing::debug!(step = "video-upscale", "awaiting shutdown step");
     if let Some(runtime) = video_upscale_dispatcher {
         runtime.shutdown().await;
     }
+    tracing::debug!(step = "idle-evict", "awaiting shutdown step");
     if let Some(handle) = idle_evict_handle {
         handle.abort();
         let _ = handle.await;
     }
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
+    tracing::debug!(step = "resources-aggregator", "awaiting shutdown step");
     resources_aggregator.abort();
     let _ = resources_aggregator.await;
 
     // These tasks may be inside spawn_blocking and therefore cannot be safely
     // detached or cancelled. Await their actual completion before returning
     // server authority to an in-process lifecycle owner.
+    tracing::debug!(step = "thumbnail-warmup", "awaiting shutdown step");
     if let Some(handle) = thumbnail_warmup_handle {
         let _ = handle.await;
     }
+    tracing::debug!(step = "gallery-reconcile", "awaiting shutdown step");
     if let Some(handle) = gallery_reconcile_handle {
         let _ = handle.await;
     }
+    tracing::debug!(step = "scheduler-cancel", "awaiting shutdown step");
     scheduler_shutdown.cancel();
+    tracing::debug!(step = "durable-feeder", "awaiting shutdown step");
     if let Some(handle) = durable_feeder_handle {
         let _ = handle.await;
     }
+    tracing::debug!(step = "trash-sweeper", "awaiting shutdown step");
     if let Some(handle) = trash_sweeper_handle {
         // Its token is a child of `scheduler_shutdown`, so the loop exits on
         // the cancel above; a pass already inside `spawn_blocking` finishes.
         let _ = handle.await;
     }
+    tracing::debug!(step = "queue-sweeper", "awaiting shutdown step");
     // Same child-token contract as the trash sweeper.
     let _ = queue_sweeper_handle.await;
+    tracing::debug!(step = "generation-worker", "awaiting shutdown step");
     if let Some(generation_worker_handle) = generation_worker_handle {
         if !uses_cooperative_gpu_dispatch {
             // The CPU/legacy worker predates the coordinator cancellation
@@ -1442,6 +1455,7 @@ pub async fn run_server(
     // and sets the shared flag for any owner finishing a current lease.
     // Joining here makes an in-process server restart incapable of inheriting
     // detached CUDA owner threads or contexts.
+    tracing::debug!(step = "gpu-owners", "awaiting shutdown step");
     let shutdown_pool = gpu_pool.clone();
     let join = tokio::task::spawn_blocking(move || {
         shutdown_pool.workers.shutdown_and_join_all();
@@ -1465,6 +1479,8 @@ pub async fn run_server(
             );
         }
     }
+
+    tracing::debug!("shutdown sequence complete");
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");

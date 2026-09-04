@@ -76,6 +76,15 @@ async fn engine_boots_authenticates_and_shuts_down() {
         .unwrap();
     assert!(shutdown.status().is_success());
 
+    // Drop the client — and with it the connection pool — BEFORE waiting on
+    // the thread. Axum's graceful shutdown drains live connections, and this
+    // client's pooled keep-alive connection is one, so holding it here makes
+    // the test the reason the server cannot finish. That is exactly what the
+    // intermittent CI failures were: the whole shutdown sequence ran within
+    // 2 ms of this test giving up and unwinding, never before it.
+    drop(shutdown);
+    drop(client);
+
     // …and reported dead once the thread exits, so the connection state
     // machine knows to restart instead of handing out a dead base URL.
     //
