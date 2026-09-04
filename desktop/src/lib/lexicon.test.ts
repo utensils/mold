@@ -248,7 +248,7 @@ describe("lexicon — the composer", () => {
 
   it("keeps Generate to one word and says the queue depth beside it", () => {
     expect(generateViewSource).toContain(
-      'const buttonLabel = computed(() => (submissionPlanning.value ? "Cancel" : "Generate"));',
+      'const buttonLabel = computed(() => (composerSubmitting.value ? "Cancel" : "Generate"));',
     );
     expect(generateViewSource).toContain("`+${generation.pending.length} queued`");
     expect(composerSource).toContain('data-test="generate-queued-note"');

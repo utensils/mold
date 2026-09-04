@@ -73,3 +73,16 @@
   what the door promised. Under a finished picture the caption names its file
   and size and offers **Make 4 variations** (⌥↩, and in the command palette) and
   **Make bigger** beside Save.
+- **A short clip is a timeline you can see the whole of.** Choosing Short clip
+  now raises a timeline above the composer instead of taking the composer away:
+  the words you type are the selected scene's, the chip reads Make 1 clip, and
+  ⌘↩ still makes the whole thing. The timeline plays the clip back once its
+  scenes have rendered, with a clock, a ruler in round seconds and a playhead
+  that follows. Scenes sit in a lane that always fits the window rather than a
+  strip you had to scroll: each block is as wide as the time it plays, wears
+  the words you wrote for it and its own rendered frame, and the selected one
+  gets a handle on its right edge for making that scene longer. ←/→ move
+  between scenes, ↩ opens the join before one, ⌫ removes it. Underneath, one
+  line says what the clip adds up to — "3 scenes · 289 frames · 0:12 at 24fps"
+  — and the app says "scene" throughout, where it used to say clip, sequence
+  and filmstrip in the same breath.

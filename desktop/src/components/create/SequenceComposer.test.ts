@@ -77,12 +77,16 @@ beforeEach(() => {
 });
 afterEach(() => (document.body.innerHTML = ""));
 
-describe("SequenceComposer — rail", () => {
-  it("renders the clip rail from the draft store and adds clips through it", async () => {
+describe("SequenceComposer — lane", () => {
+  it("renders the scenes lane from the draft store and adds a scene from the transport", async () => {
     const draft = seedDraft();
     const wrapper = mountComposer();
-    expect(wrapper.findAll(".ms-clip")).toHaveLength(2);
-    await wrapper.get(".ms-rail__add").trigger("click");
+    expect(wrapper.findAll("[data-test='scene-block']")).toHaveLength(2);
+    expect(wrapper.findAll("[data-test='scene-title']").map((t) => t.text())).toEqual([
+      "clip one",
+      "clip two",
+    ]);
+    await wrapper.get("[data-test='add-scene']").trigger("click");
     expect(draft.clips).toHaveLength(3);
   });
 
@@ -98,20 +102,17 @@ describe("SequenceComposer — rail", () => {
   });
 });
 
-describe("SequenceComposer — active clip editor", () => {
-  it("captions the active clip and binds its prompt and frames", async () => {
+describe("SequenceComposer — the selected scene", () => {
+  it("captions the selected scene and binds its length", async () => {
     const draft = seedDraft();
     draft.activeClipId = draft.clips[1]!.id;
-    // A context-capable LTX-2 model: the seam reads "Smooth from clip 1"
+    // A context-capable LTX-2 model: the seam reads "Smooth from scene 1"
     // (LTX-Video's zero motion tail would label it "Join" instead).
     const wrapper = mountComposer({
       selectedModel: { name: "ltx-2-19b-distilled:fp8", family: "ltx2" } as ModelEntry,
     });
     expect(wrapper.get("[data-test='active-clip-caption']").text()).toContain("Scene 2 of 2");
     expect(wrapper.get("[data-test='active-clip-meta']").text()).toContain("Smooth from scene 1");
-
-    await wrapper.get("[data-test='clip-prompt']").setValue("a new beat");
-    expect(draft.clips[1]!.prompt).toBe("a new beat");
 
     const frames = wrapper.get<HTMLSelectElement>("[data-test='clip-frames']");
     // 8n+1 options above the motion tail, capped by chain limits.
@@ -120,16 +121,14 @@ describe("SequenceComposer — active clip editor", () => {
     expect(draft.clips[1]!.frames).toBe(41);
   });
 
-  it("submits on ⌘↵ from the prompt editor", async () => {
+  it("writes no words of its own — the composer carries them", () => {
     seedDraft();
     const wrapper = mountComposer();
-    await wrapper
-      .get("[data-test='clip-prompt']")
-      .trigger("keydown", { key: "Enter", metaKey: true });
-    expect(wrapper.emitted("submit")).toHaveLength(1);
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    expect(wrapper.find("[data-test='generate-sequence']").exists()).toBe(false);
   });
 
-  it("keeps opening-image controls out of the clip editor", async () => {
+  it("keeps opening-image controls out of the selected scene", async () => {
     const draft = seedDraft();
     draft.activeClipId = draft.clips[0]!.id;
     const wrapper = mountComposer();
@@ -146,18 +145,62 @@ describe("SequenceComposer — active clip editor", () => {
   });
 });
 
-describe("SequenceComposer — footer", () => {
-  it("keeps the preparing action responsive and emits cancel", async () => {
+describe("SequenceComposer — transport, ruler, and playhead", () => {
+  it("offers nothing to play until a scene has been rendered", () => {
     seedDraft();
-    const wrapper = mountComposer({ submitting: true });
-    const button = wrapper.get("[data-test='generate-sequence']");
-    expect(button.attributes("disabled")).toBeUndefined();
-    expect(button.text()).toContain("Cancel");
-    await button.trigger("click");
-    expect(wrapper.emitted("cancel")).toHaveLength(1);
-    expect(wrapper.emitted("submit")).toBeUndefined();
+    const wrapper = mountComposer();
+    expect(wrapper.get("[data-test='timeline-play']").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-test='timeline-play']").attributes("title")).toContain(
+      "Nothing to play yet",
+    );
+    expect(wrapper.find("[data-test='timeline-playhead']").exists()).toBe(false);
   });
 
+  it("plays the first rendered scene and reads the clock against the whole clip", async () => {
+    const draft = seedDraft();
+    const wrapper = mountComposer({
+      stageMediaByClipId: {
+        [draft.clips[0]!.id]: { status: "ready", hasMedia: true },
+        [draft.clips[1]!.id]: { status: "ready", hasMedia: true },
+      },
+    });
+    // Two 25-frame scenes at 24fps: 50 frames, just over two seconds.
+    expect(wrapper.get("[data-test='sequence-length']").text().replace(/\s+/g, " ")).toBe(
+      "0:00 / 0:02",
+    );
+
+    await wrapper.get("[data-test='timeline-play']").trigger("click");
+    expect(wrapper.emitted("play-clip")?.at(-1)).toEqual([draft.clips[0]!.id]);
+  });
+
+  it("puts the playhead at the playing scene's own place in the clip", async () => {
+    const draft = seedDraft();
+    const media = {
+      [draft.clips[0]!.id]: { status: "ready" as const, hasMedia: true },
+      [draft.clips[1]!.id]: { status: "ready" as const, hasMedia: true },
+    };
+    const wrapper = mountComposer({
+      stageMediaByClipId: media,
+      playingClipId: draft.clips[1]!.id,
+      elapsedSeconds: 0,
+    });
+    // Scene 2 starts halfway through a clip of two equal scenes.
+    expect(wrapper.get("[data-test='timeline-playhead']").attributes("style")).toContain("50%");
+    expect(wrapper.get("[data-test='sequence-length']").text()).toContain("0:01");
+  });
+
+  it("marks the ruler out in round seconds", () => {
+    seedDraft();
+    const wrapper = mountComposer();
+    expect(wrapper.findAll(".ms-timeline__tick-label").map((tick) => tick.text())).toEqual([
+      "0:00",
+      "0:01",
+      "0:02",
+    ]);
+  });
+});
+
+describe("SequenceComposer — plan and tools", () => {
   it("discards an in-flight validation when the rendering host changes", async () => {
     let resolveValidation!: (value: Awaited<ReturnType<typeof validateChain>>) => void;
     validateChainMock.mockReturnValue(
@@ -241,10 +284,9 @@ describe("SequenceComposer — footer", () => {
       }),
       target,
     );
-    expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
-      "Validated · 2 scenes · 50f · 2.1s",
-    );
-    expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain("12.0 GiB");
+    const readout = wrapper.get("[data-test='sequence-fit']").text().replace(/\s+/g, " ");
+    expect(readout).toContain("2 scenes · 50 frames · 2.1s to render");
+    expect(readout).toContain("12.0 GB of graphics memory");
     expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
       "Join normalized",
     );
@@ -252,11 +294,12 @@ describe("SequenceComposer — footer", () => {
       .get("[data-test='sequence-validation-plan']")
       .text()
       .replace(/\s+/g, " ");
-    expect(planText).toContain("Scene 1 · 25f in / 25f out · Join · Opening image");
-    expect(planText).toContain("Scene 2 · 25f in / 25f out · Join · Source image");
-    expect(wrapper.emitted("submit")).toBeUndefined();
+    expect(planText).toContain("Scene 1 · 25 → 25 frames · Join · from your opening photo");
+    expect(planText).toContain(
+      "Scene 2 · 25 → 25 frames · Join · from a photo · with words to steer away from",
+    );
 
-    await wrapper.get("[data-test='clip-prompt']").setValue("edited opening");
+    draft.clips[0]!.prompt = "edited opening";
     await flushPromises();
     expect(wrapper.find("[data-test='sequence-validation-plan']").exists()).toBe(false);
   });
@@ -305,20 +348,21 @@ describe("SequenceComposer — footer", () => {
     expect(draft.clips[1]!.sourceImage?.base64).toBe("SECOND");
   });
 
-  it("disables Generate with the first validation message while a clip is blank", () => {
+  it("hands the composer the first validation message while a scene is blank", () => {
     seedDraft(["described", ""]);
     const wrapper = mountComposer();
-    const button = wrapper.get("[data-test='generate-sequence']");
-    expect(button.attributes("disabled")).toBeDefined();
-    expect(wrapper.text()).toContain("Describe clip 2 before generating.");
+    expect(wrapper.emitted("update:blockedReason")?.at(-1)).toEqual([
+      "Describe clip 2 before generating.",
+    ]);
   });
 
-  it("shows the fit note when the sequence validates", () => {
+  it("reads the clip out and refuses nothing once it validates", () => {
     seedDraft();
     const wrapper = mountComposer();
-    expect(wrapper.get("[data-test='sequence-fit']").text()).toContain("✓ fits");
-    expect(wrapper.get("[data-test='sequence-fit']").text()).toContain("@ 24fps");
-    expect(wrapper.get("[data-test='generate-sequence']").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get("[data-test='sequence-fit']").text().replace(/\s+/g, " ")).toBe(
+      "2 scenes · 50 frames · 0:02 at 24fps",
+    );
+    expect(wrapper.emitted("update:blockedReason")?.at(-1)).toEqual([null]);
   });
 
   it("blocks sequence-incapable checkpoints with the server's reason", () => {
@@ -330,11 +374,12 @@ describe("SequenceComposer — footer", () => {
         sequence_unsupported_reason: "Two-stage checkpoint — can't chain clips",
       },
     });
-    expect(wrapper.get("[data-test='generate-sequence']").attributes("disabled")).toBeDefined();
-    expect(wrapper.text()).toContain("Two-stage checkpoint");
+    expect(wrapper.emitted("update:blockedReason")?.at(-1)).toEqual([
+      "Two-stage checkpoint — can't chain clips",
+    ]);
   });
 
-  it("keeps audio out of the composer footer", () => {
+  it("keeps audio out of the timeline", () => {
     seedDraft();
     expect(mountComposer().find("[data-test='sequence-audio']").exists()).toBe(false);
     document.body.innerHTML = "";
@@ -359,14 +404,13 @@ describe("SequenceComposer — edit sessions", () => {
     return draft;
   }
 
-  it("banners the edit with cached/re-render counts and relabels the button", async () => {
+  it("banners the edit with cached/re-render counts", async () => {
     const draft = startEditing();
     const wrapper = mountComposer();
     expect(wrapper.get("[data-test='edit-banner']").text()).toContain("Editing clip abcdef12");
     expect(wrapper.get("[data-test='edit-banner']").text()).toContain(
       "2 cached · 0 will re-render",
     );
-    expect(wrapper.get("[data-test='generate-sequence']").text()).toContain("Generate");
 
     draft.clips[1]!.prompt = "changed beat";
     await flushPromises();
@@ -457,7 +501,6 @@ describe("SequenceComposer — clear sequence", () => {
     (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
     await flushPromises();
     expect(draft.editing).toBeNull();
-    expect(wrapper.emitted("submit")).toBeUndefined();
     expect(wrapper.emitted("duplicate")).toBeUndefined();
   });
 });
@@ -604,6 +647,12 @@ describe("SequenceComposer — context menus", () => {
     await wrapper.findAll("[data-clip-id]")[0]!.trigger("contextmenu", rightClick);
     menuItem("Remove clip").action!();
     await flushPromises();
+    // Removing a scene asks first, with the plain shared confirm.
+    expect(document.querySelector("[data-test='confirm-dialog']")?.textContent).toContain(
+      "Remove this scene?",
+    );
+    (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
+    await flushPromises();
     expect(draft.clips.some((clip) => clip.id === removed)).toBe(false);
   });
 
@@ -615,12 +664,12 @@ describe("SequenceComposer — context menus", () => {
     expect(menuItem("Remove clip").danger).toBe(true);
   });
 
-  it("opens the rail menu on the bench background and adds a clip", async () => {
+  it("opens the timeline menu on the lane background and adds a clip", async () => {
     const draft = seedDraft();
     const wrapper = mountComposer();
     const menu = useContextMenuStore();
 
-    await wrapper.get(".ms-rail").trigger("contextmenu", rightClick);
+    await wrapper.get("[data-test='scene-lane']").trigger("contextmenu", rightClick);
 
     expect(menu.visible).toBe(true);
     expect(menuLabels()).toEqual([
@@ -635,12 +684,12 @@ describe("SequenceComposer — context menus", () => {
     expect(draft.clips).toHaveLength(3);
   });
 
-  it("leaves the prompt textarea and the seam pill alone", async () => {
+  it("leaves the length picker and the seam pill alone", async () => {
     seedDraft();
     const wrapper = mountComposer();
     const menu = useContextMenuStore();
 
-    await wrapper.get("[data-test='clip-prompt']").trigger("contextmenu", rightClick);
+    await wrapper.get("[data-test='clip-frames']").trigger("contextmenu", rightClick);
     expect(menu.visible).toBe(false);
 
     // The seam's own right-click opens the transition editor instead.

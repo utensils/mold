@@ -5,6 +5,7 @@ import modelPickerSource from "../components/create/ModelPicker.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import sequenceComposerSource from "../components/create/SequenceComposer.vue?raw";
 import composerCardSource from "../components/create/ComposerCard.vue?raw";
+import sceneLaneSource from "../components/create/SceneLane.vue?raw";
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -37,18 +38,16 @@ describe("GenerateView layout", () => {
     expect(viewSource).not.toContain('class="absolute inset-0 h-full w-full object-cover"');
   });
 
-  it("fills the bottom panel and pins composer actions to its bottom edge", () => {
+  it("fills the bottom panel and pins the timeline's readout to its bottom edge", () => {
     expect(classesFor(viewSource, "create-bottom-panel")).toContain("flex");
     expect(classesFor(viewSource, "create-bottom-panel")).toContain("flex-col");
-    expect(classesFor(viewSource, "generate-sequence-shell")).toContain("min-h-[300px]");
-    expect(classesFor(viewSource, "generate-sequence-shell")).toContain("flex-[1_0_300px]");
+    expect(classesFor(viewSource, "generate-sequence-shell")).toContain("min-h-[228px]");
+    expect(classesFor(viewSource, "generate-sequence-shell")).toContain("flex-[1_0_228px]");
     expect(classesFor(viewSource, "generate-sequence-composer")).toContain("flex-1");
     // The composer takes its own height under the canvas; the canvas absorbs slack.
     expect(classesFor(viewSource, "generate-composer")).toContain("shrink-0");
-    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__footer\s*\{[^}]*margin-top:\s*auto/s);
-    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__clip\s*\{[^}]*flex:\s*1/s);
-    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__prompt--main\s*\{[^}]*flex:\s*1/s);
-    expect(sequenceComposerSource).toContain('data-test="sequence-composer-footer"');
+    expect(sequenceComposerSource).toMatch(/\.ms-timeline__foot\s*\{[^}]*margin-top:\s*auto/s);
+    expect(sequenceComposerSource).toContain('data-test="sequence-fit"');
     // The one-shot composer is no longer a bench panel: it is a card under
     // the canvas whose control row carries Generate, so its actions have no
     // bottom edge of their own to pin to.
@@ -96,8 +95,16 @@ describe("GenerateView layout", () => {
     );
     expect(viewSource).toContain("const generationInputBlockerReason = computed");
     expect(viewSource).toContain("if (generationInputBlockerReason.value ||");
-    expect(viewSource).toContain(':disabled="composerDisabled"');
-    expect(viewSource).toContain(':disabled-reason="composerBlockerReason"');
+    // One composer answers for both modes, so the bindings read the switch and
+    // the one-shot authorities stay behind it.
+    expect(viewSource).toContain(':disabled="composerLocked"');
+    expect(viewSource).toContain(':disabled-reason="composerRefusal"');
+    expect(viewSource).toMatch(
+      /const composerRefusal = computed\([\s\S]{0,200}?composerBlockerReason\.value,/,
+    );
+    expect(viewSource).toMatch(
+      /const composerLocked = computed\([\s\S]{0,200}?composerDisabled\.value,/,
+    );
   });
 
   it("takes the blank-canvas guidance from the shared prompt rule", () => {
@@ -116,31 +123,34 @@ describe("GenerateView layout", () => {
     expect(viewSource).toMatch(/const settledFrameStyle = computed/);
   });
 
-  it("lets sequence mode shrink the filmstrip on resize instead of growing scrollbars", () => {
-    // The bench floor in sequence mode covers the composer's fixed chrome +
-    // the filmstrip's minimum height, so dragging the resizer compresses the
-    // rail (fluid cqh sizing) rather than overflowing into a scrollbar.
+  it("lets clip mode shrink the scenes lane on resize instead of growing scrollbars", () => {
+    // The bench floor in clip mode covers the timeline's fixed chrome + the
+    // lane's minimum height, so dragging the resizer compresses the lane
+    // rather than overflowing into a scrollbar.
     expect(viewSource).toContain("MIN_SEQUENCE_BENCH_HEIGHT");
     expect(viewSource).toMatch(/function minBenchHeight\(\)/);
     expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), available - MIN_CANVAS_HEIGHT\)/);
     expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), height\)/);
     // Switching Output re-clamps the persisted height against the new floor.
     expect(viewSource).toMatch(/watch\(isSequence, [\s\S]{0,400}?clampBenchToViewport\(\)/);
-    // The bench root must opt out of min-content flooring: floored at auto,
-    // it counts the rail's 204px basis (not its 104px floor) and the panel
-    // scrolls before the filmstrip's shrink weight ever engages.
-    expect(sequenceComposerSource).toMatch(/\.ms-seqbench\s*\{[^}]*min-height:\s*0/s);
-    // The preferred rail height must be the flex BASIS, never a `height`: a
+    // The timeline root must opt out of min-content flooring: floored at auto,
+    // it counts the lane's preferred basis and the panel scrolls before the
+    // lane's shrink weight ever engages.
+    expect(sequenceComposerSource).toMatch(/\.ms-timeline\s*\{[^}]*min-height:\s*0/s);
+    // The preferred lane height must be the flex BASIS, never a `height`: a
     // specified height becomes the wrapper's min-content contribution and
     // resurrects the scrollbar the shrink weight exists to prevent.
     expect(sequenceComposerSource).toMatch(
-      /\.ms-seqbench__railwrap\s*\{[^}]*flex:\s*0\s+999\s+204px/s,
+      /\.ms-timeline__lanewrap\s*\{[^}]*flex:\s*0\s+999\s+96px/s,
     );
     expect(sequenceComposerSource).not.toMatch(
-      /\.ms-seqbench__railwrap\s*\{[^}]*[\s;]height:\s*\d/s,
+      /\.ms-timeline__lanewrap\s*\{[^}]*[\s;]height:\s*\d/s,
     );
-    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__railwrap\s*\{[^}]*min-height:/s);
-    expect(sequenceComposerSource).toMatch(/\.ms-seqbench__rail\s*\{[^}]*height:\s*100%/s);
+    expect(sequenceComposerSource).toMatch(/\.ms-timeline__lanewrap\s*\{[^}]*min-height:/s);
+    // Every block is as wide as the time it plays, so the lane fits its width
+    // and never scrolls.
+    expect(sceneLaneSource).toMatch(/flexGrow: `\$\{playedFrames\(clip, index\) \/ fps\}`/);
+    expect(sceneLaneSource).toMatch(/\.ms-lane\s*\{[^}]*flex:\s*1/s);
   });
 
   // The floating Templates popover is gone: starting points are a tab in the

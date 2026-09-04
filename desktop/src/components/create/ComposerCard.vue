@@ -55,6 +55,16 @@ const props = withDefaults(
     /** The Style chip: plain name first, the mono id second. */
     styleLabel?: string;
     styleId?: string;
+    /** Clip mode: the composer writes the SELECTED SCENE's words rather than
+     * the form's prompt. Null keeps the one-shot binding. */
+    promptValue?: string | null;
+    /** Clip mode's own invitation — "Scene 2 — describe what happens next". */
+    placeholder?: string | null;
+    /** Stands in for the Make stepper where the recipe makes exactly one
+     * thing: "Make 1 clip". */
+    countLabel?: string | null;
+    /** Rewriting reaches the one-shot prompt only, so a scene has no expander. */
+    showExpand?: boolean;
   }>(),
   {
     history: () => [],
@@ -63,6 +73,10 @@ const props = withDefaults(
     batchLocked: false,
     styleLabel: "",
     styleId: "",
+    promptValue: null,
+    placeholder: null,
+    countLabel: null,
+    showExpand: true,
   },
 );
 
@@ -75,6 +89,8 @@ const emit = defineEmits<{
   /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
    * prompt and releases any quick expansion, where typing keeps it. */
   "prompt-authored": [value: string, source: PromptAuthoringSource];
+  /** Clip mode: the selected scene's new words. */
+  "update:promptValue": [value: string];
   "update:remixSource": [value: "original" | "current"];
   /** The Style and Shape chips are doors to the inspector's Settings tab. */
   "open-style": [];
@@ -87,12 +103,22 @@ const generateDisabled = computed(() => props.disabled && !props.submitting);
 // The recipe is the prompt rule's authority (a mesh family has no text
 // encoder to feed), so the form's snapshot of it rides along — without it the
 // pre-profile family rule would ask for a description nothing reads.
-const placeholder = computed(() =>
-  promptPlaceholder(
-    promptInputForForm(props.form),
-    "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
-  ),
+const invitation = computed(
+  () =>
+    props.placeholder ??
+    promptPlaceholder(
+      promptInputForForm(props.form),
+      "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
+    ),
 );
+/** One writable prompt whichever words the composer is carrying. */
+const promptText = computed({
+  get: () => props.promptValue ?? props.form.prompt,
+  set: (value: string) => {
+    if (props.promptValue === null) props.form.prompt = value;
+    else emit("update:promptValue", value);
+  },
+});
 // Expand and Remix rewrite the prompt, so the same recipe snapshot answers
 // for them: a family with no text encoder reads nothing a rewrite could say.
 const transformBlockedReason = computed(() =>
@@ -122,20 +148,16 @@ watch(
 function growPrompt() {
   if (promptEl.value) autoGrowRows(promptEl.value);
 }
-watch(
-  () => props.form.prompt,
-  () => void nextTick(growPrompt),
-  { flush: "post" },
-);
+watch(promptText, () => void nextTick(growPrompt), { flush: "post" });
 onMounted(() => {
   growPrompt();
   promptEl.value?.focus();
 });
 
 function cycleHistory(direction: "prev" | "next"): boolean {
-  const replacement = direction === "prev" ? cycler.prev(props.form.prompt) : cycler.next();
+  const replacement = direction === "prev" ? cycler.prev(promptText.value) : cycler.next();
   if (replacement === null) return false;
-  props.form.prompt = replacement;
+  promptText.value = replacement;
   emit("prompt-authored", replacement, "recalled");
   void nextTick(() => {
     const el = promptEl.value;
@@ -145,9 +167,11 @@ function cycleHistory(direction: "prev" | "next"): boolean {
 }
 
 function onPromptInput(event: Event) {
+  const value = (event.target as HTMLTextAreaElement).value;
   cycler.reset();
+  promptText.value = value;
   growPrompt();
-  emit("prompt-authored", (event.target as HTMLTextAreaElement).value, "typed");
+  emit("prompt-authored", value, "typed");
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -191,11 +215,11 @@ defineExpose({ focus, expand, record });
       <div class="ms-composer__prompt-row">
         <textarea
           ref="promptEl"
-          v-model="form.prompt"
+          :value="promptText"
           data-selectable
           rows="1"
           aria-label="Prompt"
-          :placeholder="placeholder"
+          :placeholder="invitation"
           class="ms-composer__input"
           @keydown="onKeydown"
           @input="onPromptInput"
@@ -229,7 +253,11 @@ defineExpose({ focus, expand, record });
         >
           {{ shapeLabel }} <span class="ms-chip__caret">▼</span>
         </button>
+        <span v-if="countLabel" class="ms-chip ms-chip--locked" data-test="batch-chip">{{
+          countLabel
+        }}</span>
         <span
+          v-else
           class="ms-chip ms-chip--stepper"
           data-test="batch-chip"
           :class="{ 'ms-chip--locked': batchLocked }"
@@ -245,6 +273,7 @@ defineExpose({ focus, expand, record });
           />
         </span>
         <ExpandControl
+          v-if="showExpand"
           ref="expandControl"
           :prompt="form.prompt"
           :batch-size="effectiveBatchSize"

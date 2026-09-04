@@ -156,6 +156,7 @@ a literal.
 | Shared primitives                                                                                                                               | `ui/components/` (Vue, token-var styled)                                                                                    |
 | Shell: unified toolbar · sidebar with the queue · status bar                                                                                    | `desktop/src/components/shell/{TitleBar,Sidebar,QueueRail,StatusBar}.vue`, `stores/hostStatus.ts`                           |
 | Views                                                                                                                                           | `desktop/src/views/{GenerateView,QueueView,LibraryView,ModelsView,MachinesView,HostDetailView,RunPodView,SettingsView}.vue` |
+| Clip mode: the timeline (transport · ruler · scenes lane · playhead) above the one composer                                                     | `desktop/src/components/create/{SequenceComposer,SceneLane,ComposerCard}.vue`                                               |
 | Fonts (one sans + one mono per theme, OFL)                                                                                                      | `ui/fonts/` (app-bundled; `fonts.legacy.css` carries only the Safelight pair for the embedded web bundle)                   |
 
 Rules that gate any new UI: compose only from the shared kit, reference tokens

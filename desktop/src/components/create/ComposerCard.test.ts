@@ -370,3 +370,44 @@ describe("ComposerCard — shape and style chips", () => {
     expect(wrapper.emitted("open-shape")).toHaveLength(1);
   });
 });
+
+// Clip mode keeps this one composer and hands it the selected scene's words:
+// the form's own prompt must stay untouched, and Generate still answers ⌘↩.
+describe("ComposerCard — clip mode", () => {
+  function clipMode(form: GenerateForm) {
+    return mountComposer(form, {
+      promptValue: "rain picks up",
+      placeholder: "Scene 2 — describe what happens next",
+      countLabel: "Make 1 clip",
+      showExpand: false,
+    });
+  }
+
+  it("carries the scene's words instead of the form's prompt", async () => {
+    const form = baseForm();
+    form.prompt = "a brass teapot";
+    const wrapper = clipMode(form);
+    const textarea = wrapper.get<HTMLTextAreaElement>("textarea[aria-label='Prompt']");
+
+    expect(textarea.element.value).toBe("rain picks up");
+    expect(textarea.attributes("placeholder")).toBe("Scene 2 — describe what happens next");
+
+    await textarea.setValue("the camera drifts left");
+    expect(wrapper.emitted("update:promptValue")?.at(-1)).toEqual(["the camera drifts left"]);
+    expect(form.prompt).toBe("a brass teapot");
+  });
+
+  it("counts one clip and offers no rewrite of a scene", () => {
+    const wrapper = clipMode(baseForm());
+    expect(wrapper.get("[data-test='batch-chip']").text()).toBe("Make 1 clip");
+    expect(wrapper.findComponent(ExpandControl).exists()).toBe(false);
+  });
+
+  it("still generates on ⌘↵", async () => {
+    const wrapper = clipMode(baseForm());
+    await wrapper
+      .get("textarea[aria-label='Prompt']")
+      .trigger("keydown", { key: "Enter", metaKey: true });
+    expect(wrapper.emitted("generate")).toHaveLength(1);
+  });
+});

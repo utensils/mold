@@ -57,7 +57,9 @@ describe("SequenceAdvancedSettings camera motion", () => {
     };
     useSequenceDraftStore().clips[0]!.negativePrompt = "flicker";
     const wrapper = mount(SequenceAdvancedSettings, { props: { form } });
-    const input = wrapper.get("textarea[aria-label='Active clip negative prompt']");
+    const input = wrapper.get(
+      "textarea[aria-label='What the selected scene should steer away from']",
+    );
     expect(input.attributes("disabled")).toBeDefined();
     expect(useSequenceDraftStore().clips[0]!.negativePrompt).toBe("flicker");
     expect(wrapper.get("[data-test='sequence-negative-unavailable-hint']").text()).toContain(

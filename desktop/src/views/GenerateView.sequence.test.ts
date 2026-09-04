@@ -180,6 +180,21 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("GenerateView — sequence output", () => {
+  /** A ready clip draft on a chain-capable model, mounted. */
+  async function clipMode() {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = "ltx-video";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    const wrapper = mountView();
+    await flushPromises();
+    return { wrapper, draft };
+  }
+
   it("queues nothing on license cancel and resumes exactly once after acceptance", async () => {
     readyLocal();
     installedPayload = [videoModel];
@@ -216,9 +231,9 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    const composer = wrapper.findComponent({ name: "SequenceComposer" });
+    const composer = wrapper.findComponent({ name: "ComposerCard" });
     apiJsonTo.mockClear();
-    composer.vm.$emit("submit");
+    composer.vm.$emit("generate");
     await flushPromises();
     await vi.waitFor(() => expect(licenseRequest).toHaveBeenCalledTimes(1));
     expect(
@@ -228,7 +243,7 @@ describe("GenerateView — sequence output", () => {
       ),
     ).toHaveLength(0);
 
-    composer.vm.$emit("submit");
+    composer.vm.$emit("generate");
     await flushPromises();
     await vi.waitFor(() => expect(licenseRequest).toHaveBeenCalledTimes(2));
     expect(
@@ -685,23 +700,47 @@ describe("GenerateView — sequence output", () => {
     ).toBe(true);
   });
 
-  it("renders the sequence bench instead of the single composer", async () => {
-    readyLocal();
-    installedPayload = [videoModel];
-    useModelStore().all = [videoModel];
-    useGenerateFormStore().form.model = "ltx-video";
-    const draft = useSequenceDraftStore();
-    draft.hydrate();
-    draft.output = "sequence";
-    draft.ensureClips(25);
-    const wrapper = mountView();
-    await flushPromises();
+  it("keeps the composer on screen with the timeline above it", async () => {
+    const { wrapper } = await clipMode();
 
     expect(wrapper.find("sequence-composer-stub").exists()).toBe(true);
-    expect(wrapper.find("composer-card-stub").exists()).toBe(false);
+    expect(wrapper.find("composer-card-stub").exists()).toBe(true);
   });
 
-  it("keeps the single composer for one-shot output", async () => {
+  it("writes the composer's words onto the selected scene", async () => {
+    const { wrapper, draft } = await clipMode();
+    draft.activeClipId = draft.clips[1]!.id;
+    await flushPromises();
+
+    const composer = wrapper.findComponent({ name: "ComposerCard" });
+    expect(composer.props("promptValue")).toBe("");
+    expect(composer.props("placeholder")).toContain("Scene 2");
+    expect(composer.props("countLabel")).toBe("Make 1 clip");
+
+    composer.vm.$emit("update:promptValue", "the rain picks up");
+    await flushPromises();
+    expect(draft.clips[1]!.prompt).toBe("the rain picks up");
+  });
+
+  it("submits the clip from the composer's Generate", async () => {
+    apiFetchTo.mockResolvedValue(Response.json({ job_id: "composed-clip" }));
+    const { wrapper, draft } = await clipMode();
+    draft.clips[0]!.prompt = "a paper boat sets off";
+    draft.clips[1]!.prompt = "the rain picks up";
+    await flushPromises();
+
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
+    await flushPromises();
+
+    expect(
+      apiFetchTo.mock.calls.filter(
+        ([, path, init]) =>
+          path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the composer alone for one-shot output", async () => {
     readyLocal();
     installedPayload = [videoModel];
     useModelStore().all = [videoModel];
@@ -796,7 +835,7 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
     await flushPromises();
 
     expect(amendCalls.length).toBe(1);
@@ -841,9 +880,9 @@ describe("GenerateView — sequence output", () => {
     apiFetchTo.mockResolvedValue({});
     const wrapper = mountView();
     await flushPromises();
-    const composer = wrapper.findComponent({ name: "SequenceComposer" });
+    const composer = wrapper.findComponent({ name: "ComposerCard" });
 
-    composer.vm.$emit("submit");
+    composer.vm.$emit("generate");
     await vi.waitFor(() => expect(finishAmend).toBeTypeOf("function"));
     const amendCall = apiJsonTo.mock.calls.find(
       (call) => typeof call[1] === "string" && call[1].endsWith("/amend"),
@@ -895,7 +934,7 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
     await flushPromises();
 
     expect(applySourceFitPreprocess).toHaveBeenCalledWith(
@@ -932,7 +971,7 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
     await flushPromises();
 
     expect(create.mock.calls[0]?.[1]).toMatchObject({
@@ -959,7 +998,7 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
     await flushPromises();
 
     const body = create.mock.calls[0]?.[1];
@@ -994,7 +1033,7 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
     await flushPromises();
 
     expect(applySourceFitPreprocess).not.toHaveBeenCalled();
@@ -1031,7 +1070,7 @@ describe("GenerateView — sequence output", () => {
 
     const wrapper = mountView();
     await flushPromises();
-    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
     await flushPromises();
     useConnectionStore().info = {
       mode: "local",

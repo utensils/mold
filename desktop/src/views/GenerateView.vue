@@ -725,11 +725,13 @@ const nativeImageDragOver = ref(false);
 const DEFAULT_BENCH_HEIGHT = 520;
 const MIN_BENCH_HEIGHT = 280;
 /**
- * Sequence mode's floor covers the composer's fixed chrome (activity header,
- * edit banner, clip head, prompt, tools, footer) plus the filmstrip's minimum
- * height, so resizing compresses the rail instead of growing a scrollbar.
+ * Clip mode's floor covers the timeline's fixed chrome (activity header, edit
+ * banner, transport, ruler, the scene row and the readout) plus the lane's own
+ * minimum, so resizing compresses the lane instead of growing a scrollbar. The
+ * words and Generate moved to the composer, which sits below this panel and
+ * measures itself.
  */
-const MIN_SEQUENCE_BENCH_HEIGHT = 390;
+const MIN_SEQUENCE_BENCH_HEIGHT = 320;
 const MIN_CANVAS_HEIGHT = 144;
 const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
 function readStoredBenchHeight(): number | null {
@@ -1908,6 +1910,14 @@ const playingSequenceClipId = computed(() => {
   return stageIdx === null ? null : (sequenceStageClipIds.value[stageIdx] ?? null);
 });
 
+/** How far the playing scene's own player has run. The timeline adds the
+ *  scenes before it to put the transport's needle on the whole clip. */
+const sequenceClipElapsed = ref(0);
+watch(sequencePlaybackSrc, () => (sequenceClipElapsed.value = 0));
+function onSequenceTimeUpdate(event: Event) {
+  sequenceClipElapsed.value = (event.target as HTMLVideoElement).currentTime;
+}
+
 function returnToLiveSequence() {
   playingSequenceStage.value = null;
 }
@@ -2300,7 +2310,7 @@ watch(
   { immediate: true },
 );
 
-const buttonLabel = computed(() => (submissionPlanning.value ? "Cancel" : "Generate"));
+const buttonLabel = computed(() => (composerSubmitting.value ? "Cancel" : "Generate"));
 /** The queue depth rides beside the button, never inside its one word. */
 const queuedNote = computed(() =>
   generation.pending.length > 0 ? `+${generation.pending.length} queued` : null,
@@ -3691,6 +3701,9 @@ function appendPromptWord(word: string) {
 }
 
 function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed") {
+  // Clip mode's words belong to the selected scene, so neither the one-shot
+  // prompt's provenance nor its quick rewrite has anything to say about them.
+  if (isSequence.value) return;
   // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
   // nothing left to describe: release it instead of raising the stale banner
   // whose recovery actions would re-expand a prompt no longer on screen.
@@ -3958,6 +3971,52 @@ const composerWarningReason = computed<string | null>(() =>
         form.pipeline,
       ),
 );
+
+/*
+ * One composer, two modes. In clip mode it carries the SELECTED SCENE's words,
+ * the timeline above owns the refusal, and Generate submits the whole chain —
+ * so every binding below asks `isSequence` once and nothing downstream has to.
+ */
+const activeScene = computed(
+  () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
+);
+const activeSceneIndex = computed(() => {
+  const index = draft.clips.findIndex((clip) => clip.id === activeScene.value?.id);
+  return index >= 0 ? index : 0;
+});
+const composerPrompt = computed(() =>
+  isSequence.value ? (activeScene.value?.prompt ?? "") : null,
+);
+const composerPlaceholder = computed(() => {
+  if (!isSequence.value) return null;
+  return activeSceneIndex.value === 0
+    ? "Scene 1 — describe how the clip opens"
+    : `Scene ${activeSceneIndex.value + 1} — describe what happens next`;
+});
+function writeScenePrompt(value: string) {
+  const scene = activeScene.value;
+  if (scene) scene.prompt = value;
+}
+/** What the timeline says Generate must refuse for. */
+const sequenceBlockedReason = ref<string | null>(null);
+const composerRefusal = computed(() =>
+  isSequence.value ? sequenceBlockedReason.value : composerBlockerReason.value,
+);
+const composerLocked = computed(() =>
+  isSequence.value ? sequenceBlockedReason.value !== null : composerDisabled.value,
+);
+const composerSubmitting = computed(() =>
+  isSequence.value ? sequenceSubmitting.value : submissionPlanning.value,
+);
+
+function composerGenerate() {
+  if (isSequence.value) void generateSequence();
+  else void generate();
+}
+function composerCancel() {
+  if (isSequence.value) cancelSequenceSubmission();
+  else cancelSubmissionPlanning();
+}
 
 // The shared rule picks the sentence: the surface's own wording while the
 // prompt is required, the optional wording once conditioning makes it
@@ -5291,12 +5350,13 @@ onBeforeUnmount(() => {
               controls
               loop
               playsinline
+              @timeupdate="onSequenceTimeUpdate"
             />
             <div
               class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-border bg-bg/90 px-2 py-1.5 shadow-md backdrop-blur"
             >
               <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                >Clip {{ (playingSequenceStage ?? 0) + 1 }}</span
+                >Scene {{ (playingSequenceStage ?? 0) + 1 }}</span
               >
               <button
                 type="button"
@@ -5499,7 +5559,7 @@ onBeforeUnmount(() => {
         <div
           v-if="isSequence"
           data-test="create-bottom-panel"
-          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-bg-crust"
+          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-bg-deep"
           :style="{
             height: `${benchHeight}px`,
             containerType: 'size',
@@ -5514,14 +5574,14 @@ onBeforeUnmount(() => {
             {{ sequenceReuseNotice }}
           </p>
 
-          <!-- Sequence bench replaces the single-print composer in-place -->
+          <!-- The clip timeline sits above the composer, never instead of it -->
           <EmptyStateBlock
             v-if="showSequenceEmpty"
             data-test="sequence-empty"
             class="flex-1 py-6"
             icon="image"
-            headline="Sequences need a video model"
-            guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+            headline="A short clip needs a video style"
+            guidance="Get an LTX Video or distilled LTX-2 style that can chain, then tell the story one scene at a time."
           >
             <template #action>
               <button
@@ -5536,14 +5596,14 @@ onBeforeUnmount(() => {
               </button>
             </template>
           </EmptyStateBlock>
-          <!-- Protect the sequence's hard chrome floor from Activity. The
-               composer itself stays min-h-0 so its filmstrip can squash, but
-               this parent flex item makes Activity yield before the footer or
-               Generate button can clip at the supported 390px bench floor. -->
+          <!-- Protect the timeline's hard chrome floor from Activity. The
+               timeline itself stays min-h-0 so its lane can squash, but this
+               parent flex item makes Activity yield before the transport or
+               the readout can clip at the supported bench floor. -->
           <div
             v-else-if="isSequence"
             data-test="generate-sequence-shell"
-            class="flex min-h-[300px] flex-[1_0_300px] overflow-hidden"
+            class="flex min-h-[228px] flex-[1_0_228px] overflow-hidden"
           >
             <SequenceComposer
               data-test="generate-sequence-composer"
@@ -5556,17 +5616,17 @@ onBeforeUnmount(() => {
               :chain-level-dirty="chainLevelDirty"
               :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
               :playing-clip-id="playingSequenceClipId"
+              :elapsed-seconds="sequenceClipElapsed"
               :target="sequenceTarget"
-              @submit="generateSequence"
-              @cancel="cancelSequenceSubmission"
               @duplicate="duplicateSequenceAsNew"
               @play-clip="playSequenceClip"
+              @update:blocked-reason="sequenceBlockedReason = $event"
             />
           </div>
         </div>
-        <!-- The sequence bench replaces the single-print composer in place. -->
+        <!-- One composer for both modes: in clip mode it carries the selected
+             scene's words and Generate submits the whole chain. -->
         <ComposerCard
-          v-if="!isSequence"
           ref="composerRef"
           data-test="generate-composer"
           class="shrink-0"
@@ -5576,25 +5636,30 @@ onBeforeUnmount(() => {
           :expansion-host-label="expansionHostLabel"
           :can-undo="quickExpansionOriginal !== null"
           :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-          :disabled="composerDisabled"
-          :disabled-reason="composerBlockerReason"
-          :warning-reason="composerWarningReason"
-          :submitting="submissionPlanning"
+          :disabled="composerLocked"
+          :disabled-reason="composerRefusal"
+          :warning-reason="isSequence ? null : composerWarningReason"
+          :submitting="composerSubmitting"
           :button-label="buttonLabel"
-          :queued-note="queuedNote"
-          :estimate-request="estimateRequest"
+          :queued-note="isSequence ? null : queuedNote"
+          :estimate-request="isSequence ? null : estimateRequest"
           :estimate-target="estimateTarget"
-          :preprocessing-status="submissionStatus"
-          :history="promptHistory"
+          :preprocessing-status="isSequence ? null : submissionStatus"
+          :history="isSequence ? [] : promptHistory"
           :remix-source="remixSource"
           :batch-locked="batchLocked"
           :style-label="modelLabels.get(form.model) ?? form.model"
           :style-id="form.model"
+          :prompt-value="composerPrompt"
+          :placeholder="composerPlaceholder"
+          :count-label="isSequence ? 'Make 1 clip' : null"
+          :show-expand="!isSequence"
           @open-style="inspectorTab = 'settings'"
           @open-shape="inspectorTab = 'settings'"
           @prompt-authored="onPromptAuthored"
-          @generate="generate"
-          @cancel="cancelSubmissionPlanning"
+          @update:prompt-value="writeScenePrompt"
+          @generate="composerGenerate"
+          @cancel="composerCancel"
           @expand="expandForCurrentBatch()"
           @remix="remixForCurrentPrompt()"
           @update:remix-source="remixSource = $event"

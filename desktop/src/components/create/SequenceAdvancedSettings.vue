@@ -104,8 +104,8 @@ function reset() {
       <AccordionSection
         v-if="activeClip"
         icon="negative"
-        :title="`Clip ${activeIndex + 1} negative prompt`"
-        summary="What to steer away from in this clip"
+        :title="`Scene ${activeIndex + 1} — what to steer away from`"
+        summary="What this scene should keep out"
         :open="true"
         :header-interactive="false"
         data-test="sequence-section-negative"
@@ -117,7 +117,7 @@ function reset() {
           rows="2"
           placeholder="blurry, low quality, deformed…"
           class="ms-textarea"
-          aria-label="Active clip negative prompt"
+          aria-label="What the selected scene should steer away from"
         />
         <p
           v-if="!guidanceCaps.supportsNegativePrompt"
@@ -136,7 +136,7 @@ function reset() {
       <AccordionSection
         v-if="activeClip && cameraControlsEnabled"
         icon="video"
-        :title="`Clip ${activeIndex + 1} camera motion`"
+        :title="`Scene ${activeIndex + 1} camera motion`"
         :summary="
           cameraControls.find((control) => control.id === activeClip?.cameraControl)?.label ??
           activeClip.cameraControl ??

@@ -240,35 +240,46 @@ the phone keep Create / Library / Models until their own redesign.
   pull without returning any queued job is reported as an error. The
   sequence and video Create empty states deep-link straight to the video
   catalog.
-- **Sequences** (inside Create): multi-clip video is a setting, not a place:
-  switch the inspector's **Output** control to **Sequence** (File → New
-  Sequence and the ⌘K palette land there too) and the composer becomes a clip
-  rail. Clip pills carry per-clip prompts and frame counts (validated on the
-  family's own grid; `8n+1`, or `4n+1` for Wan; defaulted from the
-  selected model, and capped at that model's own clip size, so a sequence
-  clip is never longer than the clips a one-shot Duration would be split
-  into), and the seam pills between them name
-  each transition in words; **Smooth**, **Cut**, or **Fade 8f** (zero-tail
-  joins say **Join**); with a click opening the seam editor's teaching
-  rows and fade-length stepper. Right-click a clip pill for Play (when a
-  cached render exists), Duplicate, Insert before/after, Move, and Remove, or
-  the rail background for Add clip, Check the plan, the TOML file tools, and
-  Clear the clip. A live fits/duration forecast runs against
+- **Short clip** (inside Create): multi-clip video is a setting, not a place:
+  switch the view toolbar's control to **Short clip** (File → New Sequence and
+  the ⌘K palette land there too) and a timeline rises above the composer. The
+  composer stays where it is: it now carries the selected scene's words —
+  "Scene 2 — describe what happens next" — the chip reads **Make 1 clip**, and
+  ⌘↩ makes the whole clip. The timeline is a transport (play the clip back once
+  scenes have rendered, with the clock reading `0:06 / 0:20`, and **Add a
+  scene**), a ruler in round seconds, and the scenes lane. Each block in the
+  lane is as wide as the time it plays, so the lane always fits the window and
+  never scrolls; a block wears the scene's own words, its rendered frame behind
+  them, and its length in the corner. Drag the selected block's right edge to
+  make that scene longer — it snaps to the family's own frame grid (`8n+1`, or
+  `4n+1` for Wan, defaulted from the selected model and capped at that model's
+  own clip size, so a scene is never longer than the clips a one-shot Duration
+  would be split into) — or drag the block itself to reorder. The seam floating
+  above each join names its transition in words; **Smooth**, **Cut**, or
+  **Fade 8f** (zero-tail joins say **Join**); a click opens the seam editor's
+  teaching rows and fade-length stepper. With a block focused, ←/→ move between
+  scenes, Shift+←/→ change its length, ↩ opens the seam before it, and ⌫ removes
+  it after a confirm. Right-click a block for Play (when a cached render
+  exists), Duplicate, Insert before/after, Move, and Remove, or the lane
+  background for Add clip, Check the plan, the TOML file tools, and Clear the
+  clip. One mono line beneath the lane says what the clip adds up to — "3 scenes
+  · 289 frames · 0:12 at 24fps", or the machine's own answer once you check the
+  plan. A live fits/duration forecast runs against
   `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
   and running sequence jobs appear in the same activity strip as prints with
   watch and cancel. A finished sequence leaves the strip: its video lands on
   the Create canvas with **Edit sequence** and **Show in library**, its print
   is in the Library, and its job record is in **Library ▸ History ▸
-  Sequences**. Editing a finished sequence reloads its clips onto
-  the rail, marks which clips stay cached versus re-render as you change
+  Sequences**. Editing a finished sequence reloads its scenes onto
+  the lane, marks which stay cached versus re-render as you change
   things, and **Update sequence** re-renders only from the earliest changed
   clip; changing a transition type or a fade length re-stitches with no
   re-render at all. From a sequence print in the Library, **Edit sequence**
   re-enters the original job with its cached clips and **Duplicate as new**
   starts a fresh sequence from the recorded clips. The picker shows
   sequence-capable video models from every connected
-  host (choosing Sequence auto-picks one and remembers your single-mode model;
-  with none installed the bench deep-links to Discover with Video + Models
+  host (choosing Short clip auto-picks one and remembers your single-mode model;
+  with none installed the timeline deep-links to Discover with Video + Models
   filters), and limits, creation, events, previews, and job actions stay
   routed to the model's host. An optional **Opening image** well (with its
   source strength and fit-to-frame controls) sits in the inspector's primary
@@ -414,7 +425,10 @@ release is published.
 | Cmd/Ctrl+1–5, comma | New image / Queue / My images / Styles / Machines / Settings |
 | Cmd/Ctrl+K          | Command palette                                              |
 | Cmd/Ctrl+N          | New image (clear composer, focus)                            |
-| Cmd/Ctrl+Enter      | Generate                                                     |
+| Cmd/Ctrl+Enter      | Generate (in Short clip, make the whole clip)                |
+| ←/→                 | Short clip: move between scenes on the lane                  |
+| Shift+←/→           | Short clip: shorten / lengthen the selected scene            |
+| ↩ / ⌫               | Short clip: open the seam before a scene / remove it         |
 | Alt/Option+Enter    | Make 4 variations of the last picture                        |
 | Cmd/Ctrl+E          | Expand prompt                                                |
 | Cmd/Ctrl+R          | Surprise me (a new seed)                                     |
