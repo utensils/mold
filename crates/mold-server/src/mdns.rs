@@ -401,10 +401,6 @@ pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<Mdn
     Ok(MdnsGuard { daemon, fullname })
 }
 
-/// Start the server's long-lived DNS-SD browser and cache updater.
-///
-/// The background thread tracks resolved and removed services by fullname.
-/// If browsing stops, it marks discovery unavailable and clears cached peers.
 /// Drain browse events into the shared peer cache until the channel closes,
 /// the daemon reports `SearchStopped`, or `stop` is set. Split out of the
 /// thread body so a test can prove the loop leaves on the flag alone, with a
@@ -470,6 +466,10 @@ fn browse_until_stopped(
     }
 }
 
+/// Start the server's long-lived DNS-SD browser and cache updater.
+///
+/// The background thread tracks resolved and removed services by fullname.
+/// If browsing stops, it marks discovery unavailable and clears cached peers.
 pub fn start_browser(
     discovery: Arc<crate::state::DiscoveryState>,
     own_instance_id: Arc<String>,
@@ -482,7 +482,7 @@ pub fn start_browser(
     discovery.set_can_browse(true);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let thread_discovery = discovery.clone();
-    let thread_instance_id = own_instance_id.clone();
+    let thread_instance_id = own_instance_id;
     let thread_stop = stop.clone();
     let thread = std::thread::Builder::new()
         .name("mold-mdns-browser".to_string())
