@@ -68,9 +68,22 @@ async fn engine_boots_authenticates_and_shuts_down() {
 
     // …and reported dead once the thread exits, so the connection state
     // machine knows to restart instead of handing out a dead base URL.
+    //
+    // The bound is the server's own shutdown contract, not a smaller number:
+    // `run_server` waits up to `DEFAULT_SHUTDOWN_ABORT_SECS` for GPU owners
+    // and then stops waiting, so an engine that exits inside that budget is
+    // behaving. A 15 s bound here failed on slow macOS runners at 15.6-16 s
+    // (main runs 33616295687, 33820692419, 33823114932) with no server hang
+    // behind it. The elapsed time is printed either way so a run that drifts
+    // toward the budget is visible before it fails.
+    let budget = Duration::from_secs(mold_server::DEFAULT_SHUTDOWN_ABORT_SECS + 15);
+    let started = std::time::Instant::now();
+    let exited = engine.join(budget);
+    let elapsed = started.elapsed();
+    eprintln!("engine shutdown took {elapsed:.1?} (bound {budget:?})");
     assert!(
-        engine.join(Duration::from_secs(15)),
-        "engine thread did not exit"
+        exited,
+        "engine thread did not exit within {budget:?} (waited {elapsed:.1?})"
     );
     assert!(!engine.is_alive(), "engine thread did not exit");
 }
