@@ -142,6 +142,10 @@ metal = ["mold-server/metal"]
 # `mold_core::identity::identity_runtime_available()` is `cfg!(feature =
 # "pulid")` inside mold-core's own compilation.
 pulid = ["mold-core/pulid", "mold-server/pulid"]
+# Animated WebP export for clips and mesh turntables. This must be forwarded
+# explicitly: the `image` crate's decode feature above is unrelated to the
+# embedded server's statically linked encoder.
+webp = ["mold-server/webp"]
 
 [profile.release]
 lto = "thin"
