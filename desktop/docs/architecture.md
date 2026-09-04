@@ -13,7 +13,18 @@ the Mold Studio package (lexicon, shell anatomy, component vocabulary, the six
 themes) with `mold-studio-desktop.dc.html` as the desktop reference
 implementation. The desktop's destinations are New image, Queue, My images,
 Styles, and Machines (⌘1–⌘5), plus Settings (⌘,); web and the phone keep the
-five-workspace names until their own redesign.
+five-workspace names until their own redesign. `desktop/src/lib/lexicon.test.ts`
+pins those words wherever a rename could leave one surface behind.
+
+Settings is a 200 px jump nav over always-open sections, declared once as
+`SECTIONS` in `desktop/src/lib/settingsSchema.ts`: Look, Defaults for new
+images, Write more for me, Machines, Styles & disk, Style licences, My images &
+trash, Saving pictures & clips, Phone pairing, Speed & memory, Accounts &
+tokens, Profiles, Advanced, Updates & about. Search narrows the nav and the page
+together and `?section=` jumps (`about` folds into `updates`). Themes are the
+same contract every surface reads — `ThemeId`, `THEME_META`, `THEME_PAIR`,
+`migrateLegacyTheme`, `applyTheme` in `ui/theme.ts` — with the Rust
+`AppSettings` persisting `{ theme, match_system }`.
 
 ## Android foundation
 
@@ -344,24 +355,26 @@ desktop/
 ├── index.html  vite.config.ts  tsconfig.json  vitest.config.ts
 ├── src/
 │   ├── main.ts  App.vue  router.ts
-│   ├── styles/tokens.css  styles/base.css   # design system (CSS vars, light/dark)
+│   ├── styles/tokens.css  styles/base.css   # the Tailwind layer over ui/tokens.css (six themes, one data-theme)
 │   ├── lib/
 │   │   ├── api/client.ts                    # typed fetch wrapper (base URL + X-Api-Key from IPC)
 │   │   ├── api/sse.ts                       # fetch-event-source helpers (POST-SSE, snapshots, reconnect)
 │   │   ├── api/types.ts                     # mirrored mold-core wire types
 │   │   ├── capabilities.ts                  # ported from web/src/lib/generateCapabilities.ts
 │   │   └── ipc.ts                           # invoke() wrappers for all Tauri commands
-│   ├── stores/  connection.ts generation.ts queue.ts composer.ts settings.ts
+│   ├── stores/  connection.ts generation.ts jobs.ts composer.ts gallery.ts hosts.ts …
+│   ├── composables/ useQueueActivity.ts useQueueRowContext.ts useQueueCommands.ts useShellSubtitle.ts …
 │   ├── views/   GenerateView.vue QueueView.vue LibraryView.vue ModelsView.vue MachinesView.vue HostDetailView.vue RunPodView.vue SettingsView.vue
 │   └── components/
-│       ├── shell/   TitleBar.vue Sidebar.vue QueueRail.vue StatusBar.vue CommandPalette.vue Toasts.vue ContextMenu.vue
-│       ├── generate/ ParamPanel.vue LoraStack.vue SourceImageWell.vue ExpandSheet.vue EstimateBadge.vue VideoParams.vue PlacementPanel.vue
-│       ├── gallery/ AuthedMedia.vue Lightbox.vue           # (planned: VirtualGrid/MediaCard/DetailPane/MetadataTable; the justified grid lives in LibraryView.vue)
-│       ├── library/ HistoryDrawer.vue LibraryHeader.vue LibraryChipRow.vue CollectionsShelf.vue CollectionDrillIn.vue TrashBanner.vue TagEditor.vue CollectionPicker.vue
-│       ├── create/  CreateHeader.vue (editable print title) HostChip.vue InspectorPanel.vue …
-│       ├── settings/ LibrarySection.vue (trash retention for This device) GenerationSection.vue MediaSection.vue …
-│       ├── jobs/    QueueStrip.vue JobCard.vue ChainComposer.vue StageCard.vue ChainJobDetail.vue DownloadsDrawer.vue
-│       └── models/  ModelList.vue CatalogSearch.vue ComponentStatus.vue PullProgress.vue
+│       ├── shell/   TitleBar.vue Sidebar.vue QueueRail.vue QueueRowMenu.vue StatusBar.vue CommandPalette.vue Toasts.vue ContextMenu.vue ContextMenuItem.vue ConfirmDialog.vue
+│       ├── create/  InspectorPanel.vue ComposerCard.vue CreateHeader.vue (editable print title) SequenceComposer.vue SceneLane.vue StarterList.vue RecentPrints.vue HostChip.vue FileUnderGroup.vue AdvancedSettings.vue
+│       ├── generate/ LoraStack.vue SourceImageWell.vue IdentityWell.vue MaskEditorModal.vue ExpandControl.vue EstimateBadge.vue TemplatesPanel.vue
+│       ├── gallery/ AuthedMedia.vue Lightbox.vue           # the justified virtualized grid lives in LibraryView.vue
+│       ├── library/ LibraryHeader.vue LibraryChipRow.vue CollectionsShelf.vue TrashBanner.vue BulkBar.vue TagEditor.vue CollectionPicker.vue HistoryDrawer.vue (the inline History column)
+│       ├── settings/ AppearanceCard.vue (Look) StylesDiskSection.vue GenerationSection.vue LibrarySection.vue MediaSection.vue UpdatesSection.vue …
+│       ├── jobs/    QueueEntryDrawer.vue
+│       ├── machines/ ConnectMachineModal.vue HostQueuePanel.vue PodCostMeter.vue
+│       └── models/  InstalledTab.vue CatalogTab.vue ModelTableRow.vue CatalogTableRow.vue DownloadsTray.vue DownloadTargetDialog.vue CatalogDetailDrawer.vue
 └── src-tauri/
     ├── Cargo.toml  Cargo.lock  build.rs (tauri_build::build())
     ├── tauri.conf.json

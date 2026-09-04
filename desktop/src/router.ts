@@ -69,7 +69,7 @@ export const router = createRouter({
     // Legacy paths fold into the five destinations so existing links,
     // deep-links, and a persisted last-route keep working. `router.replace`
     // during restore runs these redirects too (restoring "/gallery" lands on
-    // "/library", "/history" opens the Library history drawer).
+    // "/library", "/history" opens the History column in My images).
     { path: "/generate", redirect: "/create" },
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
     { path: "/chains", redirect: { path: "/create", query: { output: "sequence" } } },

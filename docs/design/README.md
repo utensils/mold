@@ -62,7 +62,12 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).
 Anything that costs money is stated in money, in `--mold-state-cost`.
-`desktop/src/lib/lexicon.test.ts` pins the destination words on the router, the sidebar, the palette, and the native menu, and the inspector's seed labels.
+`desktop/src/lib/lexicon.test.ts` pins these words where a rename could leave one
+surface behind: the destinations on the router, the sidebar, the palette and the
+native menu; the File and Generate menu verbs; the finished-work toasts;
+Settings' section and row labels; the inspector's seed, Detail, guidance, 3-D
+and Add-on-looks labels; the composer's Generate and Write more for me; and the
+retired words the Styles and Machines surfaces may never say again.
 
 ## 3 · Shell anatomy
 
@@ -152,11 +157,18 @@ a literal.
 | Shell metrics, control heights, semantic surfaces, `--mold-state-*`                                                                             | `ui/mold-desktop.css`                                                                                                       |
 | Theme contract (`ThemeId`, `THEME_META`, `THEME_PAIR`, `migrateLegacyTheme`, `applyTheme`)                                                      | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
 | Desktop Tailwind layer (`bg-panel`, `text-fg-dim`, `rounded-control`, `text-micro`…)                                                            | `desktop/src/styles/tokens.css` + `base.css`; `tokens.legacy.test.ts` refuses the retired vocabulary                        |
-| Shared kit: shimmer, pulse, toolbar button, group label                                                                                         | `ui/kit.css`                                                                                                                |
-| Shared primitives                                                                                                                               | `ui/components/` (Vue, token-var styled)                                                                                    |
+| Shared kit: shimmer, pulse, `.ms-toolbar-button`, `.ms-group-label`, `.ms-card-edge`, `.ms-lib-upscaled`                                        | `ui/kit.css`                                                                                                                |
+| Shared primitives (`SegmentedControl` `inline`, `SliderRow` `low`/`high`, `ModalPanel` header + `#description`, `DrawerPanel`)                  | `ui/components/` (Vue, token-var styled)                                                                                    |
 | Shell: unified toolbar · sidebar with the queue · status bar                                                                                    | `desktop/src/components/shell/{TitleBar,Sidebar,QueueRail,StatusBar}.vue`, `stores/hostStatus.ts`                           |
 | Views                                                                                                                                           | `desktop/src/views/{GenerateView,QueueView,LibraryView,ModelsView,MachinesView,HostDetailView,RunPodView,SettingsView}.vue` |
+| Queue: what a row is waiting on, and the only ETA source (`estimated_finish_unix_ms`)                                                           | `desktop/src/composables/useQueueRowContext.ts`, `lib/queueRows.ts`, `components/shell/QueueRowMenu.vue`                    |
+| New image: the inspector's groups                                                                                                               | `desktop/src/components/create/InspectorPanel.vue`, `lib/qualityPresets.ts`, `lib/meshDetailLadder.ts`                      |
+| New image: the Starters and Recent tabs beside Settings                                                                                         | `desktop/src/components/create/{inspectorTabs.ts,StarterList.vue,RecentPrints.vue}`                                         |
 | Clip mode: the timeline (transport · ruler · scenes lane · playhead) above the one composer                                                     | `desktop/src/components/create/{SequenceComposer,SceneLane,ComposerCard}.vue`                                               |
+| My images: scopes, the chip row, the trash banner, History as a column                                                                          | `desktop/src/components/library/{LibraryHeader,LibraryChipRow,CollectionsShelf,TrashBanner,BulkBar,HistoryDrawer}.vue`      |
+| Styles: the one column axis (`--model-row-columns`) and the pinned download banner                                                              | `desktop/src/components/models/{InstalledTab,ModelTableRow,CatalogTab,DownloadsTray}.vue`                                   |
+| Settings: the jump nav's sections and rows                                                                                                      | `desktop/src/lib/settingsSchema.ts`, `components/settings/{AppearanceCard,StylesDiskSection}.vue`                           |
+| Context menu: one row, root list and submenu alike                                                                                              | `desktop/src/components/shell/{ContextMenu,ContextMenuItem}.vue`, `stores/contextMenu.ts`                                   |
 | Fonts (one sans + one mono per theme, OFL)                                                                                                      | `ui/fonts/` (app-bundled; `fonts.legacy.css` carries only the Safelight pair for the embedded web bundle)                   |
 
 Rules that gate any new UI: compose only from the shared kit, reference tokens
@@ -177,3 +189,40 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   selects each theme map on any element, not only `:root`, so the Look picker
   can show a theme's own surfaces without repeating a hex in TypeScript. That
   band is the only themed island the app is allowed.
+- **Smoothness for a one-shot clip stays in Advanced ▸ Video.** The Clip card
+  carries it only in clip mode, where the whole sequence renders at one fps. A
+  one-shot's fps is a model knob beside frames, and lifting it into the
+  essentials would put two spellings of the same number on one screen.
+- **The bulk Delete says "Move N pictures to trash".** The lexicon's noun for a
+  result is a picture, and the count is what makes a bulk action safe to
+  confirm; "Delete" alone on a selection of forty reads as one thing.
+- **Write more for me is hidden in clip mode.** The composer's rewrite reaches
+  the one-shot prompt, and in clip mode the field holds the selected scene's
+  words. Rewriting a scene is a different feature, so the control stands down
+  rather than silently retargeting.
+- **The plan validator says "clip N", not "scene N".** Its wording lives in
+  `studio/lib/sequence.ts` and is what web reads too. One shared sentence beats
+  a desktop-only copy that would drift; only the surfaces desktop owns say
+  scene.
+- **The seam chip is built in `SceneLane.vue`.** Web renders it from the shared
+  `ClipRail`, but the lane's blocks are time-proportional and its seam floats on
+  the join, so the geometry is desktop's. The words are still the shared
+  `transitionLabel` from `ui/lib/seam.ts`.
+- **An active download reads "Downloading", not "Being made".** The queue's
+  vocabulary describes a picture arriving; a style arriving is a different
+  event, and `DownloadsTray` names it plainly rather than borrowing the row
+  sentence.
+- **History is a column and keeps its Runs / Prompts / Sequences tabs.** Moving
+  it out of a modal drawer took the scrim away, not the three lenses; the tabs
+  render in the column body, and `?panel=history&tab=` still addresses them.
+- **Refresh stays in My images.** The primary bucket is SSE-live, but a
+  connected remote's gallery is polled, so the toolbar keeps one explicit way to
+  ask every machine again.
+
+### Named absences (no backend, not oversights)
+
+Save every result · a per-print generation time on a Recent row · the mock's
+SPEED column · an hourly rate in the Rent-this-GPU confirm · a friendly name
+for a licence, which is its id and summary · pausing the job that is already
+running. Each needs a field or an API that does not exist, so the surface says
+nothing rather than guessing.
