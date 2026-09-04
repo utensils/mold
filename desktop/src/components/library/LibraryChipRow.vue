@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
  * LibraryChipRow — the 30px filter strip under the Library header in the
- * Prints scope (V3 "Shelf"): ♥ Favorites, the top tags (mono counts; active
+ * Prints scope: ♥ Favorites, the top tags (mono counts; active
  * = AND), "More tags…" (popover with search + checkable list), the host
  * chips that used to live in the header, and the open collection as a
  * removable chip. Always present — with nothing filtered it is a quiet
@@ -116,7 +116,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
         data-test="favorites-chip"
         @click="emit('update:favoritesOnly', !favoritesOnly)"
       >
-        <span class="ms-lib-heart" aria-hidden="true">♥</span>
+        <span class="ms-lib-chip-heart" aria-hidden="true">♥</span>
         Favourites
         <span class="ms-lib-chip__n">{{ favoritesCount }}</span>
       </Chip>
@@ -274,8 +274,8 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
   color: var(--mold-blue);
 }
 
-.ms-lib-heart {
-  font-size: 12px;
+.ms-lib-chip-heart {
+  font-size: var(--mold-fs-xs);
   line-height: 1;
 }
 

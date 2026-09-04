@@ -81,6 +81,116 @@ describe("font-size utilities", () => {
   });
 });
 
+/*
+ * README §7: a component references --mold-radius-1/2/3 and the seven-step type
+ * scale, never a literal. A literal survives a theme swap unchanged, so Nebula's
+ * square corners and Blueprint's 10.5px micro never reach it. `0` is not a
+ * literal here, and a line may opt out with `/* literal: <reason> *​/` beside it.
+ */
+const LITERAL_STYLE = /\b(border-radius|font-size)\s*:\s*[^;{}]*\b\d+(?:\.\d+)?px/;
+
+function literalStyles(text: string): string[] {
+  const hits: string[] = [];
+  text.split("\n").forEach((line, index) => {
+    if (line.includes("/* literal:")) return;
+    const match = line.match(LITERAL_STYLE);
+    if (match) hits.push(`${index + 1}: ${match[0].trim()}`);
+  });
+  return hits;
+}
+
+/*
+ * A RATCHET, not an allowlist. These files still carry literals from before the
+ * token scale existed. Most are shared ui/ and studio/ primitives the redesign
+ * has yet to reach, where converting blind would move web and the phone by a
+ * pixel apiece with nothing watching; the six create/ files are the ones the
+ * New-image restructure rebuilds. So each file may keep the count it has and
+ * never more, and a file that reaches zero must leave the table.
+ */
+const UNCONVERTED: Record<string, number> = {
+  "src/components/create/AdvancedSettings.vue": 23,
+  "src/components/create/FileUnderGroup.vue": 19,
+  "src/components/create/HostChip.vue": 6,
+  "src/components/create/ModelPicker.vue": 7,
+  "src/components/create/SequenceAdvancedSettings.vue": 7,
+  "src/components/create/SequenceOpeningImageWell.vue": 4,
+  "../ui/components/AccordionSection.vue": 2,
+  "../ui/components/ActionBlocker.vue": 4,
+  "../ui/components/BadgePill.vue": 1,
+  "../ui/components/CatalogLayoutToggle.vue": 1,
+  "../ui/components/Chip.vue": 1,
+  "../ui/components/ClipPill.vue": 11,
+  "../ui/components/ClipRail.vue": 8,
+  "../ui/components/EmptyStateBlock.vue": 3,
+  "../ui/components/LiveActivityList.vue": 6,
+  "../ui/components/MediaTile.vue": 3,
+  "../ui/components/MeshExportDialog.vue": 9,
+  "../ui/components/MeshGeometryFields.vue": 7,
+  "../ui/components/NavItem.vue": 1,
+  "../ui/components/PalettePanel.vue": 7,
+  "../ui/components/ProgressBar.vue": 1,
+  "../ui/components/ProgressRing.vue": 1,
+  "../ui/components/ResolutionSelector.vue": 4,
+  "../ui/components/SeamEditor.vue": 10,
+  "../ui/components/SeamPill.vue": 3,
+  "../ui/components/SegmentedControl.vue": 3,
+  "../ui/components/SequenceJobRow.vue": 8,
+  "../ui/components/ShapePicker.vue": 2,
+  "../ui/components/SheetPanel.vue": 5,
+  "../ui/components/Stepper.vue": 2,
+  "../ui/components/ThumbnailSizeSlider.vue": 2,
+  "../ui/components/ToastShelf.vue": 4,
+  "../ui/components/Tooltip.vue": 2,
+  "../ui/components/UpscaleDialog.vue": 12,
+  "../ui/components/VideoDurationSlider.vue": 1,
+  "../ui/components/VideoExportDialog.vue": 11,
+  "../studio/components/DevicePanel.vue": 7,
+  "../studio/components/IdentityPhotoWell.vue": 1,
+  "../studio/components/ImageDropWell.vue": 7,
+  "../studio/components/LicenseAcceptanceDialog.vue": 4,
+  "../studio/components/MeshViewer.vue": 5,
+  "../studio/components/MinimaxH3AuthoringPanel.vue": 10,
+  "../studio/components/MinimaxH3InventoryPanel.vue": 15,
+  "../studio/components/MobilePairingCard.vue": 10,
+  "../studio/components/NotificationsCenter.vue": 14,
+  "../studio/components/PairingAccessPanel.vue": 8,
+  "../studio/components/QueueEntryDetail.vue": 14,
+  "../studio/components/QueuePlanWorkList.vue": 4,
+  "../studio/components/ReferenceCropEditor.vue": 3,
+  "../studio/components/SourceMediaWells.vue": 1,
+  "../studio/components/SwipeActionRow.vue": 2,
+};
+
+describe("literal radii and font sizes", () => {
+  it("are recognised by the guard (positive control)", () => {
+    expect(literalStyles("  border-radius: 9px;")).toHaveLength(1);
+    expect(literalStyles("  font-size: 13.5px;")).toHaveLength(1);
+    expect(literalStyles("  border-radius: 22px 22px 0 0;")).toHaveLength(1);
+    expect(literalStyles("  border-radius: var(--mold-radius-2);")).toHaveLength(0);
+    expect(literalStyles("  font-size: 0;")).toHaveLength(0);
+    expect(literalStyles("  padding: 2px 6px;")).toHaveLength(0);
+    expect(literalStyles("  border-radius: 3px; /* literal: QR quiet zone */")).toHaveLength(0);
+  });
+
+  it("appear only where the ratchet still allows them", () => {
+    const counts: Record<string, number> = {};
+    for (const root of ROOTS) {
+      for (const file of walk(root)) {
+        // Tests quote the literals they refuse; the guard is about shipped styles.
+        if (file.endsWith(".test.ts")) continue;
+        const hits = literalStyles(readFileSync(file, "utf8"));
+        if (hits.length) counts[file] = hits.length;
+      }
+    }
+    const over = Object.entries(counts)
+      .filter(([file, count]) => count > (UNCONVERTED[file] ?? 0))
+      .map(([file, count]) => `${file}: ${count} > ${UNCONVERTED[file] ?? 0}`);
+    expect(over).toEqual([]);
+    const cleared = Object.keys(UNCONVERTED).filter((file) => !counts[file]);
+    expect(cleared).toEqual([]);
+  });
+});
+
 describe("legacy token vocabulary", () => {
   it("is recognised by the guard (positive control)", () => {
     // One hit per pattern family: the colour utilities and the type roles.

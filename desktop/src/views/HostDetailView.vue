@@ -316,7 +316,7 @@ const drawerRepairing = ref(false);
 // Loaded-model chip unload state — declared here (not with its handlers)
 // because the identity watch's immediate run resets it.
 const unloading = ref<Set<string>>(new Set());
-/** Name awaiting the confirming second click before it unloads (§08 G12). */
+/** Name awaiting the confirming second click before it unloads. */
 const unloadPending = ref<string | null>(null);
 /** Optimistically hidden until the telemetry poll confirms the unload. */
 const recentlyUnloaded = ref<Set<string>>(new Set());
@@ -638,7 +638,7 @@ async function disconnect() {
   void router.push("/machines");
 }
 
-// Forget drops the saved entry AND the stored API key — confirmed first (§08 G12).
+// Forget drops the saved entry AND the stored API key — confirmed first.
 const forgetOpen = ref(false);
 
 async function forget() {
@@ -776,7 +776,12 @@ async function forget() {
             data-test="telemetry-panel"
             class="grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-2.5"
           >
-            <div v-for="gpu in gpus" :key="gpu.ordinal" class="tile" data-test="gpu-card">
+            <div
+              v-for="gpu in gpus"
+              :key="gpu.ordinal"
+              class="tile ms-card-edge"
+              data-test="gpu-card"
+            >
               <span class="ms-group-label uppercase">
                 {{ unifiedMemory ? "Memory" : "Graphics memory"
                 }}<template v-if="gpus.length > 1"> · GPU {{ gpu.ordinal }}</template>
@@ -811,7 +816,7 @@ async function forget() {
                 >
               </span>
             </div>
-            <div v-if="cpu" class="tile" data-test="cpu-card">
+            <div v-if="cpu" class="tile ms-card-edge" data-test="cpu-card">
               <span class="ms-group-label uppercase">Processor</span>
               <span class="text-lg font-semibold text-fg">{{ cpu.usage_percent.toFixed(0) }}%</span>
               <span
@@ -829,7 +834,7 @@ async function forget() {
               </span>
               <span class="font-mono text-micro text-fg-dim">{{ cpu.cores }} CORES</span>
             </div>
-            <div v-if="ram && !unifiedMemory" class="tile" data-test="ram-card">
+            <div v-if="ram && !unifiedMemory" class="tile ms-card-edge" data-test="ram-card">
               <span class="ms-group-label uppercase">System memory</span>
               <span class="text-lg font-semibold text-fg">
                 {{ Math.round(percent(ram.used, ram.total)) }}%
@@ -854,7 +859,7 @@ async function forget() {
                 {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
               </span>
             </div>
-            <div v-if="modelsDisk" class="tile" data-test="storage-card">
+            <div v-if="modelsDisk" class="tile ms-card-edge" data-test="storage-card">
               <span class="ms-group-label uppercase">Disk for styles</span>
               <span class="text-lg font-semibold text-fg">{{ Math.round(diskUsedPct) }}%</span>
               <span
@@ -1160,8 +1165,6 @@ async function forget() {
   flex-direction: column;
   gap: 7px;
   padding: 13px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
   background: var(--mold-panel);
 }
 </style>

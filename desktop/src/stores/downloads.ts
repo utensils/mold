@@ -479,7 +479,7 @@ export const useDownloadsStore = defineStore("downloads", {
       else void useModelStore().fetch();
     },
     /**
-     * A pull failed on some host (§08 G11). `job_failed` carries no model, so
+     * A pull failed on some host. `job_failed` carries no model, so
      * recover it from the just-settled history row, then toast + notify (native
      * only fires while backgrounded).
      */

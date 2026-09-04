@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * LibraryHeader — the Library's 52px top bar (V3 "Shelf"). Title, the
+ * LibraryHeader — the per-view toolbar over the grid. Title, the
  * scope control (Prints | Collections | Trash with mono counts), a per-scope
  * count label, then the right cluster: thumbnail slider, media-kind control,
  * search, History / Select / Refresh. Collections hides the slider and kind

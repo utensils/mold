@@ -23,7 +23,16 @@ const toasts = useToastStore();
 
 const schema = computed(() => schemaFor(props.schemaKey));
 const row = computed(() => config.row(props.schemaKey));
-const locked = computed(() => row.value?.source === "env" || schema.value?.liveReadOnly);
+/** Why the row is read-only here, if it is — the environment wins over any
+ * stored value, and a startup-only key cannot move while the server runs. */
+const lockedReason = computed(() => {
+  if (schema.value?.liveReadOnly)
+    return "Startup-only while the server is running. Use the CLI while stopped, then restart.";
+  if (row.value?.source === "env")
+    return `Locked by ${row.value.env_var ?? "the environment"} — unset it to edit here.`;
+  return undefined;
+});
+const locked = computed(() => lockedReason.value !== undefined);
 
 async function save(value: string | number | boolean | null) {
   const error = await config.save(props.schemaKey, value);
@@ -53,13 +62,7 @@ const asNumber = computed(() => {
     :label="schema.label"
     :help="schema.help"
     :source="row.source"
-    :locked="locked"
-    :locked-by="row.env_var ?? undefined"
-    :locked-reason="
-      schema.liveReadOnly
-        ? 'Startup-only while the server is running. Use the CLI while stopped, then restart.'
-        : undefined
-    "
+    :locked-reason="lockedReason"
     :needs-engine-restart="schema.needsEngineRestart || row.restart_required"
     resettable
     @reset="reset"

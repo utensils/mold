@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * History drawer (spec §06) — the Library's Runs + Prompts + Sequences log on a
+ * History drawer — the Library's Runs + Prompts + Sequences log on a
  * right-side @ui DrawerPanel. Runs are gallery-backed (every finished
  * generation with its print, settings, and seed); Prompts is the raw prompt log
  * fanned out over every ready host; Sequences is the one place the durable
@@ -575,7 +575,7 @@ async function cleanUpDiskConfirmed() {
       />
     </template>
     <template #header>
-      <span class="ms-drawer-kicker">History</span>
+      <span class="ms-group-label uppercase">History</span>
       <div
         class="ml-3 flex rounded-control border border-border-control bg-bg-deep p-0.5"
         role="group"
@@ -866,34 +866,26 @@ async function cleanUpDiskConfirmed() {
         </p>
       </div>
     </div>
-
-    <ConfirmDialog
-      :open="confirmDeleteSequence !== null"
-      title="Delete this sequence?"
-      :message="`Removes the job and its cached clips${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished video in the Library is kept.`"
-      confirm-label="Delete"
-      danger
-      @confirm="deleteSequenceConfirmed"
-      @cancel="confirmDeleteSequence = null"
-    />
-    <ConfirmDialog
-      :open="confirmCleanUpDisk"
-      title="Clean up sequence cache?"
-      message="This discards cached scene media used for scene playback and sequence editing. Final videos in the Library remain."
-      confirm-label="Clean up"
-      danger
-      @confirm="cleanUpDiskConfirmed"
-      @cancel="confirmCleanUpDisk = false"
-    />
   </DrawerPanel>
-</template>
 
-<style scoped>
-.ms-drawer-kicker {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
-}
-</style>
+  <!-- Siblings of the drawer: the drawer panel is positioned, and a dialog
+       nested inside it would size to the panel instead of the frame. -->
+  <ConfirmDialog
+    :open="confirmDeleteSequence !== null"
+    title="Delete this sequence?"
+    :message="`Removes the job and its cached clips${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished video in the Library is kept.`"
+    confirm-label="Delete"
+    danger
+    @confirm="deleteSequenceConfirmed"
+    @cancel="confirmDeleteSequence = null"
+  />
+  <ConfirmDialog
+    :open="confirmCleanUpDisk"
+    title="Clean up sequence cache?"
+    message="This discards cached scene media used for scene playback and sequence editing. Final videos in the Library remain."
+    confirm-label="Clean up"
+    danger
+    @confirm="cleanUpDiskConfirmed"
+    @cancel="confirmCleanUpDisk = false"
+  />
+</template>

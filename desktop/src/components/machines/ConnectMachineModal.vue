@@ -134,13 +134,11 @@ async function connect() {
 </script>
 
 <template>
-  <ModalPanel
-    :open="open"
-    :width="480"
-    title="Connect a machine"
-    description="Point mold at another computer running mold serve to borrow its GPU."
-    @close="emit('close')"
-  >
+  <ModalPanel :open="open" :width="480" title="Connect a machine" @close="emit('close')">
+    <template #description>
+      Point mold at another computer running <code class="font-mono">mold serve</code> to borrow its
+      GPU.
+    </template>
     <div class="flex flex-col gap-3.5">
       <!-- Found on your network -->
       <div class="flex flex-col gap-1.5">

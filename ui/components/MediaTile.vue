@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Media tile — square print tile for library grids (spec §06). Rest state
+ * Media tile — square print tile for library grids. Rest state
  * carries the inset top highlight; hover lifts with a drop shadow. Optional
  * NEW badge for fresh prints; the "overlay" slot pins extra badges (e.g. a
  * video duration) to the bottom-right corner.

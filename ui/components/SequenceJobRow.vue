@@ -48,7 +48,7 @@ const emit = defineEmits<{
   select: [vm: SequenceVM];
 }>();
 
-// State color follows the development-temperature rule (spec §2.1).
+// State colour follows the development-temperature rule.
 const STATE_CLASS: Record<ChainJobState, string> = {
   queued: "ms-seqrow__state--waiting",
   running: "ms-seqrow__state--active",

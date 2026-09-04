@@ -71,7 +71,7 @@ export type {
 const REFETCH_DEBOUNCE_MS = 500;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Library header scope (V3 "Shelf"): the grid, the collections shelf, or
+/** Library header scope: the grid, the collections shelf, or
  *  the trash. Never a sixth workspace — it lives inside Library. */
 export type LibraryScope = "prints" | "collections" | "trash";
 
@@ -355,8 +355,8 @@ export const useGalleryStore = defineStore("gallery", {
     /** Whether the Library has been opened this session — nothing is NEW on the
      *  very first visit (that visit only establishes the baseline). */
     libraryVisited: false,
-    /** Prints optimistically removed from the grid, pending commit or undo
-     *  (§08 G12). Keyed `${sourceKey}::${filename}`; excluded from every view
+    /** Prints optimistically removed from the grid, pending commit or undo.
+     *  Keyed `${sourceKey}::${filename}`; excluded from every view
      *  the moment delete is pressed, restored by undo, and only DELETEd on
      *  commit. */
     pendingDeletions: new Set<string>(),
@@ -816,7 +816,7 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /**
      * Prints developed since the last Library visit — drives the Library nav
-     * badge (§08 G11). Zero until the Library has been opened once (that visit
+     * badge. Zero until the Library has been opened once (that visit
      * only establishes the baseline), then counts every merged print not yet
      * marked seen. Re-opening Library calls `markLibrarySeen`, resetting it.
      */

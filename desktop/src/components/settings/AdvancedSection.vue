@@ -21,8 +21,6 @@ import { fetchServerCapabilities } from "../../lib/api/serverCapabilities";
 import { apiJsonTo } from "../../lib/api/client";
 import type { ServerStatus } from "../../lib/api/types";
 
-defineProps<{ filter?: ((row: ConfigRow) => boolean) | undefined }>();
-
 const config = useSettingsConfigStore();
 const toasts = useToastStore();
 const connection = useConnectionStore();
@@ -144,7 +142,6 @@ async function reset(row: ConfigRow) {
 <template>
   <div>
     <DevicePanel
-      v-if="!filter"
       class="mb-5"
       :devices="devices"
       :plan="plan"
@@ -156,14 +153,14 @@ async function reset(row: ConfigRow) {
       @toggle="toggleDevice"
     />
     <ConfigSettingRow schema-key="server_port" />
-    <PlacementSection v-if="!filter" class="mt-5" />
+    <PlacementSection class="mt-5" />
     <p class="mt-4 mb-1 text-micro text-fg-dim">
       Everything the engine exposes that has no curated control — including keys added by newer
       engines. Provenance: ⌂ database · ⛁ config.toml · ⚿ environment.
     </p>
     <template v-for="row in config.advancedRows" :key="row.key">
       <ConfigRowItem
-        v-if="!schemaFor(row.key) && (!filter || filter(row))"
+        v-if="!schemaFor(row.key)"
         :row="row"
         @save="(v) => save(row, v)"
         @reset="reset(row)"

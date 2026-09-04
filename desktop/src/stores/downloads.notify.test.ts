@@ -28,7 +28,7 @@ beforeEach(() => {
   vi.mocked(notifyPulled).mockReset();
 });
 
-describe("pull failure notifications (G11)", () => {
+describe("pull failure notifications", () => {
   it("toasts the model, error, and fires a native notification for a primary pull", () => {
     const store = useDownloadsStore();
     store.history = [failed()];

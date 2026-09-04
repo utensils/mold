@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /*
- * Slider row — labeled range control (prototype Detail / Prompt strength).
- * Header row pairs the label with a mono accent readout; the full-width
- * range input sits below. The readout defaults to the raw value and can be
- * overridden with a formatted string (e.g. "28 steps").
+ * Slider row — a labelled range control. The head pairs the plain word with a
+ * mono readout, the 4px track sits below it, and an optional `low`/`high` pair
+ * closes the group with the two ends named in words. The readout defaults to
+ * the raw value and can be overridden with a formatted string.
  */
 import { computed, ref, useId } from "vue";
 
@@ -23,6 +23,9 @@ const props = withDefaults(
     /** Formatted readout; defaults to String(modelValue). */
     valueLabel?: string;
     ariaValueText?: string;
+    /** The two ends of the range in plain words, e.g. Loose → Literal. */
+    low?: string;
+    high?: string;
     disabled?: boolean;
     marks?: readonly SliderMark[];
     /** Fraction of the full range captured by a mark during pointer drag. */
@@ -156,6 +159,10 @@ function onPointerCancel() {
         />
       </datalist>
     </div>
+    <div v-if="low || high" class="ms-slider__ends">
+      <span>{{ low }}</span>
+      <span>{{ high }}</span>
+    </div>
   </div>
 </template>
 
@@ -168,26 +175,33 @@ function onPointerCancel() {
 
 .ms-slider__label {
   font-family: var(--mold-font-sans);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   font-weight: 600;
   color: var(--mold-text-2);
 }
 
 .ms-slider__value {
   font-family: var(--mold-font-mono);
-  font-size: 11px;
-  color: var(--mold-blue);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 
-/* Track — a 4px pill whatever the theme's box radius is. */
+.ms-slider__ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+
+/* A square 4px track: the theme's radii start at the thumb. */
 .ms-slider__input {
   -webkit-appearance: none;
   appearance: none;
   display: block;
   width: 100%;
   height: 4px;
-  border-radius: 999px;
-  background: var(--mold-border-control);
+  background: var(--mold-surface);
 }
 
 .ms-slider__track--marked .ms-slider__input {
@@ -196,23 +210,21 @@ function onPointerCancel() {
 
 .ms-slider__input::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--mold-blue);
+  width: 14px;
+  height: 14px;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-slider__input::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border: 0;
-  border-radius: 50%;
-  background: var(--mold-blue);
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
@@ -263,7 +275,7 @@ function onPointerCancel() {
 
 .ms-slider__mark b {
   order: 1;
-  font-size: 8px;
+  font-size: 8px; /* literal: tick captions ride a 4px track and collide at micro */
   font-weight: 500;
   line-height: 1;
 }

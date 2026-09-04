@@ -20,7 +20,7 @@ import {
 /*
  * The notifications bell — the durable record behind transient toasts. A long
  * server error the user never caught in time is readable here in full. One
- * shared component on web and desktop (spec §06); iPhone gets its own
+ * shared component on web and desktop; iPhone gets its own
  * placement pass. Opening the panel marks everything read; Clear empties it.
  */
 const store = useNotificationsStore();

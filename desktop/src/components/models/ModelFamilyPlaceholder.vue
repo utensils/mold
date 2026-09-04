@@ -7,7 +7,7 @@ interface FamilyIdentity {
   tone: "cool" | "warm" | "neutral";
 }
 
-const props = defineProps<{ family: string; layout: "grid" | "table" }>();
+const props = defineProps<{ family: string }>();
 
 const identity = computed<FamilyIdentity>(() => {
   const family = props.family.trim().toLowerCase();
@@ -36,25 +36,19 @@ const identity = computed<FamilyIdentity>(() => {
 
 <template>
   <div
-    class="family-placeholder relative isolate shrink-0 overflow-hidden"
-    :class="layout === 'grid' ? 'h-32 w-full rounded-t-window' : 'h-12 w-16 rounded-inner'"
+    class="family-placeholder rounded-t-control relative isolate h-32 w-full shrink-0 overflow-hidden"
     :data-tone="identity.tone"
-    :data-layout="layout"
     data-test="family-placeholder"
     aria-hidden="true"
   >
     <span class="family-orbit absolute rounded-control border" aria-hidden="true" />
     <span class="family-satellite absolute rounded-full" aria-hidden="true" />
     <span
-      class="family-mark font-mono text-xs absolute inset-0 flex items-center justify-center font-semibold"
-      :class="layout === 'grid' ? 'text-lg' : 'text-micro'"
+      class="family-mark font-mono absolute inset-0 flex items-center justify-center text-lg font-semibold"
     >
       {{ identity.mark }}
     </span>
-    <span
-      class="family-label font-mono absolute text-micro"
-      :class="layout === 'grid' ? 'bottom-2.5 left-3' : 'sr-only'"
-    >
+    <span class="family-label font-mono absolute bottom-2.5 left-3 text-micro">
       {{ identity.label }}
     </span>
   </div>
@@ -89,8 +83,8 @@ const identity = computed<FamilyIdentity>(() => {
 .family-orbit::after {
   position: absolute;
   inset: 18%;
-  border: 1px solid color-mix(in srgb, var(--family-secondary) 20%, transparent);
-  border-radius: 999px;
+  border: var(--mold-bw) solid color-mix(in srgb, var(--family-secondary) 20%, transparent);
+  border-radius: 50%;
   content: "";
 }
 
@@ -110,19 +104,5 @@ const identity = computed<FamilyIdentity>(() => {
 
 .family-label {
   color: color-mix(in srgb, var(--family-primary) 72%, var(--mold-text));
-}
-
-.family-placeholder[data-layout="table"] .family-orbit {
-  width: 42px;
-  right: -14px;
-  top: -20px;
-}
-
-.family-placeholder[data-layout="table"] .family-satellite {
-  width: 4px;
-  height: 4px;
-  right: 11px;
-  top: 8px;
-  box-shadow: none;
 }
 </style>

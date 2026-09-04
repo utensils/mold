@@ -14,9 +14,6 @@ const tag = computed(() => provenance(props.row.source));
 const isBool = computed(() => typeof props.row.value === "boolean");
 const isNumber = computed(() => typeof props.row.value === "number");
 
-// The MOLD_* env var that shadows this key, by mold's naming convention.
-const envVar = computed(() => `MOLD_${props.row.key.toUpperCase().replace(/\./g, "_")}`);
-
 const draft = ref(props.row.value);
 watch(
   () => props.row.value,
@@ -37,7 +34,7 @@ function commitBool(e: Event) {
     <div class="min-w-0 flex-1">
       <div class="font-mono truncate text-sm text-fg" :title="row.key">{{ row.key }}</div>
       <div v-if="locked" class="text-micro text-fg-dim">
-        Set by {{ envVar }} in your environment — unset it to edit here.
+        Set by {{ row.env_var ?? "an environment variable" }} — unset it to edit here.
       </div>
     </div>
 
@@ -67,7 +64,7 @@ function commitBool(e: Event) {
       class="font-mono text-micro text-fg-dim whitespace-nowrap w-14 shrink-0 text-right"
       :title="tag.label"
     >
-      {{ tag.glyph }} {{ tag.label }}
+      {{ tag.glyph }} {{ tag.label.toUpperCase() }}
     </span>
 
     <!-- reset (db rows only) -->

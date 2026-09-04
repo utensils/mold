@@ -118,7 +118,7 @@ describe("DownloadTargetDialog", () => {
     });
 
     await wrapper.vm.$nextTick();
-    expect(document.activeElement?.getAttribute("aria-label")).toBe("Close install target picker");
+    expect(document.activeElement).toBe(document.body.querySelector("[role='dialog']"));
 
     wrapper.unmount();
     expect(document.activeElement).toBe(opener);
@@ -135,11 +135,8 @@ describe("DownloadTargetDialog", () => {
     expect(dialog.textContent).toContain(
       "Only the missing or damaged files are fetched on the machine you pick.",
     );
-    expect(
-      document.body
-        .querySelector<HTMLButtonElement>("[aria-label='Close repair target picker']")
-        ?.getAttribute("aria-label"),
-    ).toBe("Close repair target picker");
+    document.body.querySelector<HTMLButtonElement>('[data-test="download-target-cancel"]')!.click();
+    expect(wrapper.emitted("close")).toHaveLength(1);
     wrapper.unmount();
   });
 });

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ConfirmDialog from "./ConfirmDialog.vue";
 
-// The dialog teleports to <body>; clean it between tests.
+// The dialog renders in its own frame; the mounts attach to <body>, so clear it
+// between tests.
 afterEach(() => {
   document.body.innerHTML = "";
 });

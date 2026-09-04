@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Phone-surface sheet (spec §05) — full-screen takeover ("full") or
+ * Phone-surface sheet — full-screen takeover ("full") or
  * bottom sheet with grab handle ("bottom"). Renders INSIDE its owning
  * frame: absolute overlay, never Teleport or position:fixed. Backdrop
  * click and Esc close; clicks inside the panel do not.

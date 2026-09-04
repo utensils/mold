@@ -63,6 +63,8 @@ const inventoryKnown = useInventoryKnown();
  *  control); an explicit `layout` prop still overrides for embeddings/tests. */
 const effectiveLayout = computed(() => props.layout ?? ui.catalogLayout);
 
+// The toggle's "list" arm is mounted as `table` here, so only the store's own
+// two layouts can arrive; the guard is the type narrowing that says so.
 function setCatalogLayout(layout: CatalogLayoutChoice) {
   if (layout !== "list") ui.setCatalogLayout(layout);
 }

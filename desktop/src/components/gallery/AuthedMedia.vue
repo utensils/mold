@@ -281,13 +281,13 @@ onUnmounted(() => {
 }
 
 .media-placeholder span {
-  border: 1px solid color-mix(in srgb, var(--mold-text) 20%, transparent);
-  border-radius: 999px;
+  border: var(--mold-bw) solid color-mix(in srgb, var(--mold-text) 20%, transparent);
+  border-radius: var(--mold-radius-2);
   padding: 5px 9px;
   background: color-mix(in srgb, var(--mold-bg) 78%, transparent);
   color: var(--mold-text-dim);
   font-family: var(--mold-font-mono);
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }

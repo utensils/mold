@@ -2,7 +2,7 @@ import { reconcileHostConnectivity, type HostStatusSnapshot } from "@studio/lib/
 import type { Job } from "./generationJob";
 
 /**
- * Cross-surface notification helpers (§08 G11). Pure so the "toast only when
+ * Cross-surface notification helpers. Pure so the "toast only when
  * off-canvas" and "offline fires once" guarantees are testable without wiring
  * Vue watchers. The App shell owns the seen-sets and the actual toast/native
  * dispatch.

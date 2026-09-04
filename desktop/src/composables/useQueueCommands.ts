@@ -27,7 +27,6 @@ export interface QueueCommands {
   /** Bring the row to the canvas (or the surface that can inspect it). */
   open(row: QueueRow): void;
   contextMenu(event: MouseEvent, row: QueueRow): void;
-  menu(row: QueueRow): MenuEntry[];
   cancellingShared: Ref<string[]>;
 }
 
@@ -321,7 +320,6 @@ export function useQueueCommands(): QueueCommands {
     cancel,
     open,
     contextMenu: openContextMenu,
-    menu,
     cancellingShared,
   };
 }

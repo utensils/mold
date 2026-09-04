@@ -209,7 +209,9 @@ defineExpose({ openCollections, openTags, closePopovers });
             </button>
           </template>
           <div class="w-60" data-test="bulk-collections-panel">
-            <p class="lightbox-kicker mb-1 px-0.5">Add {{ selectedCount }} {{ noun }} to</p>
+            <p class="ms-group-label mb-1 px-0.5 uppercase">
+              Add {{ selectedCount }} {{ noun }} to
+            </p>
             <CollectionPicker
               :collections="[...collections]"
               :selected="[...collectionSelected]"
@@ -246,7 +248,9 @@ defineExpose({ openCollections, openTags, closePopovers });
             </button>
           </template>
           <div class="w-64" data-test="bulk-tags-panel">
-            <p class="lightbox-kicker mb-1 px-0.5">Tags on all {{ selectedCount }} {{ noun }}</p>
+            <p class="ms-group-label mb-1 px-0.5 uppercase">
+              Tags on all {{ selectedCount }} {{ noun }}
+            </p>
             <TagEditor
               :model-value="[...tags]"
               :suggestions="[...tagSuggestions]"
@@ -330,13 +334,13 @@ defineExpose({ openCollections, openTags, closePopovers });
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border: 1px solid var(--mold-border);
+  border: var(--mold-bw) solid var(--mold-border);
   background: transparent;
   color: var(--mold-text-2);
   border-radius: var(--mold-radius-2);
   padding: 0 10px;
   font-family: var(--mold-font-sans);
-  font-size: 11.5px;
+  font-size: var(--mold-fs-xs);
   white-space: nowrap;
   transition:
     color var(--mold-dur-quick) var(--mold-ease-out),
@@ -380,13 +384,5 @@ defineExpose({ openCollections, openTags, closePopovers });
   height: 18px;
   background: var(--mold-border);
   margin: 0 2px;
-}
-
-.lightbox-kicker {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
 }
 </style>

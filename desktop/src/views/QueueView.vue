@@ -146,7 +146,7 @@ function previewSrc(row: QueueRow): string | null {
       <!-- explainer -->
       <div class="flex gap-3 rounded-control border border-border bg-panel-raised p-3">
         <span class="font-mono text-xs text-accent">•</span>
-        <p class="text-xs leading-relaxed text-fg-2" style="text-wrap: pretty">
+        <p class="text-xs leading-body text-fg-2" style="text-wrap: pretty">
           One image is made at a time so each gets your machine's full attention. Drag a row to
           reorder, or hit Jump the line on the one you need first. Closing the window keeps the
           queue running.

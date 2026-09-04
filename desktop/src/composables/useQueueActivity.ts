@@ -51,8 +51,6 @@ export interface QueueActivity {
   rows: ComputedRef<QueueRow[]>;
   /** The row being made now, if any (the sidebar's active card). */
   active: ComputedRef<QueueRow | null>;
-  /** Rows that are neither the active one nor settled. */
-  waiting: ComputedRef<QueueRow[]>;
   /** Finished and failed prints kept for the rail. */
   settled: ComputedRef<QueueRow[]>;
   activeCount: ComputedRef<number>;
@@ -62,8 +60,8 @@ export interface QueueActivity {
 }
 
 /**
- * The queue as every shell surface sees it (README §04: the queue lives in
- * the sidebar, the Queue view is the same list at full width). Merges this
+ * The queue as every shell surface sees it: it lives in the sidebar, and the
+ * Queue view is the same list at full width. Merges this
  * client's prints, its sequences, and the fleet's recovered work into one
  * newest-first timeline, deduplicating rows this client already owns.
  */
@@ -140,7 +138,6 @@ export function useQueueActivity(): QueueActivity {
   return {
     rows,
     active,
-    waiting,
     settled,
     activeCount: computed(() => running.value.length),
     waitingCount: computed(() => waiting.value.length),

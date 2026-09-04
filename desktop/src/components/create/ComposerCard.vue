@@ -397,7 +397,7 @@ defineExpose({ focus, expand, record });
   cursor: default;
 }
 .ms-chip__caret {
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 .ms-chip--stepper {

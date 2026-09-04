@@ -2,7 +2,7 @@
 import Icon from "@ui/components/Icon.vue";
 /*
  * TrashBanner — the 40px retention strip under the Library header in the
- * Trash scope (V3 "Shelf"). Copy comes from the shared
+ * Trash scope. Copy comes from the shared
  * `trashRetentionSummary` (This device sets the sentence, hosts that differ
  * are named) with every number set in the mono face; the right edge carries
  * the count and a "Change retention · Machines" link the parent routes.

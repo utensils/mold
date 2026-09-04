@@ -25,7 +25,7 @@ const dotClass = computed(() => {
     case "error":
       return "bg-error";
     case "connecting":
-      return "bg-sapphire ms-pulse";
+      return "bg-accent ms-pulse";
     case "idle":
       return "bg-fg-dim";
     default:

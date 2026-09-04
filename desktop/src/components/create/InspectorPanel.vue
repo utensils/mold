@@ -800,7 +800,7 @@ defineExpose({ setOutputMode });
     </div>
     <div v-else class="ms-inspector__scroll">
       <div class="ms-inspector__head">
-        <span class="ms-inspector__kicker">Style</span>
+        <span class="ms-group-label uppercase">Style</span>
         <button
           type="button"
           class="ms-inspector__reset"
@@ -809,7 +809,8 @@ defineExpose({ setOutputMode });
           aria-label="Reset settings to model defaults"
           @click="resetSettings"
         >
-          ↺ Reset
+          <Icon name="refresh" :size="12" />
+          Reset
         </button>
       </div>
 
@@ -929,6 +930,8 @@ defineExpose({ setOutputMode });
           :disabled="activeRecipe?.steps.mode === 'fixed'"
           label="Detail"
           :value-label="`${form.steps} passes`"
+          low="Faster"
+          high="Finer"
           @update:model-value="form.steps = $event"
         />
         <p v-if="stepsError" class="ms-field__error" role="alert">{{ stepsError }}</p>
@@ -965,6 +968,8 @@ defineExpose({ setOutputMode });
           :disabled="thresholdControl.mode === 'fixed'"
           label="How tight to the photo"
           :value-label="thresholdValue.toFixed(2)"
+          low="Puffier"
+          high="Sharper edges"
           @update:model-value="form.mesh.threshold = $event"
         />
         <p
@@ -1018,6 +1023,8 @@ defineExpose({ setOutputMode });
           :step="activeRecipe?.guidance.step ?? 0.1"
           label="Stick to my words"
           :value-label="(caps.fixedGuidance ?? form.guidance).toFixed(1)"
+          low="Loose"
+          high="Literal"
           :disabled="activeRecipe?.guidance.mode === 'fixed' || !caps.guidanceAdjustable"
           @update:model-value="form.guidance = $event"
         />
@@ -1317,21 +1324,17 @@ defineExpose({ setOutputMode });
   gap: 8px;
   margin-bottom: 16px;
 }
-.ms-inspector__kicker {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
-}
 .ms-inspector__reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex-shrink: 0;
-  border: 1px solid var(--mold-border-control);
+  border: var(--mold-bw) solid var(--mold-border-control);
   background: transparent;
   color: var(--mold-text-2);
   padding: 4px 8px;
-  border-radius: 8px;
-  font-size: 11px;
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -1345,11 +1348,11 @@ defineExpose({ setOutputMode });
 .ms-field {
   margin-bottom: 20px;
 }
-/* Highlighted per mockup 1c: the Output choice reads as a mode, not a knob. */
+/* The Output choice reads as a mode, not a knob, so it keeps an accent edge. */
 .ms-output {
-  border: 1px solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
+  border: var(--mold-bw) solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
   background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
-  border-radius: 9px;
+  border-radius: var(--mold-radius-3);
   padding: 11px;
 }
 .ms-output .ms-field__hint {
@@ -1361,7 +1364,7 @@ defineExpose({ setOutputMode });
   justify-content: space-between;
 }
 .ms-field__label {
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
@@ -1370,10 +1373,10 @@ defineExpose({ setOutputMode });
   margin-bottom: 0;
 }
 .ms-field__hint {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   margin-top: 6px;
-  line-height: 1.4;
+  line-height: var(--mold-lh-snug);
 }
 .ms-field__hint--after-slider {
   margin-top: 12px;
@@ -1382,7 +1385,7 @@ defineExpose({ setOutputMode });
   color: var(--mold-blue);
 }
 .ms-field__error {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-error);
   margin-top: 6px;
 }
@@ -1391,7 +1394,7 @@ defineExpose({ setOutputMode });
   border: 0;
   background: transparent;
   color: var(--mold-blue);
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   cursor: pointer;
 }
 .ms-field__match-source:hover {
@@ -1402,8 +1405,8 @@ defineExpose({ setOutputMode });
   gap: 3px;
   padding: 3px;
   background: var(--mold-bg-deep);
-  border: 1px solid var(--mold-border-control);
-  border-radius: 9px;
+  border: var(--mold-bw) solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
 }
 .ms-seg__btn {
   flex: 1;
@@ -1411,14 +1414,13 @@ defineExpose({ setOutputMode });
   background: transparent;
   color: var(--mold-text-2);
   padding: 7px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
 .ms-seg__btn[data-on="true"] {
   background: var(--mold-bg);
   color: var(--mold-text);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 .ms-seed__value {
   display: flex;
@@ -1430,11 +1432,11 @@ defineExpose({ setOutputMode });
   height: 32px;
   width: 100%;
   min-width: 0;
-  border: 1px solid var(--mold-border-control);
-  border-radius: 6px;
+  border: var(--mold-bw) solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   background: var(--mold-bg-deep);
   padding: 0 8px;
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
   color: var(--mold-text);
 }
 .ms-seed__reroll {
@@ -1455,12 +1457,12 @@ defineExpose({ setOutputMode });
 }
 .ms-advanced {
   width: 100%;
-  border: 1px solid var(--mold-border-control);
+  border: var(--mold-bw) solid var(--mold-border-control);
   background: transparent;
   color: var(--mold-text-2);
   padding: 11px;
-  border-radius: 9px;
-  font-size: 12px;
+  border-radius: var(--mold-radius-3);
+  font-size: var(--mold-fs-xs);
   display: flex;
   align-items: center;
   justify-content: space-between;

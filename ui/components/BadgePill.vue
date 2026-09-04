@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Badge pill — small mono status/count pill (spec §03). Tones follow the fixed
+ * Badge pill — small mono status/count pill. Tones follow the fixed
  * token jobs: accent (selection), info (halide), success, warning, danger
  * (stop), neutral. Solid tints the tone at 18% behind tone ink; outline keeps
  * a transparent bg with a 1px tone border. Non-interactive — content only.

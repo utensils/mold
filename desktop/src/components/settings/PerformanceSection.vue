@@ -66,7 +66,6 @@ async function restartEngine() {
         :key="knob.key"
         :label="knob.label"
         :help="knob.help"
-        :needs-engine-restart="false"
       >
         <span class="font-mono text-micro text-fg-dim whitespace-nowrap mr-1">{{
           envName(knob.key)

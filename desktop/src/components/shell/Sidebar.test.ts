@@ -773,7 +773,7 @@ describe("Sidebar queue controls", () => {
   });
 });
 
-describe("Sidebar destination badges (G11)", () => {
+describe("Sidebar destination badges", () => {
   function readyLocal() {
     const conn = useConnectionStore();
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };

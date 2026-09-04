@@ -106,7 +106,7 @@ watch(
   ([pending, enabled]) => void ipc.setDockBadge(dockBadgeValue(pending, enabled)),
 );
 
-// Cross-surface notifications (§08 G11). A generation finishing while the user
+// Cross-surface notifications. A generation finishing while the user
 // is somewhere other than Create raises a toast that jumps to My images; the
 // native notification (dispatched by the generation store) covers the
 // backgrounded case, so the foreground toast bows out then.

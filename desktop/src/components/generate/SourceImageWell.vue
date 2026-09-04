@@ -25,6 +25,7 @@ import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/Sourc
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { resolveExclusiveWells, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
+import SliderRow from "@ui/components/SliderRow.vue";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -697,20 +698,19 @@ function setSourceFitMode(e: Event) {
 
     <!-- Strength (wan pins the first frame exactly and never reads it) -->
     <template v-if="sourceRefinements && form.sourceImage && caps.supportsStrength">
-      <label class="mt-3 flex items-center justify-between text-micro text-fg-2">
-        {{ strength.label }}
-        <span class="font-mono text-xs text-fg">{{ form.strength.toFixed(2) }}</span>
-      </label>
-      <input
-        v-model.number="form.strength"
-        type="range"
-        min="0.05"
-        max="1"
-        step="0.05"
-        class="mt-1 w-full accent-[var(--mold-blue)]"
-        :aria-label="strength.label"
-        :title="strength.hint"
+      <SliderRow
+        class="mt-3"
+        :model-value="form.strength"
+        :min="0.05"
+        :max="1"
+        :step="0.05"
+        :label="strength.label"
+        :value-label="form.strength.toFixed(2)"
+        low="Keep the photo"
+        high="Start fresh"
+        @update:model-value="form.strength = $event"
       />
+      <p class="mt-1 text-micro text-fg-dim">{{ strength.hint }}</p>
     </template>
 
     <!-- Mask well (inpaint families) -->

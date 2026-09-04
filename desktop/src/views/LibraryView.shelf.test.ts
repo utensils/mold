@@ -436,12 +436,10 @@ describe("tile context menu", () => {
     await tileFor(wrapper, plain.filename).trigger("contextmenu");
     useContextMenuStore().activate(menuEntry("Rename…")!);
     await flushPromises();
-    const dialog = document.body.querySelector("[data-test='rename-dialog']")!;
-    expect(dialog.textContent).toContain("Rename print");
-    const input = dialog.querySelector("input") as HTMLInputElement;
-    input.value = "Bottled storm";
-    input.dispatchEvent(new Event("input"));
-    (dialog.querySelector("[data-test='rename-save']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='rename-dialog']");
+    expect(dialog.text()).toContain("Rename print");
+    await dialog.get("input").setValue("Bottled storm");
+    await dialog.get("[data-test='rename-save']").trigger("click");
     await flushPromises();
     expect(org.patchGalleryImage).toHaveBeenCalledWith(PLATO, plain.filename, {
       title: "Bottled storm",
@@ -814,10 +812,10 @@ describe("Albums scope", () => {
     await wrapper.get("[data-test='collection-card'][data-slug='smurfs']").trigger("contextmenu");
     useContextMenuStore().activate(menuEntry("Delete album…")!);
     await flushPromises();
-    const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
-    expect(dialog.textContent).toContain("Delete album “Smurfs”?");
-    expect(dialog.textContent).toContain("Its pictures stay in My images.");
-    (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Delete album “Smurfs”?");
+    expect(dialog.text()).toContain("Its pictures stay in My images.");
+    await dialog.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(org.deleteCollection).toHaveBeenCalledWith(PLATO, "col-smurfs");
     expect(gallery.mergedCollections.map((c) => c.name)).not.toContain("Smurfs");
@@ -854,8 +852,7 @@ describe("Albums scope", () => {
     const { wrapper } = await mountView();
     key("N", { ctrlKey: true, shiftKey: true });
     await flushPromises();
-    const dialog = document.body.querySelector("[data-test='rename-dialog']")!;
-    expect(dialog.textContent).toContain("New album");
+    expect(wrapper.get("[data-test='rename-dialog']").text()).toContain("New album");
     wrapper.unmount();
   });
 });
@@ -880,13 +877,13 @@ describe("Trash scope", () => {
   it("Empty trash confirms with the plain dialog naming the hosts, then purges", async () => {
     const { wrapper } = await mountView("/library?scope=trash");
     await wrapper.get("[data-test='empty-trash']").trigger("click");
-    const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
-    expect(dialog.textContent).toContain("Empty trash?");
-    expect(dialog.textContent).toContain(
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Empty trash?");
+    expect(dialog.text()).toContain(
       "Delete 1 picture in the trash on plato forever? This can't be undone.",
     );
-    expect(dialog.querySelector("input")).toBeNull();
-    (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    expect(dialog.find("input").exists()).toBe(false);
+    await dialog.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(org.emptyTrash).toHaveBeenCalledWith(PLATO);
     expect(wrapper.find("[data-test='empty-trash']").attributes("disabled")).toBeDefined();
@@ -899,9 +896,9 @@ describe("Trash scope", () => {
     await tileFor(wrapper, trashed.filename).trigger("click");
     key("Delete");
     await flushPromises();
-    const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
-    expect(dialog.textContent).toContain("Delete “Grain test 01” forever?");
-    (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Delete “Grain test 01” forever?");
+    await dialog.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(
       PLATO,
@@ -936,9 +933,7 @@ describe("keyboard", () => {
     });
     key("Backspace", { ctrlKey: true });
     await flushPromises();
-    expect(document.body.querySelector("[data-test='confirm-dialog']")!.textContent).toContain(
-      "forever?",
-    );
+    expect(wrapper.get("[data-test='confirm-dialog']").text()).toContain("forever?");
     wrapper.unmount();
   });
 
@@ -1205,12 +1200,10 @@ describe("selection-derived organize gating", () => {
     // selection, so the guard must refuse honestly.
     key("N", { ctrlKey: true, shiftKey: true });
     await flushPromises();
-    const dialog = document.body.querySelector("[data-test='rename-dialog']")!;
-    expect(dialog.textContent).toContain("New album");
-    const input = dialog.querySelector("input") as HTMLInputElement;
-    input.value = "Ghost shelf";
-    input.dispatchEvent(new Event("input"));
-    (dialog.querySelector("[data-test='rename-save']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='rename-dialog']");
+    expect(dialog.text()).toContain("New album");
+    await dialog.get("input").setValue("Ghost shelf");
+    await dialog.get("[data-test='rename-save']").trigger("click");
     await flushPromises();
     expect(org.createCollection).not.toHaveBeenCalled();
     expect(useToastStore().items.at(-1)?.message).toContain("no album was created");

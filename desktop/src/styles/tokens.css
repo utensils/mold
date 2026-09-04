@@ -51,6 +51,15 @@
   --color-row-hover: var(--mold-row-hover);
   --color-row-selected: var(--mold-row-selected);
 
+  /* Job state: a status, never an accent. --mold-desktop.css aliases each
+     onto a token that already exists. */
+  --color-state-active: var(--mold-state-active);
+  --color-state-waiting: var(--mold-state-waiting);
+  --color-state-done: var(--mold-state-done);
+  --color-state-blocked: var(--mold-state-blocked);
+  --color-state-failed: var(--mold-state-failed);
+  --color-state-cost: var(--mold-state-cost);
+
   --color-media-bed: var(--mold-media-bed);
   --color-on-media: var(--mold-on-media);
   --color-scrim: var(--mold-scrim);
@@ -75,6 +84,11 @@
   --text-lg--line-height: var(--mold-lh-snug);
   --text-xl: var(--mold-fs-xl);
   --text-xl--line-height: var(--mold-lh-snug);
+
+  /* The theme's two leadings, so `leading-snug` / `leading-body` move with a
+     theme swap where Tailwind's fixed 1.375 / 1.625 would not. */
+  --leading-snug: var(--mold-lh-snug);
+  --leading-body: var(--mold-lh-body);
 
   /* ── Radius (theme-scoped: Safelight 6/9/16, Nebula 0/2/6) ──────── */
   --radius-inner: var(--mold-radius-1);

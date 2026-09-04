@@ -322,7 +322,7 @@ async function unload(m: LibraryModelEntry) {
 
     <section v-for="[heading, list] in sections" :key="heading">
       <div class="mb-2 flex items-center gap-2.5 px-3">
-        <span class="ms-group-label uppercase">{{ heading.toUpperCase() }}</span>
+        <span class="ms-group-label uppercase">{{ heading }}</span>
         <div class="h-px flex-1 border-t border-border" />
       </div>
 

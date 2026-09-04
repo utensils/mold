@@ -1,7 +1,8 @@
 /**
- * Per-GPU queue lane computation for the Jobs view — the desktop port of the
- * web SPA's RunningStrip lane logic (web/src/components/RunningStrip.vue).
- * Pure functions so lane grouping and the drag/drop policy are unit-testable.
+ * Per-GPU queue lane computation for a machine's queue panel — the desktop
+ * port of the web SPA's RunningStrip lane logic
+ * (web/src/components/RunningStrip.vue). Pure functions so lane grouping and
+ * the drag/drop policy are unit-testable.
  */
 
 import { compareNewestQueueEntry } from "@studio/lib/activityOrder";

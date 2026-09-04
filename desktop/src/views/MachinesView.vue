@@ -45,7 +45,7 @@ onMounted(() => {
   void refreshSaved();
   void scan();
   // Surface any billing pods on the list so a paid host's running cost is
-  // visible without opening the RunPod pane (§08 G9). No-ops when unconfigured.
+  // visible without opening the RunPod pane. No-ops when unconfigured.
   void runpod.load();
 });
 onUnmounted(() => jobs.stopPolling());
@@ -469,7 +469,7 @@ async function onConnected() {
           :key="host.id"
           type="button"
           :data-test="host.primary ? 'this-device-card' : 'host-card'"
-          class="machine-card"
+          class="machine-card ms-card-edge"
           :class="{
             'machine-card--target': isTarget(host),
             'machine-card--selected': selectedId === host.id,
@@ -513,12 +513,12 @@ async function onConnected() {
           </span>
         </button>
 
-        <!-- Billing pods not yet connected as machines: cost meter + Stop (§08 G9) -->
+        <!-- Billing pods not yet connected as machines: cost meter + Stop -->
         <div
           v-for="pod in runpod.runningPods"
           :key="pod.id"
           data-test="runpod-running"
-          class="machine-card machine-card--pod relative cursor-pointer"
+          class="machine-card ms-card-edge machine-card--pod relative cursor-pointer"
           @click="openPodDetail(pod)"
           @contextmenu="contextMenu.open($event, podMenu(pod))"
         >
@@ -563,7 +563,7 @@ async function onConnected() {
             v-for="saved in rememberedHosts"
             :key="saved.id"
             data-test="remembered-host"
-            class="machine-card machine-card--dim"
+            class="machine-card ms-card-edge machine-card--dim"
             @contextmenu="contextMenu.open($event, rememberedHostMenu(saved))"
           >
             <span class="flex items-center gap-2.5">
@@ -602,7 +602,7 @@ async function onConnected() {
           v-for="host in undiscovered"
           :key="host.url"
           data-test="discovered-host"
-          class="machine-card"
+          class="machine-card ms-card-edge"
           @contextmenu="contextMenu.open($event, discoveredHostMenu(host))"
         >
           <span class="flex items-center gap-2.5">
@@ -690,8 +690,6 @@ async function onConnected() {
   flex-direction: column;
   gap: 9px;
   padding: 13px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
   background: var(--mold-surface);
   text-align: left;
   transition:

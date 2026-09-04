@@ -760,7 +760,7 @@ async function performVideoExport(options: VideoExportOptions) {
           <p
             data-selectable
             data-test="lightbox-prompt"
-            class="whitespace-pre-wrap text-sm leading-relaxed text-fg"
+            class="whitespace-pre-wrap text-sm leading-body text-fg"
             :title="meta.prompt"
           >
             {{ meta.prompt }}
@@ -1083,17 +1083,17 @@ async function performVideoExport(options: VideoExportOptions) {
 </template>
 
 <style scoped>
-/* The lightbox is the whole window on a near-solid crust (README §04). */
+/* The lightbox is the whole window on a near-solid crust. */
 .lightbox-scrim {
   background: color-mix(in srgb, var(--mold-bg-crust) 92%, transparent);
 }
 
-/* Title lead line: 15/600, a quiet underline that turns accent while editing. */
+/* Title lead line: a quiet underline that turns accent while editing. */
 .lightbox-title {
   display: block;
   height: 30px;
   font-family: var(--mold-font-sans);
-  font-size: 15px;
+  font-size: var(--mold-fs-md);
   font-weight: 600;
   color: var(--mold-text);
   background: transparent;
@@ -1141,17 +1141,5 @@ input.lightbox-title:focus,
   font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   text-align: right;
-}
-
-.ms-lib-upscaled {
-  font-family: var(--mold-font-mono);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: color-mix(in srgb, var(--mold-text) 88%, black);
-  color: var(--mold-on-accent);
-  padding: 2px 6px;
-  border-radius: 5px;
 }
 </style>

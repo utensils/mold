@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Toast shelf — top-right presenter inside the app frame (spec G11/G12).
+ * Toast shelf — top-right presenter inside the app frame.
  * The host owns the toast list and timers; this component renders it and
  * reports dismiss(id) / action(id). Errors and warnings are alerts with a
  * tinted border — a warning here is the sticky "your machine is gone", not an

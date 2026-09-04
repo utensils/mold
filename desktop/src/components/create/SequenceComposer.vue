@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Sequence bench (mockup 1c): replaces the single-print ComposerCard when
+ * Sequence bench: replaces the single-print ComposerCard when
  * Output = Sequence. Clip rail with seam pills, an active-clip prompt
  * editor, and a footer with file tools, validation, the fit note, and the
  * primary Generate/Update button. Clips live in the shared sequence draft
@@ -11,6 +11,7 @@ import ClipRail from "@ui/components/ClipRail.vue";
 import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
+import { clipLabel } from "@ui/lib/duration";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
@@ -183,7 +184,6 @@ function resizeClip(id: string, frames: number) {
 const openSeamId = ref<string | null>(null);
 const seamClip = computed(() => draft.clips.find((clip) => clip.id === openSeamId.value) ?? null);
 const seamIndex = computed(() => draft.clips.findIndex((clip) => clip.id === openSeamId.value));
-const clipLabel = (idx: number) => (idx === 0 ? "opening" : `scene ${idx + 1}`);
 
 function onSeamClick(id: string) {
   openSeamId.value = openSeamId.value === id ? null : id;
@@ -574,7 +574,7 @@ function onBenchContextMenu(event: MouseEvent) {
     </div>
     <div v-if="helpOpen" class="ms-seqbench__help" data-test="timeline-help-text">
       <span class="font-mono text-xs text-accent">•</span>
-      <span class="text-micro leading-relaxed text-fg-2" style="text-wrap: pretty">
+      <span class="text-micro leading-body text-fg-2" style="text-wrap: pretty">
         Each block is one scene, written in your own words. Drag a block's right edge to make that
         scene longer, drag the block itself to reorder, and click the marker between two blocks to
         say how they should meet. The whole thing is made as one continuous clip.

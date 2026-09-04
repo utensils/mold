@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * One settings row (README §04): a plain label over one line of help on the
+ * One settings row: a plain label over one line of help on the
  * left, the control on the right, 52px tall, separated by hairlines inside
  * the section panel. Provenance, restart, and lock notes stay mono.
  */
@@ -12,10 +12,7 @@ defineProps<{
   help?: string | undefined;
   /** Engine-config provenance tag (db/file/env); omit for app-side prefs. */
   source?: ConfigSource | undefined;
-  /** Env-resolved rows are locked — the environment wins. */
-  locked?: boolean | undefined;
-  /** Name of the env var that wins when locked. */
-  lockedBy?: string | undefined;
+  /** Why this row cannot be edited here; its presence is the lock. */
   lockedReason?: string | undefined;
   /** Changing this only takes effect after an engine restart. */
   needsEngineRestart?: boolean | undefined;
@@ -45,18 +42,12 @@ defineEmits<{ (e: "reset"): void }>();
         >
       </div>
       <p v-if="help" class="max-w-md text-xs text-fg-dim">{{ help }}</p>
-      <p v-if="locked" class="text-xs text-sapphire">
-        <template v-if="lockedReason">{{ lockedReason }}</template>
-        <template v-else>
-          Locked by <span class="font-mono">{{ lockedBy ?? "the environment" }}</span> — unset it to
-          edit here.
-        </template>
-      </p>
+      <p v-if="lockedReason" class="text-xs text-sapphire">{{ lockedReason }}</p>
     </div>
     <div class="flex shrink-0 items-center gap-2">
       <slot />
       <button
-        v-if="resettable && !locked"
+        v-if="resettable && !lockedReason"
         type="button"
         class="h-[26px] rounded-control px-1.5 text-micro text-fg-dim hover:text-error"
         title="Reset to default"

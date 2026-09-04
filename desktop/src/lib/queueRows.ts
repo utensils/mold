@@ -99,18 +99,19 @@ export function rowGlyph(row: QueueRow): string {
 export function rowTone(row: QueueRow): string {
   if (row.kind === "print") {
     const job = row.print;
-    if (job.status === "complete") return "text-success";
-    if (job.status === "error" && job.retryable) return "text-warning";
-    if (job.status === "error") return job.outcomeUnknown ? "text-fg-dim" : "text-error";
-    if (job.status === "queued") return "text-fg-dim";
-    return "text-accent";
+    if (job.status === "complete") return "text-state-done";
+    if (job.status === "error" && job.retryable) return "text-state-blocked";
+    if (job.status === "error")
+      return job.outcomeUnknown ? "text-state-waiting" : "text-state-failed";
+    if (job.status === "queued") return "text-state-waiting";
+    return "text-state-active";
   }
   if (row.kind === "sequence") {
     return row.sequence.phase === "queued" || row.sequence.state === "paused"
-      ? "text-fg-dim"
-      : "text-accent";
+      ? "text-state-waiting"
+      : "text-state-active";
   }
-  return row.shared.kind === "download" ? "text-warning" : "text-accent";
+  return row.shared.kind === "download" ? "text-state-blocked" : "text-state-active";
 }
 
 /** The status bar's queue clause: "1 image being made · 3 waiting". */

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Progress ring — SVG ring for the generate canvas (spec §09). The dash
+ * Progress ring — SVG ring for the generate canvas. The dash
  * offset is computed directly from `value`: no tween, no transition —
  * progress tracks the reported value exactly. The ring always sits on
  * media (the shimmering print bed, which never inverts), so the track is

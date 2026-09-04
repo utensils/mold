@@ -57,7 +57,7 @@ beforeEach(() => {
   document.body.innerHTML = "";
 });
 
-describe("InstalledTab shelf (README §04 Styles)", () => {
+describe("InstalledTab shelf", () => {
   it("stacks the request id and the plain note under a row's name", async () => {
     useModelStore().all = [model({ display_name: "Photoreal — best quality" })];
     const wrapper = mount(InstalledTab);
@@ -107,13 +107,13 @@ describe("InstalledTab shelf (README §04 Styles)", () => {
     await flushPromises();
     expect(removeModel).not.toHaveBeenCalled();
 
-    const dialog = document.body.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Remove flux-dev:q4 from disk?");
-    expect(dialog?.textContent).toContain("Frees 6.8 GB weights");
-    (dialog!.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Remove flux-dev:q4 from disk?");
+    expect(dialog.text()).toContain("Frees 6.8 GB weights");
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(removeModel).toHaveBeenCalledWith("flux-dev:q4", undefined);
-    expect(document.body.querySelector("[data-test='confirm-dialog']")).toBeNull();
+    expect(wrapper.find("[data-test='confirm-dialog']").exists()).toBe(false);
     wrapper.unmount();
   });
 

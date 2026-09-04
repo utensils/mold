@@ -1,6 +1,6 @@
 <script setup lang="ts" generic="C extends RailClip">
 /*
- * Clip rail — the horizontal strip inside the composer bench (mockup 1c):
+ * Clip rail — the horizontal strip inside the composer bench:
  * clip pills with seam pills between them, a dashed add-clip pill gated by
  * the stage cap, and drag-to-reorder. The seam pill between clip N−1 and N
  * edits clip N's incoming transition; clicking it emits `seam-click` so
@@ -15,6 +15,7 @@ import {
   watch,
 } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
+import { clipLabel } from "../lib/duration";
 import ClipPill from "./ClipPill.vue";
 import SeamPill from "./SeamPill.vue";
 import type { ClipRailMedia, RailClip } from "./types";
@@ -156,10 +157,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", updateScrollAffordances);
 });
 
-function clipLabel(index: number): string {
-  return index === 0 ? "Opening clip" : `Clip ${index + 1}`;
-}
-
 // VueDraggable mutates a proxy list; we emit the id order and let the
 // store apply it so the rail never owns clip state.
 const dragModel = computed({
@@ -211,6 +208,7 @@ const dragModel = computed({
             />
             <ClipPill
               :label="clipLabel(index)"
+              :index="index"
               :frames="clip.frames"
               :fps="fps"
               :active="clip.id === activeId"

@@ -12,7 +12,7 @@ const candidate = computed(() => updater.candidate);
     data-test="update-banner"
     role="status"
     aria-live="polite"
-    class="border-accent/35 flex min-h-10 items-center gap-4 border-b bg-accent-tint px-4"
+    class="border-accent flex min-h-10 items-center gap-4 border-b bg-accent-tint px-4"
   >
     <p class="min-w-0 flex-1 text-sm text-fg">
       <span class="font-semibold">Mold {{ candidate.version }} is available.</span>

@@ -103,6 +103,14 @@
   color: var(--mold-error);
 }
 
+/* Card edge — the hairline and control radius every card inside a view shares.
+ * The ground and the layout stay with the caller: a machine card sits on the
+ * raised plane, a telemetry tile and a catalog card on the panel. */
+.ms-card-edge {
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+}
+
 /* Group and table-header label: mono micro, tracked, dim. Uppercase is the
  * caller's call — a header that reads as a sentence keeps its case. */
 .ms-group-label {
@@ -110,6 +118,20 @@
   font-size: var(--mold-fs-micro);
   letter-spacing: 0.08em;
   color: var(--mold-text-dim);
+}
+
+/* Upscaled marker on a print — the tile grid and the Lightbox draw the same
+ * badge, so it lives here rather than in each of them. */
+.ms-lib-upscaled {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--mold-text) 88%, black);
+  color: var(--mold-on-accent);
+  padding: 2px 6px;
+  border-radius: var(--mold-radius-2);
 }
 
 /* Entrance for overlays/results — never applied to core chrome. */

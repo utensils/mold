@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Shape picker — aspect-ratio chips (spec §03). Each option is a chip with a
+ * Shape picker — aspect-ratio chips. Each option is a chip with a
  * proportional swatch (the swatch IS the ratio, never text) above a mono
  * label. Keyboard: arrow keys move the selection (roving tabindex).
  */

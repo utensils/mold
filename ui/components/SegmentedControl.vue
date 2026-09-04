@@ -1,6 +1,6 @@
 <script setup lang="ts" generic="T extends string | number">
 /*
- * Segmented control — 2–4 exclusive options (spec §03). Accent-tinted active
+ * Segmented control — 2–4 exclusive options. Accent-tinted active
  * segment with ring. Options may carry a sub-line (e.g. resolution "Draft").
  * Keyboard: arrow keys move the selection (roving tabindex).
  */

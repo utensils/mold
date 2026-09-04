@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
-import Keycap from "@ui/components/Keycap.vue";
 import { useUiStore } from "../../stores/ui";
 import { useGalleryStore } from "../../stores/gallery";
 import { useModelStore } from "../../stores/models";
@@ -616,7 +615,7 @@ function onKeydown(e: KeyboardEvent) {
           aria-label="Search or run a command"
           @keydown="onKeydown"
         />
-        <Keycap>esc</Keycap>
+        <kbd class="font-mono text-micro font-bold text-accent">esc</kbd>
       </div>
       <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto" role="listbox">
         <p v-if="results.length === 0" class="px-4 py-6 text-center text-sm text-fg-dim">

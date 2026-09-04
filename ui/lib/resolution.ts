@@ -1,5 +1,5 @@
 /*
- * Megapixel-based resolution math (spec §03 — Resolution selector).
+ * Megapixel-based resolution math for the resolution selector.
  * Dimensions derive from a target megapixel budget and an aspect ratio,
  * rounded to the legacy /64 grid, with a /16 under-ceiling correction for
  * the 1.8 MP tier used by newer model contracts.
@@ -13,7 +13,7 @@ export interface AspectOption {
   ratio: number;
 }
 
-/** The five canonical shapes (spec §03 — Shape picker). */
+/** The five canonical shapes the shape picker offers. */
 export const ASPECTS: readonly AspectOption[] = [
   { id: "square", label: "1:1", ratio: 1 },
   { id: "portrait", label: "3:4", ratio: 3 / 4 },
@@ -22,7 +22,7 @@ export const ASPECTS: readonly AspectOption[] = [
   { id: "tall", label: "9:16", ratio: 9 / 16 },
 ];
 
-/** The megapixel steps with their human labels (spec §03). */
+/** The megapixel steps with their human labels. */
 export const RESOLUTIONS = [
   { mp: 0.5, label: "0.5 MP", sub: "Draft" },
   { mp: 1, label: "1 MP", sub: "Standard" },

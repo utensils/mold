@@ -12,7 +12,6 @@ import { shortcutLabel } from "../../lib/platform";
 
 const prefs = useAppPrefsStore();
 
-/** "Switches to Blueprint in daylight." — names the paired theme. */
 const matchSystemHelp = computed(() => {
   const partner = THEME_PAIR[prefs.theme][THEME_TONE[prefs.theme] === "dark" ? "light" : "dark"];
   const when = THEME_TONE[prefs.theme] === "dark" ? "in daylight" : "after dark";

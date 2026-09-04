@@ -6,6 +6,8 @@ import type { ClipRailMedia } from "./types";
 const props = withDefaults(
   defineProps<{
     label: string;
+    /** Zero-based position in the rail; drawn on the thumb as 1, 2, 3… */
+    index: number;
     frames: number;
     fps?: number;
     active?: boolean;
@@ -161,9 +163,7 @@ const statusLabel = computed(() => {
       <span class="ms-clip__thumb">
         <img v-if="media?.posterUrl" :src="media.posterUrl" alt="" />
         <slot v-else name="thumb" />
-        <span class="ms-clip__number" aria-hidden="true">{{
-          label === "Opening clip" ? 1 : label.replace("Clip ", "")
-        }}</span>
+        <span class="ms-clip__number" aria-hidden="true">{{ index + 1 }}</span>
         <span
           v-if="media?.status === 'running'"
           class="ms-clip__rendering"

@@ -378,7 +378,7 @@ describe("Lightbox save action", () => {
   });
 });
 
-describe("Lightbox organization (V3 Shelf)", () => {
+describe("Lightbox organization", () => {
   const organization = {
     title: "smurf 04",
     favorite: true,
@@ -495,11 +495,11 @@ describe("Lightbox organization (V3 Shelf)", () => {
     expect(wrapper.emitted("restore")).toHaveLength(1);
 
     await wrapper.get("[data-test='lightbox-delete-forever']").trigger("click");
-    const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
-    expect(dialog.textContent).toContain("Delete “smurf 04” forever?");
-    expect(dialog.textContent).toContain("This can't be undone.");
-    expect(dialog.querySelector("input")).toBeNull();
-    (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Delete “smurf 04” forever?");
+    expect(dialog.text()).toContain("This can't be undone.");
+    expect(dialog.find("input").exists()).toBe(false);
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     expect(wrapper.emitted("deleteForever")).toHaveLength(1);
     wrapper.unmount();
   });

@@ -1169,17 +1169,15 @@ describe("HostDetailView forget", () => {
     await wrapper.get("[data-test='forget-host']").trigger("click");
     expect(forgetRemoteHost).not.toHaveBeenCalled();
 
-    // The confirm dialog teleports to <body>; it carries the §11 copy.
-    const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Forget hal9000?");
-    expect(dialog?.textContent).toContain("Its saved API key is discarded.");
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Forget hal9000?");
+    expect(dialog.text()).toContain("Its saved API key is discarded.");
 
-    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(forgetRemoteHost).toHaveBeenCalledWith(REMOTE_ID);
     expect(useHostsStore().extras).toHaveLength(0);
     expect(router.currentRoute.value.path).toBe("/machines");
-    document.body.innerHTML = "";
   });
 });
 
@@ -1289,19 +1287,18 @@ describe("HostDetailView storage (Library trash)", () => {
     await wrapper.get("[data-test='host-empty-trash']").trigger("click");
     expect(emptyTrash).not.toHaveBeenCalled();
 
-    const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Empty trash?");
-    expect(dialog?.textContent).toContain(
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Empty trash?");
+    expect(dialog.text()).toContain(
       "Delete 2 prints in the trash on hal9000 forever? This can't be undone.",
     );
     // No typed-phrase gate anywhere (design amendment).
-    expect(dialog?.querySelector("input")).toBeNull();
+    expect(dialog.find("input").exists()).toBe(false);
 
-    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(emptyTrash).toHaveBeenCalledWith(TARGET);
     expect(wrapper.get("[data-test='host-trash-count']").text()).toContain("0");
-    document.body.innerHTML = "";
   });
 
   it("disables Empty trash when the trash is empty", async () => {

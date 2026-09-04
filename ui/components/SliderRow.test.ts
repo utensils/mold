@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import SliderRow from "./SliderRow.vue";
+import SliderRowSource from "./SliderRow.vue?raw";
 
 function make(extra: Record<string, unknown> = {}) {
   return mount(SliderRow, {
@@ -13,6 +14,24 @@ describe("SliderRow", () => {
     const wrapper = make();
     expect(wrapper.find(".ms-slider__label").text()).toBe("Detail");
     expect(wrapper.find(".ms-slider__value").text()).toBe("28");
+  });
+
+  it("closes the group with the two ends in words only when they are given", () => {
+    expect(make().find(".ms-slider__ends").exists()).toBe(false);
+    const ends = make({ low: "Loose", high: "Literal" }).find(
+      ".ms-slider__ends",
+    );
+    expect(ends.exists()).toBe(true);
+    expect(ends.text()).toContain("Loose");
+    expect(ends.text()).toContain("Literal");
+  });
+
+  it("draws a square track with a themed-radius thumb, never a pill", () => {
+    const source = SliderRowSource;
+    expect(source).not.toContain("border-radius: 999px");
+    expect(source).not.toContain("border-radius: 50%");
+    expect(source).toContain("border-radius: var(--mold-radius-1)");
+    expect(source).toContain("background: var(--mold-surface)");
   });
 
   it("prefers valueLabel for the readout when provided", () => {

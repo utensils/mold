@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Chip — rounded pill toggle button (spec §03). Style/filter chips with an
+ * Chip — toggle button. Style/filter chips with an
  * accent-tinted active state and ring. The parent owns toggle/deselect
  * semantics; the chip only reports clicks and mirrors `active` in
  * aria-pressed.

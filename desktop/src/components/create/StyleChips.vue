@@ -28,7 +28,7 @@ function pick(id: string) {
       :aria-expanded="open"
       @click="open = !open"
     >
-      <span class="ms-styles__kicker">Style</span>
+      <span class="ms-group-label uppercase">Style</span>
       <Chip :active="modelValue !== ''" data-test="style-active">{{
         stylePresetLabel(modelValue)
       }}</Chip>
@@ -63,13 +63,6 @@ function pick(id: string) {
   padding: 4px 0;
   text-align: left;
   cursor: pointer;
-}
-.ms-styles__kicker {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--mold-text-dim);
 }
 .ms-styles__spacer {
   flex: 1;

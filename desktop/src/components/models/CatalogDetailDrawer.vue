@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
+import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
 import { fetchCatalogDetail, startCatalogDownload } from "../../lib/api/catalog";
@@ -297,24 +298,16 @@ function selectVariant(id: string): void {
 function formatSize(bytes: number | null): string {
   return bytes != null ? formatGB(bytes) : "—";
 }
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") emit("close");
-}
-onMounted(() => window.addEventListener("keydown", onKeydown));
-onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 </script>
 
 <template>
-  <aside
-    class="border-border fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bg shadow-md"
-    role="dialog"
-    aria-modal="false"
-    :aria-label="merged.display_name ?? merged.name"
+  <DrawerPanel
+    :open="true"
+    :title="merged.display_name ?? merged.name"
     data-test="catalog-detail-drawer"
+    @close="emit('close')"
   >
-    <!-- Header -->
-    <div class="border-border flex items-center gap-2 border-b px-4 py-3">
+    <template #header>
       <SourceGlyph :source="glyphSource" :size="16" class="shrink-0 text-fg-dim" />
       <h2
         class="min-w-0 flex-1 truncate text-sm font-semibold text-fg"
@@ -322,23 +315,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       >
         {{ merged.display_name ?? merged.name }}
       </h2>
-      <button
-        type="button"
-        class="h-7 shrink-0 rounded-control px-2 text-fg-2 hover:bg-bg-deep hover:text-fg"
-        aria-label="Close model detail"
-        data-test="drawer-close"
-        @click="emit('close')"
-      >
-        ✕
-      </button>
-    </div>
+    </template>
 
-    <div class="min-h-0 flex-1 overflow-y-auto">
+    <div class="flex flex-col gap-3">
       <!-- Preview -->
       <!-- A 4:3 hero keeps more of a portrait preview than 16:9 did; the
            placeholder branch stays 16:9 because its mark is a fixed height. -->
       <div
-        class="border-border relative w-full overflow-hidden border-b"
+        class="border-border relative w-full overflow-hidden rounded-control border"
         :class="showHero ? 'aspect-[4/3]' : 'aspect-video'"
       >
         <img
@@ -351,296 +335,289 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           class="catalog-hero h-full w-full object-cover"
           @error="thumbFailed = true"
         />
-        <ModelFamilyPlaceholder v-else :family="merged.family" layout="grid" />
+        <ModelFamilyPlaceholder v-else :family="merged.family" />
       </div>
 
-      <div class="flex flex-col gap-3 p-4">
-        <!-- Classification stays together: what it is, what it creates, and
+      <!-- Classification stays together: what it is, what it creates, and
              whether it contains mature material. -->
-        <ModelMetadataBadges
-          :kind="kindValue"
-          :family="merged.family"
-          :modality="mediaBadge"
-          :nsfw="merged.nsfw"
-          data-test="drawer-classification"
-        />
+      <ModelMetadataBadges
+        :kind="kindValue"
+        :family="merged.family"
+        :modality="mediaBadge"
+        :nsfw="merged.nsfw"
+        data-test="drawer-classification"
+      />
 
-        <!-- State chips -->
-        <div v-if="merged.installed || unsupported" class="flex flex-wrap gap-1.5">
-          <span
-            v-if="merged.installed"
-            class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-sapphire"
-          >
-            ● ready
-          </span>
-          <span
-            v-if="unsupported"
-            class="rounded-control border border-error px-2 py-0.5 text-micro text-error"
-          >
-            Unsupported catalog package
-          </span>
-        </div>
+      <!-- State chips -->
+      <div v-if="merged.installed || unsupported" class="flex flex-wrap gap-1.5">
+        <span
+          v-if="merged.installed"
+          class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-sapphire"
+        >
+          ● ready
+        </span>
+        <span
+          v-if="unsupported"
+          class="rounded-control border border-error px-2 py-0.5 text-micro text-error"
+        >
+          Unsupported catalog package
+        </span>
+      </div>
 
-        <!-- Description belongs with identity/classification rather than
+      <!-- Description belongs with identity/classification rather than
              being buried after the technical metadata grid. -->
-        <p v-if="merged.description" class="text-micro leading-relaxed text-fg-2">
-          {{ merged.description }}
-        </p>
-        <p v-else-if="loading" class="text-micro text-fg-dim">Loading details…</p>
+      <p v-if="merged.description" class="text-micro leading-body text-fg-2">
+        {{ merged.description }}
+      </p>
+      <p v-else-if="loading" class="text-micro text-fg-dim">Loading details…</p>
 
-        <!-- Meta grid -->
-        <dl class="grid grid-cols-2 gap-x-3 gap-y-2">
-          <div v-if="merged.author" class="min-w-0">
-            <dt class="text-micro text-fg-dim">Author</dt>
-            <dd class="truncate text-sm text-fg-2">{{ merged.author }}</dd>
-          </div>
-          <div>
-            <dt class="text-micro text-fg-dim">Family</dt>
-            <dd class="font-mono text-sm text-fg-2">{{ merged.family }}</dd>
-          </div>
-          <div>
-            <dt class="text-micro text-fg-dim">Source</dt>
-            <dd class="text-sm text-fg-2" data-test="drawer-source">{{ sourceLabel }}</dd>
-          </div>
-          <div v-if="merged.file_format">
-            <dt class="text-micro text-fg-dim">Format</dt>
-            <dd class="font-mono text-sm text-fg-2">{{ merged.file_format }}</dd>
-          </div>
-          <div v-if="merged.size_bytes != null">
-            <dt class="text-micro text-fg-dim">Weights</dt>
-            <dd class="font-mono text-sm text-fg-2">{{ formatGB(merged.size_bytes) }}</dd>
-          </div>
-          <div v-if="merged.download_count">
-            <dt class="text-micro text-fg-dim">Downloads</dt>
-            <dd class="font-mono text-sm text-fg-2">
-              {{ formatCount(merged.download_count) }}
-            </dd>
-          </div>
-          <div v-if="merged.likes" data-test="drawer-likes">
-            <dt class="text-micro text-fg-dim">Likes</dt>
-            <dd class="font-mono text-sm text-fg-2">♥ {{ formatCount(merged.likes) }}</dd>
-          </div>
-          <div v-if="merged.rating != null">
-            <dt class="text-micro text-fg-dim">Rating</dt>
-            <dd class="font-mono text-sm text-fg-2">★ {{ merged.rating.toFixed(1) }}</dd>
-          </div>
-          <div v-if="merged.license" class="col-span-2 min-w-0">
-            <dt class="text-micro text-fg-dim">License</dt>
-            <dd class="truncate text-sm text-fg-2" :title="merged.license">
-              {{ merged.license }}
-            </dd>
-          </div>
-          <div v-if="catalogDate" data-test="drawer-updated">
-            <dt class="text-micro text-fg-dim">{{ catalogDate.label }}</dt>
-            <dd class="text-sm text-fg-2">{{ catalogDate.value }}</dd>
-          </div>
-          <div v-if="detailPageUrl" class="col-span-2 min-w-0">
-            <dt class="text-micro text-fg-dim">Style page</dt>
-            <dd>
-              <button
-                type="button"
-                class="text-sm text-accent hover:underline"
-                data-test="drawer-page-link"
-                @click="openModelPage"
-              >
-                View on {{ sourceLabel }}
-              </button>
-            </dd>
-          </div>
-        </dl>
+      <!-- Meta grid -->
+      <dl class="grid grid-cols-2 gap-x-3 gap-y-2">
+        <div v-if="merged.author" class="min-w-0">
+          <dt class="text-micro text-fg-dim">Author</dt>
+          <dd class="truncate text-sm text-fg-2">{{ merged.author }}</dd>
+        </div>
+        <div>
+          <dt class="text-micro text-fg-dim">Family</dt>
+          <dd class="font-mono text-sm text-fg-2">{{ merged.family }}</dd>
+        </div>
+        <div>
+          <dt class="text-micro text-fg-dim">Source</dt>
+          <dd class="text-sm text-fg-2" data-test="drawer-source">{{ sourceLabel }}</dd>
+        </div>
+        <div v-if="merged.file_format">
+          <dt class="text-micro text-fg-dim">Format</dt>
+          <dd class="font-mono text-sm text-fg-2">{{ merged.file_format }}</dd>
+        </div>
+        <div v-if="merged.size_bytes != null">
+          <dt class="text-micro text-fg-dim">Weights</dt>
+          <dd class="font-mono text-sm text-fg-2">{{ formatGB(merged.size_bytes) }}</dd>
+        </div>
+        <div v-if="merged.download_count">
+          <dt class="text-micro text-fg-dim">Downloads</dt>
+          <dd class="font-mono text-sm text-fg-2">
+            {{ formatCount(merged.download_count) }}
+          </dd>
+        </div>
+        <div v-if="merged.likes" data-test="drawer-likes">
+          <dt class="text-micro text-fg-dim">Likes</dt>
+          <dd class="font-mono text-sm text-fg-2">♥ {{ formatCount(merged.likes) }}</dd>
+        </div>
+        <div v-if="merged.rating != null">
+          <dt class="text-micro text-fg-dim">Rating</dt>
+          <dd class="font-mono text-sm text-fg-2">★ {{ merged.rating.toFixed(1) }}</dd>
+        </div>
+        <div v-if="merged.license" class="col-span-2 min-w-0">
+          <dt class="text-micro text-fg-dim">License</dt>
+          <dd class="truncate text-sm text-fg-2" :title="merged.license">
+            {{ merged.license }}
+          </dd>
+        </div>
+        <div v-if="catalogDate" data-test="drawer-updated">
+          <dt class="text-micro text-fg-dim">{{ catalogDate.label }}</dt>
+          <dd class="text-sm text-fg-2">{{ catalogDate.value }}</dd>
+        </div>
+        <div v-if="detailPageUrl" class="col-span-2 min-w-0">
+          <dt class="text-micro text-fg-dim">Style page</dt>
+          <dd>
+            <button
+              type="button"
+              class="text-sm text-accent hover:underline"
+              data-test="drawer-page-link"
+              @click="openModelPage"
+            >
+              View on {{ sourceLabel }}
+            </button>
+          </dd>
+        </div>
+      </dl>
 
-        <!-- Footprint tiles: model weights (SIZE) vs full footprint (FETCH,
+      <!-- Footprint tiles: model weights (SIZE) vs full footprint (FETCH,
              which includes shared components and is always ≥ SIZE). -->
-        <div
-          v-if="sizeInfo.weightsBytes != null"
-          class="flex gap-2.5"
-          data-test="drawer-stat-tiles"
-        >
-          <div class="border-border flex-1 rounded-control border bg-bg-deep p-3">
-            <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
-              {{ weightsHeading }}
-            </div>
-            <div class="font-mono mt-1 text-base text-fg" data-test="stat-checkpoint">
-              {{ checkpointLabel }}
-            </div>
+      <div v-if="sizeInfo.weightsBytes != null" class="flex gap-2.5" data-test="drawer-stat-tiles">
+        <div class="border-border flex-1 rounded-control border bg-bg-deep p-3">
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
+            {{ weightsHeading }}
           </div>
-          <div class="border-border flex-1 rounded-control border bg-bg-deep p-3">
-            <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
-              Full footprint
-            </div>
-            <div class="font-mono mt-1 text-base text-fg" data-test="stat-footprint">
-              {{ footprintLabel }}
-            </div>
+          <div class="font-mono mt-1 text-base text-fg" data-test="stat-checkpoint">
+            {{ checkpointLabel }}
           </div>
         </div>
+        <div class="border-border flex-1 rounded-control border bg-bg-deep p-3">
+          <div class="font-mono text-micro text-fg-dim whitespace-nowrap uppercase">
+            Full footprint
+          </div>
+          <div class="font-mono mt-1 text-base text-fg" data-test="stat-footprint">
+            {{ footprintLabel }}
+          </div>
+        </div>
+      </div>
 
-        <!-- Variants: the selected chip is the exact pull target. -->
-        <section v-if="variants?.length" data-test="drawer-variants">
-          <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-1.5 uppercase">
-            Variants
-          </div>
-          <div class="flex flex-wrap gap-1.5">
-            <button
-              v-for="variant in variants"
-              :key="variant.id"
-              type="button"
-              data-test="variant-chip"
-              class="font-mono rounded-control border px-2.5 py-1 text-micro transition-colors duration-100"
-              :class="
-                variant.id === selectedVariantId
-                  ? 'border-accent text-accent'
-                  : 'border-border text-fg-2 hover:text-fg'
-              "
-              :aria-pressed="variant.id === selectedVariantId"
-              @click="selectVariant(variant.id)"
-            >
-              {{ variant.label }}
-              <span v-if="variant.sizeBytes != null" class="text-fg-dim">
-                · {{ formatSize(variant.sizeBytes) }}
-              </span>
-            </button>
-          </div>
-        </section>
-
-        <!-- Download contents -->
-        <section
-          v-if="downloadItems.length"
-          class="border-border border-t pt-3"
-          data-test="download-contents"
-        >
-          <div class="mb-1.5 flex items-baseline justify-between">
-            <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
-              >DOWNLOAD CONTENTS</span
-            >
-            <span class="font-mono text-micro text-fg">{{ downloadTotalLabel }}</span>
-          </div>
-          <ul class="flex flex-col gap-1">
-            <li
-              v-for="item in downloadItems"
-              :key="item.key"
-              class="grid grid-cols-[1fr_auto] items-baseline gap-2"
-            >
-              <span class="min-w-0 truncate text-micro text-fg-2" :title="item.label">
-                {{ item.label }}
-              </span>
-              <span class="font-mono text-micro text-fg-dim">
-                {{ item.kind }} · {{ formatSize(item.sizeBytes) }}
-              </span>
-            </li>
-          </ul>
-        </section>
-
-        <!-- On-disk components (installed models) -->
-        <section
-          v-if="componentList.length"
-          class="border-border border-t pt-3"
-          data-test="component-list"
-        >
-          <div class="mb-1.5 flex items-baseline justify-between">
-            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">ON THIS MACHINE</span>
-            <span class="font-mono text-micro text-fg">
-              {{ componentsPresent }}/{{ componentList.length }} present
-            </span>
-          </div>
-          <ul class="flex flex-col gap-1">
-            <li
-              v-for="c in componentList"
-              :key="c.name"
-              class="flex items-center gap-2"
-              data-test="component-row"
-            >
-              <span
-                class="h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="c.present ? 'bg-sapphire' : 'bg-error'"
-                role="img"
-                :title="c.present ? 'Present' : 'Missing'"
-                :aria-label="c.present ? 'Present' : 'Missing'"
-              />
-              <span class="min-w-0 truncate text-micro text-fg-2">{{ c.name }}</span>
-              <span class="font-mono text-micro text-fg-dim whitespace-nowrap ml-auto shrink-0">{{
-                c.kind
-              }}</span>
-              <button
-                v-if="!c.present && c.repair_model"
-                type="button"
-                data-test="component-repair"
-                class="border-border h-6 shrink-0 rounded-control border px-2 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-40"
-                :disabled="repairing.has(c.name)"
-                :title="`Re-download the missing ${c.name}`"
-                @click="repairComponent(c)"
-              >
-                {{ repairing.has(c.name) ? "Repairing…" : "Repair" }}
-              </button>
-            </li>
-          </ul>
-        </section>
-
-        <!-- Civitai trigger phrases are high-value authoring metadata. -->
-        <section
-          v-if="merged.trained_words?.length"
-          class="border-border border-t pt-3"
-          data-test="drawer-trained-words"
-        >
-          <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-1.5 uppercase">
-            Trigger words
-          </div>
-          <div class="flex flex-wrap gap-1">
-            <span
-              v-for="word in merged.trained_words"
-              :key="word"
-              class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-fg-2"
-            >
-              {{ word }}
-            </span>
-          </div>
-        </section>
-
-        <!-- Tags -->
-        <div v-if="merged.tags?.length" class="flex flex-wrap gap-1">
-          <span
-            v-for="tag in merged.tags"
-            :key="tag"
-            class="border-border rounded-control border px-1.5 py-0.5 text-micro text-fg-dim"
+      <!-- Variants: the selected chip is the exact pull target. -->
+      <section v-if="variants?.length" data-test="drawer-variants">
+        <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-1.5 uppercase">
+          Variants
+        </div>
+        <div class="flex flex-wrap gap-1.5">
+          <button
+            v-for="variant in variants"
+            :key="variant.id"
+            type="button"
+            data-test="variant-chip"
+            class="font-mono rounded-control border px-2.5 py-1 text-micro transition-colors duration-100"
+            :class="
+              variant.id === selectedVariantId
+                ? 'border-accent text-accent'
+                : 'border-border text-fg-2 hover:text-fg'
+            "
+            :aria-pressed="variant.id === selectedVariantId"
+            @click="selectVariant(variant.id)"
           >
-            {{ tag }}
+            {{ variant.label }}
+            <span v-if="variant.sizeBytes != null" class="text-fg-dim">
+              · {{ formatSize(variant.sizeBytes) }}
+            </span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Download contents -->
+      <section
+        v-if="downloadItems.length"
+        class="border-border border-t pt-3"
+        data-test="download-contents"
+      >
+        <div class="mb-1.5 flex items-baseline justify-between">
+          <span class="font-mono text-micro text-fg-dim whitespace-nowrap">DOWNLOAD CONTENTS</span>
+          <span class="font-mono text-micro text-fg">{{ downloadTotalLabel }}</span>
+        </div>
+        <ul class="flex flex-col gap-1">
+          <li
+            v-for="item in downloadItems"
+            :key="item.key"
+            class="grid grid-cols-[1fr_auto] items-baseline gap-2"
+          >
+            <span class="min-w-0 truncate text-micro text-fg-2" :title="item.label">
+              {{ item.label }}
+            </span>
+            <span class="font-mono text-micro text-fg-dim">
+              {{ item.kind }} · {{ formatSize(item.sizeBytes) }}
+            </span>
+          </li>
+        </ul>
+      </section>
+
+      <!-- On-disk components (installed models) -->
+      <section
+        v-if="componentList.length"
+        class="border-border border-t pt-3"
+        data-test="component-list"
+      >
+        <div class="mb-1.5 flex items-baseline justify-between">
+          <span class="font-mono text-micro text-fg-dim whitespace-nowrap">ON THIS MACHINE</span>
+          <span class="font-mono text-micro text-fg">
+            {{ componentsPresent }}/{{ componentList.length }} present
           </span>
         </div>
+        <ul class="flex flex-col gap-1">
+          <li
+            v-for="c in componentList"
+            :key="c.name"
+            class="flex items-center gap-2"
+            data-test="component-row"
+          >
+            <span
+              class="h-1.5 w-1.5 shrink-0 rounded-full"
+              :class="c.present ? 'bg-sapphire' : 'bg-error'"
+              role="img"
+              :title="c.present ? 'Present' : 'Missing'"
+              :aria-label="c.present ? 'Present' : 'Missing'"
+            />
+            <span class="min-w-0 truncate text-micro text-fg-2">{{ c.name }}</span>
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap ml-auto shrink-0">{{
+              c.kind
+            }}</span>
+            <button
+              v-if="!c.present && c.repair_model"
+              type="button"
+              data-test="component-repair"
+              class="border-border h-6 shrink-0 rounded-control border px-2 text-micro text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-40"
+              :disabled="repairing.has(c.name)"
+              :title="`Re-download the missing ${c.name}`"
+              @click="repairComponent(c)"
+            >
+              {{ repairing.has(c.name) ? "Repairing…" : "Repair" }}
+            </button>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Civitai trigger phrases are high-value authoring metadata. -->
+      <section
+        v-if="merged.trained_words?.length"
+        class="border-border border-t pt-3"
+        data-test="drawer-trained-words"
+      >
+        <div class="font-mono text-micro text-fg-dim whitespace-nowrap mb-1.5 uppercase">
+          Trigger words
+        </div>
+        <div class="flex flex-wrap gap-1">
+          <span
+            v-for="word in merged.trained_words"
+            :key="word"
+            class="border-border font-mono rounded-control border px-2 py-0.5 text-micro text-fg-2"
+          >
+            {{ word }}
+          </span>
+        </div>
+      </section>
+
+      <!-- Tags -->
+      <div v-if="merged.tags?.length" class="flex flex-wrap gap-1">
+        <span
+          v-for="tag in merged.tags"
+          :key="tag"
+          class="border-border rounded-control border px-1.5 py-0.5 text-micro text-fg-dim"
+        >
+          {{ tag }}
+        </span>
       </div>
     </div>
 
-    <!-- Action -->
-    <div class="border-border border-t p-4">
-      <p
-        v-if="props.runtimeNotice"
-        data-test="runtime-unavailable-note"
-        class="text-micro text-fg-2"
-      >
-        {{ props.runtimeNotice.message }}
-      </p>
-      <button
-        v-if="isRepair"
-        type="button"
-        data-test="drawer-repair"
-        class="border-border h-8 w-full rounded-control border text-sm text-fg-2 transition-colors duration-150 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
-        :disabled="pulling || !downloadable"
-        title="Re-fetch any missing or incomplete files for this style"
-        @click="emit('pull', pullEntry)"
-      >
-        {{ pulling ? "Repairing…" : "Repair" }}
-      </button>
-      <button
-        v-else
-        type="button"
-        data-test="drawer-pull"
-        class="border-border h-8 w-full rounded-control border text-sm text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
-        :disabled="pulling || !downloadable"
-        :title="downloadable ? 'Download this style' : 'Unsupported catalog package'"
-        @click="emit('pull', pullEntry)"
-      >
-        {{ pullLabel }}
-      </button>
-    </div>
-  </aside>
+    <template #footer>
+      <div class="flex w-full flex-col gap-2">
+        <p
+          v-if="props.runtimeNotice"
+          data-test="runtime-unavailable-note"
+          class="text-micro text-fg-2"
+        >
+          {{ props.runtimeNotice.message }}
+        </p>
+        <button
+          v-if="isRepair"
+          type="button"
+          data-test="drawer-repair"
+          class="border-border h-8 w-full rounded-control border text-sm text-fg-2 transition-colors duration-150 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
+          :disabled="pulling || !downloadable"
+          title="Re-fetch any missing or incomplete files for this style"
+          @click="emit('pull', pullEntry)"
+        >
+          {{ pulling ? "Repairing…" : "Repair" }}
+        </button>
+        <button
+          v-else
+          type="button"
+          data-test="drawer-pull"
+          class="border-border h-8 w-full rounded-control border text-sm text-accent transition-colors duration-150 hover:border-accent active:translate-y-px disabled:opacity-50"
+          :disabled="pulling || !downloadable"
+          :title="downloadable ? 'Download this style' : 'Unsupported catalog package'"
+          @click="emit('pull', pullEntry)"
+        >
+          {{ pullLabel }}
+        </button>
+      </div>
+    </template>
+  </DrawerPanel>
 </template>
 
 <style scoped>

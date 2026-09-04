@@ -1,6 +1,6 @@
 /*
  * Mold Studio icon registry — line icons on a 24-unit grid, 1.7–1.8 stroke,
- * round caps, drawn with currentColor (spec §02). Inner-SVG markup only;
+ * round caps, drawn with currentColor. Inner-SVG markup only;
  * rendered by components/Icon.vue. Add missing glyphs at the same weight
  * (Lucide-compatible geometry) — never mix fills or weights.
  */
@@ -69,7 +69,7 @@ export const ICONS = {
     '<path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/><path d="M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/>',
   star: '<path d="M12 3l2.7 5.9 6.3.7-4.7 4.3 1.3 6.1L12 16.9 6.4 20l1.3-6.1L3 9.6l6.3-.7z"/>',
 
-  // Library organization (spec G16). `star` means "loaded" — never reuse it
+  // Library organization. `star` means "loaded" — never reuse it
   // for favorites.
   // Price-tag outline with its eyelet (Lucide `tag` geometry).
   tag: '<path d="M12.6 20.6a2 2 0 0 1-2.8 0L3.4 14.2A1.5 1.5 0 0 1 3 13.2V4.5A1.5 1.5 0 0 1 4.5 3h8.7a1.5 1.5 0 0 1 1 .4l6.4 6.4a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1"/>',

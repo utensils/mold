@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Right-side drawer (spec §05) — Advanced controls, model detail. Renders
+ * Right-side drawer — Advanced controls, model detail. Renders
  * INSIDE its owning frame: absolute overlay against the nearest positioned
  * ancestor, never Teleport or position:fixed. Backdrop click and Esc close;
  * clicks inside the panel do not.
@@ -31,7 +31,7 @@ useRootFocusOnOpen(root, () => props.open);
   <div
     v-if="open"
     ref="root"
-    class="ms-drawer"
+    class="ms-drawer ms-fade-up"
     role="dialog"
     aria-modal="true"
     :aria-label="title"
@@ -43,7 +43,9 @@ useRootFocusOnOpen(root, () => props.open);
       <slot name="leading" />
       <div class="ms-drawer__header">
         <slot name="header">
-          <span v-if="title" class="ms-drawer__title">{{ title }}</span>
+          <span v-if="title" class="ms-group-label ms-drawer__title">{{
+            title
+          }}</span>
         </slot>
         <div class="ms-drawer__spacer" />
         <button
@@ -66,31 +68,14 @@ useRootFocusOnOpen(root, () => props.open);
 </template>
 
 <style scoped>
-@keyframes ms-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
 .ms-drawer {
   position: absolute;
   inset: 0;
   z-index: 40;
-  background: rgba(6, 5, 10, 0.72);
+  background: var(--mold-scrim);
   backdrop-filter: blur(5px);
   display: flex;
   justify-content: flex-end;
-  animation: ms-fade-up var(--mold-dur-base) var(--mold-ease-out);
-}
-
-.ms-drawer:focus-visible {
-  outline: 2px solid var(--mold-blue);
-  outline-offset: 2px;
 }
 
 .ms-drawer__panel {
@@ -99,7 +84,7 @@ useRootFocusOnOpen(root, () => props.open);
   height: 100%;
   box-sizing: border-box;
   background: var(--mold-bg);
-  border-left: 1px solid var(--mold-border);
+  border-left: var(--mold-bw) solid var(--mold-border);
   box-shadow: -24px 0 70px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
@@ -108,7 +93,7 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-drawer__header {
   height: 52px;
   flex: 0 0 52px;
-  border-bottom: 1px solid var(--mold-border);
+  border-bottom: var(--mold-bw) solid var(--mold-border);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -116,11 +101,7 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-drawer__title {
-  font-family: var(--mold-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--mold-text-dim);
 }
 
 .ms-drawer__spacer {
@@ -131,7 +112,7 @@ useRootFocusOnOpen(root, () => props.open);
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
-  border-radius: 999px;
+  border-radius: var(--mold-radius-2);
   border: 0;
   background: color-mix(in srgb, var(--mold-text) 9%, transparent);
   color: var(--mold-text-2);
@@ -162,7 +143,7 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-drawer__footer {
-  border-top: 1px solid var(--mold-border);
+  border-top: var(--mold-bw) solid var(--mold-border);
   padding: 14px 20px;
 }
 </style>

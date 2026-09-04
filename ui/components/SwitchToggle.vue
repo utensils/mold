@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /*
- * Switch toggle — boolean control (prototype upscale toggle). 44×26 track
- * with a 20px knob that slides 18px right when on; the on state tints the
- * track with the selection set and lights the knob with the accent.
+ * Switch toggle — boolean control. A 44×26 track with a 20px knob that slides
+ * 18px right when on; the on state tints the track with the selection set and
+ * lights the knob with the accent.
  * Space/Enter toggle (handled on keydown with preventDefault so the native
  * button activation never double-fires).
  */
@@ -47,15 +47,14 @@ function onKeydown(event: KeyboardEvent) {
 </template>
 
 <style scoped>
-/* The track is a pill whatever the theme's box radius is. */
 .ms-switch {
   position: relative;
   width: 44px;
   height: 26px;
   flex: 0 0 auto;
   padding: 0;
-  border: 1px solid var(--mold-border-control);
-  border-radius: 999px;
+  border: var(--mold-bw) solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   background: var(--mold-bg);
   cursor: pointer;
   transition:
@@ -69,7 +68,7 @@ function onKeydown(event: KeyboardEvent) {
   left: 2px;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: var(--mold-radius-1);
   background: var(--mold-text-dim);
   transition:
     transform var(--mold-dur-quick) var(--mold-ease-out),

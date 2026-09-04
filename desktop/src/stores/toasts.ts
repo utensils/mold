@@ -35,7 +35,7 @@ export interface ToastOptions {
 
 let nextId = 1;
 
-/** Default lifetime; the undo window overrides it (§08 G12). */
+/** Default lifetime; the undo window overrides it. */
 const DEFAULT_DURATION_MS = 4000;
 
 /** Toasts drop in at the top right, newest first; 4 s, max 3 on screen (design spec §6). */

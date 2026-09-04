@@ -36,18 +36,17 @@ interface Destination {
   route: string;
   label: string;
   icon: "create" | "list" | "library" | "models" | "machines";
-  shortcut: string;
 }
 
 /** MAKE: the things a person came to do. SETUP: what makes them possible. */
 const MAKE: Destination[] = [
-  { route: "/create", label: "New image", icon: "create", shortcut: "1" },
-  { route: "/queue", label: "Queue", icon: "list", shortcut: "2" },
-  { route: "/library", label: "My images", icon: "library", shortcut: "3" },
+  { route: "/create", label: "New image", icon: "create" },
+  { route: "/queue", label: "Queue", icon: "list" },
+  { route: "/library", label: "My images", icon: "library" },
 ];
 const SETUP: Destination[] = [
-  { route: "/models", label: "Styles", icon: "models", shortcut: "4" },
-  { route: "/machines", label: "Machines", icon: "machines", shortcut: "5" },
+  { route: "/models", label: "Styles", icon: "models" },
+  { route: "/machines", label: "Machines", icon: "machines" },
 ];
 
 const collapsed = computed(() => appPrefs.sidebarCollapsed);
@@ -75,8 +74,8 @@ function isActive(path: string): boolean {
   return route.path === path || (path !== "/create" && route.path.startsWith(`${path}/`));
 }
 
-// Trailing readouts: prints developed since the last visit badge My images
-// (G11), downloads in flight badge Styles, an unreachable host dots Machines.
+// Trailing readouts: prints developed since the last visit badge My images,
+// downloads in flight badge Styles, an unreachable host dots Machines.
 const newPrints = computed(() => gallery.newCount);
 const pictureCount = computed(() => gallery.basePrintCount);
 const downloading = computed(() => downloads.hostedInFlight.length);
@@ -88,7 +87,7 @@ const machineTone = computed(() => {
     case "error":
       return "bg-error";
     case "connecting":
-      return "bg-sapphire ms-pulse";
+      return "bg-accent ms-pulse";
     case "idle":
       return "bg-fg-dim";
     default:

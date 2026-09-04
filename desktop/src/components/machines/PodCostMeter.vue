@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Running-cost meter for a rented RunPod instance (§08 G9). Accrued cost ticks
+ * Running-cost meter for a rented RunPod instance. Accrued cost ticks
  * every 30 s from the pod's reported uptime plus wall-clock time since the last
  * overview poll, so a paid host always shows what it has cost so far. Stop is
  * always adjacent to the meter.
@@ -52,7 +52,7 @@ onBeforeUnmount(() => {
 <template>
   <div data-test="pod-cost-meter" class="flex items-center gap-2">
     <span class="font-mono text-micro text-fg-dim">
-      <span class="text-warning" data-test="pod-accrued">≈{{ formatUsd(accrued) }}</span>
+      <span class="text-state-cost" data-test="pod-accrued">≈{{ formatUsd(accrued) }}</span>
       · {{ formatUsd(costPerHr) }}/hr
     </span>
     <span class="flex-1" />

@@ -63,12 +63,12 @@ describe("queue rows speak the lexicon", () => {
       retryable: true,
     });
     expect(rowStatusLine(held)).toBe("Needs a download first");
-    expect(rowTone(held)).toBe("text-warning");
+    expect(rowTone(held)).toBe("text-state-blocked");
     expect(rowGlyph(held)).toBe("↓");
 
     const parked = print({ status: "error", holdError: "no free GPU", retryable: true });
     expect(rowStatusLine(parked)).toBe("Held — no free GPU");
-    expect(rowTone(parked)).toBe("text-warning");
+    expect(rowTone(parked)).toBe("text-state-blocked");
     expect(rowGlyph(parked)).toBe("·");
   });
 

@@ -333,9 +333,7 @@ describe("HostQueuePanel", () => {
     await flushPromises();
     expect(cancel).not.toHaveBeenCalled();
 
-    // ConfirmDialog teleports to the body, so it is not inside the wrapper.
-    const accept = document.querySelector<HTMLButtonElement>("[data-test='confirm-accept']");
-    accept?.click();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(cancel).toHaveBeenCalledWith("local", "srv-0");
   });

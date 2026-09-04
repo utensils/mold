@@ -27,7 +27,7 @@ const toasts = useToastStore();
 const apiKey = ref("");
 const savingKey = ref(false);
 const confirmingDelete = ref<string | null>(null);
-// Confirm-before-spend (§08 G9): nothing provisions or resumes billing without
+// Confirm before spend: nothing provisions or resumes billing without
 // an explicit acknowledgement.
 const confirmProvision = ref(false);
 const confirmStartPod = ref<RunPodPod | null>(null);
@@ -310,9 +310,7 @@ onBeforeUnmount(() => {
       class="flex flex-1 items-center justify-center p-8"
     >
       <section class="border-border w-full max-w-lg rounded-window border bg-bg p-6">
-        <h1 class="font-sans text-lg font-bold text-fg" style="font-stretch: 90%">
-          Add cloud GPUs to your bench
-        </h1>
+        <h1 class="font-sans text-lg font-bold text-fg">Add cloud GPUs to your bench</h1>
         <p class="mt-2 max-w-md text-sm text-fg-2">
           Paste a RunPod API key to launch, stop, and connect to mold instances from this app. The
           key is stored only on this device.
@@ -728,9 +726,8 @@ onBeforeUnmount(() => {
                 </div>
                 <p class="font-mono truncate text-micro text-fg-dim">
                   {{ podGpuName(pod) }} · {{ pod.machine?.location ?? "Placement pending" }} ·
-                  {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
-                    · {{ uptime(pod.uptimeSeconds) }}</span
-                  >
+                  <span class="text-state-cost">{{ money(pod.costPerHr) }}/hr</span
+                  ><span v-if="pod.uptimeSeconds"> · {{ uptime(pod.uptimeSeconds) }}</span>
                 </p>
                 <p v-if="podHardwareSummary(pod)" class="font-mono truncate text-micro text-fg-dim">
                   {{ podHardwareSummary(pod) }}

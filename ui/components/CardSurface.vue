@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Card surface — flat bench card with an inset top highlight (spec §04).
+ * Card surface — flat bench card with an inset top highlight.
  * `large` bumps the radius, `dashed` swaps to a dashed cutting-edge border
  * for empty/offer cards, `padded: false` lets content own its own padding.
  */

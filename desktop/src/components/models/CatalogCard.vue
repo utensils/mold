@@ -124,7 +124,7 @@ function openPage(): void {
 
 <template>
   <article
-    class="catalog-card-contained flex cursor-pointer flex-col rounded-control border border-border bg-panel transition-colors duration-100 hover:border-border-focus"
+    class="catalog-card-contained ms-card-edge flex cursor-pointer flex-col bg-panel transition-colors duration-100 hover:border-border-focus"
     :class="selected ? 'catalog-card-contained--selected' : ''"
     data-test="catalog-card"
     data-layout="grid"
@@ -166,7 +166,7 @@ function openPage(): void {
         @error="thumbFailed = true"
       />
     </div>
-    <ModelFamilyPlaceholder v-else :family="entry.family" layout="grid" />
+    <ModelFamilyPlaceholder v-else :family="entry.family" />
 
     <div class="flex min-h-32 flex-1 flex-col gap-2 p-3.5">
       <div class="flex min-w-0 items-start justify-between gap-2">
@@ -240,7 +240,7 @@ function openPage(): void {
 
       <p
         v-if="description"
-        class="line-clamp-2 text-xs leading-relaxed text-fg-2"
+        class="line-clamp-2 text-xs leading-body text-fg-2"
         data-test="catalog-description"
         :title="description"
       >

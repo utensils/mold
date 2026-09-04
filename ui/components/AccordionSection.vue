@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Accordion section — the disclosure primitive for Advanced panels (spec §07).
+ * Accordion section — the disclosure primitive for Advanced panels.
  * Bordered bath container; header row = optional halide icon plate + title
  * with one-line summary + trailing chevron. With `headerInteractive: false`
  * the header is a plain div (no chevron) for rows whose action lives in a

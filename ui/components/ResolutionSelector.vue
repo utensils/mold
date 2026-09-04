@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Resolution selector — megapixel steps (spec §03). A segmented control over
+ * Resolution selector — megapixel steps. A segmented control over
  * the MP budget plus a mono resolved-pixels line derived from the current
  * shape's aspect ratio, so users always see the real output dimensions.
  */

@@ -74,11 +74,13 @@ const ordered = computed(() => [...toasts.items].reverse());
           <span
             v-if="toast.description"
             data-test="toast-description"
-            class="mt-0.5 block text-micro leading-relaxed text-fg-dim"
+            class="mt-0.5 block text-micro leading-body text-fg-dim"
           >
             {{ toast.description }}
           </span>
         </button>
+        <!-- A toast with an onClick opens something instead of dismissing, so
+             the ✕ is the only way to send that card away. -->
         <button
           type="button"
           data-test="toast-dismiss"

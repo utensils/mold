@@ -109,7 +109,8 @@ describe("CatalogCard", () => {
     });
     await flushPromises();
     const gridPlaceholder = grid.get('[data-test="family-placeholder"]');
-    expect(gridPlaceholder.attributes("data-layout")).toBe("grid");
+    // The placeholder's top corners must match the card's, not the window's.
+    expect(gridPlaceholder.classes()).toContain("rounded-t-control");
     expect(gridPlaceholder.text()).toContain("SDXL");
   });
 

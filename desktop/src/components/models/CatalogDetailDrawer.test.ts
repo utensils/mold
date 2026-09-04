@@ -339,11 +339,11 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.find("[data-test='drawer-pull']").exists()).toBe(true);
   });
 
-  it("emits close from the close button and from Escape", async () => {
+  it("emits close from the kit drawer's close button and from Escape", async () => {
     const wrapper = await mountDrawer(summary());
-    await wrapper.get("[data-test='drawer-close']").trigger("click");
+    await wrapper.get("[aria-label='Close']").trigger("click");
     expect(wrapper.emitted("close")).toHaveLength(1);
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await wrapper.get("[data-test='catalog-detail-drawer']").trigger("keydown", { key: "Escape" });
     expect(wrapper.emitted("close")).toHaveLength(2);
   });
 

@@ -166,7 +166,7 @@ watch(
   { immediate: true },
 );
 
-// ── Scopes (V3 "Shelf": Prints | Collections | Trash) ────────────────────────
+// ── Scopes: Prints | Collections | Trash ────────────────────────────────────
 // Capability-gated: Collections needs an organize-capable host, Trash a
 // trash-capable one (or this device's offline `.trash/` listing). With only
 // Prints the control disappears and every organization affordance hides, so
@@ -1355,7 +1355,7 @@ watch(rowHeight, (value) => {
   }, SLIDER_PERSIST_MS);
 });
 
-// ── Delete: optimistic + undoable (§08 G12) ──────────────────────────────────
+// ── Delete: optimistic + undoable ───────────────────────────────────────────
 // The tile leaves the grid instantly; a 6 s undo toast holds the print in limbo
 // (no server call). Undo restores it; letting the toast expire commits the real
 // DELETE — which on a trash-capable host moves the print to the trash. Several
@@ -2804,10 +2804,10 @@ onUnmounted(() => {
             v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
             type="button"
             data-test="tile-favorite"
-            class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-control text-on-media transition-opacity duration-100"
+            class="ms-lib-tile-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-control text-on-media transition-opacity duration-100"
             :class="
               tile.model.favorite
-                ? 'ms-lib-heart--on opacity-100'
+                ? 'ms-lib-tile-heart--on opacity-100'
                 : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
             "
             :aria-pressed="tile.model.favorite"
@@ -3012,7 +3012,6 @@ onUnmounted(() => {
 
 .ms-lib-tile:hover {
   transform: translate3d(var(--tile-x), calc(var(--tile-y) - 2px), 0);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
 }
 
 .ms-lib-tile-layer {
@@ -3027,39 +3026,27 @@ onUnmounted(() => {
 
 .ms-lib-new {
   font-family: var(--mold-font-mono);
-  font-size: 8.5px;
+  font-size: var(--mold-fs-micro);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   background: var(--mold-blue);
   color: var(--mold-on-accent);
   padding: 2px 6px;
-  border-radius: 5px;
-}
-
-.ms-lib-upscaled {
-  font-family: var(--mold-font-mono);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: color-mix(in srgb, var(--mold-text) 88%, black);
-  color: var(--mold-on-accent);
-  padding: 2px 6px;
-  border-radius: 5px;
+  border-radius: var(--mold-radius-2);
 }
 
 /* ♥ overlay: a drop shadow keeps the glyph legible on any print; the
-   favorited state fills the outline glyph with the current color. */
-.ms-lib-heart {
+   favourited state fills the outline glyph with the current colour. */
+.ms-lib-tile-heart {
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
 }
 
-.ms-lib-heart--on :deep(svg) {
+.ms-lib-tile-heart--on :deep(svg) {
   fill: currentColor;
 }
 
-.ms-lib-heart:focus-visible {
+.ms-lib-tile-heart:focus-visible {
   outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
   opacity: 1;

@@ -106,7 +106,7 @@ async function requestDelete(template: GenerationTemplate) {
 
 <template>
   <div data-test="templates-panel">
-    <div class="mt-5 mb-2 flex items-center gap-2">
+    <div class="mb-2 flex items-center gap-2">
       <span class="font-mono text-micro text-fg-dim whitespace-nowrap">Templates</span>
       <span class="font-mono text-micro text-fg-dim">{{ templates.length }}</span>
       <div class="border-border h-px flex-1 border-t" />

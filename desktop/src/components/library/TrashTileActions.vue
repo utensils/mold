@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
  * TrashTileActions — what a Trash-scope tile wears on top of its thumbnail
- * (V3 "Shelf"): the "Purges in N d" chip (warning tone on the number only;
+ * in the Trash scope: the "Purges in N d" chip (warning tone on the number only;
  * "Kept" when retention is forever) and, on hover, Restore (default) /
  * Delete forever (secondary). The tile itself stays a plain button — these
  * are absolutely positioned overlays that stop click propagation so the

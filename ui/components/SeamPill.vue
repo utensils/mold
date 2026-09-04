@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
  * Seam pill — the resting transition control between two clips on the rail
- * (spec §06, mockup `docs/design`… sequence-filmstrip): a circular glyph
+ * a circular glyph
  * badge with the transition named in words beneath it; fade length rides
  * along in the caption. `motionTail` is REQUIRED so the zero-tail
  * "Join" label can never be skipped (the old SpliceMark defaulted it

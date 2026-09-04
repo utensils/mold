@@ -31,8 +31,11 @@ const commands = useQueueCommands();
 const explainOpen = ref(false);
 
 const active = computed(() => queue.active.value);
+// The rail is context, not the record: it shows what fits a sidebar without
+// becoming a scroll of its own. The Queue view is the full list.
+const RAIL_ROWS = 12;
 const rows = computed(() =>
-  queue.rows.value.filter((row) => row.key !== active.value?.key).slice(0, 12),
+  queue.rows.value.filter((row) => row.key !== active.value?.key).slice(0, RAIL_ROWS),
 );
 
 /** A mesh print's saved file is binary glTF, so its rendered poster is its
@@ -119,7 +122,7 @@ function progressPct(row: QueueRow): number | null {
       <div
         v-if="active"
         data-test="queue-active"
-        class="flex shrink-0 cursor-pointer flex-col gap-2 rounded-control bg-panel-raised p-2.5 shadow-[inset_0_0_0_1px_var(--mold-blue)] focus-visible:outline-2 focus-visible:outline-accent"
+        class="flex shrink-0 cursor-pointer flex-col gap-2 rounded-control border border-accent bg-panel-raised p-2.5"
         role="button"
         tabindex="0"
         @click="commands.open(active)"
@@ -190,11 +193,7 @@ function progressPct(row: QueueRow): number | null {
             What's this?
           </button>
         </div>
-        <p
-          v-if="explainOpen"
-          class="text-micro leading-relaxed text-fg-2"
-          style="text-wrap: pretty"
-        >
+        <p v-if="explainOpen" class="text-micro leading-body text-fg-2" style="text-wrap: pretty">
           Your picture starts as random static and gets cleared up pass by pass — big shapes first,
           fine detail last. That's why the thumbnail looks soft until the end.
         </p>

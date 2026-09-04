@@ -19,13 +19,15 @@ const props = withDefaults(
     /** Current 1-based step; this and earlier bars are tinted. */
     step?: number;
     /** Accessible name for the dialog. */
-    label?: string;
+    label?: string | undefined;
+    /** `alertdialog` for a decision the user cannot get past. */
+    role?: "dialog" | "alertdialog";
     /** Header title; with it the header block renders, bordered below. */
-    title?: string;
-    /** One plain sentence under the title. */
-    description?: string;
+    title?: string | undefined;
+    /** One plain sentence under the title; the `description` slot overrides it. */
+    description?: string | undefined;
   }>(),
-  { width: 480, step: 1 },
+  { width: 480, step: 1, role: "dialog" },
 );
 
 const emit = defineEmits<{ close: [] }>();
@@ -39,8 +41,8 @@ useRootFocusOnOpen(root, () => props.open);
   <div
     v-if="open"
     ref="root"
-    class="ms-modal"
-    role="dialog"
+    class="ms-modal ms-fade-up"
+    :role="role"
     aria-modal="true"
     :aria-label="label ?? title"
     tabindex="-1"
@@ -58,9 +60,11 @@ useRootFocusOnOpen(root, () => props.open);
       </div>
       <div v-if="title" class="ms-modal__head">
         <span class="ms-modal__title">{{ title }}</span>
-        <span v-if="description" class="ms-modal__desc">{{ description }}</span>
+        <span v-if="slots.description || description" class="ms-modal__desc">
+          <slot name="description">{{ description }}</slot>
+        </span>
       </div>
-      <div class="ms-modal__body">
+      <div v-if="slots.default" class="ms-modal__body">
         <slot />
       </div>
       <div v-if="slots.footer" class="ms-modal__footer">
@@ -71,17 +75,6 @@ useRootFocusOnOpen(root, () => props.open);
 </template>
 
 <style scoped>
-@keyframes ms-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
 .ms-modal {
   position: absolute;
   inset: 0;
@@ -90,12 +83,6 @@ useRootFocusOnOpen(root, () => props.open);
   align-items: center;
   justify-content: center;
   padding: 40px;
-  animation: ms-fade-up var(--mold-dur-base) var(--mold-ease-out);
-}
-
-.ms-modal:focus-visible {
-  outline: 2px solid var(--mold-blue);
-  outline-offset: 2px;
 }
 
 .ms-modal__panel {
@@ -137,7 +124,7 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-modal__dot {
   width: 22px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--mold-radius-1);
   background: var(--mold-border-control);
   transition: background var(--mold-dur-base) var(--mold-ease-out);
 }

@@ -14,8 +14,9 @@
  *     window, depth is surface value alone.
  *   · Accent: one. --mold-state-* are status, not accents.
  *   · Icons: 24×24, fill:none, stroke:currentColor, stroke-width:2, round
- *     caps/joins (ui/icons.ts). Glyphs ✓ ★ ⠂ • ! ↓ ▼ are typed in mono, never
- *     redrawn as SVG.
+ *     caps/joins (ui/icons.ts). Prefer assets/icons/*.svg; substitute from
+ *     Lucide and say so. No filled or duotone glyphs. Glyphs ✓ ★ ⠂ • ! ↓ ▼
+ *     are typed in mono, never redrawn as SVG.
  *   · Numbers are mono with tabular figures; prose is sans. A row shows plain
  *     words first and the mono value second.
  */

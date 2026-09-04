@@ -48,11 +48,11 @@ defineExpose({ expand });
 </script>
 
 <template>
-  <div class="flex min-w-0 flex-wrap items-center gap-2">
+  <div class="ms-expand">
     <button
       type="button"
       data-test="expand-action"
-      class="border-border min-h-7 rounded-control border px-2 text-sm text-fg-2 transition-colors duration-100 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
+      class="ms-toolbar-button"
       :disabled="!!transformBlockedReason || blocked || running || !prompt.trim()"
       :title="
         transformBlockedReason
@@ -66,13 +66,13 @@ defineExpose({ expand });
       @click="expand"
     >
       {{ actionLabel }}
-      <kbd v-if="!running" class="font-mono text-sm ml-1">{{ shortcutLabel("E") }}</kbd>
+      <kbd v-if="!running" class="ms-expand__chord">{{ shortcutLabel("E") }}</kbd>
     </button>
 
     <button
       type="button"
       data-test="remix-action"
-      class="border-border min-h-7 rounded-control border px-2 text-sm text-fg-2 transition-colors duration-100 hover:border-accent hover:text-fg active:translate-y-px disabled:opacity-50"
+      class="ms-toolbar-button"
       :disabled="!!transformBlockedReason || blocked || running || !prompt.trim()"
       :title="
         transformBlockedReason
@@ -85,11 +85,11 @@ defineExpose({ expand });
     >
       Remix
     </button>
-    <label v-if="originalAvailable" class="flex items-center gap-1 text-micro text-fg-dim">
+    <label v-if="originalAvailable" class="ms-expand__source">
       Source
       <select
         data-test="remix-source-select"
-        class="border-border min-h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg-2 disabled:opacity-50"
+        class="ms-expand__select"
         :disabled="!!transformBlockedReason"
         :value="remixSource ?? 'original'"
         @change="
@@ -107,7 +107,7 @@ defineExpose({ expand });
     <button
       v-if="!isPreparedBatch && canUndo"
       type="button"
-      class="min-h-7 rounded-control px-1.5 text-sm text-sapphire transition-colors duration-100 hover:text-fg"
+      class="ms-expand__restore"
       title="Restore original prompt"
       aria-label="Restore original prompt"
       @click="emit('restore')"
@@ -118,7 +118,7 @@ defineExpose({ expand });
     <span
       v-if="transformBlockedReason"
       data-test="transform-blocked-hint"
-      class="min-w-0 text-micro text-fg-dim"
+      class="ms-expand__note"
       >{{ transformBlockedReason }}</span
     >
 
@@ -126,9 +126,71 @@ defineExpose({ expand });
       v-else-if="running"
       role="status"
       aria-live="polite"
-      class="min-w-0 text-micro text-sapphire"
+      class="ms-expand__note ms-expand__note--live"
     >
       {{ progressLabel }}
     </span>
   </div>
 </template>
+
+<style scoped>
+.ms-expand {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ms-expand__chord {
+  font-family: var(--mold-font-mono);
+  color: var(--mold-text-dim);
+}
+
+.ms-expand__source {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+
+.ms-expand__select {
+  height: var(--mold-ctl-md);
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
+  padding: 0 6px;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
+}
+
+.ms-expand__select:disabled {
+  opacity: 0.5;
+}
+
+.ms-expand__restore {
+  height: var(--mold-ctl-md);
+  border: 0;
+  background: transparent;
+  padding: 0 6px;
+  font-size: var(--mold-fs-sm);
+  color: var(--mold-blue);
+  cursor: pointer;
+  transition: color var(--mold-dur-quick) var(--mold-ease-out);
+}
+
+.ms-expand__restore:hover {
+  color: var(--mold-text);
+}
+
+.ms-expand__note {
+  min-width: 0;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+
+.ms-expand__note--live {
+  color: var(--mold-blue);
+}
+</style>

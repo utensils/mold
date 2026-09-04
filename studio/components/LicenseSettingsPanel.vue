@@ -104,41 +104,46 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
       role="alert"
     >
       <span>{{ loadError }}</span>
-      <button type="button" @click="load">Retry</button>
+      <button class="license-settings__button" type="button" @click="load">
+        Retry
+      </button>
     </div>
     <p v-if="message" class="license-settings__success" role="status">
       {{ message }}
     </p>
-    <div
-      v-if="!loadError"
-      v-for="license in rows"
-      :key="license.id"
-      class="license-settings__row"
-    >
-      <div>
-        <strong>{{ license.name }}</strong>
-        <p>{{ license.summary }}</p>
-        <a
-          :href="license.url"
-          target="_blank"
-          rel="noreferrer"
-          @click="openTerms($event, license.url)"
-          >Pinned terms</a
-        >
-        <span> · </span>
-        <a
-          :href="license.canonical"
-          target="_blank"
-          rel="noreferrer"
-          @click="openTerms($event, license.canonical)"
-          >Project terms</a
-        >
-      </div>
-      <span v-if="license.accepted" class="license-settings__accepted"
-        >Accepted</span
+    <template v-if="!loadError">
+      <div
+        v-for="license in rows"
+        :key="license.id"
+        class="license-settings__row"
       >
-      <span v-else class="license-settings__pending">Review required</span>
-    </div>
+        <div>
+          <strong>{{ license.name }}</strong>
+          <p>{{ license.summary }}</p>
+          <a
+            class="license-settings__link"
+            :href="license.url"
+            target="_blank"
+            rel="noreferrer"
+            @click="openTerms($event, license.url)"
+            >Pinned terms</a
+          >
+          <span> · </span>
+          <a
+            class="license-settings__link"
+            :href="license.canonical"
+            target="_blank"
+            rel="noreferrer"
+            @click="openTerms($event, license.canonical)"
+            >Project terms</a
+          >
+        </div>
+        <span v-if="license.accepted" class="license-settings__accepted"
+          >Accepted</span
+        >
+        <span v-else class="license-settings__pending">Review required</span>
+      </div>
+    </template>
     <div
       v-if="!loadError && requirements.length"
       class="license-settings__actions"
@@ -148,10 +153,18 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
         :key="requirement.installModel"
         class="license-settings__action-pair"
       >
-        <button type="button" @click="review(requirement, 'record')">
+        <button
+          class="license-settings__button"
+          type="button"
+          @click="review(requirement, 'record')"
+        >
           Accept terms for {{ requirement.installModel }}
         </button>
-        <button type="button" @click="review(requirement, 'download')">
+        <button
+          class="license-settings__button"
+          type="button"
+          @click="review(requirement, 'download')"
+        >
           Review terms and download {{ requirement.installModel }}
         </button>
       </div>
@@ -171,13 +184,13 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   flex-direction: column;
   gap: 12px;
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
 }
 .license-settings__lede,
 .license-settings__muted,
 .license-settings__row p {
   margin: 0;
-  line-height: 1.5;
+  line-height: var(--mold-lh-body);
 }
 .license-settings__action-pair {
   display: flex;
@@ -189,7 +202,7 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   align-items: center;
   gap: 16px;
   padding: 12px;
-  border: 1px solid var(--mold-border);
+  border: var(--mold-bw) solid var(--mold-border);
   border-radius: var(--mold-radius-2);
   background: var(--mold-bg-deep);
 }
@@ -200,17 +213,21 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 .license-settings__row strong {
   color: var(--mold-text);
 }
-a {
+.license-settings__link {
   color: var(--mold-blue);
 }
 .license-settings__accepted {
   color: var(--mold-success);
-  font: 600 11px var(--mold-font-mono);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  font-weight: 600;
   text-transform: uppercase;
 }
 .license-settings__pending {
   color: var(--mold-error);
-  font: 600 11px var(--mold-font-mono);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  font-weight: 600;
   text-transform: uppercase;
 }
 .license-settings__actions {
@@ -225,14 +242,16 @@ a {
   gap: 12px;
   color: var(--mold-error);
 }
-button {
-  min-height: 44px;
-  border: 1px solid var(--mold-blue);
+.license-settings__button {
+  min-height: var(--mold-ctl-lg, 32px);
+  border: var(--mold-bw) solid var(--mold-blue);
   border-radius: var(--mold-radius-2);
   background: transparent;
   color: var(--mold-blue);
   padding: 0 12px;
-  font: 600 12px var(--mold-font-sans);
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
   cursor: pointer;
 }
 .license-settings__success {

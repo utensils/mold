@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from "vue";
+import ContextMenuItem from "./ContextMenuItem.vue";
 import {
   hasCheckColumn,
   hasChildren,
@@ -78,17 +79,6 @@ const submenuLabel = computed(() => {
   const parent = menu.submenu ? menu.entries[menu.submenu.parentIndex] : undefined;
   return parent && !isSeparator(parent) ? parent.label : "Submenu";
 });
-
-function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted: boolean) {
-  return [
-    entry.disabled
-      ? "cursor-default text-fg-dim"
-      : entry.danger
-        ? "text-error hover:bg-error/15"
-        : "text-fg hover:bg-accent-tint",
-    highlighted && !entry.disabled ? (entry.danger ? "bg-error/15" : "bg-accent-tint") : "",
-  ];
-}
 </script>
 
 <template>
@@ -114,36 +104,16 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
     >
       <template v-for="(entry, i) in menu.entries" :key="i">
         <div v-if="isSeparator(entry)" class="border-border mx-2 my-1 border-t" role="separator" />
-        <button
+        <ContextMenuItem
           v-else
-          type="button"
-          :role="entry.checked !== undefined ? 'menuitemcheckbox' : 'menuitem'"
-          :aria-checked="entry.checked !== undefined ? entry.checked : undefined"
-          :aria-disabled="entry.disabled || undefined"
-          :aria-haspopup="hasChildren(entry) ? 'menu' : undefined"
-          :aria-expanded="hasChildren(entry) ? menu.submenu?.parentIndex === i : undefined"
-          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-xs transition-colors duration-75"
-          :class="itemClasses(entry, i === menu.highlighted)"
-          :disabled="entry.disabled"
-          @mouseenter="onRootEnter(entry, i, $event)"
-          @click="onRootClick(entry, $event)"
-        >
-          <span
-            v-if="hasCheckColumn(menu.entries)"
-            class="w-3.5 shrink-0 text-center font-mono text-micro leading-none"
-            data-test="menu-check"
-            aria-hidden="true"
-            >{{ entry.checked ? "✓" : "" }}</span
-          >
-          <span class="min-w-0 flex-1 truncate">{{ entry.label }}</span>
-          <span
-            v-if="hasChildren(entry)"
-            class="shrink-0 text-fg-dim"
-            data-test="menu-chevron"
-            aria-hidden="true"
-            >›</span
-          >
-        </button>
+          :entry="entry"
+          :highlighted="i === menu.highlighted"
+          :check-column="hasCheckColumn(menu.entries)"
+          expandable
+          :expanded="menu.submenu?.parentIndex === i"
+          @enter="onRootEnter(entry, i, $event)"
+          @activate="onRootClick(entry, $event)"
+        />
       </template>
     </div>
     <div
@@ -161,27 +131,14 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
     >
       <template v-for="(entry, j) in menu.submenu.entries" :key="j">
         <div v-if="isSeparator(entry)" class="border-border mx-2 my-1 border-t" role="separator" />
-        <button
+        <ContextMenuItem
           v-else
-          type="button"
-          :role="entry.checked !== undefined ? 'menuitemcheckbox' : 'menuitem'"
-          :aria-checked="entry.checked !== undefined ? entry.checked : undefined"
-          :aria-disabled="entry.disabled || undefined"
-          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-xs transition-colors duration-75"
-          :class="itemClasses(entry, j === menu.submenu.highlighted)"
-          :disabled="entry.disabled"
-          @mouseenter="menu.submenu.highlighted = j"
-          @click="menu.activate(entry)"
-        >
-          <span
-            v-if="hasCheckColumn(menu.submenu.entries)"
-            class="w-3.5 shrink-0 text-center font-mono text-micro leading-none"
-            data-test="menu-check"
-            aria-hidden="true"
-            >{{ entry.checked ? "✓" : "" }}</span
-          >
-          <span class="min-w-0 flex-1 truncate">{{ entry.label }}</span>
-        </button>
+          :entry="entry"
+          :highlighted="j === menu.submenu.highlighted"
+          :check-column="hasCheckColumn(menu.submenu.entries)"
+          @enter="menu.submenu.highlighted = j"
+          @activate="menu.activate(entry)"
+        />
       </template>
     </div>
   </Teleport>

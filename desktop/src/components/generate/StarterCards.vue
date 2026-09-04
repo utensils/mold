@@ -11,7 +11,7 @@ const emit = defineEmits<{ (e: "browse"): void }>();
 const downloads = useDownloadsStore();
 const toasts = useToastStore();
 
-// Cold start (§08 G10): the shortest path to a first print. Three small,
+// Cold start: the shortest path to a first print. Three small,
 // fast-to-pull models — the recommended one first — each a one-click pull.
 const STARTERS = STARTER_MODELS;
 
