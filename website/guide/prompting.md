@@ -50,8 +50,8 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-lightning` | `qwen-image` | `shared.md`, `families/qwen-image.md`, `models/qwen-image-flash.md` | 180 | 567 |
 | `qwen-image-flash` | `qwen-image` | `shared.md`, `families/qwen-image.md`, `models/qwen-image-flash.md` | 180 | 567 |
 | `qwen-image-distill` | `qwen-image` | `shared.md`, `families/qwen-image.md`, `models/qwen-image-flash.md` | 180 | 567 |
-| `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 494 |
-| `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 575 |
+| `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 513 |
+| `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 594 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
 | `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
@@ -1013,6 +1013,8 @@ image's background, furniture, and composition unchanged.
 - Omitting what must stay identical is the usual cause of drifted geometry.
 - Translating quoted text or changing its case rewrites the sign.
 - Exaggerated face or make-up edits break identity.
+- One to three input images are the tested quality range. Additional images
+  remain accepted, but may reduce consistency.
 
 #### CLI
 
@@ -1033,6 +1035,7 @@ mold run qwen-image-edit-lightning:fp8 'Replace the sign text with "CLOSED", kee
 
 - https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py
 - https://github.com/QwenLM/Qwen-Image
+- https://huggingface.co/Qwen/Qwen-Image-Edit-2509
 - https://huggingface.co/Qwen/Qwen-Image-Edit
 
 <!-- families/ltx-video.md -->

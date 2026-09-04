@@ -58,6 +58,8 @@ image's background, furniture, and composition unchanged.
 - Omitting what must stay identical is the usual cause of drifted geometry.
 - Translating quoted text or changing its case rewrites the sign.
 - Exaggerated face or make-up edits break identity.
+- One to three input images are the tested quality range. Additional images
+  remain accepted, but may reduce consistency.
 
 ## CLI
 
@@ -78,4 +80,5 @@ mold run qwen-image-edit-lightning:fp8 'Replace the sign text with "CLOSED", kee
 
 - https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py
 - https://github.com/QwenLM/Qwen-Image
+- https://huggingface.co/Qwen/Qwen-Image-Edit-2509
 - https://huggingface.co/Qwen/Qwen-Image-Edit
