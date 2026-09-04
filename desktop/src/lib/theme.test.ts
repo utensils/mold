@@ -29,6 +29,28 @@ describe("shared theme contract", () => {
     }
   });
 
+  it("gives every theme a tone phrase whose first word is its machine tone", () => {
+    for (const meta of THEME_META) {
+      const [tone, rest] = meta.toneLabel.split(" · ");
+      expect(tone?.toLowerCase(), meta.id).toBe(meta.tone);
+      expect(rest, meta.id).toBeTruthy();
+    }
+    expect(THEME_META.find((meta) => meta.id === "mocha")?.toneLabel).toBe("Dark · the original");
+    expect(THEME_META.find((meta) => meta.id === "porcelain")?.toneLabel).toBe(
+      "Light · high-key, compact",
+    );
+  });
+
+  it("scopes every theme map to any element carrying data-theme, not only the root", () => {
+    // The Look picker paints each card's swatch band from the theme's own map
+    // by stamping `data-theme` on the band; a :root-only selector would leave
+    // every band painted in the ACTIVE theme.
+    const css = readFileSync("../ui/tokens.css", "utf8");
+    for (const id of THEMES) {
+      expect(css, id).toContain(`:root[data-theme="${id}"],\n[data-theme="${id}"] {`);
+    }
+  });
+
   it("declares exactly the themes ui/tokens.css carries", () => {
     const css = readFileSync("../ui/tokens.css", "utf8");
     const declared = [...css.matchAll(/:root\[data-theme="([\w-]+)"\]/g)].map((m) => m[1]);

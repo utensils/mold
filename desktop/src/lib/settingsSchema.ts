@@ -15,6 +15,7 @@ export type SectionId =
   | "generation"
   | "expansion"
   | "hosts"
+  | "styles"
   | "media"
   | "library"
   | "licenses"
@@ -63,8 +64,35 @@ export const SECTIONS: SectionInfo[] = [
   {
     id: "hosts",
     label: "Machines",
-    summary: "This device, its key, and where its styles and pictures live",
+    summary: "This device, its key, and the Mold home it works out of",
     keywords: ["hosts", "this device", "engine", "api key", "mold home"],
+  },
+  {
+    id: "styles",
+    label: "Styles & disk",
+    summary: "Where styles and finished pictures land, and how much disk they take",
+    keywords: [
+      "models",
+      "weights",
+      "checkpoints",
+      "disk",
+      "storage",
+      "space",
+      "directory",
+      "folder",
+    ],
+  },
+  {
+    id: "licenses",
+    label: "Style licences",
+    summary: "Some styles need you to accept their terms once per machine",
+    keywords: ["licence", "license", "terms", "accept"],
+  },
+  {
+    id: "library",
+    label: "My images & trash",
+    summary: "Trash retention on this device",
+    keywords: ["trash", "retention", "collections", "albums", "deleted prints", "purge", "library"],
   },
   {
     id: "media",
@@ -81,18 +109,6 @@ export const SECTIONS: SectionInfo[] = [
       "photo",
       "video",
     ],
-  },
-  {
-    id: "library",
-    label: "My images & trash",
-    summary: "Trash retention on this device",
-    keywords: ["trash", "retention", "collections", "albums", "deleted prints", "purge", "library"],
-  },
-  {
-    id: "licenses",
-    label: "Style licences",
-    summary: "Some styles need you to accept their terms once per machine",
-    keywords: ["licence", "license", "terms", "accept"],
   },
   {
     id: "pairing",
@@ -156,17 +172,17 @@ export interface KeySchema {
 export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "models_dir",
-    section: "hosts",
-    label: "Models directory",
-    help: "Where pulled model weights live on this host. Moving it does not copy existing models.",
+    section: "styles",
+    label: "Where styles are kept",
+    help: "Downloaded style weights live here on this machine. Moving it does not copy the styles already there.",
     editor: "path",
     needsEngineRestart: true,
   },
   {
     key: "output_dir",
-    section: "hosts",
-    label: "Output directory",
-    help: "Where finished prints are written. Startup-only: stop the engine, run `mold config set output_dir <path>`, then restart.",
+    section: "styles",
+    label: "Where finished pictures are written",
+    help: "Startup-only: stop the engine, run `mold config set output_dir <path>`, then restart.",
     editor: "path",
     needsEngineRestart: true,
     liveReadOnly: true,

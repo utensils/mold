@@ -61,10 +61,19 @@ onMounted(() => void updater.init());
       <div class="flex items-start gap-4">
         <div class="min-w-0 flex-1">
           <h2 id="desktop-update-status" class="text-sm font-medium text-fg">Desktop updates</h2>
-          <p class="mt-0.5 text-micro text-fg-dim">
-            Current version
-            <span class="font-mono text-xs text-fg-2">{{ updater.currentVersion ?? "dev" }}</span>
-            · {{ channelName }}
+          <p class="mt-0.5 flex items-center gap-2 text-micro text-fg-dim">
+            <span>
+              Current version
+              <span class="font-mono text-xs text-fg-2">{{ updater.currentVersion ?? "dev" }}</span>
+              · {{ channelName }}
+            </span>
+            <span
+              v-if="updater.phase === 'up-to-date'"
+              data-test="update-up-to-date"
+              class="inline-flex h-5 items-center rounded-inner bg-success px-[7px] font-mono text-micro font-bold text-bg-deep"
+            >
+              up to date
+            </span>
           </p>
         </div>
         <button
@@ -176,14 +185,14 @@ onMounted(() => void updater.init());
           <button
             v-if="updater.error.retryable"
             type="button"
-            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
+            class="ms-toolbar-button"
             @click="candidate ? updater.install() : updater.check()"
           >
             {{ candidate ? "Try update again" : "Check again" }}
           </button>
           <button
             type="button"
-            class="h-7 px-1 text-micro text-fg-dim hover:text-fg"
+            class="h-[26px] px-1 text-micro text-fg-dim hover:text-fg"
             @click="updater.clearError()"
           >
             Dismiss

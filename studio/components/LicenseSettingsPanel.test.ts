@@ -41,11 +41,18 @@ describe("LicenseSettingsPanel", () => {
     });
     await flushPromises();
 
-    await wrapper.get(".license-settings__actions button").trigger("click");
+    // Either row opens the ONE dialog covering everything the bundle needs.
+    const rows = wrapper.findAll(".license-settings__row");
+    const pending = rows.find((row) =>
+      row.text().includes("a · Restricted use."),
+    )!;
+    expect(pending.text()).toContain("Needs your OK");
+    await pending.get("button").trigger("click");
     expect(request).toHaveBeenCalledWith(
       expect.objectContaining({
         hostLabel: "host-b",
         target: { baseUrl: "http://host-b:7680", apiKey: "b" },
+        intent: "record",
         requirements: [
           expect.objectContaining({
             installModel: "future-bundle",
@@ -57,6 +64,53 @@ describe("LicenseSettingsPanel", () => {
         ],
       }),
     );
+  });
+
+  it("renders one row per licence: mono id, a state word, and a two-word action", async () => {
+    fetchLicenseListing.mockResolvedValue({
+      licenses: [
+        { ...terms("a", ["bundle-a"]), accepted: true },
+        terms("b", ["bundle-b"]),
+      ],
+    });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://h:7680", apiKey: null },
+        hostLabel: "h",
+      },
+    });
+    await flushPromises();
+
+    const rows = wrapper
+      .findAll(".license-settings__row")
+      .filter((row) => row.find(".license-settings__id").exists());
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.get(".license-settings__id").text()).toBe(
+      "a · Restricted use.",
+    );
+    expect(rows[0]!.get(".license-settings__state").text()).toBe("Accepted");
+    expect(rows[0]!.get("button").text()).toBe("View terms");
+    // Pending is a warning, never an error: nothing has gone wrong yet.
+    expect(rows[1]!.get(".license-settings__state").classes()).toContain(
+      "license-settings__state--pending",
+    );
+    expect(rows[1]!.get(".license-settings__state").text()).toBe(
+      "Needs your OK",
+    );
+    expect(rows[1]!.get("button").text()).toBe("Read & accept");
+  });
+
+  it("shows the machine the answers belong to in the slot the surface fills", async () => {
+    fetchLicenseListing.mockResolvedValue({ licenses: [] });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://h:7680", apiKey: null },
+        hostLabel: "h",
+      },
+      slots: { machine: '<span data-test="picker">studio-rack</span>' },
+    });
+    await flushPromises();
+    expect(wrapper.get("[data-test='picker']").text()).toBe("studio-rack");
   });
 
   it("fences a slow old-host response after the selected host changes", async () => {
@@ -80,8 +134,8 @@ describe("LicenseSettingsPanel", () => {
     resolveA({ licenses: [terms("a", ["bundle-a"])] });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Terms b");
-    expect(wrapper.text()).not.toContain("Terms a");
+    expect(wrapper.text()).toContain("b · Restricted use.");
+    expect(wrapper.text()).not.toContain("a · Restricted use.");
   });
 
   it("keeps a failed host visible with an explicit retry", async () => {

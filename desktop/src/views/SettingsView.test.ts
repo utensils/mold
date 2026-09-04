@@ -17,6 +17,7 @@ vi.mock("../components/settings/HostsSection.vue", () => stub("stub-hosts"));
 vi.mock("../components/settings/PerformanceSection.vue", () => stub("stub-performance"));
 vi.mock("../components/settings/GenerationSection.vue", () => stub("stub-generation"));
 vi.mock("../components/settings/MediaSection.vue", () => stub("stub-media"));
+vi.mock("../components/settings/StylesDiskSection.vue", () => stub("stub-styles"));
 vi.mock("../components/settings/LibrarySection.vue", () => stub("stub-library"));
 vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansion"));
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
@@ -73,6 +74,7 @@ describe("SettingsView shell", () => {
       "generation",
       "expansion",
       "hosts",
+      "styles",
       "media",
       "library",
       "licenses",
@@ -166,13 +168,17 @@ describe("SettingsView shell", () => {
     expect(wrapper.findAll("nav button")).toHaveLength(0);
   });
 
-  it("finds Machines for a host-owned setting by key or by label", async () => {
+  it("finds Styles & disk for a directory setting by key or by label", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "models_dir");
-    expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='section-styles']").exists()).toBe(true);
     expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(false);
 
-    await typeSearch(wrapper, "Output directory");
+    await typeSearch(wrapper, "finished pictures");
+    expect(wrapper.find("[data-test='section-styles']").exists()).toBe(true);
+
+    // Machines keeps its own doorway, findable by the words it still owns.
+    await typeSearch(wrapper, "api key");
     expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
   });
 });

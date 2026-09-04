@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
 const routerPush = vi.hoisted(() => vi.fn());
@@ -27,6 +27,8 @@ import { useDownloadsStore } from "../../stores/downloads";
 import { useComposerStore } from "../../stores/composer";
 import { useGenerationStore } from "../../stores/generation";
 import { useToastStore } from "../../stores/toasts";
+import { useJobsStore } from "../../stores/jobs";
+import { shortcutLabel } from "../../lib/platform";
 import type { GalleryImage, ModelEntry } from "../../lib/api/types";
 
 beforeEach(() => {
@@ -137,6 +139,116 @@ describe("CommandPalette command registry", () => {
       "Cancelled 1 job; remaining jobs already settled",
     );
     expect(useToastStore().items.map((item) => item.message)).not.toContain("Cancelled all jobs");
+    wrapper.unmount();
+  });
+});
+
+describe("CommandPalette shortcut column and mock groups", () => {
+  /** The row's mono columns: the group on the left, the shortcut on the right. */
+  function columns(option: DOMWrapper<Element>) {
+    const spans = option.findAll("span");
+    return { group: spans[0]!.text(), key: spans.at(-1)!.text() };
+  }
+
+  function rowFor(wrapper: VueWrapper, title: string) {
+    return wrapper.findAll("[role='option']").find((option) => option.text().includes(title));
+  }
+
+  it("renders a command's shortcut in the right mono column, read from the keyboard map", async () => {
+    const wrapper = await openPalette();
+    // The destination takes its chord from NAV_ROUTES; the action takes its own.
+    expect(columns(rowFor(wrapper, "New image")!).key).toBe(shortcutLabel("1"));
+    expect(columns(rowFor(wrapper, "Start a blank image")!).key).toBe(shortcutLabel("N"));
+    expect(columns(rowFor(wrapper, "Settings")!).key).toBe(shortcutLabel(","));
+    wrapper.unmount();
+  });
+
+  it("groups its rows the way the mock does — make · queue · go · styles · machines", async () => {
+    const wrapper = await openPalette();
+    useModelStore().all = [
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        downloaded: true,
+        is_loaded: false,
+        size_gb: 1,
+      } as never,
+    ];
+    await wrapper.vm.$nextTick();
+    const groups = new Map(
+      wrapper.findAll("[role='option']").map((option) => [option.text(), columns(option).group]),
+    );
+    const groupOf = (title: string) =>
+      [...groups.entries()].find(([text]) => text.includes(title))?.[1];
+
+    expect(groupOf("New image")).toBe("make");
+    expect(groupOf("Surprise me")).toBe("make");
+    expect(groupOf("My images")).toBe("go");
+    expect(groupOf("Machines")).toBe("go");
+    expect(groupOf("Use flux-dev:q4")).toBe("styles");
+    expect(groupOf("Connect a machine…")).toBe("machines");
+    expect(groupOf("Rent a GPU…")).toBe("machines");
+    expect([...groups.values()]).not.toContain("do");
+    wrapper.unmount();
+  });
+
+  it("generates from the words already in the composer, exactly as the Generate menu item does", async () => {
+    const wrapper = await openPalette();
+    const ui = useUiStore();
+    await wrapper.get("input").setValue("Generate from these words");
+    const row = rowFor(wrapper, "Generate from these words")!;
+    expect(row.exists()).toBe(true);
+    expect(columns(row)).toEqual({ group: "make", key: shortcutLabel("↩") });
+
+    await row.trigger("click");
+    expect(ui.generateTick).toBe(1);
+    expect(ui.paletteOpen).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("opens Browse more for Download a style…", async () => {
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("Download a style");
+    const row = rowFor(wrapper, "Download a style…")!;
+    expect(columns(row).group).toBe("styles");
+
+    await row.trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/models?tab=discover");
+    wrapper.unmount();
+  });
+
+  it("pauses and resumes the queue on the machine that owns it", async () => {
+    useConnectionStore().info = { baseUrl: "http://127.0.0.1:7680", apiKey: null } as never;
+    useConnectionStore().status = "ready";
+    const jobs = useJobsStore();
+    jobs.queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    };
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue();
+    const resume = vi.spyOn(jobs, "resume").mockResolvedValue();
+
+    const wrapper = await openPalette();
+    const row = rowFor(wrapper, "Pause the queue")!;
+    expect(columns(row)).toEqual({ group: "queue", key: "Space" });
+    await row.trigger("click");
+    expect(pause).toHaveBeenCalledWith("local");
+
+    jobs.queues["local"]!.paused = true;
+    useUiStore().paletteOpen = true;
+    await wrapper.vm.$nextTick();
+    await rowFor(wrapper, "Resume the queue")!.trigger("click");
+    expect(resume).toHaveBeenCalledWith("local");
+    wrapper.unmount();
+  });
+
+  it("offers no queue command on a machine that cannot pause", async () => {
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Pause the queue")).toBeUndefined();
     wrapper.unmount();
   });
 });

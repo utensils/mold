@@ -53,11 +53,12 @@ const THEME_KEYS = [
   "radius-3",
 ] as const;
 
+/** The declarations a selector opens. A theme map is also selectable on a
+ *  nested element, so the selector may lead a list rather than stand alone. */
 function block(selector: string): string {
-  const marker = `${selector} {`;
-  const start = css.indexOf(marker);
+  const start = css.indexOf(selector);
   if (start < 0) throw new Error(`Missing CSS block: ${selector}`);
-  const bodyStart = start + marker.length;
+  const bodyStart = css.indexOf("{", start) + 1;
   return css.slice(bodyStart, css.indexOf("}", bodyStart));
 }
 

@@ -27,6 +27,7 @@ import HostsSection from "../components/settings/HostsSection.vue";
 import PerformanceSection from "../components/settings/PerformanceSection.vue";
 import GenerationSection from "../components/settings/GenerationSection.vue";
 import MediaSection from "../components/settings/MediaSection.vue";
+import StylesDiskSection from "../components/settings/StylesDiskSection.vue";
 import LibrarySection from "../components/settings/LibrarySection.vue";
 import ExpansionSection from "../components/settings/ExpansionSection.vue";
 import AccountsSection from "../components/settings/AccountsSection.vue";
@@ -64,6 +65,10 @@ const licenseTarget = computed(() =>
     : pairingTarget.value,
 );
 const licenseHostLabel = computed(() => licenseHost.value?.label ?? "This device");
+// The row always names the machine the answers belong to, the way the mock
+// does. It only becomes a picker once another machine can answer differently:
+// a one-option select is a control that cannot act.
+const licensePicker = computed(() => licenseHosts.value.some((host) => host.kind !== "local"));
 
 const query = ref("");
 const searching = computed(() => query.value.trim().length > 0);
@@ -127,6 +132,7 @@ const componentFor: Partial<Record<SectionId, unknown>> = {
   generation: GenerationSection,
   expansion: ExpansionSection,
   hosts: HostsSection,
+  styles: StylesDiskSection,
   media: MediaSection,
   library: LibrarySection,
   performance: PerformanceSection,
@@ -208,36 +214,36 @@ watch(
         :data-test="`section-${s.id}`"
         class="flex scroll-mt-[18px] flex-col gap-2.5"
       >
-        <div class="flex items-baseline gap-2.5">
+        <div class="flex flex-col gap-1">
           <span class="ms-group-label uppercase">{{ s.label }}</span>
           <span class="text-micro text-fg-dim">{{ s.summary }}</span>
         </div>
 
         <div class="rounded-control border border-border bg-panel">
           <template v-if="s.id === 'licenses'">
-            <div class="p-3.5">
-              <label
-                v-if="licenseHosts.length > 1"
-                class="mb-2.5 flex items-center gap-2 text-sm"
-                data-test="license-host-select"
-              >
-                <span class="text-fg-2">Machine</span>
+            <LicenseSettingsPanel
+              :target="licenseTarget"
+              :host-label="licenseHostLabel"
+              :open-external="openExternal"
+            >
+              <template #machine>
                 <select
+                  v-if="licensePicker"
                   v-model="licenseHostId"
-                  class="h-[26px] rounded-control border border-border bg-bg px-1.5 text-xs text-fg"
+                  aria-label="Machine"
+                  data-test="license-host-select"
+                  class="h-[26px] shrink-0 rounded-control border border-border bg-bg px-1.5 font-mono text-xs text-fg"
                 >
                   <option v-for="host in licenseHosts" :key="host.id" :value="host.id">
                     {{ host.label }}
                     {{ host.kind === "local" ? "(this device)" : `(${host.baseUrl})` }}
                   </option>
                 </select>
-              </label>
-              <LicenseSettingsPanel
-                :target="licenseTarget"
-                :host-label="licenseHostLabel"
-                :open-external="openExternal"
-              />
-            </div>
+                <span v-else class="shrink-0 font-mono text-micro text-fg-2">
+                  {{ licenseHostLabel }}
+                </span>
+              </template>
+            </LicenseSettingsPanel>
           </template>
           <div v-else-if="s.id === 'pairing'" class="p-3.5">
             <PairingAccessPanel

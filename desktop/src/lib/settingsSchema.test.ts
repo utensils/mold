@@ -12,7 +12,6 @@ import {
 
 describe("settings schema", () => {
   it("routes curated keys to their sections", () => {
-    expect(sectionForConfigKey("models_dir")).toBe("hosts");
     expect(sectionForConfigKey("default_model")).toBe("generation");
     expect(sectionForConfigKey("expand.temperature")).toBe("expansion");
   });
@@ -23,6 +22,32 @@ describe("settings schema", () => {
     expect(SECTIONS.find((section) => section.id === "hosts")?.label).toBe("Machines");
     expect(SECTIONS.find((section) => section.id === "library")?.label).toBe("My images & trash");
     expect(SECTIONS.find((section) => section.id === "expansion")?.label).toBe("Write more for me");
+    expect(SECTIONS.find((section) => section.id === "styles")?.label).toBe("Styles & disk");
+  });
+
+  it("keeps the mock's relative order for every section the mock names", () => {
+    // docs/design/mold-studio-desktop.dc.html `settingsNav`. The four extra
+    // sections slot between them; the shared nine never trade places.
+    const mock = [
+      "app",
+      "generation",
+      "hosts",
+      "styles",
+      "licenses",
+      "library",
+      "pairing",
+      "performance",
+      "updates",
+    ];
+    const ids = SECTIONS.map((section) => section.id);
+    expect(ids.filter((id) => mock.includes(id))).toEqual(mock);
+  });
+
+  it("gives the disk its own section: styles and finished pictures on this machine", () => {
+    expect(sectionForConfigKey("models_dir")).toBe("styles");
+    expect(sectionForConfigKey("output_dir")).toBe("styles");
+    expect(schemasForSection("styles").map((s) => s.key)).toEqual(["models_dir", "output_dir"]);
+    expect(schemasForSection("hosts")).toEqual([]);
   });
 
   it("unknown keys fall through to advanced — future engine keys must surface", () => {

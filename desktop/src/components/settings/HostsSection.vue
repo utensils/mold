@@ -1,23 +1,21 @@
 <script setup lang="ts">
 /*
  * Settings ▸ Machines: this device and its key (the one machine knob that
- * belongs in Settings, because it exposes THIS device to other apps), the
- * Mold home, and where styles and pictures live. Adding, connecting, and
- * forgetting other machines all live in the Machines workspace.
+ * belongs in Settings, because it exposes THIS device to other apps) and the
+ * Mold home it works out of. The directories underneath it are Styles & disk;
+ * adding, connecting, and forgetting other machines live in the Machines
+ * workspace.
  */
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
-import ConfigSettingRow from "./ConfigSettingRow.vue";
 import MoldHomeCard from "./MoldHomeCard.vue";
 import SettingRow from "./SettingRow.vue";
 import { ipc } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
-import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
 
 const router = useRouter();
 const conn = useConnectionStore();
-const config = useSettingsConfigStore();
 const toasts = useToastStore();
 
 const restarting = computed(() => conn.status === "starting");
@@ -127,11 +125,5 @@ const engineDot = computed(() =>
     </div>
 
     <MoldHomeCard />
-
-    <!-- Where styles and pictures live (engine config) -->
-    <template v-if="config.available">
-      <ConfigSettingRow schema-key="models_dir" />
-      <ConfigSettingRow schema-key="output_dir" />
-    </template>
   </div>
 </template>

@@ -67,7 +67,7 @@ onMounted(() => void refresh());
         </span>
         <button
           type="button"
-          class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg disabled:opacity-40"
+          class="ms-toolbar-button disabled:opacity-40"
           :disabled="saving"
           data-test="choose-media-save-directory"
           @click="chooseDirectory"

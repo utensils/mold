@@ -161,3 +161,18 @@ a literal.
 Rules that gate any new UI: compose only from the shared kit, reference tokens
 (never hard-coded hex), keep the default path one screen, render overlays
 inside their owning frame, speak the lexicon, and keep copy terse and emoji-free.
+
+### Deliberate divergences from the reference implementation
+
+- **Settings section headers carry a summary sentence.** The mock's header is
+  the bare mono group label; the app puts `SectionInfo.summary` on a second line
+  beneath it in `text-micro text-fg-dim`. It is what the global search matches
+  on, and it tells a reader what a section holds before they scroll into it.
+- **No "Install updates automatically" toggle.** The mock has one, on by
+  default. Updates are check-only by policy: an available update is announced
+  and installed only by an explicit **Update and restart**, which is what the
+  Updates & about copy already says.
+- **The theme swatch band paints from a nested `data-theme`.** `ui/tokens.css`
+  selects each theme map on any element, not only `:root`, so the Look picker
+  can show a theme's own surfaces without repeating a hex in TypeScript. That
+  band is the only themed island the app is allowed.

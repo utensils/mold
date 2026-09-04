@@ -58,12 +58,7 @@ async function create() {
     <p v-else class="text-micro text-fg-dim">No profiles reported by this engine.</p>
 
     <div class="mt-3">
-      <button
-        v-if="!creating"
-        type="button"
-        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
-        @click="creating = true"
-      >
+      <button v-if="!creating" type="button" class="ms-toolbar-button" @click="creating = true">
         New profile…
       </button>
       <div v-else class="flex items-center gap-2">
@@ -81,7 +76,7 @@ async function create() {
         />
         <button
           type="button"
-          class="h-7 rounded-control bg-accent px-2.5 text-sm font-semibold text-on-accent disabled:opacity-50"
+          class="ms-toolbar-button ms-toolbar-button--on disabled:opacity-50"
           :disabled="!newName.trim()"
           @click="create"
         >

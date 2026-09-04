@@ -51,7 +51,7 @@ async function clear() {
       />
       <button
         type="button"
-        class="h-7 rounded-control bg-accent px-2.5 text-sm font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
+        class="ms-toolbar-button ms-toolbar-button--on disabled:opacity-50"
         :disabled="!draft.trim()"
         @click="save"
       >
@@ -62,17 +62,13 @@ async function clear() {
       <span class="font-mono text-micro" :class="present ? 'text-fg-2' : 'text-fg-dim'">
         {{ present ? "••••••••  set" : "not set" }}
       </span>
-      <button
-        type="button"
-        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
-        @click="editing = true"
-      >
+      <button type="button" class="ms-toolbar-button" @click="editing = true">
         {{ present ? "Replace…" : "Set…" }}
       </button>
       <button
         v-if="present"
         type="button"
-        class="h-7 rounded-control px-1.5 text-micro text-fg-dim hover:text-error"
+        class="h-[26px] rounded-control px-1.5 text-micro text-fg-dim hover:text-error"
         title="Remove"
         aria-label="Remove secret"
         @click="clear"

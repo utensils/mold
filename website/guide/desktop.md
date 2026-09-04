@@ -276,22 +276,25 @@ the phone keep Create / Library / Models until their own redesign.
 - **Queues** (inside each machine): running and waiting jobs, pause/resume,
   cancellation, and queue capacity live with the host that owns them. The old
   standalone `/jobs` URL redirects to Machines.
-- **Settings**: a single-column preferences workspace. Appearance
-  (six themes — Mocha, Safelight, Blueprint, Graphite, Porcelain, Nebula —
-  plus a **Match system appearance** toggle that swaps to the paired light or
-  dark theme with macOS; a fresh install starts on Mocha; media never
-  inverts), Updates, and About sit up
-  top; a **Hosts** link jumps to the **Machines** workspace, where host,
-  API-key, and network-discovery management now live. The deeper controls
-  collapse into accordion sections: Performance (the `MOLD_*` engine knobs as
-  real controls, applied on engine restart), Generation defaults, Saved media,
-  Library (this device's trash retention and the title auto-tag), a Prompt
-  expansion form, Accounts & tokens (Hugging Face / Civitai keys in an
+- **Settings**: a 200px jump nav beside one scrolling page of always-open
+  sections — **Look**, **Defaults for new images**, **Write more for me**,
+  **Machines**, **Styles & disk**, **Style licences**, **My images & trash**,
+  **Saving pictures & clips**, **Phone pairing**, **Speed & memory**,
+  **Accounts & tokens**, **Profiles**, **Advanced**, and **Updates & about**.
+  Typing in the search field narrows the nav and the page together, and nothing
+  is hidden behind an accordion. Look holds the six themes and the **Match
+  system appearance** toggle; Machines keeps this device, its API key, and the
+  Mold home, with connecting and forgetting other machines living in the
+  Machines workspace; **Styles & disk** holds where styles are kept, where
+  finished pictures are written, and how full that disk is; Style licences
+  lists each licence as one row with its state and a single action; Speed &
+  memory exposes the `MOLD_*` engine knobs as real controls, applied on engine
+  restart; Accounts & tokens keeps Hugging Face and Civitai keys in an
   owner-only local file under the app's data directory (no Keychain prompts;
-  exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Profiles (switch or
-  create), and Advanced) every remaining `/api/config` row with its provenance
-  tag (⌂ db / ⛁ file / ⚿ env); environment-overridden rows are locked with the
-  variable that owns them.
+  exported to the engine as `HF_TOKEN` / `CIVITAI_TOKEN`); and Advanced carries
+  every remaining `/api/config` row with its provenance tag (⌂ db / ⛁ file /
+  ⚿ env), where environment-overridden rows are locked with the variable that
+  owns them.
   Settings also shows the effective **Mold home** (the shared root holding
   config, the SQLite DB, models, outputs, and logs) with a native folder picker
   or typed path. Changing it offers a recommended copy-everything migration.
@@ -392,7 +395,8 @@ release is published.
 | Cmd/Ctrl+R          | Surprise me (a new seed)                                     |
 | Cmd/Ctrl+.          | Stop the image being made                                    |
 | Cmd/Ctrl+\          | Toggle sidebar                                               |
-| Space               | Quick Look in Library                                        |
+| Space               | Pause / resume the queue (outside a field and a dialog)      |
+| Space               | Quick Look in My images, which keeps Space for itself        |
 | ←/→                 | Library navigate                                             |
 | ⌫                   | Library: move to trash (Undo for 6 s)                        |
 | Cmd/Ctrl+⌫          | Library: delete forever (confirm)                            |
@@ -408,9 +412,11 @@ use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
 **Look** offers six Mold Studio themes: Mocha (the default), Safelight,
-Graphite, and Nebula are dark; Blueprint and Porcelain are light. Each theme
-brings its own type pairing and corner radius, and **Match system appearance**
-swaps a pick for its light or dark partner when macOS changes. Saved choices
+Graphite, and Nebula are dark; Blueprint and Porcelain are light. Each card
+shows a band of that theme's own surfaces above its name, the tone it strikes,
+and the type pairing it brings. Each theme also brings its own corner radius,
+and **Match system appearance** swaps a pick for its light or dark partner when
+macOS changes. Saved choices
 from earlier releases migrate to the nearest theme (Safelight stays
 Safelight; the Mold palette becomes Mocha or Blueprint; System becomes the
 match toggle). New iPhone installs start with Safelight (see

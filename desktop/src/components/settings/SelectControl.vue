@@ -14,7 +14,7 @@ const emit = defineEmits<{ (e: "commit", value: string): void }>();
     :value="modelValue"
     :disabled="disabled"
     :aria-label="ariaLabel"
-    class="border-border h-7 max-w-56 rounded-control border bg-bg-deep px-2 text-sm text-fg disabled:opacity-40"
+    class="border-border font-mono text-xs h-7 max-w-56 rounded-control border bg-bg-deep px-2 text-fg disabled:opacity-40"
     @change="emit('commit', ($event.target as HTMLSelectElement).value)"
   >
     <option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option>

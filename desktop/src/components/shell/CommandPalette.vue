@@ -13,7 +13,10 @@ import { useGenerationStore } from "../../stores/generation";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useQueueCommands } from "../../composables/useQueueCommands";
 import { THEME_META } from "../../lib/theme";
+import { NAV_ROUTES } from "../../lib/shortcuts";
+import { shiftShortcutLabel, shortcutLabel } from "../../lib/platform";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
@@ -34,6 +37,8 @@ interface Command extends Matchable {
   id: string;
   title: string;
   subtitle?: string;
+  /** The chord that runs this without the palette, in the right mono column. */
+  key?: string | undefined;
   run: () => void;
 }
 
@@ -52,18 +57,47 @@ const generation = useGenerationStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
 const appPrefs = useAppPrefsStore();
+// The same queue authority Space and the sidebar act on, so the palette can
+// never pause a different machine than the status bar's hint promises.
+const queueCommands = useQueueCommands();
 const inventoryKnown = useInventoryKnown();
 
-/** The mono group column (README §04): where a command belongs, in the lexicon. */
+/**
+ * The mono group column (README §04): the mock's five groups — make · queue ·
+ * go · styles · machines. First matching prefix wins, so a specific id sits
+ * above the family it belongs to. Look is a `go` row: it reaches a setting,
+ * and `make` is reserved for the rows that put a picture on the canvas.
+ */
+const GROUPS: readonly (readonly [prefix: string, group: string])[] = [
+  ["nav-runpod", "machines"],
+  ["nav-create", "make"],
+  ["nav-sequence", "make"],
+  ["nav-", "go"],
+  ["act-add-host", "machines"],
+  ["act-engine-restart", "machines"],
+  ["act-cancel", "queue"],
+  ["act-clear-finished", "queue"],
+  ["act-", "make"],
+  ["queue-", "queue"],
+  ["theme-", "go"],
+  ["appear-", "go"],
+  ["history-", "make"],
+  ["print-", "go"],
+  ["model-", "styles"],
+  ["load-", "styles"],
+  ["unload-", "styles"],
+  ["install-", "styles"],
+  ["style-", "styles"],
+];
+
 function sectionLabel(id: string): string {
-  if (id.startsWith("nav-")) return "go";
-  if (id.startsWith("theme-") || id.startsWith("appear-")) return "look";
-  if (id.startsWith("model-") || id.startsWith("load-") || id.startsWith("unload-"))
-    return "styles";
-  if (id.startsWith("install-")) return "get";
-  if (id.startsWith("history-")) return "recent";
-  if (id.startsWith("print-")) return "images";
-  return "do";
+  return GROUPS.find(([prefix]) => id.startsWith(prefix))?.[1] ?? "go";
+}
+
+/** The nav chord for a destination, read from the keyboard map itself. */
+function navKey(route: string): string | undefined {
+  const key = Object.entries(NAV_ROUTES).find(([, target]) => target === route)?.[0];
+  return key ? shortcutLabel(key) : undefined;
 }
 
 const query = ref("");
@@ -191,30 +225,35 @@ const staticCommands = computed<Command[]>(() => {
       title: "New image",
       // The old names keep muscle memory working.
       keywords: ["create", "generate", "compose"],
+      key: navKey("/create"),
       run: () => go("/create"),
     },
     {
       id: "nav-queue",
       title: "Queue",
       keywords: ["jobs", "waiting", "line", "being made"],
+      key: navKey("/queue"),
       run: () => go("/queue"),
     },
     {
       id: "nav-library",
       title: "My images",
       keywords: ["library", "gallery", "prints", "pictures"],
+      key: navKey("/library"),
       run: () => go("/library"),
     },
     {
       id: "nav-models",
       title: "Styles",
       keywords: ["models", "catalog", "checkpoints"],
+      key: navKey("/models"),
       run: () => go("/models"),
     },
     {
       id: "nav-machines",
       title: "Machines",
       keywords: ["hosts", "jobs", "gpu"],
+      key: navKey("/machines"),
       run: () => go("/machines"),
     },
     {
@@ -235,20 +274,37 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["runpod", "cloud", "gpu", "instance", "pod"],
       run: () => go("/machines/runpod"),
     },
-    { id: "nav-settings", title: "Settings", run: () => go("/settings") },
+    {
+      id: "nav-settings",
+      title: "Settings",
+      key: navKey("/settings"),
+      run: () => go("/settings"),
+    },
     {
       id: "act-new",
       title: "Start a blank image",
       keywords: ["new", "clear", "compose", "generation"],
+      key: shortcutLabel("N"),
       run: () => {
         ui.newGeneration();
         go("/create");
       },
     },
     {
+      id: "act-generate",
+      title: "Generate from these words",
+      keywords: ["make", "render", "submit", "run"],
+      key: shortcutLabel("↩"),
+      run: () => {
+        ui.generate();
+        close();
+      },
+    },
+    {
       id: "act-seed",
       title: "Surprise me — a new seed",
       keywords: ["seed", "randomize", "repeat this look"],
+      key: shortcutLabel("R"),
       run: () => {
         ui.randomizeSeed();
         go("/create");
@@ -278,10 +334,17 @@ const staticCommands = computed<Command[]>(() => {
       id: "act-copy-seed",
       title: "Copy last seed",
       keywords: ["seed", "clipboard"],
+      key: shiftShortcutLabel("C"),
       run: () => {
         ui.copySeed();
         close();
       },
+    },
+    {
+      id: "style-download",
+      title: "Download a style…",
+      keywords: ["get", "install", "pull", "browse", "catalog", "models"],
+      run: () => go("/models?tab=discover"),
     },
     ...THEME_META.map((meta) => ({
       id: `theme-${meta.id}`,
@@ -306,11 +369,24 @@ const staticCommands = computed<Command[]>(() => {
       },
     },
   ];
+  if (queueCommands.canPause.value) {
+    cmds.push({
+      id: "queue-pause",
+      title: queueCommands.paused.value ? "Resume the queue" : "Pause the queue",
+      keywords: ["pause", "resume", "hold", "queue", "dispatch"],
+      key: "Space",
+      run: () => {
+        void queueCommands.togglePause();
+        close();
+      },
+    });
+  }
   if (generation.pending.length > 0) {
     cmds.push({
       id: "act-cancel",
       title: "Stop the image being made",
       keywords: ["cancel", "job"],
+      key: shortcutLabel("."),
       run: () => {
         void generation
           .cancel()
@@ -638,9 +714,14 @@ function onKeydown(e: KeyboardEvent) {
           >
             {{ sectionLabel(cmd.id) }}
           </span>
-          <span class="min-w-0 flex-1 truncate text-sm text-fg">{{ cmd.title }}</span>
-          <span v-if="cmd.subtitle" class="shrink-0 font-mono text-micro text-fg-dim">{{
-            cmd.subtitle
+          <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span class="truncate text-sm text-fg">{{ cmd.title }}</span>
+            <span v-if="cmd.subtitle" class="truncate text-micro text-fg-dim">
+              {{ cmd.subtitle }}
+            </span>
+          </span>
+          <span v-if="cmd.key" class="shrink-0 font-mono text-micro text-fg-dim">{{
+            cmd.key
           }}</span>
         </button>
       </div>

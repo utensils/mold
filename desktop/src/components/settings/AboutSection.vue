@@ -66,29 +66,19 @@ function openPrivacyPolicy(): void {
       <button
         type="button"
         data-test="desktop-privacy-policy"
-        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
+        class="ms-toolbar-button"
         @click="openPrivacyPolicy"
       >
         Privacy policy
       </button>
     </SettingRow>
     <SettingRow label="Logs" help="Engine and app logs live in the active Mold home.">
-      <button
-        type="button"
-        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
-        @click="ipc.openLogsDir()"
-      >
+      <button type="button" class="ms-toolbar-button" @click="ipc.openLogsDir()">
         Open logs folder
       </button>
     </SettingRow>
     <SettingRow label="Diagnostics" help="Versions, connection, and engine state as JSON.">
-      <button
-        type="button"
-        class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
-        @click="copyDiagnostics"
-      >
-        Copy
-      </button>
+      <button type="button" class="ms-toolbar-button" @click="copyDiagnostics">Copy</button>
     </SettingRow>
   </div>
 </template>

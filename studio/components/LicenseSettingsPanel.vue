@@ -33,6 +33,17 @@ const requirements = computed(() =>
 );
 let loadEpoch = 0;
 
+/** Every install bundle this licence still blocks, with the OTHER terms that
+ * bundle needs: one dialog answers for everything the download requires, so a
+ * user never accepts one term and is stopped again by its sibling. */
+function requirementsFor(
+  license: ThirdPartyLicenseStatus,
+): LicenseRequirement[] {
+  return requirements.value.filter((requirement) =>
+    requirement.licenses.some((terms) => terms.id === license.id),
+  );
+}
+
 async function load() {
   const epoch = ++loadEpoch;
   const target = props.target
@@ -63,17 +74,15 @@ async function load() {
 
 /** `intent: "record"` accepts the terms and stops there; `"download"` also
  * fetches the bundle. Consent and acquisition are different acts, and a user
- * who only wants to agree should not be made to transfer gigabytes to do it. */
-async function review(
-  requirement: LicenseRequirement,
-  intent: "download" | "record" = "download",
-) {
-  if (!props.target) return;
+ * who only wants to agree should not be made to transfer gigabytes to do it —
+ * so this panel only ever records, and Styles owns the acquisition door. */
+async function review(requirementsToReview: LicenseRequirement[]) {
+  if (!props.target || requirementsToReview.length === 0) return;
   const { accepted } = await prompt.request({
     hostLabel: props.hostLabel,
     target: props.target,
-    requirements: [requirement],
-    intent,
+    requirements: requirementsToReview,
+    intent: "record",
   });
   if (accepted) {
     message.value = `Required terms accepted on ${props.hostLabel}.`;
@@ -81,10 +90,24 @@ async function review(
   }
 }
 
-function openTerms(event: MouseEvent, url: string) {
-  if (!props.openExternal) return;
-  event.preventDefault();
+function openTerms(url: string) {
+  if (!props.openExternal) {
+    window.open(url, "_blank", "noreferrer");
+    return;
+  }
   void props.openExternal(url);
+}
+
+/** A pending licence opens the terms it still needs; anything else — accepted,
+ * or blocking no bundle this host knows about — just shows what it says. */
+function act(license: ThirdPartyLicenseStatus) {
+  const pending = requirementsFor(license);
+  if (pending.length > 0) void review(pending);
+  else openTerms(license.url);
+}
+
+function actionLabel(license: ThirdPartyLicenseStatus): string {
+  return requirementsFor(license).length > 0 ? "Read & accept" : "View terms";
 }
 
 onMounted(load);
@@ -93,22 +116,31 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 
 <template>
   <div class="license-settings" data-test="license-settings">
-    <p class="license-settings__lede">
-      Review restricted model terms for {{ hostLabel }}. Acceptance is stored on
-      {{ hostLabel }} only.
+    <div class="license-settings__row">
+      <p class="license-settings__lede">
+        Review restricted model terms for {{ hostLabel }}. Acceptance is stored
+        on {{ hostLabel }} only.
+      </p>
+      <slot name="machine" />
+    </div>
+    <p v-if="loading" class="license-settings__row license-settings__note">
+      Checking licenses…
     </p>
-    <p v-if="loading" class="license-settings__muted">Checking licenses…</p>
     <div
       v-if="loadError && !loading"
-      class="license-settings__load-error"
+      class="license-settings__row license-settings__error"
       role="alert"
     >
-      <span>{{ loadError }}</span>
-      <button class="license-settings__button" type="button" @click="load">
+      <span class="license-settings__lede">{{ loadError }}</span>
+      <button class="ms-toolbar-button" type="button" @click="load">
         Retry
       </button>
     </div>
-    <p v-if="message" class="license-settings__success" role="status">
+    <p
+      v-if="message"
+      class="license-settings__row license-settings__ok"
+      role="status"
+    >
       {{ message }}
     </p>
     <template v-if="!loadError">
@@ -117,61 +149,26 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
         :key="license.id"
         class="license-settings__row"
       >
-        <div>
-          <strong>{{ license.name }}</strong>
-          <p>{{ license.summary }}</p>
-          <a
-            class="license-settings__link"
-            :href="license.url"
-            target="_blank"
-            rel="noreferrer"
-            @click="openTerms($event, license.url)"
-            >Pinned terms</a
-          >
-          <span> · </span>
-          <a
-            class="license-settings__link"
-            :href="license.canonical"
-            target="_blank"
-            rel="noreferrer"
-            @click="openTerms($event, license.canonical)"
-            >Project terms</a
-          >
-        </div>
-        <span v-if="license.accepted" class="license-settings__accepted"
-          >Accepted</span
+        <span class="license-settings__id"
+          >{{ license.id }} · {{ license.summary }}</span
         >
-        <span v-else class="license-settings__pending">Review required</span>
+        <span
+          class="license-settings__state"
+          :class="
+            license.accepted
+              ? 'license-settings__state--ok'
+              : 'license-settings__state--pending'
+          "
+          >{{ license.accepted ? "Accepted" : "Needs your OK" }}</span
+        >
+        <button class="ms-toolbar-button" type="button" @click="act(license)">
+          {{ actionLabel(license) }}
+        </button>
       </div>
     </template>
-    <div
-      v-if="!loadError && requirements.length"
-      class="license-settings__actions"
-    >
-      <div
-        v-for="requirement in requirements"
-        :key="requirement.installModel"
-        class="license-settings__action-pair"
-      >
-        <button
-          class="license-settings__button"
-          type="button"
-          @click="review(requirement, 'record')"
-        >
-          Accept terms for {{ requirement.installModel }}
-        </button>
-        <button
-          class="license-settings__button"
-          type="button"
-          @click="review(requirement, 'download')"
-        >
-          Review terms and download {{ requirement.installModel }}
-        </button>
-      </div>
-    </div>
     <p
       v-if="!loading && !loadError && rows.length === 0"
-      class="license-settings__muted"
+      class="license-settings__row license-settings__note"
     >
       This host has no third-party model licenses.
     </p>
@@ -182,85 +179,58 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 .license-settings {
   display: flex;
   flex-direction: column;
-  gap: 12px;
   color: var(--mold-text-2);
-  font-size: var(--mold-fs-sm);
-}
-.license-settings__lede,
-.license-settings__muted,
-.license-settings__row p {
-  margin: 0;
-  line-height: var(--mold-lh-body);
-}
-.license-settings__action-pair {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 .license-settings__row {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  background: var(--mold-bg-deep);
+  /* The phone shares this panel; a narrow row wraps rather than needing its
+     own breakpoint inside a settings list. */
+  flex-wrap: wrap;
+  gap: 14px;
+  min-height: 52px;
+  margin: 0;
+  padding: 13px 14px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
 }
-.license-settings__row > div:first-child {
+.license-settings__row:last-child {
+  border-bottom: 0;
+}
+.license-settings__lede {
   flex: 1;
   min-width: 0;
+  margin: 0;
+  font-size: var(--mold-fs-sm);
+  line-height: var(--mold-lh-body);
 }
-.license-settings__row strong {
-  color: var(--mold-text);
-}
-.license-settings__link {
-  color: var(--mold-blue);
-}
-.license-settings__accepted {
-  color: var(--mold-success);
+.license-settings__id {
+  flex: 1;
+  min-width: 0;
   font-family: var(--mold-font-mono);
   font-size: var(--mold-fs-micro);
-  font-weight: 600;
-  text-transform: uppercase;
+  color: var(--mold-text-dim);
+  overflow-wrap: anywhere;
 }
-.license-settings__pending {
-  color: var(--mold-error);
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  font-weight: 600;
-  text-transform: uppercase;
-}
-.license-settings__actions {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.license-settings__load-error {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--mold-error);
-}
-.license-settings__button {
-  min-height: var(--mold-ctl-lg, 32px);
-  border: var(--mold-bw) solid var(--mold-blue);
-  border-radius: var(--mold-radius-2);
-  background: transparent;
-  color: var(--mold-blue);
-  padding: 0 12px;
-  font-family: var(--mold-font-sans);
+.license-settings__state {
+  flex-shrink: 0;
   font-size: var(--mold-fs-xs);
   font-weight: 600;
-  cursor: pointer;
 }
-.license-settings__success {
+.license-settings__state--ok {
   color: var(--mold-success);
 }
-@media (max-width: 600px) {
-  .license-settings__row {
-    align-items: stretch;
-    flex-direction: column;
-  }
+.license-settings__state--pending {
+  color: var(--mold-warning);
+}
+.license-settings__note {
+  font-size: var(--mold-fs-sm);
+  line-height: var(--mold-lh-body);
+}
+.license-settings__ok {
+  font-size: var(--mold-fs-sm);
+  color: var(--mold-success);
+}
+.license-settings__error {
+  color: var(--mold-error);
 }
 </style>

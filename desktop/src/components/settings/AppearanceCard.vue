@@ -76,17 +76,22 @@ function pick(theme: ThemeId) {
         "
         @click="pick(meta.id)"
       >
-        <span class="flex items-center gap-2">
-          <span
-            class="h-3 w-3 shrink-0 rounded-full"
-            :style="{ background: meta.accent }"
-            aria-hidden="true"
-          />
-          <span class="text-sm font-semibold text-fg">{{ meta.label }}</span>
-          <span class="ml-auto font-mono text-micro text-fg-dim">{{ meta.tone }}</span>
+        <!-- The theme's own surfaces, painted by its own map: the band carries
+             `data-theme`, so ui/tokens.css stays the only place a hex lives. -->
+        <span
+          :data-theme="meta.id"
+          class="flex h-11 overflow-hidden rounded-inner border border-border"
+          aria-hidden="true"
+        >
+          <span class="flex-1 bg-bg" />
+          <span class="flex-1 bg-bg-deep" />
+          <span class="flex-1 bg-surface" />
+          <span class="flex-1 bg-accent" />
         </span>
+        <span class="text-sm font-semibold text-fg">{{ meta.label }}</span>
+        <span class="truncate font-mono text-micro text-fg-dim">{{ meta.toneLabel }}</span>
         <span class="text-micro text-fg-dim">{{ meta.blurb }}</span>
-        <span class="font-mono text-micro text-fg-faint">{{ meta.type }}</span>
+        <span class="truncate font-mono text-micro text-fg-dim">{{ meta.type }}</span>
       </button>
     </div>
 
