@@ -31,7 +31,7 @@ describe("clampPanelWidth", () => {
     ["generateParams", 333, 333],
     ["generateParams", 480, 480],
     ["generateParams", 4000, 480],
-    ["historyDrawer", 10, 420],
+    ["historyDrawer", 10, 260],
     ["historyDrawer", 680, 680],
     ["historyDrawer", 4000, 960],
   ] as const)("clamps %s width %d to %d", (panel, px, expected) => {

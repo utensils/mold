@@ -149,20 +149,34 @@ beforeEach(() => {
 });
 
 describe("HistoryDrawer runs", () => {
-  it("starts wider and persists left-edge resizing or a double-click reset", async () => {
+  it("is an inline column, never a modal drawer over the grid", async () => {
+    const wrapper = await mountDrawer();
+    // A scrim with `aria-modal` made every tile behind it unclickable; the
+    // panel is a plain flex sibling of the grid instead.
+    expect(wrapper.findComponent(DrawerPanel).exists()).toBe(false);
+    const panel = wrapper.get("[data-test='history-panel']");
+    expect(panel.attributes("aria-modal")).toBeUndefined();
+    expect(panel.attributes("role")).toBeUndefined();
+    expect(panel.attributes("aria-label")).toBe("History");
+    expect(wrapper.find(".ms-drawer").exists()).toBe(false);
+  });
+
+  it("opens at the mock's column width and persists left-edge resizing or a reset", async () => {
     const wrapper = await mountDrawer();
     const prefs = useAppPrefsStore();
     const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined);
-    expect(wrapper.getComponent(DrawerPanel).props("width")).toBe(620);
+    const width = () =>
+      (wrapper.get("[data-test='history-panel']").element as HTMLElement).style.width;
+    expect(width()).toBe("290px");
 
     const handle = wrapper.getComponent(PanelResizeHandle);
     expect(handle.props("label")).toBe("Resize history");
     handle.vm.$emit("resize", -80);
     await flushPromises();
-    expect(wrapper.getComponent(DrawerPanel).props("width")).toBe(700);
+    expect(width()).toBe("370px");
     handle.vm.$emit("commit");
     await flushPromises();
-    expect(update).toHaveBeenCalledWith({ historyDrawerWidth: 700 });
+    expect(update).toHaveBeenCalledWith({ historyDrawerWidth: 370 });
 
     handle.vm.$emit("reset");
     await flushPromises();
@@ -177,7 +191,11 @@ describe("HistoryDrawer runs", () => {
     expect(rows[0]!.text()).toContain("flux2-klein");
     expect(rows[0]!.text()).toContain("1024×768");
     expect(rows[0]!.text()).toContain("seed 42");
-    expect(rows[0]!.text()).toContain("4 passes");
+    // The mock's meta line folds the clock in and drops the pass count.
+    expect(rows[0]!.get("[data-test='run-meta']").text()).toMatch(
+      /^flux2-klein · 1024×768 · seed 42 · \d{1,2}:\d{2}/,
+    );
+    expect(rows[0]!.text()).toContain("Use these settings");
   });
 
   it("reuses a run's full settings including the seed", async () => {

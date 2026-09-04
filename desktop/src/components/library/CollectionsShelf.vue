@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /*
- * CollectionsShelf — the Albums scope's grid of cover cards plus the
- * dashed "New album" card. The new card turns into an
- * inline name input; Enter creates (emit), Escape / empty cancels. Pure:
- * the parent resolves covers and runs the store calls.
+ * CollectionsShelf — the Albums scope's horizontally scrolling strip of
+ * 150px cover cards plus the dashed "New album" card, ABOVE the grid, which
+ * stays mounted beneath it. The new card turns into an inline name input;
+ * Enter creates (emit), Escape / empty cancels. Pure: the parent resolves
+ * covers and runs the store calls.
  */
 import { nextTick, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -31,8 +32,10 @@ withDefaults(
     canCreate?: boolean;
     busy?: boolean;
     nowMs?: number;
+    /** Shown in place of cards when there are none to show. */
+    note?: string | null;
   }>(),
-  { canCreate: true, busy: false },
+  { canCreate: true, busy: false, note: null },
 );
 
 const emit = defineEmits<{
@@ -72,7 +75,13 @@ defineExpose({ startCreate, isCreating: () => creating.value });
 </script>
 
 <template>
-  <div class="ms-shelf grid gap-4 p-6" data-test="collections-shelf">
+  <div
+    class="border-border flex shrink-0 gap-2.5 overflow-x-auto border-b px-3.5 py-3"
+    data-test="collections-shelf"
+  >
+    <p v-if="note" class="self-center text-xs text-fg-dim" data-test="collections-shelf-note">
+      {{ note }}
+    </p>
     <CollectionCard
       v-for="card in cards"
       :key="card.slug"
@@ -89,18 +98,9 @@ defineExpose({ startCreate, isCreating: () => creating.value });
     />
     <div
       v-if="canCreate"
-      class="flex flex-col gap-0.5 rounded-control border border-dashed border-border-control bg-transparent p-2.5 text-left"
+      class="ms-shelf-card flex flex-col justify-center gap-1.5 rounded-control border border-dashed border-border-control bg-transparent p-2.5 text-left"
       data-test="new-collection-card"
     >
-      <button
-        type="button"
-        class="mb-2 flex aspect-[4/3] w-full items-center justify-center rounded-control border border-dashed border-border-control text-fg-dim transition-colors duration-100 hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
-        aria-label="New album"
-        :disabled="busy"
-        @click="startCreate"
-      >
-        <Icon name="plus" :size="22" />
-      </button>
       <template v-if="creating">
         <input
           ref="inputEl"
@@ -120,27 +120,29 @@ defineExpose({ startCreate, isCreating: () => creating.value });
       <template v-else>
         <button
           type="button"
-          class="font-sans font-semibold text-left text-base font-semibold text-fg hover:text-accent"
+          class="flex items-center gap-1.5 text-left text-xs text-fg-dim hover:text-accent"
           data-test="new-collection-label"
+          aria-label="New album"
           :disabled="busy"
           @click="startCreate"
         >
+          <Icon name="plus" :size="13" />
           New album
         </button>
         <span class="font-mono text-micro text-fg-dim"
           ><Keycap>{{ newCollectionChord }}</Keycap></span
         >
-        <span class="text-xs text-fg-dim">
-          Name it, then add pictures from the grid or a selection.
-        </span>
       </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 4-up at the desktop workspace width, 3-up below ~1100px, 2-up when narrow. */
-.ms-shelf {
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+/* The mock's strip: fixed 150px cards that scroll sideways, never a grid that
+   pushes the pictures off the screen. */
+.ms-shelf-card,
+:deep(.ms-ccard) {
+  width: 150px;
+  flex: 0 0 150px;
 }
 </style>

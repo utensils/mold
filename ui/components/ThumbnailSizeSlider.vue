@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /*
- * Lightroom-style thumbnail size control. One ramp spanning the whole track
- * communicates dense-to-large without adding toolbar copy; the native range
- * input preserves keyboard, pointer, and assistive-technology behavior.
+ * Thumbnail size — a 13px grid glyph beside a bare 74×4 track, no border and
+ * no ground of its own, so it sits inside a 40px view toolbar instead of
+ * filling it. The filled part of the track shows the current size; the native
+ * range input rides invisibly over it and keeps keyboard, pointer, and
+ * assistive-technology behaviour.
  */
 import { computed } from "vue";
 
@@ -15,6 +17,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 const valueText = computed(() => `${props.modelValue} px`);
+/** How far along its travel the size sits, as a percentage of the track. */
+const fraction = computed(() => {
+  const span = props.max - props.min;
+  if (span <= 0) return 0;
+  return Math.min(
+    100,
+    Math.max(0, ((props.modelValue - props.min) / span) * 100),
+  );
+});
 
 function onInput(event: Event) {
   emit("update:modelValue", Number((event.target as HTMLInputElement).value));
@@ -24,104 +35,118 @@ function onInput(event: Event) {
 <template>
   <label class="ms-thumbnail-size" :title="`Thumbnail size: ${valueText}`">
     <svg
-      class="ms-thumbnail-size__ramp"
-      data-test="thumbnail-size-ramp"
-      viewBox="0 0 114 24"
-      preserveAspectRatio="none"
+      class="ms-thumbnail-size__glyph"
+      data-test="thumbnail-size-glyph"
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
       aria-hidden="true"
     >
-      <path d="M0 17L114 3L114 19L0 19Z" />
+      <rect x="4" y="4" width="7" height="7" rx="1" />
+      <rect x="14" y="4" width="6" height="6" rx="1" />
     </svg>
-    <input
-      class="ms-thumbnail-size__input"
-      type="range"
-      :min="min"
-      :max="max"
-      :step="step"
-      :value="modelValue"
-      aria-label="Thumbnail size"
-      :aria-valuetext="valueText"
-      @input="onInput"
-    />
+    <span class="ms-thumbnail-size__track">
+      <span
+        class="ms-thumbnail-size__fill"
+        data-test="thumbnail-size-fill"
+        :style="{ width: `${fraction}%` }"
+      />
+      <span
+        class="ms-thumbnail-size__knob"
+        :style="{ left: `calc(${fraction}% - 7px)` }"
+      />
+      <input
+        class="ms-thumbnail-size__input"
+        type="range"
+        :min="min"
+        :max="max"
+        :step="step"
+        :value="modelValue"
+        aria-label="Thumbnail size"
+        :aria-valuetext="valueText"
+        @input="onInput"
+      />
+    </span>
   </label>
 </template>
 
 <style scoped>
 .ms-thumbnail-size {
-  position: relative;
   display: inline-flex;
-  width: 136px;
-  height: 34px;
-  flex: 0 0 136px;
+  flex: 0 0 auto;
   align-items: center;
-  border: 1px solid var(--mold-border-control);
-  border-radius: var(--mold-radius-2);
-  background: color-mix(in srgb, var(--mold-bg-deep) 82%, transparent);
+  gap: 7px;
   color: var(--mold-text-dim);
 }
 
-/*
- * Spans the thumb's full travel (the 7px-wide thumb centers at 10.5px and
- * 123.5px), so the ramp reads as one glyph the thumb rides along instead of
- * separate marks with dead track between them.
- */
-.ms-thumbnail-size__ramp {
+.ms-thumbnail-size__glyph {
+  flex: 0 0 auto;
+}
+
+.ms-thumbnail-size__track {
+  position: relative;
+  display: block;
+  width: 74px;
+  height: 4px;
+  flex: 0 0 74px;
+  background: var(--mold-surface);
+}
+
+.ms-thumbnail-size__fill {
+  display: block;
+  height: 100%;
+  background: var(--mold-blue);
+}
+
+.ms-thumbnail-size__knob {
   position: absolute;
-  top: 5px;
-  left: 10px;
-  right: 10px;
-  height: 24px;
-  fill: currentColor;
+  top: -5px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
   pointer-events: none;
 }
 
+/* The real control: invisible, but the only thing that takes the pointer,
+   the keyboard, and the accessibility tree. */
 .ms-thumbnail-size__input {
   position: absolute;
-  inset: 0 7px;
-  width: calc(100% - 14px);
-  height: 34px;
+  top: -8px;
+  left: -7px;
+  width: calc(100% + 14px);
+  height: 20px;
   margin: 0;
   -webkit-appearance: none;
   appearance: none;
   background: transparent;
+  opacity: 0;
   cursor: ew-resize;
 }
 
-.ms-thumbnail-size__input::-webkit-slider-runnable-track {
-  height: 100%;
-  background: transparent;
-}
-
 .ms-thumbnail-size__input::-webkit-slider-thumb {
-  width: 7px;
-  height: 28px;
-  margin-top: 3px;
+  width: 14px;
+  height: 20px;
   -webkit-appearance: none;
-  border: 0;
-  border-radius: 999px;
-  background: var(--mold-text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-}
-
-.ms-thumbnail-size__input::-moz-range-track {
-  height: 100%;
   border: 0;
   background: transparent;
 }
 
 .ms-thumbnail-size__input::-moz-range-thumb {
-  width: 7px;
-  height: 28px;
+  width: 14px;
+  height: 20px;
   border: 0;
-  border-radius: 999px;
-  background: var(--mold-text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  background: transparent;
 }
 
-.ms-thumbnail-size__input:focus-visible {
-  border-radius: var(--mold-radius-2);
+.ms-thumbnail-size:focus-within .ms-thumbnail-size__track {
   outline: 2px solid var(--mold-blue);
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 
 .ms-thumbnail-size:hover {

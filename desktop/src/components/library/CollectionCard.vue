@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /*
- * CollectionCard — one shelf card in the Library's Collections scope (V3
- * "Shelf"): a 2×2 cover mosaic (the set cover first, then the newest prints),
- * display-weight name, a mono meta line (count · hosts), and last-updated.
- * Pure: the parent resolves media paths/targets and owns every action
- * (open = click / Enter, menu = right-click).
+ * CollectionCard — one 150px card in the My images album strip: a single
+ * 74px cover, the name, and a mono count. The machines holding it and when it
+ * last changed are the tooltip's, not the card's — the strip sits above the
+ * grid and must stay one row tall. Pure: the parent resolves media
+ * paths/targets and owns every action (open = click / Enter, menu =
+ * right-click).
  */
 import { computed } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -31,7 +32,7 @@ const props = withDefaults(
     hostLabels: readonly string[];
     /** Unix seconds of the latest change across hosts; null = unknown. */
     updatedAt?: number | null;
-    /** Up to four cover thumbnails, set cover first. */
+    /** Cover thumbnails, set cover first; only the first is drawn. */
     covers: readonly CoverTile[];
     hidden?: boolean;
     /** Optional clock for deterministic tests. */
@@ -42,41 +43,37 @@ const props = withDefaults(
 
 const emit = defineEmits<{ open: []; contextmenu: [event: MouseEvent] }>();
 
-const meta = computed(() => {
-  const noun = props.count === 1 ? "picture" : "pictures";
-  const hosts = props.hostLabels.join(" · ");
-  return hosts ? `${props.count} ${noun} · ${hosts}` : `${props.count} ${noun}`;
+const meta = computed(() => `${props.count} ${props.count === 1 ? "picture" : "pictures"}`);
+
+/** Everything the card no longer shows, kept where a pointer can still ask. */
+const tooltip = computed(() => {
+  const parts = [props.name];
+  if (props.hostLabels.length > 0) parts.push(props.hostLabels.join(" · "));
+  if (props.updatedAt != null) {
+    parts.push(`Updated ${timeAgo(props.updatedAt * 1000, props.nowMs ?? Date.now())}`);
+  }
+  return parts.join(" · ");
 });
 
-const updated = computed(() =>
-  props.updatedAt != null
-    ? `Updated ${timeAgo(props.updatedAt * 1000, props.nowMs ?? Date.now())}`
-    : "",
-);
-
-const mosaic = computed(() => props.covers.slice(0, 4));
+const cover = computed(() => props.covers[0] ?? null);
 </script>
 
 <template>
   <button
     type="button"
-    class="ms-ccard group flex flex-col gap-0.5 rounded-control border border-border bg-panel p-2.5 text-left transition-colors duration-100 hover:border-border-focus hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+    class="ms-ccard group flex flex-col gap-2 rounded-control border border-border bg-panel p-2.5 text-left transition-colors duration-100 hover:border-border-focus hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     data-test="collection-card"
-    :aria-label="`Open collection ${name}`"
+    :aria-label="`Open album ${name}`"
+    :title="tooltip"
     @click="emit('open')"
     @contextmenu="emit('contextmenu', $event)"
   >
     <span
-      class="ms-ccard__mosaic mb-2 grid aspect-[4/3] w-full overflow-hidden border border-border bg-media-bed"
-      :class="mosaic.length <= 1 ? 'grid-cols-1' : 'grid-cols-2 gap-0.5'"
-      data-test="collection-mosaic"
+      class="ms-ccard__cover flex h-[74px] w-full items-center justify-center overflow-hidden border border-border bg-media-bed"
+      data-test="collection-cover"
     >
-      <span v-if="mosaic.length === 0" class="flex items-center justify-center text-fg-dim">
-        <Icon name="collection" :size="26" :stroke-width="1.4" />
-      </span>
       <AuthedMedia
-        v-for="(cover, i) in mosaic"
-        :key="`${cover.cacheKey ?? ''}:${cover.path}:${i}`"
+        v-if="cover"
         :path="cover.path"
         :target="cover.target"
         :cache-key="cover.cacheKey"
@@ -85,8 +82,9 @@ const mosaic = computed(() => props.covers.slice(0, 4));
         :alt="cover.alt ?? ''"
         class="h-full w-full object-cover"
       />
+      <Icon v-else name="collection" :size="22" :stroke-width="1.4" class="text-fg-dim" />
     </span>
-    <span class="text-xs font-semibold text-fg" data-test="collection-name">
+    <span class="truncate text-xs font-semibold text-fg" data-test="collection-name">
       {{ name }}
       <span
         v-if="hidden"
@@ -96,15 +94,12 @@ const mosaic = computed(() => props.covers.slice(0, 4));
       >
     </span>
     <span class="font-mono text-micro text-fg-dim" data-test="collection-meta">{{ meta }}</span>
-    <span v-if="updated" class="text-xs text-fg-dim" data-test="collection-updated">
-      {{ updated }}
-    </span>
   </button>
 </template>
 
 <style scoped>
-.ms-ccard__mosaic :deep(img),
-.ms-ccard__mosaic :deep(video) {
+.ms-ccard__cover :deep(img),
+.ms-ccard__cover :deep(video) {
   width: 100%;
   height: 100%;
   object-fit: cover;

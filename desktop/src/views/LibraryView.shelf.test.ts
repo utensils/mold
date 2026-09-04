@@ -1,5 +1,5 @@
 /**
- * My images: the Everything | Albums | Trash scopes, the filter
+ * My images: the Everything | Favourites | Albums | Trash scopes, the filter
  * chip row, the collections shelf + drill-in, the trash grid, the bulk bar's
  * organization actions, the tile menu, the keyboard map, and URL sync. One
  * remote host (plato) advertises organize + trash; the local engine is off.
@@ -86,6 +86,11 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 vi.mock("@studio/api/galleryOrganization", () => org);
+const saveGalleryMedia = vi.hoisted(() => vi.fn());
+vi.mock("../lib/mediaSave", () => ({
+  saveGalleryMedia,
+  showSavedMediaToast: vi.fn(),
+}));
 
 import LibraryView from "./LibraryView.vue";
 import { useConnectionStore } from "../stores/connection";
@@ -293,6 +298,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
+  saveGalleryMedia.mockResolvedValue({
+    filename: "saved.png",
+    path: "/Pictures/saved.png",
+    directory: "Pictures",
+  });
   org.patchGalleryImage.mockResolvedValue(null);
   org.organizeGallery.mockResolvedValue(undefined);
   org.restoreTrashed.mockResolvedValue({ restored: 1 });
@@ -305,15 +315,33 @@ afterEach(() => {
 });
 
 describe("scopes + capability gating", () => {
-  it("shows Everything | Albums | Trash with counts when a machine can organize and trash", async () => {
+  it("shows Everything | Favourites | Albums | Trash with counts when a machine can organize and trash", async () => {
     const { wrapper } = await mountView();
     const control = wrapper.get("[data-test='library-scope']");
     const labels = control
       .findAll("button")
       .map((b) => `${b.find(".ms-seg__label").text()} ${b.find(".ms-seg__sub").text()}`);
-    expect(labels).toEqual(["Everything 4", "Albums 2", "Trash 1"]);
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("4 pictures · 4.0 MB");
+    expect(labels).toEqual(["Everything 4", "Favourites 1", "Albums 2", "Trash 1"]);
+    expect(wrapper.find("[data-test='library-count']").exists()).toBe(false);
     expect(wrapper.find("[data-test='library-chip-row']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("the Favourites scope narrows the grid to the favourited prints", async () => {
+    const { wrapper, gallery, router } = await mountView();
+    await wrapper.get("[data-test='library-scope']").findAll("button")[1]!.trigger("click");
+    await flushPromises();
+
+    expect(gallery.scope).toBe("favorites");
+    expect(gallery.favoritesOnly).toBe(true);
+    const tiles = wrapper.findAll(".ms-lib-tile");
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0]!.attributes("data-filename")).toBe(smurf04.filename);
+    // The scope's own mono count is the number of tiles it shows.
+    expect(
+      wrapper.get("[data-test='library-scope']").findAll("button")[1]!.find(".ms-seg__sub").text(),
+    ).toBe("1");
+    expect(router.currentRoute.value.query.scope).toBe("favorites");
     wrapper.unmount();
   });
 
@@ -361,14 +389,9 @@ describe("Prints tiles + chip row", () => {
     wrapper.unmount();
   });
 
-  it("♥ Favourites and tag chips filter the grid (AND) and sync to ?fav / ?tag", async () => {
+  it("tag chips filter the grid (AND) and sync to ?tag", async () => {
     const { wrapper, router } = await mountView();
-    await wrapper.get("[data-test='favorites-chip']").trigger("click");
-    await flushPromises();
-    expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(1);
-    expect(router.currentRoute.value.query.fav).toBe("1");
-
-    await wrapper.get("[data-test='favorites-chip']").trigger("click");
+    expect(wrapper.find("[data-test='favorites-chip']").exists()).toBe(false);
     await wrapper.get("[data-test='tag-chip'][data-tag='smurf']").trigger("click");
     await flushPromises();
     expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(2);
@@ -385,11 +408,15 @@ describe("Prints tiles + chip row", () => {
     wrapper.unmount();
   });
 
-  it("restores ♥ / tag filters from a deep link", async () => {
-    const { wrapper, gallery } = await mountView("/library?fav=1&tag=smurf");
+  it("restores the tag filter from a deep link, and maps a legacy ?fav to the scope", async () => {
+    const { wrapper, gallery, router } = await mountView("/library?fav=1&tag=smurf");
+    expect(gallery.scope).toBe("favorites");
     expect(gallery.favoritesOnly).toBe(true);
     expect(gallery.tagFilter).toEqual(["smurf"]);
     expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(1);
+    await flushPromises();
+    expect(router.currentRoute.value.query.fav).toBeUndefined();
+    expect(router.currentRoute.value.query.scope).toBe("favorites");
     wrapper.unmount();
   });
 });
@@ -472,12 +499,26 @@ describe("tile context menu", () => {
 });
 
 describe("bulk bar", () => {
+  it("Export… hands every selected picture to the same save path a single print uses", async () => {
+    const { wrapper } = await mountView();
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await wrapper.get("[data-test='bulk-select-all']").trigger("click");
+    await wrapper.get("[data-test='bulk-export']").trigger("click");
+    await flushPromises();
+
+    expect(saveGalleryMedia).toHaveBeenCalledTimes(live.length);
+    expect(saveGalleryMedia.mock.calls.map((call) => call[1]).sort()).toEqual(
+      live.map((print) => print.filename).sort(),
+    );
+    wrapper.unmount();
+  });
+
   it("enters selection naturally with Command-click and Shift-click", async () => {
     const { wrapper } = await mountView();
     await tileFor(wrapper, smurf04.filename).trigger("click");
     await tileFor(wrapper, river.filename).trigger("click", { metaKey: true });
 
-    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 4 selected");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 selected");
     expect(tileFor(wrapper, smurf04.filename).get("button").attributes("aria-pressed")).toBe(
       "true",
     );
@@ -499,7 +540,7 @@ describe("bulk bar", () => {
       }),
     );
     await tileFor(wrapper, plain.filename).trigger("click", { shiftKey: true });
-    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("3 / 4 selected");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("3 selected");
     wrapper.unmount();
   });
 
@@ -515,7 +556,7 @@ describe("bulk bar", () => {
     key("a", { ctrlKey: true });
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 2 selected");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 selected");
     expect(wrapper.findAll("[data-test='select-indicator']").map((node) => node.text())).toEqual([
       "✓",
       "✓",
@@ -556,7 +597,7 @@ describe("bulk bar", () => {
         new PointerEvent("pointerup", { pointerId: 41, pointerType: "mouse", isPrimary: true }),
       );
       await wrapper.vm.$nextTick();
-      expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("3 / 4 selected");
+      expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("3 selected");
 
       await tiles[0]!.trigger("pointerdown", {
         pointerId: 42,
@@ -579,7 +620,7 @@ describe("bulk bar", () => {
         new PointerEvent("pointerup", { pointerId: 42, pointerType: "mouse", isPrimary: true }),
       );
       await wrapper.vm.$nextTick();
-      expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 / 4 selected");
+      expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 selected");
       expect(tileFor(wrapper, river.filename).get("button").attributes("aria-pressed")).toBe(
         "true",
       );
@@ -602,7 +643,7 @@ describe("bulk bar", () => {
     expect(menuEntry("Rename…")).toBeUndefined();
 
     await tileFor(wrapper, river.filename).trigger("contextmenu");
-    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 / 4 selected");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 selected");
     expect(menuEntry("Move to trash")).toBeDefined();
     wrapper.unmount();
   });
@@ -622,7 +663,7 @@ describe("bulk bar", () => {
     });
     await tileFor(wrapper, smurf04.filename).trigger("contextmenu", { ctrlKey: true });
 
-    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 4 selected");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 selected");
     expect(menuEntry("Favourite 2 selected")).toBeDefined();
     expect(menuEntry("Move 2 selected to trash")).toBeDefined();
     wrapper.unmount();
@@ -678,7 +719,7 @@ describe("bulk bar", () => {
       await tileFor(wrapper, river.filename).trigger("click");
       await tileFor(wrapper, plain.filename).trigger("click", { metaKey: true });
       const bar = wrapper.get("[data-test='bulk-action-bar']");
-      expect(bar.text()).toContain("2 / 4 selected");
+      expect(bar.text()).toContain("2 selected");
       expect(bar.get("[data-test='bulk-delete']").text()).toContain("Move 2 pictures to trash");
       await bar.get("[data-test='bulk-delete']").trigger("click");
       await flushPromises();
@@ -759,9 +800,12 @@ describe("Albums scope", () => {
       "River studies",
       "Smurfs",
     ]);
-    expect(cards[1]!.find("[data-test='collection-meta']").text()).toBe("2 pictures · plato");
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 albums");
-    expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(false);
+    expect(cards[1]!.find("[data-test='collection-meta']").text()).toBe("2 pictures");
+    expect(cards[1]!.attributes("title")).toMatch(/^Smurfs · plato · Updated/);
+    // The strip sits ABOVE the grid, which stays mounted, so the size slider
+    // and the kind control stay with it.
+    expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(4);
+    expect(wrapper.find("input[aria-label='Thumbnail size']").exists()).toBe(true);
 
     // The collection endpoint records membership order (when prints were
     // added), which is deliberately the reverse of generation time here.
@@ -860,7 +904,9 @@ describe("Albums scope", () => {
 describe("Trash scope", () => {
   it("lists trashed prints with the banner, a purge chip, and hover Restore / Delete forever", async () => {
     const { wrapper } = await mountView("/library?scope=trash");
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("1 picture in trash · 1.0 MB");
+    expect(wrapper.get("[data-test='trash-banner-count']").text()).toBe(
+      "1 picture in trash · 1.0 MB",
+    );
     expect(wrapper.get("[data-test='trash-banner-summary']").text()).toBe(
       "Prints stay in the trash 30 d before purge",
     );
@@ -943,7 +989,7 @@ describe("keyboard", () => {
     key("t");
     await flushPromises();
     await wrapper.vm.$nextTick();
-    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 / 4 selected");
+    expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("1 selected");
     expect(document.body.querySelector("[data-test='bulk-tags-panel']")).not.toBeNull();
     // Escape closes the popover first, then leaves select mode.
     key("Escape");

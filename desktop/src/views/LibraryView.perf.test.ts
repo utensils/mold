@@ -199,6 +199,34 @@ describe("Library grid at 2 000 prints", () => {
     wrapper.unmount();
   });
 
+  it("narrows to the Favourites scope without a new union pass or extra per-tile marks", async () => {
+    const { wrapper, gallery } = await mountGrid();
+    counters.reset();
+
+    gallery.scope = "favorites";
+    await nextTick();
+    await flushPromises();
+
+    const tiles = wrapper.findAll(".ms-lib-tile");
+    expect(tiles.length).toBeGreaterThan(0);
+    expectOpsUnder("tiles in the DOM (Favourites)", tiles.length, MAX_TILES_IN_DOM);
+    // The scope reads the same cached organization index the grid already
+    // built; narrowing must never re-union the gallery.
+    expectOpsUnder("unionOrganization across a scope switch", counters.unionOrganization, 0);
+    // The ★ mark and the word badge are at most one span per rendered tile.
+    expectOpsUnder(
+      "★ marks in the DOM",
+      wrapper.findAll("[data-test='tile-favorite']").length,
+      tiles.length,
+    );
+    expectOpsUnder(
+      "kind badges in the DOM",
+      wrapper.findAll("[data-test='media-kind-badge']").length,
+      tiles.length,
+    );
+    wrapper.unmount();
+  });
+
   it("re-flows on a thumbnail-size change without remounting surviving tiles", async () => {
     const { wrapper } = await mountGrid();
     const before = new Set(

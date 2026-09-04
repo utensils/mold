@@ -80,10 +80,11 @@ import { useComposerStore } from "../stores/composer";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
-import { inTauri, ipc } from "../lib/ipc";
+import { inTauri, ipc, type SavedMedia } from "../lib/ipc";
+import { saveGalleryMedia, showSavedMediaToast } from "../lib/mediaSave";
+import { suggestedSaveName } from "../lib/gallery/saveName";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
-import { formatBytes } from "../lib/format";
 import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu, allowsNativeSelectAll, isSelectAllChord } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
@@ -166,17 +167,17 @@ watch(
   { immediate: true },
 );
 
-// ── Scopes: Prints | Collections | Trash ────────────────────────────────────
-// Capability-gated: Collections needs an organize-capable host, Trash a
-// trash-capable one (or this device's offline `.trash/` listing). With only
-// Prints the control disappears and every organization affordance hides, so
-// old servers keep today's Library and its hard-delete wording.
+// ── Scopes: Everything | Favourites | Albums | Trash ───────────────────────
+// Capability-gated: Favourites and Albums need an organize-capable host,
+// Trash a trash-capable one (or this device's offline `.trash/` listing). With
+// only Everything the control disappears and every organization affordance
+// hides, so old servers keep today's Library and its hard-delete wording.
 const organizeAvailable = computed(() => gallery.anyOrganizeCapable);
 const offlineLocalTrash = computed(() => inTauri() && !gallery.hostFor("local"));
 const trashAvailable = computed(() => gallery.anyTrashCapable || offlineLocalTrash.value);
 const scopes = computed<LibraryScope[]>(() => [
   "prints",
-  ...(organizeAvailable.value ? (["collections"] as const) : []),
+  ...(organizeAvailable.value ? (["favorites", "collections"] as const) : []),
   ...(trashAvailable.value ? (["trash"] as const) : []),
 ]);
 const scope = computed<LibraryScope>(() =>
@@ -209,7 +210,7 @@ function setScope(next: LibraryScope) {
 }
 
 /** What the grid renders right now: the trash, or the live filtered set
- *  (which already applies ♥ / tags / the open collection). */
+ *  (which already applies the Favourites scope, tags, and the open album). */
 const entries = computed<MergedPrint[]>(() =>
   inTrash.value ? gallery.trashFiltered : gallery.filtered,
 );
@@ -233,11 +234,6 @@ const entryTrashCapable = (entry: MergedPrint) => {
 };
 
 // ── Header labels ────────────────────────────────────────────────────────────
-const hostScopeLabel = computed(() =>
-  gallery.filter === "all"
-    ? null
-    : (gallery.sources.find((s) => s.key === gallery.filter)?.label ?? null),
-);
 const scopeCounts = computed(() => {
   const hidden = new Set(
     gallery.mergedCollections
@@ -249,23 +245,10 @@ const scopeCounts = computed(() => {
   ).length;
   return {
     prints,
+    favorites: favoritesCount.value,
     collections: gallery.mergedCollections.length,
     trash: gallery.trashCount,
   };
-});
-const countLabel = computed(() => {
-  if (showShelf.value) {
-    const n = shelfCards.value.length;
-    return `${n} ${n === 1 ? "album" : "albums"}`;
-  }
-  const list = entries.value;
-  const n = list.length;
-  const noun = n === 1 ? "picture" : "pictures";
-  const parts = [inTrash.value ? `${n} ${noun} in trash` : `${n} ${noun}`];
-  const bytes = list.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0);
-  if (bytes > 0) parts.push(formatBytes(bytes));
-  if (hostScopeLabel.value) parts.push(hostScopeLabel.value);
-  return parts.join(" · ");
 });
 const trashBytes = computed(() =>
   gallery.trashMerged.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0),
@@ -326,6 +309,49 @@ async function saveToThisMac(entry: MergedPrint) {
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   }
+}
+
+/**
+ * Export the selection: the per-print save path, once per picture, into the
+ * configured media folder. One toast for the batch — a per-file toast for a
+ * hundred-print selection would bury the app.
+ */
+const exportBusy = ref(false);
+async function exportSelected(targets: MergedPrint[]) {
+  if (exportBusy.value || targets.length === 0) return;
+  exportBusy.value = true;
+  let saved: SavedMedia | null = null;
+  let failed = 0;
+  let firstError: string | null = null;
+  try {
+    for (const entry of targets) {
+      try {
+        saved = await saveGalleryMedia(
+          targetFor(entry),
+          entry.item.filename,
+          suggestedSaveName({ ...entry.item, title: orgOf(entry).title }),
+          null,
+          inTrash.value,
+        );
+      } catch (err) {
+        failed += 1;
+        firstError ??= err instanceof Error ? err.message : String(err);
+      }
+    }
+  } finally {
+    exportBusy.value = false;
+  }
+  if (saved && failed === 0 && targets.length === 1) {
+    showSavedMediaToast(toasts, saved);
+    return;
+  }
+  const ok = targets.length - failed;
+  if (ok > 0) {
+    toasts.push(`Exported ${ok} ${ok === 1 ? "picture" : "pictures"}`, "info", {
+      ...(saved ? { description: `To ${saved.directory}` } : {}),
+    });
+  }
+  if (firstError) toasts.push(firstError, "error");
 }
 
 // ── Upscale ────────────────────────────────────────────────────────────────
@@ -1072,6 +1098,14 @@ const shelfCards = computed<ShelfCard[]>(() => {
     }));
 });
 
+/** What the strip says instead of cards; the New card is always offered. */
+const shelfNote = computed(() => {
+  if (shelfCards.value.length > 0) return null;
+  return gallery.mergedCollections.length === 0
+    ? "No albums yet — an album lives on every machine that holds a copy."
+    : "No albums match the current search.";
+});
+
 const shelf = ref<InstanceType<typeof CollectionsShelf> | null>(null);
 
 function openCollectionSlug(slug: string) {
@@ -1372,7 +1406,7 @@ const pendingDeletes = new Map<
 const deleteKey = (sourceKey: string, filename: string) => `${sourceKey}::${filename}`;
 let bulkDeleteSeq = 0;
 
-// ── History drawer ──────────────────────────────────────────────────────────
+// ── History column ──────────────────────────────────────────────────────────
 // Open state lives in the URL (?panel=history) so the retired /history route
 // and the command palette can deep-link straight into it; the header button
 // toggles the same param, and closing clears it.
@@ -1408,14 +1442,10 @@ const kindOptions = computed(() => [
 ]);
 const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
-// ── Filter chips (♥ / tags / hosts) ─────────────────────────────────────────
+// ── Filter chips (tags / machines) ──────────────────────────────────────────
+// The row is present in every scope, exactly as the mock shows it.
 const chipRow = ref<InstanceType<typeof LibraryChipRow> | null>(null);
-const showChipRow = computed(
-  () =>
-    scope.value !== "trash" &&
-    !showShelf.value &&
-    (organizeAvailable.value || gallery.chipCounts.length > 1),
-);
+const showChipRow = computed(() => organizeAvailable.value || gallery.chipCounts.length > 1);
 function toggleTagFilter(name: string) {
   const key = name.toLowerCase();
   const have = gallery.tagFilter.some((t) => t.toLowerCase() === key);
@@ -1424,7 +1454,6 @@ function toggleTagFilter(name: string) {
     : [...gallery.tagFilter, name];
 }
 function clearFilters() {
-  gallery.favoritesOnly = false;
   gallery.tagFilter = [];
   gallery.filter = "all";
   if (inCollections.value) exitCollection();
@@ -1752,6 +1781,8 @@ interface TileModel {
   video: boolean;
   audio: boolean;
   mesh: boolean;
+  /** The mock's word badge: "clip 5s" / "3-D" / "audio", "" for a still. */
+  kindBadge: string;
   upscaled: boolean;
   /** Media bytes are addressed differently for a host bucket and this Mac. */
   mediaPath: string;
@@ -1759,6 +1790,25 @@ interface TileModel {
   target: ApiTarget | null;
   mediaVersion: string;
   fresh: boolean;
+}
+
+/**
+ * The tile's bottom-left word badge. A clip carries its length, which the
+ * gallery records as frames + fps (the `video_*` names are the legacy desktop
+ * aliases); a clip whose row has neither is still a clip and says so.
+ */
+function mediaKindBadge(
+  item: GalleryImage,
+  kind: { video: boolean; audio: boolean; mesh: boolean },
+): string {
+  if (kind.mesh) return "3-D";
+  if (kind.audio) return "audio";
+  if (!kind.video) return "";
+  const frames = item.metadata.frames ?? item.metadata.video_frames ?? null;
+  const fps = item.metadata.fps ?? item.metadata.video_fps ?? null;
+  if (!frames || !fps || fps <= 0) return "clip";
+  const seconds = frames / fps;
+  return `clip ${seconds >= 1 ? Math.round(seconds) : seconds.toFixed(1)}s`;
 }
 
 const tileModels = computed<TileModel[]>(() => {
@@ -1776,6 +1826,8 @@ const tileModels = computed<TileModel[]>(() => {
     // evaluates `rows` (and so this computed) synchronously during setup,
     // before the aliases declared further down are initialized.
     const video = isVideoItem(item);
+    const mesh = isMeshItem(item);
+    const audio = isAudioItem(item);
     models[i] = {
       entry,
       item,
@@ -1788,8 +1840,9 @@ const tileModels = computed<TileModel[]>(() => {
       availability: entry.availableOn.map((s) => s.label).join(" · "),
       purgeAt: org.purgeAt,
       video,
-      audio: isAudioItem(item),
-      mesh: isMeshItem(item),
+      audio,
+      mesh,
+      kindBadge: mediaKindBadge(item, { video, audio, mesh }),
       upscaled: isUpscaledImage(item),
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes
@@ -2094,8 +2147,9 @@ function onKeydown(e: KeyboardEvent) {
     header.value?.focusSearch();
     return;
   }
-  // The history drawer owns the keyboard while it's open.
-  if (historyOpen.value) return;
+  // History is a column beside the grid, not an overlay over it, so the grid
+  // keeps its keyboard while it is open; every destructive chord below already
+  // stands down inside a text field, the panel's search included.
   // ⌘A selects exactly the current filtered result set, never hidden prints.
   if (isSelectAllChord(e) && !allowsNativeSelectAll(document.activeElement)) {
     e.preventDefault();
@@ -2291,12 +2345,14 @@ async function useSelectedAsSource() {
   if (entry) await useAsSource(entry);
 }
 
-// ── URL sync (?scope, ?c, ?tag, ?fav — plus the pre-existing ?host, ?print,
+// ── URL sync (?scope, ?c, ?tag — plus the pre-existing ?host, ?print,
 //    ?panel, ?tab) ───────────────────────────────────────────────────────────
 // Route → store when the params are present (a deep link or a back/forward
 // hop); store → route (replace) so the address bar always names the view.
 // Plain /library keeps the session state, like ?host always has.
-const VALID_SCOPES: readonly LibraryScope[] = ["prints", "collections", "trash"];
+// Favourites is a scope now, so the retired `?fav=1` reads as one and is
+// dropped from the address on the way back out.
+const VALID_SCOPES: readonly LibraryScope[] = ["prints", "favorites", "collections", "trash"];
 const asString = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
 
@@ -2318,7 +2374,7 @@ watch(
           .map((t) => t.trim())
           .filter((t) => t.length > 0);
       }
-      if (fav !== undefined) gallery.favoritesOnly = asString(fav) === "1";
+      if (!wantScope && asString(fav) === "1") gallery.scope = "favorites";
     } finally {
       syncingFromRoute = false;
     }
@@ -2327,14 +2383,8 @@ watch(
 );
 
 watch(
-  () =>
-    [
-      gallery.scope,
-      gallery.collectionSlug,
-      gallery.tagFilter.join(","),
-      gallery.favoritesOnly,
-    ] as const,
-  ([scopeValue, slug, tags, fav]) => {
+  () => [gallery.scope, gallery.collectionSlug, gallery.tagFilter.join(",")] as const,
+  ([scopeValue, slug, tags]) => {
     if (syncingFromRoute || openingPrintDeepLink || route.path !== "/library") return;
     const query: Record<string, string | undefined> = {
       ...(route.query as Record<string, string | undefined>),
@@ -2346,12 +2396,16 @@ watch(
     set("scope", scopeValue === "prints" ? null : scopeValue);
     set("c", scopeValue === "collections" && slug ? slug : null);
     set("tag", tags.length > 0 ? tags : null);
-    set("fav", fav ? "1" : null);
+    set("fav", null);
     const same = Object.keys({ ...route.query, ...query }).every(
       (key) => (route.query[key] ?? undefined) === (query[key] ?? undefined),
     );
     if (!same) void router.replace({ path: "/library", query });
   },
+  // Immediate so a legacy `?fav=1` link normalizes to `?scope=favorites` on
+  // arrival: the scope is already set by the route watcher above, so nothing
+  // would change afterwards to trigger the rewrite.
+  { immediate: true },
 );
 
 // Deep link: /library?host=<bucket key> pre-picks a chip ("local" = This
@@ -2417,7 +2471,6 @@ watch(
     openingPrintDeepLink = true;
     gallery.scope = hiddenCollection ? "collections" : "prints";
     gallery.collectionSlug = hiddenCollection?.slug ?? null;
-    gallery.favoritesOnly = false;
     gallery.tagFilter = [];
     gallery.filter = "all";
     gallery.mediaKind = "all";
@@ -2539,38 +2592,31 @@ onUnmounted(() => {
       :scope="scope"
       :scopes="scopes"
       :counts="scopeCounts"
-      :count-label="countLabel"
       :error="gallery.firstError"
       :thumbnail-size="rowHeight"
       :media-kind="gallery.mediaKind"
       :kind-options="kindOptions"
       :search="searchInput"
       :select-mode="selectMode"
-      :trash-count="gallery.trashCount"
-      :busy="organizeBusy"
+      :history-open="historyOpen"
       @update:scope="setScope"
       @update:thumbnail-size="rowHeight = $event"
       @update:media-kind="setKind"
       @update:search="searchInput = $event"
-      @open-history="openHistory"
+      @toggle-history="historyOpen ? closeHistory() : openHistory()"
       @toggle-select="setSelectMode(!selectMode)"
       @refresh="gallery.fetchAll()"
-      @empty-trash="emptyTrashOpen = true"
     />
 
     <LibraryChipRow
       v-if="showChipRow"
       ref="chipRow"
       :organize="organizeAvailable"
-      :favorites-only="gallery.favoritesOnly"
-      :favorites-count="favoritesCount"
       :tags="gallery.filterChipTags"
       :active-tags="gallery.tagFilter"
       :host-chips="gallery.chipCounts"
       :host-filter="gallery.filter"
-      :all-count="gallery.basePrintCount"
       :collection-name="drillInName"
-      @update:favorites-only="gallery.favoritesOnly = $event"
       @toggle-tag="toggleTagFilter"
       @update:host-filter="gallery.filter = $event"
       @clear-filters="clearFilters"
@@ -2618,216 +2664,210 @@ onUnmounted(() => {
       :count="gallery.trashCount"
       :bytes="trashBytes"
       :link-label="retentionLinkLabel"
+      :busy="organizeBusy"
       @change-retention="changeRetention"
+      @empty-now="emptyTrashOpen = true"
     />
 
-    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" style="contain: strict">
-      <!-- Collections shelf -->
-      <template v-if="showShelf">
+    <!-- Albums: a strip of cards ABOVE the grid, which stays mounted. -->
+    <CollectionsShelf
+      v-if="showShelf"
+      ref="shelf"
+      :cards="shelfCards"
+      :busy="organizeBusy"
+      :note="shelfNote"
+      @open="openCollectionSlug"
+      @create="(name) => createCollection(name)"
+      @contextmenu="(slug, event) => contextMenu.open(event, collectionMenu(slug))"
+    />
+
+    <div class="flex min-h-0 flex-1">
+      <div
+        ref="scrollEl"
+        data-test="library-scroll"
+        class="min-h-0 min-w-0 flex-1 overflow-y-auto"
+        style="contain: strict"
+      >
+        <!-- Trash empty states -->
         <EmptyState
-          v-if="gallery.mergedCollections.length === 0"
-          headline="No albums yet"
-          detail="Group pictures however you like — an album lives on every machine that holds a copy."
-          action="New album"
-          @action="openNewCollection()"
+          v-if="inTrash && entries.length === 0 && gallery.trashCount > 0"
+          headline="No prints in the trash match"
+          detail="Nothing in the trash matches the current search or filter."
+        />
+        <EmptyState v-else-if="inTrash && entries.length === 0" headline="Trash is empty" />
+
+        <!-- Drill-in empty state -->
+        <EmptyState
+          v-else-if="
+            inCollections && gallery.collectionSlug && gallery.loaded && entries.length === 0
+          "
+          headline="Nothing in this album yet"
+          detail="Select pictures in My images and choose Add to album."
+          action="Go to pictures"
+          @action="setScope('prints')"
+        />
+
+        <!-- Prints empty states -->
+        <EmptyState
+          v-else-if="gallery.loaded && entries.length === 0 && gallery.hostFiltered.length > 0"
+          headline="No matching pictures"
+          detail="Nothing here matches the current search or filters."
         />
         <EmptyState
-          v-else-if="shelfCards.length === 0"
-          headline="No matching albums"
-          detail="Nothing here matches the current search."
+          v-else-if="gallery.loaded && entries.length === 0"
+          headline="No pictures here yet"
+          :detail="
+            gallery.filter === 'local'
+              ? 'Generations saved on this Mac will appear here.'
+              : 'Generate one and it lands here.'
+          "
+          action="Go to New image"
+          @action="router.push('/create')"
         />
-        <CollectionsShelf
+        <div
           v-else
-          ref="shelf"
-          :cards="shelfCards"
-          :busy="organizeBusy"
-          @open="openCollectionSlug"
-          @create="(name) => createCollection(name)"
-          @contextmenu="(slug, event) => contextMenu.open(event, collectionMenu(slug))"
-        />
-      </template>
-
-      <!-- Trash empty states -->
-      <EmptyState
-        v-else-if="inTrash && entries.length === 0 && gallery.trashCount > 0"
-        headline="No prints in the trash match"
-        detail="Nothing in the trash matches the current search or filter."
-      />
-      <EmptyState v-else-if="inTrash && entries.length === 0" headline="Trash is empty" />
-
-      <!-- Drill-in empty state -->
-      <EmptyState
-        v-else-if="inCollections && gallery.loaded && entries.length === 0"
-        headline="Nothing in this album yet"
-        detail="Select pictures in My images and choose Add to album."
-        action="Go to pictures"
-        @action="setScope('prints')"
-      />
-
-      <!-- Prints empty states -->
-      <EmptyState
-        v-else-if="gallery.loaded && entries.length === 0 && gallery.hostFiltered.length > 0"
-        headline="No matching pictures"
-        detail="Nothing here matches the current search or filters."
-      />
-      <EmptyState
-        v-else-if="gallery.loaded && entries.length === 0"
-        headline="No pictures here yet"
-        :detail="
-          gallery.filter === 'local'
-            ? 'Generations saved on this Mac will appear here.'
-            : 'Generate one and it lands here.'
-        "
-        action="Go to New image"
-        @action="router.push('/create')"
-      />
-      <div v-else class="ms-lib-tile-layer" :style="{ height: `${virtualizer.getTotalSize()}px` }">
-        <!-- One flat, print-keyed list of the tiles inside the virtual window
+          class="ms-lib-tile-layer"
+          :style="{ height: `${virtualizer.getTotalSize()}px` }"
+        >
+          <!-- One flat, print-keyed list of the tiles inside the virtual window
              (see `visibleTiles`). A tile is a wrapper (click / context /
              dblclick) around a focusable button carrying the media, badges,
              and the rising edge code; the ♥ and trash actions are sibling
              overlays so they never nest a button inside a button. Every
              per-tile fact comes from its `TileModel` — the template calls
              nothing that walks the gallery. -->
-        <div
-          v-for="tile in visibleTiles"
-          :key="tile.model.key"
-          class="ms-lib-tile group overflow-hidden rounded-control border"
-          :class="
-            (
-              selectMode
-                ? bulkSelection.has(tile.model.item.filename)
-                : isSelected(tile.model.entry)
-            )
-              ? 'border-transparent ring-2 ring-accent'
-              : 'border-border'
-          "
-          :style="{
-            width: `${tile.width}px`,
-            height: `${tile.height}px`,
-            '--tile-x': `${tile.x}px`,
-            '--tile-y': `${tile.y}px`,
-          }"
-          :data-filename="tile.model.item.filename"
-          @pointerdown="beginSelectionDrag($event, tile.model.entry)"
-          @click="onTileClick(tile.model.entry, $event)"
-          @contextmenu="onTileContextMenu(tile.model.entry, $event)"
-          @dblclick="onTileDblclick(tile.model.entry)"
-        >
-          <button
-            type="button"
-            class="absolute inset-0 block h-full w-full overflow-hidden text-left"
-            :aria-label="tile.model.title"
-            :aria-pressed="selectMode ? bulkSelection.has(tile.model.item.filename) : undefined"
-          >
-            <AuthedMedia
-              :path="tile.model.mediaPath"
-              :target="tile.model.target"
-              :cache-key="tile.model.entry.sourceKey"
-              :media-version="tile.model.mediaVersion"
-              :priority="tile.priority"
-              :video="tile.model.localVideo"
-              :alt="tile.model.item.metadata.prompt"
-            />
-            <!-- NEW badge (top-left) — hidden while selecting, where the
-                 checkbox owns that corner; never in the trash. -->
-            <span
-              v-if="!selectMode && !inTrash && tile.model.fresh"
-              data-test="new-badge"
-              class="ms-lib-new absolute top-2 left-2"
-            >
-              New
-            </span>
-            <!-- Upscaled + media kind share the top-right corner in one row so
-                 a Framewise-upscaled clip shows both instead of stacking them.
-                 The kind glyphs (▶ / ♪ / ◈) are the ones the iPhone Library
-                 wears, over the same predicates as the kind chips. -->
-            <span
-              v-if="
-                (!selectMode && tile.model.upscaled) ||
-                tile.model.video ||
-                tile.model.audio ||
-                tile.model.mesh
-              "
-              class="absolute top-1.5 right-1.5 flex items-center gap-1"
-            >
-              <span
-                v-if="!selectMode && tile.model.upscaled"
-                data-test="upscaled-badge"
-                class="ms-lib-upscaled"
-              >
-                Upscaled
-              </span>
-              <span
-                v-if="tile.model.video || tile.model.audio || tile.model.mesh"
-                data-test="media-kind-badge"
-                class="rounded-control bg-black/60 px-1 text-micro text-on-media"
-                :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
-              >
-                {{ tile.model.mesh ? "◈" : tile.model.audio ? "♪" : "▶" }}
-              </span>
-            </span>
-            <span
-              v-if="selectMode"
-              data-test="select-indicator"
-              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-control text-micro"
-              :class="
-                bulkSelection.has(tile.model.item.filename)
-                  ? 'bg-accent font-semibold text-on-accent'
-                  : 'border border-white/70 bg-black/40 text-on-media'
-              "
-            >
-              {{ bulkSelection.has(tile.model.item.filename) ? "✓" : "" }}
-            </span>
-            <!-- The badge yields to the rising edge code on hover — both live
-                 in the tile's bottom margin and must never overlap. -->
-            <span
-              v-if="showBadges"
-              data-test="host-badge"
-              class="font-mono text-micro text-fg-dim whitespace-nowrap absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
-              :title="`Available on ${tile.model.availability}`"
-            >
-              {{ tile.model.availability }}
-            </span>
-            <span
-              v-if="!inTrash"
-              data-test="edge-strip"
-              class="font-mono text-micro text-fg-dim whitespace-nowrap absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
-            >
-              {{ tile.model.title }} · {{ tile.model.modelLabel }} · seed
-              {{ tile.model.item.metadata.seed }}
-            </span>
-          </button>
-          <!-- ♥ (bottom-right): filled when favorite, faint on hover when not;
-               click toggles without opening the print. -->
-          <button
-            v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
-            type="button"
-            data-test="tile-favorite"
-            class="ms-lib-tile-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-control text-on-media transition-opacity duration-100"
+          <div
+            v-for="tile in visibleTiles"
+            :key="tile.model.key"
+            class="ms-lib-tile group overflow-hidden rounded-control border"
             :class="
-              tile.model.favorite
-                ? 'ms-lib-tile-heart--on opacity-100'
-                : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
+              (
+                selectMode
+                  ? bulkSelection.has(tile.model.item.filename)
+                  : isSelected(tile.model.entry)
+              )
+                ? 'border-transparent ring-2 ring-accent'
+                : 'border-border'
             "
-            :aria-pressed="tile.model.favorite"
-            :aria-label="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
-            :title="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
-            @click.stop="toggleFavorite(tile.model.entry)"
-            @dblclick.stop
+            :style="{
+              width: `${tile.width}px`,
+              height: `${tile.height}px`,
+              '--tile-x': `${tile.x}px`,
+              '--tile-y': `${tile.y}px`,
+            }"
+            :data-filename="tile.model.item.filename"
+            @pointerdown="beginSelectionDrag($event, tile.model.entry)"
+            @click="onTileClick(tile.model.entry, $event)"
+            @contextmenu="onTileContextMenu(tile.model.entry, $event)"
+            @dblclick="onTileDblclick(tile.model.entry)"
           >
-            <Icon name="heart" :size="14" />
-          </button>
-          <TrashTileActions
-            v-if="inTrash"
-            :purge-at="tile.model.purgeAt"
-            :show-actions="!selectMode"
-            :busy="organizeBusy"
-            @restore="restorePrints([tile.model.entry])"
-            @delete-forever="askDeleteForever([tile.model.entry])"
-          />
+            <button
+              type="button"
+              class="absolute inset-0 block h-full w-full overflow-hidden text-left"
+              :aria-label="tile.model.title"
+              :aria-pressed="selectMode ? bulkSelection.has(tile.model.item.filename) : undefined"
+            >
+              <AuthedMedia
+                :path="tile.model.mediaPath"
+                :target="tile.model.target"
+                :cache-key="tile.model.entry.sourceKey"
+                :media-version="tile.model.mediaVersion"
+                :priority="tile.priority"
+                :video="tile.model.localVideo"
+                :alt="tile.model.item.metadata.prompt"
+              />
+              <!-- NEW badge (top-left) — hidden while selecting, where the
+                 checkbox owns that corner; never in the trash. -->
+              <span
+                v-if="!selectMode && !inTrash && tile.model.fresh"
+                data-test="new-badge"
+                class="ms-lib-new absolute top-2 left-2"
+              >
+                New
+              </span>
+              <span
+                v-if="selectMode"
+                data-test="select-indicator"
+                class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-control text-micro"
+                :class="
+                  bulkSelection.has(tile.model.item.filename)
+                    ? 'bg-accent font-semibold text-on-accent'
+                    : 'border border-white/70 bg-black/40 text-on-media'
+                "
+              >
+                {{ bulkSelection.has(tile.model.item.filename) ? "✓" : "" }}
+              </span>
+              <!-- Word badges share the bottom-left corner in one row and yield
+                 together to the rising edge code on hover — they live in the
+                 tile's bottom margin and must never overlap it. -->
+              <span
+                v-if="showBadges || tile.model.upscaled || tile.model.kindBadge"
+                class="absolute bottom-1.5 left-1.5 flex max-w-[85%] items-center gap-1 transition-opacity duration-100 group-hover:opacity-0"
+              >
+                <span v-if="tile.model.upscaled" data-test="upscaled-badge" class="ms-lib-upscaled">
+                  Upscaled
+                </span>
+                <span
+                  v-if="tile.model.kindBadge"
+                  data-test="media-kind-badge"
+                  class="ms-lib-kind"
+                  :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
+                >
+                  {{ tile.model.kindBadge }}
+                </span>
+                <span
+                  v-if="showBadges"
+                  data-test="host-badge"
+                  class="font-mono text-micro text-fg-dim min-w-0 truncate rounded-control bg-black/60 px-1 !text-on-media"
+                  :title="`Available on ${tile.model.availability}`"
+                >
+                  {{ tile.model.availability }}
+                </span>
+              </span>
+              <span
+                v-if="!inTrash"
+                data-test="edge-strip"
+                class="font-mono text-micro text-fg-dim whitespace-nowrap absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
+              >
+                {{ tile.model.title }} · {{ tile.model.modelLabel }} · seed
+                {{ tile.model.item.metadata.seed }}
+              </span>
+            </button>
+            <!-- ★ (top-right): lit when favourite, faint on hover when not;
+               click toggles without opening the print. -->
+            <button
+              v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
+              type="button"
+              data-test="tile-favorite"
+              class="ms-lib-tile-star absolute top-1 right-1.5 z-10 flex h-5 w-5 items-center justify-center font-mono text-sm transition-opacity duration-100"
+              :class="
+                tile.model.favorite
+                  ? 'text-star opacity-100'
+                  : 'text-on-media opacity-0 group-hover:opacity-60 hover:!opacity-100'
+              "
+              :aria-pressed="tile.model.favorite"
+              :aria-label="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
+              :title="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
+              @click.stop="toggleFavorite(tile.model.entry)"
+              @dblclick.stop
+            >
+              ★
+            </button>
+            <TrashTileActions
+              v-if="inTrash"
+              :purge-at="tile.model.purgeAt"
+              :show-actions="!selectMode"
+              :busy="organizeBusy"
+              @restore="restorePrints([tile.model.entry])"
+              @delete-forever="askDeleteForever([tile.model.entry])"
+            />
+          </div>
         </div>
       </div>
+
+      <!-- History is an inline column, never a modal drawer: the tiles reflow
+           beside it and stay clickable while it is open. -->
+      <HistoryDrawer :open="historyOpen" @close="closeHistory" />
     </div>
 
     <!-- Floating bulk-action bar while select mode is active. -->
@@ -2841,7 +2881,7 @@ onUnmounted(() => {
       :organize-blocked-reason="selectionOrganizeBlockedReason"
       :trash="selectionTrashCapable"
       :confirming="confirmingBulkDelete"
-      :busy="bulkDeleting || organizeBusy"
+      :busy="bulkDeleting || organizeBusy || exportBusy"
       :collections="gallery.mergedCollections"
       :collection-selected="selectionOrganization.collectionsAll"
       :collection-mixed="selectionOrganization.collectionsSome"
@@ -2854,6 +2894,7 @@ onUnmounted(() => {
       @select-all="selectAllInFilter"
       @clear="clearBulkSelection"
       @exit="setSelectMode(false)"
+      @export="exportSelected(selectedEntries)"
       @favorite="(value) => setFavorite(selectedEntries, value)"
       @trash="deleteSelectedPrints"
       @update:confirming="confirmingBulkDelete = $event"
@@ -2929,8 +2970,6 @@ onUnmounted(() => {
       @resume="transitionUpscale('resume')"
       @cancel="transitionUpscale('cancel')"
     />
-
-    <HistoryDrawer :open="historyOpen" @close="closeHistory" />
 
     <!-- Naming dialogs (shared RenameDialog shell) -->
     <RenameDialog
@@ -3036,17 +3075,22 @@ onUnmounted(() => {
   border-radius: var(--mold-radius-2);
 }
 
-/* ♥ overlay: a drop shadow keeps the glyph legible on any print; the
-   favourited state fills the outline glyph with the current colour. */
-.ms-lib-tile-heart {
+/* Word badge on the crust, the one ground a tile's own pixels never match. */
+.ms-lib-kind {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
+  background: var(--mold-bg-crust);
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+/* ★ overlay: a drop shadow keeps the glyph legible on any print. */
+.ms-lib-tile-star {
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
 }
 
-.ms-lib-tile-heart--on :deep(svg) {
-  fill: currentColor;
-}
-
-.ms-lib-tile-heart:focus-visible {
+.ms-lib-tile-star:focus-visible {
   outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
   opacity: 1;

@@ -1363,13 +1363,13 @@ describe("organization union + filters", () => {
     expect(gallery.organizationOf(halShared).title).toBe("Grain test");
   });
 
-  it("favoritesOnly and tag chips (AND over the union) narrow the grid", () => {
+  it("the Favourites scope and tag chips (AND over the union) narrow the grid", () => {
     const gallery = seed();
-    gallery.favoritesOnly = true;
+    gallery.scope = "favorites";
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "solo.png"]);
     gallery.tagFilter = ["BLUE", "portrait"];
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
-    gallery.favoritesOnly = false;
+    gallery.scope = "prints";
     gallery.tagFilter = ["keep"];
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png"]);
   });

@@ -1,14 +1,15 @@
 <script setup lang="ts">
 /*
- * BulkBar — the floating selection toolbar at the foot of the My images
- * grid. Everything: N / M selected · Select all · Clear · Add to album ▾
- * (CollectionPicker popover, mixed state over the selection) · Tag ▾
- * (TagEditor popover; chips = the tags every selected picture carries;
- * add / remove apply to the whole selection) · ♥ Favourite (toggle) · Trash
- * (6 s undo) — or, on machines without a trash, the old two-press
- * "Delete N pictures? This can't be undone." arming button. Inside an album
- * drill-in: Remove from album. Trash scope: Restore / Delete forever. Pure
- * props/emits; the view runs the store calls.
+ * BulkBar — the selection toolbar at the foot of the My images grid. "N
+ * selected" and the quiet Select all / Clear lead; a spacer then pushes the
+ * action cluster right: ★ Favourite (toggle) · Add tag ▾ (TagEditor popover;
+ * chips = the tags every selected picture carries; add / remove apply to the
+ * whole selection) · Add to album ▾ (CollectionPicker popover, mixed state
+ * over the selection) · Export… · Delete — a trash move with its 6 s undo, or
+ * on machines without a trash the two-press "Delete N pictures? This can't be
+ * undone." arming button. Inside an album drill-in: Remove from album. Trash
+ * scope: Restore / Delete forever. Pure props/emits; the view runs the store
+ * calls.
  */
 import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -75,6 +76,7 @@ const emit = defineEmits<{
   selectAll: [];
   clear: [];
   exit: [];
+  export: [];
   favorite: [value: boolean];
   trash: [];
   /** Hard delete (non-trash hosts): first press arms, second deletes. */
@@ -137,22 +139,22 @@ defineExpose({ openCollections, openTags, closePopovers });
     role="toolbar"
     aria-label="Selection actions"
   >
-    <span class="font-mono px-1 text-micro text-fg">
-      {{ selectedCount }}
-      <span class="text-fg-dim">/ {{ total }} selected</span>
+    <span class="px-1 text-xs font-semibold text-fg" data-test="bulk-count">
+      {{ selectedCount }} selected
     </span>
     <button
       type="button"
-      class="ms-bb"
+      class="ms-bb ms-bb--quiet"
       :disabled="total === 0"
       data-test="bulk-select-all"
+      :title="`Select all ${total}`"
       @click="emit('selectAll')"
     >
       Select all
     </button>
     <button
       type="button"
-      class="ms-bb"
+      class="ms-bb ms-bb--quiet"
       :disabled="none"
       data-test="bulk-clear"
       @click="emit('clear')"
@@ -160,8 +162,9 @@ defineExpose({ openCollections, openTags, closePopovers });
       Clear
     </button>
 
+    <span class="flex-1" data-test="bulk-spacer" />
+
     <template v-if="scope === 'trash'">
-      <span class="ms-bb-vr" aria-hidden="true" />
       <button
         type="button"
         class="ms-bb"
@@ -185,7 +188,58 @@ defineExpose({ openCollections, openTags, closePopovers });
 
     <template v-else>
       <template v-if="organize">
-        <span class="ms-bb-vr" aria-hidden="true" />
+        <button
+          type="button"
+          class="ms-bb"
+          :class="{ 'ms-bb--on': allFavorite && !none }"
+          :disabled="none || busy || organizeBlocked"
+          :title="organizeBlockedReason ?? undefined"
+          :aria-pressed="allFavorite && !none"
+          data-test="bulk-favorite"
+          @click="emit('favorite', !allFavorite)"
+        >
+          <span class="font-mono" aria-hidden="true">★</span>
+          {{ allFavorite && !none ? "Unfavourite" : "Favourite" }}
+        </button>
+        <Popover
+          :open="tagsOpen"
+          placement="top-start"
+          label="Add tag"
+          @update:open="tagsOpen = $event"
+        >
+          <template #trigger>
+            <button
+              type="button"
+              class="ms-bb"
+              :class="{ 'ms-bb--on': tagsOpen }"
+              :disabled="none || busy || organizeBlocked"
+              :title="organizeBlockedReason ?? undefined"
+              :aria-expanded="tagsOpen"
+              data-test="bulk-tags"
+              @click="tagsOpen ? closePopovers() : openTags()"
+            >
+              <Icon name="tag" :size="13" />
+              Add tag
+              <Icon name="chevron-down" :size="11" />
+            </button>
+          </template>
+          <div class="w-64" data-test="bulk-tags-panel">
+            <p class="ms-group-label mb-1 px-0.5 uppercase">
+              Tags on all {{ selectedCount }} {{ noun }}
+            </p>
+            <TagEditor
+              :model-value="[...tags]"
+              :suggestions="[...tagSuggestions]"
+              :disabled="busy"
+              aria-label="Tag the selection"
+              @add="(name) => emit('addTags', [name])"
+              @remove="(name) => emit('removeTags', [name])"
+            />
+            <p class="mt-1 px-0.5 font-mono text-micro text-fg-dim">
+              Adding or removing a tag applies to every selected picture.
+            </p>
+          </div>
+        </Popover>
         <Popover
           :open="collectionsOpen"
           placement="top-start"
@@ -225,58 +279,6 @@ defineExpose({ openCollections, openTags, closePopovers });
             />
           </div>
         </Popover>
-        <Popover
-          :open="tagsOpen"
-          placement="top-start"
-          label="Tag selection"
-          @update:open="tagsOpen = $event"
-        >
-          <template #trigger>
-            <button
-              type="button"
-              class="ms-bb"
-              :class="{ 'ms-bb--on': tagsOpen }"
-              :disabled="none || busy || organizeBlocked"
-              :title="organizeBlockedReason ?? undefined"
-              :aria-expanded="tagsOpen"
-              data-test="bulk-tags"
-              @click="tagsOpen ? closePopovers() : openTags()"
-            >
-              <Icon name="tag" :size="13" />
-              Tag
-              <Icon name="chevron-down" :size="11" />
-            </button>
-          </template>
-          <div class="w-64" data-test="bulk-tags-panel">
-            <p class="ms-group-label mb-1 px-0.5 uppercase">
-              Tags on all {{ selectedCount }} {{ noun }}
-            </p>
-            <TagEditor
-              :model-value="[...tags]"
-              :suggestions="[...tagSuggestions]"
-              :disabled="busy"
-              aria-label="Tag the selection"
-              @add="(name) => emit('addTags', [name])"
-              @remove="(name) => emit('removeTags', [name])"
-            />
-            <p class="mt-1 px-0.5 font-mono text-micro text-fg-dim">
-              Adding or removing a tag applies to every selected picture.
-            </p>
-          </div>
-        </Popover>
-        <button
-          type="button"
-          class="ms-bb"
-          :class="{ 'ms-bb--on': allFavorite && !none }"
-          :disabled="none || busy || organizeBlocked"
-          :title="organizeBlockedReason ?? undefined"
-          :aria-pressed="allFavorite && !none"
-          data-test="bulk-favorite"
-          @click="emit('favorite', !allFavorite)"
-        >
-          <span aria-hidden="true">♥</span>
-          {{ allFavorite && !none ? "Unfavourite" : "Favourite" }}
-        </button>
         <button
           v-if="collectionName"
           type="button"
@@ -290,11 +292,19 @@ defineExpose({ openCollections, openTags, closePopovers });
           Remove from album
         </button>
       </template>
-      <span class="ms-bb-vr" aria-hidden="true" />
       <button
         type="button"
         class="ms-bb"
-        :class="confirming && !trash ? 'ms-bb--armed' : 'hover:text-error'"
+        :disabled="none || busy"
+        data-test="bulk-export"
+        @click="emit('export')"
+      >
+        Export…
+      </button>
+      <button
+        type="button"
+        class="ms-bb ms-bb--delete"
+        :class="confirming && !trash ? 'ms-bb--armed' : ''"
         :disabled="none || busy"
         data-test="bulk-delete"
         @blur="!trash && emit('update:confirming', false)"
@@ -362,6 +372,29 @@ defineExpose({ openCollections, openTags, closePopovers });
   background: var(--mold-accent-tint);
 }
 
+/* The leading Select all / Clear are affordances, not actions: no border, so
+   the bordered cluster on the right reads as the one place things happen. */
+.ms-bb--quiet {
+  border-color: transparent;
+  color: var(--mold-text-dim);
+  padding: 0 6px;
+}
+
+.ms-bb--quiet:hover:not(:disabled) {
+  color: var(--mold-text);
+}
+
+.ms-bb--delete {
+  border-color: var(--mold-error);
+  color: var(--mold-error);
+  font-weight: 600;
+}
+
+.ms-bb--delete:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--mold-error) 12%, transparent);
+  color: var(--mold-error);
+}
+
 .ms-bb--danger {
   color: var(--mold-error);
   border-color: color-mix(in srgb, var(--mold-error) 50%, transparent);
@@ -377,12 +410,5 @@ defineExpose({ openCollections, openTags, closePopovers });
 .ms-bb:focus-visible {
   outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
-}
-
-.ms-bb-vr {
-  width: 1px;
-  height: 18px;
-  background: var(--mold-border);
-  margin: 0 2px;
 }
 </style>

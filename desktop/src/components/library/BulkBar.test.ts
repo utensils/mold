@@ -32,11 +32,39 @@ afterEach(() => {
 });
 
 describe("BulkBar (Prints)", () => {
-  it("offers Add to album · Tag · ♥ Favourite · Move to trash with the count", async () => {
+  it("reads N selected, then a spacer, then ★ Favourite · Add tag · Add to album · Export… · Delete", async () => {
     const wrapper = mountBar();
-    expect(wrapper.text()).toContain("5 / 24 selected");
+    expect(wrapper.get("[data-test='bulk-count']").text()).toBe("5 selected");
+    const cluster = wrapper
+      .findAll("button[data-test^='bulk-']")
+      .map((el) => el.attributes("data-test"));
+    expect(cluster).toEqual([
+      "bulk-select-all",
+      "bulk-clear",
+      "bulk-favorite",
+      "bulk-tags",
+      "bulk-collections",
+      "bulk-export",
+      "bulk-delete",
+    ]);
+    expect(wrapper.find("[data-test='bulk-spacer']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("emits export for the selection", async () => {
+    const wrapper = mountBar();
+    const button = wrapper.get("[data-test='bulk-export']");
+    expect(button.text()).toContain("Export…");
+    await button.trigger("click");
+    expect(wrapper.emitted("export")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("offers Add to album · Add tag · ★ Favourite · Move to trash", async () => {
+    const wrapper = mountBar();
+    expect(wrapper.text()).toContain("5 selected");
     expect(wrapper.get("[data-test='bulk-collections']").text()).toContain("Add to album");
-    expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Tag");
+    expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Add tag");
     expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favourite");
     const trash = wrapper.get("[data-test='bulk-delete']");
     expect(trash.text()).toContain("Move 5 pictures to trash");

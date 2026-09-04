@@ -71,9 +71,9 @@ export type {
 const REFETCH_DEBOUNCE_MS = 500;
 let refetchTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Library header scope: the grid, the collections shelf, or
+/** Library header scope: the grid, the favourites, the albums shelf, or
  *  the trash. Never a sixth workspace — it lives inside Library. */
-export type LibraryScope = "prints" | "collections" | "trash";
+export type LibraryScope = "prints" | "favorites" | "collections" | "trash";
 
 /** One host's collections listing. */
 export interface CollectionsBucket {
@@ -360,10 +360,8 @@ export const useGalleryStore = defineStore("gallery", {
      *  the moment delete is pressed, restored by undo, and only DELETEd on
      *  commit. */
     pendingDeletions: new Set<string>(),
-    /** Library header scope: Prints grid, Collections shelf, or Trash. */
+    /** Library header scope: the grid, Favourites, the albums shelf, or Trash. */
     scope: "prints" as LibraryScope,
-    /** ♥ chip — only favorites (union over every copy). */
-    favoritesOnly: false,
     /** Tag chips (tag keys, AND). */
     tagFilter: [] as string[],
     /** Collections drill-in: the open collection's slug, or null (the shelf). */
@@ -602,7 +600,19 @@ export const useGalleryStore = defineStore("gallery", {
         );
       };
     },
-    /** Excludes members of hidden collections only from the default Prints scope. */
+    /**
+     * The live grid's two scopes. Favourites is Everything with one filter on
+     * top, so it keeps every default-grid rule — hidden collections excluded,
+     * chip counts computed over the same set.
+     */
+    inDefaultGrid(): boolean {
+      return this.scope === "prints" || this.scope === "favorites";
+    },
+    /** ★ Favourites scope — only favourites (union over every copy). */
+    favoritesOnly(): boolean {
+      return this.scope === "favorites";
+    },
+    /** Excludes members of hidden collections only from the default grid. */
     visibleInDefaultLibrary(): (entry: MergedPrint) => boolean {
       const hiddenSlugs = new Set(
         this.mergedCollections
@@ -614,9 +624,7 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /** Logical prints available to default filter-chip counts. */
     basePrints(): MergedPrint[] {
-      return this.scope === "prints"
-        ? this.merged.filter(this.visibleInDefaultLibrary)
-        : this.merged;
+      return this.inDefaultGrid ? this.merged.filter(this.visibleInDefaultLibrary) : this.merged;
     },
     /** Header/chip count before host, kind, search, and organization narrowing. */
     basePrintCount(): number {
@@ -625,10 +633,9 @@ export const useGalleryStore = defineStore("gallery", {
     /** Exact tag counts over the same logical prints as the default grid. */
     filterChipTags(): TagCount[] {
       const visible = this.basePrints;
-      const excluded =
-        this.scope === "prints"
-          ? this.merged.filter((entry) => !this.visibleInDefaultLibrary(entry))
-          : [];
+      const excluded = this.inDefaultGrid
+        ? this.merged.filter((entry) => !this.visibleInDefaultLibrary(entry))
+        : [];
       return visibleTagCounts(
         this.mergedTags,
         visible.map(this.organizationOf),
@@ -720,8 +727,8 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /**
      * What the Gallery grid renders: host chip → media kind → text query →
-     * ♥ favorites → tag chips (AND over the union tags) → the open
-     * collection (Collections scope drill-in only). Filtering preserves the
+     * the Favourites scope → tag chips (AND over the union tags) → the open
+     * album (Albums scope drill-in only). Filtering preserves the
      * gallery's newest-first generation order; collection membership order is
      * deliberately irrelevant because it records when prints were filed.
      */
@@ -730,7 +737,7 @@ export const useGalleryStore = defineStore("gallery", {
       const wantsFavorites = this.favoritesOnly;
       const tagKeys = this.tagFilter.map((t) => tagKey(t)).filter((k) => k.length > 0);
       const slug = this.scope === "collections" ? this.collectionSlug : null;
-      if (this.scope === "prints") entries = entries.filter(this.visibleInDefaultLibrary);
+      if (this.inDefaultGrid) entries = entries.filter(this.visibleInDefaultLibrary);
       if (!wantsFavorites && tagKeys.length === 0 && !slug) return entries;
       const organizationOf = this.organizationOf;
       entries = entries.filter((entry) => {
@@ -749,10 +756,9 @@ export const useGalleryStore = defineStore("gallery", {
      *  the host-chip-filtered set only, so chip labels stay stable while the
      *  kind chip or search narrows the grid. */
     kindCounts(): GalleryKindCounts {
-      const entries =
-        this.scope === "prints"
-          ? this.hostFiltered.filter(this.visibleInDefaultLibrary)
-          : this.hostFiltered;
+      const entries = this.inDefaultGrid
+        ? this.hostFiltered.filter(this.visibleInDefaultLibrary)
+        : this.hostFiltered;
       let video = 0;
       let audio = 0;
       let mesh = 0;
@@ -782,7 +788,7 @@ export const useGalleryStore = defineStore("gallery", {
       return this.sources.map((source) => {
         const items = this.buckets[source.key]?.items ?? [];
         const count =
-          this.scope === "prints" && hiddenSlugs.size > 0
+          this.inDefaultGrid && hiddenSlugs.size > 0
             ? items.filter((item) => !hidesInDefault(item)).length
             : items.length;
         return { key: source.key, label: source.label, count };

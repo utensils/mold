@@ -8,8 +8,6 @@ function mountRow(props: Record<string, unknown> = {}) {
   return mount(LibraryChipRow, {
     props: {
       organize: true,
-      favoritesOnly: false,
-      favoritesCount: 6,
       tags,
       activeTags: [],
       hostChips: [
@@ -17,7 +15,6 @@ function mountRow(props: Record<string, unknown> = {}) {
         { key: "plato", label: "plato", count: 12 },
       ],
       hostFilter: "all",
-      allCount: 24,
       ...props,
     },
   });
@@ -28,24 +25,36 @@ afterEach(() => {
 });
 
 describe("LibraryChipRow", () => {
-  it("shows ♥ Favourites, the top 8 tags with mono counts, More tags… (+N), and machine chips", () => {
+  it("shows the top 8 tags with mono counts, the ＋ tag chip (+N), and Made on machine chips", () => {
     const wrapper = mountRow();
-    const fav = wrapper.get("[data-test='favorites-chip']");
-    expect(fav.text()).toContain("Favourites");
-    expect(fav.text()).toContain("6");
-    expect(fav.attributes("aria-pressed")).toBe("false");
+    // Favourites is a SCOPE now; the chip is gone.
+    expect(wrapper.find("[data-test='favorites-chip']").exists()).toBe(false);
     const chips = wrapper.findAll("[data-test='tag-chip']");
     expect(chips.map((c) => c.attributes("data-tag"))).toEqual(tags.slice(0, 8).map((t) => t.name));
     expect(chips[0]!.find(".ms-lib-chip__n").text()).toBe("20");
+    expect(wrapper.get("[data-test='more-tags']").text()).toContain("＋ tag");
     expect(wrapper.get("[data-test='more-tags']").text()).toContain("+3");
-    expect(wrapper.find("[role='tablist']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='made-on-label']").text()).toBe("Made on");
+    const hosts = wrapper.findAll("[data-test='host-chip']");
+    expect(hosts.map((c) => c.attributes("data-host"))).toEqual(["local", "plato"]);
+    expect(hosts[0]!.text()).toContain("This Mac");
+    expect(hosts[0]!.find(".ms-lib-chip__n").text()).toBe("15");
     expect(wrapper.find("[data-test='clear-filters']").exists()).toBe(false);
   });
 
-  it("toggles favorites and tags through emits, and keeps an active hidden tag inline", async () => {
+  it("selects a machine chip and clears it by pressing it again", async () => {
+    const wrapper = mountRow({ hostFilter: "plato" });
+    const hosts = wrapper.findAll("[data-test='host-chip']");
+    expect(hosts[1]!.attributes("aria-pressed")).toBe("true");
+    await hosts[0]!.trigger("click");
+    expect(wrapper.emitted("update:hostFilter")).toEqual([["local"]]);
+    await hosts[1]!.trigger("click");
+    expect(wrapper.emitted("update:hostFilter")?.at(-1)).toEqual(["all"]);
+    expect(wrapper.find("[data-test='clear-filters']").exists()).toBe(true);
+  });
+
+  it("toggles tags through emits, and keeps an active hidden tag inline", async () => {
     const wrapper = mountRow({ activeTags: ["tag11"] });
-    await wrapper.get("[data-test='favorites-chip']").trigger("click");
-    expect(wrapper.emitted("update:favoritesOnly")).toEqual([[true]]);
     const chips = wrapper.findAll("[data-test='tag-chip']");
     expect(chips.map((c) => c.attributes("data-tag"))).toContain("tag11");
     expect(chips.at(-1)!.attributes("aria-pressed")).toBe("true");
@@ -55,7 +64,7 @@ describe("LibraryChipRow", () => {
     expect(wrapper.emitted("clearFilters")).toHaveLength(1);
   });
 
-  it("opens More tags… as a searchable checkable list", async () => {
+  it("opens the ＋ tag popover as a searchable checkable list", async () => {
     const wrapper = mountRow({ activeTags: ["tag10"] });
     await wrapper.get("[data-test='more-tags']").trigger("click");
     const panel = document.body.querySelector("[data-test='more-tags-panel']");
@@ -82,11 +91,10 @@ describe("LibraryChipRow", () => {
     expect(wrapper.find("[data-test='clear-filters']").exists()).toBe(true);
   });
 
-  it("hides ♥ and tags when no host can organize but keeps the host chips", () => {
+  it("hides the tags when no host can organize but keeps the machine chips", () => {
     const wrapper = mountRow({ organize: false });
-    expect(wrapper.find("[data-test='favorites-chip']").exists()).toBe(false);
     expect(wrapper.findAll("[data-test='tag-chip']")).toHaveLength(0);
-    expect(wrapper.find("[role='tablist']").exists()).toBe(true);
+    expect(wrapper.findAll("[data-test='host-chip']")).toHaveLength(2);
   });
 
   it("says so quietly when there are no tags yet", () => {

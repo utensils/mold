@@ -9,8 +9,8 @@ export const PANEL_LIMITS = {
   navRail: { min: 220, def: 270, max: 360 },
   // 340 keeps all five 52px aspect controls on one row after 18px side padding.
   generateParams: { min: 280, def: 340, max: 480 },
-  // Wide enough for History tabs; sequence actions wrap below their metadata.
-  historyDrawer: { min: 420, def: 620, max: 960 },
+  // 290 is the mock's inline History column; it widens for sequence rows.
+  historyDrawer: { min: 260, def: 290, max: 960 },
 } as const;
 
 export type PanelId = keyof typeof PANEL_LIMITS;

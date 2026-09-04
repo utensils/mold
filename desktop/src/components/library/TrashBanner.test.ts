@@ -24,7 +24,7 @@ describe("TrashBanner", () => {
     expect(wrapper.find("[data-test='trash-banner']").attributes("role")).toBe("status");
   });
 
-  it("emits changeRetention from the Machines link", async () => {
+  it("emits changeRetention from the mono retention control", async () => {
     const wrapper = mount(TrashBanner, {
       props: { hosts: [{ label: "This device", retentionDays: 0 }], count: 1 },
     });
@@ -33,9 +33,32 @@ describe("TrashBanner", () => {
     );
     expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("1 picture in trash");
     const link = wrapper.find("[data-test='trash-banner-link']");
-    expect(link.text()).toBe("Change retention · Machines");
+    expect(link.text()).toBe("Keep forever ▼");
+    expect(link.attributes("title")).toBe("Change retention · Machines");
     await link.trigger("click");
     expect(wrapper.emitted("changeRetention")).toHaveLength(1);
+  });
+
+  it("names this device's retention and carries Empty now at the right edge", async () => {
+    const wrapper = mount(TrashBanner, {
+      props: {
+        hosts: [{ label: "This device", retentionDays: 30 }],
+        count: 3,
+      },
+    });
+    expect(wrapper.get("[data-test='trash-banner-link']").text()).toBe("Keep for 30 days ▼");
+    const empty = wrapper.get("[data-test='empty-trash']");
+    expect(empty.text()).toBe("Empty now");
+    expect(empty.classes()).toContain("ms-toolbar-button--danger");
+    await empty.trigger("click");
+    expect(wrapper.emitted("emptyNow")).toHaveLength(1);
+  });
+
+  it("disables Empty now at zero", () => {
+    const wrapper = mount(TrashBanner, {
+      props: { hosts: [{ label: "This device", retentionDays: 30 }], count: 0 },
+    });
+    expect(wrapper.get("[data-test='empty-trash']").attributes("disabled")).toBeDefined();
   });
 
   it("explains when no connected machine keeps a trash, and hides the link", () => {

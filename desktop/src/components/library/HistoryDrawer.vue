@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /*
- * History drawer — the Library's Runs + Prompts + Sequences log on a
- * right-side @ui DrawerPanel. Runs are gallery-backed (every finished
+ * History — the Library's Runs + Prompts + Sequences log as an INLINE column
+ * beside the grid, never a modal drawer: no scrim, no `aria-modal`, and the
+ * tiles reflow next to it and stay clickable. Runs are gallery-backed (every finished
  * generation with its print, settings, and seed); Prompts is the raw prompt log
  * fanned out over every ready host; Sequences is the one place the durable
  * server-side sequence jobs are enumerated, acted on, and cleaned up — the
@@ -13,7 +14,7 @@
  */
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import DrawerPanel from "@ui/components/DrawerPanel.vue";
+import Icon from "@ui/components/Icon.vue";
 import SequenceJobRow from "@ui/components/SequenceJobRow.vue";
 import {
   HISTORY_JOBS_RENDER_CAP,
@@ -177,6 +178,14 @@ function runTime(img: GalleryImage): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** The mock's one meta line: `flux-dev:q4 · 1024² · seed 4821 · 12:41`. A
+ *  square canvas is written once with a superscript two, as the mock does. */
+function runMeta(img: GalleryImage): string {
+  const { model, width, height, seed } = img.metadata;
+  const size = width === height ? `${width}²` : `${width}×${height}`;
+  return `${model} · ${size} · seed ${seed} · ${runTime(img)}`;
 }
 
 function useRun(img: GalleryImage) {
@@ -564,20 +573,38 @@ async function cleanUpDiskConfirmed() {
 </script>
 
 <template>
-  <DrawerPanel :open="open" :width="drawerWidth" title="History" @close="emit('close')">
-    <template #leading>
-      <PanelResizeHandle
-        class="absolute inset-y-0 -left-0.5 z-10"
-        label="Resize history"
-        @resize="onDrawerResize"
-        @commit="onDrawerCommit"
-        @reset="onDrawerReset"
-      />
-    </template>
-    <template #header>
-      <span class="ms-group-label uppercase">History</span>
+  <aside
+    v-if="open"
+    data-test="history-panel"
+    aria-label="History"
+    class="border-border relative flex shrink-0 flex-col border-l bg-chrome"
+    :style="{ width: `${drawerWidth}px` }"
+  >
+    <PanelResizeHandle
+      class="absolute inset-y-0 -left-0.5 z-10"
+      label="Resize history"
+      @resize="onDrawerResize"
+      @commit="onDrawerCommit"
+      @reset="onDrawerReset"
+    />
+    <header
+      class="border-border flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2 border-b bg-bg px-3.5"
+    >
+      <span class="text-sm font-semibold text-fg">History</span>
+      <span class="flex-1" />
+      <button
+        type="button"
+        class="flex h-6 w-6 items-center justify-center rounded-control text-fg-dim hover:text-fg"
+        aria-label="Close history"
+        @click="emit('close')"
+      >
+        <Icon name="close" :size="13" />
+      </button>
+    </header>
+
+    <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
       <div
-        class="ml-3 flex rounded-control border border-border-control bg-bg-deep p-0.5"
+        class="flex rounded-control border border-border-control bg-bg-deep p-0.5"
         role="group"
         aria-label="History view"
       >
@@ -612,9 +639,7 @@ async function cleanUpDiskConfirmed() {
           Sequences
         </button>
       </div>
-    </template>
 
-    <div class="flex flex-col gap-3">
       <div v-if="tab !== 'sequences'" class="flex items-center gap-2">
         <input
           v-model="query"
@@ -670,7 +695,7 @@ async function cleanUpDiskConfirmed() {
             :key="runKey(entry)"
             type="button"
             data-test="run-row"
-            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bg-deep"
+            class="border-border flex w-full items-center gap-2.5 rounded-control border p-2.5 text-left hover:bg-surface"
             @click="useRun(entry.item)"
             @contextmenu="contextMenu.open($event, runMenu(entry))"
           >
@@ -691,25 +716,22 @@ async function cleanUpDiskConfirmed() {
                 :alt="entry.item.metadata.prompt"
               />
             </div>
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-sm text-fg" :title="entry.item.metadata.prompt">
+            <div class="flex min-w-0 flex-1 flex-col gap-1">
+              <span class="truncate text-xs text-fg" :title="entry.item.metadata.prompt">
                 {{ entry.item.metadata.prompt }}
-              </div>
-              <div class="font-mono mt-0.5 truncate text-micro text-fg-dim">
-                {{ entry.item.metadata.model }} · {{ entry.item.metadata.width }}×{{
-                  entry.item.metadata.height
-                }}
-                · seed {{ entry.item.metadata.seed }} · {{ entry.item.metadata.steps }} passes
-              </div>
+              </span>
+              <span class="font-mono truncate text-micro text-fg-dim" data-test="run-meta">
+                {{ runMeta(entry.item) }}
+              </span>
+              <span
+                v-if="showBadges"
+                data-test="host-badge"
+                class="font-mono truncate text-micro text-fg-dim"
+              >
+                {{ availabilityLabel(entry) }}
+              </span>
+              <span class="text-micro font-semibold text-accent">Use these settings</span>
             </div>
-            <span
-              v-if="showBadges"
-              data-test="host-badge"
-              class="font-mono text-micro text-fg-dim whitespace-nowrap max-w-24 shrink-0 truncate"
-            >
-              {{ availabilityLabel(entry) }}
-            </span>
-            <span class="font-mono shrink-0 text-micro text-fg-dim">{{ runTime(entry.item) }}</span>
           </button>
         </template>
         <p
@@ -866,10 +888,10 @@ async function cleanUpDiskConfirmed() {
         </p>
       </div>
     </div>
-  </DrawerPanel>
+  </aside>
 
-  <!-- Siblings of the drawer: the drawer panel is positioned, and a dialog
-       nested inside it would size to the panel instead of the frame. -->
+  <!-- Siblings of the column: it is positioned, and a dialog nested inside it
+       would size to the column instead of the frame. -->
   <ConfirmDialog
     :open="confirmDeleteSequence !== null"
     title="Delete this sequence?"

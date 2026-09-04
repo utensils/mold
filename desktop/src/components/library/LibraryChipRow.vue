@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /*
- * LibraryChipRow — the 30px filter strip under the Library header in the
- * Prints scope: ♥ Favorites, the top tags (mono counts; active
- * = AND), "More tags…" (popover with search + checkable list), the host
- * chips that used to live in the header, and the open collection as a
- * removable chip. Always present — with nothing filtered it is a quiet
+ * LibraryChipRow — the 30px filter strip under the Library header, in every
+ * scope: the top tags (mono counts; active = AND), the "＋ tag" chip that
+ * opens the searchable list of the rest, the open album as a removable chip,
+ * and — after a dim "Made on" caption — one bordered mono chip per machine.
+ * Favourites is a SCOPE, not a chip. With nothing filtered the row is a quiet
  * status line; with anything active it grows a **Clear filters** link.
  * Pure props/emits: the store owns every filter.
  */
@@ -12,11 +12,10 @@ import { computed, ref } from "vue";
 import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
-import HostFilterChips from "../shell/HostFilterChips.vue";
 import { tagKey } from "@studio/lib/libraryOrganization";
 import type { TagCount } from "@studio/lib/api/galleryOrganization";
 
-/** Tags shown inline before they fold into "More tags…". */
+/** Tags shown inline before they fold into the "＋ tag" popover. */
 const INLINE_TAG_LIMIT = 8;
 
 interface HostChip {
@@ -27,17 +26,14 @@ interface HostChip {
 
 const props = withDefaults(
   defineProps<{
-    /** Hide ♥ / tags when no connected host can organize. */
+    /** Hide the tags when no connected host can organize. */
     organize: boolean;
-    favoritesOnly: boolean;
-    favoritesCount: number;
     /** Host-merged tags, already sorted (count desc, name). */
     tags: readonly TagCount[];
     /** Active tag filter (names). */
     activeTags: readonly string[];
     hostChips: readonly HostChip[];
     hostFilter: string;
-    allCount: number;
     /** Open collection (drill-in) shown as a removable chip. */
     collectionName?: string | null;
   }>(),
@@ -45,7 +41,6 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  "update:favoritesOnly": [value: boolean];
   toggleTag: [name: string];
   "update:hostFilter": [key: string];
   clearFilters: [];
@@ -56,7 +51,7 @@ const activeKeys = computed(() => new Set(props.activeTags.map(tagKey)));
 const isActive = (name: string) => activeKeys.value.has(tagKey(name));
 
 /** Inline chips: the top N plus any active tag that would otherwise hide
- *  inside "More tags…" — an active filter must stay visible to be removable. */
+ *  inside the "＋ tag" popover — an active filter must stay removable. */
 const inlineTags = computed(() => {
   const top = props.tags.slice(0, INLINE_TAG_LIMIT);
   const shown = new Set(top.map((t) => tagKey(t.name)));
@@ -73,11 +68,7 @@ const moreMatches = computed(() => {
 });
 
 const anyFilter = computed(
-  () =>
-    props.favoritesOnly ||
-    props.activeTags.length > 0 ||
-    props.hostFilter !== "all" ||
-    !!props.collectionName,
+  () => props.activeTags.length > 0 || props.hostFilter !== "all" || !!props.collectionName,
 );
 
 function closeMore() {
@@ -111,17 +102,6 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
 
     <template v-if="organize">
       <Chip
-        class="ms-lib-chip"
-        :active="favoritesOnly"
-        data-test="favorites-chip"
-        @click="emit('update:favoritesOnly', !favoritesOnly)"
-      >
-        <span class="ms-lib-chip-heart" aria-hidden="true">♥</span>
-        Favourites
-        <span class="ms-lib-chip__n">{{ favoritesCount }}</span>
-      </Chip>
-      <span class="ms-lib-vr" aria-hidden="true" />
-      <Chip
         v-for="tag in inlineTags"
         :key="tag.name"
         class="ms-lib-chip"
@@ -140,7 +120,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
       <Popover
         v-if="tags.length > 0"
         :open="moreOpen"
-        label="More tags"
+        label="All tags"
         @update:open="moreOpen = $event"
       >
         <template #trigger>
@@ -148,10 +128,11 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
             type="button"
             class="ms-lib-chip ms-lib-chip--more"
             data-test="more-tags"
+            aria-label="All tags"
             :aria-expanded="moreOpen"
             @click="moreOpen ? closeMore() : (moreOpen = true)"
           >
-            More tags…
+            ＋ tag
             <span v-if="hiddenCount > 0" class="ms-lib-chip__n">+{{ hiddenCount }}</span>
           </button>
         </template>
@@ -214,14 +195,23 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
     >
       Clear filters
     </button>
-    <HostFilterChips
-      v-if="hostChips.length > 1"
-      :model-value="hostFilter"
-      :chips="[...hostChips]"
-      :all-count="allCount"
-      class="ms-lib-hostchips shrink-0"
-      @update:model-value="emit('update:hostFilter', $event)"
-    />
+    <template v-if="hostChips.length > 1">
+      <span class="shrink-0 text-micro text-fg-dim" data-test="made-on-label">Made on</span>
+      <button
+        v-for="host in hostChips"
+        :key="host.key"
+        type="button"
+        class="ms-lib-chip ms-lib-chip--host"
+        :class="hostFilter === host.key ? 'ms-lib-chip--on' : ''"
+        data-test="host-chip"
+        :data-host="host.key"
+        :aria-pressed="hostFilter === host.key"
+        @click="emit('update:hostFilter', hostFilter === host.key ? 'all' : host.key)"
+      >
+        <span class="max-w-32 truncate">{{ host.label }}</span>
+        <span class="ms-lib-chip__n">{{ host.count }}</span>
+      </button>
+    </template>
   </div>
 </template>
 
@@ -259,6 +249,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
 }
 
 .ms-lib-chip--more:focus-visible,
+.ms-lib-chip--host:focus-visible,
 .ms-lib-chip--on:focus-visible {
   outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
@@ -274,11 +265,6 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
   color: var(--mold-blue);
 }
 
-.ms-lib-chip-heart {
-  font-size: var(--mold-fs-xs);
-  line-height: 1;
-}
-
 .ms-lib-vr {
   width: 1px;
   height: 16px;
@@ -287,9 +273,9 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
   flex: 0 0 auto;
 }
 
-/* The host chip group was built for the 52px header; trim it to the row. */
-.ms-lib-hostchips :deep(button) {
-  padding-top: 2px;
-  padding-bottom: 2px;
+/* Machine chips read as facts, so their name and count are both mono. */
+.ms-lib-chip--host {
+  font-family: var(--mold-font-mono);
+  cursor: pointer;
 }
 </style>

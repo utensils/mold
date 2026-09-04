@@ -210,7 +210,7 @@ describe("appPrefs panel widths", () => {
     const prefs = useAppPrefsStore();
     expect(prefs.navRailWidth).toBe(270);
     expect(prefs.generateParamsWidth).toBe(340);
-    expect(prefs.historyDrawerWidth).toBe(620);
+    expect(prefs.historyDrawerWidth).toBe(290);
   });
 
   it("defaults to the PANEL_LIMITS defaults when the persisted values are null", async () => {
@@ -219,7 +219,7 @@ describe("appPrefs panel widths", () => {
     await prefs.init();
     expect(prefs.navRailWidth).toBe(270);
     expect(prefs.generateParamsWidth).toBe(340);
-    expect(prefs.historyDrawerWidth).toBe(620);
+    expect(prefs.historyDrawerWidth).toBe(290);
   });
 
   it("reflects persisted widths", async () => {

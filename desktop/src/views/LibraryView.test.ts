@@ -244,7 +244,7 @@ describe("LibraryView delete keyboard handling", () => {
     const tiles = wrapper.findAll(".ms-lib-tile");
     await tiles[0]!.trigger("click");
     await tiles[1]!.trigger("click", { metaKey: true });
-    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 / 2 selected");
+    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 selected");
 
     await tiles[0]!.trigger("contextmenu");
     const menu = useContextMenuStore();
@@ -1038,9 +1038,9 @@ describe("LibraryView Use these settings retained source media", () => {
 });
 
 describe("LibraryView header + NEW badges", () => {
-  it("counts prints across all hosts in the header", async () => {
+  it("leaves the count to the shell's title bar rather than repeating it", async () => {
     const { wrapper } = await mountView();
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 pictures");
+    expect(wrapper.find("[data-test='library-count']").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1118,7 +1118,7 @@ describe("LibraryView header + NEW badges", () => {
     wrapper.unmount();
   });
 
-  it("badges a Framewise-upscaled video tile beside its play marker", async () => {
+  it("badges a Framewise-upscaled clip with both words", async () => {
     const { wrapper } = await mountView(undefined, (gallery) => {
       const first = gallery.buckets.local?.items[0];
       if (first) {
@@ -1137,11 +1137,11 @@ describe("LibraryView header + NEW badges", () => {
     });
 
     expect(wrapper.get('[data-test="upscaled-badge"]').text()).toBe("Upscaled");
-    expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("▶");
+    expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("clip");
     wrapper.unmount();
   });
 
-  it("badges a mesh tile with the 3-D marker the iPhone Library already wears", async () => {
+  it("badges a mesh tile with the 3-D word", async () => {
     const { wrapper } = await mountView(undefined, (gallery) => {
       const first = gallery.buckets.local?.items[0];
       if (first) {
@@ -1151,7 +1151,7 @@ describe("LibraryView header + NEW badges", () => {
     });
 
     const badge = wrapper.get('[data-test="media-kind-badge"]');
-    expect(badge.text()).toBe("◈");
+    expect(badge.text()).toBe("3-D");
     expect(badge.attributes("aria-label")).toBe("3-D mesh");
     wrapper.unmount();
   });
@@ -1177,6 +1177,38 @@ describe("LibraryView history drawer", () => {
     await router.push({ path: "/library", query: { panel: "history" } });
     await flushPromises();
     expect(wrapper.getComponent({ name: "HistoryDrawer" }).props("open")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("sits the history column beside the grid and leaves the tiles clickable", async () => {
+    const { wrapper, router } = await mountView();
+    await router.push({ path: "/library", query: { panel: "history" } });
+    await flushPromises();
+
+    // A sibling of the scroll container inside one flex row — not an overlay.
+    const panel = wrapper.getComponent({ name: "HistoryDrawer" }).element as HTMLElement;
+    const scroller = wrapper.get("[data-test='library-scroll']").element;
+    expect(panel.parentElement).toBe(scroller.parentElement);
+    expect(wrapper.find("[aria-modal='true']").exists()).toBe(false);
+
+    await wrapper.get(".ms-lib-tile").trigger("click");
+    await wrapper.get(".ms-lib-tile").trigger("dblclick");
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("leaves the grid its keyboard while the history column is open", async () => {
+    const { wrapper, router } = await mountView();
+    await router.push({ path: "/library", query: { panel: "history" } });
+    await flushPromises();
+
+    // A column is not an overlay, so Select all still reaches the grid.
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", ctrlKey: true, cancelable: true }),
+    );
+    await flushPromises();
+    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 selected");
     wrapper.unmount();
   });
 

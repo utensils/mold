@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /*
- * LibraryHeader — the per-view toolbar over the grid. Title, the
- * scope control (Prints | Collections | Trash with mono counts), a per-scope
- * count label, then the right cluster: thumbnail slider, media-kind control,
- * search, History / Select / Refresh. Collections hides the slider and kind
- * control; Trash keeps slider + Select and swaps Refresh for **Empty trash**.
- * Scope options are whatever the parent says the connected hosts can do —
- * with a single option the control is not rendered at all.
+ * LibraryHeader — the 40px per-view toolbar over the grid: the scope control
+ * (Everything | Favourites | Albums | Trash with mono counts), search, and the
+ * media-kind control on the left, then a spacer and the right cluster
+ * (thumbnail slider, Select, History, Refresh). No count label — the shell's
+ * title bar already carries "312 pictures · 6 albums". Scope options are
+ * whatever the parent says the connected hosts can do — with a single option
+ * the control is not rendered at all.
  */
 import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -21,6 +21,7 @@ import type { GalleryKindFilter, LibraryScope } from "../../stores/gallery";
 
 export interface ScopeCounts {
   prints: number;
+  favorites: number;
   collections: number;
   trash: number;
 }
@@ -31,19 +32,15 @@ const props = withDefaults(
     /** Scopes the connected hosts support, in display order. */
     scopes: readonly LibraryScope[];
     counts: ScopeCounts;
-    /** Per-scope count sentence ("24 prints · 3.1 GB"). */
-    countLabel: string;
     error?: string | null;
     thumbnailSize: number;
     mediaKind: GalleryKindFilter;
     kindOptions: readonly { value: GalleryKindFilter; label: string }[];
     search: string;
     selectMode: boolean;
-    /** Enables **Empty trash** (Trash scope). */
-    trashCount?: number;
-    busy?: boolean;
+    historyOpen?: boolean;
   }>(),
-  { error: null, trashCount: 0, busy: false },
+  { error: null, historyOpen: false },
 );
 
 const emit = defineEmits<{
@@ -51,14 +48,14 @@ const emit = defineEmits<{
   "update:thumbnailSize": [px: number];
   "update:mediaKind": [kind: GalleryKindFilter];
   "update:search": [value: string];
-  openHistory: [];
+  toggleHistory: [];
   toggleSelect: [];
   refresh: [];
-  emptyTrash: [];
 }>();
 
 const SCOPE_LABELS: Record<LibraryScope, string> = {
   prints: "Everything",
+  favorites: "Favourites",
   collections: "Albums",
   trash: "Trash",
 };
@@ -101,27 +98,6 @@ defineExpose({ focusSearch });
       data-test="library-scope"
       @update:model-value="emit('update:scope', $event)"
     />
-    <span class="font-mono text-micro text-fg-dim" data-test="library-count">{{ countLabel }}</span>
-    <span v-if="error" class="text-micro text-error">{{ error }}</span>
-
-    <div class="flex-1" />
-
-    <ThumbnailSizeSlider
-      v-if="scope !== 'collections'"
-      :model-value="thumbnailSize"
-      :min="GALLERY_THUMBNAIL_SIZE_MIN"
-      :max="GALLERY_THUMBNAIL_SIZE_MAX"
-      :step="GALLERY_THUMBNAIL_SIZE_STEP"
-      @update:model-value="emit('update:thumbnailSize', $event)"
-    />
-
-    <SegmentedControl
-      v-if="scope === 'prints'"
-      :model-value="mediaKind"
-      :options="kindOptions"
-      label="Media kind"
-      @update:model-value="emit('update:mediaKind', $event)"
-    />
 
     <label
       class="flex h-[26px] w-[170px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
@@ -139,6 +115,25 @@ defineExpose({ focusSearch });
       />
     </label>
 
+    <SegmentedControl
+      :model-value="mediaKind"
+      :options="kindOptions"
+      label="Media kind"
+      @update:model-value="emit('update:mediaKind', $event)"
+    />
+
+    <span v-if="error" class="truncate text-micro text-error">{{ error }}</span>
+
+    <div class="flex-1" />
+
+    <ThumbnailSizeSlider
+      :model-value="thumbnailSize"
+      :min="GALLERY_THUMBNAIL_SIZE_MIN"
+      :max="GALLERY_THUMBNAIL_SIZE_MAX"
+      :step="GALLERY_THUMBNAIL_SIZE_STEP"
+      @update:model-value="emit('update:thumbnailSize', $event)"
+    />
+
     <button
       type="button"
       class="ms-toolbar-button"
@@ -153,27 +148,20 @@ defineExpose({ focusSearch });
     <button
       type="button"
       class="ms-toolbar-button"
+      :class="historyOpen ? 'ms-toolbar-button--on' : ''"
+      :aria-pressed="historyOpen"
       title="History"
-      aria-label="Open history"
-      @click="emit('openHistory')"
+      :aria-label="historyOpen ? 'Close history' : 'Open history'"
+      @click="emit('toggleHistory')"
     >
       History
     </button>
+    <!-- Refresh is not the poll: `pollExtras` deliberately skips the primary
+         bucket because it is live over SSE, so this is the only way back to a
+         current grid when that stream has dropped. -->
     <button
-      v-if="scope === 'trash'"
       type="button"
-      data-test="empty-trash"
-      class="ms-toolbar-button ms-toolbar-button--danger"
-      :disabled="trashCount === 0 || busy"
-      @click="emit('emptyTrash')"
-    >
-      <Icon name="trash" :size="14" />
-      Empty trash
-    </button>
-    <button
-      v-else
-      type="button"
-      class="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-control border border-border text-fg-2 transition-colors duration-100 hover:border-border-focus hover:text-fg"
+      class="ms-toolbar-button ms-toolbar-button--icon"
       title="Refresh"
       aria-label="Refresh my images"
       @click="emit('refresh')"

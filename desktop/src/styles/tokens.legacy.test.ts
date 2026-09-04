@@ -138,7 +138,6 @@ const UNCONVERTED: Record<string, number> = {
   "../ui/components/ShapePicker.vue": 2,
   "../ui/components/SheetPanel.vue": 5,
   "../ui/components/Stepper.vue": 2,
-  "../ui/components/ThumbnailSizeSlider.vue": 2,
   "../ui/components/ToastShelf.vue": 4,
   "../ui/components/Tooltip.vue": 2,
   "../ui/components/UpscaleDialog.vue": 12,
