@@ -1349,34 +1349,67 @@ pub async fn run_server(
 
     let fatal_cuda_journal = queue_journal.clone();
     let fatal_cuda_deadline = fatal_cuda_error.clone();
-    let server = std::future::IntoFuture::into_future(
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = http_shutdown_rx.await;
-            tracing::info!("shutting down");
-        }),
-    );
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => result?,
-        _ = fatal_cuda_shutdown.notified() => {
-            // Before anything discards: this path ends in `anyhow::bail!` and a
-            // supervised restart, so the queue must survive it. Missing this
-            // fence would make the one restart mold performs on its own behalf
-            // the one that deletes every queued job.
-            fatal_cuda_journal.retain_all();
-            // Same bound as the operator-initiated path: this restart is the
-            // one mold performs on its own behalf, and it must not hang.
-            arm_shutdown_deadline(fatal_cuda_deadline);
-            tracing::error!("fatal CUDA context error; stopping server for process restart");
-            // Give the triggering request a brief window to receive its explicit
-            // fatal-context error, then drop the server future. A normal graceful
-            // shutdown could wait forever on queued SSE requests assigned to the
-            // now-quarantined worker and prevent the service manager from restarting.
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let (drain_started_tx, drain_started_rx) = tokio::sync::oneshot::channel::<()>();
+    // A block, so the serve future — and with it the listener — is dropped
+    // before the shutdown steps below run, on every arm. (On the fatal-CUDA
+    // arm this is what that arm's own comment always described; the
+    // listener used to stay open, backlogging connects, until `run_server`
+    // returned.)
+    {
+        let server = std::future::IntoFuture::into_future(
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = http_shutdown_rx.await;
+                tracing::info!("shutting down");
+                let _ = drain_started_tx.send(());
+            }),
+        );
+        tokio::pin!(server);
+        let drain_grace = http_drain_grace();
+        tokio::select! {
+            // Biased: a drain that completes on the same tick its grace
+            // elapses is a completed drain, and its result is not swallowed.
+            biased;
+            result = &mut server => result?,
+            _ = drain_grace_elapsed(drain_started_rx, drain_grace) => {
+                // Graceful shutdown waits for every in-flight request, and a
+                // client the host does not control can keep one in flight for
+                // as long as it likes: a webview that stops draining a paused
+                // video, a request whose body never arrives. The host asked for
+                // a stop with a budget it cannot enforce by ending the process,
+                // so the drain is bounded here. Dropping the serve future closes
+                // the listener; the connections themselves end with the runtime
+                // the host tears down once this returns. Until then a handler
+                // this arm abandoned may still be running against the
+                // subsystems the steps below tear down — `begin_runtime_shutdown`
+                // fenced scheduling before the drain began, and by definition
+                // that request is stuck, so the steps do not wait for it.
+                if let Some(grace) = drain_grace {
+                    tracing::warn!(
+                        ?grace,
+                        "in-flight HTTP requests outlived the drain grace; giving up on them"
+                    );
+                }
+            }
+            _ = fatal_cuda_shutdown.notified() => {
+                // Before anything discards: this path ends in `anyhow::bail!` and a
+                // supervised restart, so the queue must survive it. Missing this
+                // fence would make the one restart mold performs on its own behalf
+                // the one that deletes every queued job.
+                fatal_cuda_journal.retain_all();
+                // Same bound as the operator-initiated path: this restart is the
+                // one mold performs on its own behalf, and it must not hang.
+                arm_shutdown_deadline(fatal_cuda_deadline);
+                tracing::error!("fatal CUDA context error; stopping server for process restart");
+                // Give the triggering request a brief window to receive its explicit
+                // fatal-context error, then drop the server future. A normal graceful
+                // shutdown could wait forever on queued SSE requests assigned to the
+                // now-quarantined worker and prevent the service manager from restarting.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         }
     }
 
@@ -1544,6 +1577,50 @@ pub fn allow_hard_shutdown_exit() {
 
 fn hard_shutdown_exit_allowed() -> bool {
     HARD_SHUTDOWN_EXIT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// How long in-flight HTTP requests get once shutdown begins before the
+/// server gives up on them, in milliseconds; zero means the drain is
+/// unbounded, which is the standalone server's contract (its hard deadline
+/// ends the process instead).
+static HTTP_DRAIN_GRACE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bound the HTTP drain for a host that owns the process and cannot end it.
+///
+/// Axum's graceful shutdown waits for every in-flight request, and a client
+/// the host does not control can keep one in flight indefinitely: a webview
+/// that stops draining a paused video, a request whose body never arrives, a
+/// reader that simply stopped reading a megabyte-sized response. The
+/// standalone server bounds that with a deadline that ends the process; an
+/// embedded server cannot, so it gives in-flight requests `grace` after the
+/// shutdown signal and then stops waiting for them. Call once, before
+/// `run_server`, from the host that has a stop budget to keep. A zero grace
+/// is treated as one millisecond: zero is how "never set" is stored, and a
+/// host that calls this has asked for a bound.
+pub fn bound_http_drain(grace: std::time::Duration) {
+    let millis = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX).max(1);
+    HTTP_DRAIN_GRACE_MS.store(millis, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn http_drain_grace() -> Option<std::time::Duration> {
+    match HTTP_DRAIN_GRACE_MS.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        millis => Some(std::time::Duration::from_millis(millis)),
+    }
+}
+
+/// Resolves `grace` after the HTTP drain has begun — never before the
+/// shutdown signal, and never at all when the drain is unbounded.
+async fn drain_grace_elapsed(
+    drain_started: tokio::sync::oneshot::Receiver<()>,
+    grace: Option<std::time::Duration>,
+) {
+    let Some(grace) = grace else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let _ = drain_started.await;
+    tokio::time::sleep(grace).await;
 }
 
 /// What expiry of the shutdown budget should do.
@@ -1953,6 +2030,37 @@ mod tests {
             ),)
             .is_none()
         );
+    }
+
+    /// The standalone server keeps its contract: the drain waits for every
+    /// in-flight request, and only the process-ending deadline bounds it.
+    #[tokio::test(start_paused = true)]
+    async fn an_unbounded_drain_grace_never_elapses() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let _ = started_tx.send(());
+        let elapsed = tokio::time::timeout(
+            Duration::from_secs(60 * 60),
+            super::drain_grace_elapsed(started_rx, None),
+        )
+        .await;
+        assert!(elapsed.is_err(), "an unbounded drain must never give up");
+    }
+
+    /// The grace is measured from the moment the drain begins, not from
+    /// boot: a server that ran for an hour still gives its in-flight
+    /// requests the whole grace once it is asked to stop.
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_grace_counts_from_the_drain_not_from_boot() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let boot = tokio::time::Instant::now();
+        let waiter = tokio::spawn(async move {
+            super::drain_grace_elapsed(started_rx, Some(Duration::from_secs(3))).await;
+            boot.elapsed()
+        });
+        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+        let _ = started_tx.send(());
+        let elapsed = waiter.await.unwrap();
+        assert_eq!(elapsed, Duration::from_secs(60 * 60 + 3));
     }
 
     /// Shutdown must abort the running render, not just stop admitting new

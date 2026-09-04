@@ -8,6 +8,22 @@ use std::time::Duration;
 use mold_core::types::GpuSelection;
 
 pub const DEFAULT_QUEUE_SIZE: usize = 200;
+/// How long the app waits for the embedded engine to stop — on the explicit
+/// stop command and at app exit — before it tells the user gallery
+/// authority is stuck with the server. (Changing Mold home waits twice
+/// this: it is about to copy the whole root.)
+pub const ENGINE_STOP_BUDGET: Duration = Duration::from_secs(5);
+/// How long in-flight HTTP requests get once the engine is asked to stop.
+/// The webview is a client the app does not control — a paused video stops
+/// draining its socket, and graceful shutdown would wait on it forever — so
+/// the engine gives up on such requests after this and finishes stopping
+/// inside `ENGINE_STOP_BUDGET`, with room for the dozen steps after the
+/// drain and the runtime teardown.
+pub const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    HTTP_DRAIN_GRACE.as_millis() * 2 <= ENGINE_STOP_BUDGET.as_millis(),
+    "the drain grace must leave the stop budget room for the rest of shutdown"
+);
 /// Port a user-run `mold serve` listens on by default.
 pub const WELL_KNOWN_PORT: u16 = 7680;
 pub const LAN_BIND: &str = "0.0.0.0";
@@ -163,6 +179,10 @@ fn start_engine_inner(
                 .thread_name("mold-engine-worker")
                 .build()
                 .expect("engine tokio runtime");
+            // This host has a stop budget and cannot end the process to keep
+            // it, so the engine's HTTP drain is bounded rather than left to
+            // the webview's connections.
+            mold_server::bound_http_drain(HTTP_DRAIN_GRACE);
             let result = rt.block_on(mold_server::run_server(
                 &bind,
                 port,

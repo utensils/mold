@@ -179,7 +179,7 @@ pub async fn change_mold_home(
             return Err("A separately run mold serve process is active on this Mac. Stop it before changing Mold home so its database and gallery cannot be copied while live.".into());
         }
     }
-    stop_local_engine_inner(&state, Duration::from_secs(10)).await?;
+    stop_local_engine_inner(&state, server::ENGINE_STOP_BUDGET * 2).await?;
 
     let source_for_copy = source.clone();
     let destination_for_copy = destination.clone();
@@ -441,7 +441,7 @@ pub async fn start_local_engine(
 pub async fn stop_local_engine(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo, String> {
-    stop_local_engine_inner(&state, Duration::from_secs(5)).await
+    stop_local_engine_inner(&state, server::ENGINE_STOP_BUDGET).await
 }
 
 async fn stop_local_engine_inner(
