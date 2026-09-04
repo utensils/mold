@@ -196,6 +196,103 @@ fn civitai_empty_model_descriptions_fall_back_to_version_description() {
 }
 
 #[test]
+fn civitai_qwen_edit_names_refine_the_generic_base_model_family() {
+    for (item_name, version_name) in [
+        ("Qwen Image Edit portrait", "v1"),
+        ("QWEN_IMAGE_EDIT portrait", "v1"),
+        ("Community checkpoint", "qwen-image-edit-2511 FP8"),
+        ("Community checkpoint", "QwenImageEdit2511"),
+        ("Community checkpoint", "QWEN-EDIT"),
+        ("Community checkpoint", "Qwen-image_2511_Edit"),
+        ("Qwen community checkpoint", "Image Edit 2511"),
+    ] {
+        let item: CivitaiItem = serde_json::from_value(serde_json::json!({
+            "id": 42,
+            "name": item_name,
+            "type": "Checkpoint",
+            "nsfw": false,
+            "tags": [],
+            "modelVersions": [{
+                "id": 99,
+                "name": version_name,
+                "baseModel": "Qwen",
+                "baseModelType": "Standard",
+                "files": [{
+                    "id": 7,
+                    "name": "model.safetensors",
+                    "type": "Model",
+                    "sizeKB": 100,
+                    "downloadCount": 0,
+                    "metadata": { "format": "SafeTensor" },
+                    "downloadUrl": "https://civitai.example/model",
+                    "hashes": {}
+                }],
+                "images": []
+            }]
+        }))
+        .expect("parse Civitai fixture");
+
+        let entry = from_civitai(item).expect("normalize Civitai fixture");
+        assert_eq!(
+            entry.family,
+            Family::QwenImageEdit,
+            "{item_name} / {version_name}"
+        );
+        assert_eq!(entry.family.as_str(), "qwen-image-edit");
+        assert_eq!(entry.modality, Modality::Image);
+        assert!(entry.supported);
+        assert_eq!(entry.companions, vec!["qwen-image-runtime"]);
+        assert!(entry.download_recipe.files[0]
+            .dest
+            .starts_with("{family}/civitai/"));
+    }
+}
+
+#[test]
+fn civitai_qwen_names_without_exact_edit_tokens_stay_qwen_image() {
+    for (item_name, version_name) in [
+        ("Qwen Image", "v1"),
+        ("Qwen Image Editorial Style", "v1"),
+        ("Qwen Image Editable Captioner", "v1"),
+        ("Community checkpoint", "Qwen Image Editorial"),
+        ("Community checkpoint", "QwenImageEditable"),
+    ] {
+        let item: CivitaiItem = serde_json::from_value(serde_json::json!({
+            "id": 42,
+            "name": item_name,
+            "type": "Checkpoint",
+            "nsfw": false,
+            "tags": [],
+            "modelVersions": [{
+                "id": 99,
+                "name": version_name,
+                "baseModel": "Qwen 2",
+                "baseModelType": "Standard",
+                "files": [{
+                    "id": 7,
+                    "name": "model.safetensors",
+                    "type": "Model",
+                    "sizeKB": 100,
+                    "downloadCount": 0,
+                    "metadata": { "format": "SafeTensor" },
+                    "downloadUrl": "https://civitai.example/model",
+                    "hashes": {}
+                }],
+                "images": []
+            }]
+        }))
+        .expect("parse Civitai fixture");
+
+        let entry = from_civitai(item).expect("normalize Civitai fixture");
+        assert_eq!(
+            entry.family,
+            Family::QwenImage,
+            "{item_name} / {version_name}"
+        );
+    }
+}
+
+#[test]
 fn civitai_zimage_multifile_version_picks_model_file_not_text_encoder() {
     // cv:2442439 lists Text Encoder, VAE, then Model. The primary recipe
     // must choose the Model file; otherwise mold tries to load Qwen3 text

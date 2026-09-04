@@ -210,6 +210,22 @@ fn separated_bundling_has_no_companions() {
 }
 
 #[test]
+fn qwen_edit_single_file_reuses_the_verified_qwen_runtime_bundle() {
+    assert_eq!(
+        companions_for(
+            Family::QwenImageEdit,
+            None,
+            Bundling::SingleFile,
+            Kind::Checkpoint,
+        ),
+        vec!["qwen-image-runtime"]
+    );
+    let runtime = companion_by_name("qwen-image-runtime").expect("qwen runtime");
+    assert!(runtime.family_scope.contains(&Family::QwenImage));
+    assert!(runtime.family_scope.contains(&Family::QwenImageEdit));
+}
+
+#[test]
 fn lora_kind_never_pulls_companions() {
     // LoRAs are self-contained safetensors patches — they are merged into a
     // base model that itself supplies T5/CLIP/VAE. Pulling companions for
@@ -223,6 +239,7 @@ fn lora_kind_never_pulls_companions() {
         Family::ZImage,
         Family::LtxVideo,
         Family::Ltx2,
+        Family::QwenImageEdit,
     ] {
         for bundling in [Bundling::SingleFile, Bundling::Separated] {
             let names = companions_for(family, None, bundling, Kind::Lora);

@@ -111,6 +111,37 @@ const ONE_QWEN_CHECKPOINT: &str = r#"{
     "metadata": { "totalPages": 1 }
 }"#;
 
+const ONE_QWEN_EDIT_CHECKPOINT: &str = r#"{
+    "items": [{
+        "id": 9202,
+        "name": "Community Qwen Image Edit",
+        "type": "Checkpoint",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 102, "rating": 4.8, "favoriteCount": 12 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8202,
+            "name": "QWEN_IMAGE_EDIT fp8",
+            "baseModel": "Qwen",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1,
+                "name": "qwenImageEdit_fp8.safetensors",
+                "type": "Model",
+                "sizeKB": 19951792,
+                "downloadCount": 1,
+                "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/qwen-edit.safetensors",
+                "hashes": { "SHA256": "def456" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
 fn flux_lora_opts(q: &str) -> LiveSearchOpts {
     LiveSearchOpts {
         q: Some(q.into()),
@@ -262,6 +293,39 @@ async fn family_filter_forwards_as_civitai_base_models_when_no_query() {
         .await
         .unwrap();
     assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn qwen_edit_family_reuses_generic_civitai_bucket_then_filters_locally() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("baseModels", "Qwen"))
+        .and(query_param("baseModels", "Qwen 2"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_QWEN_EDIT_CHECKPOINT))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let opts = LiveSearchOpts {
+        q: None,
+        family: Some(Family::QwenImageEdit),
+        kind: Some(Kind::Checkpoint),
+        source: Some(Source::Civitai),
+        page: 1,
+        page_size: 20,
+        include_nsfw: false,
+        sort: CatalogSort::Downloads,
+        civitai_token: None,
+        hf_token: None,
+    };
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("qwen edit search");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].family, Family::QwenImageEdit);
 }
 
 /// Civitai bug: `query=` + `baseModels=` returns empty first-cursor
@@ -892,6 +956,10 @@ fn family_from_hf_id_substring() {
         ("stabilityai/stable-diffusion-3.5-large", Family::Sd3),
         ("city96/stable-diffusion-3.5-medium-gguf", Family::Sd3),
         ("Tongyi-MAI/Z-Image-Turbo", Family::ZImage),
+        ("Qwen/Qwen-Image-Edit-2511", Family::QwenImageEdit),
+        ("someone/QWEN_IMAGE_EDIT_finetune", Family::QwenImageEdit),
+        ("someone/qwen-image-edit-lightning", Family::QwenImageEdit),
+        ("Qwen/Qwen-Image", Family::QwenImage),
     ];
     for (id, want) in cases {
         let (got, _role) =
@@ -907,6 +975,31 @@ fn family_from_hf_id_substring() {
             family_from_hf(id, &[], None).is_none(),
             "H3 lookalike {id} must not be classified"
         );
+    }
+}
+
+#[test]
+fn family_from_hf_uses_official_qwen_edit_metadata_without_overmatching() {
+    use mold_catalog::entry::FamilyRole;
+
+    let tags = vec!["diffusers:QwenImageEditPlusPipeline".to_string()];
+    let (family, role) = family_from_hf("Qwen/Qwen-Image-2511", &tags, Some("image-to-image"))
+        .expect("official Qwen edit metadata");
+    assert_eq!(family, Family::QwenImageEdit);
+    assert_eq!(role, FamilyRole::Finetune);
+
+    let (_, role) = family_from_hf("Qwen/Qwen-Image-Edit-2511", &tags, Some("image-to-image"))
+        .expect("official seed");
+    assert_eq!(role, FamilyRole::Foundation);
+
+    for id in [
+        "someone/qwen-image-editorial-style",
+        "someone/qwen-image-editable-captioner",
+        "someone/qwen-image",
+    ] {
+        let (family, _) = family_from_hf(id, &[], Some("image-to-image"))
+            .unwrap_or_else(|| panic!("expected generic Qwen family for {id}"));
+        assert_eq!(family, Family::QwenImage, "{id}");
     }
 }
 

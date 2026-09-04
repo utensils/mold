@@ -1122,51 +1122,67 @@ mod tests {
     }
 
     #[test]
-    fn qwen_runtime_companion_paths_populated() {
+    fn qwen_and_qwen_edit_runtime_companion_paths_populated() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_models_dir_env();
-        let dir = tempfile::tempdir().unwrap();
-        let _home = pin_mold_home(dir.path());
-        let models_dir = dir.path();
-        let primary =
-            models_dir.join("cv-2110043/qwen-image/civitai/2110043/qwenImage_fp8.safetensors");
-        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
-        std::fs::File::create(&primary).unwrap();
+        for (family, slug, id, filename) in [
+            (
+                Family::QwenImage,
+                "qwen-image",
+                "2110043",
+                "qwenImage_fp8.safetensors",
+            ),
+            (
+                Family::QwenImageEdit,
+                "qwen-image-edit",
+                "2110044",
+                "qwenImageEdit_fp8.safetensors",
+            ),
+        ] {
+            clear_models_dir_env();
+            let dir = tempfile::tempdir().unwrap();
+            let _home = pin_mold_home(dir.path());
+            let models_dir = dir.path();
+            let primary = models_dir.join(format!("cv-{id}/{slug}/civitai/{id}/{filename}"));
+            std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+            std::fs::File::create(&primary).unwrap();
 
-        let runtime_dir = models_dir.join("qwen-image-runtime");
-        let vae = runtime_dir.join("vae/diffusion_pytorch_model.safetensors");
-        let te = runtime_dir.join("text_encoder/model-00001-of-00004.safetensors");
-        let tok = runtime_dir.join("tokenizer/tokenizer.json");
-        for p in [&vae, &te, &tok] {
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::File::create(p).unwrap();
+            let runtime_dir = models_dir.join("qwen-image-runtime");
+            let vae = runtime_dir.join("vae/diffusion_pytorch_model.safetensors");
+            let te = runtime_dir.join("text_encoder/model-00001-of-00004.safetensors");
+            let tok = runtime_dir.join("tokenizer/tokenizer.json");
+            for p in [&vae, &te, &tok] {
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::File::create(p).unwrap();
+            }
+            let mut config = config_in(models_dir);
+            config.models.insert(
+                "qwen-image-runtime".into(),
+                ModelConfig {
+                    family: Some("companion".into()),
+                    transformer: Some(vae.to_string_lossy().into_owned()),
+                    vae: Some(vae.to_string_lossy().into_owned()),
+                    text_encoder_files: Some(vec![te.to_string_lossy().into_owned()]),
+                    text_tokenizer: Some(tok.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            );
+
+            let mut entry = flux_unet_only_entry(id, filename);
+            entry.family = family;
+            entry.companions = vec!["qwen-image-runtime".into()];
+            let intent = synthesize_intent(&entry, models_dir).unwrap();
+            let cfg = resolve_intent_to_model_config(&format!("cv:{id}"), &intent, &config, FAIL)
+                .unwrap();
+
+            assert_eq!(cfg.transformer.as_deref(), primary.to_str(), "{family}");
+            assert_eq!(cfg.vae.as_deref(), vae.to_str(), "{family}");
+            assert_eq!(
+                cfg.text_encoder_files.as_deref(),
+                Some(vec![te.to_string_lossy().into_owned()].as_slice()),
+                "{family}"
+            );
+            assert_eq!(cfg.text_tokenizer.as_deref(), tok.to_str(), "{family}");
         }
-        let mut config = config_in(models_dir);
-        config.models.insert(
-            "qwen-image-runtime".into(),
-            ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(vae.to_string_lossy().into_owned()),
-                vae: Some(vae.to_string_lossy().into_owned()),
-                text_encoder_files: Some(vec![te.to_string_lossy().into_owned()]),
-                text_tokenizer: Some(tok.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        let mut entry = flux_unet_only_entry("2110043", "qwenImage_fp8.safetensors");
-        entry.family = Family::QwenImage;
-        entry.companions = vec!["qwen-image-runtime".into()];
-        let intent = synthesize_intent(&entry, models_dir).unwrap();
-        let cfg = resolve_intent_to_model_config("cv:2110043", &intent, &config, FAIL).unwrap();
-
-        assert_eq!(cfg.transformer.as_deref(), primary.to_str());
-        assert_eq!(cfg.vae.as_deref(), vae.to_str());
-        assert_eq!(
-            cfg.text_encoder_files.as_deref(),
-            Some(vec![te.to_string_lossy().into_owned()].as_slice())
-        );
-        assert_eq!(cfg.text_tokenizer.as_deref(), tok.to_str());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::civitai_map::{map_base_model, supported_for};
+use crate::civitai_map::{map_base_model, refine_family_from_names, supported_for};
 use crate::companions::companions_for;
 use crate::entry::{
     Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags,
@@ -504,6 +504,7 @@ fn from_civitai_version(
     a14b_policy: A14bEmitPolicy,
 ) -> Option<CatalogEntry> {
     let (family, family_role, sub_family) = map_base_model(&version.base_model)?;
+    let family = refine_family_from_names(family, &item.name, version.name.as_deref());
     let file = pick_safetensors(&version.files)?;
     // Drop entries whose Civitai type isn't representable in the catalog
     // (TextualInversion, Hypernetwork, etc.) before doing any further work.

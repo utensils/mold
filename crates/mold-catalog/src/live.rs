@@ -1070,10 +1070,15 @@ async fn civitai_fetch_window(
         // below — the response is broader but cards land on screen.
         if trimmed_q.is_none() {
             if let Some(family) = opts.family {
-                for bm in CIVITAI_BASE_MODELS
-                    .iter()
-                    .filter(|bm| matches!(map_base_model(bm), Some((f, _, _)) if f == family))
-                {
+                for bm in CIVITAI_BASE_MODELS.iter().filter(|bm| {
+                    matches!(
+                        map_base_model(bm),
+                        Some((mapped, _, _))
+                            if mapped == family
+                                || (family == Family::QwenImageEdit
+                                    && mapped == Family::QwenImage)
+                    )
+                }) {
                     q.append_pair("baseModels", bm);
                 }
             }
@@ -1186,6 +1191,7 @@ fn hf_family_search_term(family: Family) -> &'static str {
         Family::Wan => "wan2",
         Family::MinimaxH3 => "minimax-h3",
         Family::QwenImage => "qwen-image",
+        Family::QwenImageEdit => "qwen-image-edit",
         Family::Wuerstchen => "wuerstchen",
         Family::Hunyuan3d => "hunyuan3d",
     }
@@ -1452,7 +1458,7 @@ pub fn wan_sub_family_from_id(repo_id: &str) -> Option<String> {
 pub fn family_from_hf(
     repo_id: &str,
     tags: &[String],
-    _pipeline_tag: Option<&str>,
+    pipeline_tag: Option<&str>,
 ) -> Option<(Family, FamilyRole)> {
     let id_lower = repo_id.to_ascii_lowercase();
     let role_for = |id: &str, family: Family| -> FamilyRole {
@@ -1467,6 +1473,17 @@ pub fn family_from_hf(
     // Repo-id substring match — the load-bearing path. HF doesn't
     // expose a canonical "model family" tag, so id-substring + curated
     // seed list is the cleanest signal.
+    let qwen_edit_pipeline = tags.iter().any(|tag| {
+        matches!(
+            tag.to_ascii_lowercase().as_str(),
+            "diffusers:qwenimageeditpipeline" | "diffusers:qwenimageeditpluspipeline"
+        )
+    });
+    let qwen_edit_name =
+        crate::civitai_map::refine_family_from_names(Family::QwenImage, repo_id, None)
+            == Family::QwenImageEdit;
+    let qwen_image_name = id_lower.contains("qwen-image") || id_lower.contains("qwen_image");
+
     let family = if looks_like_minimax_h3(&id_lower) {
         Family::MinimaxH3
     } else if id_lower.contains("flux.2") || id_lower.contains("flux-2") {
@@ -1487,7 +1504,13 @@ pub fn family_from_hf(
         Family::Wan
     } else if id_lower.contains("z-image") || id_lower.contains("zimage") {
         Family::ZImage
-    } else if id_lower.contains("qwen-image") || id_lower.contains("qwen_image") {
+    } else if qwen_edit_name
+        || (qwen_image_name
+            && qwen_edit_pipeline
+            && pipeline_tag.is_none_or(|tag| tag.eq_ignore_ascii_case("image-to-image")))
+    {
+        Family::QwenImageEdit
+    } else if qwen_image_name {
         Family::QwenImage
     } else if id_lower.contains("wuerstchen") {
         Family::Wuerstchen
@@ -1523,6 +1546,8 @@ pub fn family_from_hf(
                     // a repo that tags itself `wan` is claiming the family.
                     "wan" => Some(Family::Wan),
                     "minimax-h3" | "minimax_h3" | "minimaxh3" => Some(Family::MinimaxH3),
+                    "qwen-image-edit" | "qwen_image_edit" => Some(Family::QwenImageEdit),
+                    "qwen-image" | "qwen_image" => Some(Family::QwenImage),
                     _ => continue,
                 }
             };
@@ -1976,6 +2001,7 @@ mod tests {
             (Family::Wan, "wan2"),
             (Family::MinimaxH3, "minimax-h3"),
             (Family::QwenImage, "qwen-image"),
+            (Family::QwenImageEdit, "qwen-image-edit"),
             (Family::Wuerstchen, "wuerstchen"),
             (Family::Hunyuan3d, "hunyuan3d"),
         ];
@@ -2081,6 +2107,38 @@ mod tests {
             result.entries[0].source_id,
             "city96/stable-diffusion-3.5-medium-gguf"
         );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn hf_qwen_edit_filter_uses_the_specific_upstream_term_and_metadata() {
+        let server = MockServer::start().await;
+        let hits = vec![serde_json::json!({
+            "id": "Qwen/Qwen-Image-2511",
+            "tags": ["diffusers", "diffusers:QwenImageEditPlusPipeline"],
+            "pipeline_tag": "image-to-image"
+        })];
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .and(query_param("search", "qwen-image-edit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(hits))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = hf_search(
+            &server.uri(),
+            &LiveSearchOpts {
+                family: Some(Family::QwenImageEdit),
+                source: Some(Source::Hf),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Qwen edit family page");
+
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].family, Family::QwenImageEdit);
         server.verify().await;
     }
 
