@@ -7,7 +7,7 @@
  */
 import { computed } from "vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
-import { formatGB, percent } from "../../lib/format";
+import { formatGBPair, percent } from "../../lib/format";
 import { useHostStatusStore } from "../../stores/hostStatus";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 
@@ -53,7 +53,7 @@ const usedPercent = computed(() =>
           <span class="bg-accent" :style="{ width: `${usedPercent}%` }" />
         </span>
         <span class="font-mono text-micro text-fg-dim">
-          {{ formatGB(usedBytes) }} of {{ formatGB(disk.total_bytes) }}
+          {{ formatGBPair(usedBytes, disk.total_bytes) }}
         </span>
       </div>
     </div>

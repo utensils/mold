@@ -77,10 +77,78 @@ describe("ModalPanel", () => {
     expect(wrapper.emitted("close")).toHaveLength(1);
   });
 
-  it("emits close on Escape", async () => {
-    const wrapper = make();
-    await wrapper.find("[role=dialog]").trigger("keydown", { key: "Escape" });
+  it("emits close on Escape pressed inside the panel", async () => {
+    const wrapper = mount(ModalPanel, {
+      props: { open: true, label: "Add a machine" },
+      slots: { default: "<input data-test='first' />" },
+      attachTo: document.body,
+    });
+    await wrapper
+      .get("[data-test='first']")
+      .trigger("keydown", { key: "Escape" });
     expect(wrapper.emitted("close")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  /**
+   * The panel is only `aria-modal`, so focus can be anywhere in the app when
+   * Escape arrives. A listener on the root closed the dialog only while it
+   * happened to hold focus, which is a trap rather than a dialog.
+   */
+  it("closes on Escape from anywhere in the document while it is open", async () => {
+    const wrapper = mount(ModalPanel, {
+      props: { open: true, label: "Add a machine" },
+      slots: { default: "<p>Modal content</p>" },
+      attachTo: document.body,
+    });
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(wrapper.emitted("close")).toHaveLength(1);
+
+    await wrapper.setProps({ open: false });
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("keeps Tab inside the panel", async () => {
+    const wrapper = mount(ModalPanel, {
+      props: { open: true, label: "Add a machine" },
+      slots: {
+        default: "<input data-test='first' />",
+        footer: "<button data-test='last'>Continue</button>",
+      },
+      attachTo: document.body,
+    });
+    const first = wrapper.get("[data-test='first']").element as HTMLElement;
+    const last = wrapper.get("[data-test='last']").element as HTMLElement;
+
+    last.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(document.activeElement).toBe(first);
+
+    first.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
+    );
+    expect(document.activeElement).toBe(last);
+    wrapper.unmount();
+  });
+
+  it("pulls focus back in when it has escaped the panel", async () => {
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    const wrapper = mount(ModalPanel, {
+      props: { open: true, label: "Add a machine" },
+      slots: { default: "<input data-test='first' />" },
+      attachTo: document.body,
+    });
+    outside.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(document.activeElement).toBe(
+      wrapper.get("[data-test='first']").element,
+    );
+    wrapper.unmount();
+    outside.remove();
   });
 
   it("focuses the overlay root when opened", async () => {

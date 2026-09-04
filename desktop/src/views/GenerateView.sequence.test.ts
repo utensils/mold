@@ -86,6 +86,7 @@ import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
@@ -1417,5 +1418,266 @@ describe("GenerateView — sequence reuse handoff", () => {
 
     expect(draft.output).toBe("single");
     expect(useComposerStore().pendingSequence).toBeNull();
+  });
+});
+
+/**
+ * The one composer is the ONLY Generate button in clip mode, so what the
+ * timeline refuses has to reach it — and so does what the view refuses on the
+ * timeline's behalf. With no installed style that can chain, the timeline is
+ * `v-else`'d away entirely: nothing emits, and Generate used to sit live over
+ * an empty bench and fail with a toast after the click.
+ */
+describe("GenerateView — what locks the one composer in clip mode", () => {
+  /** The real timeline, so its own refusal is proved on both sides of the seam. */
+  function mountWithTimeline() {
+    return mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+      global: { stubs: { SequenceComposer: false, ComposerCard: true } },
+    });
+  }
+
+  function composerProps(wrapper: ReturnType<typeof mountWithTimeline>) {
+    const card = wrapper.findComponent({ name: "ComposerCard" });
+    return {
+      disabled: card.props("disabled") as boolean,
+      reason: card.props("disabledReason") as string | null,
+    };
+  }
+
+  async function clipDraft(installed: ModelEntry[]) {
+    readyLocal();
+    installedPayload = installed;
+    useModelStore().all = installed;
+    const form = useGenerateFormStore().form;
+    form.model = installed[0]?.name ?? "";
+    form.family = installed[0]?.family ?? "";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    return draft;
+  }
+
+  it("refuses with no style that can make a clip, where the timeline never mounts", async () => {
+    await clipDraft([imageModel]);
+    const wrapper = mountWithTimeline();
+    await flushPromises();
+    expect(wrapper.find("[data-test='sequence-empty']").exists()).toBe(true);
+    expect(composerProps(wrapper)).toEqual({
+      disabled: true,
+      reason: "Pick a video style first.",
+    });
+  });
+
+  it("carries the timeline's own refusal while a scene is blank", async () => {
+    const draft = await clipDraft([videoModel]);
+    draft.clips[0]!.prompt = "a kite over the harbour";
+    draft.clips[1]!.prompt = "";
+    const wrapper = mountWithTimeline();
+    await flushPromises();
+    expect(composerProps(wrapper)).toEqual({
+      disabled: true,
+      reason: "Describe clip 2 before generating.",
+    });
+  });
+
+  it("unlocks once every scene has words", async () => {
+    const draft = await clipDraft([videoModel]);
+    draft.clips[0]!.prompt = "a kite over the harbour";
+    draft.clips[1]!.prompt = "the kite falls into the water";
+    const wrapper = mountWithTimeline();
+    await flushPromises();
+    expect(composerProps(wrapper)).toEqual({ disabled: false, reason: null });
+  });
+
+  /** Losing the style unmounts the timeline mid-draft; the last thing it
+   *  emitted was `null`, and that stale value used to stand. */
+  it("locks again when the style that could chain goes away", async () => {
+    const draft = await clipDraft([videoModel]);
+    draft.clips[0]!.prompt = "a kite over the harbour";
+    draft.clips[1]!.prompt = "the kite falls into the water";
+    const wrapper = mountWithTimeline();
+    await flushPromises();
+    expect(composerProps(wrapper).disabled).toBe(false);
+
+    useModelStore().all = [imageModel];
+    useHostModelsStore().byHost.local = {
+      entries: [imageModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='sequence-empty']").exists()).toBe(true);
+    expect(composerProps(wrapper)).toEqual({
+      disabled: true,
+      reason: "Pick a video style first.",
+    });
+  });
+});
+
+/**
+ * The Recent tab's door says "Use these settings again", so it is the same
+ * path the Lightbox takes — including the branch that matters most: a stitched
+ * clip restores as a CLIP. Routing it through the metadata prefill forced the
+ * output back to `single` and kept one scene's words as the whole prompt.
+ */
+describe("GenerateView — Recent restores what the print actually was", () => {
+  function sequenceMetadata(): OutputMetadata {
+    return {
+      model: videoModel.name,
+      prompt: "a kite over the harbour\nthe kite falls into the water",
+      output_mode: "sequence",
+      seed: 4242,
+      steps: 25,
+      guidance: 3,
+      width: 1024,
+      height: 576,
+      chain: {
+        stage_count: 2,
+        motion_tail_frames: 8,
+        stages: [
+          { prompt: "a kite over the harbour", frames: 25, transition: "smooth" as const },
+          { prompt: "the kite falls into the water", frames: 25, transition: "smooth" as const },
+        ],
+      },
+    } as OutputMetadata;
+  }
+
+  function recentPrint(metadata: OutputMetadata) {
+    return {
+      sourceKey: "local",
+      hostLabel: "This device",
+      item: { filename: "harbour.mp4", metadata, timestamp: 1, size_bytes: 10 },
+    } as never;
+  }
+
+  it("hands a stitched clip to the sequence path, not to a metadata prefill", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const wrapper = mountView();
+    await flushPromises();
+    const composer = useComposerStore();
+
+    wrapper
+      .findComponent({ name: "InspectorPanel" })
+      .vm.$emit("reuse-print", recentPrint(sequenceMetadata()));
+    await flushPromises();
+
+    expect(useSequenceDraftStore().output).toBe("sequence");
+    expect(useSequenceDraftStore().clips.map((clip) => clip.prompt)).toEqual([
+      "a kite over the harbour",
+      "the kite falls into the water",
+    ]);
+    expect(composer.prefill).toBeNull();
+  });
+
+  it("still restores a still print through the metadata prefill", async () => {
+    readyLocal();
+    installedPayload = [imageModel];
+    useModelStore().all = [imageModel];
+    const wrapper = mountView();
+    await flushPromises();
+
+    const metadata = { model: imageModel.name, prompt: "a brass teapot" } as OutputMetadata;
+    wrapper
+      .findComponent({ name: "InspectorPanel" })
+      .vm.$emit("reuse-print", recentPrint(metadata));
+    await flushPromises();
+
+    expect(useSequenceDraftStore().output).toBe("single");
+    expect(useGenerateFormStore().form.prompt).toBe("a brass teapot");
+  });
+});
+
+/**
+ * `ModalPanel` is `position: absolute; inset: 0`, and the bench strip declares
+ * `container-type: size` — which implies `contain: layout` and makes it the
+ * containing block for every absolutely positioned descendant. A confirm
+ * rendered inside the timeline was therefore centred in a 320px strip, inside
+ * an `overflow-hidden` box that clipped a longer message. The timeline emits
+ * what it needs asked; the workbench renders it as a sibling of the bench.
+ */
+describe("GenerateView — the timeline's dialogs belong to the workbench", () => {
+  it("renders the clear confirm outside the bench strip", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = videoModel.name;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    const wrapper = mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+      global: { stubs: { SequenceComposer: false, ConfirmDialog: false, ModalPanel: false } },
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='sequence-clear']").trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Clear the clip?");
+    expect(dialog.element.closest("[data-test='create-bottom-panel']")).toBeNull();
+    expect(dialog.element.closest("[data-test='generate-workbench']")).not.toBeNull();
+  });
+});
+
+/**
+ * The palette and the native menu raise a Create intent and then navigate, so
+ * New image is MOUNTING when the tick lands. A plain watcher registers on the
+ * already-incremented value and sees no change — "Generate from these words"
+ * run from My images did nothing at all, and ⌥↩ from another workspace
+ * navigated to Create and made no variations.
+ */
+describe("GenerateView — an intent raised on the way here", () => {
+  it("generates once for a tick raised before this view mounted", async () => {
+    readyLocal();
+    installedPayload = [imageModel];
+    useModelStore().all = [imageModel];
+    const ui = useUiStore();
+    ui.generate();
+
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    form.prompt = "a brass teapot";
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
+
+    mountView();
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it("acts on the intent exactly once, however many views see it", async () => {
+    readyLocal();
+    installedPayload = [imageModel];
+    useModelStore().all = [imageModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    form.prompt = "a brass teapot";
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
+
+    useUiStore().generate();
+    const first = mountView();
+    await flushPromises();
+    expect(submit).toHaveBeenCalledTimes(1);
+
+    // Leaving Create and coming back must not replay it.
+    first.unmount();
+    mountView();
+    await flushPromises();
+    expect(submit).toHaveBeenCalledTimes(1);
   });
 });

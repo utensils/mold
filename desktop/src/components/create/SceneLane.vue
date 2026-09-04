@@ -14,6 +14,7 @@ import SeamGlyph from "@ui/components/SeamGlyph.vue";
 import { transitionLabel } from "@ui/lib/seam";
 import { formatFrameDuration } from "@ui/lib/duration";
 import type { ClipRailMedia, RailClip } from "@ui/components/types";
+import { sceneLabel } from "../../lib/sequenceTimeline";
 
 const props = withDefaults(
   defineProps<{
@@ -72,11 +73,7 @@ function blockStyle(clip: RailClip, index: number) {
   return { flexGrow: `${playedFrames(clip, index) / fps}`, flexShrink: "1", flexBasis: "0px" };
 }
 
-function sceneTitle(clip: RailClip, index: number): string {
-  const written = clip.prompt.trim();
-  if (written) return written;
-  return index === 0 ? "Opening scene" : `Scene ${index + 1}`;
-}
+const sceneTitle = (clip: RailClip, index: number) => sceneLabel(clip.prompt, index);
 
 const planWord: Record<"cached" | "rerender" | "new", string> = {
   cached: "kept",

@@ -585,7 +585,7 @@ describe("HistoryDrawer sequences", () => {
     await wrapper.get("[data-test='seq-clear-inactive']").trigger("click");
     expect(chains.clearInactive).not.toHaveBeenCalled();
     expect(wrapper.get("[data-test='seq-clear-inactive']").text()).toBe(
-      "Delete 2 inactive sequences on okra?",
+      "Delete 2 inactive clips on okra?",
     );
     await wrapper.get("[data-test='seq-clear-inactive']").trigger("click");
     await flushPromises();
@@ -606,10 +606,8 @@ describe("HistoryDrawer sequences", () => {
     await wrapper.get("[data-test='seq-cleanup-disk']").trigger("click");
     expect(chains.gc).not.toHaveBeenCalled();
     const dialog = document.querySelector("[data-test='confirm-dialog']") as HTMLElement;
-    expect(dialog.textContent).toContain(
-      "cached scene media used for scene playback and sequence editing",
-    );
-    expect(dialog.textContent).toContain("Final videos in the Library remain.");
+    expect(dialog.textContent).toContain("the cached scenes used for playback and editing");
+    expect(dialog.textContent).toContain("Finished clips in My images stay.");
 
     (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
     await flushPromises();
@@ -636,7 +634,7 @@ describe("HistoryDrawer sequences", () => {
     await wrapper.get("[data-test='tab-sequences']").trigger("click");
     await flushPromises();
     const empty = wrapper.get("[data-test='sequences-empty']");
-    expect(empty.text()).toContain("No sequences yet");
+    expect(empty.text()).toContain("No clips yet");
     const buttons = empty.findAll("button");
     expect(buttons).toHaveLength(1);
     await buttons[0]!.trigger("click");

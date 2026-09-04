@@ -594,11 +594,7 @@ async function performVideoExport(options: VideoExportOptions) {
       >
         <Icon name="reuse" :size="13" />
         {{
-          isSequence
-            ? canEditSequence
-              ? "Edit sequence"
-              : "Duplicate as new"
-            : "Use these settings"
+          isSequence ? (canEditSequence ? "Edit clip" : "Duplicate as new") : "Use these settings"
         }}
       </button>
       <button

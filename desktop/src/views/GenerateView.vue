@@ -41,6 +41,8 @@ import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
+import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import { SEQUENCE_NEEDS_STYLE, type SequenceConfirmation } from "../lib/sequenceTimeline";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -140,12 +142,13 @@ import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
 import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
-import { useUiStore } from "../stores/ui";
+import { useUiStore, type CreateIntent } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import {
   generationCapabilitiesForFamily,
   generationCapabilitiesForForm,
 } from "../lib/capabilities";
+import { batchLockedForForm, canRepeatPrint } from "../lib/variations";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -268,11 +271,7 @@ import {
 } from "../lib/gallery/media";
 import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
 import { readGalleryMediaBase64 } from "../lib/gallery/sourceMedia";
-import {
-  retainedSourceMediaDisclosable,
-  retainedSourceMediaDisclosure,
-  retainedSourceMediaInventory,
-} from "@studio/api/gallerySourceMedia";
+import { useReuseStillPrint } from "../composables/useReuseStillPrint";
 import { upscaleLibraryImage } from "@studio/api/videoUpscale";
 import { defaultUpscaler } from "@studio/lib/upscale";
 import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
@@ -322,6 +321,7 @@ const videoExportError = ref("");
 const videoExportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 // Multi-host gallery — source-image restore looks up prints across hosts.
 const hostGallery = useGalleryStore();
+const reuseStillPrint = useReuseStillPrint();
 const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
 const licenseAcceptance = useLicenseAcceptance();
@@ -943,29 +943,13 @@ const recentPrints = computed(() => hostGallery.merged.slice(0, RECENT_PRINTS_CA
  * path, not a prompt-only shortcut.
  */
 function reuseRecentPrint(entry: MergedPrint) {
-  const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
-  const target = hostGallery.targetOf(entry.sourceKey);
-  if (target) {
-    void retainedSourceMediaInventory(entry.item.filename, target)
-      .then((inventory) => {
-        if (
-          !composer.setRetainedSourceIfCurrent(retainedVersion, {
-            filename: entry.item.filename,
-            origin: target,
-            inventory,
-          })
-        ) {
-          return;
-        }
-        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
-          ? retainedSourceMediaDisclosure(inventory.availability)
-          : null;
-        if (disclosure) toasts.push(disclosure, "error");
-      })
-      // A transport failure inspecting the additive endpoint must not turn a
-      // working restore into a dead end; the local stash path stays live.
-      .catch(() => {});
+  // A stitched clip restores as a clip, exactly as the Lightbox restores it:
+  // a metadata prefill would force `single` and keep one scene's words.
+  if (planSequenceReuse(entry.item.metadata)) {
+    composer.setSequence({ kind: "reuse", metadata: entry.item.metadata });
+    return;
   }
+  reuseStillPrint(entry);
   inspectorTab.value = "settings";
   void nextTick(() => composerRef.value?.focus?.());
 }
@@ -1155,9 +1139,7 @@ const requestConditioning = computed(() =>
 
 /** The recipe renders one at a time (an edit model, or a request that
  * carries references): the Make chip reads 1 and locks. */
-const batchLocked = computed(
-  () => caps.value.forcesBatchSizeOne || requestConditioning.value === "references",
-);
+const batchLocked = computed(() => batchLockedForForm(form, caps.value));
 const effectiveBatchSize = computed(() =>
   batchLocked.value ? 1 : Math.max(1, Math.floor(form.batchSize)),
 );
@@ -2765,12 +2747,20 @@ async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promi
  * Make 4 variations: the print that is on the canvas, made again as a batch.
  * Nothing else changes — the words, the style, the size and the seed policy
  * are whatever produced this picture, which is the whole point of the action.
+ * The count rides this ONE submission: writing it to the form would leave
+ * every later Generate making four.
+ *
+ * It is offered only for a finished still on a recipe that can repeat: a clip,
+ * a mesh and a sound have no batch, and a batch-locked recipe coerces the
+ * count to one, so the button would promise four and make exactly one.
  */
 const VARIATION_BATCH = 4;
+function canMakeVariations(candidate: Job | null): boolean {
+  return !isSequence.value && canRepeatPrint(candidate, batchLocked.value);
+}
 function makeVariations(count = VARIATION_BATCH) {
-  if (isSequence.value) return;
-  form.batchSize = Math.min(Math.max(count, 1), MAX_BATCH_SIZE);
-  void generate();
+  if (!canMakeVariations(job.value)) return;
+  void generate(Math.min(Math.max(count, 1), MAX_BATCH_SIZE));
 }
 
 // ── Make bigger (the caption's upscale door) ────────────────────────────────
@@ -3936,7 +3926,7 @@ const generationInputBlockerReason = computed<string | null>(() => {
   // H3 opening-frame correction until the user starts typing.
   if (h3AuthoringError.value) return h3AuthoringError.value;
   if (promptMissing.value) return "Add a prompt before generating.";
-  if (!form.model) return "Choose an installed model before generating.";
+  if (!form.model) return "Choose a style first.";
   if (chainValidationError.value) return chainValidationError.value;
   if (quickStaleReasons.value.length > 0) {
     return "The prepared rewrite no longer matches the prompt, model, or machine. Choose a recovery action above.";
@@ -3997,8 +3987,16 @@ function writeScenePrompt(value: string) {
   const scene = activeScene.value;
   if (scene) scene.prompt = value;
 }
-/** What the timeline says Generate must refuse for. */
-const sequenceBlockedReason = ref<string | null>(null);
+/**
+ * What Generate must refuse for in clip mode. The timeline raises its own
+ * refusal while it is mounted, but it is `v-else`'d away entirely when no
+ * installed style can make a clip — so the view answers for it there, and the
+ * one composer is locked whether or not the timeline exists.
+ */
+const timelineBlockedReason = ref<string | null>(SEQUENCE_NEEDS_STYLE);
+const sequenceBlockedReason = computed(() =>
+  showSequenceEmpty.value ? SEQUENCE_NEEDS_STYLE : timelineBlockedReason.value,
+);
 const composerRefusal = computed(() =>
   isSequence.value ? sequenceBlockedReason.value : composerBlockerReason.value,
 );
@@ -4008,6 +4006,18 @@ const composerLocked = computed(() =>
 const composerSubmitting = computed(() =>
   isSequence.value ? sequenceSubmitting.value : submissionPlanning.value,
 );
+
+/**
+ * The timeline's destructive questions, asked over the whole workbench. The
+ * bench strip is a `container-type: size` box, which makes it the containing
+ * block for an absolutely positioned dialog — one rendered inside it would be
+ * centred and clipped in a 320px strip.
+ */
+const sequenceConfirmation = ref<SequenceConfirmation | null>(null);
+function resolveSequenceConfirmation(answer: "confirm" | "cancel") {
+  const pending = sequenceConfirmation.value;
+  if (pending) pending[answer]();
+}
 
 function composerGenerate() {
   if (isSequence.value) void generateSequence();
@@ -4029,7 +4039,9 @@ const emptyCanvasGuidance = computed(() =>
   ),
 );
 
-async function generate() {
+/** `batchOverride` submits a one-off count — Make 4 variations — without
+ *  touching the batch size the form keeps for every later Generate. */
+async function generate(batchOverride: number | null = null) {
   if (generationInputBlockerReason.value || preparedSubmitting.value || submissionPlanning.value)
     return;
   clearSelectedQueueRender();
@@ -4096,6 +4108,7 @@ async function generate() {
   submissionPlanning.value = true;
   try {
     const draft = cloneGenerateForm(form);
+    if (batchOverride !== null) draft.batchSize = batchOverride;
     const routingModel = selectedEntry.value
       ? {
           default_frames: selectedEntry.value.default_frames,
@@ -4941,8 +4954,25 @@ watch(isSequence, (on) => {
   clampBenchToViewport();
 });
 
+/**
+ * Act on a shell intent exactly once, whether it was raised while this view
+ * was mounted or on the way here. The palette and the native menu raise the
+ * intent and then navigate, so a plain watcher registered on the already
+ * incremented tick would drop every cross-workspace command silently.
+ */
+function onCreateIntent(intent: CreateIntent, tick: () => number, run: () => void) {
+  watch(
+    tick,
+    () => {
+      if (ui.consumeIntent(intent)) run();
+    },
+    { immediate: true },
+  );
+}
+
 // ⌘N — clear the composer for a fresh generation, keeping the model.
-watch(
+onCreateIntent(
+  "newGeneration",
   () => ui.newGenerationTick,
   () => {
     invalidateRetainedRestore();
@@ -4981,7 +5011,8 @@ watch(
 );
 
 // ⌘R — randomize the seed.
-watch(
+onCreateIntent(
+  "randomizeSeed",
   () => ui.randomizeSeedTick,
   () => {
     form.seed = String(randomSeed());
@@ -4989,18 +5020,21 @@ watch(
 );
 
 // ⌥↩ / palette — the picture on the canvas, made four more times.
-watch(
+onCreateIntent(
+  "makeVariations",
   () => ui.makeVariationsTick,
   () => makeVariations(),
 );
 
 // Menu ▸ Generate / Expand Prompt reuse the composer actions. In sequence
 // output the same intent submits the sequence.
-watch(
+onCreateIntent(
+  "generate",
   () => ui.generateTick,
   () => (isSequence.value ? void generateSequence() : void generate()),
 );
-watch(
+onCreateIntent(
+  "expand",
   () => ui.expandTick,
   () => {
     if (refusePromptTransform()) return;
@@ -5280,6 +5314,7 @@ onBeforeUnmount(() => {
                       Save
                     </button>
                     <button
+                      v-if="canMakeVariations(job)"
                       type="button"
                       data-test="canvas-variations"
                       class="caption-action"
@@ -5592,7 +5627,7 @@ onBeforeUnmount(() => {
                   router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
                 "
               >
-                Browse video models
+                Browse video styles
               </button>
             </template>
           </EmptyStateBlock>
@@ -5620,7 +5655,8 @@ onBeforeUnmount(() => {
               :target="sequenceTarget"
               @duplicate="duplicateSequenceAsNew"
               @play-clip="playSequenceClip"
-              @update:blocked-reason="sequenceBlockedReason = $event"
+              @update:blocked-reason="timelineBlockedReason = $event"
+              @update:confirmation="sequenceConfirmation = $event"
             />
           </div>
         </div>
@@ -5664,6 +5700,16 @@ onBeforeUnmount(() => {
           @remix="remixForCurrentPrompt()"
           @update:remix-source="remixSource = $event"
           @restore="restoreQuickExpansion"
+        />
+
+        <ConfirmDialog
+          :open="sequenceConfirmation !== null"
+          :title="sequenceConfirmation?.title ?? ''"
+          :message="sequenceConfirmation?.message ?? ''"
+          :confirm-label="sequenceConfirmation?.confirmLabel ?? 'Confirm'"
+          danger
+          @confirm="resolveSequenceConfirmation('confirm')"
+          @cancel="resolveSequenceConfirmation('cancel')"
         />
       </div>
     </div>

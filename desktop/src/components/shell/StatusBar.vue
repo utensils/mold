@@ -124,7 +124,10 @@ const downloading = computed(() => downloads.hostedInFlight.length);
     <span class="flex-1" />
     <span class="keycap">{{ shortcutLabel("↩") }}</span
     ><span>Generate</span> <span class="keycap">{{ shortcutLabel("K") }}</span
-    ><span>Search</span> <span class="keycap">Space</span><span>Pause queue</span>
+    ><span>Search</span>
+    <template v-if="commands.canPause.value">
+      <span class="keycap">Space</span><span data-test="status-pause-hint">Pause queue</span>
+    </template>
   </footer>
 </template>
 

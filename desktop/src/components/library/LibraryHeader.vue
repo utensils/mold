@@ -93,7 +93,7 @@ defineExpose({ focusSearch });
       inline
       :model-value="scope"
       :options="scopeOptions"
-      label="Library scope"
+      label="My images scope"
       compact
       data-test="library-scope"
       @update:model-value="emit('update:scope', $event)"

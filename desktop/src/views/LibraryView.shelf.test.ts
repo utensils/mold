@@ -464,7 +464,7 @@ describe("tile context menu", () => {
     useContextMenuStore().activate(menuEntry("Rename…")!);
     await flushPromises();
     const dialog = wrapper.get("[data-test='rename-dialog']");
-    expect(dialog.text()).toContain("Rename print");
+    expect(dialog.text()).toContain("Rename picture");
     await dialog.get("input").setValue("Bottled storm");
     await dialog.get("[data-test='rename-save']").trigger("click");
     await flushPromises();
@@ -871,7 +871,7 @@ describe("Albums scope", () => {
   it("hides collection members from Prints and search while preserving drill-in", async () => {
     const { wrapper, gallery } = await mountView("/library?scope=collections");
     await wrapper.get("[data-test='collection-card'][data-slug='smurfs']").trigger("contextmenu");
-    useContextMenuStore().activate(menuEntry("Hide from Library")!);
+    useContextMenuStore().activate(menuEntry("Hide from My images")!);
     await flushPromises();
     expect(org.updateCollectionHidden).toHaveBeenCalledWith(PLATO, "col-smurfs", true);
     expect(

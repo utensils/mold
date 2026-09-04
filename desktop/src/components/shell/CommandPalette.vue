@@ -31,6 +31,9 @@ import {
   type SearchableCatalogEntry,
 } from "@studio/lib/modelSearch";
 import { newGenerateForm, applyModelDefaults } from "../../lib/generateForm";
+import { useGenerateFormStore } from "../../stores/generateForm";
+import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { batchLockedForForm, canRepeatPrint } from "../../lib/variations";
 import type { ModelEntry } from "../../lib/api/types";
 
 interface Command extends Matchable {
@@ -57,6 +60,15 @@ const generation = useGenerationStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
 const appPrefs = useAppPrefsStore();
+const generateForm = useGenerateFormStore();
+/** The composer's own recipe is New image's to resolve; the palette asks the
+ *  form's family and model, the coarse answer every other surface uses. */
+const batchLocked = computed(() =>
+  batchLockedForForm(
+    generateForm.form,
+    generationCapabilitiesForFamily(generateForm.form.family, generateForm.form.model),
+  ),
+);
 // The same queue authority Space and the sidebar act on, so the palette can
 // never pause a different machine than the status bar's hint promises.
 const queueCommands = useQueueCommands();
@@ -297,16 +309,6 @@ const staticCommands = computed<Command[]>(() => {
       key: shortcutLabel("↩"),
       run: () => {
         ui.generate();
-        close();
-      },
-    },
-    {
-      id: "act-variations",
-      title: "Make 4 variations of the last picture",
-      keywords: ["batch", "again", "more", "siblings", "four"],
-      key: altShortcutLabel("↩"),
-      run: () => {
-        ui.makeVariations();
         go("/create");
       },
     },
@@ -379,6 +381,18 @@ const staticCommands = computed<Command[]>(() => {
       },
     },
   ];
+  if (canRepeatPrint(generation.active, batchLocked.value)) {
+    cmds.push({
+      id: "act-variations",
+      title: "Make 4 variations of the last picture",
+      keywords: ["batch", "again", "more", "siblings", "four"],
+      key: altShortcutLabel("↩"),
+      run: () => {
+        ui.makeVariations();
+        go("/create");
+      },
+    });
+  }
   if (queueCommands.canPause.value) {
     cmds.push({
       id: "queue-pause",

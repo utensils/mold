@@ -16,6 +16,7 @@ vi.mock("@studio/api/chains", () => ({
 }));
 
 import SequenceComposer from "./SequenceComposer.vue";
+import type { SequenceConfirmation } from "../../lib/sequenceTimeline";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
@@ -286,7 +287,9 @@ describe("SequenceComposer — plan and tools", () => {
     );
     const readout = wrapper.get("[data-test='sequence-fit']").text().replace(/\s+/g, " ");
     expect(readout).toContain("2 scenes · 50 frames · 2.1s to render");
-    expect(readout).toContain("12.0 GB of graphics memory");
+    // Decimal GB, the app's one byte unit: the machine card and the status
+    // bar read the same number the same way.
+    expect(readout).toContain("12.9 GB of graphics memory");
     expect(wrapper.get("[data-test='sequence-validation-plan']").text()).toContain(
       "Join normalized",
     );
@@ -449,8 +452,17 @@ describe("SequenceComposer — edit sessions", () => {
   });
 });
 
+/**
+ * The timeline decides what it needs confirmed and the workbench renders the
+ * dialog: the bench strip declares `container-type: size`, so a dialog inside
+ * it would centre in a 320px strip instead of over the app.
+ */
+function pendingConfirmation(wrapper: ReturnType<typeof mountComposer>) {
+  return wrapper.emitted("update:confirmation")?.at(-1)?.[0] as SequenceConfirmation | null;
+}
+
 describe("SequenceComposer — clear sequence", () => {
-  it("confirms, then resets to two fresh clips and stays in Sequence", async () => {
+  it("asks first, then resets to two fresh clips and stays in Sequence", async () => {
     const draft = seedDraft(["clip one", "clip two"]);
     draft.addClip(25);
     draft.clips[2]!.prompt = "clip three";
@@ -458,28 +470,29 @@ describe("SequenceComposer — clear sequence", () => {
     const wrapper = mountComposer();
 
     await wrapper.get("[data-test='sequence-clear']").trigger("click");
-    // The confirm dialog teleports to <body>; blunt copy names the count.
-    const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Clear the clip?");
-    expect(dialog?.textContent).toContain("Removes all 3 scenes");
+    const pending = pendingConfirmation(wrapper)!;
+    expect(pending.title).toBe("Clear the clip?");
+    expect(pending.message).toContain("Removes all 3 scenes");
+    expect(wrapper.find("[data-test='confirm-dialog']").exists()).toBe(false);
 
-    (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
+    pending.confirm();
     await flushPromises();
 
     expect(draft.clips).toHaveLength(2);
     expect(draft.clips.every((clip) => clip.prompt === "")).toBe(true);
     expect(draft.enableAudio).toBe(false);
     expect(draft.output).toBe("sequence");
-    expect(document.querySelector("[data-test='confirm-dialog']")).toBeNull();
+    expect(pendingConfirmation(wrapper)).toBeNull();
   });
 
   it("cancel keeps every clip", async () => {
     const draft = seedDraft(["clip one", "clip two"]);
     const wrapper = mountComposer();
     await wrapper.get("[data-test='sequence-clear']").trigger("click");
-    (document.querySelector("[data-test='confirm-cancel']") as HTMLElement).click();
+    pendingConfirmation(wrapper)!.cancel();
     await flushPromises();
     expect(draft.clips.map((clip) => clip.prompt)).toEqual(["clip one", "clip two"]);
+    expect(pendingConfirmation(wrapper)).toBeNull();
   });
 
   it("clearing during an edit session ends the session without emitting", async () => {
@@ -496,9 +509,9 @@ describe("SequenceComposer — clear sequence", () => {
     );
     const wrapper = mountComposer();
     await wrapper.get("[data-test='sequence-clear']").trigger("click");
-    const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Ends the edit session");
-    (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
+    const pending = pendingConfirmation(wrapper)!;
+    expect(pending.message).toContain("Ends the edit session");
+    pending.confirm();
     await flushPromises();
     expect(draft.editing).toBeNull();
     expect(wrapper.emitted("duplicate")).toBeUndefined();
@@ -648,10 +661,9 @@ describe("SequenceComposer — context menus", () => {
     menuItem("Remove clip").action!();
     await flushPromises();
     // Removing a scene asks first, with the plain shared confirm.
-    expect(document.querySelector("[data-test='confirm-dialog']")?.textContent).toContain(
-      "Remove this scene?",
-    );
-    (document.querySelector("[data-test='confirm-accept']") as HTMLElement).click();
+    const pending = pendingConfirmation(wrapper)!;
+    expect(pending.title).toBe("Remove this scene?");
+    pending.confirm();
     await flushPromises();
     expect(draft.clips.some((clip) => clip.id === removed)).toBe(false);
   });

@@ -315,14 +315,23 @@ const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
 // server's, never a client constant.
 const canvasless = computed(() => caps.value.canvasless || outputShape.value.canvasless);
 const meshProfile = computed(() => caps.value.mesh ?? null);
-const octreeOptions = computed(() =>
-  meshDetailLadder(meshProfile.value?.octree_resolutions, meshProfile.value?.octree_default),
-);
 /** `null` on the form means "use the profile default", and the default is
  * the segment that reads as chosen. */
 const octreeValue = computed(
   () => props.form.mesh.octreeResolution ?? meshProfile.value?.octree_default ?? 0,
 );
+const octreeOptions = computed(() => {
+  const ladder = meshDetailLadder(
+    meshProfile.value?.octree_resolutions,
+    meshProfile.value?.octree_default,
+  );
+  // A print made at a rung the three-step ladder skips — 192 or 320, from the
+  // CLI, an older client or a reuse — must stay visible rather than leave the
+  // control with nothing selected while the truth line reads `octree 192`.
+  const current = octreeValue.value;
+  if (current <= 0 || ladder.some((step) => step.value === current)) return ladder;
+  return [...ladder, { value: current, label: String(current) }].sort((a, b) => a.value - b.value);
+});
 const thresholdControl = computed(() => meshProfile.value?.threshold ?? null);
 const thresholdValue = computed(
   () => props.form.mesh.threshold ?? thresholdControl.value?.default ?? 0,
@@ -848,8 +857,8 @@ defineExpose({ setOutputMode });
           type="button"
           class="ms-inspector__reset"
           data-test="settings-reset"
-          title="Reset settings to model defaults"
-          aria-label="Reset settings to model defaults"
+          title="Reset to the style's defaults"
+          aria-label="Reset to the style's defaults"
           @click="resetSettings"
         >
           <Icon name="refresh" :size="12" />
@@ -1316,8 +1325,6 @@ defineExpose({ setOutputMode });
         :camera-controls="cameraControls"
         :camera-controls-loaded="cameraControlsLoaded"
         :camera-unsupported-reason="cameraUnsupportedReason"
-        :lora-route="loraRoute"
-        @append-word="emit('append-word', $event)"
         @canvas-intent="emit('canvas-intent', $event)"
       />
     </div>

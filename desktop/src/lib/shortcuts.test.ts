@@ -5,9 +5,9 @@ import {
   allowsNativeSelectAll,
   isSelectAllChord,
   overlayOwnsKeyboard,
-  resolveBareShellShortcut,
+  resolveFocusSensitiveShortcut,
   resolveShellShortcut,
-  type BareKeyContext,
+  type ShellKeyContext,
 } from "./shortcuts";
 
 const key = (k: string, mods: Partial<Parameters<typeof resolveShellShortcut>[0]> = {}) => ({
@@ -48,15 +48,10 @@ describe("resolveShellShortcut", () => {
     expect(resolveMacShortcut(key("r"))).toEqual({ kind: "randomize-seed" });
   });
 
-  it("maps ⌥↩ to four variations of the last picture, on every platform", () => {
+  it("leaves ⌥↩ to the focus-sensitive map, so a field can claim it", () => {
     const chord = key("Enter", { metaKey: false, altKey: true });
-    expect(resolveMacShortcut(chord)).toEqual({ kind: "make-variations" });
-    expect(resolveShellShortcut(chord, "windows")).toEqual({ kind: "make-variations" });
-    // The primary modifier is Generate's chord, not this one.
-    expect(resolveMacShortcut(key("Enter", { altKey: true }))).toBeNull();
-    expect(resolveMacShortcut(key("Enter", { metaKey: false, altKey: true, shiftKey: true }))).toBe(
-      null,
-    );
+    expect(resolveMacShortcut(chord)).toBeNull();
+    expect(resolveShellShortcut(chord, "windows")).toBeNull();
   });
 
   it("maps ⇧⌘C to copy seed", () => {
@@ -102,8 +97,8 @@ describe("resolveShellShortcut", () => {
   });
 });
 
-describe("resolveBareShellShortcut", () => {
-  const space = (over: Partial<Parameters<typeof resolveBareShellShortcut>[0]> = {}) => ({
+describe("resolveFocusSensitiveShortcut", () => {
+  const space = (over: Partial<Parameters<typeof resolveFocusSensitiveShortcut>[0]> = {}) => ({
     key: " ",
     metaKey: false,
     ctrlKey: false,
@@ -111,7 +106,7 @@ describe("resolveBareShellShortcut", () => {
     shiftKey: false,
     ...over,
   });
-  const context = (over: Partial<BareKeyContext> = {}): BareKeyContext => ({
+  const context = (over: Partial<ShellKeyContext> = {}): ShellKeyContext => ({
     target: null,
     overlayOpen: false,
     route: "/create",
@@ -119,39 +114,79 @@ describe("resolveBareShellShortcut", () => {
   });
 
   it("pauses the queue on a bare Space outside a field", () => {
-    expect(resolveBareShellShortcut(space(), context())).toEqual({ kind: "toggle-queue-pause" });
+    expect(resolveFocusSensitiveShortcut(space(), context())).toEqual({
+      kind: "toggle-queue-pause",
+    });
   });
 
   it("leaves Space to the field being typed in", () => {
     for (const tag of ["input", "textarea", "select"]) {
       const el = document.createElement(tag);
-      expect(resolveBareShellShortcut(space(), context({ target: el })), tag).toBeNull();
+      expect(resolveFocusSensitiveShortcut(space(), context({ target: el })), tag).toBeNull();
     }
     const editable = document.createElement("div");
     editable.setAttribute("contenteditable", "true");
     document.body.appendChild(editable);
-    expect(resolveBareShellShortcut(space(), context({ target: editable }))).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space(), context({ target: editable }))).toBeNull();
   });
 
   it("leaves Space to a focused button, which owns it as its own activation", () => {
     expect(
-      resolveBareShellShortcut(space(), context({ target: document.createElement("button") })),
+      resolveFocusSensitiveShortcut(space(), context({ target: document.createElement("button") })),
     ).toBeNull();
     const row = document.createElement("div");
     row.setAttribute("role", "button");
-    expect(resolveBareShellShortcut(space(), context({ target: row }))).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space(), context({ target: row }))).toBeNull();
   });
 
   it("stands down under an overlay, and in My images where Space is Quick Look", () => {
-    expect(resolveBareShellShortcut(space(), context({ overlayOpen: true }))).toBeNull();
-    expect(resolveBareShellShortcut(space(), context({ route: "/library" }))).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space(), context({ overlayOpen: true }))).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space(), context({ route: "/library" }))).toBeNull();
   });
 
   it("ignores a modified or repeating Space, and every other bare key", () => {
-    expect(resolveBareShellShortcut(space({ metaKey: true }), context())).toBeNull();
-    expect(resolveBareShellShortcut(space({ shiftKey: true }), context())).toBeNull();
-    expect(resolveBareShellShortcut(space({ repeat: true }), context())).toBeNull();
-    expect(resolveBareShellShortcut(space({ key: "p" }), context())).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space({ metaKey: true }), context())).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space({ shiftKey: true }), context())).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space({ repeat: true }), context())).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space({ key: "p" }), context())).toBeNull();
+  });
+
+  const optionReturn = () => space({ key: "Enter", altKey: true });
+
+  it("makes four variations on ⌥↩ outside a field, on every route", () => {
+    expect(resolveFocusSensitiveShortcut(optionReturn(), context())).toEqual({
+      kind: "make-variations",
+    });
+    expect(resolveFocusSensitiveShortcut(optionReturn(), context({ route: "/library" }))).toEqual({
+      kind: "make-variations",
+    });
+  });
+
+  it("leaves Option+Return to the prompt, where it inserts a newline", () => {
+    const textarea = document.createElement("textarea");
+    expect(resolveFocusSensitiveShortcut(optionReturn(), context({ target: textarea }))).toBeNull();
+  });
+
+  it("stands down on ⌥↩ under an open dialog", () => {
+    expect(
+      resolveFocusSensitiveShortcut(optionReturn(), context({ overlayOpen: true })),
+    ).toBeNull();
+  });
+
+  it("claims ⌥↩ only without the primary modifier or Shift", () => {
+    expect(
+      resolveFocusSensitiveShortcut(
+        space({ key: "Enter", altKey: true, metaKey: true }),
+        context(),
+      ),
+    ).toBeNull();
+    expect(
+      resolveFocusSensitiveShortcut(
+        space({ key: "Enter", altKey: true, shiftKey: true }),
+        context(),
+      ),
+    ).toBeNull();
+    expect(resolveFocusSensitiveShortcut(space({ key: "Enter" }), context())).toBeNull();
   });
 });
 

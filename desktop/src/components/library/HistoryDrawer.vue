@@ -245,7 +245,7 @@ function runMenu(entry: MergedPrint): MenuEntry[] {
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
           ),
     },
-    { label: "Show in library", action: () => emit("close") },
+    { label: "Show in My images", action: () => emit("close") },
   ];
 }
 
@@ -524,7 +524,7 @@ const sequenceHostLabel = computed(() =>
 const clearSequencesLabel = computed(() => {
   if (!confirmingClearSequences.value) return "Clear inactive";
   const n = inactiveSequenceCount.value;
-  return `Delete ${n} inactive sequence${n === 1 ? "" : "s"} on ${sequenceHostLabel.value}?`;
+  return `Delete ${n} inactive clip${n === 1 ? "" : "s"} on ${sequenceHostLabel.value}?`;
 });
 
 async function clearInactiveSequences() {
@@ -540,7 +540,7 @@ async function clearInactiveSequences() {
       ? await chains.clearInactive(scope)
       : await chains.clearInactive();
     if (failed > 0) toasts.push(`Cleared ${cleared}, ${failed} could not be deleted`, "error");
-    else toasts.push(`Cleared ${cleared} sequence${cleared === 1 ? "" : "s"}`);
+    else toasts.push(`Cleared ${cleared} clip${cleared === 1 ? "" : "s"}`);
   } catch (err) {
     toasts.push(String(err), "error");
   } finally {
@@ -636,7 +636,7 @@ async function cleanUpDiskConfirmed() {
           :class="tab === 'sequences' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('sequences')"
         >
-          Sequences
+          Clips
         </button>
       </div>
 
@@ -748,8 +748,8 @@ async function cleanUpDiskConfirmed() {
         <EmptyState
           v-if="sequenceRows.length === 0"
           data-test="sequences-empty"
-          headline="No sequences yet"
-          detail="A sequence you develop keeps its job here — watch it, edit its clips, or clear it out."
+          headline="No clips yet"
+          detail="A clip you make keeps its job here — watch it, edit its scenes, or clear it out."
           action="Go to New image"
           @action="
             emit('close');
@@ -806,7 +806,7 @@ async function cleanUpDiskConfirmed() {
                 : 'text-fg-2 hover:text-error'
             "
             :disabled="clearingSequences"
-            title="Delete every sequence job that isn't running or queued"
+            title="Delete every clip job that isn't running or being made"
             @blur="confirmingClearSequences = false"
             @click="clearInactiveSequences"
           >
@@ -816,7 +816,7 @@ async function cleanUpDiskConfirmed() {
             type="button"
             data-test="seq-cleanup-disk"
             class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg"
-            title="Sweep ephemeral jobs and prune artifact directories"
+            title="Free the disk space cached scenes are holding"
             @click="cleanUpDisk"
           >
             Clean up disk
@@ -894,8 +894,8 @@ async function cleanUpDiskConfirmed() {
        would size to the column instead of the frame. -->
   <ConfirmDialog
     :open="confirmDeleteSequence !== null"
-    title="Delete this sequence?"
-    :message="`Removes the job and its cached clips${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished video in the Library is kept.`"
+    title="Delete this clip?"
+    :message="`Removes the job and its cached scenes${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished clip in My images is kept.`"
     confirm-label="Delete"
     danger
     @confirm="deleteSequenceConfirmed"
@@ -903,8 +903,8 @@ async function cleanUpDiskConfirmed() {
   />
   <ConfirmDialog
     :open="confirmCleanUpDisk"
-    title="Clean up sequence cache?"
-    message="This discards cached scene media used for scene playback and sequence editing. Final videos in the Library remain."
+    title="Clean up the clip cache?"
+    message="This discards the cached scenes used for playback and editing. Finished clips in My images stay."
     confirm-label="Clean up"
     danger
     @confirm="cleanUpDiskConfirmed"

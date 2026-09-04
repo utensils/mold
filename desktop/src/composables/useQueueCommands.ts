@@ -61,10 +61,18 @@ export function useQueueCommands(): QueueCommands {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
 
+  /**
+   * Pause or resume the display host's queue. The snapshot is refreshed FIRST:
+   * `paused` is read off `jobs.queues`, and pausing a host whose snapshot has
+   * not been read yet writes nothing back — so a second Space would pause
+   * again instead of resuming, leaving the queue stopped with no way back.
+   */
   async function togglePause() {
     const host = hostStatus.displayHost;
     if (!host) return;
     try {
+      await jobs.refreshHost(host);
+      if (!canPause.value) return;
       if (paused.value) await jobs.resume(host.id);
       else await jobs.pause(host.id);
     } catch (error) {

@@ -113,7 +113,7 @@ async function selectSegment(
   wrapper: Awaited<ReturnType<typeof mountView>>,
   label: "Ready to use" | "Browse more",
 ) {
-  const seg = wrapper.get('[aria-label="Model view"]');
+  const seg = wrapper.get('[aria-label="Styles view"]');
   const button = seg.findAll("button").find((b) => b.text().startsWith(label));
   await button!.trigger("click");
   await flushPromises();

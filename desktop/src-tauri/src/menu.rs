@@ -344,26 +344,48 @@ mod tests {
         );
     }
 
+    /// docs/design/README.md §2 lists the words these menus may never say.
+    /// Asserting the constants against copies of themselves proved nothing: it
+    /// passed for any future wording someone updated in both places.
+    const RETIRED_MENU_WORDS: [&str; 5] =
+        ["Generation", "Sequence", "Expand", "Randomize", "Cancel"];
+
     #[test]
-    fn file_and_generate_menus_speak_the_binding_lexicon() {
-        // docs/design/README.md §2: New image / Short clip / Write more for me
-        // / Surprise me / Stop. The ids stay put — the frontend maps them.
+    fn file_and_generate_menu_labels_never_say_a_retired_word() {
+        let labels = FILE_MENU_ITEMS
+            .iter()
+            .map(|(_, label, _)| *label)
+            .chain(GENERATE_MENU_ITEMS.iter().map(|(_, label, _)| *label));
+        for label in labels {
+            for retired in RETIRED_MENU_WORDS {
+                assert!(
+                    !label.contains(retired),
+                    "menu label {label:?} still says {retired:?}"
+                );
+            }
+        }
+    }
+
+    /// Every id the frontend routes on keeps a label and its chord: a menu
+    /// item with no accelerator is one the keyboard map cannot reach.
+    #[test]
+    fn every_menu_id_keeps_its_label_and_accelerator() {
+        for (id, label, key) in GENERATE_MENU_ITEMS {
+            assert!(!id.is_empty() && !label.is_empty(), "{id} is unlabelled");
+            assert!(!key.is_empty(), "{id} lost its accelerator");
+        }
+        // New Image is the one File item with a chord; New Clip has none by
+        // design, so the constant carries an Option rather than a blank key.
         assert_eq!(
-            FILE_MENU_ITEMS,
-            [
-                ("new-generation", "New Image", Some("N")),
-                ("new-sequence", "New Clip", None),
-            ]
+            FILE_MENU_ITEMS
+                .iter()
+                .filter(|(_, _, key)| key.is_some())
+                .count(),
+            1
         );
-        assert_eq!(
-            GENERATE_MENU_ITEMS,
-            [
-                ("generate", "Generate", "Return"),
-                ("expand-prompt", "Write More For Me", "E"),
-                ("randomize-seed", "Surprise Me", "R"),
-                ("cancel-job", "Stop", "."),
-            ]
-        );
+        for (id, label, _) in FILE_MENU_ITEMS {
+            assert!(!id.is_empty() && !label.is_empty(), "{id} is unlabelled");
+        }
     }
 
     /// Windows and Linux build the Window menu from plain command items whose

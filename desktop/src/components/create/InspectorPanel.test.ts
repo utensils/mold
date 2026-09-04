@@ -818,7 +818,7 @@ describe("InspectorPanel — reset to model defaults", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("sdxl") } });
     const reset = wrapper.get('[data-test="settings-reset"]');
     expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
-    expect(reset.attributes("aria-label")).toBe("Reset settings to model defaults");
+    expect(reset.attributes("aria-label")).toBe("Reset to the style's defaults");
   });
 
   it("restores the model's defaults while preserving prompt/model and resetting Batch", async () => {
@@ -1396,7 +1396,7 @@ describe("InspectorPanel — a restored model no machine has", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("z-image-turbo:q6");
-    expect(wrapper.get('[data-test="selected-model-missing"]').text()).toBe("Not installed");
+    expect(wrapper.get('[data-test="selected-model-missing"]').text()).toBe("Not on this machine");
   });
 
   it("offers the pull for that exact id when its picker row is chosen", async () => {
@@ -1414,9 +1414,9 @@ describe("InspectorPanel — a restored model no machine has", () => {
     expect(form.model).toBe("z-image-turbo:q6");
   });
 
-  it("shows Choose a model only when nothing is selected at all", () => {
+  it("shows Choose a style only when nothing is selected at all", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Choose a model");
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Choose a style");
     expect(wrapper.find('[data-test="selected-model-missing"]').exists()).toBe(false);
   });
 });

@@ -83,7 +83,7 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
     class="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border bg-chrome px-3.5 py-2"
     data-test="library-chip-row"
     role="group"
-    aria-label="Library filters"
+    aria-label="My images filters"
   >
     <template v-if="collectionName">
       <button

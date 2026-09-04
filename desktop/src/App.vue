@@ -27,7 +27,7 @@ import {
   allowsNativeSelectAll,
   isSelectAllChord,
   overlayOwnsKeyboard,
-  resolveBareShellShortcut,
+  resolveFocusSensitiveShortcut,
   resolveShellShortcut,
 } from "./lib/shortcuts";
 import { useQueueCommands } from "./composables/useQueueCommands";
@@ -37,6 +37,7 @@ import { useContextMenuStore } from "./stores/contextMenu";
 import { useEventsStore } from "./stores/events";
 import { useHostsStore } from "./stores/hosts";
 import { useHostStatusStore } from "./stores/hostStatus";
+import { useJobsStore } from "./stores/jobs";
 import { useGenerationStore } from "./stores/generation";
 import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useToastStore } from "./stores/toasts";
@@ -50,6 +51,7 @@ const contextMenu = useContextMenuStore();
 const events = useEventsStore();
 const hostsStore = useHostsStore();
 const hostStatus = useHostStatusStore();
+const jobs = useJobsStore();
 const libraryPrefs = useLibraryPrefsStore();
 
 // App-wide server-event subscription (live gallery). Re-probe whenever the
@@ -183,7 +185,7 @@ function onKeydown(e: KeyboardEvent) {
   const route = router.currentRoute.value.path;
   const action =
     resolveShellShortcut(e) ??
-    resolveBareShellShortcut(e, {
+    resolveFocusSensitiveShortcut(e, {
       target: document.activeElement,
       overlayOpen: ui.paletteOpen || contextMenu.visible || overlayOwnsKeyboard(),
       route,
@@ -255,12 +257,17 @@ async function listenForMenu() {
         return void router.push("/create");
       case "new-sequence":
         return void router.push({ path: "/create", query: { output: "sequence" } });
+      // New image consumes these intents, so every raiser has to route there:
+      // an intent left pending would fire on the next visit instead.
       case "generate":
-        return ui.generate();
+        ui.generate();
+        return void router.push("/create");
       case "expand-prompt":
-        return ui.expandPrompt();
+        ui.expandPrompt();
+        return void router.push("/create");
       case "randomize-seed":
-        return ui.randomizeSeed();
+        ui.randomizeSeed();
+        return void router.push("/create");
       case "cancel-job":
         if (generation.active)
           void generation
@@ -324,6 +331,10 @@ onMounted(async () => {
   // Synchronous and first: the Create form's auto-tag mirror has to be right
   // before any request can be built from it, whichever workspace opens.
   libraryPrefs.init();
+  // Every host's queue snapshot, on every route: the status bar, the sidebar
+  // rail and Space all read `jobs.queues`, so the poll belongs to the shell
+  // rather than to Machines, which a launch may never open.
+  jobs.startPolling();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
   window.addEventListener("selectstart", suppressChromeSelection);
@@ -364,6 +375,7 @@ onUnmounted(() => {
   window.removeEventListener("focus", reconcileDurableOnWake);
   document.removeEventListener("visibilitychange", reconcileDurableOnWake);
   unlistenNotificationAction?.();
+  jobs.stopPolling();
   hostStatus.stop();
 });
 </script>

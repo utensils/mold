@@ -765,6 +765,9 @@ describe("Sidebar queue controls", () => {
     const jobs = useJobsStore();
     jobs.queues.local = { entries: [], caps: { canPause: true }, paused: false } as never;
     const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    // Toggling reads the host's queue first, so pause and resume decide
+    // against what the host says rather than a snapshot nobody fetched.
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined as never);
     await flushPromises();
 
     await wrapper.get("[data-test='queue-pause']").trigger("click");
@@ -797,6 +800,9 @@ describe("Sidebar queue controls", () => {
     const jobs = useJobsStore();
     jobs.queues.local = { entries: [], caps: { canPause: true }, paused: false } as never;
     const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    // Toggling reads the host's queue first, so pause and resume decide
+    // against what the host says rather than a snapshot nobody fetched.
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined as never);
     await flushPromises();
 
     await wrapper.get("[data-test='queue-active-pause']").trigger("click");

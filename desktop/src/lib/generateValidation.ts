@@ -138,7 +138,7 @@ export function mobileMediaBudgetValidationError(form: GenerateForm): string | n
 export function stepsValidationError(value: number): string | null {
   return Number.isInteger(value) && value >= 1 && value <= 100
     ? null
-    : "Steps must be a whole number from 1 to 100.";
+    : "Detail must be a whole number of passes from 1 to 100.";
 }
 
 export function profileStepsValidationError(

@@ -127,6 +127,24 @@ describe("ComposerCard", () => {
     expect(form.prompt).toBe("a lighthouse");
   });
 
+  it("says Generate in one word, and Cancel while a submission is in flight", () => {
+    // The mono shortcut rides the button; the word beside it is the label.
+    expect(mountComposer(baseForm()).get("[data-test='generate-button']").text()).toContain(
+      "Generate",
+    );
+    expect(
+      mountComposer(baseForm(), { submitting: true, buttonLabel: "Cancel" })
+        .get("[data-test='generate-button']")
+        .text(),
+    ).toContain("Cancel");
+  });
+
+  it("puts the queue depth beside the button, never inside it", () => {
+    const wrapper = mountComposer(baseForm(), { queuedNote: "+3 queued" });
+    expect(wrapper.get("[data-test='generate-queued-note']").text()).toBe("+3 queued");
+    expect(wrapper.get("[data-test='generate-button']").text()).not.toContain("queued");
+  });
+
   it("can disable Generate without displaying obvious guidance", () => {
     const emptyForm = baseForm();
     emptyForm.prompt = "";

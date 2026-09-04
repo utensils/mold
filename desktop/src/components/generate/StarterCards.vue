@@ -28,11 +28,11 @@ async function pull(model: string) {
     await downloads.createDownload(model);
     void downloads.subscribe().catch((error) => {
       const detail = error instanceof Error ? error.message : String(error);
-      toasts.push(`Pull started, but progress is unavailable — ${detail}`, "error");
+      toasts.push(`It is downloading, but progress is unavailable — ${detail}`, "error");
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    toasts.push(`Couldn't pull ${model} — ${detail}`, "error");
+    toasts.push(`Couldn't get ${model} — ${detail}`, "error");
   }
 }
 </script>
@@ -40,10 +40,10 @@ async function pull(model: string) {
 <template>
   <div data-test="starter-cards" class="flex h-full flex-col items-center justify-center p-8">
     <h1 class="font-sans font-semibold text-xl font-bold text-fg" style="font-stretch: 90%">
-      Develop your first print.
+      Make your first picture.
     </h1>
     <p class="mt-2 max-w-md text-center text-base text-fg-2">
-      mold runs models locally on your machine's GPU. Pull one to start.
+      mold makes pictures on this machine's own graphics card. Get a style to start.
     </p>
 
     <div class="mt-8 grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-3">
@@ -79,7 +79,7 @@ async function pull(model: string) {
             class="font-mono text-micro text-fg-dim whitespace-nowrap"
             data-test="starter-pulling"
           >
-            Pulling…
+            Getting it…
             {{
               Math.round(
                 percent(jobFor(starter.model)!.bytes_done, jobFor(starter.model)!.bytes_total),
@@ -100,13 +100,13 @@ async function pull(model: string) {
           :disabled="pulling.has(starter.model)"
           @click="pull(starter.model)"
         >
-          Pull
+          Get it
         </button>
       </div>
     </div>
 
     <button type="button" class="mt-6 text-sm text-sapphire hover:text-fg" @click="emit('browse')">
-      Browse all models
+      Browse more
     </button>
   </div>
 </template>

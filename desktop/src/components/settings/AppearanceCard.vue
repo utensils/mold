@@ -38,8 +38,8 @@ const BEHAVIOUR_TOGGLES = [
   },
   {
     key: "saveRemoteOutputs",
-    label: "Save remote prints locally",
-    help: "Also save generations from remote hosts and RunPod into this device's gallery.",
+    label: "Save pictures from other machines here",
+    help: "Keep a copy of anything another machine or a rented GPU makes in My images on this device.",
   },
   {
     key: "restoreLastRoute",

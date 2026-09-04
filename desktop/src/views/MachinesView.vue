@@ -17,10 +17,11 @@ import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { countPhrase } from "../composables/useShellSubtitle";
 import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
-import { gpuFleetLabel, gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
+import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
 import { formatGBPair, percent } from "../lib/format";
-import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
+import { hostIdFromUrl } from "../lib/hosts";
+import { machineSentence } from "../lib/machineSentence";
 import { podGpuName, podProxyUrl, runPodForHostUrl, type RunPodPod } from "../lib/runpod";
 import { useHostsStore, type HostView } from "../stores/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
@@ -269,28 +270,10 @@ function hostGpus(id: string) {
   return gpuSnapshotsFromWorkers(telemetry?.gpuInfo, telemetry?.gpuWorkers);
 }
 
-/** "RTX 4090 · CUDA" — the card's hardware, or nothing before telemetry. */
-function hardwareLabel(host: HostView): string {
-  const gpus = hostGpus(host.id);
-  const fleet = gpuFleetLabel(gpus);
-  if (!fleet) return "";
-  const first = gpus[0];
-  return host.kind === "local" && first
-    ? `${fleet} · ${(first.backend ?? inferBackendFromGpuName(first.name)).toUpperCase()}`
-    : fleet;
-}
-
-/** The plain sentence under the name: what it is and where it lives. */
+/** The plain sentence under the name: what it is and where it lives. The
+ *  machine pane says the same one, with its uptime on the end. */
 function hostSentence(host: HostView): string {
-  const address = host.baseUrl?.replace(/^https?:\/\//, "") ?? "";
-  const where =
-    host.kind === "local"
-      ? "This machine — works without a network."
-      : /\.runpod\.net/.test(address)
-        ? "Rented cloud GPU — stop it to stop paying."
-        : `On your network at ${address}.`;
-  const hardware = hardwareLabel(host);
-  return hardware ? `${hardware} — ${where.charAt(0).toLowerCase()}${where.slice(1)}` : where;
+  return machineSentence(host, hostGpus(host.id), { address: true });
 }
 
 /** The meter directly above says what this measures, so the reading is just

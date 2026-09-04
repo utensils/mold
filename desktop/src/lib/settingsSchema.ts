@@ -303,7 +303,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     key: "expand.model",
     section: "expansion",
     label: "Local expansion model",
-    help: "Model used by the local backend (pull it from Models if missing).",
+    help: "Model used by the local backend (get it from Styles if missing).",
     editor: "text",
   },
   {
@@ -389,8 +389,8 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
   {
     key: "env.MOLD_STEP_PREVIEW",
     section: "performance",
-    label: "Live denoise previews",
-    help: "Stream a low-fi preview of the forming image after each step. Costs ~ms per step.",
+    label: "Live previews while a picture is made",
+    help: "Stream a rough preview of the forming picture after each pass. Costs ~ms per pass.",
     editor: "select",
     options: [
       { value: "", label: "On (default)" },

@@ -95,8 +95,26 @@ describe("StatusBar", () => {
     expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 32.0 GB/64.0 GB");
   });
 
-  it("advertises the three chords the shell really binds", async () => {
+  /**
+   * Space is offered only where it does something: `jobs.pause` writes nothing
+   * back on a host that does not advertise queue pause, so advertising the
+   * chord there promises a key that quietly fails.
+   */
+  it("advertises Space only on a machine that reports a pausable queue", async () => {
     const wrapper = await mountBar();
+    connectLocal();
+    await flushPromises();
+    expect(hints(wrapper)).toEqual([
+      [shortcutLabel("↩"), "Generate"],
+      [shortcutLabel("K"), "Search"],
+    ]);
+
+    useJobsStore().queues.local = {
+      entries: [],
+      caps: { canPause: true },
+      paused: false,
+    } as never;
+    await flushPromises();
     expect(hints(wrapper)).toEqual([
       [shortcutLabel("↩"), "Generate"],
       [shortcutLabel("K"), "Search"],

@@ -1,4 +1,4 @@
-import { computed, type ComputedRef } from "vue";
+import { computed, onScopeDispose, ref, watch, type ComputedRef } from "vue";
 import { predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import { buildQueueStatusIndex, queueStatusFor, queueWorkItemFor } from "@studio/lib/queuePosition";
 import { useHostsStore } from "../stores/hosts";
@@ -22,6 +22,33 @@ export interface QueueRowContextReader {
 export function useQueueRowContext(): QueueRowContextReader {
   const hosts = useHostsStore();
   const jobs = useJobsStore();
+
+  /**
+   * A 1s clock, running only while some host predicts a finish. An ETA is a
+   * countdown, and `Date.now()` captured inside a computed only moves when the
+   * queue store is reassigned — which is a 5s poll at best, and nothing at all
+   * on a host that is quietly working, so "about 12s left" sat frozen.
+   */
+  const now = ref(Date.now());
+  const predicting = computed(() =>
+    Object.values(jobs.queues).some((snapshot) => snapshot?.plan != null),
+  );
+  let clock: ReturnType<typeof setInterval> | null = null;
+  function stopClock() {
+    if (clock !== null) clearInterval(clock);
+    clock = null;
+  }
+  watch(
+    predicting,
+    (on) => {
+      if (!on) return stopClock();
+      if (clock !== null) return;
+      now.value = Date.now();
+      clock = setInterval(() => (now.value = Date.now()), 1000);
+    },
+    { immediate: true },
+  );
+  onScopeDispose(stopClock);
 
   const statusIndex = computed(() =>
     buildQueueStatusIndex(
@@ -50,7 +77,7 @@ export function useQueueRowContext(): QueueRowContextReader {
   const contextFor = computed(() => {
     const index = statusIndex.value;
     const queues = jobs.queues;
-    const now = Date.now();
+    const at = now.value;
     return (row: QueueRow): QueueRowContext => {
       const ref = serverRef(row);
       if (!ref) return {};
@@ -59,7 +86,7 @@ export function useQueueRowContext(): QueueRowContextReader {
         wait: queueStatusFor(index, ref.hostId, ref.id),
         etaSeconds:
           typeof finish === "number" && Number.isFinite(finish)
-            ? Math.max(0, Math.round((finish - now) / 1000))
+            ? Math.max(0, Math.round((finish - at) / 1000))
             : null,
         queuePaused: queues[ref.hostId]?.paused === true,
       };
@@ -67,13 +94,13 @@ export function useQueueRowContext(): QueueRowContextReader {
   });
 
   const totalEtaSeconds = computed(() => {
-    const now = Date.now();
+    const at = now.value;
     let last: number | null = null;
     for (const snapshot of Object.values(jobs.queues)) {
-      const at = snapshot?.plan ? predictedCompletionUnixMs(snapshot.plan, now) : null;
-      if (at !== null) last = last === null ? at : Math.max(last, at);
+      const finish = snapshot?.plan ? predictedCompletionUnixMs(snapshot.plan, at) : null;
+      if (finish !== null) last = last === null ? finish : Math.max(last, finish);
     }
-    return last === null ? null : Math.round((last - now) / 1000);
+    return last === null ? null : Math.round((last - at) / 1000);
   });
 
   return { contextFor, totalEtaSeconds };

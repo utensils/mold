@@ -194,14 +194,16 @@ function onPointerCancel() {
   color: var(--mold-text-dim);
 }
 
-/* A square 4px track: the theme's radii start at the thumb. */
+/* A square 4px track: the theme's radii start at the thumb. The control
+   border is the one ground that reads on every surface — a card group paints
+   itself on `--mold-surface`, which would swallow a track of the same value. */
 .ms-slider__input {
   -webkit-appearance: none;
   appearance: none;
   display: block;
   width: 100%;
   height: 4px;
-  background: var(--mold-surface);
+  background: var(--mold-border-control);
 }
 
 .ms-slider__track--marked .ms-slider__input {

@@ -31,7 +31,10 @@ describe("SliderRow", () => {
     expect(source).not.toContain("border-radius: 999px");
     expect(source).not.toContain("border-radius: 50%");
     expect(source).toContain("border-radius: var(--mold-radius-1)");
-    expect(source).toContain("background: var(--mold-surface)");
+    // The control border is the one track ground that reads on every surface;
+    // a card group paints itself on `--mold-surface` and would swallow it.
+    expect(source).toContain("background: var(--mold-border-control)");
+    expect(source).not.toContain("background: var(--mold-surface)");
   });
 
   it("prefers valueLabel for the readout when provided", () => {

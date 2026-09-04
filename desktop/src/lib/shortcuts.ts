@@ -36,13 +36,11 @@ export interface KeyLike {
   repeat?: boolean;
 }
 
-/** What the shell knows when a key arrives with no modifier on it. */
-export interface BareKeyContext {
+/** What the shell knows about the surface a key arrived on. */
+export interface ShellKeyContext {
   /** The element with focus, which may be entitled to the key itself. */
   target: Element | null;
-  /** Whether a modal overlay owns the keyboard. */
   overlayOpen: boolean;
-  /** The current route path. */
   route: string;
 }
 
@@ -100,7 +98,7 @@ export function allowsNativeContextMenu(el: Element | null): boolean {
 
 /**
  * Resolve a keydown into a shell-level action, or null if unhandled. Every
- * chord but ⌥↩ requires the platform primary modifier and no Alt. Route-scoped
+ * chord here requires the platform primary modifier and no Alt. Route-scoped
  * actions (such as randomize seed) are resolved here but gated by the current
  * route in the shell.
  */
@@ -109,12 +107,6 @@ export function resolveShellShortcut(
   platform: DesktopPlatform = CURRENT_PLATFORM,
 ): ShellAction | null {
   const primaryPressed = platform === "macos" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-  // ⌥↩ is the one chord that deliberately carries no primary modifier: it
-  // sits one Option away from ⌘↩ Generate because it makes the same picture
-  // four more times.
-  if (e.key === "Enter") {
-    return e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey ? { kind: "make-variations" } : null;
-  }
   if (!primaryPressed || e.altKey) return null;
   // `+` is Shift+= on standard keyboards, so recognize zoom before the
   // general shifted-shortcut gate below.
@@ -157,14 +149,23 @@ export function overlayOwnsKeyboard(root: ParentNode = document): boolean {
 }
 
 /**
- * The shell's one un-modified chord: Space pauses and resumes the queue
- * (status bar hint, README §3). It resolves only where a bare key is a
- * command — never inside a field or on a focused control, never under an
- * overlay, and never in My images, which spends Space on Quick Look.
+ * The two chords the focused element can claim before the shell does: Space
+ * pauses and resumes the queue (status bar hint, README §3), and ⌥↩ makes the
+ * canvas print four more times. Neither carries the primary modifier, so both
+ * stand down inside a field or on a focused control, and under any overlay —
+ * Option+Return is a newline in a prompt, and a dialog owns the keyboard while
+ * it is up. Space additionally stands down in My images, which spends it on
+ * Quick Look.
  */
-export function resolveBareShellShortcut(e: KeyLike, ctx: BareKeyContext): ShellAction | null {
+export function resolveFocusSensitiveShortcut(
+  e: KeyLike,
+  ctx: ShellKeyContext,
+): ShellAction | null {
+  if (ctx.overlayOpen || ownsBareKey(ctx.target)) return null;
+  if (e.key === "Enter") {
+    return e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey ? { kind: "make-variations" } : null;
+  }
   if (e.key !== " " || e.repeat) return null;
   if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
-  if (ctx.overlayOpen || ctx.route.startsWith("/library")) return null;
-  return ownsBareKey(ctx.target) ? null : { kind: "toggle-queue-pause" };
+  return ctx.route.startsWith("/library") ? null : { kind: "toggle-queue-pause" };
 }

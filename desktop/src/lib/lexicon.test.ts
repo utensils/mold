@@ -6,7 +6,6 @@ import paletteSource from "../components/shell/CommandPalette.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import appSource from "../App.vue?raw";
 import chainJobsSource from "../stores/chainJobs.ts?raw";
-import composerSource from "../components/create/ComposerCard.vue?raw";
 import expandSource from "../components/generate/ExpandControl.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import loraSource from "../components/generate/LoraStack.vue?raw";
@@ -246,12 +245,8 @@ describe("lexicon — the composer", () => {
     expect(expandSource).not.toContain("'Expand prompt'");
   });
 
-  it("keeps Generate to one word and says the queue depth beside it", () => {
-    expect(generateViewSource).toContain(
-      'const buttonLabel = computed(() => (composerSubmitting.value ? "Cancel" : "Generate"));',
-    );
+  it("says the queue depth beside Generate rather than in the button", () => {
     expect(generateViewSource).toContain("`+${generation.pending.length} queued`");
-    expect(composerSource).toContain('data-test="generate-queued-note"');
   });
 });
 
@@ -311,6 +306,127 @@ describe("lexicon — Styles and Machines", () => {
     const tray = sources.get("DownloadsTray")!;
     for (const word of ["Downloading", "Waiting", "Finished", "Failed", "Cancelled"]) {
       expect(tray, word).toContain(`"${word}"`);
+    }
+  });
+});
+
+/**
+ * The view copy the phase-2 review found still speaking the old words. Each
+ * surface is scanned for the words it may never say again, and pinned on the
+ * sentence that replaced them — including the aria labels, which are copy a
+ * person hears rather than reads.
+ */
+describe("lexicon — view copy and assistive labels", () => {
+  const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+
+  const starterCards = read("../components/generate/StarterCards.vue");
+  const modelPicker = read("../components/create/ModelPicker.vue");
+  const sequenceComposer = read("../components/create/SequenceComposer.vue");
+  const sequenceTimeline = read("./sequenceTimeline.ts");
+  const librarySource = read("../views/LibraryView.vue");
+  const lightbox = read("../components/gallery/Lightbox.vue");
+  const history = read("../components/library/HistoryDrawer.vue");
+  const fileUnder = read("../components/create/FileUnderGroup.vue");
+  const settingsSchemaSource = read("./settingsSchema.ts");
+  const validationSource = read("./generateValidation.ts");
+  const appearance = read("../components/settings/AppearanceCard.vue");
+  const chipRow = read("../components/library/LibraryChipRow.vue");
+  const libraryHeader = read("../components/library/LibraryHeader.vue");
+  const modelsView = read("../views/ModelsView.vue");
+  const hostChip = read("../components/create/HostChip.vue");
+  const hostDetail = read("../views/HostDetailView.vue");
+
+  it("greets a first run with Get it and Browse more", () => {
+    const text = templateText(starterCards);
+    expect(text).toContain("Make your first picture.");
+    expect(text).toContain("Get it");
+    expect(text).toContain("Browse more");
+    for (const banned of [/\bPull\b/, /Browse all models/, /Develop your first print/]) {
+      expect(banned.test(text), String(banned)).toBe(false);
+    }
+  });
+
+  it("calls the Style field's own copy a style, on this machine", () => {
+    expect(modelPicker).toContain('"Choose a style"');
+    expect(modelPicker).toContain("Not on this machine");
+    expect(modelPicker).toContain("Not on this machine — get it");
+    expect(modelPicker).toContain('browseLabel: "Browse more →"');
+    expect(modelPicker).not.toContain("Browse all models");
+    expect(templateText(modelPicker)).not.toContain("Not installed");
+  });
+
+  it("refuses a clip in the words of a style, on both sides of the seam", () => {
+    expect(sequenceTimeline).toContain('"Pick a video style first."');
+    expect(sequenceComposer).toContain("This style can't make a clip.");
+    expect(sequenceComposer).not.toContain("Pick a video model first.");
+    expect(sequenceComposer).not.toContain("This model can't render a clip sequence.");
+    expect(generateViewSource).toContain("Browse video styles");
+    expect(generateViewSource).toContain('"Choose a style first."');
+    expect(generateViewSource).not.toContain("Browse video models");
+    expect(generateViewSource).not.toContain("Choose an installed model before generating.");
+  });
+
+  it("names My images and a clip in every menu that acts on a print", () => {
+    expect(librarySource).toContain('"Show in My images" : "Hide from My images"');
+    expect(librarySource).toContain('label: "Edit clip"');
+    expect(librarySource).toContain('title="Rename picture"');
+    expect(lightbox).toContain('"Edit clip"');
+    for (const source of [librarySource, lightbox]) {
+      expect(source).not.toContain("Edit sequence");
+    }
+  });
+
+  it("calls the History column's third tab Clips", () => {
+    const text = templateText(history);
+    expect(text).toContain("Clips");
+    expect(text).not.toMatch(/\bSequences\b/);
+    expect(history).toContain('label: "Show in My images"');
+    expect(history).not.toContain('"Show in library"');
+  });
+
+  it("calls the thing File under files into an album", () => {
+    expect(fileUnder).toContain("New album…");
+    expect(fileUnder).toContain('aria-label="Album"');
+    expect(fileUnder).toContain('placeholder="Album name"');
+    expect(fileUnder).not.toContain("New collection…");
+    expect(fileUnder).not.toContain('aria-label="Collection"');
+  });
+
+  it("says passes and previews in Settings, and points at Styles for a download", () => {
+    expect(settingsSchemaSource).toContain("Live previews while a picture is made");
+    expect(settingsSchemaSource).toContain("after each pass");
+    expect(settingsSchemaSource).toContain("get it from Styles if missing");
+    expect(settingsSchemaSource).not.toContain("Live denoise previews");
+    expect(settingsSchemaSource).not.toContain("pull it from Models");
+  });
+
+  it("names the Detail slider in its own error", () => {
+    expect(validationSource).toContain("Detail must be a whole number of passes from 1 to 100.");
+    expect(validationSource).not.toContain("Steps must be a whole number");
+  });
+
+  it("says where pictures from other machines are kept", () => {
+    expect(appearance).toContain("Save pictures from other machines here");
+    expect(appearance).not.toContain("Save remote prints locally");
+    expect(appearance).not.toMatch(/remote hosts/);
+  });
+
+  it("speaks the lexicon in every assistive label the review named", () => {
+    expect(chipRow).toContain('aria-label="My images filters"');
+    expect(libraryHeader).toContain('label="My images scope"');
+    expect(modelsView).toContain('label="Styles view"');
+    expect(hostChip).toContain('aria-label="Where it runs"');
+    expect(inspectorSource).toContain('aria-label="Reset to the style\'s defaults"');
+    expect(hostDetail).toContain('aria-label="Disk for styles"');
+    for (const [name, source, banned] of [
+      ["LibraryChipRow", chipRow, "Library filters"],
+      ["LibraryHeader", libraryHeader, "Library scope"],
+      ["ModelsView", modelsView, "Model view"],
+      ["HostChip", hostChip, "Generation host"],
+      ["InspectorPanel", inspectorSource, "Reset settings to model defaults"],
+      ["HostDetailView", hostDetail, "Models disk used"],
+    ] as const) {
+      expect(source.includes(banned), `${name}: ${banned}`).toBe(false);
     }
   });
 });

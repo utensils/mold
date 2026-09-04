@@ -125,7 +125,7 @@ onUnmounted(() => {
       <SegmentedControl
         :model-value="segment"
         :options="segments"
-        label="Model view"
+        label="Styles view"
         compact
         inline
         @update:model-value="segment = $event"

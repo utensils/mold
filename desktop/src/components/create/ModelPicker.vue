@@ -40,7 +40,7 @@ const props = withDefaults(
     showAvailability: true,
     disabledReason: null,
     browseTarget: "/models",
-    browseLabel: "Browse all models →",
+    browseLabel: "Browse more →",
     missingModel: null,
   },
 );
@@ -123,7 +123,7 @@ onBeforeUnmount(() => {
   <div ref="pickerEl" class="ms-model">
     <button type="button" :aria-expanded="open" class="ms-model__button" @click="open = !open">
       <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
-        selected ? modelDisplayName(selected) : phantom ? phantomLabel : "Choose a model"
+        selected ? modelDisplayName(selected) : phantom ? phantomLabel : "Choose a style"
       }}</span>
       <span v-if="selected?.disk_usage_bytes" class="font-mono text-xs ms-model__size">
         {{ formatGB(selected.disk_usage_bytes) }}
@@ -133,7 +133,7 @@ onBeforeUnmount(() => {
         data-test="selected-model-missing"
         class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0"
       >
-        Not installed
+        Not on this machine
       </span>
     </button>
     <div v-if="open" data-test="model-picker-menu" class="ms-model__menu">
@@ -149,7 +149,7 @@ onBeforeUnmount(() => {
         <span class="min-w-0 flex-1">
           <span class="block break-all text-fg" :title="phantomLabel">{{ phantomLabel }}</span>
           <span class="font-mono text-micro text-fg-dim mt-0.5 block break-all">
-            Not installed — download it
+            Not on this machine — get it
           </span>
         </span>
       </button>

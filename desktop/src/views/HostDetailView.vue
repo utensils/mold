@@ -27,9 +27,10 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
-import { formatGB, formatGBPair, formatUptime, percent, vramLevel } from "../lib/format";
+import { formatGB, formatGBPair, percent, vramLevel } from "../lib/format";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
+import { machineSentence } from "../lib/machineSentence";
 import {
   isOpaqueModelId,
   modelDiskBytes,
@@ -591,34 +592,15 @@ function statusDot(s: "connecting" | "ready" | "error"): string {
   }
 }
 
-/** "RTX 4090 · CUDA" for the toolbar sentence; empty before any reading. */
-const hardwareLine = computed(() => {
-  const first = gpus.value[0];
-  return first ? `${first.name} · ${backendLabel(first)}` : "";
-});
-
 /**
  * The toolbar's one plain sentence — what the machine is, where it lives, how
- * long it has been up. Same shape as the machine card's, so the list and the
- * page say the same thing about the same box.
+ * long it has been up. It is the machine card's own sentence plus the uptime:
+ * one builder, so the list and the page cannot describe the same box two ways.
+ * The address stays off it and rides the name's tooltip instead.
  */
-const hostSentence = computed(() => {
-  const h = host.value;
-  if (!h) return "";
-  const where =
-    h.kind === "local"
-      ? "this device"
-      : /\.runpod\.net/.test(h.baseUrl ?? "")
-        ? "rented cloud GPU"
-        : "on your network";
-  return [
-    hardwareLine.value,
-    where,
-    uptime.value === null ? "" : `up ${formatUptime(uptime.value)}`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-});
+const hostSentence = computed(() =>
+  host.value ? machineSentence(host.value, gpus.value, { uptimeSeconds: uptime.value }) : "",
+);
 
 /** The wire facts a person only needs when something is wrong: address,
  *  version, instance id. They ride the name's tooltip, not the toolbar. */
@@ -876,7 +858,7 @@ async function forget() {
                 aria-valuemin="0"
                 aria-valuemax="100"
                 :aria-valuenow="Math.round(diskUsedPct)"
-                aria-label="Models disk used"
+                aria-label="Disk for styles"
               >
                 <span
                   class="block h-full transition-[width] duration-300"

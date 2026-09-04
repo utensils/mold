@@ -108,7 +108,7 @@ onBeforeUnmount(() => {
       v-if="popoverOpen"
       data-test="host-menu"
       role="menu"
-      aria-label="Generation host"
+      aria-label="Where it runs"
       class="ms-hostchip__popover ms-fade-up"
     >
       <div class="ms-hostchip__kicker font-mono text-xs">run on</div>

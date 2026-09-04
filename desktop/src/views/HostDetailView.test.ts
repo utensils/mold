@@ -465,8 +465,11 @@ describe("HostDetailView header", () => {
   it("says what the machine is in one plain sentence, not a row of wire facts", async () => {
     const wrapper = await mountView();
     expect(wrapper.get("[data-test='host-title']").text()).toBe("hal9000");
+    // Every card in the box, built by the ONE machine-sentence builder the
+    // Machines list also calls — a two-card machine may not read as one here
+    // and as two there.
     expect(wrapper.get("[data-test='host-sentence']").text()).toBe(
-      "NVIDIA GeForce RTX 4090 · CUDA · on your network · up 5s",
+      "NVIDIA GeForce RTX 4090 + NVIDIA B200 · CUDA · on your network · up 5s",
     );
     // The kind is in the sentence; the badge and the raw address are gone.
     const toolbar = wrapper.get("[data-test='host-toolbar']");

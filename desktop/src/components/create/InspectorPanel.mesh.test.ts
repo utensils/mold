@@ -403,3 +403,81 @@ describe("InspectorPanel — Mesh group", () => {
     expect(faces.attributes("aria-invalid")).toBeUndefined();
   });
 });
+
+/**
+ * The three-rung collapse is the design; the unmatched restored value is not.
+ * `MESH_OCTREE_RESOLUTIONS` is five rungs, so 192 and 320 have no segment —
+ * and a print made at one of them (the CLI, an older client, Use these
+ * settings) left the control with nothing chosen while the truth line beneath
+ * it read `octree 192`.
+ */
+describe("InspectorPanel — an off-ladder octree value", () => {
+  it("adds the restored rung in order so it reads as chosen", async () => {
+    const { form, wrapper } = mountFor(meshModel());
+    await flushPromises();
+    form.mesh.octreeResolution = 192;
+    await flushPromises();
+    const octree = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    expect(octree.props("options")).toEqual([
+      { value: 128, label: "Rough" },
+      { value: 192, label: "192" },
+      { value: 256, label: "Normal" },
+      { value: 384, label: "Fine" },
+    ]);
+    expect(octree.props("modelValue")).toBe(192);
+  });
+
+  it("keeps the three-rung ladder for a value already on it", async () => {
+    const { form, wrapper } = mountFor(meshModel());
+    await flushPromises();
+    form.mesh.octreeResolution = 384;
+    await flushPromises();
+    const octree = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    expect(octree.props("options")).toHaveLength(3);
+  });
+});
+
+/**
+ * The Quality rows and the Add-on-looks group are the two main-column groups
+ * the inspector renders beside the sliders. Quality writes `form.steps` — it
+ * is the Detail slider's own three rungs, never a second setting — and a
+ * recipe that pins its steps offers no rows at all.
+ */
+describe("InspectorPanel — Quality and Add-on looks", () => {
+  it("offers the recipe's own floor, default and ceiling, and writes Detail", async () => {
+    const { form, wrapper } = mountFor(rasterModel());
+    await flushPromises();
+    const rows = wrapper.get("[data-test='quality-presets']");
+    expect(rows.text()).toContain("Quality");
+    expect(rows.findAll("button").map((b) => b.text())).toEqual([
+      expect.stringContaining("Draft"),
+      expect.stringContaining("Good"),
+      expect.stringContaining("Best"),
+    ]);
+
+    await wrapper.get("[data-test='quality-draft']").trigger("click");
+    expect(form.steps).toBe(sdxlRecipe().steps!.min);
+    expect(wrapper.get("[data-test='quality-draft']").attributes("aria-pressed")).toBe("true");
+
+    await wrapper.get("[data-test='quality-best']").trigger("click");
+    expect(form.steps).toBe(sdxlRecipe().steps!.max);
+  });
+
+  it("keeps Add-on looks in the main column for a recipe that takes them", async () => {
+    const raster = mountFor(rasterModel());
+    await flushPromises();
+    expect(raster.wrapper.find("[data-test='inspector-loras']").exists()).toBe(true);
+
+    raster.wrapper.unmount();
+    document.body.innerHTML = "";
+    setActivePinia(createPinia());
+
+    const mesh = mountFor(meshModel());
+    await flushPromises();
+    expect(mesh.wrapper.find("[data-test='inspector-loras']").exists()).toBe(false);
+  });
+});

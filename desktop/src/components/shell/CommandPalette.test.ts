@@ -25,9 +25,10 @@ import { useHostsStore } from "../../stores/hosts";
 import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useComposerStore } from "../../stores/composer";
-import { useGenerationStore } from "../../stores/generation";
+import { newJob, useGenerationStore } from "../../stores/generation";
 import { useToastStore } from "../../stores/toasts";
 import { useJobsStore } from "../../stores/jobs";
+import { useGenerateFormStore } from "../../stores/generateForm";
 import { altShortcutLabel, shortcutLabel } from "../../lib/platform";
 import type { GalleryImage, ModelEntry } from "../../lib/api/types";
 
@@ -39,6 +40,27 @@ beforeEach(() => {
   startCatalogDownloadMock.mockClear();
   startCatalogDownloadMock.mockResolvedValue("job-1");
 });
+
+/** A finished still on the canvas: the only state Make 4 variations is for. */
+function finishAStill() {
+  const generation = useGenerationStore();
+  const job = newJob({
+    prompt: "a brass teapot",
+    model: "sdxl-base:fp16",
+    width: 1024,
+    height: 1024,
+    steps: 30,
+  } as never);
+  Object.assign(job, {
+    clientId: 1,
+    batchId: 1,
+    id: "finished-print",
+    status: "complete",
+    result: { image: "cGl4ZWxz", filename: "teapot.png", model: "sdxl-base:fp16", format: "png" },
+  });
+  generation.jobs.push(job);
+  generation.selectedClientId = job.clientId;
+}
 
 async function openPalette() {
   const wrapper = mount(CommandPalette, { attachTo: document.body });
@@ -207,6 +229,7 @@ describe("CommandPalette shortcut column and mock groups", () => {
   });
 
   it("asks for four variations of the last picture under ⌥↩", async () => {
+    finishAStill();
     const wrapper = await openPalette();
     const ui = useUiStore();
     await wrapper.get("input").setValue("Make 4 variations");
@@ -245,24 +268,61 @@ describe("CommandPalette shortcut column and mock groups", () => {
     };
     const pause = vi.spyOn(jobs, "pause").mockResolvedValue();
     const resume = vi.spyOn(jobs, "resume").mockResolvedValue();
+    // Toggling reads the host's queue first, so the decision is made against
+    // what the host says rather than against a snapshot nobody fetched.
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue();
 
     const wrapper = await openPalette();
     const row = rowFor(wrapper, "Pause the queue")!;
     expect(columns(row)).toEqual({ group: "queue", key: "Space" });
     await row.trigger("click");
+    await flushPromises();
     expect(pause).toHaveBeenCalledWith("local");
 
     jobs.queues["local"]!.paused = true;
     useUiStore().paletteOpen = true;
     await wrapper.vm.$nextTick();
     await rowFor(wrapper, "Resume the queue")!.trigger("click");
+    await flushPromises();
     expect(resume).toHaveBeenCalledWith("local");
     wrapper.unmount();
   });
 
   it("offers no queue command on a machine that cannot pause", async () => {
+    useConnectionStore().info = { baseUrl: "http://127.0.0.1:7680", apiKey: null } as never;
+    useConnectionStore().status = "ready";
+    useJobsStore().queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: { canPause: false, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    } as never;
+
     const wrapper = await openPalette();
     expect(rowFor(wrapper, "Pause the queue")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  /**
+   * The action makes exactly one picture on a batch-locked recipe and means
+   * nothing at all before a print exists, so the palette does not list it.
+   */
+  it("offers no variations command until a still is on the canvas", async () => {
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("offers no variations command on a batch-locked recipe", async () => {
+    finishAStill();
+    const form = useGenerateFormStore().form;
+    form.family = "qwen-image-edit";
+    form.model = "qwen-image-edit-2511:q8";
+
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeUndefined();
     wrapper.unmount();
   });
 });

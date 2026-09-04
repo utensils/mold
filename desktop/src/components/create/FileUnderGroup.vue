@@ -336,7 +336,7 @@ onBeforeUnmount(() => {
           class="ms-fu__collection-main"
           data-test="file-under-collection"
           :aria-expanded="collectionMenuOpen"
-          aria-label="Collection"
+          aria-label="Album"
           @click.stop="toggleCollectionMenu"
         >
           <Icon name="collection" :size="14" />
@@ -355,8 +355,8 @@ onBeforeUnmount(() => {
           type="button"
           class="ms-fu__chip-x"
           data-test="file-under-collection-clear"
-          aria-label="Clear collection"
-          title="Clear collection"
+          aria-label="Clear the album"
+          title="Clear the album"
           @click.stop="clearChosen"
         >
           ✕
@@ -395,7 +395,7 @@ onBeforeUnmount(() => {
           @click="openNewCollection"
         >
           <Icon name="plus" :size="13" />
-          <span class="ms-fu__row-name">New collection…</span>
+          <span class="ms-fu__row-name">New album…</span>
         </button>
         <div v-else class="ms-fu__row ms-fu__row--new">
           <Icon name="plus" :size="13" />
@@ -404,8 +404,8 @@ onBeforeUnmount(() => {
             type="text"
             class="ms-fu__new-input"
             data-test="file-under-new-collection-input"
-            placeholder="Collection name"
-            aria-label="New collection name"
+            placeholder="Album name"
+            aria-label="New album name"
             @keydown.enter.prevent="commitNewCollection"
             @keydown.esc.prevent="closeCollectionMenu"
           />

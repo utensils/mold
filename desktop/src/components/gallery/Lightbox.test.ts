@@ -113,7 +113,7 @@ describe("Lightbox reuse", () => {
       canEditSequence: true,
     });
 
-    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain("Edit sequence");
+    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain("Edit clip");
     expect(wrapper.get("[data-test='lightbox-duplicate-sequence']").text()).toBe(
       "Duplicate as new",
     );

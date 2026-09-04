@@ -61,11 +61,7 @@ import {
   type MergedCollection,
 } from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
-import {
-  retainedSourceMediaDisclosable,
-  retainedSourceMediaDisclosure,
-  retainedSourceMediaInventory,
-} from "@studio/api/gallerySourceMedia";
+import { useReuseStillPrint } from "../composables/useReuseStillPrint";
 import {
   useGalleryStore,
   type FanoutResult,
@@ -131,6 +127,7 @@ const composer = useComposerStore();
 const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
+const reuseStillPrint = useReuseStillPrint();
 /** `modelDisplayNameForId` scans the installed list; a grid of 2 000 tiles
  *  would scan it 2 000 times per render. Memoize per name, dropping the memo
  *  whenever the installed inventory changes. */
@@ -673,36 +670,7 @@ function reuseSettings(entry: MergedPrint) {
   }
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
-  const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
-  const target = gallery.targetOf(entry.sourceKey);
-  // Always ask — the host is the only authority on what it retained, and the
-  // metadata under-reports inline video/audio/mask bytes. But a text-to-image
-  // print's archive entry resolves with no pins, which the server can only
-  // report as `unavailable_legacy`, so an UNAVAILABLE answer is toasted only
-  // when the print's own metadata says conditioning bytes were shipped.
-  if (target) {
-    void retainedSourceMediaInventory(entry.item.filename, target)
-      .then((inventory) => {
-        if (
-          !composer.setRetainedSourceIfCurrent(retainedVersion, {
-            filename: entry.item.filename,
-            origin: target,
-            inventory,
-          })
-        ) {
-          return;
-        }
-        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
-          ? retainedSourceMediaDisclosure(inventory.availability)
-          : null;
-        if (disclosure) toasts.push(disclosure, "error");
-      })
-      .catch(() => {
-        // The established local stash/gallery-name restore stays live. A
-        // transport failure inspecting the additive endpoint must not turn a
-        // previously working Reuse settings action into a dead end.
-      });
-  }
+  reuseStillPrint(entry);
   lightboxOpen.value = false;
   void router.push("/create");
 }
@@ -1126,7 +1094,7 @@ function collectionMenu(slug: string): MenuEntry[] {
   return [
     { label: "Open", action: () => openCollectionSlug(slug) },
     {
-      label: hidden ? "Show in Library" : "Hide from Library",
+      label: hidden ? "Show in My images" : "Hide from My images",
       action: () => void setCollectionHidden(slug, !hidden),
     },
     { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
@@ -1282,7 +1250,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     ...(isSequencePrint(entry)
       ? [
           ...(canEditSequence(entry)
-            ? [{ label: "Edit sequence", action: () => void editSequence(entry) }]
+            ? [{ label: "Edit clip", action: () => void editSequence(entry) }]
             : []),
           { label: "Duplicate as new", action: () => reuseSequence(entry) },
         ]
@@ -2148,8 +2116,9 @@ function onKeydown(e: KeyboardEvent) {
     return;
   }
   // History is a column beside the grid, not an overlay over it, so the grid
-  // keeps its keyboard while it is open; every destructive chord below already
-  // stands down inside a text field, the panel's search included.
+  // keeps its keyboard while it is open — which makes every unmodified chord
+  // below, the arrows included, stand down inside a text field: the panel's
+  // own search is one, and the caret has to be able to move in it.
   // ⌘A selects exactly the current filtered result set, never hidden prints.
   if (isSelectAllChord(e) && !allowsNativeSelectAll(document.activeElement)) {
     e.preventDefault();
@@ -2218,9 +2187,11 @@ function onKeydown(e: KeyboardEvent) {
     }
     void Promise.resolve().then(() => bulkBar.value?.openTags());
   } else if (e.key === "ArrowRight") {
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     moveSelection(1);
   } else if (e.key === "ArrowLeft") {
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     moveSelection(-1);
   } else if (e.key === " ") {
@@ -2974,7 +2945,7 @@ onUnmounted(() => {
     <!-- Naming dialogs (shared RenameDialog shell) -->
     <RenameDialog
       :open="renameTarget !== null"
-      title="Rename print"
+      title="Rename picture"
       :initial="renameTarget ? (orgOf(renameTarget).title ?? '') : ''"
       @save="onRenameSave"
       @cancel="renameTarget = null"

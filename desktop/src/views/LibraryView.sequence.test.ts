@@ -203,15 +203,15 @@ describe("Library — sequence print actions", () => {
   it("offers Edit sequence on a sequence print but not on a legacy one", async () => {
     const { wrapper } = await mountView();
 
-    expect(entryNamed(await menuFor(wrapper, "seed 7"), "Edit sequence")).toBeDefined();
+    expect(entryNamed(await menuFor(wrapper, "seed 7"), "Edit clip")).toBeDefined();
     useContextMenuStore().close();
-    expect(entryNamed(await menuFor(wrapper, "seed 42"), "Edit sequence")).toBeUndefined();
+    expect(entryNamed(await menuFor(wrapper, "seed 42"), "Edit clip")).toBeUndefined();
   });
 
   it("hides Edit sequence once the host's loaded listing proves the job is gone", async () => {
     // Positive knowledge only: an unloaded listing keeps the action visible.
     const { wrapper } = await mountView({ knownJobIds: ["job-other"] });
-    expect(entryNamed(await menuFor(wrapper, "seed 7"), "Edit sequence")).toBeUndefined();
+    expect(entryNamed(await menuFor(wrapper, "seed 7"), "Edit clip")).toBeUndefined();
   });
 
   it("duplicates a sequence print's clips as a NEW draft on the Create sequence route", async () => {
@@ -254,7 +254,7 @@ describe("Library — sequence print actions", () => {
     } as unknown as ChainJobDetail);
 
     const menu = await menuFor(wrapper, "seed 7");
-    menu.activate(entryNamed(menu, "Edit sequence")!);
+    menu.activate(entryNamed(menu, "Edit clip")!);
     await flushPromises();
 
     expect(chains.fetchDetail).toHaveBeenCalledWith("plato-7680", "job-9");
@@ -271,7 +271,7 @@ describe("Library — sequence print actions", () => {
     vi.spyOn(chains, "fetchDetail").mockRejectedValue(new ApiError("gone", 404));
 
     const menu = await menuFor(wrapper, "seed 7");
-    menu.activate(entryNamed(menu, "Edit sequence")!);
+    menu.activate(entryNamed(menu, "Edit clip")!);
     await flushPromises();
 
     expect(useComposerStore().pendingSequence?.kind).toBe("reuse");
@@ -292,7 +292,7 @@ describe("Library — sequence print actions", () => {
     vi.spyOn(chains, "fetchDetail").mockRejectedValue(new Error("network down"));
 
     const menu = await menuFor(wrapper, "seed 7");
-    menu.activate(entryNamed(menu, "Edit sequence")!);
+    menu.activate(entryNamed(menu, "Edit clip")!);
     await flushPromises();
 
     expect(useComposerStore().pendingSequence).toBeNull();
@@ -310,6 +310,6 @@ describe("Library — sequence print actions", () => {
     const { wrapper } = await mountView({ localOrigin: true });
     const menu = await menuFor(wrapper, "seed 7");
     expect(entryNamed(menu, "Duplicate as new")).toBeDefined();
-    expect(entryNamed(menu, "Edit sequence")).toBeUndefined();
+    expect(entryNamed(menu, "Edit clip")).toBeUndefined();
   });
 });

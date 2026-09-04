@@ -226,7 +226,14 @@ describe("QueueView", () => {
     expect(menuLabels()).toContain("Resume");
   });
 
+  /**
+   * The ETA is a countdown against a ticking clock, so the assertion needs a
+   * fixed one: rounding `(finish - Date.now()) / 1000` at render turns 45 s
+   * into 44 s after half a second of real drift between setup and assertion.
+   */
   it("counts today's prints from the gallery and states the fleet's time left", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T12:00:00Z"));
     const wrapper = await mountView();
     const gallery = useGalleryStore();
     const now = Date.now();
@@ -254,5 +261,12 @@ describe("QueueView", () => {
     expect(stats[2]!.text()).toContain("all saved to My images");
     expect(stats[2]!.text()).toContain("1");
     expect(wrapper.get("[data-test='queue-total-eta']").text()).toBe("about 45s left in total");
+
+    // The clock is the composable's own 1s tick, so the countdown moves
+    // between queue refreshes instead of freezing at the value it was read at.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    expect(wrapper.get("[data-test='queue-total-eta']").text()).toBe("about 35s left in total");
+    vi.useRealTimers();
   });
 });

@@ -178,13 +178,13 @@ the phone keep Create / Library / Models until their own redesign.
   `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
   and a running clip sits in the sidebar's queue beside prints, with
   watch and cancel. A finished clip leaves the queue: its video lands on
-  the New image canvas with **Edit sequence** and **Show in library**, its print
+  the New image canvas with **Edit clip** and **Show in My images**, its print
   is in My images, and its job record is in **My images ▸ History ▸
-  Sequences**. Editing a finished sequence reloads its scenes onto
+  Clips**. Editing a finished clip reloads its scenes onto
   the lane, marks which stay cached versus re-render as you change
   things, and **Update sequence** re-renders only from the earliest changed
   clip; changing a transition type or a fade length re-stitches with no
-  re-render at all. From a sequence print in My images, **Edit sequence**
+  re-render at all. From a clip print in My images, **Edit clip**
   re-enters the original job with its cached clips and **Duplicate as new**
   starts a fresh sequence from the recorded clips. The picker shows
   clip-capable styles from every connected
@@ -202,7 +202,8 @@ the phone keep Create / Library / Models until their own redesign.
   Machine). Drag a row to reorder it, or **Jump the line** on the one you need
   first; a waiting row's ⋯ offers Pause and Resume where the machine supports
   holding one job. **Pause queue** and **Stop everything** sit in the view
-  toolbar, and Space pauses or resumes the queue from anywhere outside a field.
+  toolbar, and Space pauses or resumes the queue from anywhere outside a field —
+  on a machine that offers it, which is also where the status bar shows the hint.
   Closing the window keeps the queue running.
 - **My images** (⌘3): a justified, virtualized contact-sheet grid, with a
   Lightroom-style small-to-large slider in the view toolbar
@@ -210,7 +211,7 @@ the phone keep Create / Library / Models until their own redesign.
   badges on fresh prints, a two-pane lightbox, and a History column holding
   Runs, Prompts and Sequences. **Space** opens
   Quick Look, ←/→ navigate, and **Use these settings** jumps back to New image
-  with every parameter restored. On a print a sequence produced, **Edit sequence**
+  with every parameter restored. On a print a clip produced, **Edit clip**
   is the primary action and re-enters the original job on the machine that made
   it so already-rendered clips stay cached. **Duplicate as new** loads the
   recorded clips as a fresh sequence (if the durable job is gone Mold takes
@@ -270,10 +271,10 @@ the phone keep Create / Library / Models until their own redesign.
   wording.
 - **History** (a column inside My images, `?panel=history`): a fast,
   searchable list of past prompts from every ready machine, with **Runs**,
-  **Prompts** and **Sequences** as tabs in the column body; ↩ refills the
+  **Prompts** and **Clips** as tabs in the column body; ↩ refills the
   composer, while Up/Down recalls the same merged history inline. It opens
   beside the grid rather than over it, so the pictures stay clickable. The
-  **Sequences** tab is the one place durable clip jobs are listed: open,
+  **Clips** tab is the one place durable clip jobs are listed: open,
   edit, resume, or delete a job, jump to the print it produced, and run the
   machine-scoped **Clear inactive** and **Clean up disk** maintenance. It
   renders the 200 newest jobs and says so when
@@ -464,12 +465,12 @@ release is published.
 | ←/→                 | Short clip: move between scenes on the lane                  |
 | Shift+←/→           | Short clip: shorten / lengthen the selected scene            |
 | ↩ / ⌫               | Short clip: open the seam before a scene / remove it         |
-| Alt/Option+Enter    | Make 4 variations of the last picture                        |
+| Alt/Option+Enter    | Make 4 variations of the finished picture (not in a field)   |
 | Cmd/Ctrl+E          | Write more for me                                            |
 | Cmd/Ctrl+R          | Surprise me (a new seed)                                     |
 | Cmd/Ctrl+.          | Stop the image being made                                    |
 | Cmd/Ctrl+\          | Toggle sidebar                                               |
-| Space               | Pause / resume the queue (outside a field and a dialog)      |
+| Space               | Pause / resume the queue (where the machine offers it)       |
 | Space               | Quick Look in My images, which keeps Space for itself        |
 | ←/→                 | My images: navigate                                          |
 | Cmd/Ctrl+F          | My images: focus the search field                            |
@@ -607,7 +608,7 @@ wire types as the CLI and web UI:
 - **History (a column in My images)** (three lenses: **Runs** (every finished
   generation with its thumbnail, style, size, seed, and clock) click to reuse
   the full settings including the seed), **Prompts** (the raw prompt log,
-  searchable, for prompts whose outputs are gone), and **Sequences** (every
+  searchable, for prompts whose outputs are gone), and **Clips** (every
   durable clip job on every connected machine, with open / edit / resume /
   delete, a jump to the print it produced, and the machine-scoped **Clear
   inactive** and **Clean up disk** maintenance). The tab is in the URL, so

@@ -14,7 +14,6 @@ import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
 import SceneLane from "./SceneLane.vue";
-import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   defaultClipFrames,
@@ -37,6 +36,12 @@ import {
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import { promptRecipeFromForm } from "../../lib/promptRecipe";
+import {
+  SEQUENCE_NEEDS_STYLE,
+  sceneLabel,
+  type SequenceConfirmation,
+} from "../../lib/sequenceTimeline";
+import { formatGB } from "../../lib/format";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
@@ -87,6 +92,8 @@ const emit = defineEmits<{
   "play-clip": [clipId: string];
   /** What the composer's Generate must refuse for, or null when it may go. */
   "update:blockedReason": [reason: string | null];
+  /** What the timeline is waiting to have confirmed, or null when nothing is. */
+  "update:confirmation": [confirmation: SequenceConfirmation | null];
 }>();
 
 const draft = useSequenceDraftStore();
@@ -159,11 +166,10 @@ const activeMeta = computed(() => {
   return parts.join(" · ");
 });
 
-/** What a scene is called: its own words, or its place in the clip. */
+/** The scene's own name, trimmed to fit one line of a dialog message. */
+const SCENE_NAME_LIMIT = 42;
 function sceneName(index: number): string {
-  const written = draft.clips[index]?.prompt.trim();
-  if (written) return written.length > 42 ? `${written.slice(0, 41)}…` : written;
-  return index === 0 ? "Opening scene" : `Scene ${index + 1}`;
+  return sceneLabel(draft.clips[index]?.prompt ?? "", index, SCENE_NAME_LIMIT);
 }
 
 function reorderClips(ids: string[]) {
@@ -246,11 +252,9 @@ function clockLabel(seconds: number): string {
 
 const disabledReason = computed(() => {
   if (props.chainLimits && props.chainLimits.supports_sequence === false) {
-    return (
-      props.chainLimits.sequence_unsupported_reason ?? "This model can't render a clip sequence."
-    );
+    return props.chainLimits.sequence_unsupported_reason ?? "This style can't make a clip.";
   }
-  if (!props.form.model) return "Pick a video model first.";
+  if (!props.form.model) return SEQUENCE_NEEDS_STYLE;
   const openingError = sequenceOpeningImageError(requestOpeningImage.value, draft.mediaRestoring);
   if (openingError) return openingError;
   return validation.value[0] ?? null;
@@ -367,8 +371,6 @@ async function validatePlan() {
   }
 }
 
-const formatBytes = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-
 /** The one-line truth under the lane: what the host says when it has been
  *  asked, and the draft's own arithmetic until then. */
 const readout = computed(() => {
@@ -386,8 +388,8 @@ const readout = computed(() => {
   if (plan.vram_estimate) {
     parts.push(
       plan.vram_estimate.fits
-        ? `${formatBytes(plan.vram_estimate.worst_case_bytes)} of graphics memory`
-        : `${formatBytes(plan.vram_estimate.worst_case_bytes)} — more than this machine has`,
+        ? `${formatGB(plan.vram_estimate.worst_case_bytes)} of graphics memory`
+        : `${formatGB(plan.vram_estimate.worst_case_bytes)} — more than this machine has`,
     );
   }
   return parts.join(" · ");
@@ -437,14 +439,7 @@ function discardEdit() {
 
 // ── Removing and clearing ────────────────────────────────────────────────────
 const removeCandidateId = ref<string | null>(null);
-const removeCandidate = computed(() =>
-  draft.clips.findIndex((clip) => clip.id === removeCandidateId.value),
-);
-const removeMessage = computed(() =>
-  removeCandidate.value < 0
-    ? ""
-    : `Removes “${sceneName(removeCandidate.value)}” and its words. The scenes around it join up.`,
-);
+const clearConfirmOpen = ref(false);
 
 function askRemoveScene(id: string) {
   if (draft.clips.length <= 2) return;
@@ -456,18 +451,36 @@ function removeScene() {
   removeCandidateId.value = null;
 }
 
-const clearConfirmOpen = ref(false);
-const clearMessage = computed(() => {
-  const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
-  return `Removes all ${draft.clips.length} scenes and their words.${edit} The style and shared settings stay.`;
-});
-
 function clearSequence() {
   clearConfirmOpen.value = false;
   openSeamId.value = null;
   draft.clearSequence(newClipFrames.value);
   toasts.push("Clip cleared");
 }
+
+/** The timeline decides what it needs confirmed; the workbench renders it. */
+const confirmation = computed<SequenceConfirmation | null>(() => {
+  const index = draft.clips.findIndex((clip) => clip.id === removeCandidateId.value);
+  if (index >= 0) {
+    return {
+      title: "Remove this scene?",
+      message: `Removes “${sceneName(index)}” and its words. The scenes around it join up.`,
+      confirmLabel: "Remove the scene",
+      confirm: removeScene,
+      cancel: () => (removeCandidateId.value = null),
+    };
+  }
+  if (!clearConfirmOpen.value) return null;
+  const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
+  return {
+    title: "Clear the clip?",
+    message: `Removes all ${draft.clips.length} scenes and their words.${edit} The style and shared settings stay.`,
+    confirmLabel: "Clear the clip",
+    confirm: clearSequence,
+    cancel: () => (clearConfirmOpen.value = false),
+  };
+});
+watch(confirmation, (pending) => emit("update:confirmation", pending), { immediate: true });
 
 // ── File tools ───────────────────────────────────────────────────────────────
 const fileToolsOpen = ref(false);
@@ -715,7 +728,6 @@ function onBenchContextMenu(event: MouseEvent) {
       label="Transition editor"
       class="ms-timeline__lanewrap"
       @update:open="(open) => !open && (openSeamId = null)"
-      @contextmenu="onBenchContextMenu"
     >
       <template #trigger>
         <div class="ms-timeline__lane-label">
@@ -889,25 +901,6 @@ function onBenchContextMenu(event: MouseEvent) {
     >
       {{ validationError }}
     </p>
-
-    <ConfirmDialog
-      :open="removeCandidateId !== null"
-      title="Remove this scene?"
-      :message="removeMessage"
-      confirm-label="Remove the scene"
-      danger
-      @confirm="removeScene"
-      @cancel="removeCandidateId = null"
-    />
-    <ConfirmDialog
-      :open="clearConfirmOpen"
-      title="Clear the clip?"
-      :message="clearMessage"
-      confirm-label="Clear the clip"
-      danger
-      @confirm="clearSequence"
-      @cancel="clearConfirmOpen = false"
-    />
   </div>
 </template>
 

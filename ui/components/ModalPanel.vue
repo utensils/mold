@@ -5,8 +5,13 @@
  * progress bars along the top. Renders INSIDE its owning frame: absolute
  * overlay, never Teleport or position:fixed. Backdrop click and Esc close;
  * clicks inside the panel do not.
+ *
+ * Escape is listened for on the DOCUMENT, not on the root: the panel is only
+ * `aria-modal`, so focus can be anywhere in the app when the key arrives, and
+ * a dialog that closes only while it happens to hold focus is a trap. Tab is
+ * kept inside the panel for the same reason.
  */
-import { ref, useSlots } from "vue";
+import { onBeforeUnmount, ref, useSlots, watch } from "vue";
 import { useRootFocusOnOpen } from "../lib/useRootFocusOnOpen";
 
 const props = withDefaults(
@@ -35,6 +40,45 @@ const emit = defineEmits<{ close: [] }>();
 const slots = useSlots();
 const root = ref<HTMLElement | null>(null);
 useRootFocusOnOpen(root, () => props.open);
+
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+function onDocumentKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    emit("close");
+    return;
+  }
+  if (e.key !== "Tab" || !root.value) return;
+  const stops = [...root.value.querySelectorAll<HTMLElement>(FOCUSABLE)];
+  if (stops.length === 0) return;
+  const first = stops[0]!;
+  const last = stops[stops.length - 1]!;
+  const active = document.activeElement;
+  if (e.shiftKey && (active === first || active === root.value)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  } else if (!root.value.contains(active)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+  }
+}
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) document.addEventListener("keydown", onDocumentKeydown, true);
+    else document.removeEventListener("keydown", onDocumentKeydown, true);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() =>
+  document.removeEventListener("keydown", onDocumentKeydown, true),
+);
 </script>
 
 <template>
@@ -47,7 +91,6 @@ useRootFocusOnOpen(root, () => props.open);
     :aria-label="label ?? title"
     tabindex="-1"
     @click="emit('close')"
-    @keydown.escape="emit('close')"
   >
     <div class="ms-modal__panel" :style="{ width: `${width}px` }" @click.stop>
       <div v-if="steps" class="ms-modal__steps" aria-hidden="true">

@@ -140,7 +140,6 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  "append-word": [word: string];
   "canvas-intent": [intent: CanvasIntent];
 }>();
 

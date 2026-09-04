@@ -95,16 +95,10 @@ describe("GenerateView layout", () => {
     );
     expect(viewSource).toContain("const generationInputBlockerReason = computed");
     expect(viewSource).toContain("if (generationInputBlockerReason.value ||");
-    // One composer answers for both modes, so the bindings read the switch and
-    // the one-shot authorities stay behind it.
+    // One composer answers for both modes. What it refuses for in each is
+    // proved by mounting, in GenerateView.sequence.test.ts.
     expect(viewSource).toContain(':disabled="composerLocked"');
     expect(viewSource).toContain(':disabled-reason="composerRefusal"');
-    expect(viewSource).toMatch(
-      /const composerRefusal = computed\([\s\S]{0,200}?composerBlockerReason\.value,/,
-    );
-    expect(viewSource).toMatch(
-      /const composerLocked = computed\([\s\S]{0,200}?composerDisabled\.value,/,
-    );
   });
 
   it("takes the blank-canvas guidance from the shared prompt rule", () => {
