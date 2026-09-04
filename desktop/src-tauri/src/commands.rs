@@ -13,13 +13,20 @@ use crate::settings::{self, AppSettings, SavedHost};
 pub struct SettingsStore {
     pub path: PathBuf,
     pub current: Mutex<AppSettings>,
+    /// Keys `settings::load_reporting` could not read and fell back on this
+    /// launch; the boot migration consults it before trusting `mode`.
+    pub recovered_keys: Vec<String>,
 }
 
 impl SettingsStore {
     pub fn load(app: &tauri::AppHandle) -> anyhow::Result<Self> {
         let path = app.path().app_data_dir()?.join("settings.json");
-        let current = Mutex::new(settings::load(&path));
-        Ok(Self { path, current })
+        let loaded = settings::load_reporting(&path);
+        Ok(Self {
+            path,
+            current: Mutex::new(loaded.settings),
+            recovered_keys: loaded.recovered,
+        })
     }
 }
 
