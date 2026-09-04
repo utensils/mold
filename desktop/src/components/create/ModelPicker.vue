@@ -214,10 +214,10 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 8px;
   border: 1px solid var(--mold-border-control);
-  border-radius: 9px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   padding: 0 12px;
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
   color: var(--mold-text);
 }
 .ms-model__size {
@@ -234,13 +234,13 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overflow-x: hidden;
   border: 1px solid var(--mold-border);
-  border-radius: 12px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
 }
 .ms-model__group {
   font-family: var(--mold-font-mono);
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mold-text-dim);
@@ -253,7 +253,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 6px 8px;
   text-align: left;
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
   color: var(--mold-text-2);
 }
 .ms-model__option:hover:not(:disabled) {
@@ -269,7 +269,7 @@ onBeforeUnmount(() => {
   height: 6px;
   width: 6px;
   flex-shrink: 0;
-  border-radius: 9999px;
+  border-radius: var(--mold-radius-2);
 }
 .ms-model__browse {
   display: flex;
@@ -278,7 +278,7 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--mold-border);
   padding: 8px;
   text-align: left;
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
   color: var(--mold-sapphire);
 }
 .ms-model__browse:hover {

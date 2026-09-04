@@ -103,17 +103,12 @@ function literalStyles(text: string): string[] {
  * A RATCHET, not an allowlist. These files still carry literals from before the
  * token scale existed. Most are shared ui/ and studio/ primitives the redesign
  * has yet to reach, where converting blind would move web and the phone by a
- * pixel apiece with nothing watching; the six create/ files are the ones the
- * New-image restructure rebuilds. So each file may keep the count it has and
- * never more, and a file that reaches zero must leave the table.
+ * pixel apiece with nothing watching. Every create/ file is converted — the
+ * New-image restructure rebuilt them — so none is left here. Each remaining
+ * file may keep the count it has and never more, and a file that reaches zero
+ * must leave the table.
  */
 const UNCONVERTED: Record<string, number> = {
-  "src/components/create/AdvancedSettings.vue": 23,
-  "src/components/create/FileUnderGroup.vue": 19,
-  "src/components/create/HostChip.vue": 6,
-  "src/components/create/ModelPicker.vue": 7,
-  "src/components/create/SequenceAdvancedSettings.vue": 7,
-  "src/components/create/SequenceOpeningImageWell.vue": 4,
   "../ui/components/AccordionSection.vue": 2,
   "../ui/components/ActionBlocker.vue": 4,
   "../ui/components/BadgePill.vue": 1,

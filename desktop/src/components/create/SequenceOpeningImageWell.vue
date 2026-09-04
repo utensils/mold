@@ -145,7 +145,7 @@ async function onOpeningImageFile(file: File) {
 
 <style scoped>
 .ms-field__label {
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
@@ -160,7 +160,7 @@ async function onOpeningImageFile(file: File) {
   display: grid;
   gap: 6px;
   color: var(--mold-text-2);
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
 }
 .ms-range > span {
   display: flex;
@@ -176,14 +176,14 @@ async function onOpeningImageFile(file: File) {
   box-sizing: border-box;
   min-height: 36px;
   border: 1px solid var(--mold-border-control);
-  border-radius: 8px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   color: var(--mold-text);
   padding: 8px 10px;
 }
 .ms-hint {
   color: var(--mold-text-dim);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   line-height: 1.45;
 }
 </style>

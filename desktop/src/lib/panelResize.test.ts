@@ -9,11 +9,15 @@ describe("PANEL_LIMITS", () => {
     }
   });
 
-  it("fits all five Generate aspect controls on one row at the default width", () => {
+  it("opens the inspector at the shell's own width and still reaches the aspect row", () => {
+    // 300 is `--mold-shell-inspector-w`, the plane the shell anatomy draws.
+    expect(PANEL_LIMITS.generateParams.def).toBe(300);
+    // Five 52px aspect controls on one row need a wider pane than the default,
+    // so the range has to reach it — the drag is what gets you there.
     const inspectorPadding = 18 * 2;
     const aspectControls = 52 * 5;
     const aspectGaps = 7 * 4;
-    expect(PANEL_LIMITS.generateParams.def - inspectorPadding).toBeGreaterThanOrEqual(
+    expect(PANEL_LIMITS.generateParams.max - inspectorPadding).toBeGreaterThanOrEqual(
       aspectControls + aspectGaps,
     );
   });

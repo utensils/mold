@@ -1,37 +1,11 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-interface FamilyIdentity {
-  mark: string;
-  label: string;
-  tone: "cool" | "warm" | "neutral";
-}
+import { familyIdentity } from "../../lib/modelFamilyIdentity";
 
 const props = defineProps<{ family: string }>();
 
-const identity = computed<FamilyIdentity>(() => {
-  const family = props.family.trim().toLowerCase();
-  if (family === "flux2" || family.startsWith("flux.2")) {
-    return { mark: "F2", label: "FLUX.2", tone: "cool" };
-  }
-  if (family.startsWith("flux")) return { mark: "F", label: "FLUX", tone: "cool" };
-  if (family === "sdxl") return { mark: "XL", label: "SDXL", tone: "warm" };
-  if (family === "sd15" || family.includes("1.5")) {
-    return { mark: "1.5", label: "SD 1.5", tone: "warm" };
-  }
-  if (family.startsWith("sd3")) return { mark: "3", label: "SD 3", tone: "warm" };
-  if (family.startsWith("qwen")) return { mark: "Q", label: "QWEN", tone: "neutral" };
-  if (family.startsWith("zimage") || family.startsWith("z-image")) {
-    return { mark: "Z", label: "Z-IMAGE", tone: "cool" };
-  }
-  if (family.startsWith("ltx")) return { mark: "LTX", label: "LTX VIDEO", tone: "neutral" };
-  if (family.startsWith("wuerstchen")) {
-    return { mark: "W", label: "WUERSTCHEN", tone: "warm" };
-  }
-
-  const label = family.replaceAll("-", " ").toUpperCase() || "MODEL";
-  return { mark: label.slice(0, 3), label, tone: "neutral" };
-});
+const identity = computed(() => familyIdentity(props.family));
 </script>
 
 <template>

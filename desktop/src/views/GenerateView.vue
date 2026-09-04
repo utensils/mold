@@ -161,6 +161,7 @@ import {
   keepingPrintIdentity,
   loraBindingMatchesRoute,
   loraHostBinding,
+  MAX_BATCH_SIZE,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
 } from "../lib/generateForm";
@@ -266,6 +267,15 @@ import {
   thumbnailPath,
 } from "../lib/gallery/media";
 import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
+import { readGalleryMediaBase64 } from "../lib/gallery/sourceMedia";
+import {
+  retainedSourceMediaDisclosable,
+  retainedSourceMediaDisclosure,
+  retainedSourceMediaInventory,
+} from "@studio/api/gallerySourceMedia";
+import { upscaleLibraryImage } from "@studio/api/videoUpscale";
+import { defaultUpscaler } from "@studio/lib/upscale";
+import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
 import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
@@ -919,10 +929,41 @@ async function listenForNativeImageDrops() {
   else stopNativeImageDrop = unlisten;
 }
 
-/** Recent tab: a past prompt becomes the words to make, as a recall. */
-function useRecentPrompt(prompt: string) {
-  form.prompt = prompt;
-  onPromptAuthored(prompt, "recalled");
+/** The Recent tab's rows: the pictures already made, newest first. */
+const RECENT_PRINTS_CAP = 24;
+const recentPrints = computed(() => hostGallery.merged.slice(0, RECENT_PRINTS_CAP));
+
+/**
+ * Recent tab: a row restores the whole recipe, exactly as the Lightbox's
+ * "Use these settings" does — full metadata through `applyPrefillToForm`, plus
+ * the print's own retained-source authority when its machine kept one. The
+ * door that opens this tab promises those settings, so it must be the same
+ * path, not a prompt-only shortcut.
+ */
+function reuseRecentPrint(entry: MergedPrint) {
+  const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
+  const target = hostGallery.targetOf(entry.sourceKey);
+  if (target) {
+    void retainedSourceMediaInventory(entry.item.filename, target)
+      .then((inventory) => {
+        if (
+          !composer.setRetainedSourceIfCurrent(retainedVersion, {
+            filename: entry.item.filename,
+            origin: target,
+            inventory,
+          })
+        ) {
+          return;
+        }
+        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
+          ? retainedSourceMediaDisclosure(inventory.availability)
+          : null;
+        if (disclosure) toasts.push(disclosure, "error");
+      })
+      // A transport failure inspecting the additive endpoint must not turn a
+      // working restore into a dead end; the local stash path stays live.
+      .catch(() => {});
+  }
   inspectorTab.value = "settings";
   void nextTick(() => composerRef.value?.focus?.());
 }
@@ -2367,26 +2408,28 @@ const liveGenerationStatus = computed(() => {
   return j.status === "finishing" ? `${copy}…` : copy;
 });
 
+/** The caption's left slot: the file this print landed as, or — while it is
+ * still developing, and for an inline completion the host never named — the
+ * style that is making it. */
 const edgeCode = computed(() => {
   const selected = selectedQueueRender.value;
+  if (selected) return modelDisplayNameForId(selected.model, installedModels.value);
+  const j = job.value;
+  if (!j) return "";
+  return j.result?.filename ?? modelDisplayNameForId(j.model, installedModels.value);
+});
+
+/** The caption's right slot: the print's size and how long it took. */
+const captionMeta = computed(() => {
+  const selected = selectedQueueRender.value;
   if (selected) {
-    const name = modelDisplayNameForId(selected.model, installedModels.value);
     const preview = selected.preview;
-    const progress =
-      preview && preview.step !== null && preview.total !== null
-        ? `${preview.step}/${preview.total}`
-        : (preview?.stage ?? "waiting for progress");
-    return `${name} · ${progress}`;
+    return preview && preview.step !== null && preview.total !== null
+      ? `${preview.step}/${preview.total}`
+      : (preview?.stage ?? "waiting for progress");
   }
   const j = job.value;
   if (!j) return "";
-  const name = modelDisplayNameForId(j.model, installedModels.value);
-  const s = j.result
-    ? `S ${j.result.seed_used}`
-    : j.visualSeed.startsWith(`${j.model}·`)
-      ? "S random"
-      : `S ${j.visualSeed.slice(0, 12)}`;
-  const stepPart = `${j.status === "complete" ? j.total : j.step}/${j.total}`;
   // A mesh has no pixels to describe — `width`/`height` are its poster's, not
   // the print's — so its geometry is the provenance: the one shared caption
   // every surface writes under a 3-D print.
@@ -2402,11 +2445,16 @@ const edgeCode = computed(() => {
         j.result?.mesh_bounds_max,
       )
     : j.result
-      ? `${j.result.width}×${j.result.height}`
-      : `${j.width}×${j.height}`;
+      ? squareSizeLabel(j.result.width, j.result.height)
+      : squareSizeLabel(j.width, j.height);
   const time = j.result ? `${(j.result.generation_time_ms / 1000).toFixed(1)}s` : "";
-  return [name, s, stepPart, size, time].filter(Boolean).join("  ");
+  return [size, time].filter(Boolean).join(" · ");
 });
+
+/** `1024²` for a square canvas, `1216×704` otherwise. */
+function squareSizeLabel(width: number, height: number): string {
+  return width === height ? `${width}²` : `${width}×${height}`;
+}
 
 let templateLoadEpoch = 0;
 async function loadTemplate(template: GenerationTemplate) {
@@ -2703,6 +2751,81 @@ async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promi
   toasts.push(outcome.message);
 }
 
+/**
+ * Make 4 variations: the print that is on the canvas, made again as a batch.
+ * Nothing else changes — the words, the style, the size and the seed policy
+ * are whatever produced this picture, which is the whole point of the action.
+ */
+const VARIATION_BATCH = 4;
+function makeVariations(count = VARIATION_BATCH) {
+  if (isSequence.value) return;
+  form.batchSize = Math.min(Math.max(count, 1), MAX_BATCH_SIZE);
+  void generate();
+}
+
+// ── Make bigger (the caption's upscale door) ────────────────────────────────
+// One print, one machine: the canvas result has exactly one origin, so this
+// carries neither the Library's authority picker nor its framewise video
+// recovery. A host that can upscale a gallery file in place does; anything
+// older streams the bytes back and saves the result beside them.
+const upscaleEntry = ref<MergedPrint | null>(null);
+const upscaleModel = ref("");
+const upscaleBusy = ref(false);
+const upscaleError = ref("");
+
+function canUpscaleCanvasResult(j: Job): boolean {
+  return (
+    j.status === "complete" &&
+    !j.result?.video_frames &&
+    !isAudioResult(j) &&
+    !isMeshResult(j) &&
+    !!canvasPrintEntry(j)
+  );
+}
+
+function openCanvasUpscale(j: Job) {
+  const entry = canvasPrintEntry(j);
+  if (!entry) return;
+  upscaleEntry.value = entry;
+  upscaleError.value = "";
+  upscaleModel.value = defaultUpscaler(models.upscalers);
+}
+
+function closeCanvasUpscale() {
+  upscaleEntry.value = null;
+  upscaleBusy.value = false;
+  upscaleError.value = "";
+}
+
+async function startCanvasUpscale() {
+  const entry = upscaleEntry.value;
+  const target = entry ? hostGallery.targetOf(entry.sourceKey) : null;
+  if (!entry || !target || upscaleBusy.value) return;
+  upscaleBusy.value = true;
+  upscaleError.value = "";
+  try {
+    if (hosts.capabilities[entry.sourceKey]?.video_upscale?.gallery_image === true) {
+      const result = await upscaleLibraryImage(target, entry.item.filename, upscaleModel.value);
+      toasts.push(`Made bigger — ${result.filename}`);
+    } else {
+      const upscaled = await upscaleImage({
+        model: upscaleModel.value,
+        image: await readGalleryMediaBase64(entry, hostGallery),
+        target,
+      });
+      const stem = entry.item.filename.replace(/\.[^.]+$/, "");
+      const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
+      toasts.push(`Made bigger — saved as ${saved}`);
+    }
+    void hostGallery.refreshHost(entry.sourceKey);
+    closeCanvasUpscale();
+  } catch (error) {
+    upscaleError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    upscaleBusy.value = false;
+  }
+}
+
 /** Whether the canvas result can be written out as a file right now. */
 function canSaveCanvasResult(j: Job): boolean {
   return !!j.result && !j.result.video_frames && !isAudioResult(j) && !!j.result.image;
@@ -2717,12 +2840,6 @@ function saveCanvasResult(j: Job) {
     .saveMediaBytes(filename, j.result.image)
     .then((saved) => showSavedMediaToast(toasts, saved))
     .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
-}
-
-/** The caption strip's "Use as source" — the same gate the menu applies. */
-function canUseCanvasAsSource(j: Job): boolean {
-  const entry = canvasPrintEntry(j);
-  return j.status === "complete" && !!entry && canUseGalleryEntryAsSource(entry.item);
 }
 
 function canvasMenu(): MenuEntry[] {
@@ -2774,7 +2891,7 @@ function canvasMenu(): MenuEntry[] {
       action: () => saveCanvasResult(j),
     },
     {
-      label: "Use as source",
+      label: "Start from this photo",
       // Whether this print CAN be a source is a question about the print, not
       // about which delivery the completion used: a mesh is geometry and an
       // audio print has no pixels, both answered from the filename the host
@@ -4812,6 +4929,12 @@ watch(
   },
 );
 
+// ⌥↩ / palette — the picture on the canvas, made four more times.
+watch(
+  () => ui.makeVariationsTick,
+  () => makeVariations(),
+);
+
 // Menu ▸ Generate / Expand Prompt reuse the composer actions. In sequence
 // output the same intent submits the sequence.
 watch(
@@ -4888,9 +5011,9 @@ onBeforeUnmount(() => {
       >
         <!-- Canvas -->
         <div
-          class="flex min-h-[144px] flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
+          class="flex min-h-[320px] flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
         >
-          <!-- Prepared variations review (prototype: this replaces the canvas) -->
+          <!-- Prepared variations review takes the canvas while it is open. -->
           <PreparedExpansionBatch
             v-if="preparedBatch"
             :batch="preparedBatch"
@@ -4938,7 +5061,7 @@ onBeforeUnmount(() => {
               class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
             >
               <div
-                class="relative max-h-full w-full max-w-full overflow-hidden rounded-inner border border-border-control bg-media-bed"
+                class="relative max-h-full w-full max-w-full overflow-hidden border border-border-control bg-media-bed"
                 data-test="preview-frame"
                 :style="previewFrameStyle"
                 @contextmenu="job ? contextMenu.open($event, canvasMenu()) : undefined"
@@ -5078,6 +5201,13 @@ onBeforeUnmount(() => {
                   >
                     {{ edgeCode }}
                   </span>
+                  <span
+                    v-if="captionMeta"
+                    data-test="generation-caption-meta"
+                    class="shrink-0 font-mono text-micro text-fg-dim whitespace-nowrap"
+                  >
+                    {{ captionMeta }}
+                  </span>
                   <template v-if="job && job.status === 'complete'">
                     <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
                     <button
@@ -5091,13 +5221,21 @@ onBeforeUnmount(() => {
                       Save
                     </button>
                     <button
-                      v-if="canUseCanvasAsSource(job)"
                       type="button"
-                      data-test="canvas-use-source"
+                      data-test="canvas-variations"
                       class="caption-action"
-                      @click="useCanvasResultAsSource(job, canvasPrintEntry(job))"
+                      @click="makeVariations()"
                     >
-                      Start from this
+                      Make 4 variations
+                    </button>
+                    <button
+                      v-if="canUpscaleCanvasResult(job)"
+                      type="button"
+                      data-test="canvas-upscale"
+                      class="caption-action"
+                      @click="openCanvasUpscale(job)"
+                    >
+                      Make bigger
                     </button>
                     <button
                       type="button"
@@ -5470,7 +5608,7 @@ onBeforeUnmount(() => {
       ref="inspectorRef"
       :form="form"
       :tab="inspectorTab"
-      :history="promptHistory"
+      :recent="recentPrints"
       :last-seed="generation.lastSeedUsed"
       :chain-limits="chainLimits"
       :canvas-intent="canvasIntent"
@@ -5480,7 +5618,19 @@ onBeforeUnmount(() => {
       @pull-missing-model="offerPullForSelectedModel"
       @update:tab="inspectorTab = $event"
       @load-template="loadTemplate"
-      @use-prompt="useRecentPrompt"
+      @reuse-print="reuseRecentPrint"
+    />
+
+    <UpscaleDialog
+      v-model="upscaleModel"
+      :open="!!upscaleEntry"
+      kind="image"
+      :source-name="upscaleEntry?.item.filename ?? ''"
+      :models="models.upscalers"
+      :busy="upscaleBusy"
+      :error="upscaleError || null"
+      @confirm="startCanvasUpscale"
+      @close="closeCanvasUpscale"
     />
 
     <DownloadTargetDialog

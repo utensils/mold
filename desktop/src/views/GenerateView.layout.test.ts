@@ -33,7 +33,7 @@ describe("GenerateView layout", () => {
     expect(tagFor(viewSource, "create-bottom-panel")).toContain("height: `${benchHeight}px`");
     expect(tagFor(viewSource, "create-bottom-panel")).toContain("containerType: 'size'");
     expect(tagFor(viewSource, "create-bottom-panel")).toContain("containerName: 'create-bench'");
-    expect(viewSource).toContain("min-h-[144px]");
+    expect(viewSource).toContain("min-h-[320px]");
     expect(viewSource).not.toContain('class="absolute inset-0 h-full w-full object-cover"');
   });
 

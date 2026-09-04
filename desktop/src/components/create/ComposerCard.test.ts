@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import ComposerCard from "./ComposerCard.vue";
-import StyleChips from "./StyleChips.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import { MAX_BATCH_SIZE, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
@@ -115,13 +114,17 @@ describe("ComposerCard", () => {
     expect(wrapper.emitted("expand")).toHaveLength(1);
   });
 
-  it("routes the style-chip selection through the form without touching the prompt", async () => {
+  it("keeps a restored look preset on the form with no strip to show it", async () => {
+    // The preset strip is gone from the desktop composer — its word collided
+    // with the bound "Style" — but a persisted draft carrying one still
+    // submits, so the field rides along untouched.
     const form = baseForm();
+    form.stylePreset = "cinematic";
     const wrapper = mountComposer(form);
-    wrapper.findComponent(StyleChips).vm.$emit("update:modelValue", "cinematic");
     await wrapper.vm.$nextTick();
+    expect(wrapper.find("[data-test='style-toggle']").exists()).toBe(false);
     expect(form.stylePreset).toBe("cinematic");
-    expect(form.prompt).toBe("a lighthouse"); // textarea untouched
+    expect(form.prompt).toBe("a lighthouse");
   });
 
   it("can disable Generate without displaying obvious guidance", () => {

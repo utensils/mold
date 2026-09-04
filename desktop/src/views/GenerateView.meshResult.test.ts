@@ -240,7 +240,12 @@ describe("GenerateView — mesh results", () => {
     primeMeshJob();
     const wrapper = mountView();
     await flushPromises();
-    const caption = wrapper.get("[data-test='generation-edge-code']").text();
+    // The caption's left slot names the file; its right slot carries the
+    // geometry, which is a 3-D print's only honest size.
+    expect(wrapper.get("[data-test='generation-edge-code']").text()).toContain(
+      "mold-hunyuan3d.glb",
+    );
+    const caption = wrapper.get("[data-test='generation-caption-meta']").text();
     expect(caption).toContain("49,152 tris · 24,576 verts · 1.00×0.80×0.60");
     // The poster's pixel size is not the print's size — it must not read as one.
     expect(caption).not.toContain("512×512");
@@ -255,7 +260,7 @@ describe("GenerateView — mesh results", () => {
     const labelled = (label: string) =>
       entries.find((entry) => !("separator" in entry) && entry.label === label);
     expect(labelled("Copy image")).toMatchObject({ disabled: true });
-    expect(labelled("Use as source")).toMatchObject({ disabled: true });
+    expect(labelled("Start from this photo")).toMatchObject({ disabled: true });
     // The save entry names what it saves: binary glTF, not an image.
     expect(labelled("Save mesh")).toMatchObject({ disabled: false });
     expect(labelled("Save image")).toBeUndefined();
@@ -462,7 +467,7 @@ describe("GenerateView — mesh results", () => {
 
       // Nothing has parsed the file yet, so the caption states no size at all
       // rather than the canvasless recipe's zero canvas.
-      expect(wrapper.get("[data-test='generation-edge-code']").text()).not.toContain("0×0");
+      expect(wrapper.get("[data-test='generation-caption-meta']").text()).not.toContain("0×0");
 
       wrapper.findComponent(MeshViewer).vm.$emit("ready", {
         vertexCount: 148_008,
@@ -470,7 +475,7 @@ describe("GenerateView — mesh results", () => {
         bounds: { min: [-0.78, -0.98, -0.8], max: [0.78, 0.99, 0.81] },
       });
       await flushPromises();
-      expect(wrapper.get("[data-test='generation-edge-code']").text()).toContain(
+      expect(wrapper.get("[data-test='generation-caption-meta']").text()).toContain(
         "324,748 tris · 148,008 verts",
       );
     });
@@ -489,7 +494,7 @@ describe("GenerateView — mesh results", () => {
       expect(labelled("Save mesh")).toBeDefined();
       expect(labelled("Save image")).toBeUndefined();
       expect(labelled("Copy image")).toMatchObject({ disabled: true });
-      expect(labelled("Use as source")).toMatchObject({ disabled: true });
+      expect(labelled("Start from this photo")).toMatchObject({ disabled: true });
     });
   });
 

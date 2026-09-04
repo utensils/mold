@@ -434,7 +434,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 8px;
   border: 1px solid var(--mold-border);
-  border-radius: 8px;
+  border-radius: var(--mold-radius-3);
   background: color-mix(in srgb, var(--mold-bg) 55%, var(--mold-bg-deep));
   padding: 10px;
 }
@@ -442,7 +442,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   font-weight: 600;
   color: var(--mold-blue);
 }
@@ -456,7 +456,7 @@ onBeforeUnmount(() => {
   gap: 5px;
   min-height: 34px;
   border: 1px solid var(--mold-border-control);
-  border-radius: 9px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   padding: 5px 7px;
 }
@@ -469,7 +469,7 @@ onBeforeUnmount(() => {
   border-radius: var(--mold-radius-2);
   background: var(--mold-bg);
   padding: 1px 5px 1px 8px;
-  font-size: 11.5px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -483,7 +483,7 @@ onBeforeUnmount(() => {
 }
 .ms-fu__chip-src {
   font-family: var(--mold-font-mono);
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.06em;
   color: var(--mold-text-dim);
 }
@@ -491,7 +491,7 @@ onBeforeUnmount(() => {
   border: 0;
   background: transparent;
   color: var(--mold-text-dim);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   line-height: 1;
   cursor: pointer;
   padding: 0 1px;
@@ -504,7 +504,7 @@ onBeforeUnmount(() => {
   min-width: 80px;
   border: 0;
   background: transparent;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text);
   padding: 2px 0;
 }
@@ -518,10 +518,10 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   border: 1px solid var(--mold-border-control);
-  border-radius: 9px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   padding: 0 9px;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text);
   cursor: pointer;
 }
@@ -554,7 +554,7 @@ onBeforeUnmount(() => {
 }
 .ms-fu__collection-match {
   flex-shrink: 0;
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 /* Anchored to the group, never to the small input: `left/right: 0` keeps the
@@ -568,7 +568,7 @@ onBeforeUnmount(() => {
   max-height: 16rem;
   overflow-y: auto;
   border: 1px solid var(--mold-border);
-  border-radius: 10px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
   padding: 5px 0;
@@ -580,7 +580,7 @@ onBeforeUnmount(() => {
   gap: 6px;
   padding: 5px 10px;
   text-align: left;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   background: transparent;
   border: 0;
@@ -600,7 +600,7 @@ onBeforeUnmount(() => {
   width: 10px;
   flex-shrink: 0;
   color: var(--mold-blue);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
 }
 .ms-fu__row-name {
   min-width: 0;
@@ -611,7 +611,7 @@ onBeforeUnmount(() => {
 }
 .ms-fu__row-count {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 .ms-fu__new-input {
@@ -619,7 +619,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   border: 0;
   background: transparent;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text);
 }
 .ms-fu__new-input:focus {
@@ -627,16 +627,16 @@ onBeforeUnmount(() => {
 }
 .ms-fu__pop-foot {
   padding: 4px 10px 2px;
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 /* Dashed, like the ghost chip: a preview of a name the host will stamp. */
 .ms-fu__filename {
   border: 1px dashed var(--mold-border-control);
-  border-radius: 6px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   padding: 6px 8px;
-  font-size: 10.5px;
+  font-size: var(--mold-fs-micro);
   line-height: 1.6;
   color: var(--mold-text-2);
   overflow-wrap: anywhere;
@@ -645,7 +645,7 @@ onBeforeUnmount(() => {
   margin-right: 5px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  font-size: 8.5px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 .ms-fu__filename-slug {

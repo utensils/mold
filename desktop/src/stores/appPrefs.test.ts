@@ -209,7 +209,7 @@ describe("appPrefs panel widths", () => {
   it("defaults to the PANEL_LIMITS defaults before settings load", () => {
     const prefs = useAppPrefsStore();
     expect(prefs.navRailWidth).toBe(270);
-    expect(prefs.generateParamsWidth).toBe(340);
+    expect(prefs.generateParamsWidth).toBe(300);
     expect(prefs.historyDrawerWidth).toBe(290);
   });
 
@@ -218,7 +218,7 @@ describe("appPrefs panel widths", () => {
     const prefs = useAppPrefsStore();
     await prefs.init();
     expect(prefs.navRailWidth).toBe(270);
-    expect(prefs.generateParamsWidth).toBe(340);
+    expect(prefs.generateParamsWidth).toBe(300);
     expect(prefs.historyDrawerWidth).toBe(290);
   });
 

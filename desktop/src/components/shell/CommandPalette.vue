@@ -16,7 +16,7 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useQueueCommands } from "../../composables/useQueueCommands";
 import { THEME_META } from "../../lib/theme";
 import { NAV_ROUTES } from "../../lib/shortcuts";
-import { shiftShortcutLabel, shortcutLabel } from "../../lib/platform";
+import { altShortcutLabel, shiftShortcutLabel, shortcutLabel } from "../../lib/platform";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
@@ -298,6 +298,16 @@ const staticCommands = computed<Command[]>(() => {
       run: () => {
         ui.generate();
         close();
+      },
+    },
+    {
+      id: "act-variations",
+      title: "Make 4 variations of the last picture",
+      keywords: ["batch", "again", "more", "siblings", "four"],
+      key: altShortcutLabel("↩"),
+      run: () => {
+        ui.makeVariations();
+        go("/create");
       },
     },
     {

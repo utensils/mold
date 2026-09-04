@@ -16,6 +16,7 @@ export const useUiStore = defineStore("ui", {
     paletteOpen: false,
     newGenerationTick: 0,
     generateTick: 0,
+    makeVariationsTick: 0,
     expandTick: 0,
     randomizeSeedTick: 0,
     copySeedTick: 0,
@@ -36,6 +37,9 @@ export const useUiStore = defineStore("ui", {
     },
     generate() {
       this.generateTick++;
+    },
+    makeVariations() {
+      this.makeVariationsTick++;
     },
     expandPrompt() {
       this.expandTick++;

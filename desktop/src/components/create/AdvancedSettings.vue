@@ -105,10 +105,8 @@ import {
 } from "@studio/lib/ltx2Control";
 import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
 import { videoOnlyBlockedReason } from "@studio/lib/videoOnly";
-import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { attachPickedVideo } from "../../lib/sourceAttachment";
-import type { HostRoute } from "../../stores/hosts";
 
 const props = withDefaults(
   defineProps<{
@@ -130,7 +128,6 @@ const props = withDefaults(
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
     cameraUnsupportedReason?: string | null;
-    loraRoute?: HostRoute | null;
   }>(),
   {
     selectedModel: null,
@@ -139,7 +136,6 @@ const props = withDefaults(
     cameraControls: () => [],
     cameraControlsLoaded: false,
     cameraUnsupportedReason: null,
-    loraRoute: null,
   },
 );
 
@@ -750,24 +746,6 @@ function reset() {
         >
           {{ identityMessage }}
         </p>
-      </AccordionSection>
-
-      <!-- 4 · Add-on looks -->
-      <AccordionSection
-        v-if="caps.supportsLora"
-        icon="layers"
-        title="Add-on looks"
-        summary="Extra looks layered on the style"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-lora"
-      >
-        <LoraStack
-          :form="form"
-          :model="form.model"
-          :route="loraRoute"
-          @append-word="emit('append-word', $event)"
-        />
       </AccordionSection>
 
       <!-- 5 · Upscale after generate -->
@@ -1392,7 +1370,7 @@ function reset() {
 }
 .ms-adv__summary {
   font-family: var(--mold-font-mono);
-  font-size: 9.5px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   letter-spacing: 0.04em;
 }
@@ -1403,7 +1381,7 @@ function reset() {
 }
 .ms-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
@@ -1418,10 +1396,10 @@ function reset() {
   height: 40px;
   background: var(--mold-bg);
   border: 1px solid var(--mold-border-control);
-  border-radius: 9px;
+  border-radius: var(--mold-radius-3);
   color: var(--mold-text);
   padding: 0 12px;
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
 }
 .ms-input--mt {
   margin-top: 6px;
@@ -1434,10 +1412,10 @@ function reset() {
   box-sizing: border-box;
   background: var(--mold-bg);
   border: 1px solid var(--mold-border-control);
-  border-radius: 10px;
+  border-radius: var(--mold-radius-3);
   color: var(--mold-text);
   font-family: var(--mold-font-sans);
-  font-size: 13.5px;
+  font-size: var(--mold-fs-sm);
   resize: none;
   outline: none;
   min-height: 64px;
@@ -1461,12 +1439,12 @@ function reset() {
   margin-top: 16px;
 }
 .ms-switch-row__title {
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   color: var(--mold-text-2);
   font-weight: 600;
 }
 .ms-switch-row__hint {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   margin-top: 2px;
 }
@@ -1488,7 +1466,7 @@ function reset() {
   gap: 8px;
 }
 .ms-error {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-error);
   margin-top: 6px;
 }
@@ -1496,7 +1474,7 @@ function reset() {
   margin-top: 6px;
 }
 .ms-hint {
-  font-size: 10.5px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   margin-top: 6px;
   line-height: 1.45;
@@ -1504,16 +1482,16 @@ function reset() {
 .ms-cue {
   border: 1px solid var(--mold-border-control);
   margin-top: 6px;
-  border-radius: 9px;
+  border-radius: var(--mold-radius-3);
   background: color-mix(in srgb, var(--mold-blue) 10%, transparent);
   padding: 8px 10px;
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-2);
 }
 .ms-file {
   display: block;
   width: 100%;
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 .ms-file-row {
@@ -1523,14 +1501,14 @@ function reset() {
   gap: 8px;
 }
 .ms-file-row__name {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ms-file-row__clear {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   background: transparent;
   border: 0;
@@ -1542,7 +1520,7 @@ function reset() {
   justify-content: space-between;
 }
 .ms-kf-add {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-blue);
   background: transparent;
   border: 0;
@@ -1559,7 +1537,7 @@ function reset() {
   height: 32px;
 }
 .ms-kf-row__name {
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1589,22 +1567,22 @@ function reset() {
   margin-left: 5px;
   padding: 1px 6px;
   border: 1px solid var(--mold-border-control);
-  border-radius: 999px;
+  border-radius: var(--mold-radius-2);
   font-family: var(--mold-font-mono);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
 }
 .ms-guidance__reset {
   border: 0;
   background: transparent;
   color: var(--mold-text-dim);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
 }
 .ms-guidance__label {
   display: block;
   color: var(--mold-text-2);
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
 }
 .ms-guidance__label .ms-input {
@@ -1615,8 +1593,8 @@ function reset() {
   background: transparent;
   color: var(--mold-text-2);
   padding: 6px 9px;
-  border-radius: 8px;
-  font-size: 11px;
+  border-radius: var(--mold-radius-3);
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
   cursor: pointer;
 }

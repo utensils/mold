@@ -21,6 +21,7 @@ export type ShellAction =
   | { kind: "command-palette" }
   | { kind: "cancel-job" }
   | { kind: "new-generation" }
+  | { kind: "make-variations" }
   | { kind: "randomize-seed" }
   | { kind: "copy-seed" }
   | { kind: "toggle-queue-pause" }
@@ -98,15 +99,22 @@ export function allowsNativeContextMenu(el: Element | null): boolean {
 }
 
 /**
- * Resolve a keydown into a shell-level action, or null if unhandled. Requires
- * the platform primary modifier and no Alt. Route-scoped actions (such as
- * randomize seed) are resolved here but gated by the current route in the shell.
+ * Resolve a keydown into a shell-level action, or null if unhandled. Every
+ * chord but ⌥↩ requires the platform primary modifier and no Alt. Route-scoped
+ * actions (such as randomize seed) are resolved here but gated by the current
+ * route in the shell.
  */
 export function resolveShellShortcut(
   e: KeyLike,
   platform: DesktopPlatform = CURRENT_PLATFORM,
 ): ShellAction | null {
   const primaryPressed = platform === "macos" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  // ⌥↩ is the one chord that deliberately carries no primary modifier: it
+  // sits one Option away from ⌘↩ Generate because it makes the same picture
+  // four more times.
+  if (e.key === "Enter") {
+    return e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey ? { kind: "make-variations" } : null;
+  }
   if (!primaryPressed || e.altKey) return null;
   // `+` is Shift+= on standard keyboards, so recognize zoom before the
   // general shifted-shortcut gate below.

@@ -9,7 +9,6 @@ import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import EstimateBadge from "../generate/EstimateBadge.vue";
-import StyleChips from "./StyleChips.vue";
 import type { GenerateForm } from "../../lib/generateForm";
 import { promptInputForForm } from "../../lib/promptRecipe";
 import type { GenerateRequest } from "../../lib/api/types";
@@ -207,7 +206,6 @@ defineExpose({ focus, expand, record });
           :target="estimateTarget"
         />
       </div>
-      <StyleChips v-model="form.stylePreset" />
       <div class="ms-composer__controls">
         <button
           type="button"

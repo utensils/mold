@@ -197,12 +197,11 @@ describe("InspectorPanel — a target host that does not have the model", () => 
     const octree = wrapper
       .findAllComponents({ name: "SegmentedControl" })
       .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    // Rough | Normal | Fine over the recipe's own floor, default and ceiling.
     expect(octree.props("options")).toEqual([
-      { value: 128, label: "128" },
-      { value: 192, label: "192" },
-      { value: 256, label: "256" },
-      { value: 320, label: "320" },
-      { value: 384, label: "384" },
+      { value: 128, label: "Rough" },
+      { value: 256, label: "Normal" },
+      { value: 384, label: "Fine" },
     ]);
   });
 
@@ -307,14 +306,14 @@ describe("InspectorPanel — Mesh group", () => {
       .findAllComponents({ name: "SegmentedControl" })
       .find((row) => row.attributes("data-test") === "mesh-octree")!;
     expect(octree.props("options")).toEqual([
-      { value: 128, label: "128" },
-      { value: 192, label: "192" },
-      { value: 256, label: "256" },
-      { value: 320, label: "320" },
-      { value: 384, label: "384" },
+      { value: 128, label: "Rough" },
+      { value: 256, label: "Normal" },
+      { value: 384, label: "Fine" },
     ]);
     // Untouched means "use the profile default", and the default is lit.
     expect(octree.props("modelValue")).toBe(256);
+    // The rung itself stays on screen as the mono truth beside the words.
+    expect(wrapper.get("[data-test='mesh-octree-truth']").text()).toContain("octree 256");
   });
 
   it("writes the chosen octree resolution onto the form", async () => {

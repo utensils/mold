@@ -58,3 +58,18 @@
   the trash moved into the trash's own banner, next to how long deleted
   pictures are kept, and the size slider is a plain track that fits its
   toolbar.
+- **New image reads as groups, and a finished picture offers what you would do
+  next.** What to make — Still picture, Short clip or 3-D object — is now the
+  one control in the view toolbar; the settings panel's duplicate output switch
+  is gone. Quality offers Draft, Good and Best, built from the model's own
+  range, so the passes slider has three named places to land. Add-on looks
+  moved out of Advanced into the settings column, each look a card with its
+  strength as a meter you can drag. A 3-D style's surface detail reads Rough,
+  Normal and Fine with the octree number beside it, and everything a clip needs
+  — length, smoothness, sound, and how long it will take — is one card. Repeat
+  this look shows the seed it would keep. Starting points are pictures with the
+  manager behind Edit…, and Recent lists the pictures you have made rather than
+  bare words: clicking one brings back everything it was made with, which is
+  what the door promised. Under a finished picture the caption names its file
+  and size and offers **Make 4 variations** (⌥↩, and in the command palette) and
+  **Make bigger** beside Save.

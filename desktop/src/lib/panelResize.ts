@@ -7,8 +7,9 @@
 export const PANEL_LIMITS = {
   // 270 per the shell anatomy (nav + machine card + queue).
   navRail: { min: 220, def: 270, max: 360 },
-  // 340 keeps all five 52px aspect controls on one row after 18px side padding.
-  generateParams: { min: 280, def: 340, max: 480 },
+  // 300 per the shell anatomy (`--mold-shell-inspector-w`); the mock's
+  // inspector plane. Still resizable 280-480.
+  generateParams: { min: 280, def: 300, max: 480 },
   // 290 is the mock's inline History column; it widens for sequence rows.
   historyDrawer: { min: 260, def: 290, max: 960 },
 } as const;

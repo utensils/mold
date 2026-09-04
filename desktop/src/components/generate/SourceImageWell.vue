@@ -162,6 +162,15 @@ const sourceLimitLabel = computed(() =>
 const pickerOpen = ref(false);
 const endPickerOpen = ref(false);
 const maskOpen = ref(false);
+/** Whether this recipe and this attachment can take a painted mask at all —
+ * the one answer behind the group's "Paint a mask" door. */
+const maskAvailable = computed(
+  () => sourceRefinements.value && caps.value.supportsMask && Boolean(props.form.sourceImage),
+);
+function openMaskEditor() {
+  if (maskAvailable.value) maskOpen.value = true;
+}
+defineExpose({ maskAvailable, openMaskEditor });
 const h3ReferencePickerOpen = ref(false);
 /** Which ordered reference the crop dialog is editing; null when closed. */
 const h3CropIndex = ref<number | null>(null);
@@ -713,19 +722,10 @@ function setSourceFitMode(e: Event) {
       <p class="mt-1 text-micro text-fg-dim">{{ strength.hint }}</p>
     </template>
 
-    <!-- Mask well (inpaint families) -->
-    <template v-if="sourceRefinements && caps.supportsMask && form.sourceImage">
-      <div class="mt-3 flex items-center justify-between">
-        <label class="text-micro text-fg-2">Mask</label>
-        <button
-          type="button"
-          class="text-micro text-accent underline-offset-2 hover:underline"
-          data-test="source-edit-mask"
-          @click="maskOpen = true"
-        >
-          Edit mask…
-        </button>
-      </div>
+    <!-- Mask well (inpaint families). Painting is opened by the Start-from-a-
+         photo group's own door, which asks this component whether it has one. -->
+    <template v-if="maskAvailable">
+      <label class="mt-3 block text-micro text-fg-2">Mask</label>
       <div class="mt-1">
         <ImageDropWell
           :image="form.maskImage"

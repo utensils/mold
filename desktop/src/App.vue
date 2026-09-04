@@ -218,6 +218,10 @@ function onKeydown(e: KeyboardEvent) {
       ui.newGeneration();
       void router.push("/create");
       break;
+    case "make-variations":
+      ui.makeVariations();
+      if (route !== "/create") void router.push("/create");
+      break;
     case "randomize-seed":
       if (route === "/create") ui.randomizeSeed();
       break;

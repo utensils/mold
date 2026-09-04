@@ -48,6 +48,17 @@ describe("resolveShellShortcut", () => {
     expect(resolveMacShortcut(key("r"))).toEqual({ kind: "randomize-seed" });
   });
 
+  it("maps ⌥↩ to four variations of the last picture, on every platform", () => {
+    const chord = key("Enter", { metaKey: false, altKey: true });
+    expect(resolveMacShortcut(chord)).toEqual({ kind: "make-variations" });
+    expect(resolveShellShortcut(chord, "windows")).toEqual({ kind: "make-variations" });
+    // The primary modifier is Generate's chord, not this one.
+    expect(resolveMacShortcut(key("Enter", { altKey: true }))).toBeNull();
+    expect(resolveMacShortcut(key("Enter", { metaKey: false, altKey: true, shiftKey: true }))).toBe(
+      null,
+    );
+  });
+
   it("maps ⇧⌘C to copy seed", () => {
     expect(resolveMacShortcut(key("c", { shiftKey: true }))).toEqual({ kind: "copy-seed" });
     expect(resolveMacShortcut(key("C", { shiftKey: true }))).toEqual({ kind: "copy-seed" });

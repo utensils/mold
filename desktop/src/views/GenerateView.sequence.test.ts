@@ -279,11 +279,11 @@ describe("GenerateView — sequence output", () => {
       "separator" in entry ? [] : [entry.label],
     );
     expect(labels).toContain("Save image");
-    expect(labels).toContain("Use as source");
+    expect(labels).toContain("Start from this photo");
     expect(labels).toContain("Copy file path");
 
     const useAsSource = useContextMenuStore().entries.find(
-      (entry) => !("separator" in entry) && entry.label === "Use as source",
+      (entry) => !("separator" in entry) && entry.label === "Start from this photo",
     );
     expect(useAsSource).toMatchObject({ disabled: false });
     useContextMenuStore().activate(useAsSource!);
@@ -329,7 +329,7 @@ describe("GenerateView — sequence output", () => {
     await flushPromises();
     await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
     const useAsSource = useContextMenuStore().entries.find(
-      (entry) => !("separator" in entry) && entry.label === "Use as source",
+      (entry) => !("separator" in entry) && entry.label === "Start from this photo",
     );
     expect(useAsSource).toMatchObject({ disabled: false });
     useContextMenuStore().activate(useAsSource!);
@@ -400,7 +400,7 @@ describe("GenerateView — sequence output", () => {
     await flushPromises();
     await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
     const useAsSource = useContextMenuStore().entries.find(
-      (entry) => !("separator" in entry) && entry.label === "Use as source",
+      (entry) => !("separator" in entry) && entry.label === "Start from this photo",
     );
     expect(useAsSource).toMatchObject({ disabled: false });
     useContextMenuStore().activate(useAsSource!);
@@ -444,7 +444,7 @@ describe("GenerateView — sequence output", () => {
     await flushPromises();
     await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
     const useAsSource = useContextMenuStore().entries.find(
-      (entry) => !("separator" in entry) && entry.label === "Use as source",
+      (entry) => !("separator" in entry) && entry.label === "Start from this photo",
     );
     expect(useAsSource).toMatchObject({ disabled: true });
   });

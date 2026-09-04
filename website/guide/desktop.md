@@ -85,8 +85,19 @@ the phone keep Create / Library / Models until their own redesign.
 ## Features
 
 - **Create**: a capability-driven inspector that shows only the
-  controls a model's family supports (negative prompt, scheduler, CFG++, LoRA
-  stack, img2img source/mask/control, video frames/fps/audio). Models are
+  controls a model's family supports (negative prompt, scheduler, CFG++,
+  add-on looks, img2img source/mask/control, video frames/fps/audio). It reads
+  as groups rather than knobs: Start from a photo with **Paint a mask** and
+  **Use a face** beneath it, a **Quality** row of Draft / Good / Best built
+  from the model's own step range, the sliders, **Add-on looks**, a **3-D
+  object** card offering Rough / Normal / Fine, a **Clip** card holding length,
+  smoothness and sound, and **Repeat this look**. What to make — Still picture,
+  Short clip or 3-D object — is the one control in the view toolbar. **Starters**
+  shows your saved starting points as cards, with the manager behind Edit…, and
+  **Recent** lists the pictures you have made; clicking one brings back
+  everything it was made with. A finished picture's caption names its file and
+  size and offers Save, **Make 4 variations** (⌥↩), **Make bigger**, and the
+  rest behind ⋯. Models are
   selected and shown throughout queues, downloads, Library metadata, and
   machine details by their human-readable catalog names even when their stable
   internal generation ids are `cv:` or `hf:`. For video-only LTX-2 community
@@ -404,6 +415,7 @@ release is published.
 | Cmd/Ctrl+K          | Command palette                                              |
 | Cmd/Ctrl+N          | New image (clear composer, focus)                            |
 | Cmd/Ctrl+Enter      | Generate                                                     |
+| Alt/Option+Enter    | Make 4 variations of the last picture                        |
 | Cmd/Ctrl+E          | Expand prompt                                                |
 | Cmd/Ctrl+R          | Surprise me (a new seed)                                     |
 | Cmd/Ctrl+.          | Stop the image being made                                    |

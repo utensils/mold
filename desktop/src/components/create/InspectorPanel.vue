@@ -43,12 +43,17 @@ import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
+import LoraStack from "../generate/LoraStack.vue";
 import TemplatesPanel from "../generate/TemplatesPanel.vue";
+import StarterList from "./StarterList.vue";
+import RecentPrints from "./RecentPrints.vue";
 import HostChip from "./HostChip.vue";
 import { INSPECTOR_TABS, type InspectorTab } from "./inspectorTabs";
 import type { GenerationTemplate } from "../../lib/generationTemplates";
 import IdentityWell from "./IdentityWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
+import { activeQualityPreset, qualityPresets, type QualityPreset } from "../../lib/qualityPresets";
+import { meshDetailLadder } from "../../lib/meshDetailLadder";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   intentForCanvas,
@@ -71,7 +76,7 @@ import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import { useGalleryStore } from "../../stores/gallery";
+import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
 import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
 import { fileUnderAvailable, matchCollection, type FileUnderState } from "@studio/lib/fileUnder";
 import FileUnderGroup from "./FileUnderGroup.vue";
@@ -87,8 +92,8 @@ const props = withDefaults(
   defineProps<{
     form: GenerateForm;
     tab?: InspectorTab;
-    /** Recent prompts, newest first, for the Recent tab. */
-    history?: string[];
+    /** Recent prints, newest first, for the Recent tab. */
+    recent?: MergedPrint[];
     /** Seed of the most recent finished print — powers "lock last seed". */
     lastSeed?: number | null;
     /** Per-model chain caps for the selected model, when Create has them —
@@ -99,7 +104,7 @@ const props = withDefaults(
   }>(),
   {
     tab: "settings",
-    history: () => [],
+    recent: () => [],
     lastSeed: null,
     chainLimits: null,
     canvasIntent: "model-default",
@@ -114,8 +119,9 @@ const emit = defineEmits<{
   "pull-missing-model": [model: string];
   "update:tab": [tab: InspectorTab];
   "load-template": [template: GenerationTemplate];
-  /** Recent tab: bring a past prompt back as the words to make. */
-  "use-prompt": [prompt: string];
+  /** Recent tab: restore a past print's whole recipe, exactly as the Lightbox
+   * does — the door that opens this tab says "Use these settings again". */
+  "reuse-print": [print: MergedPrint];
 }>();
 const durationRoutingRequest = computed(() => buildRequest(props.form));
 
@@ -270,6 +276,19 @@ const showSourceMedia = computed(() => !isSequence.value && sourcePlan.value.kin
  * back with the photo still in it — the same treatment staged LTX-2 media
  * gets. Web applies the same rule. */
 const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
+/* The two doors under the strength slider. Painting a mask belongs to the
+ * source well, which alone knows whether this recipe and this attachment can
+ * take one, so the well answers and the group only renders the button. */
+const sourceWell = ref<InstanceType<typeof SourceImageWell> | null>(null);
+const maskDoorAvailable = computed(() => sourceWell.value?.maskAvailable === true);
+const identityRevealed = ref(false);
+const identityWellOpen = computed(
+  () =>
+    showIdentity.value &&
+    // With no source group there is no door to open it from, so the well is
+    // the control itself.
+    (!showSourceMedia.value || identityRevealed.value || Boolean(props.form.identityImage)),
+);
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(contractModel.value, props.form.pipeline),
 );
@@ -277,6 +296,14 @@ const activeRecipe = computed(() =>
  * nothing at all. The inspector never composes that copy: the old hard-coded
  * distilled-CFG line was false for H3, whose guidance is pinned at 0. */
 const stepsNote = computed(() => controlNote(activeRecipe.value?.steps));
+/* Draft / Good / Best are the recipe's own floor, default and ceiling. A
+ * recipe that pins its steps offers no choice, so the rows disappear rather
+ * than reading as three names for one number. */
+const qualityRows = computed(() => qualityPresets(activeRecipe.value?.steps));
+const activeQuality = computed(() => activeQualityPreset(qualityRows.value, props.form.steps));
+function pickQuality(preset: QualityPreset) {
+  props.form.steps = preset.steps;
+}
 const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
 
 // ── 3-D mesh (canvasless recipes) ───────────────────────────────────────────
@@ -289,10 +316,7 @@ const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
 const canvasless = computed(() => caps.value.canvasless || outputShape.value.canvasless);
 const meshProfile = computed(() => caps.value.mesh ?? null);
 const octreeOptions = computed(() =>
-  (meshProfile.value?.octree_resolutions ?? []).map((value) => ({
-    value,
-    label: String(value),
-  })),
+  meshDetailLadder(meshProfile.value?.octree_resolutions, meshProfile.value?.octree_default),
 );
 /** `null` on the form means "use the profile default", and the default is
  * the segment that reads as chosen. */
@@ -352,7 +376,12 @@ function setGenerateAudio(value: boolean) {
   if (isSequence.value) draft.enableAudio = value;
   else props.form.enableAudio = value;
 }
+const showLoras = computed(() => caps.value.supportsLora && !isSequence.value);
+/** One card for every clip control the mock groups together. */
+const showClipCard = computed(() => caps.value.supportsVideo);
 const advancedExpanded = ref(false);
+/** Starters shows pictures; the save/search/sort manager is behind Edit…. */
+const managingStarters = ref(false);
 
 // ── Model picker (the shared ModelPicker; chains uses the same control) ──────
 const installedModels = computed(() =>
@@ -664,6 +693,12 @@ function setSeedMode(mode: "random" | "fixed") {
     props.form.seed = String(props.lastSeed ?? randomSeed());
   }
 }
+/** The mono truth beside the label: the pinned seed, or the last print's. */
+const seedReadout = computed(() => {
+  const raw = props.form.seed.trim();
+  if (uiSeedMode.value === "fixed") return raw === "" ? null : raw;
+  return props.lastSeed === null ? null : String(props.lastSeed);
+});
 const seedHint = computed(() => {
   if (uiSeedMode.value !== "fixed") return null;
   const raw = props.form.seed.trim();
@@ -772,31 +807,39 @@ defineExpose({ setOutputMode });
       </button>
     </div>
     <div v-if="tab === 'starters'" class="ms-inspector__scroll" data-test="inspector-starters">
-      <p class="ms-inspector__lead">
-        Pick a starting point and change the words — every setting comes with it.
-      </p>
+      <div class="ms-inspector__head">
+        <p class="ms-inspector__lead">
+          Pick a starting point and change the words — every setting comes with it.
+        </p>
+        <button
+          type="button"
+          class="ms-inspector__reset"
+          data-test="edit-starters"
+          :aria-pressed="managingStarters"
+          :data-on="managingStarters ? 'true' : undefined"
+          @click="managingStarters = !managingStarters"
+        >
+          <Icon name="pencil" :size="12" />
+          Edit…
+        </button>
+      </div>
       <TemplatesPanel
+        v-if="managingStarters"
         :form="form"
         :models="installedModels"
         @load="emit('load-template', $event)"
       />
+      <StarterList v-else :models="installedModels" @load="emit('load-template', $event)" />
     </div>
     <div v-else-if="tab === 'recent'" class="ms-inspector__scroll" data-test="inspector-recent">
-      <p v-if="history.length === 0" class="ms-inspector__lead">
-        Words you generate with show up here, newest first.
+      <p v-if="recent.length === 0" class="ms-inspector__lead">
+        Pictures you make show up here, newest first.
       </p>
-      <button
-        v-for="(prompt, index) in history"
-        :key="`${index}-${prompt}`"
-        type="button"
-        data-test="recent-prompt"
-        class="ms-recent"
-        :title="prompt"
-        @click="emit('use-prompt', prompt)"
-      >
-        <span class="ms-recent__prompt">{{ prompt }}</span>
-        <span class="ms-recent__action">Use these words</span>
-      </button>
+      <RecentPrints
+        :prints="recent"
+        :models="installedModels"
+        @reuse="emit('reuse-print', $event)"
+      />
     </div>
     <div v-else class="ms-inspector__scroll">
       <div class="ms-inspector__head">
@@ -832,37 +875,39 @@ defineExpose({ setOutputMode });
         </p>
       </div>
 
-      <!-- Output — a highlighted card: sequence is a setting of Create, not a place -->
-      <div class="ms-field">
-        <div class="ms-output" data-test="output-card">
-          <div class="ms-field__label">Output</div>
-          <SegmentedControl
-            :model-value="draft.output"
-            :options="[
-              { value: 'single', label: 'One shot' },
-              { value: 'sequence', label: 'Sequence' },
-            ]"
-            label="Output"
-            data-test="output-mode"
-            @update:model-value="setOutputMode"
-          />
-          <p v-if="isSequence" class="ms-field__hint">
-            {{ draft.clips.length }} clips on the composer rail · one-shot and sequence prompts stay
-            separate.
-          </p>
+      <!-- Start from a photo — primary-form image conditioning; the model
+           dictates whether (and how) it renders, exactly like resolutions.
+           Face conditioning is its own partition, not source media, so it sits
+           beside the source wells behind this group's second door and is
+           mounted only for a checkpoint that advertises identity support. -->
+      <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
+        <div class="ms-group-label">Start from a photo</div>
+        <SourceImageWell ref="sourceWell" :form="form" :selected-model="contractModel" />
+        <div v-if="maskDoorAvailable || showIdentity" class="ms-doors">
+          <button
+            v-if="maskDoorAvailable"
+            type="button"
+            class="ms-door"
+            data-test="source-edit-mask"
+            @click="sourceWell?.openMaskEditor()"
+          >
+            Paint a mask
+          </button>
+          <button
+            v-if="showIdentity"
+            type="button"
+            class="ms-door"
+            data-test="open-identity"
+            :data-on="identityWellOpen ? 'true' : undefined"
+            :aria-expanded="identityWellOpen"
+            @click="identityRevealed = !identityRevealed"
+          >
+            Use a face
+          </button>
         </div>
       </div>
 
-      <!-- Source media — primary-form image conditioning; the model dictates
-           whether (and how) it renders, exactly like resolutions. -->
-      <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
-        <SourceImageWell :form="form" :selected-model="contractModel" />
-      </div>
-
-      <!-- Identity photo — face conditioning is its own partition, not source
-           media, so it sits beside the source wells in the primary form and is
-           mounted only for a checkpoint that advertises identity support. -->
-      <div v-if="showIdentity" class="ms-field" data-test="inspector-identity">
+      <div v-if="identityWellOpen" class="ms-field" data-test="inspector-identity">
         <IdentityWell :form="form" />
       </div>
 
@@ -874,6 +919,27 @@ defineExpose({ setOutputMode });
         data-test="inspector-sequence-opening-image"
       >
         <SequenceOpeningImageWell :form="form" :upscalers="models.upscalers" />
+      </div>
+
+      <!-- Quality — three rungs of the recipe's own steps range, driving the
+           Detail slider below rather than a second setting. -->
+      <div v-if="qualityRows.length > 0" class="ms-field" data-test="quality-presets">
+        <div class="ms-group-label">Quality</div>
+        <div class="ms-quality">
+          <button
+            v-for="preset in qualityRows"
+            :key="preset.key"
+            type="button"
+            class="ms-quality__row"
+            :data-test="`quality-${preset.key}`"
+            :data-on="activeQuality === preset.key ? 'true' : undefined"
+            :aria-pressed="activeQuality === preset.key"
+            @click="pickQuality(preset)"
+          >
+            <span class="ms-quality__label">{{ preset.label }}</span>
+            <span class="ms-quality__meta">{{ preset.steps }} passes</span>
+          </button>
+        </div>
       </div>
 
       <!-- Shape -->
@@ -944,76 +1010,6 @@ defineExpose({ setOutputMode });
         </p>
       </div>
 
-      <!-- 3-D object, built entirely from the recipe's advertised `mesh`
-           block, so a host that widens the octree ladder or the face bounds
-           widens this group with no client release. -->
-      <div v-if="meshProfile" class="ms-field" data-test="mesh-controls">
-        <div class="ms-field__label">3-D object</div>
-        <SegmentedControl
-          v-if="octreeOptions.length > 0"
-          :model-value="octreeValue"
-          :options="octreeOptions"
-          label="Surface detail"
-          wrap
-          data-test="mesh-octree"
-          @update:model-value="form.mesh.octreeResolution = $event"
-        />
-        <SliderRow
-          v-if="thresholdControl"
-          class="mt-3"
-          :model-value="thresholdValue"
-          :min="thresholdControl.min"
-          :max="thresholdControl.max"
-          :step="thresholdControl.step"
-          :disabled="thresholdControl.mode === 'fixed'"
-          label="How tight to the photo"
-          :value-label="thresholdValue.toFixed(2)"
-          low="Puffier"
-          high="Sharper edges"
-          @update:model-value="form.mesh.threshold = $event"
-        />
-        <p
-          v-if="thresholdNote"
-          class="ms-field__hint ms-field__hint--after-slider"
-          data-test="mesh-threshold-note"
-        >
-          {{ thresholdNote }}
-        </p>
-        <div class="ms-field ms-field--row mt-3">
-          <label class="ms-field__label ms-field__label--inline" for="mesh-target-faces">
-            Simplify to
-          </label>
-          <input
-            id="mesh-target-faces"
-            data-selectable
-            data-test="mesh-target-faces"
-            type="number"
-            inputmode="numeric"
-            :min="meshProfile.target_faces_min"
-            :max="meshProfile.target_faces_max"
-            placeholder="keep every detail"
-            :value="form.mesh.targetFaces ?? ''"
-            :aria-invalid="targetFacesError ? 'true' : undefined"
-            class="ms-seed__input font-mono text-xs"
-            @input="setTargetFaces(($event.target as HTMLInputElement).value)"
-          />
-        </div>
-        <p
-          v-if="targetFacesError"
-          class="ms-field__error"
-          role="alert"
-          data-test="mesh-target-faces-error"
-        >
-          {{ targetFacesError }}
-        </p>
-        <p class="ms-field__hint">
-          Leave blank to keep the raw surface — {{ meshProfile.target_faces_min }}–{{
-            meshProfile.target_faces_max
-          }}
-          triangles when decimating.
-        </p>
-      </div>
-
       <!-- Stick to my words (guidance) -->
       <div class="ms-field">
         <SliderRow
@@ -1037,88 +1033,161 @@ defineExpose({ setOutputMode });
         </p>
       </div>
 
-      <!-- Duration is the human-facing video control; exact frames/FPS stay in Advanced. -->
-      <div v-if="caps.supportsVideo && !isSequence" class="ms-field">
-        <div
-          v-if="canPredictDuration"
-          class="ms-field ms-field--row"
-          data-test="predict-duration-control"
-        >
-          <span class="ms-field__label ms-field__label--inline">Predict duration</span>
-          <SwitchToggle
-            :model-value="form.predictDuration"
-            label="Predict duration from prompt"
-            @update:model-value="setPredictDuration"
+      <!-- Add-on looks — a main-column group, never an Advanced knob -->
+      <div v-if="showLoras" class="ms-field" data-test="inspector-loras">
+        <LoraStack
+          :form="form"
+          :model="form.model"
+          :route="loraRoute"
+          @append-word="emit('append-word', $event)"
+        />
+      </div>
+
+      <!-- 3-D object, built entirely from the recipe's advertised `mesh`
+           block, so a host that widens the octree ladder or the face bounds
+           widens this group with no client release. -->
+      <div v-if="meshProfile" class="ms-field ms-card" data-test="mesh-controls">
+        <div class="ms-group-label">3-D object</div>
+        <div class="ms-card__row">
+          <SegmentedControl
+            v-if="octreeOptions.length > 0"
+            :model-value="octreeValue"
+            :options="octreeOptions"
+            label="Surface detail"
+            data-test="mesh-octree"
+            @update:model-value="form.mesh.octreeResolution = $event"
+          />
+          <p class="ms-card__truth" data-test="mesh-octree-truth">
+            octree {{ octreeValue }} · more detail is slower
+          </p>
+        </div>
+        <SliderRow
+          v-if="thresholdControl"
+          :model-value="thresholdValue"
+          :min="thresholdControl.min"
+          :max="thresholdControl.max"
+          :step="thresholdControl.step"
+          :disabled="thresholdControl.mode === 'fixed'"
+          label="How tight to the photo"
+          :value-label="thresholdValue.toFixed(2)"
+          low="Puffier"
+          high="Sharper edges"
+          @update:model-value="form.mesh.threshold = $event"
+        />
+        <p v-if="thresholdNote" class="ms-field__hint" data-test="mesh-threshold-note">
+          {{ thresholdNote }}
+        </p>
+        <div class="ms-field--row">
+          <div>
+            <label class="ms-field__label ms-field__label--inline" for="mesh-target-faces">
+              Simplify to
+            </label>
+            <p class="ms-field__hint">Fewer faces load faster in other apps</p>
+          </div>
+          <input
+            id="mesh-target-faces"
+            data-selectable
+            data-test="mesh-target-faces"
+            type="number"
+            inputmode="numeric"
+            :min="meshProfile.target_faces_min"
+            :max="meshProfile.target_faces_max"
+            placeholder="keep every detail"
+            :value="form.mesh.targetFaces ?? ''"
+            :aria-invalid="targetFacesError ? 'true' : undefined"
+            class="ms-seed__input ms-card__faces font-mono text-xs"
+            @input="setTargetFaces(($event.target as HTMLInputElement).value)"
           />
         </div>
-        <VideoDurationSlider
-          v-if="!form.predictDuration"
-          :frames="form.frames"
-          :fps="form.fps"
-          :model="contractModel"
-          :family="form.family"
-          :model-name="form.model"
-          :source-image-capability="contractModel?.source_image ?? form.sourceImageCapability"
-          :routing-request="durationRoutingRequest"
-          @update:frames="form.frames = $event"
-        />
-        <p v-else class="ms-field__hint" data-test="predicted-duration-hint">
-          The host will choose 1–20 seconds from the prompt.
+        <p
+          v-if="targetFacesError"
+          class="ms-field__error"
+          role="alert"
+          data-test="mesh-target-faces-error"
+        >
+          {{ targetFacesError }}
+        </p>
+        <p class="ms-field__hint">
+          Start from a photo of one object. You'll get a turntable preview and can export .obj or
+          .glb. Leave the face budget blank to keep every detail —
+          {{ meshProfile.target_faces_min }}–{{ meshProfile.target_faces_max }} triangles when
+          simplifying.
         </p>
       </div>
 
-      <!-- Frame rate — sequence output surfaces it outside Advanced -->
-      <div v-if="isSequence" class="ms-field ms-field--row" data-test="sequence-fps">
-        <span class="ms-field__label ms-field__label--inline">Frame rate</span>
-        <Stepper
-          :model-value="form.fps"
-          :min="
-            activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.min : 1
-          "
-          :max="
-            activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.max : 60
-          "
-          :step="
-            activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.step : 1
-          "
-          :disabled="activeRecipe?.temporal?.fps.mode === 'fixed'"
-          label="Frames per second"
-          :format="(v: number) => `${v} fps`"
-          @update:model-value="form.fps = $event"
-        />
-      </div>
+      <!-- Clip — one card for length, smoothness and sound. Duration is the
+           human-facing control; exact frames stay in Advanced. -->
+      <div v-if="showClipCard" class="ms-field ms-card" data-test="clip-card">
+        <div class="ms-group-label">Clip</div>
+        <template v-if="!isSequence">
+          <div v-if="canPredictDuration" class="ms-field--row" data-test="predict-duration-control">
+            <span class="ms-field__label ms-field__label--inline">Predict duration</span>
+            <SwitchToggle
+              :model-value="form.predictDuration"
+              label="Predict duration from prompt"
+              @update:model-value="setPredictDuration"
+            />
+          </div>
+          <VideoDurationSlider
+            v-if="!form.predictDuration"
+            :frames="form.frames"
+            :fps="form.fps"
+            :model="contractModel"
+            :family="form.family"
+            :model-name="form.model"
+            :source-image-capability="contractModel?.source_image ?? form.sourceImageCapability"
+            :routing-request="durationRoutingRequest"
+            @update:frames="form.frames = $event"
+          />
+          <p v-else class="ms-field__hint" data-test="predicted-duration-hint">
+            The host will choose 1–20 seconds from the prompt.
+          </p>
+        </template>
 
-      <div
-        v-if="showGenerateAudio"
-        class="ms-field ms-field--row"
-        data-test="generate-audio-control"
-      >
-        <span class="ms-field__label ms-field__label--inline">Generate audio</span>
-        <SwitchToggle
-          :model-value="generateAudio"
-          :disabled="!audioOutputSupported"
-          label="Generate audio"
-          @update:model-value="setGenerateAudio"
-        />
+        <!-- Smoothness — sequence output surfaces it outside Advanced -->
+        <div v-if="isSequence" class="ms-field--row" data-test="sequence-fps">
+          <span class="ms-field__label ms-field__label--inline">Smoothness</span>
+          <Stepper
+            :model-value="form.fps"
+            :min="
+              activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.min : 1
+            "
+            :max="
+              activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.max : 60
+            "
+            :step="
+              activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.step : 1
+            "
+            :disabled="activeRecipe?.temporal?.fps.mode === 'fixed'"
+            label="Frames per second"
+            :format="(v: number) => `${v} fps`"
+            @update:model-value="form.fps = $event"
+          />
+        </div>
+
+        <div v-if="showGenerateAudio" class="ms-field--row" data-test="generate-audio-control">
+          <span class="ms-field__label ms-field__label--inline">Add sound</span>
+          <SwitchToggle
+            :model-value="generateAudio"
+            :disabled="!audioOutputSupported"
+            label="Add sound"
+            @update:model-value="setGenerateAudio"
+          />
+        </div>
+        <p v-if="audioOutputUnavailableReason" class="ms-field__hint">
+          {{ audioOutputUnavailableReason }}
+        </p>
+
+        <p class="ms-field__hint">Clips take a few minutes. You'll get a still preview first.</p>
       </div>
-      <p v-if="audioOutputUnavailableReason" class="ms-field__hint -mt-2">
-        {{ audioOutputUnavailableReason }}
-      </p>
 
       <!-- Repeat this look (the seed, in plain words) -->
       <div class="ms-field">
-        <div class="ms-field__label">Repeat this look</div>
+        <div class="ms-field__head">
+          <span class="ms-field__label ms-field__label--inline">Repeat this look</span>
+          <span v-if="seedReadout" class="ms-field__truth">seed {{ seedReadout }}</span>
+        </div>
         <div class="ms-seg" role="group" aria-label="Repeat this look">
-          <button
-            type="button"
-            data-test="seed-mode-random"
-            :aria-pressed="uiSeedMode === 'random'"
-            class="ms-seg__btn"
-            :data-on="uiSeedMode === 'random' ? 'true' : undefined"
-            @click="setSeedMode('random')"
-          >
-            Surprise me
-          </button>
           <button
             type="button"
             data-test="seed-mode-fixed"
@@ -1128,6 +1197,16 @@ defineExpose({ setOutputMode });
             @click="setSeedMode('fixed')"
           >
             Keep
+          </button>
+          <button
+            type="button"
+            data-test="seed-mode-random"
+            :aria-pressed="uiSeedMode === 'random'"
+            class="ms-seg__btn"
+            :data-on="uiSeedMode === 'random' ? 'true' : undefined"
+            @click="setSeedMode('random')"
+          >
+            Surprise me
           </button>
         </div>
         <div v-if="uiSeedMode === 'fixed'" class="ms-seed__value">
@@ -1153,7 +1232,10 @@ defineExpose({ setOutputMode });
         <p v-if="seedHint" data-test="seed-hint" class="ms-field__hint text-accent">
           {{ seedHint }}
         </p>
-        <p v-if="uiSeedMode === 'random'" class="ms-field__hint">
+        <p v-if="uiSeedMode === 'fixed'" class="ms-field__hint">
+          Keeping this number reproduces the same look when you tweak the words.
+        </p>
+        <p v-else class="ms-field__hint">
           New seed every print<template v-if="lastSeed !== null && !isSequence">
             <!-- lock-last is coupled to single prints; hidden for sequences -->
             ·
@@ -1249,8 +1331,8 @@ defineExpose({ setOutputMode });
   position: relative;
   min-height: 0;
   flex: 0 0 auto;
-  border-left: 1px solid var(--mold-border);
-  background: var(--mold-bg);
+  border-left: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg-deep);
 }
 .ms-inspector__scroll {
   flex: 1;
@@ -1289,40 +1371,15 @@ defineExpose({ setOutputMode });
   line-height: var(--mold-lh-body);
   color: var(--mold-text-2);
 }
-.ms-recent {
-  display: flex;
-  width: 100%;
-  flex-direction: column;
-  gap: 5px;
-  margin-bottom: 8px;
-  padding: 10px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-.ms-recent:hover {
-  background: var(--mold-row-hover);
-}
-.ms-recent__prompt {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--mold-fs-xs);
-  color: var(--mold-text);
-}
-.ms-recent__action {
-  font-size: var(--mold-fs-micro);
-  font-weight: 600;
-  color: var(--mold-blue);
-}
 .ms-inspector__head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 16px;
+}
+.ms-inspector__head .ms-inspector__lead {
+  margin-bottom: 0;
 }
 .ms-inspector__reset {
   display: inline-flex;
@@ -1348,16 +1405,6 @@ defineExpose({ setOutputMode });
 .ms-field {
   margin-bottom: 20px;
 }
-/* The Output choice reads as a mode, not a knob, so it keeps an accent edge. */
-.ms-output {
-  border: var(--mold-bw) solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border-control));
-  background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
-  border-radius: var(--mold-radius-3);
-  padding: 11px;
-}
-.ms-output .ms-field__hint {
-  margin-top: 8px;
-}
 .ms-field--row {
   display: flex;
   align-items: center;
@@ -1371,6 +1418,109 @@ defineExpose({ setOutputMode });
 }
 .ms-field__label--inline {
   margin-bottom: 0;
+}
+.ms-field__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ms-field__truth {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+  white-space: nowrap;
+}
+/* A group the mock draws as a card: the 3-D and Clip blocks. */
+.ms-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 11px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+}
+.ms-card__row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.ms-card__truth {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+  margin: 0;
+}
+.ms-card__faces {
+  width: auto;
+  max-width: 140px;
+  height: var(--mold-ctl-md);
+}
+.ms-card .ms-field__hint {
+  margin-top: 0;
+}
+/* Paint a mask · Use a face — the source group's two secondary doors. */
+.ms-doors {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ms-door {
+  flex: 1;
+  height: 28px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
+}
+.ms-door:hover,
+.ms-door[data-on="true"] {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
+}
+.ms-quality {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ms-quality__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 11px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-text-2);
+  cursor: pointer;
+}
+.ms-quality__row[data-on="true"] {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--mold-blue) 13%, transparent);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
+  color: var(--mold-text);
+}
+.ms-quality__label {
+  flex: 1;
+  text-align: left;
+  font-size: var(--mold-fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ms-quality__meta {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  white-space: nowrap;
+  opacity: 0.75;
 }
 .ms-field__hint {
   font-size: var(--mold-fs-micro);

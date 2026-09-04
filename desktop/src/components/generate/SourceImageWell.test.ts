@@ -56,16 +56,24 @@ describe("SourceImageWell", () => {
     expect(form.sourceImage).toBeNull();
   });
 
-  it("gates Edit mask on a source image and applies the painted mask", async () => {
+  it("gates the mask on a source image and applies the painted one", async () => {
     const form = formFor("sd15");
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
 
-    // No source yet → the Edit mask control is absent.
-    expect(wrapper.find("[data-test='source-edit-mask']").exists()).toBe(false);
+    // No source yet → the well answers no, so the group renders no door and
+    // asking for the editor anyway does nothing.
+    expect(wrapper.vm.maskAvailable).toBe(false);
+    expect(wrapper.find("[data-test='mask-well']").exists()).toBe(false);
+    wrapper.vm.openMaskEditor();
+    await flushPromises();
+    expect(wrapper.findComponent(MaskEditorModal).props("open")).toBe(false);
 
     form.sourceImage = "SRC";
     await flushPromises();
-    await wrapper.get("[data-test='source-edit-mask']").trigger("click");
+    expect(wrapper.vm.maskAvailable).toBe(true);
+    expect(wrapper.find("[data-test='mask-well']").exists()).toBe(true);
+    wrapper.vm.openMaskEditor();
+    await flushPromises();
     wrapper.findComponent(MaskEditorModal).vm.$emit("apply", "MASKB64");
     await flushPromises();
 
@@ -77,7 +85,8 @@ describe("SourceImageWell", () => {
     const form = formFor("qwen-image-edit");
     form.sourceImage = "SRC";
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
-    expect(wrapper.find("[data-test='source-edit-mask']").exists()).toBe(false);
+    expect(wrapper.vm.maskAvailable).toBe(false);
+    expect(wrapper.find("[data-test='mask-well']").exists()).toBe(false);
   });
 
   describe("source-fit selector", () => {
@@ -182,7 +191,7 @@ describe("SourceImageWell", () => {
       // pad-repaint needs a repaint mask the family can't ship — not offered.
       expect(fitOptions).not.toContain("pad-repaint");
       expect(fitOptions).toContain("crop-fill");
-      expect(wrapper.find("[data-test='source-edit-mask']").exists()).toBe(false);
+      expect(wrapper.vm.maskAvailable).toBe(false);
     });
 
     it("never renders the well for plain ltx-video (engine has no img2vid path)", () => {

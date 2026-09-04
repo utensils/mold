@@ -168,7 +168,7 @@ onBeforeUnmount(() => {
 }
 .ms-hostchip__chip {
   font-family: var(--mold-font-mono);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   display: flex;
   align-items: center;
@@ -180,7 +180,7 @@ onBeforeUnmount(() => {
 .ms-hostchip__chip--button {
   cursor: pointer;
   border: 1px solid var(--mold-border);
-  border-radius: 20px;
+  border-radius: var(--mold-radius-2);
   padding: 4px 10px;
   transition:
     color var(--mold-dur-quick) var(--mold-ease-out),
@@ -219,7 +219,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 .ms-hostchip__kicker {
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--mold-text-dim);
@@ -235,7 +235,7 @@ onBeforeUnmount(() => {
   color: var(--mold-text);
   padding: 8px;
   border-radius: var(--mold-radius-2);
-  font-size: 12.5px;
+  font-size: var(--mold-fs-xs);
   text-align: left;
   cursor: pointer;
   transition: background var(--mold-dur-quick) var(--mold-ease-out);
@@ -255,12 +255,12 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .ms-hostchip__row-sub {
-  font-size: 9.5px;
+  font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
 }
 .ms-hostchip__check {
   color: var(--mold-blue);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
 }
 .ms-hostchip__rule {
   height: 1px;

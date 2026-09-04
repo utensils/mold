@@ -43,6 +43,9 @@ export function platformUi(raw: string | DesktopPlatform | undefined = CURRENT_P
     // Shift is a glyph inside the macOS chord and a named word inside the
     // Ctrl one, so it cannot be spelled by concatenating onto modifierLabel.
     shiftLabel: isMacOS ? "⇧" : "Shift+",
+    // Option is a glyph on macOS and a named word everywhere else, for the
+    // same reason Shift is.
+    altLabel: isMacOS ? "⌥" : "Alt+",
     deviceLabel: isMacOS ? "This Mac" : "This device",
     // Each platform's own name for the app that opens a folder. "file manager"
     // is the honest generic on Linux, where there is no single one.
@@ -58,6 +61,12 @@ export const PLATFORM_UI = platformUi();
 
 export function shortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${key}`;
+}
+
+/** The platform's spelling of an Option/Alt chord, which carries no primary
+ * modifier of its own. */
+export function altShortcutLabel(key: string): string {
+  return `${PLATFORM_UI.altLabel}${key}`;
 }
 
 /** The platform's spelling of a primary-modifier + Shift chord. */

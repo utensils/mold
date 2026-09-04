@@ -113,7 +113,6 @@ function mountView() {
         SequenceComposer: true,
         ComposerCard: false,
         ExpandControl: false,
-        StyleChips: true,
         EstimateBadge: true,
         Icon: true,
         Keycap: true,

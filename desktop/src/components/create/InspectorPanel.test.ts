@@ -3,7 +3,6 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import InspectorPanel from "./InspectorPanel.vue";
-import AdvancedSettings from "./AdvancedSettings.vue";
 import ModelPicker from "./ModelPicker.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
@@ -14,6 +13,8 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import TemplatesPanel from "../generate/TemplatesPanel.vue";
+import LoraStack from "../generate/LoraStack.vue";
+import StarterList from "./StarterList.vue";
 import { aspectIdFor } from "../../lib/resolutions";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
@@ -258,23 +259,23 @@ describe("InspectorPanel — layout", () => {
     expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(false);
   });
 
-  it("defaults wide enough for one ratio row and persists left-edge resizing", async () => {
+  it("defaults to the shell's inspector width and persists left-edge resizing", async () => {
     const prefs = useAppPrefsStore();
     const update = vi.spyOn(prefs, "update").mockResolvedValue();
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     const inspector = wrapper.get('[data-test="inspector-panel"]');
     const handle = wrapper.getComponent(PanelResizeHandle);
 
-    expect(inspector.attributes("style")).toContain("width: 340px");
+    expect(inspector.attributes("style")).toContain("width: 300px");
     expect(handle.props("label")).toBe("Resize generation settings");
 
     handle.vm.$emit("resize", -40);
     await flushPromises();
-    expect(inspector.attributes("style")).toContain("width: 380px");
+    expect(inspector.attributes("style")).toContain("width: 340px");
 
     handle.vm.$emit("commit");
     await flushPromises();
-    expect(update).toHaveBeenCalledWith({ generateParamsWidth: 380 });
+    expect(update).toHaveBeenCalledWith({ generateParamsWidth: 340 });
 
     handle.vm.$emit("reset");
     await flushPromises();
@@ -543,29 +544,51 @@ describe("InspectorPanel — tabs", () => {
     expect(wrapper.emitted("update:tab")?.at(-1)).toEqual(["recent"]);
   });
 
-  it("loads a starting point from the Starters tab", () => {
+  it("loads a starting point from the Starters tab's picture cards", async () => {
     const wrapper = mount(InspectorPanel, {
       props: { form: formFor("flux"), tab: "starters" },
     });
     expect(wrapper.find('[data-test="inspector-starters"]').exists()).toBe(true);
+    // Pictures are the tab; the save/search/sort manager is behind Edit….
+    expect(wrapper.findComponent(StarterList).exists()).toBe(true);
+    expect(wrapper.findComponent(TemplatesPanel).exists()).toBe(false);
+
     const template = { id: "t1", name: "River preset" } as never;
-    wrapper.findComponent(TemplatesPanel).vm.$emit("load", template);
+    wrapper.findComponent(StarterList).vm.$emit("load", template);
     expect(wrapper.emitted("load-template")).toEqual([[template]]);
+
+    await wrapper.get('[data-test="edit-starters"]').trigger("click");
+    expect(wrapper.findComponent(TemplatesPanel).exists()).toBe(true);
+    expect(wrapper.findComponent(StarterList).exists()).toBe(false);
+    wrapper.findComponent(TemplatesPanel).vm.$emit("load", template);
+    expect(wrapper.emitted("load-template")).toHaveLength(2);
   });
 
-  it("hands a past prompt back from the Recent tab", async () => {
+  it("restores a whole recipe from a Recent row, not just its words", async () => {
+    const print = {
+      item: { filename: "a.png", metadata: { prompt: "a river", model: "flux-dev:q8" } },
+      sourceKey: "local",
+      hostLabel: "This Mac",
+      availableOn: [],
+    } as never;
     const wrapper = mount(InspectorPanel, {
-      props: { form: formFor("flux"), tab: "recent", history: ["a lighthouse", "a river"] },
+      props: { form: formFor("flux"), tab: "recent", recent: [print] },
     });
     const rows = wrapper
       .get('[data-test="inspector-recent"]')
-      .findAll('[data-test="recent-prompt"]');
-    expect(rows.map((r) => r.text())).toEqual([
-      expect.stringContaining("a lighthouse"),
-      expect.stringContaining("a river"),
-    ]);
-    await rows[1]!.trigger("click");
-    expect(wrapper.emitted("use-prompt")).toEqual([["a river"]]);
+      .findAll("[data-test='recent-print']");
+    expect(rows).toHaveLength(1);
+    await rows[0]!.trigger("click");
+    expect(wrapper.emitted("reuse-print")).toEqual([[print]]);
+  });
+
+  it("says so when nothing has been made yet", () => {
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("flux"), tab: "recent" },
+    });
+    expect(wrapper.get('[data-test="inspector-recent"]').text()).toContain(
+      "Pictures you make show up here",
+    );
   });
 
   it("names the machine the print runs on in the Settings tab", () => {
@@ -640,9 +663,9 @@ describe("InspectorPanel — advanced", () => {
     form.model = "z-image-turbo:q8";
     const wrapper = mount(InspectorPanel, { props: { form } });
 
-    await wrapper.get('[data-test="open-advanced"]').trigger("click");
-
-    expect(wrapper.getComponent(AdvancedSettings).props("loraRoute")).toMatchObject({
+    // Add-on looks is a main-column group now, so the route reaches the picker
+    // without opening Advanced at all.
+    expect(wrapper.getComponent(LoraStack).props("route")).toMatchObject({
       hostId: "plato-7680",
       target: { baseUrl: "http://plato:7680" },
     });
@@ -870,21 +893,18 @@ describe("InspectorPanel — output", () => {
     default_guidance: 4.5,
   } as ModelEntry;
 
-  function outputSegments(wrapper: ReturnType<typeof mount>) {
-    return wrapper.get("[data-test='output-mode']").findAll("button[role='radio']");
+  /** The view toolbar's Still picture | Short clip control emits `set-output`
+   * into exactly this. The inspector carries no second output switch. */
+  function setOutput(wrapper: ReturnType<typeof mount>, mode: "single" | "sequence") {
+    (wrapper.vm as unknown as { setOutputMode: (m: string) => void }).setOutputMode(mode);
   }
 
-  it("renders the Output card between Model and Shape with One shot active", () => {
+  it("carries no output switch of its own", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
-    const card = wrapper.get("[data-test='output-card']");
-    expect(card.text()).toContain("Output");
-    const segments = outputSegments(wrapper);
-    expect(segments.map((b) => b.text())).toEqual(["One shot", "Sequence"]);
-    expect(segments[0]!.attributes("aria-checked")).toBe("true");
-    // Card order: Model precedes the Output card, which precedes Shape.
-    const html = wrapper.html();
-    expect(html.indexOf("output-card")).toBeGreaterThan(html.indexOf("selected-model-name"));
-    expect(html.indexOf("output-card")).toBeLessThan(html.indexOf(">Shape<"));
+    expect(wrapper.find("[data-test='output-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='output-mode']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("One shot");
+    expect(wrapper.text()).not.toContain("Sequence");
   });
 
   it("switching to Sequence keeps prompts separate, remembers + swaps the model, and locks batch", async () => {
@@ -895,7 +915,7 @@ describe("InspectorPanel — output", () => {
     form.prompt = "a cat at dusk";
     const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
 
-    await outputSegments(wrapper)[1]!.trigger("click");
+    setOutput(wrapper, "sequence");
     await flushPromises();
 
     const draft = useSequenceDraftStore();
@@ -905,9 +925,8 @@ describe("InspectorPanel — output", () => {
     // A non-capable model is remembered and swapped for the first capable one.
     expect(draft.lastSingleModel).toBe("flux-dev:q8");
     expect(form.model).toBe("ltx-video");
-    // The switch-back caption appears. (The batch lock itself is the
-    // composer's chip now — see `ComposerCard.test.ts`.)
-    expect(wrapper.text()).toContain("one-shot and sequence prompts stay separate");
+    // The one-shot prompt is parked, not carried into clip 1.
+    expect(form.prompt).toBe("a cat at dusk");
   });
 
   it("switching back restores the remembered single model without leaking clip 1's prompt", async () => {
@@ -923,7 +942,7 @@ describe("InspectorPanel — output", () => {
     draft.lastSingleModel = "flux-dev:q8";
     const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
 
-    await outputSegments(wrapper)[0]!.trigger("click");
+    setOutput(wrapper, "single");
     await flushPromises();
 
     expect(draft.output).toBe("single");
@@ -950,7 +969,7 @@ describe("InspectorPanel — output", () => {
     const form = formFor("ltx-video");
     const wrapper = mount(InspectorPanel, { props: { form, lastSeed: 77 } });
     expect(wrapper.find('[data-test="sequence-fps"]').exists()).toBe(true);
-    expect(wrapper.text()).toContain("Frame rate");
+    expect(wrapper.get('[data-test="clip-card"]').text()).toContain("Smoothness");
     expect(wrapper.find('[data-test="lock-last-seed"]').exists()).toBe(false);
   });
 });
@@ -1183,11 +1202,12 @@ describe("InspectorPanel — source media in the primary form", () => {
     });
   });
 
-  it("renders the identity photo well right after source media when qualified", () => {
+  it("renders the identity photo well right after source media when qualified", async () => {
     const form = formFor("flux");
     form.model = "flux-dev:q8";
     form.identitySupported = true;
     const wrapper = mount(InspectorPanel, { props: { form } });
+    await wrapper.get("[data-test='open-identity']").trigger("click");
     const field = wrapper.get("[data-test='inspector-identity']");
     expect(field.find("[data-test='identity-photo-well']").exists()).toBe(true);
     // Primary form, immediately below the source wells — never behind Advanced.

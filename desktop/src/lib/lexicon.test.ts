@@ -9,6 +9,7 @@ import chainJobsSource from "../stores/chainJobs.ts?raw";
 import composerSource from "../components/create/ComposerCard.vue?raw";
 import expandSource from "../components/generate/ExpandControl.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
+import loraSource from "../components/generate/LoraStack.vue?raw";
 import generateViewSource from "../views/GenerateView.vue?raw";
 import strengthSource from "@studio/lib/strengthSemantics.ts?raw";
 import { ENGINE_KEY_SCHEMAS, SECTIONS } from "./settingsSchema";
@@ -203,6 +204,11 @@ describe("lexicon — the inspector", () => {
     expect(inspectorSource).toMatch(/seed-mode-random"[\s\S]{0,300}?Surprise me/);
     expect(inspectorSource).toMatch(/seed-mode-fixed"[\s\S]{0,300}?Keep/);
     expect(inspectorSource).not.toContain(">Seed<");
+    // Keep reads first, and the number it keeps is the mono truth beside it.
+    expect(inspectorSource.indexOf('data-test="seed-mode-fixed"')).toBeLessThan(
+      inspectorSource.indexOf('data-test="seed-mode-random"'),
+    );
+    expect(inspectorSource).toContain("seed {{ seedReadout }}");
   });
 
   it("counts Detail in passes and calls guidance Stick to my words", () => {
@@ -223,10 +229,12 @@ describe("lexicon — the inspector", () => {
     }
   });
 
-  it("titles the add-on looks section without the engine word", () => {
-    expect(advancedSource).toContain('title="Add-on looks"');
+  it("titles the add-on looks group without the engine word, in the main column", () => {
+    expect(loraSource).toContain(">Add-on looks<");
+    expect(loraSource).not.toContain("LoRA stack");
     expect(advancedSource).not.toContain('title="LoRA stack"');
     expect(advancedSource).not.toContain('summary="Style adapters"');
+    expect(advancedSource).not.toContain("Add-on looks");
   });
 });
 

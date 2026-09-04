@@ -28,7 +28,7 @@ import { useComposerStore } from "../../stores/composer";
 import { useGenerationStore } from "../../stores/generation";
 import { useToastStore } from "../../stores/toasts";
 import { useJobsStore } from "../../stores/jobs";
-import { shortcutLabel } from "../../lib/platform";
+import { altShortcutLabel, shortcutLabel } from "../../lib/platform";
 import type { GalleryImage, ModelEntry } from "../../lib/api/types";
 
 beforeEach(() => {
@@ -203,6 +203,20 @@ describe("CommandPalette shortcut column and mock groups", () => {
     await row.trigger("click");
     expect(ui.generateTick).toBe(1);
     expect(ui.paletteOpen).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("asks for four variations of the last picture under ⌥↩", async () => {
+    const wrapper = await openPalette();
+    const ui = useUiStore();
+    await wrapper.get("input").setValue("Make 4 variations");
+    const row = rowFor(wrapper, "Make 4 variations of the last picture")!;
+    expect(row.exists()).toBe(true);
+    expect(columns(row)).toEqual({ group: "make", key: altShortcutLabel("↩") });
+
+    await row.trigger("click");
+    expect(ui.makeVariationsTick).toBe(1);
+    expect(routerPush).toHaveBeenCalledWith("/create");
     wrapper.unmount();
   });
 

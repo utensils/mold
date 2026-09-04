@@ -195,18 +195,18 @@ function reset() {
 .ms-adv__summary {
   color: var(--mold-text-dim);
   font-family: var(--mold-font-mono);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
 }
 .ms-adv__reset {
   border: 1px solid var(--mold-border-control);
   background: transparent;
   color: var(--mold-text-2);
-  border-radius: 8px;
+  border-radius: var(--mold-radius-3);
   cursor: pointer;
 }
 .ms-adv__reset {
   padding: 5px 9px;
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
 }
 .ms-adv__list {
   display: flex;
@@ -218,7 +218,7 @@ function reset() {
   box-sizing: border-box;
   resize: none;
   border: 1px solid var(--mold-border-control);
-  border-radius: 8px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   color: var(--mold-text);
   padding: 9px 10px;
@@ -228,7 +228,7 @@ function reset() {
   box-sizing: border-box;
   min-height: 36px;
   border: 1px solid var(--mold-border-control);
-  border-radius: 8px;
+  border-radius: var(--mold-radius-3);
   background: var(--mold-bg-deep);
   color: var(--mold-text);
   padding: 8px 10px;
@@ -239,7 +239,7 @@ function reset() {
 }
 .ms-hint {
   color: var(--mold-text-dim);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   line-height: 1.45;
 }
 .ms-chips {
@@ -250,6 +250,6 @@ function reset() {
 }
 .ms-switch-row {
   color: var(--mold-text-2);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
 }
 </style>
