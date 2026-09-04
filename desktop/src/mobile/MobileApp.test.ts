@@ -10449,7 +10449,9 @@ describe("MobileApp gallery", () => {
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {
     // `print.timestamp` is a clock getter; read it ONCE so the seeded
     // baseline, the served print, and the expected seen-at stamp cannot
-    // straddle a second boundary (the 2026-09-02 iOS CI flake).
+    // straddle a second boundary (the 2026-09-02 iOS CI flake). Freezing is
+    // safe here only because this test makes no submission, so the stamp
+    // need not stay ahead of the clock for age-bounded gallery recovery.
     const stamp = print.timestamp;
     localStorage.setItem(
       "mold.mobile.library-seen-at.v1",
