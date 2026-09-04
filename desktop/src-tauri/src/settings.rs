@@ -492,14 +492,7 @@ fn parse_keeping_readable_keys(mut value: serde_json::Value) -> Loaded {
 /// plaintext `remoteApiKey`.
 fn preserve_invalid_document(path: &Path, raw: &str, reason: &str) {
     let backup = invalid_backup_path(path);
-    let written = std::fs::write(&backup, raw).and_then(|()| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
-    });
+    let written = std::fs::write(&backup, raw).and_then(|()| restrict_to_owner(&backup));
     match written {
         Ok(()) => tracing::warn!(
             "settings.json is invalid ({reason}); using defaults and keeping the original at {}",
@@ -509,6 +502,19 @@ fn preserve_invalid_document(path: &Path, raw: &str, reason: &str) {
             "settings.json is invalid ({reason}); using defaults (could not keep the original: {e})"
         ),
     }
+}
+
+/// Owner-only permissions for the backup (Unix); elsewhere the app-data
+/// directory's inherited per-user ACL is what protects it.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Where a document this build cannot parse at all is kept before the next
@@ -919,6 +925,23 @@ mod tests {
             loaded.notifications,
             "untouched defaults keep their defaults"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_invalid_backup_is_owner_only() {
+        // The original may still carry the legacy plaintext `remoteApiKey`,
+        // so the backup gets the same mode as `secrets.json`.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, "not json {").unwrap();
+        load(&path);
+        let mode = std::fs::metadata(invalid_backup_path(&path))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
