@@ -58,6 +58,11 @@ function addRunPodHost(hosts: ReturnType<typeof useHostsStore>) {
   });
 }
 
+/** The text of the FIRST render — captured synchronously, before any await
+ *  lets Vue's scheduler flush what `onMounted` changed. That frame is what a
+ *  user sees on arrival, and it is the only place a start-up flash lives. */
+let firstFrame = "";
+
 async function mountView(
   setup?: (hosts: ReturnType<typeof useHostsStore>) => void,
   path = "/machines",
@@ -134,6 +139,7 @@ async function mountView(
   };
   setup?.(hosts);
   const wrapper = mount(MachinesView, { global: { plugins: [pinia, router] } });
+  firstFrame = wrapper.text();
   await flushPromises();
   return wrapper;
 }
@@ -317,6 +323,43 @@ describe("MachinesView overview", () => {
     await open.trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/machines/pod-123-7680-proxy-runpod-net");
+  });
+
+  it("lists a connected pod once — as its pod row, never also as a machine card", async () => {
+    const wrapper = await mountView(addRunPodHost);
+
+    // The pod row already IS the machine row for a rented GPU: its menu is
+    // that host's own, and only it can carry the running cost and Stop.
+    const machines = wrapper.findAll("[data-test='host-card']");
+    expect(machines.map((card) => card.text())).toHaveLength(1);
+    expect(machines.every((card) => !card.text().includes("mold-runpod"))).toBe(true);
+    expect(wrapper.findAll("[data-test='runpod-running']")).toHaveLength(1);
+  });
+
+  it("marks the pod row when the pod is the machine making images", async () => {
+    appSettingsGet.mockResolvedValue({
+      savedHosts: [],
+      connectedHostIds: [],
+      generateTargetHost: "pod-123-7680-proxy-runpod-net",
+    });
+    const wrapper = await mountView(addRunPodHost);
+    const { useAppPrefsStore } = await import("../stores/appPrefs");
+    await useAppPrefsStore().init();
+    await flushPromises();
+
+    const pod = wrapper.get("[data-test='runpod-running']");
+    expect(pod.get("[data-test='target-badge']").text()).toBe("making images here");
+  });
+
+  it("does not claim the network is empty before the first scan answers", async () => {
+    // `scan()` runs in onMounted — AFTER the first render — so a `scanning`
+    // that starts false published "No other mold servers found" in the very
+    // frame the user arrives on, before anything had looked.
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountView();
+    expect(firstFrame).not.toContain("No other mold servers found");
+    // …and it does say so once the scan has actually come back empty.
+    expect(wrapper.text()).toContain("No other mold servers found");
   });
 
   it("connects to an unconnected RunPod before opening its machine detail", async () => {

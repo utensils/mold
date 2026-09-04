@@ -2,7 +2,6 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import Tooltip from "@ui/components/Tooltip.vue";
-import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
@@ -47,7 +46,6 @@ import type {
   ResourceSnapshot,
   ServerStatus,
 } from "../lib/api/types";
-import { useAppPrefsStore } from "../stores/appPrefs";
 import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
@@ -63,7 +61,6 @@ type DetailSnapshot = ResourceSnapshot & {
 
 const route = useRoute();
 const router = useRouter();
-const appPrefs = useAppPrefsStore();
 const downloads = useDownloadsStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
@@ -611,18 +608,22 @@ const identityDetail = computed(() => {
   return h.instanceId ? `${facts.join(" · ")} — click to copy the instance id` : facts.join(" · ");
 });
 
+/** The id the downloads store tags THIS host's rows with. A remote's rows
+ *  carry its own host id, but the primary's carry whatever scope the store
+ *  last subscribed as — `"primary"` until a host row claims it, never this
+ *  route's `"local"` — so the store is asked rather than assumed. Comparing
+ *  the route id left "Downloads here" permanently empty for this device
+ *  whenever another surface had subscribed without a host. */
+const downloadsHostId = computed(() =>
+  host.value?.primary ? downloads.primaryHostId : hostId.value,
+);
+
 /** Whether the Downloads-here card has anything to show under its tray. */
 const hostDownloading = computed(() =>
-  downloads.hostedInFlight.some((row) => row.hostId === hostId.value),
+  downloads.hostedInFlight.some((row) => row.hostId === downloadsHostId.value),
 );
 
 // ── Actions ───────────────────────────────────────────────────────────────
-
-const isTarget = computed(() => (appPrefs.settings?.generateTargetHost ?? null) === hostId.value);
-
-function toggleTarget() {
-  void appPrefs.update({ generateTargetHost: isTarget.value ? null : hostId.value });
-}
 
 const renameOpen = ref(false);
 
@@ -691,18 +692,10 @@ async function forget() {
           {{ hostSentence }}
         </span>
         <span class="flex-1" />
-        <button
-          type="button"
-          class="ms-toolbar-button"
-          :class="{ 'ms-toolbar-button--on': isTarget }"
-          :aria-pressed="isTarget"
-          :disabled="!isTarget && host.status !== 'ready'"
-          data-test="target-toggle"
-          @click="toggleTarget"
-        >
-          <Icon v-if="isTarget" name="check" :size="13" :stroke-width="2.4" />
-          {{ isTarget ? "Making images here" : "Make images here" }}
-        </button>
+        <!-- Three actions, the mock's. "Make images here" is reached from the
+             machine card's context menu: a fourth nowrap button here needs
+             more room than the pane has at the app's minimum width, and what
+             it pushes off the end is Forget…. -->
         <button
           v-if="host.kind === 'remote'"
           type="button"
@@ -793,7 +786,7 @@ async function forget() {
                 <span
                   class="block h-full transition-[width] duration-300"
                   :class="vramFill(gpu)"
-                  :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
+                  :style="{ width: `${Math.round(percent(gpu.vram_used, gpu.vram_total))}%` }"
                 />
               </span>
               <!-- One reading, the way the mock keeps it. The card, the GPU
@@ -819,7 +812,7 @@ async function forget() {
               >
                 <span
                   class="block h-full bg-sapphire transition-[width] duration-300"
-                  :style="{ width: `${cpu.usage_percent}%` }"
+                  :style="{ width: `${Math.round(cpu.usage_percent)}%` }"
                 />
               </span>
               <span class="font-mono text-micro text-fg-dim">{{ cpu.cores }} cores</span>
@@ -842,7 +835,7 @@ async function forget() {
                 <span
                   class="block h-full transition-[width] duration-300"
                   :class="ramFill"
-                  :style="{ width: `${percent(ram.used, ram.total)}%` }"
+                  :style="{ width: `${Math.round(percent(ram.used, ram.total))}%` }"
                 />
               </span>
               <span class="font-mono text-micro text-fg-dim">
@@ -863,7 +856,7 @@ async function forget() {
                 <span
                   class="block h-full transition-[width] duration-300"
                   :class="diskUsedPct >= 92 ? 'bg-error' : 'bg-mauve'"
-                  :style="{ width: `${diskUsedPct}%` }"
+                  :style="{ width: `${Math.round(diskUsedPct)}%` }"
                 />
               </span>
               <span class="font-mono text-micro text-fg-dim">
@@ -924,20 +917,24 @@ async function forget() {
               >PAUSED</span
             >
             <span class="flex-1" />
+            <!-- The noun rides the number in every case: a bare "3/8" beside
+                 a heading is not a reading. -->
             <span class="font-mono text-micro text-fg-dim" data-test="queue-depth">
-              <template v-if="scheduledWorkCount"> {{ scheduledWorkCount }} work · </template>
-              {{ queueDepth ?? "—" }}<template v-if="queueCapacity">/{{ queueCapacity }}</template
-              ><template v-if="scheduledWorkCount"> queued</template>
+              <template v-if="scheduledWorkCount">{{ scheduledWorkCount }} work · </template>
+              {{ queueDepth ?? "—" }}<template v-if="queueCapacity">/{{ queueCapacity }}</template>
+              queued
             </span>
           </div>
-          <div class="rounded-control border border-border bg-panel px-3">
-            <HostQueuePanel
-              :host="host"
-              row-test-id="host-queue-row"
-              empty-label="Queue is empty."
-              :thumbnails="false"
-            />
-          </div>
+          <!-- The panel's rows draw their own border and radius; a second one
+               here would be a border inside a border, and the mock has no
+               Pause / Cancel-all row on this page. -->
+          <HostQueuePanel
+            :host="host"
+            row-test-id="host-queue-row"
+            empty-label="Queue is empty."
+            :thumbnails="false"
+            :controls="false"
+          />
         </section>
 
         <div class="rounded-control border border-border bg-panel p-3.5">
@@ -957,77 +954,82 @@ async function forget() {
           />
         </div>
 
-        <!-- Storage · Downloads here -->
-        <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          <!-- Storage — this machine's own trash retention and count, behind the
+        <!-- Storage · Downloads here. The pair pairs up when THIS PANE is wide
+             enough, never when the window is: `minWidth` is 1080, so a
+             viewport breakpoint is always true and would put two columns in a
+             484px pane. -->
+        <div class="host-pair-shell">
+          <div class="host-pair grid grid-cols-1 gap-3">
+            <!-- Storage — this machine's own trash retention and count, behind the
                shared plain confirm (never a typed phrase). -->
-          <section
-            v-if="storageAvailable"
-            class="flex flex-col gap-2.5 rounded-control border border-border bg-panel p-3.5"
-            data-test="host-storage"
-          >
-            <span class="ms-group-label uppercase">Storage</span>
-            <span v-if="installedTotalLabel" class="text-xs text-fg-2">
-              Styles take {{ installedTotalLabel }}
-            </span>
-            <div class="flex items-center gap-2">
-              <label for="host-trash-retention" class="text-xs text-fg">
-                Keep deleted pictures for
-              </label>
-              <select
-                id="host-trash-retention"
-                data-test="host-trash-retention"
-                class="h-[26px] rounded-control border border-border bg-bg px-1.5 font-mono text-micro text-fg-2 disabled:opacity-50"
-                :value="String(retentionDays)"
-                :disabled="retentionLocked || retentionSaving || host.status !== 'ready'"
-                :title="
-                  retentionLocked
-                    ? `Set by ${retentionRow?.env_var ?? 'the environment'} on ${host.label}`
-                    : undefined
-                "
-                aria-label="Trash retention"
-                @change="onRetentionChange"
-              >
-                <option
-                  v-for="option in retentionOptions"
-                  :key="option.value"
-                  :value="String(option.value)"
+            <section
+              v-if="storageAvailable"
+              class="flex flex-col gap-2.5 rounded-control border border-border bg-panel p-3.5"
+              data-test="host-storage"
+            >
+              <span class="ms-group-label uppercase">Storage</span>
+              <span v-if="installedTotalLabel" class="text-xs text-fg-2">
+                Styles take {{ installedTotalLabel }}
+              </span>
+              <div class="flex items-center gap-2">
+                <label for="host-trash-retention" class="text-xs text-fg">
+                  Keep deleted pictures for
+                </label>
+                <select
+                  id="host-trash-retention"
+                  data-test="host-trash-retention"
+                  class="h-[26px] rounded-control border border-border bg-bg px-1.5 font-mono text-micro text-fg-2 disabled:opacity-50"
+                  :value="String(retentionDays)"
+                  :disabled="retentionLocked || retentionSaving || host.status !== 'ready'"
+                  :title="
+                    retentionLocked
+                      ? `Set by ${retentionRow?.env_var ?? 'the environment'} on ${host.label}`
+                      : undefined
+                  "
+                  aria-label="Trash retention"
+                  @change="onRetentionChange"
                 >
-                  {{ option.label }}
-                </option>
-              </select>
-              <span class="flex-1" />
-              <button
-                type="button"
-                data-test="host-empty-trash"
-                class="ms-toolbar-button ms-toolbar-button--danger"
-                :disabled="!trashCount || emptyingTrash || host.status !== 'ready'"
-                @click="emptyTrashOpen = true"
-              >
-                Empty trash
-              </button>
-            </div>
-            <span class="text-micro text-fg-dim" data-test="host-trash-count">
-              Pictures in trash: <span class="font-mono">{{ trashCount ?? "—" }}</span>
-              <span v-if="trashLoadError" class="block text-error">{{ trashLoadError }}</span>
-            </span>
-          </section>
+                  <option
+                    v-for="option in retentionOptions"
+                    :key="option.value"
+                    :value="String(option.value)"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <span class="flex-1" />
+                <button
+                  type="button"
+                  data-test="host-empty-trash"
+                  class="ms-toolbar-button ms-toolbar-button--danger"
+                  :disabled="!trashCount || emptyingTrash || host.status !== 'ready'"
+                  @click="emptyTrashOpen = true"
+                >
+                  Empty trash
+                </button>
+              </div>
+              <span class="text-micro text-fg-dim" data-test="host-trash-count">
+                Pictures in trash: <span class="font-mono">{{ trashCount ?? "—" }}</span>
+                <span v-if="trashLoadError" class="block text-error">{{ trashLoadError }}</span>
+              </span>
+            </section>
 
-          <section
-            class="flex flex-col gap-2.5 rounded-control border border-border bg-panel p-3.5"
-          >
-            <span class="flex items-center gap-2">
-              <span class="ms-group-label uppercase">Downloads here</span>
-              <span class="flex-1" />
-              <RouterLink to="/models" class="text-micro text-fg-dim hover:text-fg">
-                Browse more styles →
-              </RouterLink>
-            </span>
-            <DownloadsTray :host-id="hostId" compact data-test="host-downloads" />
-            <span v-if="!hostDownloading" class="text-micro text-fg-dim">
-              Nothing on its way to this machine.
-            </span>
-          </section>
+            <section
+              class="flex flex-col gap-2.5 rounded-control border border-border bg-panel p-3.5"
+            >
+              <span class="flex items-center gap-2">
+                <span class="ms-group-label uppercase">Downloads here</span>
+                <span class="flex-1" />
+                <RouterLink to="/models" class="text-micro text-fg-dim hover:text-fg">
+                  Browse more styles →
+                </RouterLink>
+              </span>
+              <DownloadsTray :host-id="downloadsHostId" compact data-test="host-downloads" />
+              <span v-if="!hostDownloading" class="text-micro text-fg-dim">
+                Nothing on its way to this machine.
+              </span>
+            </section>
+          </div>
         </div>
 
         <!-- Styles on this machine -->
@@ -1156,5 +1158,17 @@ async function forget() {
   gap: 7px;
   padding: 13px;
   background: var(--mold-panel);
+}
+
+/* Storage · Downloads here: two columns only once the PANE can hold them.
+   The shell is the query container, so the pair's own box is measured and
+   nothing else in the view gains a containing block. */
+.host-pair-shell {
+  container-type: inline-size;
+}
+@container (min-width: 34rem) {
+  .host-pair {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

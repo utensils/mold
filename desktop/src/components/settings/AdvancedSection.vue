@@ -140,21 +140,27 @@ async function reset(row: ConfigRow) {
 </script>
 
 <template>
+  <!-- `SettingRow` and `ConfigRowItem` are full-bleed and inset themselves;
+       the section card has no padding, so everything else does too. -->
   <div>
-    <DevicePanel
-      class="mb-5"
-      :devices="devices"
-      :plan="plan"
-      :mutable="lifecycleMutable"
-      :restart-enable="restartEnable"
-      show-controls
-      :busy-device-ids="[...mutatingDeviceIds]"
-      @unpin="unpinWork"
-      @toggle="toggleDevice"
-    />
+    <div class="px-3.5 pt-3.5">
+      <DevicePanel
+        class="mb-5"
+        :devices="devices"
+        :plan="plan"
+        :mutable="lifecycleMutable"
+        :restart-enable="restartEnable"
+        show-controls
+        :busy-device-ids="[...mutatingDeviceIds]"
+        @unpin="unpinWork"
+        @toggle="toggleDevice"
+      />
+    </div>
     <ConfigSettingRow schema-key="server_port" />
-    <PlacementSection class="mt-5" />
-    <p class="mt-4 mb-1 text-micro text-fg-dim">
+    <div class="px-3.5 pt-3.5">
+      <PlacementSection />
+    </div>
+    <p class="mb-1 px-3.5 text-micro text-fg-dim">
       Everything the engine exposes that has no curated control — including keys added by newer
       engines. Provenance: ⌂ database · ⛁ config.toml · ⚿ environment.
     </p>

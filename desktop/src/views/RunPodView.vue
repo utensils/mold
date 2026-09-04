@@ -345,7 +345,7 @@ onBeforeUnmount(() => {
     <!-- The house loading treatment: the shape of what is coming, shimmering. -->
     <div
       v-else-if="!runpod.loaded"
-      class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden"
+      class="grid min-h-0 flex-1 grid-cols-[minmax(0,340px)_minmax(0,1fr)] overflow-hidden"
       data-test="runpod-loading"
       aria-busy="true"
     >
@@ -357,7 +357,10 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-else class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden">
+    <div
+      v-else
+      class="grid min-h-0 flex-1 grid-cols-[minmax(0,340px)_minmax(0,1fr)] overflow-hidden"
+    >
       <aside class="min-h-0 overflow-y-auto border-r border-border bg-chrome p-3.5">
         <div class="flex items-center justify-between">
           <h2 class="text-base font-semibold text-fg">Rent a GPU</h2>
@@ -718,13 +721,18 @@ onBeforeUnmount(() => {
             :class="index ? 'border-border border-t' : ''"
             class="bg-bg-deep p-3"
           >
-            <div class="flex items-center gap-3">
+            <!-- Six nowrap controls plus the name need more width than this
+                 pane has at the app's minimum size; wrapping keeps the name
+                 and status readable instead of collapsing them to zero. -->
+            <div class="flex flex-wrap items-center gap-3">
               <span
                 class="h-2 w-2 rounded-full"
                 :class="pod.desiredStatus === 'RUNNING' ? 'bg-sapphire' : 'bg-fg-dim'"
                 aria-hidden="true"
               />
-              <div class="min-w-0 flex-1">
+              <!-- A real basis, so the row wraps instead of squeezing the
+                   identity block to nothing when the buttons don't fit. -->
+              <div class="min-w-0 flex-1 basis-72">
                 <div class="flex items-baseline gap-2">
                   <span class="truncate text-sm font-semibold text-fg">{{
                     pod.name ?? pod.id

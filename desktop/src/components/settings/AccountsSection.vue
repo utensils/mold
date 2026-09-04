@@ -17,7 +17,8 @@ import SecretControl from "./SecretControl.vue";
     >
       <SecretControl name="civitai-token" placeholder="Civitai API key" />
     </SettingRow>
-    <p class="mt-3 max-w-md text-micro text-fg-dim">
+    <!-- Inset like a row: the section card has no padding of its own. -->
+    <p class="max-w-md px-3.5 py-3 text-micro text-fg-dim">
       Tokens apply to the built-in engine the next time it starts. The remote host API key lives in
       the Engine section.
     </p>

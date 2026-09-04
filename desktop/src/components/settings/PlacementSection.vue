@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { modelDisplayName } from "@mold/studio";
 import { apiJson } from "../../lib/api/client";
@@ -19,6 +19,7 @@ import {
   type DevicePlacement,
 } from "../../lib/placement";
 import type { ResourceSnapshot } from "../../lib/api/types";
+import { useConnectionStore } from "../../stores/connection";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 
@@ -27,6 +28,7 @@ interface GpuEntry {
   name: string;
 }
 
+const conn = useConnectionStore();
 const models = useModelStore();
 const toasts = useToastStore();
 const { installed } = storeToRefs(models);
@@ -49,7 +51,11 @@ const ENCODER_FIELDS: ReadonlyArray<{ field: keyof AdvancedPlacement; label: str
   { field: "qwen", label: "Qwen" },
 ];
 
-onMounted(async () => {
+/** Read the machine's cards whenever the connection is up — NOT once on
+ *  mount. `restoreLastRoute` can land straight on Settings while the engine
+ *  is still starting, and a mount-only fetch left every placement select
+ *  GPU-less for the rest of the session. */
+async function refreshGpus() {
   if (models.all.length === 0 && !models.loading) void models.fetch();
   try {
     const snap = await apiJson<ResourceSnapshot>("/api/resources");
@@ -57,7 +63,13 @@ onMounted(async () => {
   } catch {
     gpus.value = [];
   }
-});
+}
+
+watch(
+  () => conn.ready,
+  (ready) => void (ready && refreshGpus()),
+  { immediate: true },
+);
 
 // Default to the first installed model once the list arrives.
 watch(
@@ -144,7 +156,10 @@ async function clear() {
 </script>
 
 <template>
-  <section class="border-border mb-5 rounded-window border bg-bg p-4" data-test="placement-section">
+  <section
+    class="border-border mb-5 rounded-control border bg-bg p-3.5"
+    data-test="placement-section"
+  >
     <h3 class="text-sm font-semibold text-fg">Device placement</h3>
     <p class="mt-1 text-micro text-fg-dim">
       Pin a model's components to specific GPUs or CPU. Saved as a per-model default in config.toml

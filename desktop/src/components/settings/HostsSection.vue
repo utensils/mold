@@ -26,6 +26,12 @@ const localFailure = computed(() =>
 );
 const localKeyVisible = ref(false);
 const localApiKey = computed(() => conn.localInfo?.apiKey ?? "");
+/** What to say instead of a key. "Local server unavailable" was said for a
+ *  server that IS running and simply asks for no key — beside a green dot
+ *  saying it is up. Name which of the two it is. */
+const noKeyReason = computed(() =>
+  conn.localInfo ? "This device isn't asking for a key" : "Local server not running",
+);
 
 async function copyLocalApiKey() {
   if (!localApiKey.value) return;
@@ -81,16 +87,14 @@ const engineDot = computed(() =>
       label="This device's API key"
       help="Another mold app on your network uses this key to connect here."
     >
+      <!-- A revealed key is one long unbreakable token in a `shrink-0` group:
+           bound it and let it break, or the whole page gains a horizontal
+           scrollbar at the persisted 130% interface scale. -->
       <code
-        class="rounded-control border border-border bg-bg px-2 py-1 font-mono text-micro text-fg-2"
+        class="max-w-[18ch] break-all rounded-control border border-border bg-bg px-2 py-1 font-mono text-micro text-fg-2"
+        data-test="local-api-key"
       >
-        {{
-          localApiKey
-            ? localKeyVisible
-              ? localApiKey
-              : "••••••••••••••••"
-            : "Local server unavailable"
-        }}
+        {{ localApiKey ? (localKeyVisible ? localApiKey : "••••••••••••••••") : noKeyReason }}
       </code>
       <button
         v-if="localApiKey"

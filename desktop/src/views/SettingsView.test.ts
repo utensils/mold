@@ -57,6 +57,25 @@ async function typeSearch(wrapper: Awaited<ReturnType<typeof mountView>>, value:
   await flushPromises();
 }
 
+/** A recording IntersectionObserver — the nav highlight is driven by one, and
+ *  what this suite cares about is how often the sections are re-registered. */
+const observe = vi.fn();
+const unobserve = vi.fn();
+class RecordingObserver {
+  observe = observe;
+  unobserve = unobserve;
+  disconnect = vi.fn();
+  takeRecords = () => [];
+  root = null;
+  rootMargin = "";
+  thresholds = [];
+}
+Object.defineProperty(globalThis, "IntersectionObserver", {
+  configurable: true,
+  writable: true,
+  value: RecordingObserver,
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -180,5 +199,33 @@ describe("SettingsView shell", () => {
     // Machines keeps its own doorway, findable by the words it still owns.
     await typeSearch(wrapper, "api key");
     expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
+  });
+
+  it("does not re-register every section on each keystroke", async () => {
+    const wrapper = await mountView();
+    observe.mockClear();
+    unobserve.mockClear();
+
+    // "styl" narrows to one section. The sections that stayed rendered must
+    // keep the registration they already have: an inline `:ref` arrow is a
+    // new function every render, so Vue unbound and rebound all fourteen and
+    // the nav highlight flickered as the observer re-fired.
+    await typeSearch(wrapper, "s");
+    await typeSearch(wrapper, "st");
+    await typeSearch(wrapper, "sty");
+
+    // Only sections that genuinely left the page are unobserved, and only
+    // ones that genuinely arrived are observed — never the whole set.
+    expect(unobserve.mock.calls.length).toBeLessThan(SECTIONS.length);
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it("leaves the section card unpadded, so full-bleed rows keep their hairlines", async () => {
+    // The mock's rows carry the inset and their rules span the card; padding
+    // the card would inset every rule instead. Non-row section bodies pad
+    // themselves (see each section component).
+    const wrapper = await mountView();
+    const card = wrapper.get("[data-test='section-generation']").get("div.bg-panel");
+    expect(card.classes().some((c) => /^p[xy]?-/.test(c))).toBe(false);
   });
 });

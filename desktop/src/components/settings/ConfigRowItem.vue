@@ -20,9 +20,27 @@ watch(
   (v) => (draft.value = v),
 );
 
+/** Commit on Enter or blur — but only a real change, and only a value the
+ *  engine can honour. Every row a user tabs past raises `blur`, so an
+ *  unguarded commit PUT and toasted rows nobody edited; and on a numeric row
+ *  `Number("")` is 0 while `Number("abc")` is NaN, which `lib/api/config.ts`
+ *  serialises as null — a cleared field silently rewrote the setting. */
 function commitText(e: Event) {
-  const raw = (e.target as HTMLInputElement).value;
-  emit("save", isNumber.value ? Number(raw) : raw);
+  const input = e.target as HTMLInputElement;
+  const raw = input.value;
+  if (raw === String(props.row.value ?? "")) return;
+  if (isNumber.value) {
+    const parsed = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(parsed)) {
+      // Show what the engine still holds rather than leaving a blank field
+      // that looks saved.
+      input.value = String(props.row.value ?? "");
+      return;
+    }
+    emit("save", parsed);
+    return;
+  }
+  emit("save", raw);
 }
 function commitBool(e: Event) {
   emit("save", (e.target as HTMLInputElement).checked);
@@ -30,7 +48,9 @@ function commitBool(e: Event) {
 </script>
 
 <template>
-  <div class="border-border flex items-center gap-3 border-b py-2 last:border-b-0">
+  <!-- Rows are full-bleed inside the section card, which has no padding of
+       its own; the inset is the row's, exactly as `SettingRow`'s is. -->
+  <div class="border-border flex items-center gap-3 border-b px-3.5 py-2 last:border-b-0">
     <div class="min-w-0 flex-1">
       <div class="font-mono truncate text-sm text-fg" :title="row.key">{{ row.key }}</div>
       <div v-if="locked" class="text-micro text-fg-dim">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import SettingRow from "./SettingRow.vue";
 import { apiJson } from "../../lib/api/client";
 import { ipc, inTauri } from "../../lib/ipc";
@@ -14,12 +14,24 @@ const engine = ref<ServerStatus | null>(null);
 const appVersion = ref<string | null>(null);
 const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
+/** Ask the engine again whenever the connection comes up — NOT once on
+ *  mount. Launching straight into Settings (`restoreLastRoute`) mounts this
+ *  before the engine is ready, and a mount-only read left Engine reading
+ *  "offline" for the rest of the session. */
+watch(
+  () => conn.ready,
+  async (ready) => {
+    if (!ready) return;
+    try {
+      engine.value = await apiJson<ServerStatus>("/api/status");
+    } catch {
+      /* engine offline */
+    }
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
-  try {
-    engine.value = await apiJson<ServerStatus>("/api/status");
-  } catch {
-    /* engine offline */
-  }
   if (inTauri()) {
     const { getVersion } = await import("@tauri-apps/api/app");
     appVersion.value = await getVersion();

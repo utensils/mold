@@ -29,7 +29,9 @@ async function create() {
 </script>
 
 <template>
-  <div class="max-w-md">
+  <!-- No `SettingRow` here, so the section insets itself: the card it sits in
+       has no padding, because rows are full-bleed. -->
+  <div class="max-w-md p-3.5">
     <p class="mb-3 text-micro text-fg-dim">
       Profiles keep separate per-model preferences and generation settings (rows tagged ⌂ DB).
       Bootstrap settings (⛁ file) are shared.
@@ -43,14 +45,14 @@ async function create() {
         :class="
           p === config.activeProfile
             ? 'bg-accent-tint text-fg'
-            : 'text-fg-2 hover:bg-bg hover:text-fg'
+            : 'text-fg-2 hover:bg-row-hover hover:text-fg'
         "
         @click="switchTo(p)"
       >
         <span class="min-w-0 flex-1 truncate">{{ p }}</span>
         <span
           v-if="p === config.activeProfile"
-          class="font-mono text-micro text-fg-dim whitespace-nowrap text-accent"
+          class="font-mono text-micro whitespace-nowrap text-accent"
           >ACTIVE</span
         >
       </button>

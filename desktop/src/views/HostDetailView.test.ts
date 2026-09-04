@@ -478,10 +478,25 @@ describe("HostDetailView header", () => {
     expect(toolbar.text()).not.toContain("0f7a2c31-instance-uuid");
     expect(toolbar.text()).not.toContain("0.17.0");
     // Remote hosts get the remote-only management actions; Disconnect stays
-    // on the machine card's context menu, off this four-button toolbar.
+    // on the machine card's context menu, off this three-button toolbar.
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(false);
+  });
+
+  it("carries three actions, so Forget… survives the pane's narrowest width", async () => {
+    const wrapper = await mountView();
+    const toolbar = wrapper.get("[data-test='host-toolbar']");
+    // A fourth nowrap button does not fit the 484px pane at `minWidth: 1080`,
+    // and `overflow-hidden` clips from the right — Forget… first. Making
+    // images here stays reachable from the machine card's context menu.
+    expect(toolbar.findAll("button").map((b) => b.text())).toEqual([
+      "hal9000",
+      "Rename",
+      "Open web UI",
+      "Forget…",
+    ]);
+    expect(wrapper.find("[data-test='target-toggle']").exists()).toBe(false);
   });
 
   it("keeps the address, version and instance id in the name's tooltip", async () => {
@@ -665,9 +680,33 @@ describe("HostDetailView storage and queue", () => {
   it("shows queue depth/capacity and loaded-model chips", async () => {
     installApi({ queue_depth: 3, queue_capacity: 8 });
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='queue-depth']").text()).toBe("3/8");
+    // The noun rides the number even with no scheduled work; a bare "3/8"
+    // under a heading is a figure with nothing saying what it counts.
+    expect(wrapper.get("[data-test='queue-depth']").text()).toBe("3/8 queued");
     const chips = wrapper.findAll("[data-test='loaded-model-name']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
+  });
+
+  it("gives the queue panel the section to itself — no second border, no controls row", async () => {
+    installApi({ queue_depth: 1, queue_capacity: 8 }, [
+      {
+        id: "srv-1",
+        model: "flux-dev:q8",
+        state: "running",
+        started_at_unix_ms: Date.now(),
+        position: 0,
+        gpu: 0,
+      },
+    ]);
+    const wrapper = await mountView();
+    const row = wrapper.get("[data-test='host-queue-row']");
+    // Rows carry their own border and radius; a wrapper that draws another
+    // one leaves the first row touching a rule it did not ask for.
+    const wrapped = row.element.closest(".border-border.bg-panel");
+    expect(wrapped).toBeNull();
+    // The mock's machine page has no Pause / Cancel all row.
+    expect(wrapper.find("[data-test='pause-toggle']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(false);
   });
 
   it("lists the host's server queue with state codes and ownership tags", async () => {
@@ -893,6 +932,34 @@ describe("HostDetailView models", () => {
     expect(tray.text()).toContain("Nothing else queued to download.");
     expect(tray.text()).not.toContain("[2.5 GB/10.0 GB,");
     expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
+  });
+
+  it("shows this device's downloads whatever scope the store subscribed as", async () => {
+    // The primary's rows are tagged with the downloads store's own scope,
+    // which any surface that subscribes without a host resets to "primary" —
+    // never this route's "local". Comparing the route id left Downloads here
+    // permanently empty for This device.
+    const wrapper = await mountView("/hosts/local");
+    const { useDownloadsStore } = await import("../stores/downloads");
+    const downloads = useDownloadsStore();
+    await downloads.subscribe(); // e.g. Styles, or the Starters strip
+    expect(downloads.primaryHostId).toBe("primary");
+    downloads.activeJobs = [
+      {
+        id: "pull-9",
+        model: "qwen-image:q4",
+        status: "active",
+        files_done: 1,
+        files_total: 4,
+        bytes_done: 2_500_000_000,
+        bytes_total: 10_000_000_000,
+      } as (typeof downloads.activeJobs)[number],
+    ];
+    await flushPromises();
+
+    const tray = wrapper.get("[data-test='host-downloads']");
+    expect(tray.text()).toContain("qwen-image:q4");
+    expect(wrapper.text()).not.toContain("Nothing on its way to this machine.");
   });
 
   it("keeps live components mounted across health polls and only reopens streams for credentials", async () => {

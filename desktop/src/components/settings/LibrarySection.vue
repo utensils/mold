@@ -31,7 +31,9 @@ const libraryPrefs = useLibraryPrefsStore();
       />
     </SettingRow>
     <ConfigSettingRow schema-key="gallery.trash_retention_days" />
-    <p class="mt-2 text-micro text-fg-dim" data-test="library-remote-note">
+    <!-- A footnote after the last row: inset like a row, because the card
+         itself has no padding and the rows are full-bleed. -->
+    <p class="px-3.5 py-3 text-micro text-fg-dim" data-test="library-remote-note">
       Remote machines keep their own retention — change it in Machines ▸ machine ▸ Storage.
     </p>
   </div>

@@ -209,9 +209,9 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 .access-card {
-  padding: 20px;
-  border: 1px solid var(--mold-border);
-  border-radius: 14px;
+  padding: 14px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   background: var(--mold-bg-deep);
 }
 .access-header {
@@ -223,18 +223,18 @@ onBeforeUnmount(() => {
 h3 {
   margin: 0;
   color: var(--mold-text);
-  font-size: 15px;
+  font-size: var(--mold-fs-base);
   font-weight: 650;
 }
 p {
   margin: 4px 0 0;
   color: var(--mold-text-dim);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   line-height: 1.45;
 }
 button {
   min-height: 36px;
-  border-radius: 8px;
+  border-radius: var(--mold-radius-2);
   font: inherit;
   font-weight: 650;
   cursor: pointer;
@@ -245,7 +245,7 @@ button:disabled {
 }
 .refresh-button,
 .cancel-button {
-  border: 1px solid var(--mold-border);
+  border: var(--mold-bw) solid var(--mold-border);
   padding: 0 12px;
   background: var(--mold-surface);
   color: var(--mold-text-2);
@@ -265,17 +265,17 @@ button:disabled {
   min-height: 58px;
   align-items: center;
   gap: 12px;
-  border-top: 1px solid var(--mold-border);
+  border-top: var(--mold-bw) solid var(--mold-border);
 }
 .client-icon {
   display: grid;
   width: 32px;
   height: 32px;
   place-items: center;
-  border-radius: 9px;
+  border-radius: var(--mold-radius-2);
   background: color-mix(in srgb, var(--mold-blue) 14%, transparent);
   color: var(--mold-blue);
-  font-size: 20px;
+  font-size: var(--mold-fs-lg);
 }
 .client-copy {
   display: grid;
@@ -286,13 +286,13 @@ button:disabled {
 .client-copy strong {
   overflow: hidden;
   color: var(--mold-text);
-  font-size: 13px;
+  font-size: var(--mold-fs-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .client-copy span {
   color: var(--mold-text-dim);
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
 }
 .access-actions {
   display: flex;
@@ -300,7 +300,8 @@ button:disabled {
   gap: 8px;
 }
 .revoke-button {
-  border: 1px solid color-mix(in srgb, var(--mold-error) 45%, transparent);
+  border: var(--mold-bw) solid
+    color-mix(in srgb, var(--mold-error) 45%, transparent);
   padding: 0 12px;
   background: transparent;
   color: var(--mold-error);

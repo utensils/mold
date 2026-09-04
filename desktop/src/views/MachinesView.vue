@@ -81,6 +81,21 @@ function hostForPod(pod: RunPodPod): HostView | null {
   return hosts.all.find((host) => runPodForHostUrl([pod], host.baseUrl) !== null) ?? null;
 }
 
+/** A rented pod's row IS its machine row once it is connected: `podMenu`
+ *  already resolves to that host's own menu, and only the pod card can carry
+ *  the cost meter and Stop. So the machine list drops the hosts a pod row is
+ *  already showing — otherwise one connected pod is listed twice, as a
+ *  machine card and again as a pod card. */
+const podHostIds = computed(
+  () =>
+    new Set(
+      runpod.runningPods
+        .map((pod) => hostForPod(pod)?.id)
+        .filter((id): id is string => id !== undefined),
+    ),
+);
+const machineCards = computed(() => hosts.all.filter((host) => !podHostIds.value.has(host.id)));
+
 async function openPodDetail(pod: RunPodPod) {
   try {
     const host = hostForPod(pod) ?? (await hosts.connect(podProxyUrl(pod.id), null, pod.name));
@@ -347,7 +362,10 @@ async function connectSaved(host: SavedHost) {
 
 // ── On your network (mDNS discovery) ──────────────────────────────────────
 const discovered = ref<DiscoveredHost[]>([]);
-const scanning = ref(false);
+/** True from the first paint: `scan()` runs in `onMounted`, which is AFTER
+ *  the first render, so a `false` start flashed "No other mold servers found"
+ *  before anything had looked. */
+const scanning = ref(true);
 
 const undiscovered = computed(() => {
   const seenInstanceIds = new Set<string>();
@@ -448,9 +466,9 @@ async function onConnected() {
       </div>
 
       <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2.5">
-        <!-- This device + connected remotes -->
+        <!-- This device + connected remotes (a connected pod is its pod row) -->
         <button
-          v-for="host in hosts.all"
+          v-for="host in machineCards"
           :key="host.id"
           type="button"
           :data-test="host.primary ? 'this-device-card' : 'host-card'"
@@ -489,7 +507,7 @@ async function onConnected() {
             <span
               class="block h-full"
               :class="host.kind === 'local' ? 'bg-sapphire' : 'bg-accent'"
-              :style="{ width: `${memoryPct(host)}%` }"
+              :style="{ width: `${Math.round(memoryPct(host))}%` }"
             />
           </span>
           <span class="flex justify-between font-mono text-micro text-fg-dim">
@@ -498,12 +516,18 @@ async function onConnected() {
           </span>
         </button>
 
-        <!-- Billing pods not yet connected as machines: cost meter + Stop -->
+        <!-- Billing pods: the machine row for a rented GPU, connected or not,
+             because only this card can carry the running cost and Stop. -->
         <div
           v-for="pod in runpod.runningPods"
           :key="pod.id"
           data-test="runpod-running"
           class="machine-card ms-card-edge machine-card--pod relative cursor-pointer"
+          :class="{
+            'machine-card--target': !!hostForPod(pod) && isTarget(hostForPod(pod)!),
+            'machine-card--selected': !!hostForPod(pod) && selectedId === hostForPod(pod)!.id,
+          }"
+          :aria-current="hostForPod(pod) && selectedId === hostForPod(pod)!.id ? 'true' : undefined"
           @click="openPodDetail(pod)"
           @contextmenu="contextMenu.open($event, podMenu(pod))"
         >
@@ -520,6 +544,12 @@ async function onConnected() {
               pod.name ?? pod.id
             }}</span>
             <span class="flex-1" />
+            <span
+              v-if="hostForPod(pod) && isTarget(hostForPod(pod)!)"
+              data-test="target-badge"
+              class="shrink-0 rounded-inner bg-accent px-1.5 py-0.5 font-mono text-micro text-on-accent"
+              >making images here</span
+            >
             <Icon
               name="chevron-right"
               data-test="machine-chevron"

@@ -437,7 +437,7 @@ onBeforeUnmount(() => {
 .device-panel__tentative,
 .device-panel__empty {
   color: var(--mold-text-dim, #777);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   font-weight: 500;
 }
 .device-panel__grid {
@@ -456,9 +456,12 @@ onBeforeUnmount(() => {
   align-content: start;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--line, #d5d5d5);
-  border-radius: 10px;
-  background: var(--surface-2, transparent);
+  /* `--line` and `--surface-2` were never defined anywhere, so these cards
+     drew a #d5d5d5 hairline on every dark theme. The token the old name
+     meant is the theme's own border. */
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
 }
 .device-card--utility {
   border-style: dashed;
@@ -500,9 +503,10 @@ onBeforeUnmount(() => {
 .device-card__badge {
   white-space: nowrap;
   padding: 2px 6px;
-  border: 1px solid var(--line, #aaa);
-  border-radius: 999px;
-  font-size: 10px;
+  border: var(--mold-bw) solid var(--mold-border);
+  /* Never a pill (ui/mold-desktop.css): only knobs and dots are circles. */
+  border-radius: var(--mold-radius-1);
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.04em;
 }
 .device-card__meta,
@@ -511,7 +515,7 @@ onBeforeUnmount(() => {
 .device-card__lane,
 .device-panel__blocked {
   color: var(--mold-text-2, #555);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
 }
 .device-card__line {
   display: grid;
@@ -555,8 +559,8 @@ onBeforeUnmount(() => {
   justify-self: start;
   min-height: 32px;
   padding: 4px 10px;
-  border: 1px solid var(--line, #aaa);
-  border-radius: 7px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
 }
 .device-panel__blocked {
   display: grid;
@@ -568,8 +572,8 @@ onBeforeUnmount(() => {
   margin-left: 8px;
   min-height: 28px;
   padding: 2px 8px;
-  border: 1px solid var(--line, #aaa);
-  border-radius: 7px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
 }
 @media (max-width: 639px) {
   .device-card__toggle {

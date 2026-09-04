@@ -182,9 +182,9 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 24px;
   align-items: center;
-  padding: 20px;
-  border: 1px solid var(--mold-border);
-  border-radius: 14px;
+  padding: 14px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   background: var(--mold-bg-deep);
 }
 .pairing-copy {
@@ -201,21 +201,21 @@ onBeforeUnmount(() => {
   width: 36px;
   height: 36px;
   flex: 0 0 auto;
-  border-radius: 10px;
+  border-radius: var(--mold-radius-2);
   background: color-mix(in srgb, var(--mold-blue) 18%, transparent);
   color: var(--mold-blue);
-  font-size: 22px;
+  font-size: var(--mold-fs-lg);
 }
 h3 {
   margin: 0;
   color: var(--mold-text);
-  font-size: 15px;
+  font-size: var(--mold-fs-base);
   font-weight: 650;
 }
 p {
   margin: 4px 0 0;
   color: var(--mold-text-dim);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   line-height: 1.45;
 }
 .pairing-address {
@@ -223,21 +223,20 @@ p {
   gap: 6px;
   margin-top: 16px;
   color: var(--mold-text-2);
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
 }
 .pairing-address input {
   min-width: 0;
   height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--mold-border);
-  border-radius: 8px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   background: var(--mold-surface);
   color: var(--mold-text);
-  font:
-    500 12px ui-monospace,
-    SFMono-Regular,
-    monospace;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
 }
 .pairing-hint code {
   color: var(--mold-text-2);
@@ -250,7 +249,7 @@ p {
   margin-top: 14px;
   padding: 0 14px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--mold-radius-2);
   background: var(--mold-blue);
   color: var(--mold-on-accent);
   font-weight: 650;
@@ -263,9 +262,11 @@ p {
 .pairing-code {
   width: 164px;
   padding: 9px;
-  border-radius: 12px;
+  border-radius: var(--mold-radius-2);
+  /* The white plate is the QR's quiet zone, not decoration. Inside the app
+     window depth is surface value alone — no drop shadow (mold-desktop.css). */
+  border: var(--mold-bw) solid var(--mold-border);
   background: white;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
   transition: opacity 0.2s;
 }
 .pairing-code img {
@@ -280,7 +281,7 @@ p {
   margin-top: 5px;
   white-space: nowrap;
   color: #333;
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-align: center;

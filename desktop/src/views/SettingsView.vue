@@ -89,14 +89,33 @@ const contentEl = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 let settling: ReturnType<typeof setTimeout> | null = null;
 
+/** Vue re-invokes a function `:ref` on EVERY patch of its element, so this
+ *  must be idempotent: re-registering all fourteen sections on each keystroke
+ *  in the search field is what made the nav highlight flicker. */
 function bindSection(id: SectionId, el: Element | ComponentPublicInstance | null) {
   const previous = sectionEls.get(id);
-  if (previous && previous !== el) observer?.unobserve(previous);
-  if (el instanceof HTMLElement) {
-    sectionEls.set(id, el);
-    el.dataset.section = id;
-    observer?.observe(el);
+  const next = el instanceof HTMLElement ? el : null;
+  if (previous === next) return;
+  if (previous) observer?.unobserve(previous);
+  if (next) {
+    sectionEls.set(id, next);
+    next.dataset.section = id;
+    observer?.observe(next);
   } else sectionEls.delete(id);
+}
+
+/** One stable `:ref` callback per section. An inline arrow is a NEW function
+ *  every render, which Vue treats as a changed ref: every keystroke in the
+ *  search field unobserved and re-observed all fourteen sections, and the
+ *  nav highlight flickered as the observer re-fired. */
+const sectionBinders = new Map<SectionId, (el: Element | ComponentPublicInstance | null) => void>();
+function sectionBinder(id: SectionId) {
+  let binder = sectionBinders.get(id);
+  if (!binder) {
+    binder = (el) => bindSection(id, el);
+    sectionBinders.set(id, binder);
+  }
+  return binder;
 }
 
 function jump(id: SectionId) {
@@ -210,7 +229,7 @@ watch(
       <section
         v-for="s in visibleSections"
         :key="s.id"
-        :ref="(el) => bindSection(s.id, el)"
+        :ref="sectionBinder(s.id)"
         :data-test="`section-${s.id}`"
         class="flex scroll-mt-[18px] flex-col gap-2.5"
       >

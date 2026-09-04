@@ -55,7 +55,7 @@ async function apply() {
 
 <template>
   <section
-    class="border-border mt-4 rounded-window border bg-bg p-4"
+    class="border-border m-3.5 rounded-control border bg-bg p-3.5"
     data-test="mold-home-card"
     aria-labelledby="mold-home-title"
   >
