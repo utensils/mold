@@ -101,7 +101,10 @@ export const ICONS = {
   mask: '<path d="M12 3s7 3 7 9-7 9-7 9-7-3-7-9 7-9 7-9z"/>',
 
   // Machines / connect
-  cloud: '<path d="M17 18a4 4 0 000-8 6 6 0 00-11.6 1.5A3.5 3.5 0 006 18z"/>',
+  // RunPod's mark: the rounded hexagon and its three ribbon arms, redrawn as
+  // strokes on this grid (docs/design/assets/icons/runpod.svg is a filled path).
+  runpod:
+    '<path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><path d="M7.8 8.5l5.7 1.6 4.6-2.8"/><path d="M17.2 10.3l-2.6 1.5V18"/><path d="M5.6 11.3l3 1.8v4.3"/>',
   wifi: '<path d="M5 13a10 10 0 0114 0M8.5 16.5a5 5 0 017 0M2 9.5a15 15 0 0120 0"/><circle cx="12" cy="20" r="1"/>',
   lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/>',
 

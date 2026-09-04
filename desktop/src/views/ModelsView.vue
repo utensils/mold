@@ -154,10 +154,11 @@ onUnmounted(() => {
       </label>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto">
-      <!-- Downloads on their way, pinned above the list on BOTH tabs -->
-      <DownloadsTray />
+    <!-- Downloads on their way: pinned above the list on BOTH tabs, outside
+         the scroll container so it stays put while the list moves. -->
+    <DownloadsTray class="shrink-0" />
 
+    <div class="min-h-0 flex-1 overflow-y-auto" data-test="models-scroll">
       <InstalledTab
         v-if="segment === 'installed'"
         :query="query"

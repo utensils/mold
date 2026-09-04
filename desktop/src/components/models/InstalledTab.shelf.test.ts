@@ -117,6 +117,28 @@ describe("InstalledTab shelf", () => {
     wrapper.unmount();
   });
 
+  it("heads the table once, on the grid every row shares", async () => {
+    useModelStore().all = [model(), model({ name: "sdxl-base:fp16", family: "sdxl" })];
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+
+    const headers = wrapper.findAll("[data-test='styles-columns']");
+    expect(headers).toHaveLength(1);
+    // SPEED is in the mock but nothing on ModelEntry times a render.
+    expect(headers[0]!.findAll("span").map((c) => c.text())).toEqual([
+      "Name",
+      "Good for",
+      "Size",
+      "Machine",
+      "",
+    ]);
+    // One axis for the whole table: the header and every row read the same
+    // custom property off the shared container.
+    expect(wrapper.find(".model-table").exists()).toBe(true);
+    expect(headers[0]!.classes()).toContain("model-table__header");
+    expect(wrapper.findAll(".model-table-row--has-machines")).toHaveLength(2);
+  });
+
   it("speaks the lexicon on the empty shelf and routes to Browse more", async () => {
     useModelStore().all = [];
     const wrapper = mount(InstalledTab);

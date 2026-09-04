@@ -3,6 +3,13 @@ export function formatGB(bytes: number): string {
   return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
 
+/** A used/total pair sharing one unit — `12.1 / 36.0 GB`. Meters already say
+ *  what they measure, so the reading beside them repeats neither the unit nor
+ *  the word (style guide: units stay tight and mono). */
+export function formatGBPair(used: number, total: number): string {
+  return `${(used / 1_000_000_000).toFixed(1)} / ${formatGB(total)}`;
+}
+
 /** Adaptive decimal units for totals that may be small (gallery sizes). */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1_000_000_000) return formatGB(bytes);

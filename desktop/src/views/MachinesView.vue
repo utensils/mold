@@ -19,7 +19,7 @@ import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
 import { gpuFleetLabel, gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
-import { formatGB, percent } from "../lib/format";
+import { formatGBPair, percent } from "../lib/format";
 import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
 import { podGpuName, podProxyUrl, runPodForHostUrl, type RunPodPod } from "../lib/runpod";
 import { useHostsStore, type HostView } from "../stores/hosts";
@@ -293,12 +293,14 @@ function hostSentence(host: HostView): string {
   return hardware ? `${hardware} — ${where.charAt(0).toLowerCase()}${where.slice(1)}` : where;
 }
 
+/** The meter directly above says what this measures, so the reading is just
+ *  the numbers — units tight and mono (style guide). */
 function memoryLabel(host: HostView): string | null {
   const gpus = hostGpus(host.id);
   if (!gpus.length) return null;
   const used = gpus.reduce((sum, gpu) => sum + gpu.vram_used, 0);
   const total = gpus.reduce((sum, gpu) => sum + gpu.vram_total, 0);
-  return `Memory ${formatGB(used)} / ${formatGB(total)}`;
+  return formatGBPair(used, total);
 }
 
 function memoryPct(host: HostView): number {
@@ -530,7 +532,7 @@ async function onConnected() {
             @click.stop="openPodDetail(pod)"
           />
           <span class="pointer-events-none relative z-10 flex items-center gap-2.5">
-            <span class="h-2 w-2 shrink-0 rounded-full bg-teal" />
+            <span class="h-2 w-2 shrink-0 rounded-full bg-success" />
             <span class="truncate font-mono text-xs font-bold text-fg">{{
               pod.name ?? pod.id
             }}</span>
@@ -606,7 +608,7 @@ async function onConnected() {
           @contextmenu="contextMenu.open($event, discoveredHostMenu(host))"
         >
           <span class="flex items-center gap-2.5">
-            <span class="h-2 w-2 shrink-0 rounded-full bg-sapphire" />
+            <span class="h-2 w-2 shrink-0 rounded-full bg-accent" />
             <span class="min-w-0 flex-1 truncate font-mono text-xs font-bold text-fg">
               {{ host.name }}
             </span>
@@ -639,7 +641,7 @@ async function onConnected() {
           class="mt-2 flex flex-col gap-2.5 rounded-control border border-dashed border-surface-3 p-3.5"
         >
           <span class="flex items-center gap-2.5">
-            <Icon name="cloud" :size="15" class="text-fg-dim" />
+            <Icon name="runpod" :size="15" class="text-fg-dim" />
             <span class="font-mono text-xs font-bold text-fg-2">runpod cloud</span>
           </span>
           <span class="text-xs leading-snug text-fg-dim">
@@ -709,7 +711,7 @@ async function onConnected() {
   box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 .machine-card--pod {
-  border-color: color-mix(in srgb, var(--mold-teal) 50%, var(--mold-border));
+  border-color: color-mix(in srgb, var(--mold-success) 50%, var(--mold-border));
 }
 .machine-card--dim {
   opacity: 0.7;

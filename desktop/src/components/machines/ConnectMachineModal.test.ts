@@ -167,4 +167,11 @@ describe("ConnectMachineModal", () => {
       expect.objectContaining({ generateTargetHost: "hal9000-7680" }),
     );
   });
+
+  it("sets `mold serve` in the mono face inside the dialog's sentence", async () => {
+    const wrapper = await mountModal();
+    const code = wrapper.get(".ms-modal__desc code");
+    expect(code.text()).toBe("mold serve");
+    expect(code.classes()).toContain("font-mono");
+  });
 });

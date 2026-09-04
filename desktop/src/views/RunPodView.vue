@@ -286,7 +286,7 @@ onBeforeUnmount(() => {
     <div
       class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
     >
-      <Icon name="cloud" :size="15" class="shrink-0 text-fg-dim" />
+      <Icon name="runpod" :size="15" class="shrink-0 text-fg-dim" />
       <span class="font-mono text-base font-bold text-fg">runpod cloud</span>
       <span v-if="runpod.overview.account" class="min-w-0 truncate text-xs text-fg-dim">
         {{ runpod.overview.account.email }} ·
@@ -342,8 +342,19 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <div v-else-if="!runpod.loaded" class="flex flex-1 items-center justify-center">
-      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">LOADING RUNPOD</span>
+    <!-- The house loading treatment: the shape of what is coming, shimmering. -->
+    <div
+      v-else-if="!runpod.loaded"
+      class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden"
+      data-test="runpod-loading"
+      aria-busy="true"
+    >
+      <div class="flex flex-col gap-2.5 border-r border-border bg-chrome p-3.5">
+        <span v-for="row in 5" :key="row" class="ms-shimmer h-7 rounded-control" />
+      </div>
+      <div class="flex flex-col gap-2.5 p-3.5">
+        <span v-for="row in 3" :key="row" class="ms-shimmer h-16 rounded-control" />
+      </div>
     </div>
 
     <div v-else class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden">

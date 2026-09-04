@@ -4,6 +4,11 @@
  * first-timer can act on, the CLI's progress line in mono beside it), then a
  * collapsed history. Rendered above the Styles shelf and, scoped by host, on
  * a machine's page.
+ *
+ * `compact` is that machine page's readout: one style, its percent and eta in
+ * cost ink, a 5px meter and one line of prose — no second bordered banner
+ * inside the card that already draws a border, and no history or Cancel
+ * (Styles owns both).
  */
 import { computed, ref } from "vue";
 import { useDownloadsStore, type HostedDownloadJob } from "../../stores/downloads";
@@ -21,7 +26,7 @@ const downloads = useDownloadsStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const toasts = useToastStore();
-const props = defineProps<{ hostId?: string }>();
+const props = defineProps<{ hostId?: string; compact?: boolean }>();
 
 const rows = computed(() =>
   props.hostId
@@ -95,6 +100,14 @@ function progressLine(row: HostedDownloadJob): string {
   )}, eta ${formatEta(downloads.etaByJob[job.id] ?? null)}]`;
 }
 
+/** The compact readout speaks for the first download and counts the rest. */
+const leadRow = computed(() => rows.value[0] ?? null);
+const restLabel = computed(() => {
+  const rest = rows.value.length - 1;
+  if (rest <= 0) return "Nothing else queued to download.";
+  return `${rest} more waiting to download.`;
+});
+
 async function retry(row: HostedDownloadJob) {
   const key = rowKey(row);
   if (retrying.value.includes(key)) return;
@@ -113,8 +126,34 @@ async function retry(row: HostedDownloadJob) {
 </script>
 
 <template>
+  <div v-if="compact && leadRow" class="flex flex-col gap-2" data-test="downloads-summary">
+    <div class="flex min-w-0 items-baseline gap-2">
+      <span class="min-w-0 truncate text-xs text-fg" :title="modelLabel(leadRow)">
+        {{ modelLabel(leadRow) }}
+      </span>
+      <span class="font-mono text-micro text-state-cost" data-test="downloads-summary-progress">
+        {{ Math.round(percent(leadRow.job.bytes_done, leadRow.job.bytes_total)) }}% · eta
+        {{ formatEta(downloads.etaByJob[leadRow.job.id] ?? null) }}
+      </span>
+    </div>
+    <span
+      class="block h-[5px] overflow-hidden bg-surface"
+      role="progressbar"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      :aria-valuenow="percent(leadRow.job.bytes_done, leadRow.job.bytes_total)"
+      :aria-label="`Downloading ${modelLabel(leadRow)}`"
+    >
+      <span
+        class="block h-full bg-warning transition-[width] duration-300"
+        :style="{ width: `${percent(leadRow.job.bytes_done, leadRow.job.bytes_total)}%` }"
+      />
+    </span>
+    <span class="text-micro text-fg-dim">{{ restLabel }}</span>
+  </div>
+
   <div
-    v-if="rows.length || history.length > 0"
+    v-else-if="!compact && (rows.length || history.length > 0)"
     class="flex flex-col gap-2.5 px-3.5 pt-3.5"
     data-test="downloads-tray"
   >

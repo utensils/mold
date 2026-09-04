@@ -390,3 +390,35 @@ describe("DownloadsTray host scoping", () => {
     expect(wrapper.get("[data-test='history-toggle']").text()).toContain("History (2)");
   });
 });
+
+describe("DownloadsTray compact summary", () => {
+  it("reads as one line: the style, its percent and eta, and what is left", () => {
+    useDownloadsStore().activeJobs = [job()];
+    const wrapper = mount(DownloadsTray, { props: { compact: true } });
+
+    const summary = wrapper.get("[data-test='downloads-summary']");
+    expect(summary.text()).toContain("flux-dev:q4");
+    expect(summary.get("[data-test='downloads-summary-progress']").text()).toContain("25% · eta");
+    expect(summary.text()).toContain("Nothing else queued to download.");
+    expect(summary.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
+  });
+
+  it("counts the rest instead of stacking a banner per download", () => {
+    useDownloadsStore().activeJobs = [job(), job({ id: "j2", model: "z-image:q8" })];
+    const wrapper = mount(DownloadsTray, { props: { compact: true } });
+
+    const summary = wrapper.get("[data-test='downloads-summary']");
+    expect(summary.text()).toContain("1 more waiting to download.");
+    expect(summary.text()).not.toContain("z-image:q8");
+  });
+
+  it("drops the banner chrome the card already draws — no cancel, no history", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job()];
+    store.history = [job({ id: "h1", status: "completed" })];
+    const wrapper = mount(DownloadsTray, { props: { compact: true } });
+
+    expect(wrapper.find("[data-test='history-toggle']").exists()).toBe(false);
+    expect(wrapper.findAll("button")).toHaveLength(0);
+  });
+});

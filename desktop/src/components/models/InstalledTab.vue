@@ -4,6 +4,11 @@
  * under a mono heading (README §04 table). A disk meter opens the shelf when
  * this machine reports its models disk; the ⋯ at the end of a row holds the
  * page link and the one destructive action behind a plain confirm.
+ *
+ * One mono header sits above the whole table and every row shares its grid
+ * (`--model-row-columns`), so the ⋯ lands on one axis no matter which actions
+ * a row carries. SPEED is in the mock's header but nothing on `ModelEntry`
+ * times a render, so that column and its track are left out.
  */
 import { computed, ref } from "vue";
 import { planModelInstall } from "@studio/lib/modelInstallTargets";
@@ -295,7 +300,7 @@ async function unload(m: LibraryModelEntry) {
     </button>
   </div>
 
-  <div v-else class="flex flex-col gap-4 p-3.5">
+  <div v-else class="model-table flex flex-col gap-4 p-3.5">
     <div v-if="disk" class="flex items-center gap-2.5 px-3" data-test="styles-disk-meter">
       <span class="ms-group-label uppercase">Disk used by styles</span>
       <span
@@ -320,6 +325,14 @@ async function unload(m: LibraryModelEntry) {
       </span>
     </div>
 
+    <div class="model-table__header ms-group-label px-3 uppercase" data-test="styles-columns">
+      <span>Name</span>
+      <span>Good for</span>
+      <span>Size</span>
+      <span>Machine</span>
+      <span />
+    </div>
+
     <section v-for="[heading, list] in sections" :key="heading">
       <div class="mb-2 flex items-center gap-2.5 px-3">
         <span class="ms-group-label uppercase">{{ heading }}</span>
@@ -336,6 +349,7 @@ async function unload(m: LibraryModelEntry) {
             :loaded="m.is_loaded"
             :family="m.family"
             :host-labels="hostLabels(m)"
+            machines-column
             :page-url="pageUrl(m)"
             :note="m.description || null"
             :size-primary="
@@ -455,3 +469,18 @@ async function unload(m: LibraryModelEntry) {
     @cancel="removing = null"
   />
 </template>
+
+<style scoped>
+/* The shelf's one axis: name · good for · size · machine · actions. Fixed
+   tracks (not `auto`) are what make separate rows line up — each row is its
+   own grid, so only identical track sizes share an axis. */
+.model-table {
+  --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 8rem 10.5rem;
+}
+
+.model-table__header {
+  display: grid;
+  grid-template-columns: var(--model-row-columns);
+  gap: 12px;
+}
+</style>

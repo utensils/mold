@@ -137,8 +137,8 @@ the phone keep Create / Library / Models until their own redesign.
 - **Library**: a justified, virtualized contact-sheet grid (the renamed
   gallery), with a Lightroom-style small-to-large slider in the top toolbar
   that resizes the contact sheet continuously and remembers its setting, NEW
-  badges on fresh prints, a two-pane lightbox, and a History drawer holding
-  Runs and Prompts. **Space** opens
+  badges on fresh prints, a two-pane lightbox, and a History column holding
+  Runs, Prompts and Sequences. **Space** opens
   Quick Look, ←/→ navigate, and **Use these settings** jumps back to Create with
   every parameter restored. On a print a sequence produced, **Edit sequence**
   is the primary action and re-enters the original job on the machine that made
@@ -150,18 +150,28 @@ the phone keep Create / Library / Models until their own redesign.
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and
   lightbox right-click menus. **Use as source** is offered wherever a print is
-  shown — a Library tile, the lightbox, a run in the History drawer, and the
+  shown — a Library tile, the lightbox, a run in the History column, and the
   finished render on the Create canvas — and loads that print back into the
   composer: a still becomes the source image (or the H3 first frame or ordered
   reference on those models), a clip becomes the source video, while audio and
-  3-D meshes are refused because neither is conditioning. The Library header is segmented **Prints |
-  Collections | Trash**: Prints keeps the grid plus a filter-chip row
-  (♥ Favourites · tag chips · machine chips); Collections is a shelf of cards you
-  can drill into and edit; Trash holds deleted prints with a retention banner,
-  a per-tile "Purges in N d" countdown, **Restore** / **Delete forever**, and
-  a header **Empty trash** behind a plain confirm. Titles, ♥, tags, and
-  collection membership are edited in the lightbox aside; the raw filename
-  becomes a detail line. Everything lives on the machine that holds the print
+  3-D meshes are refused because neither is conditioning. The My images header is segmented
+  **Everything | Favourites | Albums | Trash**, each with its own count.
+  Everything and Favourites keep the grid plus a filter-chip row (tag chips
+  ending in a **＋ tag** picker, then **Made on** and one chip per machine, in
+  every scope); Albums puts its cover cards in a strip above the grid, which
+  stays where it is, and each card drills in; Trash holds deleted prints under
+  a banner that carries how long they are kept and a red **Empty now** behind a
+  plain confirm, with a per-tile "Purges in N d" countdown and **Restore** /
+  **Delete forever**. A favourite wears a ★ in the top-right corner of its
+  tile, and a clip, a 3-D model, or a sound says so in a word at the
+  bottom-left ("clip 5s", "3-D", "audio"). Selecting pictures opens a bar
+  reading how many are selected, then ★ **Favourite**, **Add tag**, **Add to
+  album**, **Export…** — which saves every selected picture where a single
+  **Save a copy** would put it — and **Delete**. **History** opens as a column
+  beside the pictures rather than over them, so the grid stays usable, and each
+  past run shows its style, size, seed and time over a **Use these settings**
+  line. Titles, ♥, tags, and album membership are edited in the lightbox
+  aside; the raw filename becomes a detail line. Everything lives on the machine that holds the print
   (its `mold.db`) and is merged across machines (collections by name, tags
   case-insensitively) and every change is applied to every copy of a print.
   Deleting moves a print to that machine's trash (the 6 s Undo stays); prints
@@ -191,9 +201,12 @@ the phone keep Create / Library / Models until their own redesign.
   the live Hugging Face/Civitai catalog in Discover, filtered by
   **All / Images / Video** media chips and a model-kind chip row (Models,
   LoRAs, CLIP, text encoders, VAEs, tokenizers, ControlNet), sorted by
-  downloads, rating, or recency, with compact Grid and Table layouts. Active downloads pin to
-  the top of the view, each showing its source glyph and the host receiving
-  the pull. The desktop reuses cacheable 512 px Civitai thumbnails across both
+  downloads, rating, or recency, with compact Grid and Table layouts. Ready to
+  use is headed once by a mono column row — **NAME · GOOD FOR · SIZE ·
+  MACHINE** — and every row below it shares that one grid, so each row's ⋯
+  sits on the same line whether or not the row also offers Get it or Unload.
+  Active downloads pin above the list and stay put while the list scrolls,
+  each showing its source glyph and the machine receiving the download. The desktop reuses cacheable 512 px Civitai thumbnails across both
   layouts, lazily decodes them, and contains each card's layout and paint
   work. Missing previews use a local model-family mark, with no additional
   image request. Grid cards and table rows carry the same kind badge, and
@@ -564,7 +577,14 @@ wire types as the CLI and web UI:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
   models, every GPU's utilization, VRAM and lifecycle state, current queue
   state, active model-download progress, and a freshly fetched inventory of
-  the models installed on that host. Each GPU can be enabled or disabled from
+  the models installed on that host. Its toolbar says the machine in one plain
+  sentence — `RTX 4090 · CUDA · on your network · up 6 days` — beside **Make
+  images here**, **Rename**, **Open web UI** and **Forget…**; the address,
+  version and instance id live in the name's tooltip, and clicking the name
+  copies the instance id. Each **Right now** tile keeps one short reading
+  (`14.9 / 24.0 GB`, `16 cores`) with the card and its backend in the tooltip,
+  and **Downloads here** is a compact readout — the style, its percent and
+  eta, a meter, and one line saying what else is queued. Each GPU can be enabled or disabled from
   host detail. This device also exposes the same controls under **Settings →
   Advanced**. A busy disable drains its current stage before the owner thread
   exits; enabling starts a fresh owner thread.

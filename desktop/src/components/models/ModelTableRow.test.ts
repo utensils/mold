@@ -137,6 +137,22 @@ describe("ModelTableRow", () => {
     expect(wrapper.get("[data-test='pull']").text()).toBe("Pull");
   });
 
+  it("gives the machine chips a column of their own only when asked", () => {
+    const inline = mountRow({ hostLabels: ["This Mac"] });
+    expect(inline.find(".model-table-row__machines").exists()).toBe(false);
+    expect(inline.get("[data-test='installed-host']").text()).toBe("This Mac");
+
+    const columned = mountRow({ hostLabels: ["This Mac", "hal9000"], machinesColumn: true });
+    const cell = columned.get(".model-table-row__machines");
+    expect(cell.findAll("[data-test='installed-host']").map((c) => c.text())).toEqual([
+      "This Mac",
+      "hal9000",
+    ]);
+    expect(columned.get("[data-test='model-table-row']").classes()).toContain(
+      "model-table-row--has-machines",
+    );
+  });
+
   it("marks the row that backs the open model detail", () => {
     const wrapper = mountRow({ selected: true });
     const row = wrapper.get("[data-test='model-table-row']");

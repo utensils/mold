@@ -462,26 +462,41 @@ describe("HostDetailView GPU lifecycle controls", () => {
 });
 
 describe("HostDetailView header", () => {
-  it("renders name, status, kind, url, version and instance id from the stores", async () => {
+  it("says what the machine is in one plain sentence, not a row of wire facts", async () => {
     const wrapper = await mountView();
     expect(wrapper.get("[data-test='host-title']").text()).toBe("hal9000");
-    expect(wrapper.text()).toContain("REMOTE");
-    expect(wrapper.get("[data-test='host-url']").text()).toBe("http://hal9000:7680");
-    expect(wrapper.get("[data-test='host-version']").text()).toContain("0.17.0");
-    const instance = wrapper.get("[data-test='host-instance-id']");
-    expect(instance.text()).toContain("0f7a2c31-instance-uuid");
-    // Remote hosts get the remote-only management actions.
+    expect(wrapper.get("[data-test='host-sentence']").text()).toBe(
+      "NVIDIA GeForce RTX 4090 · CUDA · on your network · up 5s",
+    );
+    // The kind is in the sentence; the badge and the raw address are gone.
+    const toolbar = wrapper.get("[data-test='host-toolbar']");
+    expect(toolbar.text()).not.toContain("REMOTE");
+    expect(toolbar.text()).not.toContain("http://hal9000:7680");
+    expect(toolbar.text()).not.toContain("0f7a2c31-instance-uuid");
+    expect(toolbar.text()).not.toContain("0.17.0");
+    // Remote hosts get the remote-only management actions; Disconnect stays
+    // on the machine card's context menu, off this four-button toolbar.
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(false);
   });
 
-  it("copies the full instance id on click even though the display truncates", async () => {
+  it("keeps the address, version and instance id in the name's tooltip", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='host-identity']").trigger("focusin");
+    await flushPromises();
+    const tip = document.body.querySelector('[role="tooltip"]');
+    expect(tip?.textContent).toContain("http://hal9000:7680");
+    expect(tip?.textContent).toContain("v0.17.0");
+    expect(tip?.textContent).toContain("0f7a2c31-instance-uuid");
+  });
+
+  it("copies the full instance id when the name is clicked", async () => {
     const wrapper = await mountView();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
-    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    await wrapper.get("[data-test='host-title']").trigger("click");
     expect(writeText).toHaveBeenCalledWith("0f7a2c31-instance-uuid");
   });
 
@@ -492,7 +507,7 @@ describe("HostDetailView header", () => {
       value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
     });
 
-    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    await wrapper.get("[data-test='host-title']").trigger("click");
     await flushPromises();
     const { useToastStore } = await import("../stores/toasts");
     const toasts = useToastStore();
@@ -501,9 +516,8 @@ describe("HostDetailView header", () => {
 
   it("renders the local primary without remote-only actions", async () => {
     const wrapper = await mountView("/hosts/local");
-    expect(wrapper.text()).toContain("THIS DEVICE");
+    expect(wrapper.get("[data-test='host-sentence']").text()).toContain("this device");
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(false);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(false);
   });
 
@@ -528,10 +542,15 @@ describe("HostDetailView telemetry", () => {
     // Before any frame: every status-poll worker is visible.
     const fallbackCards = wrapper.findAll("[data-test='gpu-card']");
     expect(fallbackCards).toHaveLength(2);
-    expect(fallbackCards[0]!.text()).toContain("NVIDIA GeForce RTX 4090");
-    expect(fallbackCards[0]!.text()).toContain("6.0 GB/24.0 GB");
-    expect(fallbackCards[1]!.text()).toContain("NVIDIA B200");
-    expect(fallbackCards[1]!.text()).toContain("20.0 GB/80.0 GB");
+    // The card names itself in the tooltip; the note stays one reading.
+    expect(fallbackCards[0]!.get("[data-test='gpu-note']").attributes("title")).toContain(
+      "NVIDIA GeForce RTX 4090",
+    );
+    expect(fallbackCards[0]!.text()).toContain("6.0 / 24.0 GB");
+    expect(fallbackCards[1]!.get("[data-test='gpu-note']").attributes("title")).toContain(
+      "NVIDIA B200",
+    );
+    expect(fallbackCards[1]!.text()).toContain("20.0 / 80.0 GB");
     expect(wrapper.find("[data-test='cpu-card']").exists()).toBe(false);
 
     stream.options.onEvent(
@@ -556,13 +575,15 @@ describe("HostDetailView telemetry", () => {
     await flushPromises();
 
     const gpuCard = wrapper.get("[data-test='gpu-card']");
-    expect(gpuCard.text()).toContain("CUDA");
-    expect(gpuCard.text()).toContain("18.0 GB/24.0 GB");
-    expect(gpuCard.get("[data-test='gpu-utilization']").text()).toBe("97%");
+    // The note stays a single short reading; the card names the rest.
+    expect(gpuCard.get("[data-test='gpu-note']").text()).toBe("18.0 / 24.0 GB");
+    expect(gpuCard.get("[data-test='gpu-note']").attributes("title")).toBe(
+      "NVIDIA GeForce RTX 4090 · CUDA · 97% util",
+    );
     const cpuCard = wrapper.get("[data-test='cpu-card']");
-    expect(cpuCard.text()).toContain("16 CORES");
+    expect(cpuCard.text()).toContain("16 cores");
     expect(cpuCard.text()).toContain("43%");
-    expect(wrapper.get("[data-test='ram-card']").text()).toContain("21.0 GB/64.0 GB");
+    expect(wrapper.get("[data-test='ram-card']").text()).toContain("21.0 / 64.0 GB");
   });
 
   it("collapses VRAM and RAM into one Memory row on a unified-memory Metal host", async () => {
@@ -592,7 +613,7 @@ describe("HostDetailView telemetry", () => {
     const gpuCard = wrapper.get("[data-test='gpu-card']");
     expect(gpuCard.text()).toContain("Memory");
     expect(gpuCard.text()).not.toContain("Graphics memory");
-    expect(gpuCard.text()).toContain("46.9 GB/51.5 GB");
+    expect(gpuCard.text()).toContain("46.9 / 51.5 GB");
     // The standalone RAM row would repeat the same numbers — it stays hidden,
     // while CPU keeps its own row.
     expect(wrapper.find("[data-test='ram-card']").exists()).toBe(false);
@@ -861,9 +882,13 @@ describe("HostDetailView models", () => {
     );
     await flushPromises();
 
+    // The card draws its own border, so this slot is the compact readout:
+    // one style, its percent and eta, a meter, one line of prose.
     const tray = wrapper.get("[data-test='host-downloads']");
     expect(tray.text()).toContain("qwen-image:q4");
-    expect(tray.text()).toContain("[2.5 GB/10.0 GB,");
+    expect(tray.get("[data-test='downloads-summary-progress']").text()).toContain("25% · eta");
+    expect(tray.text()).toContain("Nothing else queued to download.");
+    expect(tray.text()).not.toContain("[2.5 GB/10.0 GB,");
     expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
   });
 
@@ -1091,10 +1116,10 @@ describe("HostDetailView layout", () => {
     ).toBe(false);
   });
 
-  it("shows uptime from /api/status in the telemetry header", async () => {
+  it("shows uptime from /api/status in the toolbar sentence", async () => {
     installApi({ uptime_secs: 200_000 });
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='host-uptime']").text()).toBe("· up 2d 7h");
+    expect(wrapper.get("[data-test='host-sentence']").text()).toContain("up 2d 7h");
   });
 
   it("renders the models-disk meter inside the telemetry panel, not a separate section", async () => {

@@ -27,7 +27,7 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
-import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
+import { formatGB, formatGBPair, formatUptime, percent, vramLevel } from "../lib/format";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
@@ -389,6 +389,15 @@ function backendLabel(gpu: GpuSnapshot): string {
   return (gpu.backend || inferBackendFromGpuName(gpu.name)).toUpperCase();
 }
 
+/** Which card this meter belongs to, for the tile's tooltip. */
+function gpuDetail(gpu: GpuSnapshot): string {
+  const util =
+    gpu.gpu_utilization === null || gpu.gpu_utilization === undefined
+      ? ""
+      : `${gpu.gpu_utilization}% util`;
+  return [gpu.name, backendLabel(gpu), util].filter(Boolean).join(" · ");
+}
+
 const cpu = computed(() => snapshot.value?.cpu ?? null);
 const ram = computed(() => snapshot.value?.system_ram ?? null);
 /** Apple Metal shares one physical pool — a VRAM row and a RAM row would
@@ -588,6 +597,38 @@ const hardwareLine = computed(() => {
   return first ? `${first.name} · ${backendLabel(first)}` : "";
 });
 
+/**
+ * The toolbar's one plain sentence — what the machine is, where it lives, how
+ * long it has been up. Same shape as the machine card's, so the list and the
+ * page say the same thing about the same box.
+ */
+const hostSentence = computed(() => {
+  const h = host.value;
+  if (!h) return "";
+  const where =
+    h.kind === "local"
+      ? "this device"
+      : /\.runpod\.net/.test(h.baseUrl ?? "")
+        ? "rented cloud GPU"
+        : "on your network";
+  return [
+    hardwareLine.value,
+    where,
+    uptime.value === null ? "" : `up ${formatUptime(uptime.value)}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+});
+
+/** The wire facts a person only needs when something is wrong: address,
+ *  version, instance id. They ride the name's tooltip, not the toolbar. */
+const identityDetail = computed(() => {
+  const h = host.value;
+  if (!h) return "";
+  const facts = [h.baseUrl, h.version ? `v${h.version}` : "", h.instanceId ?? ""].filter(Boolean);
+  return h.instanceId ? `${facts.join(" · ")} — click to copy the instance id` : facts.join(" · ");
+});
+
 /** Whether the Downloads-here card has anything to show under its tray. */
 const hostDownloading = computed(() =>
   downloads.hostedInFlight.some((row) => row.hostId === hostId.value),
@@ -630,14 +671,6 @@ async function openHostUrl(url: string) {
   }
 }
 
-async function disconnect() {
-  const h = host.value;
-  if (!h) return;
-  await hosts.disconnect(h.id);
-  toasts.push(`Disconnected from ${h.label}`);
-  void router.push("/machines");
-}
-
 // Forget drops the saved entry AND the stored API key — confirmed first.
 const forgetOpen = ref(false);
 
@@ -655,42 +688,25 @@ async function forget() {
 <template>
   <div class="flex h-full min-h-0 w-full flex-col" data-test="host-detail-content">
     <template v-if="host">
-      <!-- toolbar: dot · mono name · one sentence · the machine's actions -->
+      <!-- toolbar: dot · mono name · one plain sentence · the machine's actions -->
       <div
         class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
+        data-test="host-toolbar"
       >
         <span
           class="h-2 w-2 shrink-0 rounded-full"
           :class="statusDot(host.status)"
           data-test="host-status-dot"
         />
-        <h1 class="shrink-0 font-mono text-base font-bold text-fg" data-test="host-title">
-          {{ host.label }}
-        </h1>
-        <span class="shrink-0 font-mono text-micro text-fg-dim">
-          {{ host.kind === "local" ? "THIS DEVICE" : "REMOTE" }}
-        </span>
-        <span class="flex min-w-0 items-center gap-1.5 truncate text-xs text-fg-dim">
-          <span v-if="hardwareLine" class="shrink-0">{{ hardwareLine }} ·</span>
-          <span class="truncate font-mono" data-selectable data-test="host-url">{{
-            host.baseUrl
-          }}</span>
-          <span v-if="host.version" class="shrink-0 font-mono" data-test="host-version"
-            >· v{{ host.version }}</span
-          >
-          <span v-if="uptime !== null" class="shrink-0" data-test="host-uptime"
-            >· up {{ formatUptime(uptime) }}</span
-          >
-          <Tooltip v-if="host.instanceId" :text="`${host.instanceId} — click to copy`">
-            <button
-              type="button"
-              class="max-w-28 truncate font-mono text-micro text-fg-faint hover:text-fg"
-              data-test="host-instance-id"
-              @click="copyInstanceId"
-            >
-              · {{ host.instanceId }}
+        <Tooltip :text="identityDetail" data-test="host-identity" class="shrink-0">
+          <h1 class="font-mono text-base font-bold text-fg">
+            <button type="button" data-test="host-title" @click="copyInstanceId">
+              {{ host.label }}
             </button>
-          </Tooltip>
+          </h1>
+        </Tooltip>
+        <span class="min-w-0 truncate text-xs text-fg-dim" data-test="host-sentence">
+          {{ hostSentence }}
         </span>
         <span class="flex-1" />
         <button
@@ -723,24 +739,17 @@ async function forget() {
         >
           Open web UI
         </button>
-        <template v-if="host.kind === 'remote'">
-          <button
-            type="button"
-            data-test="disconnect-host"
-            class="ms-toolbar-button"
-            @click="disconnect"
-          >
-            Disconnect
-          </button>
-          <button
-            type="button"
-            data-test="forget-host"
-            class="ms-toolbar-button ms-toolbar-button--danger-hover"
-            @click="forgetOpen = true"
-          >
-            Forget…
-          </button>
-        </template>
+        <!-- Disconnect stays on the machine card's context menu: this toolbar
+             carries the four actions the mock names and no more. -->
+        <button
+          v-if="host.kind === 'remote'"
+          type="button"
+          data-test="forget-host"
+          class="ms-toolbar-button ms-toolbar-button--danger-hover"
+          @click="forgetOpen = true"
+        >
+          Forget…
+        </button>
       </div>
 
       <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -805,15 +814,14 @@ async function forget() {
                   :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
                 />
               </span>
-              <span class="truncate font-mono text-micro text-fg-dim" :title="gpu.name">
-                {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }} · {{ gpu.name }} ·
-                {{ backendLabel(gpu)
-                }}<template
-                  v-if="gpu.gpu_utilization !== null && gpu.gpu_utilization !== undefined"
-                >
-                  ·
-                  <span data-test="gpu-utilization">{{ gpu.gpu_utilization }}%</span> util</template
-                >
+              <!-- One reading, the way the mock keeps it. The card, the GPU
+                   and its backend ride the tooltip rather than truncating. -->
+              <span
+                class="font-mono text-micro text-fg-dim"
+                :title="gpuDetail(gpu)"
+                data-test="gpu-note"
+              >
+                {{ formatGBPair(gpu.vram_used, gpu.vram_total) }}
               </span>
             </div>
             <div v-if="cpu" class="tile ms-card-edge" data-test="cpu-card">
@@ -832,7 +840,7 @@ async function forget() {
                   :style="{ width: `${cpu.usage_percent}%` }"
                 />
               </span>
-              <span class="font-mono text-micro text-fg-dim">{{ cpu.cores }} CORES</span>
+              <span class="font-mono text-micro text-fg-dim">{{ cpu.cores }} cores</span>
             </div>
             <div v-if="ram && !unifiedMemory" class="tile ms-card-edge" data-test="ram-card">
               <span class="ms-group-label uppercase">System memory</span>
@@ -856,7 +864,7 @@ async function forget() {
                 />
               </span>
               <span class="font-mono text-micro text-fg-dim">
-                {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
+                {{ formatGBPair(ram.used, ram.total) }}
               </span>
             </div>
             <div v-if="modelsDisk" class="tile ms-card-edge" data-test="storage-card">
@@ -1033,7 +1041,7 @@ async function forget() {
                 Browse more styles →
               </RouterLink>
             </span>
-            <DownloadsTray :host-id="hostId" data-test="host-downloads" class="-mx-3.5" />
+            <DownloadsTray :host-id="hostId" compact data-test="host-downloads" />
             <span v-if="!hostDownloading" class="text-micro text-fg-dim">
               Nothing on its way to this machine.
             </span>

@@ -19,8 +19,13 @@ import type { ModelSource } from "../../lib/modelSource";
  * Purely presentational: parents own data fetching, size resolution, and
  * actions (the `#actions` slot). README §04 table row, left to right:
  * residency star · source glyph · name stacked over its mono id and
- * family · machines (dot + mono name) · page link · `#meta` · a plain
- * one-line note · relative footprint + two-line size block · `#actions`.
+ * family · page link · `#meta` · a plain one-line note · relative footprint
+ * + two-line size block · machines (dot + mono name) · `#actions`.
+ *
+ * Every cell is a grid track, and a list that wants one axis for all its rows
+ * sets `--model-row-columns` on an ancestor (the Styles shelf does, under a
+ * mono header on the same template). Without it each row sizes its own
+ * tracks, which is what a machine card's narrow embedding wants.
  */
 const props = withDefaults(
   defineProps<{
@@ -31,6 +36,9 @@ const props = withDefaults(
     /** GPU residency star: true = warm, false = cold placeholder, omit = no column. */
     loaded?: boolean | undefined;
     hostLabels?: string[];
+    /** Give the machine chips a column of their own instead of trailing the
+     * name — what a table with a MACHINE header needs, and only that. */
+    machinesColumn?: boolean;
     family?: string | null;
     /** External model page; renders the link-out icon when present. */
     pageUrl?: string | null;
@@ -55,6 +63,7 @@ const props = withDefaults(
     id: null,
     loaded: undefined,
     hostLabels: () => [],
+    machinesColumn: false,
     family: null,
     pageUrl: null,
     note: null,
@@ -102,6 +111,7 @@ function onRowKeydown(event: KeyboardEvent): void {
       clickable ? 'cursor-pointer focus-visible:outline-2 focus-visible:outline-accent' : '',
       barPercent != null ? 'model-table-row--has-footprint' : '',
       note ? 'model-table-row--has-note' : '',
+      machinesColumn ? 'model-table-row--has-machines' : '',
       slots.actions ? 'model-table-row--has-actions' : '',
       selected ? 'model-table-row--selected' : '',
     ]"
@@ -163,15 +173,17 @@ function onRowKeydown(event: KeyboardEvent): void {
           }}</span>
         </span>
       </div>
-      <span
-        v-for="label in hostLabels"
-        :key="label"
-        data-test="installed-host"
-        class="flex shrink-0 items-center gap-1.5 font-mono text-xs text-fg-dim"
-      >
-        <span class="h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
-        {{ label }}
-      </span>
+      <template v-if="!machinesColumn">
+        <span
+          v-for="label in hostLabels"
+          :key="label"
+          data-test="installed-host"
+          class="flex shrink-0 items-center gap-1.5 font-mono text-xs text-fg-dim"
+        >
+          <span class="h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
+          {{ label }}
+        </span>
+      </template>
       <Tooltip v-if="pageUrl" text="Open the style's page" class="shrink-0">
         <button
           type="button"
@@ -239,18 +251,39 @@ function onRowKeydown(event: KeyboardEvent): void {
       </span>
     </div>
 
+    <div v-if="machinesColumn" class="model-table-row__machines">
+      <span
+        v-for="label in hostLabels"
+        :key="label"
+        data-test="installed-host"
+        class="flex min-w-0 items-center gap-1.5 font-mono text-xs text-fg-dim"
+      >
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden="true" />
+        <span class="truncate" :title="label">{{ label }}</span>
+      </span>
+    </div>
+
     <!-- Clicks on parent-provided actions must never open the row. -->
-    <div v-if="slots.actions" class="flex shrink-0 items-center gap-1.5" @click.stop>
+    <div v-if="slots.actions" class="model-table-row__actions" @click.stop>
       <slot name="actions" />
     </div>
   </div>
 </template>
 
 <style scoped>
+/* One track per cell. Absent cells contribute an empty custom property, so a
+   row's own template collapses to what it renders while a list that sets
+   --model-row-columns pins every row (and its header) to one axis. */
 .model-table-row {
+  --mtr-note: ;
+  --mtr-machines: ;
+  --mtr-actions: ;
   container-type: inline-size;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: var(
+    --model-row-columns,
+    minmax(0, 1fr) var(--mtr-note) auto var(--mtr-machines) var(--mtr-actions)
+  );
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -258,15 +291,15 @@ function onRowKeydown(event: KeyboardEvent): void {
 }
 
 .model-table-row--has-note {
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 13rem) auto;
+  --mtr-note: minmax(8rem, 13rem);
+}
+
+.model-table-row--has-machines {
+  --mtr-machines: auto;
 }
 
 .model-table-row--has-actions {
-  grid-template-columns: minmax(0, 1fr) auto auto;
-}
-
-.model-table-row--has-note.model-table-row--has-actions {
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 13rem) auto auto;
+  --mtr-actions: auto;
 }
 
 .model-table-row__identity {
@@ -302,6 +335,22 @@ function onRowKeydown(event: KeyboardEvent): void {
 
 .model-table-row--has-footprint .model-table-row__footprint {
   width: clamp(9rem, 33cqw, 16rem);
+  max-width: 100%;
+}
+
+.model-table-row__machines {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-table-row__actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 /* At machine-card widths, protect identity and sizes first. The note and
@@ -312,12 +361,14 @@ function onRowKeydown(event: KeyboardEvent): void {
     display: none;
   }
 
-  .model-table-row--has-note {
-    grid-template-columns: minmax(0, 1fr) auto;
+  /* A pinned table's axis is wider than this embedding — fall back to the
+     row's own tracks rather than overflowing the card. */
+  .model-table-row {
+    --model-row-columns: initial;
   }
 
-  .model-table-row--has-note.model-table-row--has-actions {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+  .model-table-row--has-note {
+    --mtr-note: ;
   }
 
   .model-table-row--has-footprint .model-table-row__footprint {

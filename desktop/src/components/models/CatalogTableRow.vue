@@ -16,7 +16,8 @@ import type { CatalogEntry } from "../../lib/api/types";
  * shape with catalog specifics on top: no preview image (that's the grid
  * card's job), lazy size resolution (HF summary rows arrive without
  * `size_bytes`), SIZE/FETCH as the two size lines, and Get it / ready
- * state in the actions column. Clicking the row opens the detail drawer.
+ * state in the actions column — Get it is the filled accent button the card
+ * uses, one verb and one treatment. Clicking the row opens the detail drawer.
  */
 const props = withDefaults(
   defineProps<{
@@ -163,7 +164,7 @@ const counts = computed(() => {
         v-if="showAction"
         type="button"
         data-test="pull"
-        class="ms-toolbar-button ms-toolbar-button--accent disabled:opacity-50"
+        class="ms-toolbar-button ms-toolbar-button--on disabled:opacity-50"
         :disabled="pulling"
         @click.stop="emit('pull', entry)"
       >

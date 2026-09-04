@@ -218,6 +218,16 @@ describe("ModelsView downloads and remote hosts", () => {
     expect(html.indexOf("downloads-tray")).toBeLessThan(html.indexOf("catalog-source-chips"));
   });
 
+  it("pins the banner outside the scrolling list, not inside it", async () => {
+    const wrapper = await mountView();
+    useDownloadsStore().activeJobs = [job()];
+    await flushPromises();
+    const tray = wrapper.get("[data-test='downloads-tray']").element;
+    const scroll = wrapper.get("[data-test='models-scroll']").element;
+    expect(scroll.contains(tray)).toBe(false);
+    expect(scroll.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  });
+
   it("shows installed models and active downloads from a connected remote host", async () => {
     const wrapper = await mountView();
     useHostsStore().extras.push({

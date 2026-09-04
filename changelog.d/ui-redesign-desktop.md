@@ -7,12 +7,17 @@
   and how deep the queue is; and the plain-English lexicon on every door — New
   image, Queue, My images, Styles, Machines, with technical truth beside each
   plain label in mono. The Queue is its own view (⌘2). Styles opens on Ready to
-  use | Browse more with a disk-used-by-styles meter, a download banner that
-  reads as a sentence with the CLI progress line beside it, and Get it as the
-  one acquisition verb. Machines is a master/detail list beside the machine's
-  pane (Right now tiles, Loaded and ready, Waiting on this machine, Storage,
-  Downloads here) with Connect a machine as one dialog and Rent a GPU stating
-  its cost. Settings is a jump nav over always-open sections (Look, Defaults
+  use | Browse more with a disk-used-by-styles meter, one column header the
+  whole table lines up under, a download banner that stays put above the
+  scrolling list and reads as a sentence with the CLI progress line beside it,
+  and Get it as the one acquisition verb, filled the same way in a row as on a
+  card. Machines is a master/detail list beside the machine's pane (Right now
+  tiles whose readings stay short, Loaded and ready, Waiting on this machine,
+  Storage, and Downloads here as a compact readout rather than a banner inside
+  a card) whose toolbar says the machine in one plain sentence — "RTX 4090 ·
+  CUDA · on your network · up 6 days" — and keeps its address, version and
+  instance id in the name's tooltip; Connect a machine is one dialog, and Rent
+  a GPU states its cost under RunPod's own mark. Settings is a jump nav over always-open sections (Look, Defaults
   for new images, Write more for me, …), with a new Styles & disk section
   holding where styles are kept, where finished pictures are written, and how
   full that disk is; each theme card shows a band of its own surfaces, and
@@ -41,3 +46,15 @@
   utility", and the phone-pairing panels now paint from the theme's own tokens
   instead of falling back to hard-coded greys, so they follow the six themes
   and stop failing contrast on the light ones.
+- **My images puts favourites, albums and history where you look for them.**
+  Favourites is now a place at the top of My images beside Everything, Albums
+  and Trash, each with its own count, instead of a chip you had to find; a
+  favourite wears a star in the corner of its picture, and a clip, a 3-D model
+  or a sound says so in a word rather than a symbol. Albums keep their cards in
+  a strip above the pictures instead of replacing them, History opens as a
+  column beside the grid you can still click through, with **Use these
+  settings** written on every past run, and selecting pictures now offers
+  **Export…** alongside Favourite, Add tag, Add to album and Delete. Emptying
+  the trash moved into the trash's own banner, next to how long deleted
+  pictures are kept, and the size slider is a plain track that fits its
+  toolbar.

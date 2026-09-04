@@ -4,6 +4,7 @@ import {
   formatEta,
   formatRate,
   formatGB,
+  formatGBPair,
   formatUptime,
   percent,
   timeAgo,
@@ -32,6 +33,13 @@ describe("formatGB", () => {
   it("formats decimal gigabytes with one decimal", () => {
     expect(formatGB(38_200_000_000)).toBe("38.2 GB");
     expect(formatGB(0)).toBe("0.0 GB");
+  });
+});
+
+describe("formatGBPair", () => {
+  it("names the unit once, on the total", () => {
+    expect(formatGBPair(12_100_000_000, 36_000_000_000)).toBe("12.1 / 36.0 GB");
+    expect(formatGBPair(0, 0)).toBe("0.0 / 0.0 GB");
   });
 });
 

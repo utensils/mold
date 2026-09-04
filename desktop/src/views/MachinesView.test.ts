@@ -280,9 +280,10 @@ describe("MachinesView overview", () => {
     // This device shows its memory meter and hardware line.
     const device = wrapper.get("[data-test='this-device-card']");
     expect(device.text()).toContain("Apple M3 Max");
-    expect(device.text()).toContain("Memory");
+    // The meter above says what it measures, so the reading is bare numbers.
+    expect(device.text()).not.toContain("Memory");
     expect(remotes[0]!.text()).toContain("NVIDIA GeForce RTX 4090 + NVIDIA B200");
-    expect(remotes[0]!.text()).toContain("30.0 GB / 104.0 GB");
+    expect(remotes[0]!.text()).toContain("30.0 / 104.0 GB");
   });
 
   it("never offers Forget on the This device card (it has no saved entry)", async () => {
