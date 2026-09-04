@@ -149,6 +149,9 @@ codegen-units = 16
 strip = true
 
 [dev-dependencies]
+# Test-only: the engine-boot test prints the server's own shutdown log so a
+# stalled phase names itself in CI instead of only reporting elapsed time.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Test-only: builds the two-triangle GLB the offline mesh-poster tests render.
 # `default = []` and the crate is already in this root's graph through
 # mold-server, so this edge adds no features and no extra compilation.

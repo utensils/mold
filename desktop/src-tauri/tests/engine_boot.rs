@@ -2,12 +2,22 @@
 //! on an ephemeral port and exercises the wire contract the webview relies
 //! on: health, capabilities, API-key auth, and graceful shutdown.
 
+use std::io::Write;
 use std::time::Duration;
 
 use mold_desktop_lib::server;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_boots_authenticates_and_shuts_down() {
+    // The server's own log, straight to stderr. Shutdown awaits a dozen
+    // background owners in sequence; when one stalls, this is what names it.
+    // `writeln!` rather than the print macros because libtest's capture hook
+    // only intercepts those, and a passing-but-slow run must stay readable.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter("mold_server=debug,warn")
+        .try_init();
+
     let models_dir = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     // Isolate from the user's real database and gallery. The server waits for
@@ -69,18 +79,24 @@ async fn engine_boots_authenticates_and_shuts_down() {
     // …and reported dead once the thread exits, so the connection state
     // machine knows to restart instead of handing out a dead base URL.
     //
-    // The bound is the server's own shutdown contract, not a smaller number:
-    // `run_server` waits up to `DEFAULT_SHUTDOWN_ABORT_SECS` for GPU owners
-    // and then stops waiting, so an engine that exits inside that budget is
-    // behaving. A 15 s bound here failed on slow macOS runners at 15.6-16 s
-    // (main runs 33616295687, 33820692419, 33823114932) with no server hang
-    // behind it. The elapsed time is printed either way so a run that drifts
-    // toward the budget is visible before it fails.
-    let budget = Duration::from_secs(mold_server::DEFAULT_SHUTDOWN_ABORT_SECS + 15);
+    // Embedded shutdown has no enforced deadline of its own: the hard-exit
+    // deadline is off for an embedded server (it would take the whole app
+    // down), so this bound is the only thing that catches a stalled phase.
+    // It is the app's own stop budget with headroom for a loaded runner —
+    // `stop_local_engine` gives the engine 10 s before it tells the user
+    // gallery authority is stuck with the server, so a shutdown anywhere near
+    // this bound is already broken for users, not merely slow here.
+    let budget = Duration::from_secs(60);
     let started = std::time::Instant::now();
     let exited = engine.join(budget);
     let elapsed = started.elapsed();
-    eprintln!("engine shutdown took {elapsed:.1?} (bound {budget:?})");
+    // Not `eprintln!`: libtest captures the print macros and shows them only
+    // for a FAILING test, so a run drifting toward the bound would say
+    // nothing. Writing to the stderr handle bypasses that capture.
+    let _ = writeln!(
+        std::io::stderr(),
+        "engine shutdown took {elapsed:.1?} (bound {budget:?}, app stop budget 10s)"
+    );
     assert!(
         exited,
         "engine thread did not exit within {budget:?} (waited {elapsed:.1?})"
