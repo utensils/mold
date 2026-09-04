@@ -99,3 +99,65 @@ describe("useQueueCommands — Space on the display host's queue", () => {
     expect(api.canPause.value).toBe(false);
   });
 });
+
+/**
+ * The Queue view's explainer says "Drag a row to reorder". Nothing in that
+ * view was draggable — reordering existed only behind the row's ⋯ menu — so
+ * the sentence instructed an interaction the view did not implement.
+ */
+describe("useQueueCommands — dragging a waiting row", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    readyLocalHost();
+  });
+
+  function queued(hostId: string, ids: string[], canReorder = true) {
+    useJobsStore().queues[hostId] = {
+      hostId,
+      entries: ids.map((id) => ({ id, state: "queued" })),
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder },
+      gpuOrdinals: [],
+      error: null,
+    } as never;
+  }
+
+  const printRow = (id: string, hostId = "local") =>
+    ({
+      key: `print:${id}`,
+      createdAtMs: 1,
+      kind: "print",
+      print: { clientId: 1, id, hostId, status: "queued" },
+    }) as never;
+
+  it("moves the dragged row into the slot of the row it was dropped on", async () => {
+    queued("local", ["a", "b", "c"]);
+    const reorderQueued = vi.spyOn(useJobsStore(), "reorderQueued").mockResolvedValue(true);
+
+    const api = commands();
+    await api.dropOn(printRow("c"), printRow("a"));
+    expect(reorderQueued).toHaveBeenCalledWith("local", "c", 0);
+  });
+
+  it("refuses a drop on a row from another machine, and on itself", async () => {
+    queued("local", ["a", "b"]);
+    queued("plato", ["x"]);
+    const reorderQueued = vi.spyOn(useJobsStore(), "reorderQueued").mockResolvedValue(true);
+
+    const api = commands();
+    await api.dropOn(printRow("a"), printRow("x", "plato"));
+    await api.dropOn(printRow("a"), printRow("a"));
+    expect(reorderQueued).not.toHaveBeenCalled();
+  });
+
+  it("offers the drag only where the host says the queue can be reordered", () => {
+    queued("local", ["a", "b"], false);
+    const api = commands();
+    expect(api.canReorder(printRow("a"))).toBe(false);
+
+    queued("local", ["a", "b"], true);
+    expect(api.canReorder(printRow("a"))).toBe(true);
+    // A row with no server id (still connecting) is never draggable.
+    expect(api.canReorder(printRow(""))).toBe(false);
+  });
+});

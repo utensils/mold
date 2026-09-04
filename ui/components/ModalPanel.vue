@@ -118,6 +118,12 @@ onBeforeUnmount(() =>
 </template>
 
 <style scoped>
+/* INVARIANT: `absolute inset-0` resolves against the nearest POSITIONED
+   ancestor, so a dialog fills whatever box that happens to be. Today that is
+   the app root (whole window) or a view root that is deliberately `relative`
+   (the library pane). Introducing a new positioned wrapper between a dialog
+   and the frame it should cover traps it — hoist the dialog to a sibling of
+   that wrapper, as the clip timeline's confirms already do. */
 .ms-modal {
   position: absolute;
   inset: 0;

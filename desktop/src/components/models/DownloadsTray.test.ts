@@ -57,6 +57,19 @@ describe("DownloadsTray a11y", () => {
     expect(bar.attributes("aria-label")).toContain("flux-dev:q4");
   });
 
+  /**
+   * `percent()` returns a float — the raw getter wrote 59.10320281982422% into
+   * the style attribute. A meter's width is a whole number of percent.
+   */
+  it("writes whole-number meter widths", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job({ bytes_done: 6_800_000_000, bytes_total: 11_507_000_000 })];
+    const wrapper = mount(DownloadsTray);
+    for (const fill of wrapper.findAll('[role="progressbar"] > *')) {
+      expect(fill.attributes("style")).toMatch(/^width: \d+%;?$/);
+    }
+  });
+
   it("labels the cancel control with the model name and target host", () => {
     const store = useDownloadsStore();
     store.activeJobs = [job()];

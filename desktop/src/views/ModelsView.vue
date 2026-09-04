@@ -21,7 +21,7 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
-import { mergeModelPresentationMetadata } from "../lib/models";
+import { mergeInstalledAcrossFleet } from "../lib/models";
 
 const conn = useConnectionStore();
 const models = useModelStore();
@@ -52,23 +52,11 @@ function setMediaType(type: MediaType) {
   void router.replace({ query: type === "all" ? rest : { ...rest, type } });
 }
 
-const installedModels = computed(() => {
-  const byName = new Map(
-    models.installed.map((entry) => [entry.name, { ...entry, hostIds: ["local"] }]),
-  );
-  for (const entry of hostModels.unionDownloaded) {
-    const existing = byName.get(entry.name);
-    if (existing) {
-      byName.set(entry.name, {
-        ...mergeModelPresentationMetadata(existing, entry),
-        hostIds: [...new Set([...existing.hostIds, ...entry.hostIds])],
-      });
-    } else {
-      byName.set(entry.name, { ...entry, hostIds: [...entry.hostIds] });
-    }
-  }
-  return [...byName.values()];
-});
+/** The whole fleet, through the one helper the title-bar subtitle also reads,
+ * so the tab badge and the shell sentence can never count different sets. */
+const installedModels = computed(() =>
+  mergeInstalledAcrossFleet(models.installed, hostModels.unionDownloaded),
+);
 
 const segments = computed<SegmentOption<Segment>[]>(() => [
   { value: "installed", label: "Ready to use", sub: String(installedModels.value.length) },
@@ -138,8 +126,11 @@ onUnmounted(() => {
         compact
         @update:model-value="setMediaType"
       />
+      <!-- The two segmented controls cannot shrink below their labels, so the
+           filter is the toolbar's only elastic child: it must be allowed to
+           give rather than push a control off the end of the row. -->
       <label
-        class="flex h-[26px] w-[190px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
+        class="flex h-[26px] min-w-0 shrink basis-[190px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
       >
         <Icon name="search" :size="14" class="shrink-0 text-fg-dim" />
         <input

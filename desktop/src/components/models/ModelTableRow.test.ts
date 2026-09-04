@@ -142,15 +142,98 @@ describe("ModelTableRow", () => {
     expect(inline.find(".model-table-row__machines").exists()).toBe(false);
     expect(inline.get("[data-test='installed-host']").text()).toBe("This Mac");
 
-    const columned = mountRow({ hostLabels: ["This Mac", "hal9000"], machinesColumn: true });
+    const columned = mountRow({ hostLabels: ["This Mac"], machinesColumn: true });
     const cell = columned.get(".model-table-row__machines");
-    expect(cell.findAll("[data-test='installed-host']").map((c) => c.text())).toEqual([
-      "This Mac",
-      "hal9000",
-    ]);
+    expect(cell.findAll("[data-test='installed-host']").map((c) => c.text())).toEqual(["This Mac"]);
     expect(columned.get("[data-test='model-table-row']").classes()).toContain(
       "model-table-row--has-machines",
     );
+  });
+
+  /**
+   * The mock's row is 52px, which is ONE line per cell. The machines cell used
+   * to stack a line per host with no cap, so a style on three machines drew a
+   * three-line row and dragged the whole table off the mock's rhythm. (Replaces
+   * the old assertion that the column listed every label inline — the rest are
+   * still reachable, in the overflow chip's tooltip.)
+   */
+  it("keeps the machines column to one line, with the rest behind a +N", () => {
+    const many = mountRow({
+      hostLabels: ["This Mac", "hal9000", "plato"],
+      machinesColumn: true,
+    });
+    const cell = many.get(".model-table-row__machines");
+    expect(cell.findAll("[data-test='installed-host']").map((c) => c.text())).toEqual(["This Mac"]);
+    const more = cell.get("[data-test='installed-host-more']");
+    expect(more.text()).toBe("+2");
+    expect(more.attributes("title")).toBe("hal9000, plato");
+
+    // One machine needs no overflow chip at all.
+    expect(
+      mountRow({ hostLabels: ["This Mac"], machinesColumn: true })
+        .find("[data-test='installed-host-more']")
+        .exists(),
+    ).toBe(false);
+  });
+
+  /**
+   * A pinned table (`--model-row-columns`) fixes the track count, so a row that
+   * skips a cell shifts every column after it one track left. `noteColumn` is
+   * the parent saying "this table has a Good for column" — the cell is then
+   * always emitted, empty or not.
+   */
+  it("emits the note cell on every row when the table pins a note column", () => {
+    const withoutNote = mountRow({ noteColumn: true });
+    expect(withoutNote.get("[data-test='row-note']").text()).toBe("");
+    expect(withoutNote.get("[data-test='model-table-row']").classes()).toContain(
+      "model-table-row--has-note",
+    );
+
+    // Unpinned rows keep sizing their own tracks: no note, no cell, no track.
+    const unpinned = mountRow();
+    expect(unpinned.find("[data-test='row-note']").exists()).toBe(false);
+    expect(unpinned.get("[data-test='model-table-row']").classes()).not.toContain(
+      "model-table-row--has-note",
+    );
+  });
+
+  it("counts one cell per pinned track so the axis never shifts", () => {
+    const cells = (wrapper: ReturnType<typeof mountRow>) =>
+      Array.from(wrapper.get("[data-test='model-table-row']").element.children).length;
+    const withNote = mountRow(
+      { noteColumn: true, note: "Full quality", machinesColumn: true, hostLabels: ["This Mac"] },
+      { actions: "<button>Load</button>" },
+    );
+    const withoutNote = mountRow(
+      { noteColumn: true, machinesColumn: true, hostLabels: ["This Mac"] },
+      { actions: "<button>Load</button>" },
+    );
+    expect(cells(withoutNote)).toBe(cells(withNote));
+    expect(cells(withNote)).toBe(5);
+  });
+
+  /**
+   * The mock's identity cell is star + name. The source mark stays — the brand
+   * marks are wanted — but small and on the mono line, never a 44px colour
+   * glyph column ahead of the first character.
+   */
+  it("puts the source mark on the mono line, not ahead of the name", () => {
+    const wrapper = mountRow({ name: "Photoreal", id: "flux-dev:q4" });
+    const identity = wrapper.get(".model-table-row__identity");
+    const glyph = identity.get("svg[data-source='hf']");
+    expect(glyph.attributes("width")).toBe("10");
+    // It rides the mono id line, so it can never widen the identity's chrome.
+    expect(glyph.element.closest("[data-test='row-mono-line']")).not.toBeNull();
+    // Never a leading track of its own in the identity flex.
+    expect(Array.from(identity.element.children).some((el) => el.tagName === "svg")).toBe(false);
+  });
+
+  it("keeps the source mark on rows that have no mono line of their own", () => {
+    // A manifest style's display name IS its id, so there is no id line and no
+    // family chip — the mark rides the title instead of inventing a line.
+    const wrapper = mountRow({ name: "flux-dev:q8", id: "flux-dev:q8" });
+    expect(wrapper.find("[data-test='row-mono-line']").exists()).toBe(false);
+    expect(wrapper.find("svg[data-source='hf']").exists()).toBe(true);
   });
 
   it("marks the row that backs the open model detail", () => {

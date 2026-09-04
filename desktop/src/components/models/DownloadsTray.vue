@@ -146,7 +146,9 @@ async function retry(row: HostedDownloadJob) {
     >
       <span
         class="block h-full bg-warning transition-[width] duration-300"
-        :style="{ width: `${percent(leadRow.job.bytes_done, leadRow.job.bytes_total)}%` }"
+        :style="{
+          width: `${Math.round(percent(leadRow.job.bytes_done, leadRow.job.bytes_total))}%`,
+        }"
       />
     </span>
     <span class="text-micro text-fg-dim">{{ restLabel }}</span>
@@ -197,7 +199,9 @@ async function retry(row: HostedDownloadJob) {
         >
           <div
             class="h-full bg-warning transition-[width] duration-300"
-            :style="{ width: `${percent(row.job.bytes_done, row.job.bytes_total)}%` }"
+            :style="{
+              width: `${Math.round(percent(row.job.bytes_done, row.job.bytes_total))}%`,
+            }"
           />
         </div>
         <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-fg-dim">

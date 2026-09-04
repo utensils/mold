@@ -68,6 +68,9 @@ useRootFocusOnOpen(root, () => props.open);
 </template>
 
 <style scoped>
+/* INVARIANT: see ModalPanel — `absolute inset-0` fills the nearest POSITIONED
+   ancestor, so a new `relative` wrapper between this drawer and the frame it
+   should cover will trap it. Hoist the drawer to a sibling of that wrapper. */
 .ms-drawer {
   position: absolute;
   inset: 0;

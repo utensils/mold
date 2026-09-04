@@ -76,7 +76,11 @@ function toggleSidebar() {
     </div>
 
     <div data-tauri-drag-region class="flex min-w-0 items-baseline gap-2.5 select-none">
-      <span data-test="shell-title" class="font-mono text-base font-bold text-fg">{{ title }}</span>
+      <!-- The title gives before the subtitle and the palette chip do: without
+           `truncate` a long view title pushed the chip off the bar. -->
+      <span data-test="shell-title" class="truncate font-mono text-base font-bold text-fg">{{
+        title
+      }}</span>
       <span v-if="subtitle" data-test="shell-subtitle" class="truncate text-xs text-fg-dim">
         {{ subtitle }}
       </span>
@@ -104,6 +108,8 @@ function toggleSidebar() {
 <style scoped>
 .toolbar-icon {
   display: inline-flex;
+  /* Fixed chrome never gives: the canvas absorbs the slack, not the buttons. */
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   align-items: center;

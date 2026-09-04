@@ -24,6 +24,13 @@ export interface QueueCommands {
   stopEverything(): Promise<void>;
   canCancel(row: QueueRow): boolean;
   cancel(row: QueueRow): Promise<void>;
+  /** Whether this row may be dragged: its host offers reorder and the row is
+   * one of that host's queued entries. */
+  canReorder(row: QueueRow): boolean;
+  /** Drop `dragged` onto `target`, taking the target's slot. Refuses a drop on
+   * itself and across machines — a queue position only means something inside
+   * one host's line. */
+  dropOn(dragged: QueueRow, target: QueueRow): Promise<void>;
   /** Bring the row to the canvas (or the surface that can inspect it). */
   open(row: QueueRow): void;
   contextMenu(event: MouseEvent, row: QueueRow): void;
@@ -192,6 +199,20 @@ export function useQueueCommands(): QueueCommands {
     await jobs.reorderQueued(ref.hostId, ref.id, Math.max(0, position));
   }
 
+  /**
+   * A drag lands the dragged row in the SLOT of the row it was dropped on.
+   * Both rows must be queued entries of the same host: a position is an index
+   * into one host's line, so a cross-machine drop would silently reorder a
+   * queue the user was not pointing at.
+   */
+  async function dropOn(dragged: QueueRow, target: QueueRow) {
+    const from = serverRef(dragged);
+    const to = serverRef(target);
+    if (!from || !to || from.hostId !== to.hostId || from.id === to.id) return;
+    if (!canReorder(dragged) || !canReorder(target)) return;
+    await reorder(dragged, queuedIndexOf(target)).catch(report);
+  }
+
   /** This row's entry in its host's live queue listing, when it has one. */
   function queueEntryOf(row: QueueRow) {
     const ref = serverRef(row);
@@ -354,6 +375,8 @@ export function useQueueCommands(): QueueCommands {
     stopEverything,
     canCancel,
     cancel,
+    canReorder,
+    dropOn,
     open,
     contextMenu: openContextMenu,
     cancellingShared,

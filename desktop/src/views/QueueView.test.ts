@@ -181,6 +181,99 @@ describe("QueueView", () => {
     expect(menuLabels()).not.toContain("Jump the line");
   });
 
+  /**
+   * The explainer says "Drag a row to reorder". Nothing here was draggable —
+   * reordering lived only behind the row's ⋯ — so the sentence instructed an
+   * interaction the view did not implement.
+   */
+  it("reorders by dragging a waiting row onto the slot it should take", async () => {
+    const wrapper = await mountView();
+    useGenerationStore().jobs = [
+      { clientId: 1, id: "srv-1", model: "flux-dev:q8", prompt: "first", status: "queued" },
+      { clientId: 2, id: "srv-2", model: "flux-dev:q8", prompt: "second", status: "queued" },
+    ] as never;
+    const jobs = useJobsStore();
+    const snapshot = {
+      hostId: "local",
+      entries: [
+        { id: "srv-1", state: "queued" },
+        { id: "srv-2", state: "queued" },
+      ],
+      paused: false,
+      caps: { canPause: false, canCancelAll: false, canReorder: true },
+      gpuOrdinals: [],
+      error: null,
+    } as unknown as HostQueueSnapshot;
+    jobs.queues.local = snapshot;
+    const reorder = vi.spyOn(jobs, "reorderQueued").mockResolvedValue(true);
+    await flushPromises();
+
+    const rows = wrapper.findAll("[data-test='queue-row-print']");
+    const first = rows.find((row) => row.text().includes("first"))!;
+    const second = rows.find((row) => row.text().includes("second"))!;
+    expect(second.attributes("draggable")).toBe("true");
+
+    await second.trigger("dragstart", { dataTransfer: { setData: vi.fn() } });
+    await first.trigger("drop");
+    await flushPromises();
+    expect(reorder).toHaveBeenCalledWith("local", "srv-2", 0);
+  });
+
+  it("offers no drag at all where the host cannot reorder", async () => {
+    const wrapper = await mountView();
+    useGenerationStore().jobs = [
+      { clientId: 1, id: "srv-1", model: "flux-dev:q8", prompt: "only", status: "queued" },
+    ] as never;
+    useJobsStore().queues.local = {
+      hostId: "local",
+      entries: [{ id: "srv-1", state: "queued" }],
+      paused: false,
+      caps: { canPause: false, canCancelAll: false, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    } as unknown as HostQueueSnapshot;
+    await flushPromises();
+    expect(wrapper.get("[data-test='queue-row-print']").attributes("draggable")).toBe("false");
+  });
+
+  it("marks the control the explainer names, and shouts its column header", async () => {
+    const wrapper = await mountView();
+    // "Jump the line" names a control; unmarked it reads as prose (mock:598).
+    expect(wrapper.get("[data-test='queue-jump-name']").text()).toBe("Jump the line");
+    // Every other ms-group-label in the app adds `uppercase`; the kit leaves
+    // the case to the caller, so this header rendered in sentence case.
+    expect(wrapper.get("[data-test='queue-columns']").classes()).toContain("uppercase");
+  });
+
+  /**
+   * `hasFinished` read this client's job list while the table renders
+   * `queue.rows`. The button that says "Clear finished" must be enabled by
+   * exactly the rows it is going to clear, on every machine.
+   */
+  it("enables Clear finished from the rows the table actually shows", async () => {
+    const wrapper = await mountView();
+    const generation = useGenerationStore();
+    expect(wrapper.get("[data-test='queue-clear-finished']").attributes("disabled")).toBeDefined();
+
+    generation.jobs = [
+      {
+        clientId: 1,
+        id: "srv-1",
+        hostId: "plato",
+        model: "flux-dev:q8",
+        prompt: "done elsewhere",
+        status: "complete",
+      },
+    ] as never;
+    await flushPromises();
+    const clear = wrapper.get("[data-test='queue-clear-finished']");
+    expect(clear.attributes("disabled")).toBeUndefined();
+
+    const prune = vi.spyOn(generation, "prune").mockImplementation(() => undefined);
+    await clear.trigger("click");
+    expect(prune).toHaveBeenCalledWith(0);
+  });
+
   it("pauses and resumes one waiting print only where the host offers it", async () => {
     const wrapper = await mountView();
     useGenerationStore().jobs = [

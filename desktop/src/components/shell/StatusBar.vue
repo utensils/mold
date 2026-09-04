@@ -122,12 +122,19 @@ const downloading = computed(() => downloads.hostedInFlight.length);
       </button>
     </template>
     <span class="flex-1" />
-    <span class="keycap">{{ shortcutLabel("↩") }}</span
-    ><span>Generate</span> <span class="keycap">{{ shortcutLabel("K") }}</span
-    ><span>Search</span>
-    <template v-if="commands.canPause.value">
+    <!-- Each hint is ONE element with its own gap. Run together in the bar's
+         own flow they rendered as "⌘↩Generate ⌘KSearch". -->
+    <span data-test="status-hint" class="flex items-center gap-1">
+      <span class="keycap">{{ shortcutLabel("↩") }}</span
+      ><span>Generate</span>
+    </span>
+    <span data-test="status-hint" class="flex items-center gap-1">
+      <span class="keycap">{{ shortcutLabel("K") }}</span
+      ><span>Search</span>
+    </span>
+    <span v-if="commands.canPause.value" data-test="status-hint" class="flex items-center gap-1">
       <span class="keycap">Space</span><span data-test="status-pause-hint">Pause queue</span>
-    </template>
+    </span>
   </footer>
 </template>
 

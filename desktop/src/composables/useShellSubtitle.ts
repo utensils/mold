@@ -5,8 +5,10 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useDownloadsStore } from "../stores/downloads";
 import { useGalleryStore } from "../stores/gallery";
 import { useGenerateFormStore } from "../stores/generateForm";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
+import { mergeInstalledAcrossFleet } from "../lib/models";
 import { useQueueActivity } from "./useQueueActivity";
 
 /** "3 waiting" / "nothing waiting" — the plural-aware count phrase. */
@@ -25,6 +27,7 @@ export function useShellSubtitle(): ComputedRef<string> {
   const downloads = useDownloadsStore();
   const gallery = useGalleryStore();
   const generateForm = useGenerateFormStore();
+  const hostModels = useHostModelsStore();
   const hosts = useHostsStore();
   const models = useModelStore();
   const activity = useQueueActivity();
@@ -54,7 +57,16 @@ export function useShellSubtitle(): ComputedRef<string> {
         return `${countPhrase(gallery.basePrintCount, "picture")} · ${countPhrase(gallery.mergedCollections.length, "album")}`;
       case "/models": {
         const pulling = downloads.hostedInFlight.length;
-        return `${countPhrase(models.installed.length, "style")} ready${pulling ? ` · ${pulling} downloading` : ""}`;
+        // The SAME set the Ready-to-use badge counts — the whole fleet. These
+        // two read different sets and said the same word, which is how "106"
+        // came to sit beside "25 styles ready".
+        const ready = mergeInstalledAcrossFleet(
+          models.installed,
+          hostModels.unionDownloaded,
+        ).length;
+        const machines = hosts.all.filter((h) => h.status === "ready").length;
+        const scope = machines > 1 ? " across your machines" : "";
+        return `${countPhrase(ready, "style")} ready${scope}${pulling ? ` · ${pulling} downloading` : ""}`;
       }
       case "/settings":
         return hosts.primaryHost?.label ?? "";

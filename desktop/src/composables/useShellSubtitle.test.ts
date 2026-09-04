@@ -8,6 +8,7 @@ import { useShellSubtitle } from "./useShellSubtitle";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
 import { useGenerateFormStore } from "../stores/generateForm";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import type { GalleryImage } from "../lib/api/types";
@@ -102,6 +103,47 @@ describe("useShellSubtitle — one live sentence per workspace", () => {
       { name: "flux-dev:q4", family: "flux", downloaded: true } as never,
     ];
     expect(subtitle.value).toBe("2 styles ready");
+  });
+
+  /**
+   * The Ready-to-use badge counts the whole fleet. This sentence counted the
+   * primary alone, so a connected second machine put "106" beside "25 styles
+   * ready" and neither string said which set it meant.
+   */
+  it("counts the same fleet the Ready-to-use badge counts, and names the scope", async () => {
+    const subtitle = await subtitleAt("/models");
+    useModelStore().all = [{ name: "flux-dev:q4", family: "flux", downloaded: true } as never];
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "plato",
+        label: "plato",
+        url: "http://plato:7680",
+        apiKey: null,
+        status: "ready",
+        error: null,
+        instanceId: "plato-uuid",
+      },
+    ];
+    const hostModels = useHostModelsStore();
+    hostModels.byHost = {
+      plato: {
+        entries: [
+          { name: "flux-dev:q4", family: "flux", downloaded: true },
+          { name: "wan22-ti2v-5b:q8", family: "wan", downloaded: true },
+        ] as never,
+        fetchedAt: 1,
+        error: null,
+      },
+    };
+    // The remote's extra style counts; the shared one is not counted twice.
+    expect(subtitle.value).toBe("2 styles ready");
+
+    // Two machines answering means the sentence has to say whose styles.
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: null };
+    conn.status = "ready";
+    expect(subtitle.value).toBe("2 styles ready across your machines");
   });
 
   it("counts the machines that answered, and names the offer on Rent a GPU", async () => {

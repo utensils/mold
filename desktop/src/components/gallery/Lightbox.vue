@@ -541,6 +541,10 @@ async function performVideoExport(options: VideoExportOptions) {
 </script>
 
 <template>
+  <!-- `fixed`, deliberately: the Lightbox covers the WHOLE window, title bar
+       and sidebar included. Never convert it to the `absolute inset-0` that
+       ModalPanel and DrawerPanel use — `LibraryView`'s root is `relative`, so
+       it would silently shrink to the grid pane. -->
   <div
     class="lightbox-scrim fixed inset-0 z-40 flex flex-col"
     role="dialog"

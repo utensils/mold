@@ -108,4 +108,37 @@ describe("LibraryHeader", () => {
     await history.trigger("click");
     expect(wrapper.emitted("toggleHistory")).toHaveLength(2);
   });
+
+  /**
+   * This row is one 40px line that never wraps, and `.ms-seg__btn` is
+   * `flex: 1` + `white-space: nowrap`, so the segmented groups cannot give.
+   * Measured at the app's own 1080px minimum the row asked for ~1105px and
+   * `<main>`'s `overflow-hidden` ate Refresh, then History, then Select.
+   */
+  it("keeps the toolbar able to shrink: the search gives, and the kind control is flat chips", () => {
+    const wrapper = mountHeader();
+    const search = wrapper.get("input[type='search']").element.parentElement!;
+    const classes = [...search.classList];
+    // A fixed width in a nowrap row is a floor nothing can get under.
+    expect(classes).not.toContain("w-[170px]");
+    expect(classes).toContain("min-w-0");
+    expect(classes).toContain("shrink");
+    expect(classes).toContain("basis-[170px]");
+
+    // The mock's media-kind control is unbordered chips, not a second
+    // segmented group with its own border, padding and 7px insets.
+    const kind = wrapper.get("[aria-label='Media kind']");
+    expect(kind.classes()).not.toContain("ms-seg");
+    expect(kind.findAll("[role='radio']")).toHaveLength(kindOptions.length);
+  });
+
+  it("marks the chosen media kind and emits the others", async () => {
+    const wrapper = mountHeader();
+    const chips = wrapper.get("[aria-label='Media kind']").findAll("[role='radio']");
+    expect(chips.map((c) => c.text())).toEqual(["All", "Pictures"]);
+    expect(chips[0]!.attributes("aria-checked")).toBe("true");
+    expect(chips[1]!.attributes("aria-checked")).toBe("false");
+    await chips[1]!.trigger("click");
+    expect(wrapper.emitted("update:mediaKind")).toEqual([["image"]]);
+  });
 });

@@ -5,10 +5,10 @@
  * Work in progress is context, so this view is a place to manage the line,
  * not to watch pixels arrive; selecting a row brings it to the canvas.
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import QueueRowMenu from "../components/shell/QueueRowMenu.vue";
-import { useQueueActivity, type QueueRow } from "../composables/useQueueActivity";
+import { rowSettled, useQueueActivity, type QueueRow } from "../composables/useQueueActivity";
 import { useQueueCommands } from "../composables/useQueueCommands";
 import { useQueueRowContext } from "../composables/useQueueRowContext";
 import { madeTodayCount, rowGlyph, rowStatusLine, rowTitle, rowTone } from "../lib/queueRows";
@@ -36,9 +36,41 @@ const totalEta = computed(() => {
   const seconds = rowContext.totalEtaSeconds.value;
   return seconds === null || seconds <= 0 ? null : `about ${formatEta(seconds)} left in total`;
 });
-const hasFinished = computed(() =>
-  generation.jobs.some((j) => j.status === "complete" || j.status === "error"),
-);
+/**
+ * The finished rows this table SHOWS, across every machine — the same set
+ * Clear finished removes. Reading `generation.jobs` directly meant the
+ * button's enablement and the table's contents were two different questions.
+ */
+const finishedRows = computed(() => queue.rows.value.filter(rowSettled));
+const hasFinished = computed(() => finishedRows.value.length > 0);
+
+function clearFinished() {
+  generation.prune(0);
+}
+
+/** The row a drag is currently carrying, so the drop knows what to move. */
+const dragging = ref<QueueRow | null>(null);
+
+function onDragStart(row: QueueRow, event: DragEvent) {
+  if (!commands.canReorder(row)) return;
+  dragging.value = row;
+  event.dataTransfer?.setData("text/plain", row.key);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function onDragOver(row: QueueRow, event: DragEvent) {
+  const held = dragging.value;
+  if (!held || held.key === row.key || !commands.canReorder(row)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+async function onDrop(row: QueueRow) {
+  const held = dragging.value;
+  dragging.value = null;
+  if (!held) return;
+  await commands.dropOn(held, row);
+}
 
 function model(row: QueueRow): string {
   const id =
@@ -119,7 +151,7 @@ function previewSrc(row: QueueRow): string | null {
         data-test="queue-clear-finished"
         class="text-xs text-fg-dim hover:text-fg disabled:text-fg-faint"
         :disabled="!hasFinished"
-        @click="generation.prune(0)"
+        @click="clearFinished()"
       >
         Clear finished
       </button>
@@ -166,14 +198,20 @@ function previewSrc(row: QueueRow): string | null {
         <span class="font-mono text-xs text-accent">•</span>
         <p class="text-xs leading-body text-fg-2" style="text-wrap: pretty">
           One image is made at a time so each gets your machine's full attention. Drag a row to
-          reorder, or hit Jump the line on the one you need first. Closing the window keeps the
-          queue running.
+          reorder, or hit
+          <strong data-test="queue-jump-name" class="font-medium text-fg">Jump the line</strong> on
+          the one you need first. Closing the window keeps the queue running.
         </p>
       </div>
 
       <!-- the table -->
       <div class="border border-border bg-panel">
-        <div class="table-grid ms-group-label border-b border-border px-3.5 py-2.5">
+        <!-- `.ms-group-label` leaves the case to the caller on purpose; every
+             other caller in the app adds `uppercase`, and so does the mock. -->
+        <div
+          data-test="queue-columns"
+          class="table-grid ms-group-label border-b border-border px-3.5 py-2.5 uppercase"
+        >
           <span>Image</span><span>What's happening</span><span>Style</span
           ><span class="text-right">Machine</span><span />
         </div>
@@ -189,8 +227,14 @@ function previewSrc(row: QueueRow): string | null {
           :key="row.key"
           :data-test="`queue-row-${row.kind}`"
           class="table-grid min-h-[56px] cursor-pointer items-center border-b border-border px-3.5 py-3 transition-colors duration-100 hover:bg-row-hover focus-visible:outline-2 focus-visible:outline-accent"
+          :class="dragging?.key === row.key ? 'opacity-50' : ''"
           role="button"
           tabindex="0"
+          :draggable="commands.canReorder(row)"
+          @dragstart="onDragStart(row, $event)"
+          @dragover="onDragOver(row, $event)"
+          @drop.prevent="onDrop(row)"
+          @dragend="dragging = null"
           @click="commands.open(row)"
           @keydown.enter.prevent="commands.open(row)"
           @keydown.space.prevent="commands.open(row)"

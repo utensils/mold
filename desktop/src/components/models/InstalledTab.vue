@@ -20,6 +20,7 @@ import { useHostStatusStore } from "../../stores/hostStatus";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import Icon from "@ui/components/Icon.vue";
+import Tooltip from "@ui/components/Tooltip.vue";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
@@ -41,6 +42,8 @@ import {
   modelSizeLabels,
 } from "../../lib/models";
 import { modelSource } from "../../lib/modelSource";
+import { styleDiskSegments, type StyleDiskSegment } from "../../lib/styleDiskSegments";
+import { familyLabel } from "@studio/lib/modelFamily";
 import { openExternal } from "../../lib/openExternal";
 import { loadModel, removeModel, unloadModel } from "../../lib/api/models";
 import { startCatalogDownload } from "../../lib/api/catalog";
@@ -85,35 +88,54 @@ const filtered = computed(() => {
 const groups = computed(() => groupInstalledModels(filtered.value));
 
 /** Family groups plus a trailing helper section, as [heading, models] rows. */
+const UTILITY_HEADING = "SHARED / UTILITY";
 const sections = computed<[string, ModelEntry[]][]>(() =>
   [
     ...groups.value.families,
     ...((props.mediaType ?? "all") === "all"
-      ? [["SHARED / UTILITY", groups.value.utility] as [string, ModelEntry[]]]
+      ? [[UTILITY_HEADING, groups.value.utility] as [string, ModelEntry[]]]
       : []),
   ].filter(([, list]) => list.length > 0),
 );
 
 /**
- * Disk used by styles on THIS machine (the primary's /api/status is the only
- * disk the shell reads): one segment per family, sized by each style's
- * primary weights. Weights are unique per style, so a T5 encoder three
- * styles share is never counted three times; the tooltip says so.
+ * A section heading reads as the family's NAME, never its wire slug — CSS
+ * uppercasing `wan` gave "WAN" over rows that said "Wan Video". One authority
+ * for the group heading and the disk meter's segment names.
  */
-const SEGMENT_TONES = ["bg-accent", "bg-sapphire", "bg-mauve", "bg-teal", "bg-lavender"];
+function sectionLabel(heading: string): string {
+  return heading === UTILITY_HEADING ? heading : familyLabel(heading);
+}
+
+/**
+ * Disk used by styles on THIS machine (the primary's /api/status is the only
+ * disk the shell reads), sized by each style's primary weights. Weights are
+ * unique per style, so a T5 encoder three styles share is never counted three
+ * times; the tooltip says so. `styleDiskSegments` owns the cap and the tones —
+ * the mock draws three segments, and a segment per family drew ten slivers.
+ */
 const disk = computed(() => hostStatus.status?.models_disk ?? null);
 const weightsBytes = (m: ModelEntry) => Math.max(0, m.size_gb) * 1_000_000_000;
 const diskSegments = computed(() =>
-  sections.value
-    .map(([heading, list], index) => ({
-      heading,
-      bytes: list
-        .filter((m) => ((m as LibraryModelEntry).hostIds ?? ["local"]).includes("local"))
-        .reduce((sum, m) => sum + weightsBytes(m), 0),
-      tone: SEGMENT_TONES[index % SEGMENT_TONES.length]!,
-    }))
-    .filter((segment) => segment.bytes > 0),
+  styleDiskSegments(
+    sections.value.map(
+      ([heading, list]) =>
+        [
+          sectionLabel(heading),
+          list
+            .filter((m) => ((m as LibraryModelEntry).hostIds ?? ["local"]).includes("local"))
+            .reduce((sum, m) => sum + weightsBytes(m), 0),
+        ] as const,
+    ),
+  ),
 );
+/** The segment's tooltip: what it is, and — for the fold — what is inside it. */
+function segmentTitle(segment: StyleDiskSegment): string {
+  const size = formatGB(segment.bytes);
+  return segment.headings.length > 1
+    ? `${segment.heading} · ${size} — ${segment.headings.join(", ")}`
+    : `${segment.heading} · ${size}`;
+}
 const stylesBytes = computed(() =>
   diskSegments.value.reduce((sum, segment) => sum + segment.bytes, 0),
 );
@@ -312,12 +334,14 @@ async function unload(m: LibraryModelEntry) {
         aria-valuemax="100"
         title="Each style's own weights. Helpers that several styles share are counted once."
       >
+        <!-- Whole numbers only: the raw getter wrote 59.10320281982422% into
+             the style attribute. The float belongs to nobody. -->
         <span
           v-for="segment in diskSegments"
           :key="segment.heading"
           :class="segment.tone"
-          :style="{ width: `${percent(segment.bytes, disk.total_bytes)}%` }"
-          :title="`${segment.heading} · ${formatGB(segment.bytes)}`"
+          :style="{ width: `${Math.round(percent(segment.bytes, disk.total_bytes))}%` }"
+          :title="segmentTitle(segment)"
         />
       </span>
       <span class="font-mono text-micro text-fg-dim">
@@ -335,7 +359,7 @@ async function unload(m: LibraryModelEntry) {
 
     <section v-for="[heading, list] in sections" :key="heading">
       <div class="mb-2 flex items-center gap-2.5 px-3">
-        <span class="ms-group-label uppercase">{{ heading }}</span>
+        <span class="ms-group-label uppercase">{{ sectionLabel(heading) }}</span>
         <div class="h-px flex-1 border-t border-border" />
       </div>
 
@@ -347,19 +371,16 @@ async function unload(m: LibraryModelEntry) {
             :id="m.name"
             :source="modelSource(m)"
             :loaded="m.is_loaded"
-            :family="m.family"
+            :family="null"
             :host-labels="hostLabels(m)"
             machines-column
+            note-column
             :page-url="pageUrl(m)"
             :note="m.description || null"
             :size-primary="
               modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
             "
-            :size-secondary="
-              modelSizeLabels(m).weights && modelSizeLabels(m).runtime
-                ? modelSizeLabels(m).runtime
-                : null
-            "
+            :size-secondary="null"
             :bar-percent="percent(modelDiskBytes(m), groups.maxDiskBytes)"
             :accessibility-label="modelAccessibilityLabel(m)"
             clickable
@@ -376,17 +397,17 @@ async function unload(m: LibraryModelEntry) {
             <template #actions>
               <!-- Ready on one machine says nothing about the others:
                    offer it until every ready machine has the style. -->
-              <button
-                v-if="installPlan(m).canInstall"
-                type="button"
-                data-test="install-elsewhere"
-                class="ms-toolbar-button ms-toolbar-button--accent"
-                title="Get this style on another machine"
-                :disabled="busy === m.name"
-                @click="requestDownload(m)"
-              >
-                Get it
-              </button>
+              <Tooltip v-if="installPlan(m).canInstall" text="Get this style on another machine">
+                <button
+                  type="button"
+                  data-test="install-elsewhere"
+                  class="ms-toolbar-button ms-toolbar-button--accent"
+                  :disabled="busy === m.name"
+                  @click="requestDownload(m)"
+                >
+                  Get it
+                </button>
+              </Tooltip>
               <span
                 v-if="runtimeUnavailable(m)"
                 data-test="runtime-unavailable-note"
@@ -415,17 +436,21 @@ async function unload(m: LibraryModelEntry) {
               >
                 Unload
               </button>
-              <button
-                type="button"
-                data-test="row-menu"
-                class="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-control text-fg-dim transition-colors duration-100 hover:bg-surface-2 hover:text-fg"
-                title="Open model page, remove from disk…"
-                aria-label="Style actions"
-                :disabled="busy === m.name"
-                @click="openRowMenu($event, m)"
-              >
-                <Icon name="more" :size="14" />
-              </button>
+              <!-- One tooltip mechanism per row: the row's star and page link
+                   already use the styled Tooltip, so these controls must not
+                   raise a second, native one beside it. -->
+              <Tooltip text="Open model page, remove from disk…">
+                <button
+                  type="button"
+                  data-test="row-menu"
+                  class="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-control text-fg-dim transition-colors duration-100 hover:bg-surface-2 hover:text-fg"
+                  aria-label="Style actions"
+                  :disabled="busy === m.name"
+                  @click="openRowMenu($event, m)"
+                >
+                  <Icon name="more" :size="14" />
+                </button>
+              </Tooltip>
             </template>
           </ModelTableRow>
         </li>

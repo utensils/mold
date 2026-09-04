@@ -18,14 +18,18 @@ import type { ModelSource } from "../../lib/modelSource";
  *
  * Purely presentational: parents own data fetching, size resolution, and
  * actions (the `#actions` slot). README §04 table row, left to right:
- * residency star · source glyph · name stacked over its mono id and
- * family · page link · `#meta` · a plain one-line note · relative footprint
- * + two-line size block · machines (dot + mono name) · `#actions`.
+ * residency star · name stacked over a mono line carrying the source mark,
+ * the id and the family · page link · `#meta` · a plain one-line note ·
+ * relative footprint + size · machines (dot + mono name) · `#actions`.
  *
  * Every cell is a grid track, and a list that wants one axis for all its rows
  * sets `--model-row-columns` on an ancestor (the Styles shelf does, under a
  * mono header on the same template). Without it each row sizes its own
- * tracks, which is what a machine card's narrow embedding wants.
+ * tracks, which is what a machine card's narrow embedding wants. A PINNED
+ * axis fixes the track COUNT, so a row that skips a cell shifts every column
+ * after it one track left — which is why `noteColumn` exists: the parent says
+ * the table has a Good-for column and the cell is emitted empty rather than
+ * dropped.
  */
 const props = withDefaults(
   defineProps<{
@@ -44,6 +48,9 @@ const props = withDefaults(
     pageUrl?: string | null;
     /** One line in plain words — what the style is good for. */
     note?: string | null;
+    /** The table pins a note track: emit the cell on every row, empty or not,
+     * so a row without a description cannot shift the columns after it. */
+    noteColumn?: boolean;
     /** Right-aligned size block: primary line + smaller secondary line. */
     sizePrimary?: string | null;
     sizeSecondary?: string | null;
@@ -67,6 +74,7 @@ const props = withDefaults(
     family: null,
     pageUrl: null,
     note: null,
+    noteColumn: false,
     sizePrimary: null,
     sizeSecondary: null,
     barPercent: null,
@@ -91,6 +99,23 @@ const familyChip = computed(() => (props.family ? familyLabel(props.family) : ""
 const showId = computed(() =>
   Boolean(props.id && props.id !== props.name && !isOpaqueModelId(props.id)),
 );
+/**
+ * The mono sub-line under the name. The source mark rides it so the identity
+ * cell starts at the name rather than behind a star + a 12px colour glyph +
+ * two 10px gaps; when a row has neither an id nor a family there is no line to
+ * ride, and the mark sits beside the title rather than inventing one.
+ */
+const showMonoLine = computed(() => showId.value || Boolean(familyChip.value));
+/** One cell per pinned track: the note is emitted whenever its track exists. */
+const showNoteCell = computed(() => props.noteColumn || props.note != null);
+
+/**
+ * The machines cell is ONE line — the mock's row is 52px and every other cell
+ * obeys that. The rest of the machines are named in the overflow chip's tip.
+ */
+const MACHINES_SHOWN = 1;
+const machinesShown = computed(() => props.hostLabels.slice(0, MACHINES_SHOWN));
+const machinesHidden = computed(() => props.hostLabels.slice(MACHINES_SHOWN));
 
 /**
  * Enter/Space on a clickable row opens it, but keydown bubbles — a keypress
@@ -110,7 +135,7 @@ function onRowKeydown(event: KeyboardEvent): void {
     :class="[
       clickable ? 'cursor-pointer focus-visible:outline-2 focus-visible:outline-accent' : '',
       barPercent != null ? 'model-table-row--has-footprint' : '',
-      note ? 'model-table-row--has-note' : '',
+      showNoteCell ? 'model-table-row--has-note' : '',
       machinesColumn ? 'model-table-row--has-machines' : '',
       slots.actions ? 'model-table-row--has-actions' : '',
       selected ? 'model-table-row--selected' : '',
@@ -140,7 +165,6 @@ function onRowKeydown(event: KeyboardEvent): void {
           >★</span
         >
       </Tooltip>
-      <SourceGlyph :source="source" class="shrink-0 text-fg-dim" />
       <div class="model-table-row__name">
         <button
           v-if="clickable"
@@ -164,15 +188,20 @@ function onRowKeydown(event: KeyboardEvent): void {
           {{ name }}
         </span>
         <span
-          v-if="showId || familyChip"
+          v-if="showMonoLine"
           class="flex min-w-0 items-center gap-1.5 font-mono text-micro text-fg-dim"
+          data-test="row-mono-line"
         >
+          <SourceGlyph :source="source" :size="10" class="shrink-0 text-fg-dim" />
           <span v-if="showId" class="truncate" data-test="row-id">{{ id }}</span>
           <span v-if="familyChip" class="shrink-0 whitespace-nowrap" data-test="row-family">{{
             familyChip
           }}</span>
         </span>
       </div>
+      <!-- No mono line to ride: the mark keeps its place beside the name
+           rather than adding a second line to a one-line row. -->
+      <SourceGlyph v-if="!showMonoLine" :source="source" :size="10" class="shrink-0 text-fg-dim" />
       <template v-if="!machinesColumn">
         <span
           v-for="label in hostLabels"
@@ -214,9 +243,9 @@ function onRowKeydown(event: KeyboardEvent): void {
     </div>
 
     <span
-      v-if="note"
+      v-if="showNoteCell"
       class="model-table-row__note truncate text-xs text-fg-2"
-      :title="note"
+      :title="note ?? undefined"
       data-test="row-note"
     >
       {{ note }}
@@ -253,7 +282,7 @@ function onRowKeydown(event: KeyboardEvent): void {
 
     <div v-if="machinesColumn" class="model-table-row__machines">
       <span
-        v-for="label in hostLabels"
+        v-for="label in machinesShown"
         :key="label"
         data-test="installed-host"
         class="flex min-w-0 items-center gap-1.5 font-mono text-xs text-fg-dim"
@@ -261,6 +290,13 @@ function onRowKeydown(event: KeyboardEvent): void {
         <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden="true" />
         <span class="truncate" :title="label">{{ label }}</span>
       </span>
+      <span
+        v-if="machinesHidden.length"
+        data-test="installed-host-more"
+        class="shrink-0 font-mono text-micro text-fg-dim"
+        :title="machinesHidden.join(', ')"
+        >+{{ machinesHidden.length }}</span
+      >
     </div>
 
     <!-- Clicks on parent-provided actions must never open the row. -->
@@ -338,11 +374,13 @@ function onRowKeydown(event: KeyboardEvent): void {
   max-width: 100%;
 }
 
+/* One LINE, never a stack: the mock's row is 52px and a style on three
+   machines used to draw three lines here. The overflow chip names the rest. */
 .model-table-row__machines {
   display: flex;
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
 }
 
 .model-table-row__actions {

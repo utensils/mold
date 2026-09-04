@@ -7,6 +7,11 @@
  * title bar already carries "312 pictures · 6 albums". Scope options are
  * whatever the parent says the connected hosts can do — with a single option
  * the control is not rendered at all.
+ *
+ * The row is 40px and never wraps, and `.ms-seg__btn` is `flex: 1` +
+ * `white-space: nowrap` — a segmented group cannot shrink below its labels.
+ * So the media kind is FLAT CHIPS (the mock's, mock:655-660) rather than a
+ * second bordered group, and the search is the row's one elastic child.
  */
 import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -99,8 +104,11 @@ defineExpose({ focusSearch });
       @update:model-value="emit('update:scope', $event)"
     />
 
+    <!-- The row never wraps and neither segmented group can shrink below its
+         labels, so the search is the one elastic child: it gives first, rather
+         than pushing Refresh, History and Select out of the clipped row. -->
     <label
-      class="flex h-[26px] w-[170px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
+      class="flex h-[26px] min-w-0 shrink basis-[170px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
     >
       <Icon name="search" :size="14" class="shrink-0 text-fg-dim" />
       <input
@@ -115,12 +123,26 @@ defineExpose({ focusSearch });
       />
     </label>
 
-    <SegmentedControl
-      :model-value="mediaKind"
-      :options="kindOptions"
-      label="Media kind"
-      @update:model-value="emit('update:mediaKind', $event)"
-    />
+    <!-- Flat chips, as the mock draws them (mock:655-660) — a second bordered
+         segmented group here costs ~90px the row does not have. -->
+    <div class="flex shrink-0 gap-0.5" role="radiogroup" aria-label="Media kind">
+      <button
+        v-for="option in kindOptions"
+        :key="option.value"
+        type="button"
+        role="radio"
+        :aria-checked="option.value === mediaKind"
+        class="rounded-control px-2.5 py-[5px] text-xs whitespace-nowrap transition-colors duration-100"
+        :class="
+          option.value === mediaKind
+            ? 'bg-surface-2 font-semibold text-fg'
+            : 'text-fg-dim hover:text-fg'
+        "
+        @click="emit('update:mediaKind', option.value)"
+      >
+        {{ option.label }}
+      </button>
+    </div>
 
     <span v-if="error" class="truncate text-micro text-error">{{ error }}</span>
 

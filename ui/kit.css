@@ -2,166 +2,181 @@
  * Mold Studio — shared kit styles: the few global effects every surface uses.
  * Imported after tokens.css. Component-specific styles live in the Vue
  * primitives themselves (scoped, token-var driven).
+ *
+ * EVERYTHING BELOW SITS IN `@layer components`, and must stay there. CSS
+ * Cascade 5 ranks an UNLAYERED normal declaration above every layered one,
+ * whatever the specificity or source order — and Tailwind emits every
+ * generated utility into `@layer utilities`. Unlayered, this file's
+ * `.ms-toolbar-button` height/colour/border and `.ms-group-label` font beat
+ * any utility a call site wrote beside them, so `text-accent` on a paused
+ * queue button, `h-[28px]` on a Lightbox button and `font-semibold` on the
+ * update banner were all silent no-ops. The layer lives here rather than at
+ * an import site because desktop, web and the phone all import this file.
  */
-
-/* Developing shimmer — 1.6s loop. Apply to placeholder tiles. */
-@keyframes ms-shimmer {
-  from {
-    background-position: 220% 0;
+@layer components {
+  /* Developing shimmer — 1.6s loop. Apply to placeholder tiles. */
+  @keyframes ms-shimmer {
+    from {
+      background-position: 220% 0;
+    }
+    to {
+      background-position: -220% 0;
+    }
   }
-  to {
-    background-position: -220% 0;
-  }
-}
 
-.ms-shimmer {
-  background-color: var(--mold-media-bed);
-  background-image: linear-gradient(
-    100deg,
-    transparent 30%,
-    var(--mold-accent-tint) 50%,
-    transparent 70%
-  );
-  background-size: 220% 100%;
-  animation: ms-shimmer 1.6s ease-in-out infinite;
-}
-
-/* Live glyphs (⠂) and status dots: a 1s two-step opacity pulse. Mechanical,
- * no bounce; meters jump, they never tween. */
-@keyframes ms-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-.ms-pulse {
-  animation: ms-pulse 1s steps(2, jump-none) infinite;
-}
-
-/* Toolbar button (README §04): 26px, 1px border, sans 12px; hover lifts the
- * border to the focus colour. Modifiers: --on (accent fill), --accent
- * (accent ink, the acquisition verb), the danger modifier (error ink at rest),
- * --danger-hover (error ink only when pointed at). */
-.ms-toolbar-button {
-  display: inline-flex;
-  height: var(--mold-ctl-md, 26px);
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 0 11px;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  font-size: var(--mold-fs-xs);
-  font-weight: 500;
-  white-space: nowrap;
-  color: var(--mold-text-2);
-  transition:
-    border-color var(--mold-dur-quick) var(--mold-ease-out),
-    background var(--mold-dur-quick) var(--mold-ease-out),
-    color var(--mold-dur-quick) var(--mold-ease-out);
-}
-.ms-toolbar-button:hover:not(:disabled) {
-  border-color: var(--mold-border-focus);
-  color: var(--mold-text);
-}
-.ms-toolbar-button:disabled {
-  color: var(--mold-text-faint);
-  cursor: default;
-}
-.ms-toolbar-button--icon {
-  width: var(--mold-ctl-md, 26px);
-  padding: 0;
-  justify-content: center;
-}
-.ms-toolbar-button--on {
-  border-color: var(--mold-blue);
-  background: var(--mold-blue);
-  color: var(--mold-on-accent);
-}
-.ms-toolbar-button--accent {
-  border-color: var(--mold-blue);
-  color: var(--mold-blue);
-}
-.ms-toolbar-button--accent:hover:not(:disabled) {
-  border-color: var(--mold-blue);
-  background: var(--mold-accent-tint);
-  color: var(--mold-blue);
-}
-.ms-toolbar-button--danger {
-  border-color: var(--mold-error);
-  color: var(--mold-error);
-  font-weight: 600;
-}
-.ms-toolbar-button--danger:hover:not(:disabled),
-.ms-toolbar-button--danger-hover:hover:not(:disabled) {
-  border-color: var(--mold-error);
-  background: color-mix(in srgb, var(--mold-error) 12%, transparent);
-  color: var(--mold-error);
-}
-
-/* Card edge — the hairline and control radius every card inside a view shares.
- * The ground and the layout stay with the caller: a machine card sits on the
- * raised plane, a telemetry tile and a catalog card on the panel. */
-.ms-card-edge {
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-}
-
-/* Group and table-header label: mono micro, tracked, dim. Uppercase is the
- * caller's call — a header that reads as a sentence keeps its case. */
-.ms-group-label {
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  letter-spacing: 0.08em;
-  color: var(--mold-text-dim);
-}
-
-/* Upscaled marker on a print — the tile grid and the Lightbox draw the same
- * badge, so it lives here rather than in each of them. */
-.ms-lib-upscaled {
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: color-mix(in srgb, var(--mold-text) 88%, black);
-  color: var(--mold-on-accent);
-  padding: 2px 6px;
-  border-radius: var(--mold-radius-2);
-}
-
-/* Entrance for overlays/results — never applied to core chrome. */
-@keyframes ms-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.ms-fade-up {
-  animation: ms-fade-up var(--mold-dur-slow) var(--mold-ease-out);
-}
-
-@media (prefers-reduced-motion: reduce) {
   .ms-shimmer {
-    animation: none;
-    background-image: none;
-    background-color: color-mix(
-      in srgb,
-      var(--mold-blue) 8%,
-      var(--mold-media-bed)
+    background-color: var(--mold-media-bed);
+    background-image: linear-gradient(
+      100deg,
+      transparent 30%,
+      var(--mold-accent-tint) 50%,
+      transparent 70%
     );
+    background-size: 220% 100%;
+    animation: ms-shimmer 1.6s ease-in-out infinite;
   }
-  .ms-pulse,
+
+  /* Live glyphs (⠂) and status dots: a 1s two-step opacity pulse. Mechanical,
+   * no bounce; meters jump, they never tween. */
+  @keyframes ms-pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  .ms-pulse {
+    animation: ms-pulse 1s steps(2, jump-none) infinite;
+  }
+
+  /* Toolbar button (README §04): 26px, 1px border, sans 12px; hover lifts the
+   * border to the focus colour. Modifiers: --on (accent fill), --accent
+   * (accent ink, the acquisition verb), the danger modifier (error ink at rest),
+   * --danger-hover (error ink only when pointed at). */
+  .ms-toolbar-button {
+    display: inline-flex;
+    height: var(--mold-ctl-md, 26px);
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+    padding: 0 11px;
+    border: var(--mold-bw) solid var(--mold-border);
+    border-radius: var(--mold-radius-2);
+    font-size: var(--mold-fs-xs);
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--mold-text-2);
+    /* Tailwind v4's preflight sets only `appearance: button`, so a <button>
+     * with no rule of its own shows the ARROW cursor. Every toolbar button in
+     * the app rides this class, so the hand belongs here. */
+    cursor: pointer;
+    transition:
+      border-color var(--mold-dur-quick) var(--mold-ease-out),
+      background var(--mold-dur-quick) var(--mold-ease-out),
+      color var(--mold-dur-quick) var(--mold-ease-out);
+  }
+  .ms-toolbar-button:hover:not(:disabled) {
+    border-color: var(--mold-border-focus);
+    color: var(--mold-text);
+  }
+  .ms-toolbar-button:disabled {
+    color: var(--mold-text-faint);
+    cursor: default;
+  }
+  .ms-toolbar-button--icon {
+    width: var(--mold-ctl-md, 26px);
+    padding: 0;
+    justify-content: center;
+  }
+  .ms-toolbar-button--on {
+    border-color: var(--mold-blue);
+    background: var(--mold-blue);
+    color: var(--mold-on-accent);
+  }
+  .ms-toolbar-button--accent {
+    border-color: var(--mold-blue);
+    color: var(--mold-blue);
+  }
+  .ms-toolbar-button--accent:hover:not(:disabled) {
+    border-color: var(--mold-blue);
+    background: var(--mold-accent-tint);
+    color: var(--mold-blue);
+  }
+  .ms-toolbar-button--danger {
+    border-color: var(--mold-error);
+    color: var(--mold-error);
+    font-weight: 600;
+  }
+  .ms-toolbar-button--danger:hover:not(:disabled),
+  .ms-toolbar-button--danger-hover:hover:not(:disabled) {
+    border-color: var(--mold-error);
+    background: color-mix(in srgb, var(--mold-error) 12%, transparent);
+    color: var(--mold-error);
+  }
+
+  /* Card edge — the hairline and control radius every card inside a view shares.
+   * The ground and the layout stay with the caller: a machine card sits on the
+   * raised plane, a telemetry tile and a catalog card on the panel. */
+  .ms-card-edge {
+    border: var(--mold-bw) solid var(--mold-border);
+    border-radius: var(--mold-radius-2);
+  }
+
+  /* Group and table-header label: mono micro, tracked, dim. Uppercase is the
+   * caller's call — a header that reads as a sentence keeps its case. */
+  .ms-group-label {
+    font-family: var(--mold-font-mono);
+    font-size: var(--mold-fs-micro);
+    letter-spacing: 0.08em;
+    color: var(--mold-text-dim);
+  }
+
+  /* Upscaled marker on a print — the tile grid and the Lightbox draw the same
+   * badge, so it lives here rather than in each of them. */
+  .ms-lib-upscaled {
+    font-family: var(--mold-font-mono);
+    font-size: var(--mold-fs-micro);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: color-mix(in srgb, var(--mold-text) 88%, black);
+    color: var(--mold-on-accent);
+    padding: 2px 6px;
+    border-radius: var(--mold-radius-2);
+  }
+
+  /* Entrance for overlays/results — never applied to core chrome. */
+  @keyframes ms-fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
   .ms-fade-up {
-    animation: none;
+    animation: ms-fade-up var(--mold-dur-slow) var(--mold-ease-out);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ms-shimmer {
+      animation: none;
+      background-image: none;
+      background-color: color-mix(
+        in srgb,
+        var(--mold-blue) 8%,
+        var(--mold-media-bed)
+      );
+    }
+    .ms-pulse,
+    .ms-fade-up {
+      animation: none;
+    }
   }
 }

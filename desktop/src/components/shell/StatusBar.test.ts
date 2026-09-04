@@ -121,4 +121,22 @@ describe("StatusBar", () => {
       ["Space", "Pause queue"],
     ]);
   });
+
+  /**
+   * The keycap and its word are one hint. Emitted as loose siblings in the
+   * bar's own flow they ran together: "⌘↩Generate ⌘KSearch".
+   */
+  it("gives every key hint its own separated pair", async () => {
+    const wrapper = await mountBar();
+    connectLocal();
+    await flushPromises();
+    const pairs = wrapper.findAll("[data-test='status-hint']");
+    expect(pairs).toHaveLength(wrapper.findAll("span.keycap").length);
+    for (const pair of pairs) {
+      expect(pair.findAll("span.keycap")).toHaveLength(1);
+      expect(pair.classes()).toContain("gap-1");
+      // The keycap must not be the pair's only child — the word rides with it.
+      expect(pair.element.children.length).toBe(2);
+    }
+  });
 });

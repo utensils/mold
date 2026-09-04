@@ -139,6 +139,85 @@ describe("InstalledTab shelf", () => {
     expect(wrapper.findAll(".model-table-row--has-machines")).toHaveLength(2);
   });
 
+  /**
+   * The header pins five tracks. A row whose style has no description used to
+   * emit four cells into them, so every column after NAME slid one track left
+   * — size under "Good for", the machine dot under "Size", and the action
+   * cluster crushed into a 128px track it overflowed.
+   */
+  it("emits one cell per pinned track whether or not a style has a description", async () => {
+    useModelStore().all = [
+      model(),
+      model({ name: "sdxl-base:fp16", family: "sdxl", description: "" }),
+    ];
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+
+    const rows = wrapper.findAll("[data-test='model-table-row']");
+    expect(rows).toHaveLength(2);
+    const header = wrapper.get("[data-test='styles-columns']");
+    for (const row of rows) {
+      expect(row.find("[data-test='row-note']").exists()).toBe(true);
+      expect(row.element.children.length).toBe(header.element.children.length);
+    }
+  });
+
+  it("names a family group once, in words, never a second wire slug per row", async () => {
+    useModelStore().all = [model({ name: "wan22-t2v-a14b:q5", family: "wan" })];
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+    // The heading is the family's name, not the raw slug CSS used to uppercase.
+    expect(wrapper.text()).toContain("Wan Video");
+    // And the row no longer repeats the heading it already sits beneath.
+    expect(wrapper.find("[data-test='row-family']").exists()).toBe(false);
+  });
+
+  it("keeps the shelf row to one size line, and one machine line", async () => {
+    useModelStore().all = [model()];
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+    const sizes = wrapper.get("[data-test='row-sizes']");
+    // The runtime footprint (weights + shared encoders) belongs to the drawer;
+    // stacking it here is one of the three things that doubled the row height.
+    expect(sizes.findAll("span")).toHaveLength(1);
+  });
+
+  it("rounds the meter's segment widths instead of writing raw floats", async () => {
+    useModelStore().all = [model({ size_gb: 6.8 })];
+    useHostStatusStore().status = status({
+      models_disk: { total_bytes: 11_507_000_000, free_bytes: 1 },
+    });
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+    const bar = wrapper.get("[data-test='styles-disk-meter']");
+    for (const segment of bar.findAll("[role='meter'] > span")) {
+      expect(segment.attributes("style")).toMatch(/^width: \d+%;?$/);
+    }
+  });
+
+  it("caps the meter at four families plus one 'Other'", async () => {
+    useModelStore().all = [
+      model({ name: "a", family: "flux", size_gb: 10 }),
+      model({ name: "b", family: "sdxl", size_gb: 9 }),
+      model({ name: "c", family: "wan", size_gb: 8 }),
+      model({ name: "d", family: "ltx", size_gb: 7 }),
+      model({ name: "e", family: "qwen-image", size_gb: 6 }),
+      model({ name: "f", family: "sd35", size_gb: 5 }),
+    ];
+    useHostStatusStore().status = status({
+      models_disk: { total_bytes: 512_000_000_000, free_bytes: 1 },
+    });
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+    const segments = wrapper
+      .get("[data-test='styles-disk-meter']")
+      .findAll("[role='meter'] > span");
+    expect(segments).toHaveLength(5);
+    expect(segments.at(-1)!.attributes("title")).toContain("Other");
+    // The fold names what it swallowed rather than hiding it.
+    expect(segments.at(-1)!.attributes("title")).toContain("Qwen Image");
+  });
+
   it("speaks the lexicon on the empty shelf and routes to Browse more", async () => {
     useModelStore().all = [];
     const wrapper = mount(InstalledTab);
