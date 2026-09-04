@@ -191,12 +191,18 @@ fn start_engine_inner(
                     }
                 }
             }
+            // The runtime drop below waits for every blocking task, so a
+            // single hung `spawn_blocking` parks this thread with the whole
+            // shutdown sequence already logged as complete — silence that
+            // looks identical to a stall inside the server. Name the boundary.
+            tracing::debug!("engine: run_server returned; dropping the runtime");
             // Do not use `shutdown_timeout`: Tokio may detach blocking tasks
             // when that deadline expires. Normal Runtime drop cancels async
             // tasks and waits for every blocking task, so EngineHandle can
             // treat thread exit as proof that no server-owned gallery work
             // survives the authority transfer.
             drop(rt);
+            tracing::debug!("engine: runtime dropped; thread exiting");
         })?;
     Ok(EngineHandle {
         port,
