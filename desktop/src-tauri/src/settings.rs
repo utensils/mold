@@ -2,7 +2,7 @@
 //! `app_data_dir`. These are window/app preferences only — engine
 //! configuration stays in mold's own config stores (config.toml + mold.db).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -359,21 +359,162 @@ impl Default for AppSettings {
     }
 }
 
+/// What `load_reporting` recovered: the settings, plus every top-level key
+/// whose value (or part of whose list) this build could not read and so
+/// fell back. `recovered` is empty on a clean parse.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Loaded {
+    pub settings: AppSettings,
+    pub recovered: Vec<String>,
+}
+
 /// Load settings from `path`. A missing or unreadable file yields defaults —
 /// settings must never block app startup.
+///
+/// Recovery is PER KEY. A value this build cannot read — an update channel
+/// or connection mode that a newer nightly wrote and an older build (or a dev
+/// build sharing the same app data) now reads back — falls back to its
+/// default alone, while the update channel, saved machines, panel widths,
+/// and every other key stay exactly as the user left them; a list keeps every
+/// element that reads. (`theme` never reaches this path: `migrate_theme_keys`
+/// maps an unknown name onto the legacy family first.) Whole-struct defaults
+/// are the one thing this function must never answer with: the next save
+/// persists them, which is how a stale dev build moved a Nightly install back
+/// to Stable and forgot every remembered machine (2026-09-03).
 pub fn load(path: &Path) -> AppSettings {
+    load_reporting(path).settings
+}
+
+/// `load`, plus the names of the keys that fell back — a caller that runs a
+/// migration off `mode` or `remoteUrl` must know when those were not the
+/// user's values (`migration_premise_intact`).
+pub fn load_reporting(path: &Path) -> Loaded {
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return AppSettings::default();
+        return Loaded::default();
     };
-    serde_json::from_str::<serde_json::Value>(&raw)
-        .and_then(|mut value| {
-            migrate_theme_keys(&mut value);
-            serde_json::from_value(value)
-        })
-        .unwrap_or_else(|e| {
-            tracing::warn!("settings.json is invalid ({e}); using defaults");
-            AppSettings::default()
-        })
+    let document = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(serde_json::Value::Object(object)) => object,
+        Ok(_) => {
+            preserve_invalid_document(path, &raw, "the document is not a JSON object");
+            return Loaded::default();
+        }
+        Err(e) => {
+            preserve_invalid_document(path, &raw, &e.to_string());
+            return Loaded::default();
+        }
+    };
+    let mut value = serde_json::Value::Object(document);
+    migrate_theme_keys(&mut value);
+    parse_keeping_readable_keys(value)
+}
+
+/// The boot-time remote-primary migration reads `mode` and `remoteUrl` as the
+/// user's own values. When either fell back in `load_reporting`, that premise
+/// is false — running the migration would clear the shared API-key slot and
+/// the ex-primary URL on a guess — so it must be skipped for this launch.
+pub fn migration_premise_intact(recovered: &[String]) -> bool {
+    !recovered
+        .iter()
+        .any(|key| key == "mode" || key == "remoteUrl")
+}
+
+/// True when `probe` (one key, or one key holding one list element) reads
+/// into the struct. The struct is `#[serde(default)]`, so probing one key at
+/// a time against the whole struct is exact.
+fn key_reads(key: &str, value: &serde_json::Value) -> bool {
+    let mut probe = serde_json::Map::new();
+    probe.insert(key.to_string(), value.clone());
+    serde_json::from_value::<AppSettings>(serde_json::Value::Object(probe)).is_ok()
+}
+
+/// Parse a settings document, dropping only what this build cannot read: a
+/// scalar key falls back whole; a list keeps every element that reads on its
+/// own, so one malformed saved machine never forgets the other seven.
+fn parse_keeping_readable_keys(mut value: serde_json::Value) -> Loaded {
+    let whole = match serde_json::from_value::<AppSettings>(value.clone()) {
+        Ok(settings) => {
+            return Loaded {
+                settings,
+                recovered: Vec::new(),
+            };
+        }
+        Err(e) => e,
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Loaded::default();
+    };
+    let mut recovered = Vec::new();
+    let keys: Vec<String> = object.keys().cloned().collect();
+    for key in keys {
+        let Some(entry) = object.get(&key) else {
+            continue;
+        };
+        if key_reads(&key, entry) {
+            continue;
+        }
+        recovered.push(key.clone());
+        if let serde_json::Value::Array(elements) = entry {
+            let total = elements.len();
+            let readable: Vec<serde_json::Value> = elements
+                .iter()
+                .filter(|element| {
+                    key_reads(&key, &serde_json::Value::Array(vec![(*element).clone()]))
+                })
+                .cloned()
+                .collect();
+            if !readable.is_empty() {
+                tracing::warn!(
+                    "settings.json: `{key}` holds {} of {total} entries this build cannot read; keeping the rest",
+                    total - readable.len()
+                );
+                object.insert(key, serde_json::Value::Array(readable));
+                continue;
+            }
+        }
+        object.remove(&key);
+        tracing::warn!(
+            "settings.json: `{key}` holds a value this build cannot read; keeping its default and every other key"
+        );
+    }
+    let settings = serde_json::from_value(value).unwrap_or_else(|e| {
+        tracing::warn!("settings.json is invalid ({whole}; after recovery: {e}); using defaults");
+        AppSettings::default()
+    });
+    Loaded {
+        settings,
+        recovered,
+    }
+}
+
+/// Keep the bytes of a document this build cannot parse at all beside the
+/// store, so the defaults the next save writes never erase what was there.
+/// Owner-only, like `secrets.json`: an old file may still carry the legacy
+/// plaintext `remoteApiKey`.
+fn preserve_invalid_document(path: &Path, raw: &str, reason: &str) {
+    let backup = invalid_backup_path(path);
+    let written = std::fs::write(&backup, raw).and_then(|()| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    });
+    match written {
+        Ok(()) => tracing::warn!(
+            "settings.json is invalid ({reason}); using defaults and keeping the original at {}",
+            backup.display()
+        ),
+        Err(e) => tracing::warn!(
+            "settings.json is invalid ({reason}); using defaults (could not keep the original: {e})"
+        ),
+    }
+}
+
+/// Where a document this build cannot parse at all is kept before the next
+/// save replaces it with defaults: `settings.json.invalid` beside the file.
+fn invalid_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.invalid")
 }
 
 /// Persist settings atomically (write to a sibling temp file, then rename).
@@ -620,11 +761,176 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_yields_defaults() {
+    fn corrupt_file_is_preserved_beside_the_defaults() {
+        // A file this build cannot even parse as JSON must not be silently
+        // overwritten by the defaults the next save writes: keep the bytes
+        // beside it so nothing is lost.
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(&path, "not json {").unwrap();
         assert_eq!(load(&path), AppSettings::default());
+        let backup = std::fs::read_to_string(invalid_backup_path(&path)).unwrap();
+        assert_eq!(backup, "not json {");
+    }
+
+    #[test]
+    fn a_value_this_build_cannot_read_keeps_every_other_key() {
+        // The 2026-09-03 incident: a build that knew `theme: system|dark|light`
+        // read a file a newer build had migrated to `theme: mocha`, failed the
+        // WHOLE struct, fell back to defaults, and saved them — resetting the
+        // update channel to stable and erasing every saved host. Only the key
+        // this build cannot read may fall back; the rest of the file is the
+        // user's and stays.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{
+              "mode": "teleport",
+              "theme": "blueprint",
+              "matchSystem": true,
+              "updateChannel": "nightly",
+              "uiScalePercent": 120,
+              "savedHosts": [{"id": "hal9000-7680", "url": "http://hal9000:7680"}],
+              "connectedHostIds": ["hal9000-7680"]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load(&path);
+
+        assert_eq!(
+            loaded.mode,
+            ConnectionMode::Local,
+            "only the unreadable key defaults"
+        );
+        assert_eq!(loaded.update_channel, UpdateChannel::Nightly);
+        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert!(loaded.match_system);
+        assert_eq!(loaded.ui_scale_percent, 120);
+        assert_eq!(loaded.saved_hosts.len(), 1);
+        assert_eq!(loaded.saved_hosts[0].url, "http://hal9000:7680");
+        assert_eq!(loaded.connected_host_ids, vec!["hal9000-7680".to_string()]);
+    }
+
+    #[test]
+    fn recovery_survives_the_save_that_used_to_persist_the_defaults() {
+        // The incident's mechanism: load fell back, the next save persisted
+        // the fallback. Round-trip through save and prove the user's channel
+        // and machines are still on disk afterwards.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{"mode":"teleport","updateChannel":"nightly","savedHosts":[{"id":"plato-7680","url":"http://plato:7680"}]}"#,
+        )
+        .unwrap();
+
+        let loaded = load_reporting(&path);
+        assert_eq!(loaded.recovered, vec!["mode".to_string()]);
+        save(&path, &loaded.settings).unwrap();
+
+        let again = load_reporting(&path);
+        assert!(again.recovered.is_empty(), "the saved file reads cleanly");
+        assert_eq!(again.settings.update_channel, UpdateChannel::Nightly);
+        assert_eq!(again.settings.saved_hosts.len(), 1);
+        assert!(
+            !invalid_backup_path(&path).exists(),
+            "per-key recovery never writes the .invalid backup"
+        );
+    }
+
+    #[test]
+    fn one_unreadable_saved_host_keeps_the_others() {
+        // A single malformed entry (a future required field, a null url) must
+        // not forget every machine: the list keeps the elements that read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{
+              "updateChannel": "nightly",
+              "savedHosts": [
+                {"id": "plato-7680", "url": "http://plato:7680"},
+                {"id": "future-host", "url": null},
+                {"id": "hal9000-7680", "url": "http://hal9000:7680"}
+              ],
+              "connectedHostIds": ["plato-7680", 42, "hal9000-7680"]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_reporting(&path);
+
+        let ids: Vec<&str> = loaded
+            .settings
+            .saved_hosts
+            .iter()
+            .map(|h| h.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["plato-7680", "hal9000-7680"]);
+        assert_eq!(
+            loaded.settings.connected_host_ids,
+            vec!["plato-7680".to_string(), "hal9000-7680".to_string()]
+        );
+        assert_eq!(loaded.settings.update_channel, UpdateChannel::Nightly);
+        let mut recovered = loaded.recovered.clone();
+        recovered.sort();
+        assert_eq!(
+            recovered,
+            vec!["connectedHostIds".to_string(), "savedHosts".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_recovered_mode_or_remote_url_withholds_the_remote_primary_migration() {
+        // The migration reads `mode`/`remoteUrl` as the user's values; a
+        // fallback there is a guess it must not act on (it clears the shared
+        // API-key slot and the ex-primary URL).
+        assert!(migration_premise_intact(&[]));
+        assert!(migration_premise_intact(&["updateChannel".to_string()]));
+        assert!(!migration_premise_intact(&["mode".to_string()]));
+        assert!(!migration_premise_intact(&[
+            "theme".to_string(),
+            "remoteUrl".to_string()
+        ]));
+    }
+
+    #[test]
+    fn several_unreadable_values_each_fall_back_alone() {
+        // A downgrade can meet more than one newer value at once (a channel
+        // and a mode this build never learned); each falls back on its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{"mode":"teleport","updateChannel":"beta","uiScalePercent":"huge","theme":"blueprint","dockBadge":false}"#,
+        )
+        .unwrap();
+
+        let loaded = load(&path);
+
+        assert_eq!(loaded.mode, ConnectionMode::Local);
+        assert_eq!(loaded.update_channel, UpdateChannel::Stable);
+        assert_eq!(loaded.ui_scale_percent, 100);
+        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert!(!loaded.dock_badge);
+        assert!(
+            loaded.notifications,
+            "untouched defaults keep their defaults"
+        );
+    }
+
+    #[test]
+    fn a_non_object_document_is_preserved_beside_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        assert_eq!(load(&path), AppSettings::default());
+        assert_eq!(
+            std::fs::read_to_string(invalid_backup_path(&path)).unwrap(),
+            "[1, 2, 3]"
+        );
     }
 
     #[test]
