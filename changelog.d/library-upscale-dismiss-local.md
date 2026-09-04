@@ -1,1 +1,0 @@
-- **Keep Library upscale actions available after saving locally.** Escape now dismisses the shared upscale dialog, a locally saved video can use another capable copy's Mold host for Framewise upscale, and multi-host prints offer a host selector when more than one copy can run it.

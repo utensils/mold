@@ -11,6 +11,752 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-04
+
+- **Desktop WebP exports.** Desktop builds now include animated WebP export for
+  clips and 3-D mesh turntables, matching WebP-enabled Mold servers
+  ([#1548](https://github.com/utensils/mold/issues/1548)).
+- **The embedded desktop engine now stops even when a client stops reading.**
+  Graceful shutdown waits for every in-flight HTTP request, and a client the
+  app does not control — a paused video that stops draining its socket, a
+  request whose body never arrives — could hold the engine open past the app's
+  stop budget, leaving "gallery authority remains with the server". The
+  engine now gives in-flight requests a short grace after a stop is requested
+  and then finishes stopping. The same mechanism was skipping the desktop
+  nightly: its boot test left a megabyte-sized `/api/models` response unread,
+  so whether shutdown completed was up to the kernel's socket buffers
+  ([#1582](https://github.com/utensils/mold/issues/1582)).
+- **A server with unusable multicast now stops when asked.** The mDNS peer
+  browser's shutdown joined its worker thread with no bound, and that thread
+  woke only when the mDNS daemon closed its channel. On a host where multicast
+  never works the daemon may never close it, so the server hung instead of
+  finishing shutdown — the desktop app reported that the embedded engine did
+  not stop and that gallery authority remained with the server. Shutdown is
+  now bounded by mold rather than by the daemon.
+- **Desktop settings survive a build that cannot read one value.** When a
+  `settings.json` key holds a value the running build does not understand
+  (an update channel or connection mode introduced by a newer nightly, then
+  read by an older build or a dev build sharing the same app data), only that
+  key falls back to its default; the update channel, saved machines, panel
+  widths, and every other preference stay, and a list keeps every entry that
+  still reads. Previously the whole file was replaced by defaults on the next
+  save, which silently moved a Nightly install back to the Stable channel and
+  forgot every remembered machine. A file that is not a JSON object is kept
+  beside the store as `settings.json.invalid` instead of being overwritten.
+- **FLUX.2 [klein] reference-image editing.** Every Klein tier (4B and 9B, distilled
+  and base, BF16/FP8/GGUF) now accepts up to four ordered reference images —
+  `mold run flux2-klein "…" --reference a.png --reference b.png`, the References
+  strip on web, desktop, and iPhone, and `edit_images` on `POST /api/generate` —
+  using the same protocol FLUX.2 [dev] already ran (references VAE-encoded and
+  appended to the sequence at time coordinates 10, 20, …; the Qwen3 encoder never
+  sees them). Klein keeps its img2img, inpaint, and LoRA paths; one render carries
+  either a source image or references, never both, and the Create rail parks
+  whichever well is not in use instead of refusing.
+- **Reference images are advertised on the wire.** The generation profile carries
+  a new `capabilities.reference_images` block (`mode`, `required`, `max_count`,
+  `primary_is_target`, `source_relation`, per-image pixel ceilings) built from one
+  core decision, and admission, the CLI, the TUI, and every Studio surface read it
+  instead of matching model names. Absence of the block means an older server, so
+  existing FLUX.2 [dev] and Qwen-Image-Edit clients keep working; the TUI now
+  routes a FLUX.2 [dev] picture into `edit_images` rather than a refused
+  `source_image`.
+- **Dropped images land on the well you dropped them on.** On desktop, an OS file
+  drag is routed to the well under the cursor (source, references, identity,
+  opening image, end frame, or a MiniMax H3 slot) instead of always overwriting
+  the source or attachment slot; a drop onto a references strip appends rather
+  than replacing it, and H3 drops reach the H3 authoring fields. On web, a file
+  dropped outside a well no longer navigates the browser away from Studio, and a
+  drop lands on the well you aimed at, the References strip included.
+- **Theme polish.** Desktop headings render in the active theme's own face
+  again instead of the system font, Match-system users no longer see a dark
+  flash before the window paints on a light desk, card highlights survive on
+  every theme, and a settings file from before theme preferences existed
+  migrates to Safelight on desktop exactly as it does on web and iPhone.
+- **Six Mold Studio themes.** Settings ▸ Appearance now offers Mocha (the new
+  default), Safelight, Blueprint, Graphite, Porcelain, and Nebula on desktop,
+  web, and iPhone — each a complete look with its own type pairing and corner
+  radius, with a **Match system appearance** toggle that swaps to the theme's
+  light or dark partner with the OS. Saved appearance choices migrate to the
+  nearest theme (Safelight stays Safelight, the Mold palette becomes Mocha or
+  Blueprint, System becomes the match toggle), and every theme keeps text and
+  control boundaries at WCAG AA contrast.
+- **A text-to-video Wan tier no longer auto-chains a long one-shot on any surface.** Asking for more frames than the tier renders in one clip used to be refused only by `mold run`; the web and desktop Studio, and the `POST /api/chain-jobs` door behind them, still split it into stages that each re-derived the scene from the same prompt and seed, so the delivered video was the same clip repeated with a visible reset at every boundary. All three now refuse it with one sentence and name the frame count that renders as a single continuous clip. On such a tier the Duration control now stops at that clip size, and selecting the model enters it on its own clip rather than carrying a longer duration from the previous one, so the length offered is always one the host will accept. Authored sequences are unchanged ([#1564](https://github.com/utensils/mold/issues/1564)).
+- **Desktop's 3-D view works again.** The Library lightbox and the Create
+  canvas both fell back to "The 3-D view couldn't start, so here's the
+  poster" for every Hunyuan3D print in a packaged desktop build, because the
+  app's content-security policy refused the viewer's `blob:` fetch. The
+  lightbox also now shows the print's poster while a mesh loads, instead of
+  a black area.
+- **One camera for the poster, the 3-D viewer, and a turntable.** Opening the
+  interactive viewer now lands on exactly the thumbnail's view — orthographic,
+  framed once to the mesh's own sweep extent — and "reset view" returns
+  there. Posters of existing prints are re-rendered to match.
+- **Turntables spin the way you'd drag them.** A rendered turntable now turns
+  the same direction a rightward drag turns the mesh in the 3-D viewer (and
+  the way auto-rotate tours it). A turntable exported before this change
+  spins the opposite way from one exported after it.
+- **Wan 2.2 TI2V 5B DMD (`wan22-ti2v-5b:dmd`).** FastVideo's DMD distill of
+  the same 2.2 TI2V-5B transformer renders 720p24 video in three denoise
+  rungs (timesteps 1000 / 757 / 522) with no classifier-free pass — `(20 x
+  2) / 3` ≈ 13.3x fewer transformer forwards per clip than the 20-step
+  `:fp16` tier, on the same UMT5 encoder and 2.2 VAE. The ladder walks its
+  own shift-5 flow-match table, the shift its distillation actually trained
+  against, not the shift-8 table FastVideo's own inference code hardcodes
+  for every DMD tier it ships. Steps, guidance, sample solver, and flow
+  shift are fixed: a request that sets one is refused by name rather than
+  silently ignored. Image-to-video is refused on this
+  tier, where the other three 5B tiers accept it: upstream ships no image
+  branch for this checkpoint, and measured against `:turbo` from the same
+  stills and seeds, the distilled student abandons the pinned first frame
+  within about four frames instead of continuing from it. Use `:turbo`,
+  `:fp16`, or `:q8` for image-to-video. `:fp16`,
+  `:q8`, and `:turbo` are unchanged, and the bare `wan22-ti2v-5b` still
+  resolves to `:fp16` ([#1562](https://github.com/utensils/mold/pull/1562)).
+- **MiniMax H3 dialogue tags now reach the model as real tokens.** H3's official
+  `<d>…</d>` dialogue delimiters, along with `<|cutoff|>`, `<|lyrics_start|>`,
+  `<|lyrics_end|>`, `<|caption_start|>` and `<|caption_end|>`, were tokenized as
+  ordinary text, so byte-level BPE merged each tag into the words around it and
+  no token marked where speech began. mold now registers them at the ids the
+  model was released with, matching the tokenizer the official pipelines build
+  ([#1430](https://github.com/utensils/mold/issues/1430)).
+- **Wan 2.1 T2V 1.3B Turbo (`wan21-t2v-1.3b:turbo`).** FastVideo's DMD distill
+  of the same 1.3B transformer renders 480p text-to-video in three denoise
+  rungs (timesteps 1000 / 757 / 522) with no classifier-free pass — 20x fewer
+  transformer forwards per clip than the 30-step `:bf16` tier, on the same
+  UMT5 encoder and Wan 2.1 VAE. The ladder is the checkpoint's published
+  schedule, so steps, guidance, sample solver, and flow shift are fixed: a
+  request that sets one is refused by name rather than silently ignored.
+  `:bf16` is unchanged, and the bare `wan21-t2v-1.3b` still resolves to it
+  ([#1560](https://github.com/utensils/mold/pull/1560)).
+- **3-D exports come out print-ready.** Exporting a mesh as OBJ, STL, or PLY
+  no longer hands back Hunyuan3D's raw normalized-unit-cube geometry, which
+  slicers read as a 2 mm blob and refuse ("object too small") and which
+  Blender's STL/PLY importers land on their side. `mold library export
+  chair.glb --format stl --size-mm 120 --up-axis y --origin center` (and the
+  matching `POST /api/gallery/export/:filename` fields, MCP `export_mesh`
+  args, and the web/desktop/iPhone export options sheet) now scale, orient,
+  and position the mesh, defaulting to what each format's own tools expect
+  (100 mm, Z-up, floor for STL and PLY; unscaled, Y-up, floor for OBJ). A
+  server that doesn't advertise `capabilities.mesh.export_geometry` gets none
+  of the new fields, and the options are refused rather than ignored on `glb`
+  or an animated turntable.
+- **Turntables no longer breathe.** A GIF/APNG/WebP turntable export used to
+  refit its scale to every frame's own silhouette, so a spinning mesh visibly
+  grew and shrank (up to ~41% on a square footprint) and popped at the
+  x/y crossover. The sweep is now fitted once for the whole turn, so the
+  mesh holds one size throughout.
+- **Recall a history prompt after Expand without the stale banner.** Pressing
+  ↑/↓ to recall a prompt from history after Expand or Remix no longer raises
+  "Expanded prompt changed after it was prepared" or blocks Generate on the web
+  and desktop Create surfaces. A recall replaces the whole prompt, so it now
+  releases the prepared rewrite outright, restoring the style chip and negative
+  fragments the expansion baked in, and the recalled prompt submits as your own;
+  hand edits to the rewrite keep the existing recovery actions.
+- **Finished 3-D prints render again on the desktop Create canvas.** A mesh
+  selected from the Now developing rail loads over the same native media
+  bridge the Library uses, takes the host's thumbnail as its poster when the
+  completion carried none, renews an expired media ticket once before giving
+  up, and re-selecting a print refreshes a stale result URL instead of only a
+  missing one.
+- **Export dialog errors wrap inside the card.** The video export dialog shows
+  a failed export in the shared error notice, with the copy button, so a long
+  host URL no longer runs off the edge; error notices everywhere now wrap
+  unbroken URLs and paths.
+- **Mesh posters render on demand.** Mesh prints mirrored onto a machine now show their own poster tile instead of the generic wireframe-cube placeholder. The poster is derived from the stored `.glb` wherever it is missing: `GET /api/gallery/thumbnail/:filename` renders it on demand and caches it, `PUT /api/gallery/import` writes it before announcing the print, and the desktop app renders it in-process while its embedded server is off.
+- A mesh whose geometry genuinely cannot be read still answers the placeholder, but tags it apart from a real tile so a client that cached one revalidates into the poster instead of holding a wireframe cube for the life of the file. The desktop's on-disk thumbnail cache no longer stores a placeholder as a print's durable tile.
+- A generated mesh writes its poster before the gallery announces it, so a client that loads the tile the moment the print appears is no longer answered a placeholder it would then cache.
+- **Use as source on every print, everywhere it is shown.** Right-clicking the
+  finished render on the web Create canvas now opens the same print menu the
+  Recent tiles have (Open, Reuse settings, Use as source, Delete), and the
+  desktop Library's History drawer gained the action on its past runs. A
+  finished clip on the desktop Create canvas is offered as source video
+  instead of being greyed out, and the phone's viewer for a just-finished
+  render offers the action exactly as the Library viewer does. Audio and 3-D
+  meshes are refused with the reason shown, since neither can condition a
+  render.
+- **Three rank-21 MiniMax H3 Turbo tiers.**
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`,
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`, and
+  `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` pull the same compact
+  stacks with drbaph's SVD-resized adapters (about 300 MB each instead of
+  1.96 GB, about 1.63-1.66 GB less to download and a measured 1.60-1.70 GB
+  less resident VRAM); they are lossy low-rank approximations of the
+  reviewed adapters, shipped on the maintainer's 2026-09-02 call on visual
+  parity and the measured VRAM saving, and the measured A/B against each
+  full-rank source tier is recorded in `docs/qualification/minimax-h3.md`
+  (visual parity on all six pairs, 1528-1622 MiB (1.60-1.70 GB) less VRAM
+  measured, PSNR 21-29 dB
+  on the FL2VA pairs and 16-17 dB on the two panning Ref2VA pairs)
+  ([#814](https://github.com/utensils/mold/issues/814)).
+- **MiniMax H3 reuses its prompt conditioning.** A repeated prompt + first
+  frame (or reference set) on the same conditioner route and device — for
+  FL2VA at any clip length or step count, neither of which reaches its
+  conditioner — skips the 15.7 GB Qwen3-VL load (53.6 s in the measured CUDA
+  row) and its encode, which scales with the conditioned patch count — 24.6 s
+  on the CUDA route for that row's 2048-square Ref2VA reference, 2,405.6 s for
+  the same reference on the host fallback route. The output is bit-identical,
+  the hit is disclosed as `prompt conditioning [cache hit]`, and
+  `MOLD_H3_CONDITIONER_CACHE=off|<MiB>` bounds or disables the 512 MiB
+  in-process cache ([#814](https://github.com/utensils/mold/issues/814)).
+- **Two more MiniMax H3 FL2VA Turbo tiers.**
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` (5 grid points)
+  and `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p` (9 grid points)
+  pull the FL2VA compact stack plus one revision-pinned, SHA-256-verified
+  adapter from `lightx2v/Minimax-h3-Turbo`, stored beside the Comfy-Org
+  adapters under `shared/minimax-h3/loras/`; each Turbo manifest row now
+  names its own adapter source and revision
+  ([#814](https://github.com/utensils/mold/issues/814)).
+- **The phone's print viewer gives the whole screen to the media.** Images,
+  clips, audio and 3-D meshes now fill the viewport behind a thin translucent
+  header, and every detail and action lives in a bottom sheet that peeks one
+  line — kind, the print's own measure (a mesh's triangles and vertices, a
+  clip's running time, a still's pixels) and the owning host — and expands on a
+  handle tap or a swipe up. Swipe it down or tap the dimmed media to put it
+  away; it collapses on its own when the gallery moves on, and reduced motion
+  drops the animation rather than the sheet. A drag on the sheet never pages
+  the gallery, a drag on the media still does, and a drag on a mesh still
+  orbits it.
+- **A mesh print's exports are one picker and two verbs.** The eight stacked
+  buttons that hid the model behind them are now a segmented format picker —
+  every container the host advertises, with the animated ones behind a single
+  **Turntable** entry — followed by **Share…** and **Save to Mold folder**.
+  Turntable still stops at the existing options sheet, which opens with the
+  destination the tapped verb chose.
+- **Save 3-D exports to a Mold folder on iPhone and Android.** Every 3-D
+  export in the phone's Library viewer — the stored GLB itself, the OBJ / STL
+  / PLY transcodes, and the GIF / APNG / WebP turntables — now offers two
+  actions: **Share…** (the native share sheet, as before) and **Save to Mold
+  folder**, which writes the file into an on-device folder you can browse.
+  On iPhone that is the app's own Documents folder, now exposed to the Files
+  app as On My iPhone ▸ Mold (the entry appears after the first save); on
+  Android it is the `Download/Mold` directory (Downloads ▸ Mold in the Files
+  app), through MediaStore on Android 10 and later. A second export of the
+  same print gets a numbered name (`chair (2).stl`) instead of overwriting,
+  the turntable's options sheet carries the same Share / Save choice, and
+  the status line names where the file went. The list stays whatever the
+  host advertises on `capabilities.mesh.export_formats`.
+- **Shared 3-D exports and turntables carry the print's own filename.** The
+  phone's share sheet used to show a staged temp name
+  (`mold-export-123-chair.stl`); each export is now staged under its real
+  name, so the share sheet and a "Save to Files" from it show `chair.stl`.
+- **Rotating a 3D model on iPhone no longer swipes the gallery.** Dragging a mesh
+  to orbit it also armed the viewer's horizontal swipe, so turning a model
+  navigated to the next or previous print instead. A surface that reads drags
+  itself now marks itself `data-gesture="own"` and the gallery leaves it alone.
+- **Hunyuan3D generates and renders from the web, desktop, and iPhone/Android
+  apps, not just the CLI.** Picking a Hunyuan3D model reshapes Create from the
+  recipe's own generation profile, the same one the TUI and Discord already
+  read: Shape, Resolution, exact-size, Fit to canvas, Strength, Mask, and
+  Negative all disappear because the profile is canvasless, strengthless,
+  maskless, and reads none of them, and a **Mesh** control group takes their
+  place — Octree detail over the advertised allowlist (128/192/256/320/384,
+  256 default), an Iso threshold slider, and an optional Target faces field
+  within the advertised bounds that keeps the raw surface when left blank.
+  The prompt bed becomes an optional note (placeholder text says the model has
+  no text encoder and renders from the source image) and Generate submits with
+  no prompt; a source image is still required. Requests are pinned to GLB and
+  carry only the mesh controls that differ from the advertised defaults, and
+  Reuse settings restores the recorded octree, threshold, and face target from
+  the print's `metadata.mesh` instead of a form's leftovers
+  ([#1496](https://github.com/utensils/mold/issues/1496)).
+- **A finished mesh renders in place, not just in the Library.** The shared
+  WebGL `MeshViewer` now mounts directly in the Create result area as well as
+  the Lightbox and the mobile viewer sheet, with a wireframe toggle beside its
+  `tris · verts · bounds` caption (the toggle is disabled, with a reason, for
+  a mesh with no edges to outline). In the three Create result areas — web,
+  desktop, and iPhone/Android — it also auto-rotates until touched, honours
+  `prefers-reduced-motion` (parking or resuming the moment the setting
+  changes), and offers a fullscreen toggle; the Lightbox and the viewer
+  sheets do not auto-rotate or go fullscreen, and fullscreen is unavailable
+  inside the iOS WKWebView, where the button never appears. The recent strip
+  and every Library tile carry a 3D badge; the web and desktop Library also
+  gain a "3D" kind filter alongside Images, Video, and Audio (the iPhone
+  Library has the badge only). The lightbox refuses **Use as source** and
+  offers no **Upscale** for a mesh — there is no raster to stage as
+  conditioning or to enlarge. The empty Create canvas explains such a model
+  in its own words (prepare the source image) instead of the optional-prompt
+  wording about motion, and the web rail's Target faces field warns inline
+  when a value falls outside the advertised bounds instead of letting
+  Generate fail. A
+  reloaded web page hydrates a mesh print from its poster and recorded counts
+  exactly like any other kind.
+- **Export as OBJ, STL, or PLY without leaving the app.** The lightbox and the
+  mobile viewer sheet offer the host's advertised
+  `capabilities.mesh.export_formats` — the same conversions the
+  `mold library export` command and the `export_mesh` MCP tool perform — and
+  never the stored GLB itself, which Download already covers. Desktop saves
+  the converted file through its normal download path; mobile hands it to the
+  native share sheet. A host that advertises an animated turntable container
+  (GIF, APNG, WebP) collapses those into one **Export turntable…** entry that
+  opens the existing GIF-export options sheet (playback direction, repeat,
+  max dimension, frame rate) instead. The web lightbox shows a refused
+  export beside the menu on both its layouts and clears it when you move to
+  the next print.
+- **Expand and Remix are refused for a model that reads no prompt.** On a
+  recipe whose profile advertises `prompt.mode: ignored`, both controls render
+  disabled on web, desktop, and iPhone with the one sentence "This model reads
+  no prompt; prepare the image instead.", the keyboard, menu, and recovery
+  paths answer with the same sentence instead of sending a request, and the
+  missing-expander pull is never offered. The host answers such a transform
+  with a single image-preparation note rather than a batch of variants, so
+  every client validator now accepts that one result for a prompt-ignoring
+  recipe instead of failing the batch.
+- **Share a 3-D print as a turntable GIF, APNG or WebP.** Nothing outside a
+  3-D tool opens a `.glb`, and the gallery poster shows one view.
+  `mold library export chair.glb --format gif` now renders that poster set
+  spinning — the same camera, lighting and slate background swept a full turn
+  around the mesh, so the first frame IS the poster — and writes it as an
+  animation you can drop into a chat, a README or a browser. The flags are the
+  gallery video export's own: `--playback loop|bounce`, `--repeat forever|once`
+  and `--max-dimension` (240–2048, default 512), plus `--frames` (8–180,
+  default 36, a 10° step) and `--fps` (1–30, default 10). A loop renders one
+  full turn whose last frame stops one step short of the first, so the wrap is
+  seamless; a bounce renders half a turn that the GIF encoder plays back, so
+  the reversal reads as deliberate rather than a full turn snapping into
+  reverse. Bounce and `once` are GIF contracts, exactly as for a video. The
+  same options are on `POST /api/gallery/export/:filename` (`playback`,
+  `repeat`, `max_dimension`, `frames`, `fps`; every bound a `422` naming it,
+  and the frame buffer capped at the video export's 256 MiB) and the
+  `export_mesh` MCP tool; `capabilities.mesh.export_formats` and
+  `/api/gallery/export-options` advertise `gif`, `apng` and — on a build with
+  the `webp` feature — `webp` beside the geometry containers, and a client
+  skips an export format it does not know instead of failing the read. The
+  TUI's `x` picker lists whatever the owning host advertises, renders a local
+  print in-process through the same code at the fixed defaults, and says so.
+  A flat mesh's edge-on frames render as background instead of failing the
+  sequence.
+- **3-D generation is a first-class contract, and meshes export as OBJ, STL and
+  PLY.** Hunyuan3D worked from the CLI and nowhere else, because every other
+  surface asked the wrong questions of it. The generation profile is now the
+  single authority for all three: it says whether a recipe requires, accepts,
+  or IGNORES a prompt (this family has no text encoder at all, so
+  `mold run hunyuan3d-mini-turbo --image cutout.png -o chair.glb` needs none),
+  whether `strength` changes the render, and — for a mesh recipe — the octree
+  resolutions, iso-threshold, and face bounds a client should offer instead of
+  a resolution picker. Server validation, the CLI, the TUI, Discord and the
+  MCP tools read those fields rather than carrying their own family lists
+  (Discord keeps one family pin, for the GLB container it cannot read off a
+  cold model cache); the web, desktop and mobile apps follow in the GUI
+  release ([#1496](https://github.com/utensils/mold/issues/1496)).
+- **An unavailable output format is a 422 at the door, not a job that holds.**
+  Durable admission now checks an explicit `output_format` against the resolved
+  recipe before the row is written, so a client naming a container the model
+  cannot deliver is told at submit time instead of watching a print hold and
+  then fail. A mesh model is the deliberate exception: it stores binary glTF
+  and nothing else, so an explicit `png` from an older client is COERCED to
+  `glb` rather than refused — the same rule `mold run` already applied.
+- **`mold library export <file> --format obj|stl|ply`** transcodes a stored
+  `.glb` into a file other tools read: OBJ for Blender and MeshLab, STL for
+  3-D printers and CAD, PLY for point-and-mesh tooling (`--format glb`
+  downloads the stored file unchanged). The gallery keeps its
+  glTF, which is the only form carrying geometry, UVs, normals and textures in
+  one file. The same conversions are on `POST /api/gallery/export/:filename`
+  and the `export_mesh` MCP tool, and `/api/capabilities.mesh.export_formats`
+  advertises them.
+- **The CLI stops describing a 3-D render as an image.** A mesh run no longer
+  resamples the source to a canvas the engine ignores or announces an img2img
+  strength nothing reads; it prints the octree resolution and threshold that
+  actually shape the mesh. Every progress line is printed once with its own
+  duration — encode, sampling, volume decode, surface extraction, and write
+  were previously printed twice each with the whole render attributed to the
+  decode — and `-o` refuses a filename a 3-D render cannot write, pointing at
+  the export command for `.obj`, `.stl`, and `.ply`.
+- **The TUI renders, previews, and exports 3-D prints.** Selecting a
+  Hunyuan3D model in `mold tui` reshapes the Create form from the recipe's
+  profile: an Advanced ▸ **3-D mesh** section (Octree over the advertised
+  allowlist, Iso threshold, Target faces — absent until touched, defaults
+  shown from the profile), a Format row pinned to GLB, Strength / Mask /
+  Negative hidden because the profile says so, and Generate that submits
+  without a prompt because the profile advertises `prompt.mode: ignored`.
+  A finished mesh saves its `.glb`, caches the poster under the gallery
+  thumbnail key, previews the poster, and captions it with
+  `tris · verts · bounds`. Every mesh print now records the octree
+  resolution, iso-threshold and face target that actually rendered in an
+  additive `OutputMetadata.mesh` block (request values, or the defaults the
+  engine fell back to), so Reuse settings restores what shaped the mesh
+  rather than a form's leftovers; the Library never hands a `.glb` to a raster
+  decoder, and `x` on a mesh opens an OBJ / STL / PLY export picker (the
+  owning machine's `capabilities.mesh.export_formats`, or the in-process
+  writer for a local print) that writes beside the TUI's other saves.
+- **The Discord bot delivers meshes.** `/generate` with a Hunyuan3D model
+  and a `source_image` needs no prompt, is delivered as GLB whatever the
+  format option says (the server's own pin), posts the rendered poster as
+  the embed image with the `.glb` attached beside it, and summarises as
+  **Mesh Generated** with triangles, vertices, bounds, format, and seed. A
+  mesh model with no `source_image` is refused up front for the image it
+  lacks rather than for a prompt it never reads; when the `.glb` and its
+  poster together exceed Discord's upload budget the poster is dropped and
+  the footer says so, and an oversized mesh with no poster still explains
+  where the file went.
+- **The `generate_mesh` MCP tool advertises the profile's own bounds.** Its
+  `octree`, `threshold`, and `target_faces` schema (with the previous
+  `octree_resolution` / `mesh_threshold` spellings declared as deprecated
+  aliases, so a schema-validating host still accepts them) is built
+  from the same `validation::MESH_*` constants the generation profile and
+  admission read, and its description points at `export_mesh` for every
+  container other than the stored GLB. `generate_mesh` reads a finished
+  mesh back from the gallery by its container (counts and bounds off the
+  glTF's own JSON chunk, the poster off the thumbnail route) and names the
+  gallery file in `structuredContent.filename`; `export_mesh` returns its
+  bytes as a resource named `<stem>.<ext>`, and `get_gallery_image` answers
+  a `.glb` with its poster rather than mislabelling geometry as an image.
+  The tool count is thirteen, and the docs say so.
+- **Expand and remix know when a model reads no prompt.** `mold expand`,
+  `mold remix`, `--expand`, `POST /api/expand`, `POST /api/remix`, the MCP
+  `expand_prompt` / `remix_prompt` tools, and the TUI's Expand and Remix used
+  to hand a Hunyuan3D request to the expansion model with a guide that says
+  "write no prompt". They now ask the generation profile's one prompt rule
+  first and, for a family that ignores its prompt, answer with the guide's
+  own image-preparation advice as the single result — no expansion model is
+  created, activated, or pulled, and generation-time expansion is skipped
+  instead of rewriting provenance. The `GENERATION CONTEXT` block states
+  when the prompt is not read, and `ExpandContext.prompt_mode` carries the
+  resolved contract on the wire (additive).
+- **The Hunyuan3D prompting guide matches the merged contract.** The family
+  guide, the agent skill, and the website page now say that the mesh
+  controls come from the model's profile, that OBJ/STL/PLY are gallery-side
+  exports, and that the same picture meshes differently in ComfyUI because
+  mold letterboxes on the alpha bounding box the way Tencent's preprocessor
+  does while ComfyUI centre-crops
+  ([#1528](https://github.com/utensils/mold/issues/1528)).
+- **Framewise upscales decode everywhere again.** A video upscale whose ×4 frame outgrew the H.264 level 5.2 ceiling (a 960×960 clip became 3840×3840, level 6.0) published a print with no thumbnail that iOS and Android would not play. Real-ESRGAN still runs at its native factor, but the encoder now fits the frame inside level 5.2 (at most 36 864 macroblocks and a 4096 px edge, so that clip publishes at 3072×3072), the publication guard refuses anything larger, and the Library's Upscaled badge now marks Framewise videos on desktop, iPhone, and Android instead of stills only.
+- **`--frames N` past one clip now renders N frames, not a whole extra
+  clip's worth.** An auto-chained long video used to round the request up to
+  whole clips and silently render the overshoot (`--frames 145` on
+  `wan22-ti2v-5b` rendered 241 frames, +66% GPU time); the last stage is now
+  exact-fitted to the requested total on every surface, and the CLI
+  discloses a total the frame lattice cannot land on exactly before
+  rendering ([#1509](https://github.com/utensils/mold/issues/1509)).
+- **Hunyuan3D renders on Apple Silicon, and on CUDA in fp16.** The first real
+  render of the image-to-3D family surfaced five engine bugs no CPU test could
+  see. Three stopped or degraded the render: the shape transformer's
+  affine-less LayerNorms carried a CPU weight tensor that every GPU forward
+  tripped over, the two 1.1B tiers fed a 512 px image to a 14 px patch encoder
+  that refuses it (both Tencent's `config.yaml` and ComfyUI encode at 518, so
+  mold now letterboxes to 512 and resizes to 518 exactly as they do), and the
+  timestep embedding was computed in half precision instead of upstream's f32.
+  Two were found by comparing the first mesh against ComfyUI on the same
+  checkpoint, image and seed: every mesh came out lying on its side, because
+  ComfyUI's VAE wrapper applies a channels-last transpose to the voxel grid
+  that the port had not reproduced, and every surface was thinner than the
+  oracle's with half the triangles, because that same wrapper maps the raw
+  logits onto a `[0, 1]` occupancy scale before the mesher thresholds them —
+  so `--mesh-threshold 0.6` now means what it means in ComfyUI. The family now
+  runs fp16 on CUDA and Metal like ComfyUI does (bf16 quantized the occupancy
+  query grid to roughly its own spacing), and the tier is identified from the
+  checkpoint's transformer depth rather than its filename. GPU-device forward
+  tests and orientation tests guard each of these, `scripts/regression-matrix.sh`
+  covers the family, and `scripts/capture-hunyuan3d-metal-uat.sh` plus
+  `scripts/capture-hunyuan3d-comfy-metal-reference.sh` reproduce the ComfyUI
+  comparison. Metal is now qualified `supported` for `hunyuan3d`; CUDA and CPU
+  remain correctness-only until measured
+  ([#1496](https://github.com/utensils/mold/issues/1496)).
+- **One prompting corpus for the agent skill, prompt expansion, remix, and MCP.** The per-family prompting guides moved into `crates/mold-core/src/prompting/`, were rewritten from the official upstream prompting references (BFL, Stability, Tongyi, Qwen-Image, Wan, Lightricks, MiniMax, Tencent) with prompt style, syntax, generation context, examples, pitfalls, restored per-model CLI examples, and sources, and gained task leaves plus per-checkpoint model leaves. `mold skill install` renders that corpus, `mold expand` / `mold remix` / `--expand` / the app Expand and Remix actions inject it into the LLM together with a new additive `context` (exact model, canvas, frames, fps, derived duration, chained clip length, audio, negative-prompt support, ordered references with the model's own labels such as `<Picture n>`, LoRA names), `mold expand` and `mold remix` take `--width/--height/--frames/--fps/--clip-frames/--reference`, Discord gains `/remix`, and `mold mcp` gains `expand_prompt` / `remix_prompt` tools plus `mold://prompting/` resources. `website/guide/prompting.md` is generated from the corpus and checked in CI.
+- **Reuse settings no longer demands an API key from an open host.** On a
+  server started without `MOLD_API_KEY`, every retained source-media lookup
+  answered "Connect this machine with an API key" for prints it never looked
+  at, so restoring a print's original source never worked on a default host
+  and a plain text-to-image print raised the error on every surface. The
+  routes now ask whether the caller is authorized — open on a keyless host,
+  exactly like the rest of the API — clients no longer warn about a print that
+  never recorded conditioning media, a host that genuinely refuses the probe
+  still gets the API-key disclosure, and the desktop Lightbox's primary Reuse button
+  attaches retained source media the way its right-click item already did.
+- **Dismiss license reviews after acceptance.** Mobile, desktop, and web now
+  close an install-triggered license dialog as soon as an older host accepts
+  and queues the model download, instead of showing “Recording…” until the
+  entire transfer finishes.
+- **`mold server status` reports on the host you selected.** `--host` (or
+  `MOLD_HOST`) now reads the named server's status over HTTP instead of
+  answering from this machine's PID file, so a status call against a remote
+  host no longer prints "No server running" about a machine it never
+  contacted. An unreachable host exits non-zero; PID, port and log path still
+  appear only for the local managed daemon.
+- **A failed metadata-DB migration reports one line, not a wall of SQL.** A DB
+  stuck on a version conflict used to dump the entire failing `CREATE TABLE`
+  block into the middle of an ordinary run; it now names the migration, the
+  version the DB is stuck at, and what SQLite objected to.
+- **Accept model licenses from every surface, not just the CLI.** Picking a
+  license-gated model such as Hunyuan3D on web, desktop or mobile used to dead-end
+  at "model not installed" with no way to read or accept the terms — a placement
+  preview only carried license terms for dependency bundles, never for the
+  checkpoint itself. Previews now carry the requested model's own outstanding
+  terms, so the existing consent dialog appears wherever you generate, and
+  installing a gated model from the Models page prompts for consent instead of
+  failing with a raw error (this also fixes PuLID installs from that page).
+- **Accept terms without downloading gigabytes.** New `POST /api/licenses/accept`
+  and `mold licenses accept <id>...` record consent on its own; the Settings
+  license panel gains a matching "Accept terms" action beside the existing
+  review-and-download button. `mold pull --accept-license` may now be repeated
+  for a bundle covered by more than one agreement.
+- **Accept on behalf of a remote host from desktop Settings.** The license panel
+  gains a machine selector, so consent can be recorded on the server that will
+  do the downloading, matching what mobile and generate-time routing already did.
+- **Review licenses from the TUI.** The command palette gains "Review model
+  licenses…", listing each agreement, its pinned terms and what needs it, for
+  whichever host the TUI is pointed at.
+- **A refused pull is no longer reported as a server fault.** Auto-pull paths
+  mapped a license refusal to `500 INTERNAL_ERROR` and discarded the pinned
+  terms; they now return the structured `403 LICENSE_NOT_ACCEPTED` a client can
+  act on.
+- **Hunyuan3D 2.1 PBR paint weights are installable.** The `hunyuan3d-paint`
+  bundle ships so the Tencent 2.1 agreement is required by something and can be
+  accepted; previously it was listed on every surface and acceptable on none.
+  The paint engine is not implemented yet, so these weights satisfy the license
+  gate but do not render.
+- **Keep Library upscale actions available after saving locally.** Escape now dismisses the shared upscale dialog, a locally saved video can use another capable copy's Mold host for Framewise upscale, and multi-host prints offer a host selector when more than one copy can run it.
+- **Forget deleted RunPod hosts.** Deleting a RunPod instance now removes its saved reconnect entry and credentials, including aliases that are already disconnected.
+- **Clean up deleted RunPod activity.** Deleting a RunPod instance now disconnects its Mold host so stale model-download rows and routing state disappear from Studio.
+- **One rambling completion no longer kills a whole expansion batch.** When an
+  expansion backend answered a chunk with more prompts than were requested —
+  the shape a small local model reliably produces when a batch template asks it
+  for exactly one variation — the request failed outright with
+  `expansion backend returned 3 prompts when exactly 1 were requested`, even
+  though the chunk had two unused retries left. That response now spends one
+  attempt and asks again, and the failure after a chunk's whole budget says how
+  many prompts it did assemble.
+- **Expansion chunks are evened out instead of filled greedily.** A batch of
+  five was asked for four prompts and then a lone one, which handed a batch
+  instruction — "generate 1 distinct prompts, output as a JSON array of 1
+  strings" — to the model; it is now asked for three and then two, at no extra
+  cost in model calls.
+- **A short run of one-prompt JSON arrays is no longer glued into one prompt.**
+  A backend that emits `["a"]` per line and came up short had its lines joined
+  into a single literal `["a"] ["b"]` prompt; those lines are now kept as the
+  prompts they are and the remainder is retried.
+- **The host records why an expansion failed.** A failed expansion left only a
+  bare `500` in the server journal, so the reason existed nowhere but in the
+  client's error toast. Backend URL credentials are redacted from that entry.
+- **Readable download progress.** Show model-download and weight-loading byte
+  counters in compact KB, MB, GB, or TB units across web, desktop, and mobile
+  activity views instead of long raw byte values.
+- **Open RunPod machines from Machines.** Running pod rows now open their Mold machine details and expose the relevant machine and RunPod actions from the right-click menu.
+- Fixed long desktop confirmation labels clipping inside their action buttons.
+- **Devshell builds with `cudnn` now run.** The Nix devshell left cuDNN off
+  `LD_LIBRARY_PATH`, and a binary built in the shell from the shipping Linux
+  feature set carries no RUNPATH, so it linked fine and then died at startup
+  with `libcudnn.so.9: cannot open shared object file`. Both `LIBRARY_PATH` and
+  `LD_LIBRARY_PATH` now carry cuDNN, and a new `devshell-cuda-load-path` flake
+  check holds the devshell's own advertised feature set to being runnable in it
+  ([#1510](https://github.com/utensils/mold/issues/1510)).
+- **Wan's step cache is on by default.** `MOLD_WAN_STEP_CACHE=auto` now needs no
+  opt-in on the non-distilled quality tiers, where it is measured at **1.85x**
+  (`wan22-t2v-a14b:q8`, 33f at 832x480, 605.6 s to 327.4 s)
+  ([#1482](https://github.com/utensils/mold/issues/1482)). It could not be the
+  default while the memory it holds went undeclared: the retained residuals are
+  invisible to the activation estimate that admission and the block-offload
+  policy both read, so a near-capacity render parked too few blocks and ran out
+  of device memory on bytes nothing had accounted for. They are charged now.
+- **The step cache's distance check no longer costs more memory than the cache
+  itself.** Comparing two residuals upcast both of them whole, holding three
+  full-size float32 copies at once — roughly 1.3 GB at A14B 53f/832x480, against
+  the ~450 MB the cache actually retains. The same comparison now reduces a slice
+  at a time, so the check's cost no longer grows with the clip length, and the
+  accumulation is more accurate than the one it replaces rather than less.
+- **A long text-to-video Wan render is refused instead of repeating itself.**
+  `mold run wan22-t2v-a14b --frames 201` chained into three stages and handed
+  back roughly the same four-second clip three times, because a text-to-video
+  checkpoint has no image conditioning to carry motion across a clip boundary —
+  every stage re-derived the scene from the same prompt and seed. It now
+  refuses up front and names both ways forward: a single continuous clip within the
+  model's own budget, or an image-to-video tier, whose continuations are seeded
+  with the previous clip's final frame. Image-conditioned and unclassified
+  checkpoints chain exactly as before.
+- **Ship the Framewise codec runtime.** Nix and CUDA-container hosts now provide
+  `ffmpeg` and `ffprobe` for video upscaling, while other hosts stop advertising
+  Framewise upscale when those required tools are unavailable.
+- **Mobile upscale sheet containment.** Keeps image and Framewise video upscale controls inside narrow phone screens and shows submission failures directly in the open dialog instead of appearing unresponsive.
+- **Library and generation upscale across every UI.** Images and MP4/MOV/WebM videos can be upscaled from Library context menus and full-media views on web, desktop, and mobile; video generation now offers the same upscaler picker and queues a durable Framewise job after publishing the original. Framewise jobs use the native Real-ESRGAN/Candle engine, auto-download weights on first use, support pause/resume/cancel and restart-safe checkpoints, preserve compatible primary audio, and publish a new provenance-bearing video. Variable-frame-rate, HDR, subtitles, chapters, multiple audio tracks, and incompatible primary audio are rejected rather than silently changed; temporal flicker may remain.
+- Fixed Windows nightly builds after durable gallery source-media retention and made the restart GPU-renumbering CI regression deterministic.
+- **Keep queued generations moving through harmless GPU telemetry changes.**
+  Multiple prepared MiniMax H3 jobs no longer leave an idle GPU stuck in a
+  high-CPU planning loop when CUDA context memory changes between planning and
+  dispatch; genuinely insufficient VRAM and changed execution plans still stop
+  the grant.
+- **Keep mobile job details on screen.** Keep Machine job details and actions inside the mobile viewport and allow dismissing the sheet with a downward swipe.
+- **Queued generations keep moving after a model switch.** Bounded warm-model
+  waits now expire correctly instead of restarting forever, private H3 renders
+  settle their durable queue rows through the same dispatch boundary as every
+  other model, and queue estimates use plain language across web, desktop, and
+  mobile.
+- **Hunyuan3D image-to-3D.** `mold run hunyuan3d-mini-turbo --image photo.png -o
+  chair.glb` turns a single photograph into a 3-D mesh. The result is a durable
+  library print like any other: it lands in the gallery with a rendered poster
+  tile, and it lists, downloads, restores from trash and reuses its settings
+  exactly like an image or a clip. Three Hunyuan3D 2.0 tiers ship —
+  `hunyuan3d-mini-turbo` (0.6B, ~5 GB VRAM, the default), `hunyuan3d-turbo`, and
+  the undistilled `hunyuan3d` — and the weights are gated behind an explicit
+  acceptance of Tencent's community licence, which does not apply in the EU, the
+  UK or South Korea ([#1495](https://github.com/utensils/mold/issues/1495)).
+- **`--octree`, `--mesh-threshold` and `--target-faces` control the geometry.**
+  `--octree` is the detail knob and its cost is cubic; `--mesh-threshold` moves
+  the extracted surface; `--target-faces` decimates. Meshes are stored as binary
+  glTF with the geometry, normals and materials in one self-contained file
+  ([#1495](https://github.com/utensils/mold/issues/1495)).
+- **Keep gallery source media reusable.** Authored images, videos, audio, masks,
+  keyframes, and references now remain encrypted after a durable generation
+  finishes, survive restarts and trash/restore, and are released only when the
+  last owning print is permanently deleted. Authenticated clients can inspect
+  availability and restore every retained role—single and collection images,
+  masks, controls, audio, source/extension video, keyframes, and references—
+  without exposing server filesystem paths.
+- **Install agent-native Mold skill bundles.** `mold skill` now renders concise,
+  progressively disclosed bundles for each supported agent, safely tracks
+  changing managed files across upgrades and uninstall, and keeps model-family
+  one canonical shared/family/task prompting tree and operational safety
+  guidance current without one giant prompt or agent-specific content forks.
+- **Run quantized LTX-2.5 safely and efficiently on Apple silicon.** Metal now uses Candle's required F32 boundary for GGUF matrix multiplication, keeps only the packed transformer blocks that fit beyond a live unified-memory safety floor, bounds on-demand disk streaming so released weights cannot accumulate, demotes resident blocks if pressure changes during load, and refuses before transformer allocation when even the minimum streaming working set would cross the macOS reserve. Failed OOM release fences stop instead of retrying into unresolved pressure, and the packed Gemma prompt encoder stays on the GPU by default. Q3_K_M, Q4_K_M, and Q6_K are hardware-qualified with prompt-fidelity inspection, including a full 97-frame Q3_K_M MP4.
+- **Preserve chained videos across restarts.** Graceful server restarts now park authored and auto-chained videos with their source and partial media intact, expose auto-chains in the shared activity queue on desktop and mobile, and allow explicit resume instead of cancelling and deleting them.
+- **Pause one queued generation without stopping the queue.** Mobile, web,
+  desktop, and CLI queue controls now pause or resume only the selected waiting
+  job while sibling work continues dispatching.
+- **The rest of the FLUX.2 family.** `mold pull flux2-dev:{q8,q6,q4,fp8}` brings
+  FLUX.2 [dev]'s transformer down from 65 GB of BF16 shards to a 20 GB
+  quantization (~56 GB installed, against 103 GB, once the shared 36 GB
+  encoder and VAE are counted) — and installs it without a Black Forest Labs
+  license acceptance, because the quantized tiers pair ungated transformers
+  with ungated mirrors of the same encoder and VAE bytes. The bare name
+  `flux2-dev` still resolves to `:bf16`. `flux2-klein:fp8` and
+  `flux2-klein-9b:fp8` add BFL's own FP8 conversions, and `flux2-klein-base{,-9b}:{bf16,q8,q6,q4}` add the
+  undistilled base checkpoints, which sample with real classifier-free guidance
+  and are the first Flux.2 tier to accept a negative prompt.
+- **FLUX.2 [dev] quantized renders now honour the guidance scale.** The
+  quantized transformer dropped the guidance conditioning a guidance-distilled
+  checkpoint is trained to receive, so a GGUF dev render ignored `--guidance`
+  entirely. Klein is distilled without guidance embedding and is unaffected.
+- **FP8 Flux.2 checkpoints apply their dequantization scale.** A single-file
+  FP8 checkpoint was loaded without its `weight_scale` sidecar, which does not
+  soften a render — it multiplies every weight in the layer by ~500x.
+- Fixed the release automation, which had been unable to compute versions since
+  the gallery expansion: seven `website/public/gallery/*.webp` posters were both
+  tracked and matched by the repository's `*.webp` rule, and release-plz refuses
+  to run at all in that state.
+- **Queued prints no longer claim that the machine has no usable device.** A
+  transient execution-planning pass on a busy host now keeps showing the
+  print's live place in line on every queue surface.
+- **Wan and LTX-2 video decode runs on cuDNN convolutions (CUDA Linux builds).**
+  The VAE decode is the largest phase of a Wan render outside the denoise, and
+  it is now **2.1x** cheaper — 23.3 s to 11.2 s, taking an 81-frame 832x480
+  `wan22-t2v-a14b:q5` render from 105.9 s to 94.9 s on an RTX 4090. Underneath
+  that, the convolutions themselves are 4.4x faster (845 ms to 192 ms per latent
+  frame), most of which came from a defect in candle rather than from cuDNN:
+  its descriptors were left at `CUDNN_DEFAULT_MATH`, which declines tensor cores
+  for bf16 and silently admits TF32 for f32, so simply enabling cuDNN captured
+  only a third of the available gain. Image families deliberately stay on the
+  previous path so an archived still seed still renders the same bytes;
+  `MOLD_CONV={cudnn,im2col}` overrides the per-family default in either
+  direction.
+- **Consistent mobile generation progress.** Create now keeps each running job's live step count visible, and Create and Machines share the same clean queue-card presentation.
+- **Mobile generation status.** Keeps Create queue status aligned with Machines lifecycle feedback and prevents long preparation details from clipping on phone layouts.
+- **Video families now default to FlashAttention.** Wan and LTX-2 resolve their
+  attention backend through a new per-family policy: with the FlashAttention v2
+  kernel compiled in, an unset `MOLD_ATTN` reaches a video DiT as `flash`
+  instead of the hand-rolled math path. Measured **2.1x** on the Wan DiT
+  (158.4 s to 75.3 s, `wan22-t2v-a14b:q5` 53 frames at 832x480 on an RTX 4090).
+  Image families are unchanged and still default to `math`, so an archived
+  still renders the same bytes it always did; `MOLD_ATTN=math` restores the old
+  arithmetic everywhere.
+- **Wan admission and block offload now price the attention backend that
+  actually runs.** The activation model charged a math-attention score matrix
+  — 44% of the per-token budget at A14B — on every render, including one using
+  FlashAttention, which materializes no such tile. Since the engine's
+  block-offload policy reads the same estimate, an 81-frame 832x480 render was
+  parking all 40 transformer blocks against a shortfall it did not have. The
+  math and flash calibrations are fitted separately, because the residual the
+  slope stands in for does not shrink when attention stops writing its tile.
+- **A Wan render that repeats a prompt no longer re-encodes it.** The engine
+  keeps the ~4 MB prompt encoding it produced and reuses it when the prompt,
+  negative, CFG arm, encoder weights, device, and dtype all match, skipping both
+  the 11.37 GB UMT5-XXL load and the forward. That covers an auto-chained long
+  video, a re-roll, and a batch child; an authored sequence gives every stage
+  its own prompt and still pays one encoder load per stage. This caches the
+  encoder's output, not the encoder, which is still dropped after use.
+- **A chain stage that runs out of GPU memory now says so.** Chain stages
+  bypassed every piece of CUDA error handling ordinary generations have, and
+  surfaced a bare `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")` with
+  no shape advice, no device synchronize, and no reduced grant for the next
+  attempt. They now classify the failure exactly as `process_job` does.
+- **Chain stages no longer double-charge host memory on Metal.** The owner-work
+  candidate charged the plan's raw `predicted_host_increment_bytes` rather than
+  going through `admission_host_demand_bytes`, so on Metal the host claim was
+  counted both against the unified device gate and again on the host ledger.
+  It now uses the same accessor every generation path does. It deliberately does
+  NOT take the warm-resident credit: a matching execution fingerprint proves the
+  engine is warm, not its text encoder, and Wan drops UMT5 after every render.
+- **Cancelling a render no longer makes its shape look too big for the card.**
+  A stopped generation or chain stage was recorded as a memory *failure*, which
+  wrote the cancel-time VRAM high-water into that shape's estimate bucket; while
+  the bucket had no successful sample, every later attempt at the same shape was
+  then planned against that floor. Cancelling a slow sequence and re-queueing it
+  is exactly how a render the card can hold came back as "not enough memory".
+  Cancellations are now recorded as `invalidated` — an observation, not evidence.
+- **A chain stage blocked on GPU memory now gets an answer instead of hanging.**
+  An `InsufficientVram` from the plan resolver was silently discarded for owner
+  work, so a blocked stage contributed no candidates, reported no reason, never
+  asked mold's own idle model cache for the missing bytes, and was retried
+  forever — indistinguishable from a hang, with the earlier stages of the
+  sequence already rendered. Blocked owner work now records a typed memory
+  block, triggers the same idle-scheduler cache reclaim queued generations get,
+  and is bounded with the post-eviction numbers if the shortfall survives.
+- **A Wan VAE decode that runs out of memory now tiles instead of failing.**
+  Wan was the only family with no decode fallback at all — every other engine
+  goes through `vae_tiling`, while an exhausted Wan decode failed the render
+  after the whole denoise had already been paid for. The full decode is still
+  attempted first, and only an OOM falls back to a spatially tiled decode with
+  ComfyUI's own geometry: 256x256 pixel tiles, a quarter-tile overlap, and a
+  linearly ramped blend mask.
+- **The Wan DiT's RMS norms use candle's fused kernel, which is also the
+  faithful one.** The hand-rolled version kept F32 across the weight multiply;
+  upstream is `self._norm(x.float()).type_as(x) * self.weight`
+  (`Wan2.2/wan/modules/model.py:82`), which casts back to the compute dtype
+  first — exactly what `candle_nn::ops::rms_norm` does. It also stops
+  materializing four full-size F32 temporaries per norm, per block, per step
+  (~671 MB apiece at A14B over an 81-frame clip).
+- **Expanded model prompting and gallery examples.** The generated Mold agent
+  skill now includes family-specific prompting recipes, and the documentation
+  gallery includes new image and synchronized-audio video examples with mobile
+  video posters. LTX Video now has one generation-spanning model page led by
+  LTX-2.5 and LTX-2.3, with legacy 0.9.x guidance collected at the end.
+- **Fix Android QR pairing.** Cancelling the in-app scanner now releases the
+  camera immediately, and a successful QR scan completes the pairing claim,
+  secure credential save, and machine selection instead of stopping at the
+  camera view.
+- **Keep LTX audio controls visible on mobile.** LTX-2 and LTX-2.5 checkpoints now keep the Generate audio control and advanced video settings visible when checkpoint metadata or the active host recipe reports that audio cannot be delivered; the control is disabled with the available explanation instead of disappearing, while non-configurable audio families remain unchanged.
+- **Generation now reports what it is actually doing.** Desktop, web, mobile,
+  CLI, TUI, Discord, and activity views distinguish dependency preparation,
+  model loading, and generation instead of leaving active work labeled as
+  queued; large-model verification also publishes live byte progress and reuses
+  durable attestations after restart.
+- **Faster, image-only desktop library picker.** Choosing a source image from a large Library now renders only the visible rows, reuses the Library's persistent prioritized thumbnail cache, and excludes gallery rows whose metadata identifies them as video even when their stored filename looks like an image.
+- **Mobile queue scrolling.** Fixed action buttons briefly appearing during
+  vertical scrolling in Create and Machine Detail.
+- **One-shot image-to-video duration.** Fixed image-to-video models opening above their one-generation duration across web, desktop, iPhone, and Android.
+- **Documentation sync.** A verified audit against the code fixed 338 stale or wrong
+  statements across the website, README, CLI skill, desktop docs, and internal
+  architecture notes: broken example commands and model ids (`mold run --model`,
+  `sdxl:fp16`, `z-image:bf16`, `--negative`, `MOLD_DEFAULT_MODEL=ltx-2`,
+  `mold runpod generate`), PuLID qualification stated once (every FLUX and every
+  SDXL checkpoint except `sdxl-turbo:fp16`), HTTP API route tables regenerated from
+  the router, LTX-2 `max_frames` (481 at 24 fps), model download sizes and
+  per-checkpoint defaults, TUI keymaps, deployment notes, and superseded design
+  documents marked as such. `CLAUDE.md` is split into a lean root plus path-scoped
+  `.claude/rules/`, with a format-on-edit hook
+  ([#1470](https://github.com/utensils/mold/pull/1470)).
+- **Restore desktop queue actions after restart.** Selecting a row now loads its durable settings, Retry uses server-held authority, ownership remains recognizable, and right-click menus expose pause/resume, retry, cancel, and GPU placement actions.
+- **Desktop Create keeps queued work compact.** The Activity area now shows one
+  current print and collapses waiting siblings into a queue count, leaving the
+  detailed actionable queue in the Now developing rail and returning space to
+  the prompt composer.
+- **Newest queue work first.** Desktop, web, and mobile now show the latest submitted activity at the top while preserving sending order for simultaneous submissions.
+- **Desktop generation notifications open prints filed in hidden collections.**
+  Clicking a completed-print notification now navigates into the print's hidden
+  collection and opens the full viewer instead of landing on a Prints grid that
+  deliberately excludes it.
+- **Unavailable MiniMax reference controls no longer cover their file details.**
+  Ordered-reference cards now adapt to the Create inspector's actual width, so
+  Reattach, Crop, reorder, and remove controls sit below the unavailable-media
+  message instead of overlapping it.
+
 ## [0.26.0] - 2026-08-30
 
 - **LTX-2.5 sequences no longer reset to the opening image at every clip.** A
@@ -3490,7 +4236,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/utensils/mold/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/utensils/mold/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/utensils/mold/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/utensils/mold/compare/v0.23.3...v0.24.0
