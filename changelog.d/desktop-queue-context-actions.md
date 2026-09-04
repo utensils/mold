@@ -1,1 +1,0 @@
-- **Restore desktop queue actions after restart.** Selecting a row now loads its durable settings, Retry uses server-held authority, ownership remains recognizable, and right-click menus expose pause/resume, retry, cancel, and GPU placement actions.
