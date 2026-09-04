@@ -8,18 +8,20 @@ use std::time::Duration;
 use mold_core::types::GpuSelection;
 
 pub const DEFAULT_QUEUE_SIZE: usize = 200;
-/// How long the app waits for the embedded engine to stop before it tells
-/// the user gallery authority is stuck with the server.
-pub const ENGINE_STOP_BUDGET: Duration = Duration::from_secs(10);
+/// How long the app waits for the embedded engine to stop — on the explicit
+/// stop command and at app exit — before it tells the user gallery
+/// authority is stuck with the server. (Changing Mold home waits twice
+/// this: it is about to copy the whole root.)
+pub const ENGINE_STOP_BUDGET: Duration = Duration::from_secs(5);
 /// How long in-flight HTTP requests get once the engine is asked to stop.
 /// The webview is a client the app does not control — a paused video stops
 /// draining its socket, and graceful shutdown would wait on it forever — so
 /// the engine gives up on such requests after this and finishes stopping
 /// inside `ENGINE_STOP_BUDGET`, with room for the dozen steps after the
 /// drain and the runtime teardown.
-pub const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(3);
+pub const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const _: () = assert!(
-    HTTP_DRAIN_GRACE.as_millis() * 3 <= ENGINE_STOP_BUDGET.as_millis(),
+    HTTP_DRAIN_GRACE.as_millis() * 2 <= ENGINE_STOP_BUDGET.as_millis(),
     "the drain grace must leave the stop budget room for the rest of shutdown"
 );
 /// Port a user-run `mold serve` listens on by default.

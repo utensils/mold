@@ -1351,7 +1351,10 @@ pub async fn run_server(
     let fatal_cuda_deadline = fatal_cuda_error.clone();
     let (drain_started_tx, drain_started_rx) = tokio::sync::oneshot::channel::<()>();
     // A block, so the serve future — and with it the listener — is dropped
-    // before the shutdown steps below run, on every arm.
+    // before the shutdown steps below run, on every arm. (On the fatal-CUDA
+    // arm this is what that arm's own comment always described; the
+    // listener used to stay open, backlogging connects, until `run_server`
+    // returned.)
     {
         let server = std::future::IntoFuture::into_future(
             axum::serve(
@@ -1367,6 +1370,9 @@ pub async fn run_server(
         tokio::pin!(server);
         let drain_grace = http_drain_grace();
         tokio::select! {
+            // Biased: a drain that completes on the same tick its grace
+            // elapses is a completed drain, and its result is not swallowed.
+            biased;
             result = &mut server => result?,
             _ = drain_grace_elapsed(drain_started_rx, drain_grace) => {
                 // Graceful shutdown waits for every in-flight request, and a
@@ -1376,7 +1382,11 @@ pub async fn run_server(
                 // a stop with a budget it cannot enforce by ending the process,
                 // so the drain is bounded here. Dropping the serve future closes
                 // the listener; the connections themselves end with the runtime
-                // the host tears down once this returns.
+                // the host tears down once this returns. Until then a handler
+                // this arm abandoned may still be running against the
+                // subsystems the steps below tear down — `begin_runtime_shutdown`
+                // fenced scheduling before the drain began, and by definition
+                // that request is stuck, so the steps do not wait for it.
                 if let Some(grace) = drain_grace {
                     tracing::warn!(
                         ?grace,
@@ -1584,7 +1594,9 @@ static HTTP_DRAIN_GRACE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 /// standalone server bounds that with a deadline that ends the process; an
 /// embedded server cannot, so it gives in-flight requests `grace` after the
 /// shutdown signal and then stops waiting for them. Call once, before
-/// `run_server`, from the host that has a stop budget to keep.
+/// `run_server`, from the host that has a stop budget to keep. A zero grace
+/// is treated as one millisecond: zero is how "never set" is stored, and a
+/// host that calls this has asked for a bound.
 pub fn bound_http_drain(grace: std::time::Duration) {
     let millis = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX).max(1);
     HTTP_DRAIN_GRACE_MS.store(millis, std::sync::atomic::Ordering::SeqCst);

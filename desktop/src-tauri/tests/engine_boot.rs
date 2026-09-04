@@ -10,14 +10,16 @@ use tokio::io::AsyncWriteExt;
 
 const API_KEY: &str = "desktop-test-key";
 
-/// The app's own stop budget: `stop_local_engine` waits this long before it
-/// tells the user gallery authority is stuck with the server. Any shutdown
-/// that reaches it is already broken for users, not merely slow here.
-const APP_STOP_BUDGET: Duration = Duration::from_secs(10);
+/// Any shutdown that reaches the app's own stop budget is already broken for
+/// users, not merely slow here. Bounds below are this with headroom for a
+/// loaded runner; the timing line each test prints is what shows drift.
+const APP_STOP_BUDGET: Duration = server::ENGINE_STOP_BUDGET;
 
-/// The engine reads its environment while it boots, and this binary runs its
-/// tests on parallel threads, so each boot holds this while the variables
-/// are set and until the engine has read them.
+/// The engine reads its environment — DB path, output dir, API key — while
+/// it boots, and this binary runs its tests on parallel threads. Each test
+/// holds this for its whole body: two engines in one process, one of them
+/// live while the other's `set_var` runs, is a race this file exists to not
+/// have.
 static BOOT_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct BootedEngine {
@@ -25,6 +27,7 @@ struct BootedEngine {
     base: String,
     _models_dir: tempfile::TempDir,
     _state_dir: tempfile::TempDir,
+    _env: tokio::sync::MutexGuard<'static, ()>,
 }
 
 async fn boot() -> BootedEngine {
@@ -43,7 +46,7 @@ async fn boot() -> BootedEngine {
 
     let models_dir = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
-    let guard = BOOT_ENV.lock().await;
+    let env = BOOT_ENV.lock().await;
     // Isolate from the user's real database and gallery. The server waits for
     // its finite gallery observers during shutdown, so inheriting a populated
     // output directory makes this boot-contract test depend on runner state.
@@ -64,13 +67,13 @@ async fn boot() -> BootedEngine {
         server::wait_healthy(&base, Duration::from_secs(30)).await,
         "engine did not become healthy"
     );
-    drop(guard);
 
     BootedEngine {
         engine,
         base,
         _models_dir: models_dir,
         _state_dir: state_dir,
+        _env: env,
     }
 }
 
@@ -91,9 +94,8 @@ async fn shutdown_and_join(booted: &mut BootedEngine, bound: Duration) -> Durati
     drop(client);
 
     // Embedded shutdown has no process-ending deadline of its own (that would
-    // take the whole app down), so this bound is what catches a stalled
-    // phase. It is the app's own stop budget with headroom for a loaded
-    // runner: a shutdown anywhere near it is already broken for users.
+    // take the whole app down), so the caller's bound is what catches a
+    // stalled phase.
     let started = std::time::Instant::now();
     let exited = booted.engine.join(bound);
     let elapsed = started.elapsed();
@@ -160,8 +162,10 @@ async fn engine_boots_authenticates_and_shuts_down() {
     assert!(booted.engine.is_alive());
 
     // …and reported dead once the thread exits, so the connection state
-    // machine knows to restart instead of handing out a dead base URL.
-    shutdown_and_join(&mut booted, Duration::from_secs(60)).await;
+    // machine knows to restart instead of handing out a dead base URL. The
+    // bound is the app's budget with generous headroom: this shutdown takes
+    // tens of milliseconds, and a hang shows as the bound itself.
+    shutdown_and_join(&mut booted, APP_STOP_BUDGET * 12).await;
 }
 
 /// A client that stops reading — or, here, stops writing — must not be able
@@ -191,8 +195,15 @@ async fn a_client_that_stalls_cannot_hold_the_engine_open() {
         .await
         .unwrap();
     stalled.flush().await.unwrap();
+    // Let the server read the head and hand the request to its handler, so
+    // the connection is in flight — not merely accepted and idle, which
+    // graceful shutdown closes at once — before the stop is requested.
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let elapsed = shutdown_and_join(&mut booted, APP_STOP_BUDGET).await;
+    // Expected: the grace, then tens of milliseconds. The bound is twice the
+    // app's budget so a loaded runner cannot fail this on timing alone; a
+    // drain that is not bounded shows as the bound itself.
+    let elapsed = shutdown_and_join(&mut booted, APP_STOP_BUDGET * 2).await;
     assert!(
         elapsed >= server::HTTP_DRAIN_GRACE,
         "the stalled request was cut before its grace ({elapsed:.1?} < {:?})",

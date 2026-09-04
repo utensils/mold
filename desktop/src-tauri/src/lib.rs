@@ -252,7 +252,7 @@ pub fn run() {
                             .header("X-Api-Key", &key)
                             .timeout(std::time::Duration::from_secs(3))
                             .send();
-                        if !engine.join(std::time::Duration::from_secs(5)) {
+                        if !engine.join(server::ENGINE_STOP_BUDGET) {
                             tracing::warn!("embedded engine remained alive during app teardown");
                         }
                     });
