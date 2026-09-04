@@ -192,7 +192,7 @@ const errorExpanded = ref(false);
   color: var(--mold-error);
 }
 .ms-seqrow__state--ink {
-  color: var(--ink);
+  color: var(--mold-text);
 }
 .ms-seqrow__state--muted {
   color: var(--mold-text-dim);

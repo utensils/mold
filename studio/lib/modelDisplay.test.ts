@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   isCatalogModelId,
+  isOpaqueModelId,
   modelDisplayName,
   modelDisplayNameForId,
 } from "./modelDisplay";
+
+describe("isOpaqueModelId", () => {
+  it("hides only a Civitai install id beside a title", () => {
+    expect(isOpaqueModelId("cv:1759168")).toBe(true);
+    expect(isOpaqueModelId("hf:black-forest-labs/FLUX.1-dev")).toBe(false);
+    expect(isOpaqueModelId("flux-dev:q4")).toBe(false);
+  });
+});
 
 describe("isCatalogModelId", () => {
   it("recognizes only opaque catalog identifiers", () => {

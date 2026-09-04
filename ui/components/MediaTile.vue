@@ -70,7 +70,6 @@ watch(
   overflow: hidden;
   background: var(--mold-media-bed);
   cursor: pointer;
-  box-shadow: inset 0 1px 0 transparent;
   transition:
     transform var(--mold-dur-quick) var(--mold-ease-out),
     box-shadow var(--mold-dur-quick) var(--mold-ease-out);

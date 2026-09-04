@@ -213,7 +213,7 @@ function onDrop(event: DragEvent): void {
 .image-well {
   display: grid;
   gap: 7px;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .image-well__input {
   display: none;
@@ -255,7 +255,7 @@ function onDrop(event: DragEvent): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .image-well__preview {
   display: grid;
@@ -300,7 +300,7 @@ function onDrop(event: DragEvent): void {
   text-underline-offset: 2px;
 }
 .image-well__action:hover {
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .image-well__action:disabled {
   opacity: 0.5;
@@ -322,7 +322,7 @@ function onDrop(event: DragEvent): void {
 }
 .image-well--touch .image-well__action {
   min-height: var(--image-well-touch-target, 44px);
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
   font-family: var(--mold-font-mono);
   font-size: 14px;
   font-weight: 700;

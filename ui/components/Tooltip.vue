@@ -150,7 +150,7 @@ onBeforeUnmount(hide);
   border: 1px solid var(--mold-border-control);
   border-radius: var(--mold-radius-2, 8px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-  color: var(--ink);
+  color: var(--mold-text);
   font-size: 12px;
   line-height: 1.45;
   pointer-events: none;

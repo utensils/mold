@@ -8,7 +8,6 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import NavItem from "@ui/components/NavItem.vue";
-import Icon from "@ui/components/Icon.vue";
 import logoUrl from "../../assets/logo.png";
 import PanelResizeHandle from "./PanelResizeHandle.vue";
 import QueueRail from "./QueueRail.vue";
@@ -164,36 +163,35 @@ onBeforeUnmount(() => {
       Setup
     </div>
     <div class="flex flex-col gap-0.5" :class="collapsed ? 'mt-2' : ''">
-      <NavItem
-        v-for="d in SETUP"
-        :key="d.route"
-        :icon="d.icon"
-        :label="d.label"
-        :collapsed="collapsed"
-        :active="isActive(d.route)"
-        @select="router.push(d.route)"
-      >
-        <template #trailing>
-          <span
-            v-if="d.route === '/models' && downloading > 0"
-            data-test="styles-downloading"
-            class="text-warning"
-            >{{ downloading }}↓</span
-          >
-          <span
-            v-else-if="d.route === '/machines'"
-            data-test="machines-dot"
-            class="h-[7px] w-[7px] rounded-full"
-            :class="machinesErrored ? 'bg-error' : 'bg-success'"
-          />
-        </template>
-      </NavItem>
-      <span
-        v-if="collapsed && machinesErrored"
-        data-test="machines-error-dot"
-        class="pointer-events-none absolute right-2 h-2 w-2 rounded-full bg-error"
-        style="bottom: 0; transform: translateY(-46px)"
-      />
+      <div v-for="d in SETUP" :key="d.route" class="relative">
+        <span
+          v-if="collapsed && d.route === '/machines' && machinesErrored"
+          data-test="machines-error-dot"
+          class="pointer-events-none absolute top-1.5 right-1.5 z-10 h-2 w-2 rounded-full bg-error"
+        />
+        <NavItem
+          :icon="d.icon"
+          :label="d.label"
+          :collapsed="collapsed"
+          :active="isActive(d.route)"
+          @select="router.push(d.route)"
+        >
+          <template #trailing>
+            <span
+              v-if="d.route === '/models' && downloading > 0"
+              data-test="styles-downloading"
+              class="text-warning"
+              >{{ downloading }}↓</span
+            >
+            <span
+              v-else-if="d.route === '/machines'"
+              data-test="machines-dot"
+              class="h-[7px] w-[7px] rounded-full"
+              :class="machinesErrored ? 'bg-error' : 'bg-success'"
+            />
+          </template>
+        </NavItem>
+      </div>
     </div>
 
     <!-- target machine -->
@@ -244,7 +242,6 @@ onBeforeUnmount(() => {
         </template>
       </NavItem>
     </div>
-    <span v-if="collapsed" class="sr-only"><Icon name="settings" :size="1" /></span>
   </nav>
 </template>
 

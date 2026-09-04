@@ -1,10 +1,9 @@
 import { createRouter, createWebHistory } from "vue-router";
 
-// `meta.title` names the active workspace in the unified titlebar
-// ("Mold Studio — {title}"). The information architecture collapses to five
-// destinations — Create, Library, Models, Machines, Settings — with every
-// legacy path kept as a redirect so deep-links and a persisted last-route keep
-// resolving to their new home.
+// `meta.title` names the active destination in the unified titlebar. The
+// sidebar's destinations are New image, Queue, My images, Styles, and
+// Machines (⌘1–⌘5) plus Settings (⌘,), with every legacy path kept as a
+// redirect so deep-links and a persisted last-route keep resolving.
 export const router = createRouter({
   history: createWebHistory(),
   routes: [

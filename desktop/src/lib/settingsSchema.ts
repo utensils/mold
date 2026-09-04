@@ -481,6 +481,7 @@ export function sectionMatchesSearch(
   const q = query.trim().toLowerCase();
   if (!q) return true;
   if (section.label.toLowerCase().includes(q)) return true;
+  if (section.summary.toLowerCase().includes(q)) return true;
   if (section.keywords?.some((keyword) => keyword.includes(q))) return true;
   if (schemasForSection(section.id).some((schema) => matchesSearch(query, schema))) return true;
   if (section.id === "advanced" && advancedRowKeys.some((key) => key.toLowerCase().includes(q)))

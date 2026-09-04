@@ -6,7 +6,6 @@
  * not to watch pixels arrive; selecting a row brings it to the canvas.
  */
 import { computed } from "vue";
-import Icon from "@ui/components/Icon.vue";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import QueueRowMenu from "../components/shell/QueueRowMenu.vue";
 import { useQueueActivity, type QueueRow } from "../composables/useQueueActivity";
@@ -222,7 +221,6 @@ function previewSrc(row: QueueRow): string | null {
         </div>
       </div>
     </div>
-    <span class="sr-only"><Icon name="list" :size="1" /></span>
   </div>
 </template>
 

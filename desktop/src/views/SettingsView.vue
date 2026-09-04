@@ -6,7 +6,15 @@
  * a `?section=` deep link (the Library trash banner, the native Check for
  * Updates action) jumps to its section. Nothing here blocks first use (G7).
  */
-import { computed, nextTick, ref, watch, type ComponentPublicInstance } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+  type ComponentPublicInstance,
+} from "vue";
 import { useRoute } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
@@ -68,19 +76,51 @@ const visibleSections = computed(() =>
   ),
 );
 
-/** The nav's highlighted section: the last one jumped to. */
+/** The nav's highlighted section: the one at the top of the page, or the
+ * one last jumped to while that scroll is still settling. */
 const active = ref<SectionId>("app");
 const sectionEls = new Map<SectionId, HTMLElement>();
+const contentEl = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+let settling: ReturnType<typeof setTimeout> | null = null;
 
 function bindSection(id: SectionId, el: Element | ComponentPublicInstance | null) {
-  if (el instanceof HTMLElement) sectionEls.set(id, el);
-  else sectionEls.delete(id);
+  const previous = sectionEls.get(id);
+  if (previous && previous !== el) observer?.unobserve(previous);
+  if (el instanceof HTMLElement) {
+    sectionEls.set(id, el);
+    el.dataset.section = id;
+    observer?.observe(el);
+  } else sectionEls.delete(id);
 }
 
 function jump(id: SectionId) {
   active.value = id;
+  // A smooth scroll passes other sections on its way; hold the pick until it lands.
+  if (settling) clearTimeout(settling);
+  settling = setTimeout(() => (settling = null), 800);
   sectionEls.get(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+onMounted(() => {
+  if (typeof IntersectionObserver === "undefined") return;
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (settling) return;
+      const top = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      const id = (top?.target as HTMLElement | undefined)?.dataset.section as SectionId | undefined;
+      if (id && visibleSections.value.some((s) => s.id === id)) active.value = id;
+    },
+    { root: contentEl.value, rootMargin: "0px 0px -70% 0px" },
+  );
+  for (const el of sectionEls.values()) observer.observe(el);
+});
+onBeforeUnmount(() => {
+  observer?.disconnect();
+  if (settling) clearTimeout(settling);
+});
 
 const componentFor: Partial<Record<SectionId, unknown>> = {
   app: AppearanceCard,
@@ -156,7 +196,7 @@ watch(
       </button>
     </nav>
 
-    <div class="flex min-h-0 flex-1 flex-col gap-[18px] overflow-y-auto p-[18px]">
+    <div ref="contentEl" class="flex min-h-0 flex-1 flex-col gap-[18px] overflow-y-auto p-[18px]">
       <p v-if="config.available === false" class="text-micro text-fg-dim">
         This engine doesn't expose configuration — some sections below may be empty.
       </p>
@@ -182,7 +222,10 @@ watch(
                 data-test="license-host-select"
               >
                 <span class="text-fg-2">Machine</span>
-                <select v-model="licenseHostId" class="input">
+                <select
+                  v-model="licenseHostId"
+                  class="h-[26px] rounded-control border border-border bg-bg px-1.5 text-xs text-fg"
+                >
                   <option v-for="host in licenseHosts" :key="host.id" :value="host.id">
                     {{ host.label }}
                     {{ host.kind === "local" ? "(this device)" : `(${host.baseUrl})` }}

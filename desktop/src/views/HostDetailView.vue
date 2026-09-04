@@ -935,7 +935,7 @@ async function forget() {
               ><template v-if="scheduledWorkCount"> queued</template>
             </span>
           </div>
-          <div class="border border-border bg-panel px-3">
+          <div class="rounded-control border border-border bg-panel px-3">
             <HostQueuePanel
               :host="host"
               row-test-id="host-queue-row"

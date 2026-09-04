@@ -112,6 +112,19 @@ function closeConnectModal() {
   connectPromptHost.value = null;
 }
 
+// `?connect=1` (the palette's Connect a machine…) opens the dialog once and
+// leaves the address clean.
+watch(
+  () => route.query.connect,
+  (connect) => {
+    if (connect === undefined) return;
+    openConnectModal();
+    const { connect: _connect, ...rest } = route.query;
+    void router.replace({ path: route.path, query: rest });
+  },
+  { immediate: true },
+);
+
 function openDetail(host: HostView) {
   void router.push(`/machines/${host.id}`);
 }

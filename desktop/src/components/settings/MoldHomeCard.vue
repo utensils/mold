@@ -117,7 +117,7 @@ async function apply() {
           spellcheck="false"
           autocomplete="off"
           placeholder="/Volumes/External/Mold"
-          class="border-border font-mono h-9 min-w-0 flex-1 rounded-control border bg-bg-deep px-3 text-sm text-fg placeholder:text-fg-dim focus:border-sapphire focus:outline-none"
+          class="border-border font-mono h-9 min-w-0 flex-1 rounded-control border bg-bg-deep px-3 text-sm text-fg placeholder:text-fg-dim focus:border-border-focus focus:outline-none"
           :disabled="busy"
         />
         <button

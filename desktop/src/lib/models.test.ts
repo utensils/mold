@@ -5,7 +5,6 @@ import {
   modelDisplayName,
   modelDisplayNameForId,
   modelSizeLabels,
-  quantTag,
 } from "./models";
 import type { ModelEntry } from "./api/types";
 
@@ -31,19 +30,6 @@ function model(
     disk_usage_bytes: disk,
   };
 }
-
-describe("quantTag", () => {
-  it("returns the part after the colon, or null", () => {
-    expect(quantTag("flux-dev:q8")).toBe("q8");
-    expect(quantTag("sdxl:fp16")).toBe("fp16");
-    expect(quantTag("real-esrgan-x4plus")).toBeNull();
-  });
-
-  it("returns null for opaque catalog ids — cv:252914 has no quant variant", () => {
-    expect(quantTag("cv:252914")).toBeNull();
-    expect(quantTag("hf:org/repo")).toBeNull();
-  });
-});
 
 describe("groupInstalledModels", () => {
   const models = [

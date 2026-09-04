@@ -69,9 +69,10 @@ const ramTone = computed(() => {
       return "";
   }
 });
-const ramLine = computed(() =>
-  hostStatus.snapshot ? `ram ${formatGB(hostStatus.snapshot.system_ram.used)}` : null,
-);
+const ramLine = computed(() => {
+  const ram = hostStatus.snapshot?.system_ram;
+  return ram ? `ram ${formatGB(ram.used)}/${formatGB(ram.total)}` : null;
+});
 
 const downloading = computed(() => downloads.hostedInFlight.length);
 </script>

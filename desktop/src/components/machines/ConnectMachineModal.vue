@@ -191,11 +191,6 @@ async function connect() {
           <span v-if="selected?.url === host.url" class="font-mono text-micro text-accent">
             selected
           </span>
-          <span
-            v-else-if="initialHost"
-            class="font-mono text-micro text-fg-dim"
-            aria-hidden="true"
-          />
         </button>
         <button
           v-if="selected && !initialHost"

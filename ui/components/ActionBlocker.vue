@@ -79,7 +79,7 @@ const effectiveTitle = () =>
 }
 .ms-action-blocker__copy strong {
   flex: 0 0 auto;
-  color: var(--ink);
+  color: var(--mold-text);
   font-weight: 700;
 }
 .ms-action-blocker__copy span {

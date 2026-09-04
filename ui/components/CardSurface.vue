@@ -33,7 +33,6 @@ withDefaults(
   background: var(--mold-bg);
   border: 1px solid var(--mold-border);
   border-radius: var(--mold-radius-2);
-  box-shadow: inset 0 1px 0 transparent;
 }
 
 .ms-card--large {

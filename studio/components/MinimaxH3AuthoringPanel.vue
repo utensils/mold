@@ -592,7 +592,7 @@ function imagePreview(
   min-width: 0;
   max-width: 100%;
   gap: 12px;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .h3-authoring__header {
   display: flex;

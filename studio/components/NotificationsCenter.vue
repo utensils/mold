@@ -293,7 +293,7 @@ function timeLabel(entry: NotificationEntry): string {
 }
 
 .notifications-bell:hover {
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 
 .notifications-bell__badge {
@@ -334,7 +334,7 @@ function timeLabel(entry: NotificationEntry): string {
 }
 
 .notifications-panel > header button:hover {
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 
 .notifications-panel__empty {
@@ -406,7 +406,7 @@ function timeLabel(entry: NotificationEntry): string {
 .notifications-panel li:hover .notifications-panel__copy-action,
 .notifications-panel__copy-action:focus-visible {
   border-color: var(--mold-border-control, var(--mold-border, #d0d5dd));
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 
 .notifications-panel__copy p {

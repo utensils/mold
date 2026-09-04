@@ -199,7 +199,7 @@ defineExpose({ close });
   flex: 1;
   border: 0;
   background: var(--mold-surface, transparent);
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
   font-size: 14px;
 }
 .swipe-row__action--danger {

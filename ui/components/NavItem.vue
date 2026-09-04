@@ -71,7 +71,7 @@ const hasBadge = computed(
 }
 
 .ms-nav:focus-visible {
-  outline: var(--mold-bw) solid var(--mold-border-focus);
+  outline: 2px solid var(--mold-border-focus);
   outline-offset: 1px;
 }
 

@@ -2580,7 +2580,7 @@ onUnmounted(() => {
     <!-- Collections drill-in: crumb bar with Select + Edit. -->
     <div
       v-if="inCollections && gallery.collectionSlug"
-      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-border bg-scrim px-6"
+      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-6"
       data-test="collection-crumbs"
     >
       <button

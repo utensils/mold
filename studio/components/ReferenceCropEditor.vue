@@ -296,7 +296,7 @@ function apply(): void {
   display: grid;
   gap: 12px;
   min-width: 0;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .crop-editor__stage {
   position: relative;

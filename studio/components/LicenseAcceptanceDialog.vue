@@ -179,7 +179,7 @@ a {
   color: var(--mold-blue);
 }
 .license-error {
-  color: var(--danger);
+  color: var(--mold-error);
   font-size: 13px;
 }
 .license-progress {

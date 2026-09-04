@@ -88,11 +88,6 @@ export function isUtilityModel(m: ModelEntry): boolean {
 /** Quant tag = the part after the first colon (`flux-dev:q8` → `q8`).
  * Catalog ids (`cv:252914`) carry no quant variant — their colon is part
  * of the identifier, not a `base:tag` split. */
-export function quantTag(name: string): string | null {
-  if (isCatalogModelId(name)) return null;
-  const i = name.indexOf(":");
-  return i >= 0 ? name.slice(i + 1) : null;
-}
 
 export function modelDiskBytes(m: ModelEntry): number {
   return m.disk_usage_bytes ?? 0;

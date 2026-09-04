@@ -44,7 +44,7 @@
 
 /* Toolbar button (README §04): 26px, 1px border, sans 12px; hover lifts the
  * border to the focus colour. Modifiers: --on (accent fill), --accent
- * (accent ink, the acquisition verb), --danger (error ink at rest),
+ * (accent ink, the acquisition verb), the danger modifier (error ink at rest),
  * --danger-hover (error ink only when pointed at). */
 .ms-toolbar-button {
   display: inline-flex;
@@ -126,13 +126,6 @@
 
 .ms-fade-up {
   animation: ms-fade-up var(--mold-dur-slow) var(--mold-ease-out);
-}
-
-/* Keyboard focus changes the border colour to the accent — no glow. */
-.ms-focus,
-:where(.ms-kit) :focus-visible {
-  outline: var(--mold-bw) solid var(--mold-border-focus);
-  outline-offset: 1px;
 }
 
 @media (prefers-reduced-motion: reduce) {

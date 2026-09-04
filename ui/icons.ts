@@ -56,7 +56,6 @@ export const ICONS = {
   expand: '<path d="M15 3h6v6M9 21H3v-6"/><path d="M21 3l-7 7M3 21l7-7"/>',
   // Three dots: the row's "more" menu.
   more: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
-  bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/>',
   download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
   upload:
     '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/>',

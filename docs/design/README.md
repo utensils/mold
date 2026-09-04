@@ -62,7 +62,7 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).
 Anything that costs money is stated in money, in `--mold-state-cost`.
-`desktop/src/lib/lexicon.test.ts` pins the destination words on every door.
+`desktop/src/lib/lexicon.test.ts` pins the destination words on the router, the sidebar, the palette, and the native menu, and the inspector's seed labels.
 
 ## 3 · Shell anatomy
 

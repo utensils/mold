@@ -277,7 +277,7 @@ async function copyDetail(): Promise<void> {
   min-width: 0;
   flex: 1;
   margin: 0;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -335,7 +335,7 @@ async function copyDetail(): Promise<void> {
 }
 .qed__printtitle {
   margin: 0;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
   font-weight: 600;
 }
 .qed__legend {

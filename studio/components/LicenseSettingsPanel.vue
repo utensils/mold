@@ -209,7 +209,7 @@ a {
   text-transform: uppercase;
 }
 .license-settings__pending {
-  color: var(--danger);
+  color: var(--mold-error);
   font: 600 11px var(--mold-font-mono);
   text-transform: uppercase;
 }
@@ -223,7 +223,7 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: var(--danger);
+  color: var(--mold-error);
 }
 button {
   min-height: 44px;

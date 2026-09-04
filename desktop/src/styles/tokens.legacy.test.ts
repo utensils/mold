@@ -23,7 +23,7 @@ const BOUND = "(?<![\\w-])";
 const END = "(?![\\w-])";
 const LEGACY_PATTERNS = [
   new RegExp(
-    `${BOUND}--(desk|bath|bench|rebate|halide|safelight|stop|ink-2|ink-3|edge|ce|sel-[a-z]+|card-hi|grad|print|on-media|on-status|f-(display|body|mono)|radius-(control|control-sm|control-lg|card|card-lg|pill)|control-edge|empty-surface|dur-(quick|base|slow)|ease)${END}`,
+    `${BOUND}--(desk|bath|bench|rebate|halide|safelight|stop|ink|ink-2|ink-3|danger|edge|ce|sel-[a-z]+|card-hi|grad|print|on-media|on-status|f-(display|body|mono)|radius-(control|control-sm|control-lg|card|card-lg|pill)|control-edge|empty-surface|dur-(quick|base|slow)|ease)${END}`,
   ),
   new RegExp(
     `${BOUND}(bg|text|border|fill|stroke|ring|from|to|via|shadow|accent|caret|divide|placeholder)-(desk|bath|bench|rebate|halide|safelight|stop|ink|ink-2|ink-3|edge|ce|control-edge|print-surface|empty-surface|card-hi)${END}`,

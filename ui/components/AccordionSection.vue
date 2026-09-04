@@ -86,7 +86,6 @@ function onHeaderClick() {
     var(--mold-sapphire) 22%,
     var(--mold-border)
   );
-  box-shadow: inset 0 1px 0 transparent;
 }
 
 .ms-acc--info.ms-acc--open {

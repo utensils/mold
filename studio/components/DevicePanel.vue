@@ -425,7 +425,7 @@ onBeforeUnmount(() => {
 .device-panel {
   display: grid;
   gap: 12px;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .device-panel__head {
   display: flex;

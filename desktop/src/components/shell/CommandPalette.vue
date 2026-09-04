@@ -55,7 +55,6 @@ const toasts = useToastStore();
 const appPrefs = useAppPrefsStore();
 const inventoryKnown = useInventoryKnown();
 
-/** Mono section label for a result row, derived from its id prefix. */
 /** The mono group column (README §04): where a command belongs, in the lexicon. */
 function sectionLabel(id: string): string {
   if (id.startsWith("nav-")) return "go";
@@ -262,7 +261,7 @@ const staticCommands = computed<Command[]>(() => {
       id: "act-add-host",
       title: "Connect a machine…",
       keywords: ["add", "engine", "server", "host", "remote"],
-      run: () => go("/machines"),
+      run: () => go("/machines?connect=1"),
     },
     {
       id: "act-engine-restart",

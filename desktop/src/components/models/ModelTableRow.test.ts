@@ -15,10 +15,9 @@ function mountRow(props: Record<string, unknown> = {}, slots: Record<string, str
 }
 
 describe("ModelTableRow", () => {
-  it("renders name, source glyph, host chips, quant chip, and family code", () => {
+  it("renders name, source glyph, host chips, and family code", () => {
     const wrapper = mountRow({
       hostLabels: ["This Mac", "hal9000"],
-      quant: "q8",
       family: "flux",
     });
     expect(wrapper.get("[data-test='row-title']").text()).toBe("flux-dev:q8");
@@ -27,7 +26,6 @@ describe("ModelTableRow", () => {
       "This Mac",
       "hal9000",
     ]);
-    expect(wrapper.text()).toContain("q8");
     // The chip shows the family's name, not its wire slug (#806).
     expect(wrapper.get("[data-test='row-family']").text()).toBe("FLUX");
   });

@@ -18,8 +18,8 @@ import type { ModelSource } from "../../lib/modelSource";
  *
  * Purely presentational: parents own data fetching, size resolution, and
  * actions (the `#actions` slot). README §04 table row, left to right:
- * residency star · source glyph · name stacked over its mono id, quant,
- * and family · machines (dot + mono name) · page link · `#meta` · a plain
+ * residency star · source glyph · name stacked over its mono id and
+ * family · machines (dot + mono name) · page link · `#meta` · a plain
  * one-line note · relative footprint + two-line size block · `#actions`.
  */
 const props = withDefaults(
@@ -31,7 +31,6 @@ const props = withDefaults(
     /** GPU residency star: true = warm, false = cold placeholder, omit = no column. */
     loaded?: boolean | undefined;
     hostLabels?: string[];
-    quant?: string | null;
     family?: string | null;
     /** External model page; renders the link-out icon when present. */
     pageUrl?: string | null;
@@ -56,7 +55,6 @@ const props = withDefaults(
     id: null,
     loaded: undefined,
     hostLabels: () => [],
-    quant: null,
     family: null,
     pageUrl: null,
     note: null,
@@ -156,11 +154,10 @@ function onRowKeydown(event: KeyboardEvent): void {
           {{ name }}
         </span>
         <span
-          v-if="showId || quant || familyChip"
+          v-if="showId || familyChip"
           class="flex min-w-0 items-center gap-1.5 font-mono text-micro text-fg-dim"
         >
           <span v-if="showId" class="truncate" data-test="row-id">{{ id }}</span>
-          <span v-if="quant" class="shrink-0 text-fg-2">{{ quant }}</span>
           <span v-if="familyChip" class="shrink-0 whitespace-nowrap" data-test="row-family">{{
             familyChip
           }}</span>

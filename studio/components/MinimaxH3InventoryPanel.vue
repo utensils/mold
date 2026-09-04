@@ -209,7 +209,7 @@ function percentage(done: number, total: number): number {
 <style scoped>
 .h3-inventory {
   margin: 16px 0;
-  color: var(--color-ink, var(--ink, currentColor));
+  color: var(--mold-text);
 }
 
 .h3-inventory__header,

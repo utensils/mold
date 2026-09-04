@@ -555,7 +555,7 @@ describe("StatusBar", () => {
     expect(wrapper.get("[data-test='status-machine']").text()).toBe(PLATFORM_UI.deviceLabel);
     expect(wrapper.get("[data-test='status-queue']").text()).toBe("nothing waiting");
     expect(wrapper.get("[data-test='status-vram']").text()).toBe("vram 32.8 GB / 196.6 GB");
-    expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 64.0 GB");
+    expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 64.0 GB/196.6 GB");
   });
 
   it("names an offline machine beside a stopped dot", async () => {

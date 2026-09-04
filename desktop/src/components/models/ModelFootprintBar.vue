@@ -52,7 +52,6 @@ const explanation = computed(() => {
   width: 100%;
   height: 6px;
   overflow: hidden;
-  border-radius: 999px;
   background: var(--mold-bg-deep);
 }
 

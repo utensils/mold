@@ -58,7 +58,10 @@ function addRunPodHost(hosts: ReturnType<typeof useHostsStore>) {
   });
 }
 
-async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => void) {
+async function mountView(
+  setup?: (hosts: ReturnType<typeof useHostsStore>) => void,
+  path = "/machines",
+) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -74,7 +77,7 @@ async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => vo
       },
     ],
   });
-  router.push("/machines");
+  router.push(path);
   await router.isReady();
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -456,6 +459,12 @@ describe("MachinesView overview", () => {
     expect(text).not.toContain("halcyon-7680");
     expect(text).toContain("halcyon-7681");
     expect(text).toContain("clone-7680");
+  });
+
+  it("opens the connect-a-machine dialog from the palette's ?connect=1 and cleans the address", async () => {
+    const wrapper = await mountView(undefined, "/machines?connect=1");
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(true);
+    expect(router.currentRoute.value.query.connect).toBeUndefined();
   });
 
   it("opens the connect-a-machine modal from Add machine", async () => {

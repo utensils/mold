@@ -79,6 +79,17 @@ describe("Settings sections", () => {
     }
   });
 
+  it("finds a section by a word that appears only in its summary sentence", () => {
+    const look = SECTIONS.find((section) => section.id === "app")!;
+    expect(sectionMatchesSearch("interface size", look)).toBe(true);
+    expect(
+      sectionMatchesSearch(
+        "interface size",
+        SECTIONS.find((s) => s.id === "media")!,
+      ),
+    ).toBe(false);
+  });
+
   it("finds the saved-media section using the user's save-location language", () => {
     const media = SECTIONS.find((section) => section.id === "media")!;
     expect(sectionMatchesSearch("save location", media)).toBe(true);

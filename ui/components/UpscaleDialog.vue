@@ -290,7 +290,7 @@ h2 {
   max-width: 100%;
   margin: 14px 0 0;
   overflow-wrap: anywhere;
-  color: var(--danger, #ff7f72);
+  color: var(--mold-error);
   font-size: 13px;
 }
 .upscale-dialog__copy {
