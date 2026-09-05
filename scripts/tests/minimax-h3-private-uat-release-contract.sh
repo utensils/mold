@@ -500,8 +500,8 @@ if grep -Fq 'Device::new_cuda' <<<"$prepare_source"; then
 fi
 reviewed_line=$(first_line_of 'prepared reviewed-record gate' \
   'private_runtime_qualification_source(' <<<"$prepare_source")
-artifact_line=$(first_line_of 'prepared artifact qualification' \
-  'qualify_private_artifacts_with_control' <<<"$prepare_source")
+artifact_line=$(first_line_of 'prepared installed artifact resolution' \
+  'resolve_installed_artifacts_with_control' <<<"$prepare_source")
 if ((reviewed_line >= artifact_line)); then
   fail "private H3 reviewed-record hash gate no longer precedes bulk artifact qualification"
 fi
@@ -514,7 +514,7 @@ fi
 admission_reviewed_line=$(first_line_of 'admission reviewed-record gate' \
   'private_runtime_qualification_source(' <<<"$admission_source")
 admission_artifact_line=$(first_line_of 'admission artifact qualification' \
-  'qualify_private_artifacts_with_control' <<<"$admission_source")
+  'resolve_installed_artifacts_with_control' <<<"$admission_source")
 if ((admission_reviewed_line >= admission_artifact_line)); then
   fail "private H3 admission no longer checks reviewed evidence before bulk artifact I/O"
 fi

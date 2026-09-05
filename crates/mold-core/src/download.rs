@@ -4586,7 +4586,7 @@ mod tests {
 
     #[test]
     fn installed_identity_survives_cold_child_process_without_hashing() {
-        const KEY: &str = "MOLD_TEST_INSTALLED_ARTIFACT_CHILD";
+        const KEY: &str = "TEST_INSTALLED_ARTIFACT_CHILD";
         if let Some(path) = std::env::var_os(KEY) {
             let path = PathBuf::from(path);
             assert_eq!(pinned_digest_hash_count(), 0);

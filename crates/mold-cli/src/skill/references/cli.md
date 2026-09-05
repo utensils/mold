@@ -178,3 +178,5 @@ is simulated until hardware-qualified.
 administer its system-wide limit; never run the server as root. Use
 `mold gpu list --json` for the inference host's effective capacity and headroom.
 Zero means automatic; increases may require restarting an idle inference process.
+
+Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.

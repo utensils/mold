@@ -7505,7 +7505,7 @@ mod tests {
 
         // Isolate global work counters from unrelated acquisition tests, and
         // execute twice to exercise re-preparation in fresh server processes.
-        const CHILD: &str = "MOLD_TEST_ZERO_HASH_PREPARATION";
+        const CHILD: &str = "TEST_ZERO_HASH_PREPARATION";
         if std::env::var_os(CHILD).is_none() {
             let state = TempDir::new().unwrap();
             for _ in 0..2 {

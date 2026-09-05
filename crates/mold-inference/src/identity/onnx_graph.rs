@@ -264,7 +264,8 @@ pub(crate) fn load_installed_onnx_model(
     path: &Path,
     pin: Option<PinnedArtifact>,
 ) -> Result<LoadedOnnxModel> {
-    let mut file = open_regular_file_no_follow(path)?;
+    let mut file = open_regular_file_no_follow(path)
+        .with_context(|| format!("failed to open the ONNX model at {}", path.display()))?;
     let before = mold_core::download::installed_artifact_identity_from_file(path, &file)?;
     let loaded = LoadedBytes::read_bounded_with_policy(
         &mut file,
@@ -277,7 +278,8 @@ pub(crate) fn load_installed_onnx_model(
         mold_core::download::installed_artifact_identity_from_file(path, &file)? == before,
         "installed ONNX changed while loading"
     );
-    let mut model = ModelProto::decode(loaded.bytes())?;
+    let mut model = ModelProto::decode(loaded.bytes())
+        .with_context(|| format!("failed to decode the ONNX model at {}", path.display()))?;
     normalize_empty_optional_resize_inputs(&mut model);
     Ok(LoadedOnnxModel {
         model,
@@ -286,22 +288,8 @@ pub(crate) fn load_installed_onnx_model(
     })
 }
 
-/// One read of a retained descriptor, with the digest of exactly those bytes.
-///
-/// This type exists to make a specific bug unrepresentable. The obvious
-/// loader — hash the descriptor, then read it — performs **two** reads, and on
-/// shared storage an in-place write landing between them pairs an
-/// authenticated digest with unauthenticated bytes: the check passes and
-/// different bytes execute. Reading twice is not a slow version of reading
-/// once; it is a different, wrong operation.
-///
-/// So there is no constructor that takes a digest, none that takes bytes, and
-/// no accessor that yields one without the other having come from the same
-/// [`read_once`](Self::read_once) call. A caller cannot hold a digest for one
-/// read and a buffer from another, because it can never obtain them
-/// separately. `mold_core::secure_file::sha256_open_file` is deliberately
-/// unused here for the same reason — it takes a `&File` and hashes it, which
-/// necessarily leaves the bytes to be fetched by a second read.
+/// One bounded private read of a retained descriptor. Explicit verification
+/// hashes this exact buffer; installed loading leaves the observed digest empty.
 #[derive(Debug)]
 struct LoadedBytes {
     bytes: Vec<u8>,

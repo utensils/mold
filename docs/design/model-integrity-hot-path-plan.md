@@ -1,7 +1,7 @@
 # Download-only model verification implementation plan
 
-Status: peer-reviewed and ready for implementation; review findings addressed.
-No runtime changes yet.
+Status: implementation, independent source review and local validation complete.
+Results and full-suite limitations are recorded in `model-integrity-hot-path-validation.md`.
 
 Branch: `fix/model-integrity-hot-path`. Deliver all changes in one PR; do not
 open the PR until requested. Use conventional commits. Baseline:
@@ -257,21 +257,23 @@ older binaries reprepare or reject unsupported plan versions clearly.
 
 ## 8. Documentation and delivery checklist
 
-- [ ] Contract tests fail for current runtime hashing.
-- [ ] Core acquisition/runtime APIs separated.
-- [ ] Local identity and replay/equivalence semantics implemented and tested.
-- [ ] Queue/dependencies, public H3, ONNX and derived loaders migrated.
-- [ ] Runtime hashing inventory has no unclassified model-body callers.
-- [ ] Observability and truthful progress labels updated across shared clients.
-- [ ] Docs updated: relevant model/storage and queue rules, H3/identity rules,
+- [x] Contract tests fail for the previous runtime hashing behavior.
+- [x] Core acquisition/runtime APIs separated.
+- [x] Local identity and equivalence semantics implemented; fresh-process preparation tested.
+- [x] Queue/dependencies, public H3, ONNX and derived loaders migrated.
+- [x] Runtime hashing inventory has no unclassified model-body callers.
+- [x] Observability and truthful progress labels updated across shared clients.
+- [x] Docs updated: relevant model/storage and queue rules, H3/identity rules,
   README, website configuration/model guides, CLI skill renderer and owning app
   docs where behavior is described; no divergent generated skill copies.
-- [ ] One `changelog.d/model-integrity-hot-path.md` fragment; no manual version
+- [x] One `changelog.d/model-integrity-hot-path.md` fragment; no manual version
   bumps or edits to CHANGELOG's Unreleased section.
-- [ ] Required checks and server benchmark evidence recorded.
-- [ ] Independent final implementation review; address valid findings.
-- [ ] All work stays on `fix/model-integrity-hot-path`; one eventual PR.
-- [ ] Do not open PR, merge, deploy or restart production until requested.
+- [x] Local checks and server artifact-resolution benchmark recorded, including
+  the non-green full server suite and end-to-end timing limitations.
+- [x] Independent final implementation review; valid findings addressed.
+- [x] All work stays on `fix/model-integrity-hot-path`; one eventual PR.
+- [x] PR opening authorized by the user after implementation; the user will
+  monitor CI. Do not merge, deploy or restart production.
 
 Peer review of this plan is recorded separately in
 `docs/design/model-integrity-hot-path-plan-review.md`; amend this plan for valid

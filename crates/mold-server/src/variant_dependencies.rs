@@ -259,6 +259,17 @@ pub(crate) async fn ensure_downloaded(
     } else {
         mold_core::download::cached_file_path_in(models_root, repo, filename, Some(subdir))
     };
+    // HF's published snapshots intentionally point to regular blobs. Only
+    // normalize results from those cache locations; clean-path symlinks retain
+    // the normal no-follow policy.
+    let clean = mold_core::download::planned_single_file_path_in(models_root, filename, subdir);
+    let cached = cached.and_then(|path| {
+        if path == clean {
+            Some(path)
+        } else {
+            path.canonicalize().ok()
+        }
+    });
     if let Some(path) = cached {
         // Hold the flight registry across the cheap completeness check: a
         // concurrent creator cannot publish unverified bytes between checks.
@@ -3350,7 +3361,7 @@ mod tests {
             "shared/pin-test",
         );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, TAMPERED_CONTENT).unwrap();
+        std::fs::write(&path, vec![b'x'; PINNED_CONTENT.len()]).unwrap();
         for policy in [
             DependencyMaterializationPolicy::ExistingOnly,
             DependencyMaterializationPolicy::Admission,
@@ -3380,6 +3391,50 @@ mod tests {
         .unwrap();
         assert!(matches!(resolved, ResolvedDependency::Pending(_)));
         assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_hf_snapshot_dependencies_reuse_regular_blobs() {
+        let root = TempDir::new().unwrap();
+        let repo = unique_test_repo("legacy-snapshot");
+        let cache = root
+            .path()
+            .join(".hf-cache")
+            .join(format!("models--{repo}"));
+        let blob = cache.join("blobs/content");
+        let snapshot = cache.join("snapshots/abc123/pinned.safetensors");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(&blob, vec![b'x'; PINNED_CONTENT.len()]).unwrap();
+        std::fs::write(cache.join("refs/main"), "abc123").unwrap();
+        std::os::unix::fs::symlink("../../blobs/content", &snapshot).unwrap();
+        let _adapter = install_test_download_adapter(
+            &repo,
+            Arc::new(|_, _, _, _| panic!("complete legacy dependency must never acquire or hash")),
+        );
+        for policy in [
+            DependencyMaterializationPolicy::ExistingOnly,
+            DependencyMaterializationPolicy::Admission,
+        ] {
+            let result = ensure_downloaded(
+                None,
+                "legacy",
+                pinned_spec(root.path(), &repo, PINNED_CONTENT_SHA256),
+                None,
+                policy,
+            )
+            .await
+            .unwrap();
+            match result {
+                ResolvedDependency::Available(path) => {
+                    assert_eq!(path, blob.canonicalize().unwrap())
+                }
+                _ => panic!("legacy snapshot was treated as missing"),
+            }
+        }
+        assert!(!mold_core::download::has_sha256_marker(&blob));
     }
 
     #[tokio::test]
