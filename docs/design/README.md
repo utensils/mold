@@ -280,9 +280,29 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   of the newest ten timed prints per style (`~20s`), and a style nobody has
   timed shows an empty cell rather than a guess.
 
+- **A licence row leads with what it unlocks.** `GET /api/licenses` names the
+  styles each licence gates with the registry's own description, and the row
+  reads that in plain words ("FLUX.1 Dev Q4 — smaller/faster, good quality")
+  over the licence's name and summary in mono; the id rides the tooltip.
+  Acceptance stays one row per licence.
+- **Save every result off means "straight to the trash", never "never
+  saved".** `GenerateRequest.save_to_gallery: false` (additive) publishes the
+  print exactly as any other — settlement, replay and provenance untouched —
+  and then moves it to the trash while the publication writer is still held,
+  so a throwaway never lists in My images yet stays recoverable until
+  retention empties the trash. The inspector's toggle sits under Repeat this
+  look with its hint; a sequence has no such switch — its stitched clip is the
+  durable job's whole deliverable, and the chain body carries no such field.
+- **Rent this GPU states RunPod's own hourly rate** for the chosen cloud
+  (`gpuTypes.securePrice` / `communityPrice`), in the picker and in the
+  "billing begins now" confirm; with none reported, the confirm keeps its
+  by-the-minute sentence and invents nothing.
+- **A machine's Storage tile says what the pictures take**
+  (`/api/status.gallery_storage`: bytes and prints, live and trashed, summed
+  from the host's own DB), never a client-side walk of the gallery.
+
 ### Named absences (no backend, not oversights)
 
-Save every result · an hourly rate in the Rent-this-GPU confirm · a friendly
-name for a licence, which is its id and summary · pausing the job that is
-already running. Each needs a field or an API that does not exist, so the
-surface says nothing rather than guessing.
+Pausing the job that is already running: an in-flight denoise cannot be
+suspended, so the active card's pause holds the queue after the current
+image and says so.

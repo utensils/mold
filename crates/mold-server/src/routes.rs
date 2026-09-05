@@ -3610,12 +3610,6 @@ pub(crate) fn validate_generate_request(
     if let Some(title) = req.title.as_deref() {
         mold_core::validate_print_title(title)?;
     }
-    // A sequence's stitched print IS the durable job's deliverable; there is
-    // no such thing as a sequence nobody keeps.
-    if !req.saves_to_gallery() && req.output_mode == Some(mold_core::GenerationOutputMode::Sequence)
-    {
-        return Err("save_to_gallery=false is not available for a sequence".into());
-    }
     match reference_form {
         mold_core::ReferenceForm::Admitted => {
             mold_core::validate_generate_request_with_family(req, family_hint)

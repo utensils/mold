@@ -1867,6 +1867,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,

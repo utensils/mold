@@ -1717,6 +1717,7 @@ pub(crate) fn build_request(
         control_model: params.control_model.clone(),
         control_scale: params.control_scale,
         expand: if params.expand { Some(true) } else { None },
+        save_to_gallery: None,
         original_prompt: params.original_prompt.clone(),
         prompt_transform: params.prompt_transform.clone(),
         batch_id: params.batch_id.clone(),

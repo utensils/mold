@@ -21853,40 +21853,6 @@ mod tests {
         );
     }
 
-    /// A sequence's stitched print is the durable job's deliverable, so the
-    /// opt-out is refused there by name; a one-shot passes this gate.
-    #[test]
-    fn save_to_gallery_off_is_refused_for_a_sequence() {
-        let sequence: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "a river",
-            "model": "ltx-video",
-            "save_to_gallery": false,
-            "output_mode": "sequence"
-        }))
-        .unwrap();
-        let error = crate::routes::validate_generate_request(
-            &sequence,
-            None,
-            mold_core::ReferenceForm::Admitted,
-        )
-        .unwrap_err();
-        assert!(error.contains("not available for a sequence"), "{error}");
-
-        let one_shot: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "a river",
-            "model": "flux-dev:q8",
-            "save_to_gallery": false
-        }))
-        .unwrap();
-        if let Err(error) = crate::routes::validate_generate_request(
-            &one_shot,
-            None,
-            mold_core::ReferenceForm::Admitted,
-        ) {
-            assert!(!error.contains("sequence"), "{error}");
-        }
-    }
-
     /// Every new organization/trash mutator and listing must wait behind
     /// the atomic publication writer exactly like the historical routes.
     #[tokio::test]

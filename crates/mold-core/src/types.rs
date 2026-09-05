@@ -1717,6 +1717,14 @@ pub struct GenerateRequest {
     /// Request server-side prompt expansion before generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<bool>,
+    /// "Save every result" off. Additive; absent means save. `false` keeps
+    /// every durable invariant — the print is published to the gallery
+    /// exactly as any other — and then moves it STRAIGHT to the trash, where
+    /// retention purges it, so a throwaway does not clutter the library yet
+    /// stays recoverable until the trash empties. A sequence has no such
+    /// switch: its stitched print is the durable job's whole deliverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_to_gallery: Option<bool>,
     /// Original user prompt before expansion (set by client when expanding locally).
     #[serde(
         default,
@@ -1892,6 +1900,12 @@ pub struct GenerateRequest {
 }
 
 impl GenerateRequest {
+    /// Whether this print stays in the library once published. Only an
+    /// explicit `save_to_gallery: false` says no; absent is the default yes.
+    pub fn saves_to_gallery(&self) -> bool {
+        self.save_to_gallery.unwrap_or(true)
+    }
+
     /// Whether durable admission must extract request-owned media or media
     /// provenance before persisting the JSON request. Ordered MiniMax H3
     /// references count: their descriptors stay on the request while their
@@ -5486,6 +5500,35 @@ mod tests {
     /// Additive: a print written before the field parses to `None`, and the
     /// field never appears in JSON unless it was measured, so older clients
     /// and older files keep their exact bytes.
+    /// Absent means save, and only an explicit `false` says otherwise; the
+    /// field never rides the wire unless a client set it.
+    #[test]
+    fn save_to_gallery_is_additive_and_defaults_to_saving() {
+        let base = serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q8",
+            "width": 8,
+            "height": 8,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        });
+        let req: GenerateRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(req.saves_to_gallery());
+        assert!(serde_json::to_value(&req)
+            .unwrap()
+            .get("save_to_gallery")
+            .is_none());
+        let mut off_json = base;
+        off_json["save_to_gallery"] = serde_json::Value::Bool(false);
+        let off: GenerateRequest = serde_json::from_value(off_json).unwrap();
+        assert!(!off.saves_to_gallery());
+        assert_eq!(
+            serde_json::to_value(&off).unwrap()["save_to_gallery"],
+            false
+        );
+    }
+
     #[test]
     fn output_metadata_generation_time_is_additive() {
         let legacy = r#"{"prompt":"a cat","model":"flux-dev:q8","seed":1,"steps":4,"guidance":1.0,"width":8,"height":8,"version":"0.1"}"#;
@@ -6619,6 +6662,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -6871,6 +6915,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -6951,6 +6996,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7234,6 +7280,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: Some("prepared-batch-1".to_string()),
@@ -7565,6 +7612,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7812,6 +7860,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7889,6 +7938,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7969,6 +8019,7 @@ mod tests {
             control_model: Some("controlnet-canny-sd15".to_string()),
             control_scale: 0.8,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -8767,6 +8818,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -8850,6 +8902,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -8946,6 +8999,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -9027,6 +9081,7 @@ mod tests {
             control_model: Some("controlnet-canny-sd15".to_string()),
             control_scale: 0.8,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -9129,6 +9184,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,

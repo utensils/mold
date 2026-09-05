@@ -1345,6 +1345,7 @@ pub async fn run(
                         control_model: None,
                         control_scale: 1.0,
                         expand: None,
+                        save_to_gallery: None,
                         original_prompt: None,
                         prompt_transform: None,
                         batch_id: None,
@@ -1564,6 +1565,7 @@ pub async fn run(
         id_start_step: identity.id_start_step,
         true_cfg: identity.true_cfg,
         cfg_start_step: identity.cfg_start_step,
+        save_to_gallery: None,
     };
     // A continuation that named no overlap renders with its family's own
     // carryover, and the metadata `record_local_save` builds resolves the

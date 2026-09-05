@@ -878,6 +878,7 @@ impl ChainRequest {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: self.original_prompt.clone(),
             prompt_transform: self.prompt_transform.clone(),
             batch_id: self.batch_id.clone(),

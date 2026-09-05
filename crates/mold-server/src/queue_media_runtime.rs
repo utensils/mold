@@ -166,6 +166,15 @@ impl<'a> AttemptQueueMediaRequest<'a> {
         matches!(self, Self::Hydrated(_))
     }
 
+    /// "Save every result" for this attempt, read from whichever request
+    /// shape the attempt holds.
+    pub fn saves_to_gallery(&self) -> bool {
+        match self {
+            Self::Plain(request) => request.saves_to_gallery(),
+            Self::Hydrated(request) => request.request.saves_to_gallery(),
+        }
+    }
+
     pub fn zeroizing_clone(&self) -> ZeroizingGenerateRequest {
         match self {
             Self::Plain(request) => ZeroizingGenerateRequest {

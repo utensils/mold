@@ -2575,6 +2575,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if let Some(ref dir) = job.output_dir {
                 let _gallery_writer = state.gallery_publication_gate.write().await;
                 let dir = dir.clone();
+                let trash_dir = dir.clone();
                 let model = request.model.clone();
                 let batch_size = request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
@@ -2673,7 +2674,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 // "Save every result" off — the same publish-then-trash the
                 // GPU worker performs, on the single-worker path.
                 if !request.saves_to_gallery() {
-                    let dir = dir.clone();
+                    let dir = trash_dir;
                     let names = saved_names.clone();
                     let db = state.metadata_db.clone();
                     let gate = state.gallery_publication_gate.clone();
@@ -4864,6 +4865,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
