@@ -153,8 +153,9 @@ the phone keep Create / Library / Models until their own redesign.
   starting points plus **Use these settings** restore recorded overrides.
 - **Short clip** (inside New image): video is a setting, not a place. Switch
   the view toolbar's control to **Short clip** (File → New Clip and the ⌘K
-  palette's **Make a short clip** land there too) and a second control appears
-  beside it: **Simple | Scenes**.
+  palette's **Make a short clip** land there too) and a strip appears under the
+  toolbar: **Simple | Scenes**, with one sentence saying what the chosen way
+  does. It has a row of its own so the toolbar's control never moves.
 
   **Simple** is where Short clip opens, and it is the plain render — describe
   the clip, pick a clip style, drag the **Length** chip on the composer, press
@@ -601,7 +602,9 @@ wire types as the CLI and web UI:
   object** — names that section above the list, marks each
   style's source (Hugging Face / Civitai / local) and ends in **Browse more
   →**, which opens Styles already filtered to the same kind, ready-to-use
-  styles first;
+  styles first; each section remembers the style it was last used with, so
+  switching back to Short clip returns to the clip style you were on and the
+  app reopens on the style and section you left;
   the VRAM badge states plainly what fits ("VRAM · fits) est. 2.3 GB of
   64.0 GB").
 - **Upscaling**: pick a Real-ESRGAN model in Advanced ▸ Upscale to upscale every

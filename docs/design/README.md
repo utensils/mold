@@ -112,14 +112,36 @@ Decisions worth keeping:
   in the clip section, disabled with the reason on the row.
 - **A clip is made the simple way unless the person asks for scenes.** Short
   clip opens onto **Simple**: a prompt, a clip style, a Length slider on the
-  composer, Generate. **Scenes** is the second segment on the same toolbar and
-  is what raises the timeline. The choice is remembered with the draft, so
+  composer, Generate. **Simple | Scenes** is a strip of its own UNDER the view
+  toolbar (the chip row's chrome), present only while the kind is a clip, with
+  one plain sentence beside it saying what the chosen way does — "One prompt,
+  one clip." / "Scene by scene, joined into one clip." — and **Scenes** is
+  what raises the timeline. It is not a second control on the toolbar: beside
+  the kind control it pushed the whole right-hand cluster left whenever Short
+  clip was chosen, so the toolbar holds the same children in every kind and
+  nothing on it ever moves. The choice is remembered with the draft, so
   Short clip opens where it was left; switching either way destroys nothing —
   going to Scenes seeds scene 1 from the words and the length already written,
   coming back parks the scenes exactly as they are, and the timeline's own
   Clear the clip stays the only eraser. Simple keeps the ordinary one-shot
   output, so Make is a real batch count there and is hidden outright in Scenes,
   where a chain has no batch.
+- **The three kinds have three names, used everywhere a kind is chosen or
+  filtered.** Still picture · Short clip · 3-D object are the Create toolbar's
+  words AND the Styles view's kind filter (All · Still picture · Short clip ·
+  3-D object), from one label table, so a person learns the mapping once: what
+  you pick in Create is what you filter by in Styles. The filter sorts by the
+  same partition the sections do, and Browse more from every section — 3-D
+  included — lands on it already filtered.
+- **Each section remembers the style it was last used with, across a
+  restart.** Still picture, Short clip and 3-D object each keep their own
+  last-used style (`studio/stores/lastUsedStyles.ts`, localStorage like the
+  draft): a section door opens onto the style the person was using there, and
+  a fresh launch opens on the style — and so the section — they left, once the
+  machine that has it has reported in. Names are remembered, never
+  availability: a machine that lacks the style gets the section's first, and
+  the name survives for the machine that has it. Desktop reads it today; web
+  and the phone adopt the same store with their redesigns.
 - **The view title names what is being made.** On New image the mono title
   follows the output kind — New image · New clip · New 3-D object — and the
   subtitle is the queue count alone. The sidebar's destination stays New image.
@@ -227,10 +249,12 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   the one-shot prompt, and in clip mode the field holds the selected scene's
   words. Rewriting a scene is a different feature, so the control stands down
   rather than silently retargeting.
-- **The plan validator says "clip N", not "scene N".** Its wording lives in
-  `studio/lib/sequence.ts` and is what web reads too. One shared sentence beats
-  a desktop-only copy that would drift; only the surfaces desktop owns say
-  scene.
+- **The plan validator takes the caller's words.** Its sentences live in
+  `studio/lib/sequence.ts`, shared with web and the phone, which say clip and
+  sequence (the default); desktop hands it `scene` and `clip`
+  (`desktop/src/lib/sequenceWording.ts`), so "Describe scene 2 before
+  generating." reads under a lane labelled scenes. One shared sentence with a
+  wording parameter beats a desktop-only copy that would drift.
 - **The seam chip is built in `SceneLane.vue`.** Web renders it from the shared
   `ClipRail`, but the lane's blocks are time-proportional and its seam floats on
   the join, so the geometry is desktop's. The words are still the shared

@@ -2,19 +2,10 @@
 import { computed, nextTick, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
-import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import type { GenerateForm } from "../../lib/generateForm";
-import { findInstalledModel } from "../../lib/generateModels";
-import {
-  modelsForOutputKind,
-  OUTPUT_KIND_PLACEHOLDER,
-  outputKindFor,
-  type OutputKind,
-} from "../../composables/useCreateOutputKind";
-import { useGenerateFormStore } from "../../stores/generateForm";
-import { useStylePicker } from "../../composables/useStylePicker";
+import { OUTPUT_KIND_PLACEHOLDER } from "../../composables/useCreateOutputKind";
+import { useOutputKindDoor } from "../../composables/useOutputKindDoor";
 import HostChip from "./HostChip.vue";
 import type { InspectorTab } from "./inspectorTabs";
 
@@ -23,6 +14,12 @@ import type { InspectorTab } from "./inspectorTabs";
  * output kind as a segmented control — Still picture | Short clip | 3-D
  * object — the two inspector doors, Starting points and Use these settings
  * again, and last the Where it runs chip. Nothing floats over the canvas.
+ *
+ * Simple | Scenes — how a video gets made — is NOT on this row: it is
+ * `ClipModeStrip`, the row beneath. Beside the kind control it pushed the
+ * whole right-hand cluster left whenever Short clip was chosen, so the control a
+ * person had just clicked jumped away from the pointer. This row holds the
+ * same children in every kind, so nothing on it ever moves.
  *
  * Where it runs is chrome, not a setting: at the foot of the inspector's
  * Settings list nobody found it, and which machine a print goes to is
@@ -39,115 +36,15 @@ const emit = defineEmits<{
   "open-tab": [tab: InspectorTab];
   /** Still picture ↔ Short clip: the inspector owns the model swap. */
   "set-output": [mode: "single" | "sequence"];
-  /** Simple ↔ Scenes, once the kind is already clip. The view owns it: it
-   *  seeds scene 1 and parks the draft, which needs the chain limits. */
-  "set-clip-mode": [mode: ClipMode];
 }>();
 
-const draft = useSequenceDraftStore();
-const formStore = useGenerateFormStore();
-// ONE inventory for the toolbar and the inspector. The header partitioned
-// every style any machine has while the inspector partitioned the picker's own
-// target rows, so a 3-D door could open onto a style the machine Create is
-// aimed at cannot run.
-const { targetModels } = useStylePicker(() => props.form);
-
-const isSequence = computed(() => draft.output === "sequence");
-const isMesh = computed(() => isMeshFamily(props.form.family));
-// Which styles each section holds is `useCreateOutputKind`'s one answer — the
-// same one the picker narrows on, so the door and the menu behind it agree.
-const meshModels = computed(() => modelsForOutputKind(targetModels.value, "mesh"));
-const stillModels = computed(() => modelsForOutputKind(targetModels.value, "still"));
-const clipModels = computed(() => modelsForOutputKind(targetModels.value, "clip"));
-
-// The same decision the title bar reads (`useCreateOutputKind`), from this
-// form rather than the store so the header answers for the form it renders.
-const outputKind = computed<OutputKind>(() => outputKindFor(draft.output, props.form.family));
-const outputOptions = computed(() => [
-  { value: "still" as const, label: "Still picture" },
-  { value: "clip" as const, label: "Short clip" },
-  // The 3-D door only exists where a 3-D style is installed; a style the
-  // machine cannot run would be a dead end.
-  ...(meshModels.value.length > 0 || isMesh.value
-    ? [{ value: "mesh" as const, label: "3-D object" }]
-    : []),
-]);
-
-/** The plain one-shot clip: the output stays `single` and the STYLE is what
- *  makes it a clip. */
-const isSimpleClip = computed(() => !isSequence.value && outputKind.value === "clip");
-
-function setOutputKind(kind: string | number) {
-  if (kind === outputKind.value) return;
-  if (kind === "clip") {
-    // Which of the two the door opens onto is the remembered sub-mode. Scenes
-    // is the inspector's swap, exactly as before; Simple keeps the one-shot
-    // output and adopts a clip style here, the way the 3-D door adopts a 3-D
-    // one — the inspector's `setOutputMode("single")` would restore a
-    // PICTURE style, which is the opposite of what Simple asks for.
-    if (draft.clipMode === "scenes") {
-      emit("set-output", "sequence");
-      return;
-    }
-    const pick = clipModels.value[0];
-    // No clip style on this machine: Scenes owns that empty state and says
-    // where to get one, so the door still opens rather than doing nothing.
-    if (!pick) {
-      emit("set-output", "sequence");
-      return;
-    }
-    parkStillModel();
-    formStore.applyModel(pick);
-    return;
-  }
-  if (isSequence.value) emit("set-output", "single");
-  if (kind === "mesh") {
-    const pick = meshModels.value[0];
-    if (!pick) return;
-    parkStillModel();
-    formStore.applyModel(pick);
-    return;
-  }
-  if (isMesh.value || isSimpleClip.value) {
-    // Whatever we restore has to be a style Still picture can make. The old
-    // "anything that is not 3-D" fallback reached for the first row on the
-    // machine, which on a box with a clip style installed put a video style
-    // under a Still picture label.
-    const restored =
-      (draft.lastStillModel && findInstalledModel(stillModels.value, draft.lastStillModel)) ||
-      stillModels.value[0];
-    if (restored) formStore.applyModel(restored);
-    draft.lastStillModel = null;
-  }
-}
-
-/** Remember the picture style while another kind holds the form. Parked on
- *  the DRAFT: leaving New image unmounts this toolbar, and a component-local
- *  ref took the parked style with it. A kind that is already not Still
- *  picture holds no picture style worth parking. */
-function parkStillModel() {
-  if (isMesh.value || isSimpleClip.value) return;
-  draft.lastStillModel = props.form.model || null;
-}
-
-/*
- * Simple | Scenes — how the clip gets made, offered only once the kind IS a
- * clip. What is on screen answers it: a sequence is the scene-by-scene way,
- * anything else is the plain render. `draft.clipMode` is the remembered
- * preference the Short clip door above reads, not the live state, so the two
- * can never disagree on screen.
- */
-const clipMode = computed<ClipMode>(() => (isSequence.value ? "scenes" : "simple"));
-const clipModeOptions = [
-  { value: "simple" as const, label: "Simple" },
-  { value: "scenes" as const, label: "Scenes" },
-];
-
-function setClipMode(mode: string | number) {
-  const next: ClipMode = mode === "scenes" ? "scenes" : "simple";
-  if (next === clipMode.value) return;
-  emit("set-clip-mode", next);
-}
+// The three doors are ONE decision (`useOutputKindDoor`), shared with the
+// palette's Make a short clip and File ▸ New Clip, which open the Short clip
+// door through the view rather than deep-linking Scenes.
+const { outputKind, outputOptions, setOutputKind } = useOutputKindDoor(
+  () => props.form,
+  (mode) => emit("set-output", mode),
+);
 
 const placeholder = computed(() => OUTPUT_KIND_PLACEHOLDER[outputKind.value]);
 const title = computed(() => props.form.title?.trim() ?? "");
@@ -251,18 +148,6 @@ function onBlur() {
       compact
       label="What to make"
       @update:model-value="setOutputKind"
-    />
-
-    <SegmentedControl
-      v-if="outputKind === 'clip'"
-      data-test="clip-mode"
-      class="ms-header__seg"
-      :model-value="clipMode"
-      :options="clipModeOptions"
-      variant="neutral"
-      compact
-      label="How to make the clip"
-      @update:model-value="setClipMode"
     />
 
     <span class="ms-header__divider" aria-hidden="true" />

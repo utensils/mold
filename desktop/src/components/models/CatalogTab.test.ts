@@ -591,7 +591,7 @@ describe("CatalogTab media filter under pagination", () => {
     const wrapper = await mountTab("video");
 
     const empty = wrapper.get("[data-test='catalog-empty']");
-    expect(empty.text()).toContain("No video models");
+    expect(empty.text()).toContain("No short clip styles");
     // Results are exhausted — no dangling infinite-scroll sentinel.
     expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(false);
   });
@@ -624,7 +624,7 @@ describe("CatalogTab media filter under pagination", () => {
     const wrapper = await mountTab("video");
 
     expect(searchCatalog.mock.calls.length).toBeLessThanOrEqual(5);
-    expect(wrapper.get("[data-test='catalog-empty']").text()).toContain("No video models");
+    expect(wrapper.get("[data-test='catalog-empty']").text()).toContain("No short clip styles");
     // More pages exist — scrolling keeps digging.
     expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(true);
   });

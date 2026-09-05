@@ -17,7 +17,6 @@ import { useUiStore } from "../../stores/ui";
 import { ApiError, currentTarget, type ApiTarget } from "../../lib/api/client";
 import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
-import { isVideoFamily } from "../../lib/capabilities";
 import { catalogIdentityKey, sortInstalledFirst } from "../../lib/catalog";
 import {
   CATALOG_KIND_OPTIONS,
@@ -26,7 +25,8 @@ import {
   type CatalogSortOption,
 } from "../../lib/catalogFilters";
 import { isCatalogModelId, modelDisplayName } from "../../lib/models";
-import { type MediaType } from "../../lib/modelAvailability";
+import { MEDIA_TYPE_KIND, mediaTypeMatches, type MediaType } from "../../lib/modelAvailability";
+import { OUTPUT_KIND_SECTION_LABEL } from "../../composables/useCreateOutputKind";
 import { useInfiniteScrollSentinel } from "../../lib/useInfiniteScrollSentinel";
 import Chip from "@ui/components/Chip.vue";
 import CatalogCard from "./CatalogCard.vue";
@@ -129,8 +129,7 @@ const familyOptions = computed(() => {
 
 /** True when `entry` passes the active media-type chip. */
 function matchesMediaType(entry: CatalogEntry): boolean {
-  const type = props.mediaType ?? "all";
-  return type === "all" || isVideoFamily(entry.family) === (type === "video");
+  return mediaTypeMatches(props.mediaType ?? "all", entry.family);
 }
 
 /**
@@ -303,10 +302,10 @@ const displayEntries = computed(() =>
 const filteredEmptyMessage = computed(() => {
   const type = props.mediaType ?? "all";
   if (type !== "all" && !combinedEntries.value.some(matchesMediaType)) {
-    const noun = type === "video" ? "video" : "image";
+    const what = OUTPUT_KIND_SECTION_LABEL[MEDIA_TYPE_KIND[type]];
     return hasMore.value
-      ? `No ${noun} models in these results yet — keep scrolling or show all media types.`
-      : `No ${noun} models in these results.`;
+      ? `No ${what} in these results yet — keep scrolling or show every kind.`
+      : `No ${what} in these results.`;
   }
   return "Everything here is already installed.";
 });

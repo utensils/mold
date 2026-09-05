@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
@@ -38,6 +38,10 @@ const LOCKED = {
   isThisMachine: false,
 };
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 async function mountModal(props: Record<string, unknown> = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -74,6 +78,15 @@ async function mountWithConnectSpy() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Nothing leaves the process. `apiJsonTo` is mocked above, but the status
+  // poll a connect starts also calls the shared studio `listQueue` /
+  // `listDevices`, which reach `fetch` directly — and "hal9000" and
+  // 192.168.1.30 are REAL machines on the developer's network, so whether
+  // they answered, and how fast, decided the "generation target" case.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.reject(new TypeError("fetch is stubbed: no network in tests"))),
+  );
   discoverServers.mockResolvedValue([]);
   testRemoteHost.mockResolvedValue({
     ok: true,

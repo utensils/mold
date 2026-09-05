@@ -12,6 +12,7 @@ import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("../../lib/ipc", () => ({
@@ -90,10 +91,6 @@ const clipModel = {
 
 function outputSegments(wrapper: ReturnType<typeof mount>) {
   return wrapper.get("[data-test='output-kind']").findAll("button");
-}
-
-function clipModeSegments(wrapper: ReturnType<typeof mount>) {
-  return wrapper.get("[data-test='clip-mode']").findAll("button");
 }
 
 /** A form already holding a clip style — the Simple sub-mode on screen. */
@@ -259,6 +256,67 @@ describe("CreateHeader", () => {
       expect(wrapper.emitted("set-output")).toEqual([["single"]]);
     });
 
+    /*
+     * Each door opens onto the style its section was last used with, from
+     * `lastUsedStyles`, and only falls to the first installed one when that
+     * style is not on this machine. Parking still covers the immediate round
+     * trip; the memory covers every later visit and the next launch.
+     */
+    it("opens Short clip on the clip style last used there", async () => {
+      readyLocal();
+      const wan = { ...clipModel, name: "wan22-ti2v-5b:dmd", family: "wan" } as ModelEntry;
+      installLocal([stillModel, clipModel, wan]);
+      useLastUsedStylesStore().remember("clip", wan.name);
+      const store = useGenerateFormStore();
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(store.form.model).toBe(wan.name);
+    });
+
+    it("never opens a door onto a style no machine can run, remembered or first", async () => {
+      // `targetModels` keeps downloaded-but-unrunnable rows so the picker can
+      // disclose them, disabled; a door must skip them the way the picker
+      // refuses them.
+      readyLocal();
+      const dead = {
+        ...clipModel,
+        name: "minimax-h3:exotic",
+        family: "minimax-h3",
+        runtime_available: false,
+        runtime_unavailable_reason: "No loader for this layout.",
+      } as ModelEntry;
+      installLocal([stillModel, dead, clipModel]);
+      useLastUsedStylesStore().remember("clip", dead.name);
+      const store = useGenerateFormStore();
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(store.form.model).toBe(clipModel.name);
+    });
+
+    it("opens 3-D on the 3-D style last used there", async () => {
+      readyLocal();
+      const other = { ...meshModel, name: "hunyuan3d-full:fp16" } as ModelEntry;
+      installLocal([stillModel, meshModel, other]);
+      useLastUsedStylesStore().remember("mesh", other.name);
+      const store = useGenerateFormStore();
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(wrapper)[2]!.trigger("click");
+      expect(store.form.model).toBe(other.name);
+    });
+
+    it("returns to Still picture on the picture style last used there when nothing is parked", async () => {
+      readyLocal();
+      const other = { ...stillModel, name: "flux2-klein-9b:q8", family: "flux2" } as ModelEntry;
+      installLocal([stillModel, other, clipModel]);
+      useLastUsedStylesStore().remember("still", other.name);
+      const store = useGenerateFormStore();
+      store.form.model = clipModel.name;
+      store.form.family = clipModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(store.form.model).toBe(other.name);
+    });
+
     it("opens the 3-D door for a 3-D style and nothing else", () => {
       // The door's existence is the section rule's answer, so a clip style on
       // the machine can never be mistaken for a 3-D one.
@@ -338,29 +396,36 @@ describe("CreateHeader", () => {
   });
 
   /*
-   * Simple | Scenes — how the clip gets made. It is offered only once the kind
-   * IS a clip, and what is on screen answers it, so the toggle and the view can
-   * never disagree.
+   * Simple | Scenes — how the video gets made — is `ClipModeStrip`'s, the row
+   * beneath. Beside the kind control it pushed the whole right-hand cluster
+   * left whenever Short clip was chosen, so the control a person had just clicked
+   * jumped away from the pointer. The toolbar holds the same children in
+   * every kind, so nothing on it ever moves.
    */
-  describe("how to make the clip", () => {
-    it("offers the toggle only while the kind is a clip", () => {
+  describe("the row never changes shape with the kind", () => {
+    function children(wrapper: ReturnType<typeof mount>) {
+      const header = wrapper.get("[data-test='create-header']").element;
+      return Array.from(header.children).map((el) => el.getAttribute("data-test") ?? el.className);
+    }
+
+    it("holds the same children for a picture, a video and a 3-D object", () => {
       readyLocal();
       installLocal([stillModel, clipModel, meshModel]);
-
-      const still = mount(CreateHeader, { props: { form: form() } });
-      expect(still.find("[data-test='clip-mode']").exists()).toBe(false);
-
+      const still = children(mount(CreateHeader, { props: { form: form() } }));
+      const clip = children(mount(CreateHeader, { props: { form: clipForm() } }));
       const mesh = form();
       mesh.family = meshModel.family;
-      const threeD = mount(CreateHeader, { props: { form: mesh } });
-      expect(threeD.find("[data-test='clip-mode']").exists()).toBe(false);
+      const threeD = children(mount(CreateHeader, { props: { form: mesh } }));
+      expect(clip).toEqual(still);
+      expect(threeD).toEqual(still);
+    });
 
-      const clip = mount(CreateHeader, { props: { form: clipForm() } });
-      expect(clip.find("[data-test='clip-mode']").exists()).toBe(true);
-      expect(clipModeSegments(clip).map((b) => b.text())).toEqual(["Simple", "Scenes"]);
-      expect(clip.get("[data-test='clip-mode']").attributes("aria-label")).toBe(
-        "How to make the clip",
-      );
+    it("carries no Simple | Scenes control of its own", () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(wrapper.find("[data-test='clip-mode']").exists()).toBe(false);
+      expect(wrapper.text()).not.toContain("Scenes");
     });
 
     it("names Short clip the kind a one-shot on a clip style already is", () => {
@@ -372,54 +437,6 @@ describe("CreateHeader", () => {
       const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
       const on = outputSegments(wrapper).find((b) => b.attributes("aria-checked") === "true");
       expect(on?.text()).toBe("Short clip");
-    });
-
-    it("reads Simple for a fresh draft and Scenes for a sequence", () => {
-      readyLocal();
-      installLocal([stillModel, clipModel]);
-      const simple = mount(CreateHeader, { props: { form: clipForm() } });
-      expect(
-        clipModeSegments(simple)
-          .find((b) => b.attributes("aria-checked") === "true")
-          ?.text(),
-      ).toBe("Simple");
-
-      useSequenceDraftStore().output = "sequence";
-      const scenes = mount(CreateHeader, { props: { form: clipForm() } });
-      expect(
-        clipModeSegments(scenes)
-          .find((b) => b.attributes("aria-checked") === "true")
-          ?.text(),
-      ).toBe("Scenes");
-    });
-
-    it("lands a reused clip print in Scenes", () => {
-      // `composer.setSequence` and an edit session both put the draft in
-      // `sequence`, and the store keeps the sub-mode true to it.
-      readyLocal();
-      installLocal([stillModel, clipModel]);
-      const draft = useSequenceDraftStore();
-      draft.output = "sequence";
-      expect(draft.clipMode).toBe("scenes");
-      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
-      expect(
-        clipModeSegments(wrapper)
-          .find((b) => b.attributes("aria-checked") === "true")
-          ?.text(),
-      ).toBe("Scenes");
-    });
-
-    it("hands the switch to the view, which seeds and parks the draft", async () => {
-      readyLocal();
-      installLocal([stillModel, clipModel]);
-      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
-
-      await clipModeSegments(wrapper)[1]!.trigger("click");
-      expect(wrapper.emitted("set-clip-mode")).toEqual([["scenes"]]);
-
-      // Picking what is already on screen changes nothing.
-      await clipModeSegments(wrapper)[0]!.trigger("click");
-      expect(wrapper.emitted("set-clip-mode")).toEqual([["scenes"]]);
     });
   });
 

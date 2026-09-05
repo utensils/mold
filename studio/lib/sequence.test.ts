@@ -168,6 +168,66 @@ describe("sequence authoring", () => {
     ).toEqual(["Describe clip 2 before generating."]);
   });
 
+  /*
+   * The validator's sentences name the piece and the whole in the CALLER's
+   * words. Web and the phone say "clip" and "sequence"; desktop says "scene"
+   * and "clip" (one word, "scene", everywhere on that surface), and it read
+   * "Describe clip 1 before generating." under a lane labelled scenes.
+   */
+  it("speaks the caller's words for the piece and the whole", () => {
+    const desktop = { piece: "scene", whole: "clip" };
+    const limits = { maxStages: 2, maxTotalFrames: 200, motionTailFrames: 25 };
+    expect(
+      sequenceValidation(
+        [{ prompt: "only", frames: 97, transition: "smooth" }],
+        {
+          ...limits,
+          wording: desktop,
+        },
+      ),
+    ).toEqual(["Add at least two scenes to make a clip."]);
+    expect(
+      sequenceValidation(
+        [
+          { prompt: "one", frames: 97, transition: "smooth" },
+          { prompt: " ", frames: 97, transition: "smooth" },
+        ],
+        { ...limits, wording: desktop },
+      ),
+    ).toEqual(["Describe scene 2 before generating."]);
+    const three = [
+      { prompt: "a", frames: 97, transition: "smooth" as const },
+      { prompt: "b", frames: 97, transition: "smooth" as const },
+      { prompt: "c", frames: 97, transition: "smooth" as const },
+    ];
+    expect(sequenceValidation(three, { ...limits, wording: desktop })).toEqual([
+      "Reduce the clip to 2 scenes or fewer.",
+    ]);
+    expect(
+      sequenceValidation(three.slice(0, 2), {
+        ...limits,
+        maxFramesPerClip: 49,
+        wording: desktop,
+      }),
+    ).toEqual(["Reduce scene 1 to 49 frames or fewer."]);
+    expect(
+      sequenceValidation(
+        [
+          { prompt: "a", frames: 98, transition: "smooth" },
+          { prompt: "b", frames: 97, transition: "smooth" },
+        ],
+        { ...limits, frameStep: 4, wording: desktop },
+      ),
+    ).toEqual(["Change scene 1 to the 4k+1 frame grid."]);
+    expect(
+      sequenceValidation(three.slice(0, 2), {
+        ...limits,
+        maxTotalFrames: 100,
+        wording: desktop,
+      }),
+    ).toEqual(["Reduce scene durations to 100 total frames or fewer."]);
+  });
+
   // The per-clip prompt gate is the only one in the codebase, so the optional
   // -prompt rule has to reach it through the limits the composer already
   // passes down — otherwise a conditioned LTX-2 sequence stays blocked on a

@@ -536,6 +536,121 @@ describe("GenerateView — sequence output", () => {
     },
   );
 
+  /*
+   * The palette's Make a short clip and File ▸ New Clip open the SHORT CLIP
+   * DOOR through an intent — the same door the toolbar's segment opens, onto
+   * the remembered way and the remembered style — whether or not New image
+   * was already open. The old `?output=sequence` deep link landed in Scenes
+   * when the door opens onto Simple, and did nothing from inside New image,
+   * where the query is consumed only on mount.
+   */
+  it("opens the Short clip door from the palette while New image is already open", async () => {
+    readyLocal();
+    installedPayload = [imageModel, videoModel];
+    useModelStore().all = [imageModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    mountView();
+    await flushPromises();
+
+    useUiStore().shortClip();
+    await flushPromises();
+
+    // Simple: the clip style in the one-shot output, not Scenes.
+    expect(draft.output).toBe("single");
+    expect(form.model).toBe(videoModel.name);
+    expect(draft.lastStillModel).toBe(imageModel.name);
+  });
+
+  it("opens the Short clip door onto Scenes when that is the remembered way", async () => {
+    readyLocal();
+    installedPayload = [imageModel, videoModel];
+    useModelStore().all = [imageModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.clipMode = "scenes";
+    // Scenes is the inspector's swap; the shallow mount stubs the inspector,
+    // so this stub records what the door handed it.
+    const setOutputMode = vi.fn();
+    mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+      global: {
+        stubs: {
+          SequenceComposer: true,
+          ComposerCard: true,
+          InspectorPanel: {
+            name: "InspectorPanel",
+            template: "<div />",
+            setup: () => ({ setOutputMode }),
+          },
+        },
+      },
+    });
+    await flushPromises();
+
+    useUiStore().shortClip();
+    await flushPromises();
+    expect(setOutputMode).toHaveBeenCalledWith("sequence");
+    expect(form.model).toBe(imageModel.name);
+  });
+
+  it("opens the Short clip door onto Scenes when raised from another workspace, before the inspector exists", async () => {
+    // The palette raises the intent and THEN navigates here, so the view
+    // consumes it during setup, when the inspector ref is still null. The
+    // swap has to wait for the inspector rather than fall on the floor.
+    readyLocal();
+    installedPayload = [imageModel, videoModel];
+    useModelStore().all = [imageModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.clipMode = "scenes";
+    const setOutputMode = vi.fn();
+    useUiStore().shortClip();
+    mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+      global: {
+        stubs: {
+          SequenceComposer: true,
+          ComposerCard: true,
+          InspectorPanel: {
+            name: "InspectorPanel",
+            template: "<div />",
+            setup: () => ({ setOutputMode }),
+          },
+        },
+      },
+    });
+    await flushPromises();
+    expect(setOutputMode).toHaveBeenCalledWith("sequence");
+  });
+
+  it("opens Scenes for the Short clip door even with no style installed at all", async () => {
+    // Nothing installed: the starter cards hold the view and the inspector is
+    // never mounted, so the Scenes swap cannot go through it. The draft is
+    // switched directly — there is no style to swap anyway — and the timeline
+    // owns that empty state.
+    readyLocal();
+    useHostModelsStore().byHost.local = { entries: [], fetchedAt: Date.now(), error: null };
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    useUiStore().shortClip();
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.find("[data-test='generate-layout']").exists()).toBe(false);
+    expect(draft.output).toBe("sequence");
+  });
+
   it("consumes ?output=sequence without leaking the one-shot prompt, then strips the query", async () => {
     readyLocal();
     installedPayload = [videoModel];
@@ -1521,7 +1636,7 @@ describe("GenerateView — what locks the one composer in clip mode", () => {
     await flushPromises();
     expect(composerProps(wrapper)).toEqual({
       disabled: true,
-      reason: "Describe clip 2 before generating.",
+      reason: "Describe scene 2 before generating.",
     });
   });
 
@@ -1827,7 +1942,7 @@ describe("GenerateView — Simple | Scenes", () => {
   it("seeds scene 1 from the words and the length already on the composer", async () => {
     const { wrapper, draft, form } = await simpleClip();
 
-    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "scenes");
+    wrapper.findComponent({ name: "ClipModeStrip" }).vm.$emit("set-clip-mode", "scenes");
     await flushPromises();
 
     expect(draft.output).toBe("sequence");
@@ -1845,7 +1960,7 @@ describe("GenerateView — Simple | Scenes", () => {
     draft.ensureClips(97);
     draft.clips[0]!.prompt = "the gate opens";
 
-    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "scenes");
+    wrapper.findComponent({ name: "ClipModeStrip" }).vm.$emit("set-clip-mode", "scenes");
     await flushPromises();
 
     expect(draft.clips[0]?.prompt).toBe("the gate opens");
@@ -1859,7 +1974,7 @@ describe("GenerateView — Simple | Scenes", () => {
     draft.clips[1]!.prompt = "the road bends away";
     await flushPromises();
 
-    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "simple");
+    wrapper.findComponent({ name: "ClipModeStrip" }).vm.$emit("set-clip-mode", "simple");
     await flushPromises();
 
     expect(draft.output).toBe("single");

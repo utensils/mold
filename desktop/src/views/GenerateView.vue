@@ -37,6 +37,7 @@ import {
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
+import ClipModeStrip from "../components/create/ClipModeStrip.vue";
 import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import StylePicker from "../components/create/StylePicker.vue";
@@ -56,7 +57,9 @@ import {
   clampBenchHeight as clampBenchHeightWithin,
 } from "../lib/benchLayout";
 import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
-import { outputKindFor } from "../composables/useCreateOutputKind";
+import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
+import { outputKindFor, outputKindForModel } from "../composables/useCreateOutputKind";
+import { useOutputKindDoor } from "../composables/useOutputKindDoor";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
@@ -1336,6 +1339,7 @@ const currentModelLabel = computed(() => modelDisplayNameForId(form.model, insta
 // ── Output = Sequence (mode is a setting, not a place) ───────────────────────
 const activeRoute = useRoute();
 const draft = useSequenceDraftStore();
+const lastUsed = useLastUsedStylesStore();
 const chains = useChainJobsStore();
 const isSequence = computed(() => draft.output === "sequence");
 const selectedEntry = computed(() =>
@@ -1600,7 +1604,7 @@ watch(
     if (current && !draft.lastSingleModel && !draft.editing) {
       draft.lastSingleModel = current;
     }
-    const pick = sequenceCapableModels.value[0];
+    const pick = lastUsed.pick("clip", sequenceCapableModels.value);
     if (pick) {
       formStore.applyModel(pick);
     } else if (
@@ -1643,7 +1647,7 @@ function consumeOutputQuery() {
     const current = selectedEntry.value;
     if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
       draft.lastSingleModel = form.model || null;
-      const pick = sequenceCapableModels.value[0];
+      const pick = lastUsed.pick("clip", sequenceCapableModels.value);
       if (pick) formStore.applyModel(pick);
     }
     draft.setOutput(
@@ -4821,16 +4825,68 @@ async function loadPromptHistory() {
   }
 }
 
-// Auto-select a default model only when none is set. With the form persisted
-// in a store, the `!form.model` guard now means "the first ever visit" — a
+// Auto-select a model only when none is set. With the form persisted in a
+// store, the `!form.model` guard means "the first visit this launch" — a
 // remount after the user chose a model leaves their choice untouched.
+//
+// That first visit lands on the style the person LEFT: the last-used memory
+// names the style and the section, and the form takes it as soon as any
+// machine reports it. While a ready machine is still reporting, a remembered
+// style that has not appeared yet is waited for rather than replaced — the
+// first inventory to arrive is this device's, and picking FLUX from it would
+// lock the form before the machine that holds the style could answer. Only
+// once the whole fleet has reported without it does the usual pick apply.
+// "Settled" waits for the boot reconnect as well as the ready machines'
+// inventories: boot leaves a remembered machine `connecting` while this
+// device's inventory has already landed, and `allReadyHostsFetched` reads only
+// the ready set, so it would call the fleet settled before that machine — the
+// one most likely to hold the remembered style — could answer. The reconnect
+// phase is `hosts.initialized`, set only after every probe has returned. It is
+// NOT "no machine is connecting": a failed probe deliberately keeps the row
+// `connecting` until it answers or is forgotten, and an offline machine must
+// not hold the form empty forever when this device has styles to offer.
+const installedInventorySettled = computed(
+  () =>
+    hosts.initialized && !models.loading && !hostModels.loading && hostModels.allReadyHostsFetched,
+);
 watch(
-  () => installedModels.value,
-  (installed) => {
-    if (!form.model && installed.length > 0) {
-      const preferred = preferredInstalledModel(installed);
-      if (preferred) formStore.applyModel(preferred);
+  [installedModels, installedInventorySettled],
+  ([installed, settled]) => {
+    if (form.model || installed.length === 0) return;
+    // In Scenes the sequence watcher above owns the pick (memory-aware too)
+    // and may leave the form EMPTY on purpose when the pinned machine has no
+    // style that can join scenes; refilling it here would fight that.
+    if (isSequence.value) return;
+    const section = lastUsed.lastSection;
+    const rememberedName = section ? lastUsed.bySection[section] : null;
+    const remembered = rememberedName ? findInstalledModel(installed, rememberedName) : null;
+    if (remembered) {
+      formStore.applyModel(remembered);
+      return;
     }
+    if (rememberedName && !settled) return;
+    const preferred = preferredInstalledModel(installed);
+    if (preferred) formStore.applyModel(preferred);
+  },
+  { immediate: true },
+);
+
+// Whatever style the form holds is the one its section was last used with.
+// One writer for every path that sets a model — the picker, the doors, Use
+// these settings, an edit session — so the memory can never disagree with
+// the screen.
+//
+// The section is the INSTALLED entry's, never the form's family: an edit
+// session can put a sequence style's name on the form while the family still
+// reads the previous still style's, and a name no machine has (a restored
+// print's missing style) is not remembered at all — it could only ever be
+// restored under the wrong kind.
+watch(
+  () => [form.model, installedModels.value] as const,
+  ([model, installed]) => {
+    if (!model) return;
+    const entry = findInstalledModel(installed, model);
+    if (entry) lastUsed.remember(outputKindForModel(entry), model);
   },
   { immediate: true },
 );
@@ -5220,7 +5276,7 @@ function setClipMode(mode: ClipMode) {
   const current = selectedEntry.value;
   if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
     draft.lastSingleModel = form.model || null;
-    const pick = sequenceCapableModels.value[0];
+    const pick = lastUsed.pick("clip", sequenceCapableModels.value);
     if (pick) formStore.applyModel(pick);
   }
   const unwritten = draft.clips.every((clip) => !clip.prompt.trim());
@@ -5357,6 +5413,39 @@ onCreateIntent(
   () => setClipMode("scenes"),
 );
 
+// Palette's Make a short clip and File ▸ New Clip — the Short clip door,
+// exactly as the toolbar's segment opens it (remembered way, remembered
+// style), whether or not New image was already open.
+const outputKindDoor = useOutputKindDoor(
+  () => form,
+  (mode) => {
+    // Raised from another workspace, the intent is consumed during setup,
+    // before the inspector exists; the swap waits a tick for it rather than
+    // falling on the floor. With no style installed at all the starter cards
+    // hold the view and the inspector never mounts, so the draft is switched
+    // directly — there is no style to swap anyway, and Scenes owns that empty
+    // state.
+    const swap = () => {
+      const inspector = inspectorRef.value;
+      if (typeof inspector?.setOutputMode === "function") inspector.setOutputMode(mode);
+      else if (mode !== draft.output) {
+        draft.setOutput(
+          mode,
+          { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+          sequenceDefaultFrames.value,
+        );
+      }
+    };
+    if (inspectorRef.value) swap();
+    else void nextTick(swap);
+  },
+);
+onCreateIntent(
+  "shortClip",
+  () => ui.shortClipTick,
+  () => outputKindDoor.setOutputKind("clip"),
+);
+
 // ⌥↩ / palette — the picture on the canvas, made four more times.
 onCreateIntent(
   "makeVariations",
@@ -5436,8 +5525,8 @@ onBeforeUnmount(() => {
         :form="form"
         @open-tab="inspectorTab = $event"
         @set-output="inspectorRef?.setOutputMode($event)"
-        @set-clip-mode="setClipMode"
       />
+      <ClipModeStrip :form="form" @set-clip-mode="setClipMode" />
 
       <div
         ref="workbenchRef"

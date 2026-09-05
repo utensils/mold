@@ -32,7 +32,6 @@ import {
   modelRuntimeNotice,
   RUNTIME_UNAVAILABLE_BADGE,
 } from "@studio/lib/modelRuntimeAvailability";
-import { isVideoFamily } from "../../lib/capabilities";
 import { installedModelToEntry } from "../../lib/catalogDetail";
 import {
   groupInstalledModels,
@@ -49,7 +48,7 @@ import { loadModel, removeModel, unloadModel } from "../../lib/api/models";
 import { startCatalogDownload } from "../../lib/api/catalog";
 import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
-import { type MediaType } from "../../lib/modelAvailability";
+import { mediaTypeMatches, type MediaType } from "../../lib/modelAvailability";
 import type { ModelEntry } from "../../lib/api/types";
 import type { HostView } from "../../stores/hosts";
 
@@ -80,10 +79,9 @@ const filtered = computed(() => {
     : sourceEntries.value;
   const type = props.mediaType ?? "all";
   if (type === "all") return searched;
-  // Utility rows aren't picture or clip makers — they only show under All.
-  return searched.filter(
-    (m) => !isUtilityModel(m) && isVideoFamily(m.family) === (type === "video"),
-  );
+  // Utility rows make no picture, clip or 3-D object — they only show under
+  // All. The kind itself is the Create toolbar's partition.
+  return searched.filter((m) => !isUtilityModel(m) && mediaTypeMatches(type, m.family));
 });
 const groups = computed(() => groupInstalledModels(filtered.value));
 
