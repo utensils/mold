@@ -226,6 +226,35 @@ describe("useQueueCommands — Stop everything asks first", () => {
       "Stops 0 pictures on 1 machine. Anything part-finished is lost.",
     );
   });
+
+  /** A second machine that offers Cancel all but has nothing queued is not
+   *  one the stop will change, so the sentence must not count it: "on 2
+   *  machines" while plato sat idle read as a threat to work it never had. */
+  it("does not count an idle machine that merely offers Cancel all", () => {
+    const jobs = useJobsStore();
+    jobs.queues["local"] = snapshot(false);
+    useHostsStore().extras.push({
+      id: "plato",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: "plato-instance",
+    });
+    jobs.queues["plato"] = {
+      hostId: "plato",
+      entries: [],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    } as never;
+    const api = commands();
+    expect(api.stopEverythingSummary.value).toBe(
+      "Stops 0 pictures on 1 machine. Anything part-finished is lost.",
+    );
+  });
 });
 
 /**

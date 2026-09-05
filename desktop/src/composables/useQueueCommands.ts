@@ -354,8 +354,11 @@ export function useQueueCommands(): QueueCommands {
     }
   }
 
-  /** Every machine the fan-out would touch: one that owns a cancellable row,
-   * or one whose queue offers Cancel all. */
+  /** Every machine the fan-out would actually change: one that owns a
+   * cancellable row, or one whose queue offers Cancel all AND holds work. An
+   * idle machine is sent the same Cancel all, but nothing on it is lost, so
+   * the sentence must not count it. Never below one: the display host is
+   * always the machine the question is about. */
   const stopEverythingHostCount = computed(() => {
     const ids = new Set<string>();
     for (const row of queue.rows.value) {
@@ -364,9 +367,11 @@ export function useQueueCommands(): QueueCommands {
       if (id) ids.add(id);
     }
     for (const host of hosts.all) {
-      if (host.status === "ready" && jobs.queues[host.id]?.caps?.canCancelAll) ids.add(host.id);
+      const queued = jobs.queues[host.id];
+      if (host.status !== "ready" || !queued?.caps?.canCancelAll) continue;
+      if (queued.entries.length > 0) ids.add(host.id);
     }
-    return ids.size;
+    return Math.max(ids.size, 1);
   });
 
   const stopEverythingSummary = computed(() => {
