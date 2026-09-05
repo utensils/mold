@@ -1,1 +1,0 @@
-- **LTX-2 audit cleanup.** Correct the per-stage prompt documentation and remove unused planning fields and test-only helpers while preserving the live sampler and retake paths ([#603](https://github.com/utensils/mold/issues/603)).
