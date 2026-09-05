@@ -44,21 +44,23 @@ beforeEach(() => {
 });
 
 /** A finished still on the canvas: the only state Make 4 variations is for. */
-function finishAStill() {
+function finishAStill(request: Record<string, unknown> = {}) {
   const generation = useGenerationStore();
+  const model = (request.model as string | undefined) ?? "sdxl-base:fp16";
   const job = newJob({
     prompt: "a brass teapot",
-    model: "sdxl-base:fp16",
+    model,
     width: 1024,
     height: 1024,
     steps: 30,
+    ...request,
   } as never);
   Object.assign(job, {
     clientId: 1,
     batchId: 1,
     id: "finished-print",
     status: "complete",
-    result: { image: "cGl4ZWxz", filename: "teapot.png", model: "sdxl-base:fp16", format: "png" },
+    result: { image: "cGl4ZWxz", filename: "teapot.png", model, format: "png" },
   });
   generation.jobs.push(job);
   generation.selectedClientId = job.clientId;
@@ -345,14 +347,33 @@ describe("CommandPalette shortcut column and mock groups", () => {
     wrapper.unmount();
   });
 
-  it("offers no variations command on a batch-locked recipe", async () => {
+  /** The recipe that answers is the PRINT'S, not whatever the composer holds. */
+  it("offers no variations command for a print an edit recipe made", async () => {
+    const editModel = {
+      name: "qwen-image-edit-2511:q8",
+      family: "qwen-image-edit",
+      downloaded: true,
+    } as ModelEntry;
+    useModelStore().all = [editModel];
+    useHostModelsStore().byHost.local = { entries: [editModel], fetchedAt: 1, error: null };
+    finishAStill({ model: editModel.name, edit_images: ["cGl4ZWxz"] });
+
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("keeps offering it for a repeatable print while the composer holds an edit recipe", async () => {
+    const sdxl = { name: "sdxl-base:fp16", family: "sdxl", downloaded: true } as ModelEntry;
+    useModelStore().all = [sdxl];
+    useHostModelsStore().byHost.local = { entries: [sdxl], fetchedAt: 1, error: null };
     finishAStill();
     const form = useGenerateFormStore().form;
     form.family = "qwen-image-edit";
     form.model = "qwen-image-edit-2511:q8";
 
     const wrapper = await openPalette();
-    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeUndefined();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeDefined();
     wrapper.unmount();
   });
 });

@@ -32,9 +32,8 @@ import {
   type SearchableCatalogEntry,
 } from "@studio/lib/modelSearch";
 import { newGenerateForm, applyModelDefaults } from "../../lib/generateForm";
-import { useGenerateFormStore } from "../../stores/generateForm";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
-import { batchLockedForForm, canRepeatPrint } from "../../lib/variations";
+import { batchLockedForRequest, canRepeatPrint } from "../../lib/variations";
 import type { ModelEntry } from "../../lib/api/types";
 
 interface Command extends Matchable {
@@ -61,15 +60,28 @@ const generation = useGenerationStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
 const appPrefs = useAppPrefsStore();
-const generateForm = useGenerateFormStore();
-/** The composer's own recipe is New image's to resolve; the palette asks the
- *  form's family and model, the coarse answer every other surface uses. */
-const batchLocked = computed(() =>
-  batchLockedForForm(
-    generateForm.form,
-    generationCapabilitiesForFamily(generateForm.form.family, generateForm.form.model),
-  ),
-);
+/**
+ * Whether Make 4 variations means anything for the picture on the canvas.
+ *
+ * The recipe that answers is the PRINT'S, read from its own saved request and
+ * the checkpoint's contract — never the composer's form, which may have moved
+ * on to another style since. Asking the form answered wrong in both
+ * directions: it hid the command for a repeatable print while an edit recipe
+ * was selected, and offered it for a print no recipe could repeat.
+ */
+const activePrintRepeatable = computed(() => {
+  const candidate = generation.active;
+  const request = candidate?.request;
+  if (!request) return false;
+  const entry = hostModels.contractEntryForTarget(request.model, candidate.hostId ?? null);
+  return canRepeatPrint(
+    candidate,
+    batchLockedForRequest(
+      request,
+      generationCapabilitiesForFamily(entry?.family ?? "", request.model),
+    ),
+  );
+});
 // The same queue authority Space and the sidebar act on, so the palette can
 // never pause a different machine than the status bar's hint promises.
 const queueCommands = useQueueCommands();
@@ -385,7 +397,7 @@ const staticCommands = computed<Command[]>(() => {
       },
     },
   ];
-  if (canRepeatPrint(generation.active, batchLocked.value)) {
+  if (activePrintRepeatable.value) {
     cmds.push({
       id: "act-variations",
       title: "Make 4 variations of the last picture",

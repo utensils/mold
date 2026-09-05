@@ -448,7 +448,7 @@ describe("InspectorPanel — an off-ladder octree value", () => {
  * recipe that pins its steps offers no rows at all.
  */
 describe("InspectorPanel — Quality and Add-on looks", () => {
-  it("offers the recipe's own floor, default and ceiling, and writes Detail", async () => {
+  it("offers the recipe's own recommended rungs, and writes Detail", async () => {
     const { form, wrapper } = mountFor(rasterModel());
     await flushPromises();
     const rows = wrapper.get("[data-test='quality-presets']");
@@ -459,12 +459,15 @@ describe("InspectorPanel — Quality and Add-on looks", () => {
       expect.stringContaining("Best"),
     ]);
 
+    const ladder = sdxlRecipe().steps!.recommended!;
     await wrapper.get("[data-test='quality-draft']").trigger("click");
-    expect(form.steps).toBe(sdxlRecipe().steps!.min);
+    // The ladder's lowest rung — never the control's raw floor, which is an
+    // admission bound rather than a draft anyone would want.
+    expect(form.steps).toBe(ladder[0]);
     expect(wrapper.get("[data-test='quality-draft']").attributes("aria-pressed")).toBe("true");
 
     await wrapper.get("[data-test='quality-best']").trigger("click");
-    expect(form.steps).toBe(sdxlRecipe().steps!.max);
+    expect(form.steps).toBe(ladder[ladder.length - 1]);
   });
 
   it("keeps Add-on looks in the main column for a recipe that takes them", async () => {

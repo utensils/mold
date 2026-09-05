@@ -25,12 +25,7 @@ export function useReuseStillPrint() {
     // The bucket's authority may be unresolved (this device before its engine
     // answers); the recipe still restores, and the canvas says the media
     // cannot load rather than the whole reuse refusing.
-    let target: ReturnType<typeof gallery.targetOf> = null;
-    try {
-      target = gallery.targetOf(entry.sourceKey);
-    } catch {
-      target = null;
-    }
+    const target = gallery.targetOfOrNull(entry.sourceKey);
     // The settings AND the picture they made: the prefill names the print so
     // the canvas shows it once the recipe has landed in the form.
     const retainedVersion = composer.beginRetainedSourceReuse({

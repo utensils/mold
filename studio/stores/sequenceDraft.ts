@@ -89,6 +89,7 @@ interface PersistedDraftV1 {
     (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
   enableAudio: boolean;
   lastSingleModel: string | null;
+  lastStillModel?: string | null;
   sequenceModel?: string | null;
 }
 
@@ -138,6 +139,9 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   const enableAudio = ref(false);
   const editing = ref<SequenceEditSession | null>(null);
   const lastSingleModel = ref<string | null>(null);
+  /** The still style parked while a 3-D style is selected. It lives here, not
+   *  in the toolbar that parks it, so leaving New image cannot lose it. */
+  const lastStillModel = ref<string | null>(null);
   const sequenceModel = ref<string | null>(null);
   const hydrated = ref(false);
 
@@ -182,6 +186,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
         : null,
       enableAudio: enableAudio.value,
       lastSingleModel: lastSingleModel.value,
+      lastStillModel: lastStillModel.value,
       sequenceModel: sequenceModel.value,
     };
     try {
@@ -203,6 +208,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     openingImage.value = saved.openingImage ?? null;
     enableAudio.value = saved.enableAudio;
     lastSingleModel.value = saved.lastSingleModel ?? null;
+    lastStillModel.value = saved.lastStillModel ?? null;
     sequenceModel.value = saved.sequenceModel ?? null;
   }
 
@@ -549,7 +555,15 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   // Sync flush so the debounce timer arms on the mutation itself (the
   // callback only re-arms a setTimeout — cheap enough for every keystroke).
   watch(
-    [output, clips, openingImage, enableAudio, lastSingleModel, sequenceModel],
+    [
+      output,
+      clips,
+      openingImage,
+      enableAudio,
+      lastSingleModel,
+      lastStillModel,
+      sequenceModel,
+    ],
     () => schedulePersist(),
     { deep: true, flush: "sync" },
   );
@@ -563,6 +577,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     enableAudio,
     editing,
     lastSingleModel,
+    lastStillModel,
     sequenceModel,
     hydrated,
     hydrate,

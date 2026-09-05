@@ -121,8 +121,9 @@ describe("ComposerCard", () => {
 
   it("keeps a restored look preset on the form with no strip to show it", async () => {
     // The preset strip is gone from the desktop composer — its word collided
-    // with the bound "Style" — but a persisted draft carrying one still
-    // submits, so the field rides along untouched.
+    // with the bound "Style" — and nothing here reads one any more. A
+    // persisted draft's preset rides along untouched and changes no request;
+    // the field survives for the phone, which still has its chips.
     const form = baseForm();
     form.stylePreset = "cinematic";
     const wrapper = mountComposer(form);

@@ -6,6 +6,7 @@ import CreateHeader from "./CreateHeader.vue";
 import createHeaderSource from "./CreateHeader.vue?raw";
 import segmentedControlSource from "@ui/components/SegmentedControl.vue?raw";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -41,6 +42,21 @@ function readyLocal() {
 /** Install models on the local host so the header's mesh door can appear. */
 function installLocal(entries: ModelEntry[]) {
   useHostModelsStore().byHost.local = { entries, fetchedAt: Date.now(), error: null };
+}
+
+/** A second machine, pinned as the one Create sends work to. */
+function pinRemote(entries: ModelEntry[]) {
+  useHostsStore().extras.push({
+    id: "plato-7680",
+    label: "plato",
+    url: "http://plato:7680",
+    apiKey: null,
+    status: "ready",
+    error: null,
+    instanceId: null,
+  });
+  useHostModelsStore().byHost["plato-7680"] = { entries, fetchedAt: Date.now(), error: null };
+  useAppPrefsStore().settings = { generateTargetHost: "plato-7680" } as never;
 }
 
 const meshModel = {
@@ -202,6 +218,44 @@ describe("CreateHeader", () => {
 
       expect(store.form.model).toBe(stillModel.name);
       expect(store.form.family).toBe("flux");
+    });
+
+    /**
+     * The header used to partition `unionInstalled` — every style any machine
+     * has — while the inspector partitioned the picker's own target rows. A
+     * 3-D door that opens onto a style the pinned machine cannot run is a dead
+     * end, so both read the one inventory.
+     */
+    it("offers only what the machine Create is aimed at can make", () => {
+      readyLocal();
+      installLocal([stillModel, meshModel]);
+      pinRemote([stillModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(wrapper).map((b) => b.text())).toEqual(["Still picture", "Short clip"]);
+    });
+
+    /**
+     * The parked still style is draft state, not component state: leaving New
+     * image and coming back unmounts the header, and a `ref` took the parked
+     * style with it — the return to Still picture then reached for the first
+     * row on the machine instead of the style the person had been using.
+     */
+    it("keeps the parked still style across a visit to another workspace", async () => {
+      readyLocal();
+      const otherStill = { ...stillModel, name: "sdxl-base:fp16", family: "sdxl" } as ModelEntry;
+      installLocal([otherStill, stillModel, meshModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[2]!.trigger("click");
+      expect(store.form.model).toBe(meshModel.name);
+      wrapper.unmount();
+
+      const returned = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(returned)[0]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
     });
 
     it("applies the first installed 3-D style, and restores the parked still style", async () => {

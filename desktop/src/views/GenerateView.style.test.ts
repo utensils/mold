@@ -1,7 +1,10 @@
 /**
- * The composer style preset is a look modifier composed into the OUTGOING
- * request at submit — the textarea (form.prompt) and negative field are never
- * mutated. The preset negative merges only for families that accept one.
+ * The desktop composer has no style-preset strip: the word "Style" belongs to
+ * the model, and the one style selector is the composer's Style chip. Nothing
+ * on this surface writes `form.stylePreset` any more, so nothing on it may
+ * READ one either — a preset left in the form by a pre-redesign template or a
+ * persisted draft is an invisible prompt rewriter, which is exactly the thing
+ * the redesign removed. The phone keeps its own chips and its own bake.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
@@ -117,34 +120,19 @@ describe("GenerateView style-at-submit", () => {
   });
   afterEach(() => (document.body.innerHTML = ""));
 
-  it("bakes the style template into the request prompt, leaving the textarea unchanged", async () => {
+  it("ships the words on screen, with no look woven into them", async () => {
     const request = await submitStyled({ model: fluxModel, stylePreset: "cinematic" });
-    expect(request.prompt).toBe(
-      "cinematic film still of a lighthouse, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
-    );
-    // The live composer text is untouched.
+    expect(request.prompt).toBe("a lighthouse");
     expect(useGenerateFormStore().form.prompt).toBe("a lighthouse");
   });
 
-  it("merges the preset negative after the user's fragments when the family accepts one", async () => {
+  it("never merges a preset's negative into the request", async () => {
     const request = await submitStyled({
       model: sdxlModel,
       stylePreset: "cinematic",
       negativePrompt: "text, watermark, anime",
     });
-    // User fragments first, exact duplicates dropped, preset fragments appended.
-    expect(request.negative_prompt).toBe("text, watermark, anime, cartoon, graphic, washed out");
-    // The visible negative field is untouched.
+    expect(request.negative_prompt).toBe("text, watermark, anime");
     expect(useGenerateFormStore().form.negativePrompt).toBe("text, watermark, anime");
-  });
-
-  it("never ships the preset negative to a family that rejects negative prompts", async () => {
-    const request = await submitStyled({
-      model: fluxModel,
-      stylePreset: "cinematic",
-      negativePrompt: "text",
-    });
-    expect(request.negative_prompt).toBeUndefined();
-    expect(useGenerateFormStore().form.negativePrompt).toBe("text");
   });
 });

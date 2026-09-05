@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import { flushPromises, mount } from "@vue/test-utils";
+import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
+
+installMemoryLocalStorage();
+
 import viewSource from "./GenerateView.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import modelPickerSource from "../components/create/ModelPicker.vue?raw";
@@ -7,6 +13,25 @@ import sequenceComposerSource from "../components/create/SequenceComposer.vue?ra
 import composerCardSource from "../components/create/ComposerCard.vue?raw";
 import sceneLaneSource from "../components/create/SceneLane.vue?raw";
 import benchLayoutSource from "../lib/benchLayout?raw";
+import GenerateView from "./GenerateView.vue";
+import { useConnectionStore } from "../stores/connection";
+import { useHostModelsStore } from "../stores/hostModels";
+import { useHostsStore } from "../stores/hosts";
+import { useModelStore } from "../stores/models";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import type { ModelEntry } from "../lib/api/types";
+
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}));
+vi.mock("../lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/client")>()),
+  apiJson: vi.fn(() => Promise.resolve([])),
+  apiJsonTo: vi.fn(() => Promise.resolve([])),
+  apiFetch: vi.fn(),
+}));
+vi.mock("../lib/ipc", () => ({ ipc: {} }));
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -211,8 +236,9 @@ describe("GenerateView layout", () => {
     expect(viewSource).toMatch(/minBench:\s*minBenchHeight\(\)/);
     expect(benchLayoutSource).toMatch(/Math\.max\(input\.minBench, input\.available - reserved\)/);
     expect(benchLayoutSource).toMatch(/Math\.max\(input\.minBench, input\.requested\)/);
-    // Switching Output re-clamps the persisted height against the new floor.
-    expect(viewSource).toMatch(/watch\(isSequence, [\s\S]{0,400}?clampBenchToViewport\(\)/);
+    // ENTERING clip mode re-clamps the persisted height against the bench's
+    // own floor; leaving it clamps nothing, which the mounted case below pins.
+    expect(viewSource).toMatch(/watch\(isSequence, [\s\S]{0,900}?clampBenchToViewport\(\)/);
     // The timeline root must opt out of min-content flooring: floored at auto,
     // it counts the lane's preferred basis and the panel scrolls before the
     // lane's shrink weight ever engages.
@@ -249,6 +275,60 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain('@open-tab="inspectorTab = $event"');
     expect(viewSource).toContain('@update:tab="inspectorTab = $event"');
     expect(viewSource).toContain('@load-template="loadTemplate"');
+  });
+
+  /**
+   * The bench only exists in clip mode, and a still's canvas floor is more
+   * than twice a clip's — so clamping on the way OUT measured the timeline
+   * against a floor no timeline was under, and quietly shrank a height the
+   * person had dragged. Coming back, the smaller number was all that was left.
+   */
+  it("leaves a dragged bench height alone while the timeline is put away", async () => {
+    setActivePinia(createPinia());
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
+    conn.status = "ready";
+    useHostsStore().initialized = true;
+    const clipModel = {
+      name: "ltx-video",
+      family: "ltx-video",
+      downloaded: true,
+      default_width: 768,
+      default_height: 512,
+      default_steps: 30,
+      default_guidance: 3,
+      supports_sequence: true,
+    } as ModelEntry;
+    useModelStore().all = [clipModel];
+    useHostModelsStore().byHost.local = {
+      entries: [clipModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+
+    const wrapper = mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    // The workbench's own box is what the clamp reserves against; jsdom
+    // reports zero for every element, which would floor both modes.
+    Object.defineProperty(wrapper.get("[data-test='generate-workbench']").element, "clientHeight", {
+      value: 800,
+      configurable: true,
+    });
+    // Drag the bench to the height a clip sequence opens at, now that the
+    // workbench has a real box to clamp against.
+    await wrapper.get("[data-test='create-bench-resizer']").trigger("dblclick");
+    const dragged = wrapper.get("[data-test='create-bottom-panel']").attributes("style");
+    expect(dragged).toContain("380px");
+
+    draft.output = "single";
+    await flushPromises();
+    draft.output = "sequence";
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='create-bottom-panel']").attributes("style")).toBe(dragged);
+    wrapper.unmount();
   });
 
   it("disables Picture-in-Picture on the generated video preview", () => {

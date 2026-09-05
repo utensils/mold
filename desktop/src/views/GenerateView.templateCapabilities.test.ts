@@ -126,6 +126,22 @@ describe("GenerateView — loading a template refreshes the recipe capabilities"
     expect(request).not.toHaveProperty("mesh");
   });
 
+  /**
+   * The desktop composer has no style-preset strip — the word "Style" belongs
+   * to the model. A template saved before that change still carries a preset,
+   * and applying it wholesale reinstated an invisible prompt rewriter: the
+   * words on screen were not the words that were sent.
+   */
+  it("leaves a pre-redesign template's style preset behind", async () => {
+    const template = legacyTemplate(sdxl.name, sdxl.family);
+    (template.form as unknown as Record<string, unknown>).stylePreset = "cinematic";
+
+    const form = await loadIntoMeshForm(template);
+
+    expect(form.stylePreset).toBe("");
+    expect(buildRequest(form).prompt).toBe("a river at dawn");
+  });
+
   it("drops the snapshot when the template's model is not installed", async () => {
     const form = await loadIntoMeshForm(legacyTemplate("flux-dev:q8", "flux"));
     expect(form.model).toBe("flux-dev:q8");

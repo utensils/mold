@@ -439,6 +439,12 @@ function askRemoveScene(id: string) {
   removeCandidateId.value = id;
 }
 
+/** Delete on a scene the floor keeps. The lane has already swallowed the key,
+ *  so the refusal has to say itself — silence read as a dead keyboard. */
+function sceneRemoveBlocked() {
+  toasts.push("A clip keeps at least two scenes — clear the clip to start over.");
+}
+
 function removeScene() {
   if (removeCandidateId.value) draft.removeClip(removeCandidateId.value);
   removeCandidateId.value = null;
@@ -742,6 +748,7 @@ function onBenchContextMenu(event: MouseEvent) {
             :disabled="submitting"
             @select="draft.activeClipId = $event"
             @remove="askRemoveScene"
+            @remove-blocked="sceneRemoveBlocked"
             @reorder="reorderClips"
             @resize="resizeClip"
             @seam-click="onSeamClick"

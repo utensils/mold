@@ -14,7 +14,7 @@ import {
   type OutputKind,
 } from "../../composables/useCreateOutputKind";
 import { useGenerateFormStore } from "../../stores/generateForm";
-import { useHostModelsStore } from "../../stores/hostModels";
+import { useStylePicker } from "../../composables/useStylePicker";
 import HostChip from "./HostChip.vue";
 import type { InspectorTab } from "./inspectorTabs";
 
@@ -43,14 +43,18 @@ const emit = defineEmits<{
 
 const draft = useSequenceDraftStore();
 const formStore = useGenerateFormStore();
-const hostModels = useHostModelsStore();
+// ONE inventory for the toolbar and the inspector. The header partitioned
+// every style any machine has while the inspector partitioned the picker's own
+// target rows, so a 3-D door could open onto a style the machine Create is
+// aimed at cannot run.
+const { targetModels } = useStylePicker(() => props.form);
 
 const isSequence = computed(() => draft.output === "sequence");
 const isMesh = computed(() => isMeshFamily(props.form.family));
 // Which styles each section holds is `useCreateOutputKind`'s one answer — the
 // same one the picker narrows on, so the door and the menu behind it agree.
-const meshModels = computed(() => modelsForOutputKind(hostModels.unionInstalled, "mesh"));
-const stillModels = computed(() => modelsForOutputKind(hostModels.unionInstalled, "still"));
+const meshModels = computed(() => modelsForOutputKind(targetModels.value, "mesh"));
+const stillModels = computed(() => modelsForOutputKind(targetModels.value, "still"));
 
 // The same decision the title bar reads (`useCreateOutputKind`), from this
 // form rather than the store so the header answers for the form it renders.
@@ -65,9 +69,6 @@ const outputOptions = computed(() => [
     : []),
 ]);
 
-/** The still-picture style parked while a 3-D style is selected. */
-const lastStillModel = ref<string | null>(null);
-
 function setOutputKind(kind: string | number) {
   if (kind === outputKind.value) return;
   if (kind === "clip") {
@@ -78,7 +79,9 @@ function setOutputKind(kind: string | number) {
   if (kind === "mesh") {
     const pick = meshModels.value[0];
     if (!pick) return;
-    if (!isMesh.value) lastStillModel.value = props.form.model || null;
+    // Parked on the DRAFT: leaving New image unmounts this toolbar, and a
+    // component-local ref took the parked style with it.
+    if (!isMesh.value) draft.lastStillModel = props.form.model || null;
     formStore.applyModel(pick);
     return;
   }
@@ -88,10 +91,10 @@ function setOutputKind(kind: string | number) {
     // machine, which on a box with a clip style installed put a video style
     // under a Still picture label.
     const restored =
-      (lastStillModel.value && findInstalledModel(stillModels.value, lastStillModel.value)) ||
+      (draft.lastStillModel && findInstalledModel(stillModels.value, draft.lastStillModel)) ||
       stillModels.value[0];
     if (restored) formStore.applyModel(restored);
-    lastStillModel.value = null;
+    draft.lastStillModel = null;
   }
 }
 

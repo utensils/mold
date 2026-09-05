@@ -847,6 +847,39 @@ describe("GenerateView — sequence output", () => {
     expect(body.stages[1].source_image).toBeUndefined();
   });
 
+  /**
+   * Amending a clip that already exists is not a new print, and the button
+   * that does it said "Generate" — the one word that promises a new one.
+   */
+  it("names the amend by what it does to the clip already made", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = "ltx-video";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    const wrapper = mountView();
+    await flushPromises();
+    const composer = wrapper.findComponent({ name: "ComposerCard" });
+    expect(composer.props("buttonLabel")).toBe("Generate");
+
+    draft.loadFromJob(
+      {
+        jobId: "job-1",
+        hostId: "local",
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 1,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+    await flushPromises();
+
+    expect(composer.props("buttonLabel")).toBe("Update clip");
+  });
+
   it("compensates a cancelled in-flight amendment on its frozen target", async () => {
     readyLocal();
     installedPayload = [videoModel];

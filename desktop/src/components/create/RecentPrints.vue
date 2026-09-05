@@ -23,17 +23,23 @@ const emit = defineEmits<{ reuse: [print: MergedPrint] }>();
 
 const gallery = useGalleryStore();
 
+// A row is drawn, not sent anywhere, so a bucket that cannot name its
+// authority reads as "no target" — the row still lists the print and its
+// recipe still restores — rather than throwing the whole tab away.
 const rows = computed(() =>
-  props.prints.map((entry) => ({
-    entry,
-    key: `${entry.sourceKey}::${entry.item.filename}`,
-    title: displayTitle(entry.item),
-    meta: modelDisplayNameForId(entry.item.metadata.model, props.models ?? []),
-    path: galleryMediaPath(entry.item.filename, gallery.mediaSourceOf(entry.sourceKey), true),
-    target: gallery.targetOf(entry.sourceKey),
-    mediaVersion:
-      entry.item.media_version ?? `${entry.item.timestamp}:${entry.item.size_bytes ?? "unknown"}`,
-  })),
+  props.prints.map((entry) => {
+    const target = gallery.targetOfOrNull(entry.sourceKey);
+    return {
+      entry,
+      key: `${entry.sourceKey}::${entry.item.filename}`,
+      title: displayTitle(entry.item),
+      meta: modelDisplayNameForId(entry.item.metadata.model, props.models ?? []),
+      path: galleryMediaPath(entry.item.filename, target ? "host" : "local", true),
+      target,
+      mediaVersion:
+        entry.item.media_version ?? `${entry.item.timestamp}:${entry.item.size_bytes ?? "unknown"}`,
+    };
+  }),
 );
 </script>
 

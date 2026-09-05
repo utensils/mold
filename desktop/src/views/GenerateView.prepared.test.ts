@@ -980,7 +980,9 @@ describe("GenerateView prepared expansion batches", () => {
     });
   });
 
-  it("remixes Batch 1 in place with the style snapshotted before the request", async () => {
+  /** A leftover preset (an old template, a stale draft) is not read, not
+   *  written and not a staleness axis: the remix lands regardless. */
+  it("remixes Batch 1 in place, leaving a leftover style preset untouched", async () => {
     const form = useGenerateFormStore().form;
     form.batchSize = 1;
     form.stylePreset = "cinematic";
@@ -1012,7 +1014,7 @@ describe("GenerateView prepared expansion batches", () => {
     expect(wrapper.findComponent(PreparedExpansionBatch).exists()).toBe(false);
     expect(form.prompt).toBe("one");
     expect(form.batchSize).toBe(1);
-    expect(form.stylePreset).toBe("");
+    expect(form.stylePreset).toBe("anime");
 
     await wrapper.get('[data-test="generate-button"]').trigger("click");
     await flushPromises();

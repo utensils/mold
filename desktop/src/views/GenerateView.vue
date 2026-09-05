@@ -153,7 +153,8 @@ import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
-import { copyBase64ImageToClipboard } from "../lib/clipboard";
+import { copyBase64ImageToClipboard, copyImageBytesToClipboard } from "../lib/clipboard";
+import { suggestedSaveName } from "../lib/gallery/saveName";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
 import { useUiStore, type CreateIntent } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
@@ -161,7 +162,7 @@ import {
   generationCapabilitiesForFamily,
   generationCapabilitiesForForm,
 } from "../lib/capabilities";
-import { batchLockedForForm, canRepeatPrint } from "../lib/variations";
+import { batchLockedForForm, batchLockedForRequest, canRepeatPrint } from "../lib/variations";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -182,7 +183,6 @@ import {
   reconcileModelCapabilities,
 } from "../lib/generateForm";
 import { emptyMeshForm } from "@studio/lib/meshControls";
-import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import { videoFramesError } from "@studio/lib/videoDuration";
 import {
   advancedVideoValidationError,
@@ -871,12 +871,6 @@ let expansionPullRequestId = 0;
 const expansionAttemptHostLabel = ref<string | null>(null);
 const quickExpansionOriginal = ref<string | null>(null);
 const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
-/**
- * The negative prompt before and after a bake-and-clear merged the preset's
- * curated fragments into it. Undo re-arms `before` alongside the prompt and
- * chip; `baked` lets it bow out when the user has since edited the field.
- */
-const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const submissionPlanning = ref(false);
 const preparationGuard = new PreparationRequestGuard();
@@ -1264,15 +1258,13 @@ const preparedStaleReasons = computed(() => {
           kind: "remix" as const,
           ...(form.originalPrompt ? { rootPrompt: form.originalPrompt } : {}),
           sourceKind: remixSource.value,
-          dimensions: defaultRemixDimensions(
-            expansionTaskForRequest(form.family, request),
-            Boolean(form.stylePreset),
-          ),
+          dimensions: defaultRemixDimensions(expansionTaskForRequest(form.family, request), false),
           conditioningFingerprint: conditioningFingerprint(request),
         }
       : {}),
     requestedCount: effectiveBatchSize.value,
-    stylePreset: form.stylePreset || null,
+    // This surface has no style preset to freeze or to go stale on.
+    stylePreset: null,
     selectedHostPolicy: stickyTarget.value,
     readyHostIds: new Set(
       hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
@@ -2344,7 +2336,11 @@ watch(
   { immediate: true },
 );
 
-const buttonLabel = computed(() => (composerSubmitting.value ? "Cancel" : "Generate"));
+/** Amending an existing clip is not a new print: the one Generate button says
+ *  what it will actually do to the clip already on the timeline. */
+const buttonLabel = computed(() =>
+  composerSubmitting.value ? "Cancel" : draft.editing ? "Update clip" : "Generate",
+);
 /** The queue depth rides beside the button, never inside its one word. */
 const queuedNote = computed(() =>
   generation.pending.length > 0 ? `+${generation.pending.length} queued` : null,
@@ -2517,6 +2513,10 @@ async function loadTemplate(template: GenerationTemplate) {
   keepingPrintIdentity(form, () =>
     Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
   );
+  // A template saved before the redesign carries a style preset, and this
+  // surface has no control that would show one. Restoring it would put back an
+  // invisible prompt rewriter: the words on screen would not be the words sent.
+  form.stylePreset = "";
   // A template is PARAMETERS, not a capability snapshot. One saved before the
   // snapshot existed (or on another host) carries none, and applying it over
   // a Hunyuan3D form left the mesh recipe's `glb` pin and zero canvas in
@@ -2807,12 +2807,152 @@ async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promi
  * count to one, so the button would promise four and make exactly one.
  */
 const VARIATION_BATCH = 4;
+
+/**
+ * The recipe that answers for a PRINT — the checkpoint's own contract, read
+ * from whichever machine holds it, exactly as the composer reads the form's.
+ * The form is irrelevant here: it may have moved on to another style entirely
+ * since this picture was made.
+ */
+function capabilitiesForPrint(request: GenerateRequest, hostId: string | null) {
+  const entry = hostModels.contractEntryForTarget(request.model, hostId);
+  const pipeline = request.pipeline ?? null;
+  return generationCapabilitiesForFamily(
+    entry?.family ?? "",
+    request.model,
+    pipeline,
+    undefined,
+    undefined,
+    effectiveGenerationRecipe(entry, pipeline),
+  );
+}
+
 function canMakeVariations(candidate: Job | null): boolean {
-  return !isSequence.value && canRepeatPrint(candidate, batchLocked.value);
+  const request = candidate?.request;
+  if (isSequence.value || !request) return false;
+  return canRepeatPrint(
+    candidate,
+    batchLockedForRequest(request, capabilitiesForPrint(request, candidate.hostId ?? null)),
+  );
 }
 function makeVariations(count = VARIATION_BATCH) {
-  if (!canMakeVariations(job.value)) return;
-  void generate(Math.min(Math.max(count, 1), MAX_BATCH_SIZE));
+  const candidate = job.value;
+  if (!candidate || !canMakeVariations(candidate)) return;
+  void repeatPrint(candidate, Math.min(Math.max(count, 1), MAX_BATCH_SIZE));
+}
+
+/**
+ * The print, made again as a batch of `count`.
+ *
+ * It submits the print's OWN saved request rather than rebuilding one from the
+ * live form: the request already carries the fitted source bytes, the baked
+ * style, the seed policy and the filing this picture was made with, and every
+ * one of those was persisted and stashed at the first submit. So the whole
+ * composer half of `generate()` — the prepared-batch guards, the style
+ * composition, source preprocessing, the retained-source relay, the media
+ * stash — has nothing to do here, and running it would make four of whatever
+ * the composer is holding now.
+ *
+ * What it keeps is everything about WHERE the four will run: the chain-routing
+ * refusal, placement (four prints is a new question, and the style may have
+ * been evicted since), the licence gate and the missing-model pull offer. An
+ * empty composer, or one holding an unrenderable form, does not block it: that
+ * refusal is the form's, not this picture's.
+ * The host is the print's own — a picture made on
+ * another machine re-rendered here is a different picture — and a pinned
+ * machine that has gone away errors through the same placement message rather
+ * than silently rerouting.
+ */
+async function repeatPrint(candidate: Job, count: number) {
+  const source = candidate.request;
+  if (!source || preparedSubmitting.value || submissionPlanning.value) return;
+  const submitToken = submissionGuard.begin();
+  const submitSignal = submissionGuard.signalFor(submitToken);
+  submissionPlanning.value = true;
+  try {
+    const request: GenerateRequest = { ...source, batch_size: count };
+    const printHostId = candidate.hostId ?? null;
+    const entry = hostModels.contractEntryForTarget(request.model, printHostId);
+    const family = entry?.family ?? "";
+    const routingModel = entry
+      ? { default_frames: entry.default_frames, source_image: entry.source_image }
+      : null;
+    const chainRouting = decideGenerateRequestRouting(request, family, routingModel);
+    if (chainRouting.kind === "reject") {
+      toasts.push(chainRouting.reason, "error");
+      return;
+    }
+    if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
+      toasts.push(
+        "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer.",
+        "error",
+      );
+      return;
+    }
+    const planningRequest =
+      chainRouting.kind === "chain" ? buildAutoChainRequest(request, chainRouting) : request;
+    // No LoRA provenance check: a saved request carries the look's PATH, not
+    // the machine that supplied it, and the resubmission goes to the print's
+    // own host, where those paths are exactly as valid as they were when it
+    // was made. A host that has gone away fails placement below with the
+    // sentence that names the machine, which is the same refusal.
+    const feasibility = await hosts.resolveFeasible(printHostId, planningRequest, count, {
+      signal: submitSignal,
+    });
+    if (!submissionGuard.isCurrent(submitToken)) return;
+    if (feasibility.kind !== "route") {
+      const offered = offerMissingModelPull(feasibility, {
+        model: request.model,
+        modelFamily: family,
+        // The print's own request, verbatim — never the composer's quick
+        // rewrite, which belongs to a different, unsubmitted print.
+        request,
+        batch: count,
+        chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
+        requestOptions: {},
+        // The request is already final — nothing is fitted or composed after
+        // the pull, so the resumed submission is byte-for-byte this one.
+        resumeAfterPull: true,
+      });
+      if (!offered) toasts.push(placementFailureMessage(feasibility), "error");
+      return;
+    }
+    const route = freezeModelFamily(feasibility.route, family)!;
+    const { accepted } = await licenseAcceptance.request({
+      hostLabel: route.label,
+      target: route.target,
+      requirements: licenseRequirements(feasibility.preview?.pending_downloads),
+    });
+    if (!accepted || !submissionGuard.isCurrent(submitToken)) return;
+    let settled: ReturnType<typeof generation.submitBatch>["settled"];
+    try {
+      ({ settled } = generation.submitBatch(request, count, route, chainRouting, {}));
+    } catch (error) {
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
+      return;
+    }
+    missingModel.value = null;
+    void settled.then((done) => {
+      for (const warning of new Set(done.flatMap((finished) => finished.requestWarnings))) {
+        toasts.push(warning, "warning");
+      }
+      const ok = done.filter((finished) => finished.status === "complete").length;
+      const failedCount = done.filter(
+        (finished) => finished.status === "error" && !finished.outcomeUnknown,
+      ).length;
+      if (ok > 0) {
+        toasts.push(
+          failedCount > 0
+            ? `Generated ${ok} of ${done.length} variations. ${failedCount} failed; the rest were saved to My images.`
+            : ok === 1
+              ? "Generated — saved to My images"
+              : `Generated ${ok} pictures — saved to My images`,
+        );
+      }
+    });
+  } finally {
+    if (submissionGuard.isCurrent(submitToken)) submissionPlanning.value = false;
+  }
 }
 
 // ── Make bigger (the caption's upscale door) ────────────────────────────────
@@ -2878,20 +3018,77 @@ async function startCanvasUpscale() {
   }
 }
 
-/** Whether the canvas result can be written out as a file right now. */
+/**
+ * Whether the canvas result can be written out as a file right now.
+ *
+ * Not "does it carry bytes": every ordinary desktop generation settles through
+ * `applyDurableCompletion`, which names the host's file and leaves `image`
+ * empty, so gating on inline bytes hid Save from every print the app makes.
+ * A named file on a reachable machine is saveable; inline bytes (a legacy or
+ * non-durable stream) still are too.
+ */
 function canSaveCanvasResult(j: Job): boolean {
-  return !!j.result && !j.result.video_frames && !isAudioResult(j) && !!j.result.image;
+  const result = j.result;
+  if (!result || result.video_frames || isAudioResult(j)) return false;
+  if (result.image) return true;
+  return !!result.filename && !!resultHostTarget(j.clientId);
 }
 
 function saveCanvasResult(j: Job) {
-  if (!j.result?.image) return;
-  const filename =
-    j.result.filename ??
-    suggestOutputFilename(j.result.model, j.result.seed_used, j.result.format, j.submittedAtUnixMs);
-  void ipc
-    .saveMediaBytes(filename, j.result.image)
+  const result = j.result;
+  if (!result) return;
+  if (result.image) {
+    const filename =
+      result.filename ??
+      suggestOutputFilename(result.model, result.seed_used, result.format, j.submittedAtUnixMs);
+    void ipc
+      .saveMediaBytes(filename, result.image)
+      .then((saved) => showSavedMediaToast(toasts, saved))
+      .catch((error) =>
+        toasts.push(error instanceof Error ? error.message : String(error), "error"),
+      );
+    return;
+  }
+  const entry = canvasPrintEntry(j);
+  const target = resultHostTarget(j.clientId);
+  if (!entry || !result.filename) return;
+  if (!target) {
+    toasts.push("This print’s machine is no longer connected.", "error");
+    return;
+  }
+  // The same road the Library and the Lightbox take, so one print saved from
+  // two places lands under one name.
+  void saveGalleryMedia(target, result.filename, suggestedSaveName(entry.item))
     .then((saved) => showSavedMediaToast(toasts, saved))
     .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
+}
+
+/**
+ * Copy image. A durable completion has no inline bytes, so the copy takes the
+ * picture the canvas is ALREADY showing — `resultUrl`, the media the native
+ * bridge (or the host) resolved for the viewer — rather than the empty field.
+ */
+async function copyCanvasImage(j: Job): Promise<void> {
+  const result = j.result;
+  if (!result) return;
+  const mime = result.format === "jpeg" ? "image/jpeg" : `image/${result.format}`;
+  if (result.image) {
+    await copyBase64ImageToClipboard(result.image, mime);
+    return;
+  }
+  const url = j.resultUrl;
+  if (!url) throw new Error("This print’s picture hasn’t loaded yet.");
+  await copyImageBytesToClipboard(url, {
+    fetchImage: async (path) => new Uint8Array(await (await fetch(path)).arrayBuffer()),
+    mimeType: mime,
+  });
+}
+
+/** Whether there is a picture to copy: raster only, and bytes from somewhere. */
+function canCopyCanvasImage(j: Job): boolean {
+  const result = j.result;
+  if (!result || result.video_frames || isAudioResult(j) || isMeshResult(j)) return false;
+  return !!result.image || !!j.resultUrl;
 }
 
 function canvasMenu(): MenuEntry[] {
@@ -2926,11 +3123,9 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Copy image",
-      disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || isMeshResult(j),
+      disabled: !canCopyCanvasImage(j),
       action: () => {
-        if (!j.result) return;
-        const mime = j.result.format === "jpeg" ? "image/jpeg" : `image/${j.result.format}`;
-        void copyBase64ImageToClipboard(j.result.image, mime)
+        void copyCanvasImage(j)
           .then(() => toasts.push("Image copied"))
           .catch((error) =>
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
@@ -3070,7 +3265,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     task: expansionTaskForRequest(form.family, request),
     context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
-    stylePreset: form.stylePreset || null,
+    stylePreset: null,
     selectedHostPolicy: stickyTarget.value,
   };
 }
@@ -3091,8 +3286,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   const request = buildRequest(form);
   const task = expansionTaskForRequest(form.family, request);
   const source = promptSource(form.prompt, form.originalPrompt, remixSource.value);
-  const stylePreset = form.stylePreset || null;
-  const dimensions = defaultRemixDimensions(task, Boolean(stylePreset));
+  const dimensions = defaultRemixDimensions(task, false);
   // Match the Batch value the composer actually presents. Capability/source
   // constraints can force the effective value to one while preserving the
   // user's saved raw preference for a later compatible model.
@@ -3102,7 +3296,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   expansionError.value = null;
   expansionAttemptHostLabel.value = route.label;
   try {
-    const style = styleHint(stylePreset ?? "");
     const response = await remixPrompt(
       {
         source_prompt: source.prompt,
@@ -3112,7 +3305,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         variations: requestedCount,
         task,
         context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
-        ...(style ? { style } : {}),
         dimensions,
       },
       route.target,
@@ -3136,8 +3328,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
       form.prompt = selected.prompt;
       form.originalPrompt = response.root_prompt ?? response.source_prompt;
       quickExpansionOriginal.value = response.source_prompt;
-      bakeStyleNegative(stylePreset ?? "", form.family);
-      form.stylePreset = "";
       quickExpansionSnapshot.value = {
         requestToken: token,
         originalPrompt: response.root_prompt ?? response.source_prompt,
@@ -3145,7 +3335,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         model: form.model,
         family: form.family,
         task,
-        stylePreset,
+        stylePreset: null,
         selectedHostPolicy: stickyTarget.value,
         route: frozenGenerationRoute(printRoute, route),
         ...expansionRouteProvenance(printRoute, route),
@@ -3175,7 +3365,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         family: form.family,
         task,
         requestedCount,
-        stylePreset,
+        stylePreset: null,
         selectedHostPolicy: stickyTarget.value,
       },
       frozenGenerationRoute(printRoute, route),
@@ -3331,9 +3521,6 @@ async function expandForCurrentBatch(
   expansionError.value = null;
   expansionMissingModel.value = null;
   try {
-    // The active chip travels as a natural-language directive the server
-    // weaves into the expander's system message — never the literal suffix.
-    const styleDirective = styleHint(inputs.stylePreset ?? "");
     const response = await expandPrompt(
       inputs.sourcePrompt,
       {
@@ -3341,7 +3528,6 @@ async function expandForCurrentBatch(
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
         task: inputs.task,
         ...(inputs.context ? { context: inputs.context } : {}),
-        ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
     );
@@ -3361,12 +3547,11 @@ async function expandForCurrentBatch(
         current.model !== inputs.model ||
         current.family !== inputs.family ||
         current.task !== inputs.task ||
-        current.stylePreset !== inputs.stylePreset ||
         current.selectedHostPolicy !== inputs.selectedHostPolicy ||
         !hostStillReady
       ) {
         expansionError.value =
-          "The prompt, style, or generation host changed while expansion was running. Expand again to use the current inputs.";
+          "The prompt, model, or generation host changed while expansion was running. Expand again to use the current inputs.";
         return;
       }
       quickExpansionOriginal.value = inputs.sourcePrompt;
@@ -3384,14 +3569,6 @@ async function expandForCurrentBatch(
         route: frozenGenerationRoute(printRoute, route),
         ...expansionRouteProvenance(printRoute, route),
       };
-      // Bake-and-clear: the rewrite absorbed the style (the server received
-      // it as a directive), so the chip clears here — leaving it lit would
-      // apply the look twice at submit. Prepared batches below KEEP the chip:
-      // it is the frozen-style indicator for the reviewed set (a style change
-      // is a named staleness axis) and their submit path never re-composes it
-      // into the reviewed prompt text.
-      bakeStyleNegative(inputs.stylePreset ?? "", inputs.family);
-      form.stylePreset = "";
       if (replacePrepared) {
         const active = document.activeElement;
         const shouldRestoreFocus =
@@ -3420,46 +3597,21 @@ async function expandForCurrentBatch(
   }
 }
 
-/**
- * Bake-and-clear owes the user the preset's curated negative: the chip is
- * about to be dropped, so submit-time composition will never see it again.
- * The look itself already reached the rewritten prompt through the expansion
- * directive — only the negative half has nowhere else to live.
- */
-function bakeStyleNegative(presetId: string, family: string) {
-  quickExpansionNegative.value = null;
-  const merged = mergeStyleNegative(form.negativePrompt, presetId, {
-    supportsNegativePrompt: generationCapabilitiesForFamily(family).supportsNegativePrompt,
-  });
-  if (merged === form.negativePrompt) return;
-  quickExpansionNegative.value = { before: form.negativePrompt, baked: merged };
-  form.negativePrompt = merged;
-}
-
-/** True while a quick expansion still owns the composer: its frozen route,
- * its undo, or the style it baked into the prompt. */
+/** True while a quick expansion still owns the composer: its frozen route or
+ * its undo. */
 function quickExpansionActive(): boolean {
   return quickExpansionSnapshot.value !== null || quickExpansionOriginal.value !== null;
 }
 
 /**
- * Drop every trace of a quick expansion without touching the prompt text:
- * the frozen route snapshot, the undo, the provenance, and the chip and
- * negative fragments the bake-and-clear apply consumed — unless the user has
- * edited the negative since, which is theirs to keep. Undo re-arms the
+ * Drop every trace of a quick expansion without touching the prompt text: the
+ * frozen route snapshot, the undo and the provenance. Undo re-arms the
  * pre-expansion state through here and then puts the original prompt back;
  * a history recall goes through here and then installs the recalled prompt.
  */
 function releaseQuickExpansion() {
   if (!quickExpansionActive()) return;
   submissionGuard.invalidate();
-  const snapshot = quickExpansionSnapshot.value;
-  if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
-  const negative = quickExpansionNegative.value;
-  if (negative && form.negativePrompt === negative.baked) {
-    form.negativePrompt = negative.before;
-  }
-  quickExpansionNegative.value = null;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
   quickExpansionSnapshot.value = null;
@@ -3521,11 +3673,6 @@ function collapsePreparedBatch(removedId: string) {
   form.batchSize = 1;
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
-  // Same bake-and-clear rule as a quick apply: the surviving reviewed text
-  // absorbed the frozen style, so keeping the chip would re-apply the look —
-  // and the frozen style's negative moves into the form with it.
-  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
-  form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
   void nextTick(() => composerRef.value?.focus?.());
@@ -3539,8 +3686,6 @@ function applyPreparedRemix(id: string) {
   form.prompt = selected.text.trim();
   form.originalPrompt = batch.rootPrompt ?? batch.sourcePrompt;
   quickExpansionOriginal.value = batch.sourcePrompt;
-  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
-  form.stylePreset = "";
   quickExpansionSnapshot.value = {
     requestToken: preparationGuard.begin(),
     originalPrompt: batch.rootPrompt ?? batch.sourcePrompt,
@@ -4199,19 +4344,9 @@ async function generate(batchOverride: number | null = null) {
           }
         : null;
     const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
-    // The composer style preset is baked into the OUTGOING request at submit —
-    // the textarea and negative field are never mutated. Reviewed prepared
-    // prompts ship verbatim (the style already reached them through the
-    // expansion directive; staleness pins the chip to the frozen style), so
-    // the prompt half only applies to the ordinary path. The preset negative
-    // is separate from the reviewed prompt text and merges for BOTH paths,
-    // gated on the family's negative-prompt support.
-    const styled = composeStyle(draft.prompt, draft.stylePreset, {
-      supportsNegativePrompt: draftCaps.supportsNegativePrompt,
-      negative: draft.negativePrompt,
-    });
-    if (!preparedSubmission) draft.prompt = styled.prompt;
-    draft.negativePrompt = styled.negative ?? "";
+    // No style bake here: the desktop composer has no preset strip, and a
+    // preset surviving in the form (an old template, a persisted draft) would
+    // rewrite the prompt invisibly — the words on screen are the words sent.
     const batch = preparedSubmission
       ? preparedSubmission.batch
       : draftCaps.forcesBatchSizeOne
@@ -5039,7 +5174,13 @@ function applySequenceHandoff() {
 watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true });
 // Leaving Sequence retires the caveat with the rail it described.
 watch(isSequence, (on) => {
-  if (!on) sequenceReuseNotice.value = null;
+  if (!on) {
+    sequenceReuseNotice.value = null;
+    // No bench is mounted in one-shot mode, and a still reserves more than
+    // twice a clip's canvas floor — clamping here measured the timeline
+    // against a floor it was never under and shrank a height the user dragged.
+    return;
+  }
   // The bench floor is mode-aware; a persisted one-shot height may sit below
   // the sequence floor and would otherwise scroll the composer.
   clampBenchToViewport();
@@ -5075,7 +5216,6 @@ onCreateIntent(
     expansionAttemptHostLabel.value = null;
     quickExpansionOriginal.value = null;
     quickExpansionSnapshot.value = null;
-    quickExpansionNegative.value = null;
     submissionGuard.invalidate();
     formStore.clearComposer();
     void nextTick(() => composerRef.value?.focus?.());

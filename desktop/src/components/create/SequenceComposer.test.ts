@@ -24,6 +24,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useContextMenuStore, type MenuItem } from "../../stores/contextMenu";
+import { useToastStore } from "../../stores/toasts";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { ModelEntry } from "../../lib/api/types";
 import { validateChain } from "@studio/api/chains";
@@ -79,6 +80,20 @@ beforeEach(() => {
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("SequenceComposer — lane", () => {
+  /** The lane swallows the key at the two-scene floor, so the refusal has to
+   *  be said out loud or the keyboard reads as broken. */
+  it("says why Delete cannot remove the last scene but one", async () => {
+    seedDraft();
+    const wrapper = mountComposer();
+    const toasts = useToastStore();
+
+    await wrapper.findAll("[data-test='scene-block']")[1]!.trigger("keydown", { key: "Delete" });
+
+    expect(toasts.items.at(-1)?.message).toBe(
+      "A clip keeps at least two scenes — clear the clip to start over.",
+    );
+  });
+
   it("renders the scenes lane from the draft store and adds a scene from the transport", async () => {
     const draft = seedDraft();
     const wrapper = mountComposer();

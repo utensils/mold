@@ -158,7 +158,9 @@ export function sdxlRecipe(): GenerationRecipeProfile {
       min: 1,
       max: 100,
       step: 1,
-      recommended: [25],
+      // The three-rung ladder the server publishes for an adjustable control:
+      // half the default, the default, half again.
+      recommended: [13, 25, 38],
       mode: "adjustable",
     },
     guidance: {

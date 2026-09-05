@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import RecentPrints from "./RecentPrints.vue";
-import type { MergedPrint } from "../../stores/gallery";
+import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
 
 vi.mock("../gallery/AuthedMedia.vue", () => ({ default: { template: "<img />" } }));
 
@@ -48,6 +48,27 @@ describe("RecentPrints", () => {
     const wrapper = mount(RecentPrints, { props: { prints: [entry] } });
     await wrapper.get("[data-test='recent-print']").trigger("click");
     expect(wrapper.emitted("reuse")?.[0]).toEqual([entry]);
+  });
+
+  /**
+   * A resolved local bucket that carries no authority makes `targetOf` throw,
+   * and a throw inside a render kills the whole inspector tab. The row is
+   * worth showing without its picture: the recipe behind it still restores.
+   */
+  it("still lists a print whose bucket has no authority to hand it", () => {
+    const gallery = useGalleryStore();
+    // Resolved, but with no authority recorded — the shape `targetOf` refuses
+    // to answer for, which the type deliberately cannot express.
+    gallery.buckets.local = {
+      ...gallery.ensureBucket("local"),
+      authorityResolved: true,
+    } as (typeof gallery.buckets)["local"];
+
+    const wrapper = mount(RecentPrints, {
+      props: { prints: [print("teapot.png", "Brass teapot", "sdxl-base:fp16")] },
+    });
+
+    expect(wrapper.get("[data-test='recent-print']").text()).toContain("Brass teapot");
   });
 
   it("renders an empty list without a row", () => {

@@ -46,6 +46,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   select: [id: string];
   remove: [id: string];
+  /** Delete on a focused block the two-scene floor refuses to remove. */
+  "remove-blocked": [];
   reorder: [ids: string[]];
   "seam-click": [id: string];
   resize: [id: string, frames: number];
@@ -176,8 +178,14 @@ function onBlockKeydown(event: KeyboardEvent, clip: RailClip, index: number) {
     event.preventDefault();
     emit("seam-click", clip.id);
   } else if (event.key === "Delete" || event.key === "Backspace") {
-    if (!removable.value) return;
+    // ALWAYS consumed on a focused block, floor or no floor: the webview's own
+    // default for a bare Backspace is to go back, so leaving the key
+    // unanswered navigated out of New image instead of refusing the removal.
     event.preventDefault();
+    if (!removable.value) {
+      emit("remove-blocked");
+      return;
+    }
     emit("remove", clip.id);
   }
 }

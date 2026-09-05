@@ -66,6 +66,25 @@ describe("sequence draft store", () => {
     expect(next.clips[0]?.cameraControl).toBe("dolly-in");
   });
 
+  /**
+   * The style parked while a 3-D style is selected belongs to the draft, not
+   * to the toolbar that parked it: leaving New image unmounts that toolbar,
+   * and a component-local ref took the parked style with it.
+   */
+  it("keeps the parked still style beside the parked one-shot style", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.lastStillModel = "flux-dev:q8";
+    vi.advanceTimersByTime(1000);
+
+    expect(
+      JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!).lastStillModel,
+    ).toBe("flux-dev:q8");
+    const next = freshStore();
+    next.hydrate();
+    expect(next.lastStillModel).toBe("flux-dev:q8");
+  });
+
   it("normalizes pre-camera drafts to an explicit empty selection", () => {
     localStorage.setItem(
       SEQUENCE_DRAFT_KEY,

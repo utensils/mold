@@ -166,6 +166,25 @@ describe("SceneLane — seams and keys", () => {
     expect(three.emitted("remove")?.at(-1)).toEqual(["c1"]);
   });
 
+  /**
+   * At the two-scene floor the lane used to leave the key unconsumed, and the
+   * webview's own default for a bare Backspace is to go BACK — pressing it on
+   * a selected scene navigated out of New image entirely. The floor is a
+   * refusal to answer for, not a key to let through.
+   */
+  it("swallows Delete and Backspace at the floor and says why", async () => {
+    for (const key of ["Delete", "Backspace"]) {
+      const two = make();
+      const event = new KeyboardEvent("keydown", { key, cancelable: true, bubbles: true });
+      two.findAll("[data-test='scene-block']")[1]!.element.dispatchEvent(event);
+      await two.vm.$nextTick();
+
+      expect(event.defaultPrevented, key).toBe(true);
+      expect(two.emitted("remove"), key).toBeUndefined();
+      expect(two.emitted("remove-blocked")?.length, key).toBe(1);
+    }
+  });
+
   it("leaves the opening scene no seam to open", async () => {
     const wrapper = make();
     await wrapper.findAll("[data-test='scene-block']")[0]!.trigger("keydown", { key: "Enter" });

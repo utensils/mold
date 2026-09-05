@@ -3,7 +3,7 @@ import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { isMeshArtifact } from "@studio/lib/meshCompletion";
 import type { GenerationCapabilities } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
-import type { CompleteEvent } from "./api/types";
+import type { CompleteEvent, GenerateRequest } from "./api/types";
 
 /**
  * The recipe renders one at a time: an edit model, or a request that carries
@@ -17,6 +17,31 @@ export function batchLockedForForm(form: GenerateForm, caps: GenerationCapabilit
       hasSource: Boolean(form.sourceImage),
       referenceCount: form.imageAttachments.length,
       lastWrite: form.exclusiveWell ?? null,
+    }) === "references"
+  );
+}
+
+/**
+ * The same question asked of a REQUEST — the print's own saved one, which is
+ * what Make 4 variations resubmits. A print made by an edit recipe stays
+ * locked however the composer has moved on since, and a repeatable print stays
+ * offered while the composer holds an edit recipe.
+ *
+ * The conditioning triple is the one `pruneRequestForFamily` already derives
+ * from a request: a request is resolved, so only one of the two wells can be
+ * on the wire and references win a stale pair.
+ */
+export function batchLockedForRequest(
+  request: GenerateRequest,
+  caps: GenerationCapabilities,
+): boolean {
+  if (caps.forcesBatchSizeOne) return true;
+  const referenceCount = request.edit_images?.length ?? 0;
+  return (
+    conditioningForRequest(caps.sourceImageMode, {
+      hasSource: Boolean(request.source_image),
+      referenceCount,
+      lastWrite: referenceCount > 0 ? "references" : null,
     }) === "references"
   );
 }
