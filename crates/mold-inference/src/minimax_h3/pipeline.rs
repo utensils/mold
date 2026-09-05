@@ -1182,18 +1182,12 @@ fn decode_endpoint(bytes: &[u8]) -> Result<RgbImage> {
         bail!("MiniMax H3 endpoint dimensions {width}x{height} exceed the bounded image contract");
     }
 
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .context("unknown endpoint image format")?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_REFERENCE_DIMENSION);
     limits.max_image_height = Some(MAX_REFERENCE_DIMENSION);
     limits.max_alloc = Some(MAX_REFERENCE_IMAGE_PIXELS.saturating_mul(4));
-    reader.limits(limits);
-    Ok(reader
-        .decode()
-        .context("endpoint image decode failed")?
-        .to_rgb8())
+    crate::img_utils::decode_oriented_srgb_with_limits(bytes, limits)
+        .context("endpoint image decode failed")
 }
 
 const PILLOW_RESAMPLE_PRECISION_BITS: u32 = 22;
@@ -1906,6 +1900,13 @@ mod tests {
         let decoded = decode_endpoint(&clamped).unwrap();
         assert_eq!(decoded.width(), 1);
         assert_eq!(decoded.height(), MAX_REFERENCE_DIMENSION);
+    }
+
+    #[test]
+    fn endpoint_decoder_applies_exif_orientation() {
+        let bytes = include_bytes!("../ltx2/testdata/preprocess/portrait_exif6.jpg");
+        let decoded = decode_endpoint(bytes).unwrap();
+        assert_eq!(decoded.dimensions(), (64, 96));
     }
 
     fn png(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {

@@ -459,10 +459,18 @@ pub(crate) fn validate_boundary_image_bytes(bytes: &[u8], boundary: &str) -> Res
     if !matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg) {
         anyhow::bail!("MiniMax H3 {boundary} frame must be PNG or JPEG; received {format:?}");
     }
-    let dimensions = reader
-        .into_dimensions()
-        .with_context(|| format!("failed to decode MiniMax H3 {boundary} frame"))?;
+    let dimensions =
+        mold_inference::img_utils::oriented_image_dimensions(reader, h3_image_decode_limits())
+            .with_context(|| format!("failed to decode MiniMax H3 {boundary} frame"))?;
     Ok(dimensions)
+}
+
+fn h3_image_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
+    limits.max_image_height = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
+    limits.max_alloc = Some(minimax_h3::MAX_REFERENCE_IMAGE_PIXELS.saturating_mul(4));
+    limits
 }
 
 fn prepare_references(
@@ -545,7 +553,8 @@ fn probe_image(
         image::ImageFormat::Gif => "image/gif",
         _ => anyhow::bail!("unsupported image format; use PNG, JPEG, WebP, or GIF"),
     };
-    let (width, height) = reader.into_dimensions()?;
+    let (width, height) =
+        mold_inference::img_utils::oriented_image_dimensions(reader, h3_image_decode_limits())?;
     Ok(GenerationReference::Image {
         media: GenerationReferenceAuthority::Descriptor,
         provenance,
@@ -740,6 +749,7 @@ fn probe_wav(file: File) -> Result<WavProbe> {
 mod tests {
     use super::*;
     use image::ImageEncoder as _;
+    use std::io::Write as _;
 
     #[test]
     fn reference_arg_preserves_kind_and_paths_containing_equals() {
@@ -747,6 +757,31 @@ mod tests {
         assert_eq!(parsed.kind, ReferenceKind::Video);
         assert_eq!(parsed.path, PathBuf::from("/tmp/clip=final.mp4"));
         assert!(!format!("{parsed:?}").contains("clip=final"));
+    }
+
+    #[test]
+    fn h3_image_probes_report_exif_oriented_dimensions() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mold-inference/src/ltx2/testdata/preprocess/portrait_exif6.jpg"
+        ));
+        assert_eq!(
+            validate_boundary_image_bytes(bytes, "first").unwrap(),
+            (64, 96)
+        );
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let descriptor = probe_image(file, GenerationReferenceProvenance::default()).unwrap();
+        assert!(matches!(
+            descriptor,
+            GenerationReference::Image {
+                width: 64,
+                height: 96,
+                ..
+            }
+        ));
     }
 
     /// A bare path is the ordered-reference form of the flag, and an image is

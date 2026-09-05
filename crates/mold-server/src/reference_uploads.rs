@@ -1839,9 +1839,13 @@ fn probe_reference(
                 .ok_or_else(|| unsupported_media(reference, "unknown image format"))?;
             let observed_mime = image_mime(format)
                 .ok_or_else(|| unsupported_media(reference, "unsupported image format"))?;
-            let (observed_width, observed_height) = reader
-                .into_dimensions()
-                .map_err(|error| unsupported_media(reference, error))?;
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
+            limits.max_image_height = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
+            limits.max_alloc = Some(minimax_h3::MAX_REFERENCE_IMAGE_PIXELS.saturating_mul(4));
+            let (observed_width, observed_height) =
+                mold_inference::img_utils::oriented_image_dimensions(reader, limits)
+                    .map_err(|error| unsupported_media(reference, error))?;
             require_equal(reference, "mime_type", mime_type.as_str(), observed_mime)?;
             if policy == ReferenceProbePolicy::Strict {
                 require_equal(reference, "width", *width, observed_width)?;
@@ -2625,6 +2629,34 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    #[test]
+    fn reference_probe_canonicalizes_exif_oriented_dimensions() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mold-inference/src/ltx2/testdata/preprocess/portrait_exif6.jpg"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("portrait.jpg");
+        std::fs::write(&path, bytes).unwrap();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let expected = GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("portrait.jpg".to_string()),
+                sha256: Some(digest.clone()),
+                crop: None,
+            },
+            mime_type: "image/jpeg".to_string(),
+            width: 64,
+            height: 96,
+        };
+
+        let metadata =
+            probe_reference(&path, &expected, 1, &digest, ReferenceProbePolicy::Strict).unwrap();
+        assert_eq!(metadata.width, Some(64));
+        assert_eq!(metadata.height, Some(96));
     }
 
     fn wav_bytes(sample_rate: u32, channels: u16, sample_count: u32) -> Vec<u8> {
