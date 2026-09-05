@@ -124,13 +124,14 @@ mod tests {
     use std::sync::Mutex;
 
     #[derive(Clone, Default)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>, Arc<Notify>);
 
-    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>, Arc<Notify>);
 
     impl Write for SharedWriterGuard {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
+            self.1.notify_one();
             Ok(bytes.len())
         }
 
@@ -143,7 +144,7 @@ mod tests {
         type Writer = SharedWriterGuard;
 
         fn make_writer(&'a self) -> Self::Writer {
-            SharedWriterGuard(self.0.clone())
+            SharedWriterGuard(self.0.clone(), self.1.clone())
         }
     }
 
@@ -193,11 +194,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unobserved_worker_error_logs_the_failure_instead_of_a_saved_output() {
-        let outcome = SupervisedOutcome::Finished(Box::new(Err(
-            "face-identity conditioning failed: no face was detected".to_string(),
-        )));
+    #[tokio::test(flavor = "current_thread")]
+    async fn unobserved_worker_error_logs_the_failure_instead_of_a_saved_output() {
         let writer = SharedWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
@@ -205,9 +203,23 @@ mod tests {
             .with_writer(writer.clone())
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
-            report_unobserved_completion("job-4", &outcome);
-        });
+        // The detached task stays on this runtime thread, inside the scoped
+        // subscriber, so capture the real failed-delivery reporting path.
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let SupervisedJob {
+            result_tx,
+            outcome_rx,
+        } = supervise_job("job-4".to_string(), Arc::new(Notify::new()));
+        drop(outcome_rx);
+        assert!(result_tx
+            .send(Err(
+                "face-identity conditioning failed: no face was detected".to_string(),
+            ))
+            .is_ok());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), writer.1.notified())
+            .await
+            .expect("the detached supervisor must log the unobserved outcome");
 
         let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
         assert!(output.contains(" WARN "), "expected a warning: {output}");
