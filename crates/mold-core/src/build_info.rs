@@ -58,7 +58,7 @@ mod tests {
     fn git_sha_is_populated() {
         assert!(!GIT_SHA.is_empty());
         if GIT_SHA == "unknown" {
-            return; // no git context (crates.io / sandboxed build)
+            return; // no git context (source archive / sandboxed build)
         }
         assert!(
             (7..=12).contains(&GIT_SHA.len()) || GIT_SHA.len() == 40,
@@ -75,7 +75,7 @@ mod tests {
     fn build_date_is_valid() {
         assert!(!BUILD_DATE.is_empty());
         if BUILD_DATE == "unknown" {
-            return; // no git context (crates.io / sandboxed build)
+            return; // no git context (source archive / sandboxed build)
         }
         // YYYY-MM-DD
         assert_eq!(

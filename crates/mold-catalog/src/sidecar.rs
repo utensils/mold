@@ -518,6 +518,23 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_preserves_qwen_image_edit_as_its_own_runtime_family() {
+        let mut entry = fixture_entry();
+        entry.family = Family::QwenImageEdit;
+        entry.name = "QwenImageEdit2511 community".into();
+        let sidecar = sidecar_from_entry(
+            &entry,
+            "qwen-image-edit/civitai/8001/model.safetensors".into(),
+        );
+
+        assert_eq!(sidecar.family, "qwen-image-edit");
+        assert_eq!(
+            Family::from_str(&sidecar.family).unwrap(),
+            Family::QwenImageEdit
+        );
+    }
+
+    #[test]
     fn installed_h3_sidecar_is_rejected_as_metadata_not_treated_as_a_cache_miss() {
         let root = tempfile::tempdir().unwrap();
         let mut entry = fixture_entry();

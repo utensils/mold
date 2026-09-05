@@ -276,7 +276,7 @@ pub static COMPANIONS: &[Companion] = &[
     Companion {
         canonical_name: "qwen-image-runtime",
         kind: Kind::TextEncoder,
-        family_scope: &[Family::QwenImage],
+        family_scope: &[Family::QwenImage, Family::QwenImageEdit],
         source: Source::Hf,
         repo: "Qwen/Qwen-Image",
         files: &[
@@ -422,6 +422,11 @@ pub fn companions_for(
         // FL2VA/Ref2VA component layouts.
         Family::MinimaxH3 => {}
         Family::QwenImage => {
+            push(&mut out, "qwen-image-runtime");
+        }
+        Family::QwenImageEdit => {
+            // The edit DiT is distinct, but its catalog single-file exports
+            // use the same Qwen2.5-VL encoder/tokenizer and VAE runtime bundle.
             push(&mut out, "qwen-image-runtime");
         }
         Family::Wuerstchen => {

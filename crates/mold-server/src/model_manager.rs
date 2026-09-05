@@ -695,6 +695,9 @@ fn live_error_to_install_error(
         LiveSearchError::Decode(e) => mold_core::InstallError::RecipeMalformed(format!(
             "{model_name}: decode upstream payload: {e}"
         )),
+        LiveSearchError::Incomplete { .. } => {
+            mold_core::InstallError::Network(format!("{model_name}: {err}"))
+        }
         LiveSearchError::Upstream { status, body, .. } if *status == 404 => {
             mold_core::InstallError::NotFound(format!(
                 "{model_name}: upstream returned 404 ({})",

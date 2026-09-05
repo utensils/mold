@@ -1,1 +1,0 @@
-- **Keep LTX audio controls visible on mobile.** LTX-2 and LTX-2.5 checkpoints now keep the Generate audio control and advanced video settings visible when checkpoint metadata or the active host recipe reports that audio cannot be delivered; the control is disabled with the available explanation instead of disappearing, while non-configurable audio families remain unchanged.

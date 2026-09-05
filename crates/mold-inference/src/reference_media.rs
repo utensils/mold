@@ -7,7 +7,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use anyhow::{anyhow, bail, Context, Result};
-use image::{ImageReader, RgbImage};
+use image::RgbImage;
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
 
@@ -44,9 +44,6 @@ pub(crate) fn decode_image_from_binding(
 ) -> Result<RgbImage> {
     let bytes = read_verified_binding(binding, checkpoint)?;
     checkpoint()?;
-    let mut reader = ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .context("unknown reference image format")?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(mold_core::minimax_h3::MAX_REFERENCE_DIMENSION);
     limits.max_image_height = Some(mold_core::minimax_h3::MAX_REFERENCE_DIMENSION);
@@ -55,11 +52,8 @@ pub(crate) fn decode_image_from_binding(
             .checked_mul(4)
             .context("reference image decode limit overflowed")?,
     );
-    reader.limits(limits);
-    let image = reader
-        .decode()
-        .context("reference image decode failed")?
-        .to_rgb8();
+    let image = crate::img_utils::decode_oriented_srgb_with_limits(&bytes, limits)
+        .context("reference image decode failed")?;
     checkpoint()?;
     Ok(image)
 }
@@ -493,6 +487,24 @@ mod tests {
 
     fn frame(value: u8) -> RgbImage {
         RgbImage::from_pixel(2, 2, image::Rgb([value, 0, 0]))
+    }
+
+    #[test]
+    fn image_binding_decodes_exif_orientation_upright() {
+        let bytes = include_bytes!("ltx2/testdata/preprocess/portrait_exif6.jpg");
+        let (_staged, binding) = binding(bytes);
+        let decoded = decode_image_from_binding(&binding, &mut || Ok(())).unwrap();
+        assert_eq!(decoded.dimensions(), (64, 96));
+
+        let expected = include_bytes!("ltx2/testdata/preprocess/decoded_portrait_exif6.bin");
+        let mean = decoded
+            .as_raw()
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| actual.abs_diff(*expected) as f64)
+            .sum::<f64>()
+            / expected.len() as f64;
+        assert!(mean <= 2.0, "upright pixels drifted: mean-abs {mean}");
     }
 
     #[test]

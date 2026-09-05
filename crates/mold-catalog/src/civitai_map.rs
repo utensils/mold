@@ -78,6 +78,89 @@ pub fn map_base_model(
     })
 }
 
+/// Refine Civitai's shared Qwen base-model bucket using the model and version
+/// names carried by each result. Civitai exposes both Qwen-Image and
+/// Qwen-Image-Edit under `baseModel=Qwen`; keeping [`map_base_model`] generic
+/// preserves that upstream query while this post-normalization step selects
+/// the runtime family that will be written to the sidecar.
+pub fn refine_family_from_names(
+    family: Family,
+    item_name: &str,
+    version_name: Option<&str>,
+) -> Family {
+    if family == Family::QwenImage
+        && [Some(item_name), version_name]
+            .into_iter()
+            .flatten()
+            .any(|name| looks_like_qwen_image_edit(name) || looks_like_image_edit(name))
+    {
+        Family::QwenImageEdit
+    } else {
+        family
+    }
+}
+
+fn looks_like_qwen_image_edit(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    words.iter().enumerate().any(|(index, word)| {
+        let compact_suffix = word.strip_prefix("qwenimageedit");
+        if compact_suffix.is_some_and(|suffix| suffix.chars().all(|ch| ch.is_ascii_digit())) {
+            return true;
+        }
+        if *word != "qwen" {
+            return false;
+        }
+        let mut rest = &words[index + 1..];
+        if rest.first() == Some(&"image") {
+            rest = &rest[1..];
+        }
+        while rest
+            .first()
+            .is_some_and(|word| word.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            rest = &rest[1..];
+        }
+        rest.first() == Some(&"edit")
+    })
+}
+
+fn looks_like_image_edit(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    words.iter().enumerate().any(|(index, word)| {
+        if *word != "image" {
+            return false;
+        }
+        let mut rest = &words[index + 1..];
+        while rest
+            .first()
+            .is_some_and(|word| word.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            rest = &rest[1..];
+        }
+        rest.first() == Some(&"edit")
+    })
+}
+
 /// Civitai base-model strings we explicitly drop. mold has no engine for
 /// these architectures, so surfacing them in the catalog would just tease
 /// users with un-runnable downloads.
@@ -189,7 +272,7 @@ pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
         // don't inherit checkpoint runnability rules.
         Lora => matches!(
             family,
-            Flux | Flux2 | Sd15 | Sdxl | Sd3 | ZImage | Ltx2 | Wan | QwenImage
+            Flux | Flux2 | Sd15 | Sdxl | Sd3 | ZImage | Ltx2 | Wan | QwenImage | QwenImageEdit
         ),
         Vae | TextEncoder | Tokenizer | Clip => true,
         ControlNet => matches!(family, Sd15 | Sdxl),
@@ -222,5 +305,40 @@ mod tests {
             Kind::Checkpoint
         ));
         assert!(supported_for(Family::Sd3, Bundling::SingleFile, Kind::Lora));
+    }
+
+    #[test]
+    fn qwen_edit_name_refinement_accepts_ecosystem_spellings_without_prefix_matches() {
+        for name in [
+            "Qwen Image Edit",
+            "QWEN_IMAGE_EDIT",
+            "QwenImageEdit2511",
+            "QWEN-EDIT",
+            "Qwen-image_2511_Edit",
+        ] {
+            assert_eq!(
+                refine_family_from_names(Family::QwenImage, name, None),
+                Family::QwenImageEdit,
+                "{name}"
+            );
+        }
+        for name in ["Qwen Image", "Qwen Image Editorial", "Qwen Image Editable"] {
+            assert_eq!(
+                refine_family_from_names(Family::QwenImage, name, None),
+                Family::QwenImage,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen_edit_catalog_shapes_are_supported() {
+        for kind in [Kind::Checkpoint, Kind::Lora] {
+            assert!(supported_for(
+                Family::QwenImageEdit,
+                Bundling::SingleFile,
+                kind
+            ));
+        }
     }
 }

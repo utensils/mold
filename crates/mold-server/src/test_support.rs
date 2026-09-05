@@ -89,6 +89,12 @@ impl TestApp {
         Self { router }
     }
 
+    pub async fn with_civitai_base(base: impl Into<String>) -> Self {
+        let state = crate::state::AppState::for_tests().with_civitai_base(base);
+        let router = crate::routes::create_router(state);
+        Self { router }
+    }
+
     pub async fn get(&self, uri: &str) -> TestResponse {
         let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();

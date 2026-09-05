@@ -27,6 +27,7 @@ fn manifest_strings_are_stable() {
         (Family::Ltx2, "ltx2"),
         (Family::Wan, "wan"),
         (Family::QwenImage, "qwen-image"),
+        (Family::QwenImageEdit, "qwen-image-edit"),
         (Family::Wuerstchen, "wuerstchen"),
     ];
     for (fam, s) in cases {
@@ -36,8 +37,7 @@ fn manifest_strings_are_stable() {
 }
 
 /// The manifest registry is the shipped-model authority; the Models taxonomy
-/// must cover every visible generation family in it. Qwen Image Edit is the
-/// one deliberate presentation merge, sharing the Qwen Image catalog shelf.
+/// must cover every visible generation family in it.
 /// Utility manifests are not generation families and never belong in the
 /// family picker.
 #[test]
@@ -54,7 +54,6 @@ fn catalog_taxonomy_covers_every_visible_generation_manifest_family() {
     let manifest_families = mold_core::manifest::visible_manifests()
         .filter_map(|manifest| {
             let family = match manifest.family.as_str() {
-                "qwen-image-edit" => "qwen-image",
                 family if UTILITY_FAMILIES.contains(&family) => return None,
                 family => family,
             };

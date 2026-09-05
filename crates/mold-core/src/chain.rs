@@ -104,9 +104,9 @@ pub struct NamedRef {
 /// latent-space conditioning).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainStage {
-    /// Prompt used for this stage. In v1 all stages receive the same prompt
-    /// (auto-expand form replicates it); the movie-maker UI in v2 will let
-    /// users author per-stage prompts.
+    /// Prompt used for this stage. Authored scripts and sequence composers
+    /// support a separate prompt for each stage; automatic splitting repeats
+    /// the one-shot prompt across stages.
     #[schema(example = "a cat walking through autumn leaves")]
     pub prompt: String,
 

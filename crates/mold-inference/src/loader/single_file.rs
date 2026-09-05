@@ -330,6 +330,7 @@ mod tests {
             Family::LtxVideo,
             Family::Ltx2,
             Family::QwenImage,
+            Family::QwenImageEdit,
             Family::Wuerstchen,
         ];
 
