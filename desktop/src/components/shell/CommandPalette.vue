@@ -293,7 +293,13 @@ const staticCommands = computed<Command[]>(() => {
       id: "nav-sequence",
       title: "Make a short clip",
       keywords: ["sequence", "clips", "video", "scenes"],
-      run: () => go("/create?output=sequence"),
+      // The Short clip door, not a `?output=sequence` deep link: that landed
+      // in Scenes when the door opens onto Simple, and did nothing at all
+      // from inside New image, where the query is consumed only on mount.
+      run: () => {
+        ui.shortClip();
+        go("/create");
+      },
     },
     {
       id: "nav-history",

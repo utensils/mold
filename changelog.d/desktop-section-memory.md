@@ -11,3 +11,9 @@
   restart: a section door reopens on the style you were using there, and the
   app launches on the style and section you left once the machine that has it
   has reported in.
+- **Make a short clip opens the Short clip door.** The ⌘K palette's row and
+  File → New Clip now open Short clip the way its toolbar segment does — on the
+  way and the style you last used — and work when New image is already open,
+  instead of deep-linking Scenes and doing nothing from inside the view.
+- **Scene validation speaks desktop's word.** The clip's plan checks say
+  "Describe scene 2 before generating." on desktop; web keeps "clip".

@@ -27,6 +27,7 @@ import {
   transitionLabel,
   type SequenceStage,
 } from "@studio/lib/sequence";
+import { DESKTOP_SEQUENCE_WORDING } from "../../lib/sequenceWording";
 import {
   buildChainRequest,
   chainScriptToClips,
@@ -238,6 +239,8 @@ const validation = computed(() =>
     frameOffset: 1,
     motionTailFrames: motionTail.value,
     promptOptional: clipPromptOptional.value,
+    // Desktop says scene for every piece and clip for the whole.
+    wording: DESKTOP_SEQUENCE_WORDING,
   }),
 );
 const duration = computed(() => sequenceDuration(stages.value, props.form.fps, motionTail.value));

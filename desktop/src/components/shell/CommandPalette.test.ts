@@ -135,14 +135,18 @@ describe("CommandPalette command registry", () => {
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
     expect(texts.some((t) => t.includes("Recent settings"))).toBe(true);
 
-    // Picking the entry deep-links into Create's sequence output (and closes).
+    // Picking the entry opens the Short clip door — an intent New image
+    // consumes, not a `?output=sequence` deep link, which landed in Scenes
+    // when the door opens onto Simple and did nothing from inside New image.
     await input.setValue("sequence");
     const option = wrapper
       .findAll("[role='option']")
       .find((o) => o.text().includes("Make a short clip"));
     expect(option).toBeTruthy();
+    const before = useUiStore().shortClipTick;
     await option!.trigger("click");
-    expect(routerPush).toHaveBeenCalledWith("/create?output=sequence");
+    expect(useUiStore().shortClipTick).toBe(before + 1);
+    expect(routerPush).toHaveBeenCalledWith("/create");
     wrapper.unmount();
   });
 

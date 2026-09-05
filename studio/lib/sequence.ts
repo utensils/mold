@@ -63,7 +63,24 @@ export interface SequenceLimits {
    * text-to-video.
    */
   promptOptional?: boolean;
+  /**
+   * The caller's words for one piece and for the whole: web and the phone
+   * say `clip` / `sequence` (the default); desktop says `scene` / `clip`,
+   * because there the whole thing IS the clip and one word, scene, names
+   * every piece on that surface. Only the sentences change.
+   */
+  wording?: SequenceWording;
 }
+
+export interface SequenceWording {
+  piece: string;
+  whole: string;
+}
+
+export const DEFAULT_SEQUENCE_WORDING: SequenceWording = {
+  piece: "clip",
+  whole: "sequence",
+};
 
 // Verified on private UAT host's 48 GB L40S at the catalog model's 1216×704 defaults.
 // The server's per-clip cap/recommendation describes a format limit, not a
@@ -181,19 +198,22 @@ export function sequenceValidation(
   stages: readonly SequenceStage[],
   limits: SequenceLimits,
 ): string[] {
-  if (stages.length < 2) return ["Add at least two clips to make a sequence."];
+  const { piece, whole } = limits.wording ?? DEFAULT_SEQUENCE_WORDING;
+  if (stages.length < 2)
+    return [`Add at least two ${piece}s to make a ${whole}.`];
   if (!limits.promptOptional) {
     const empty = stages.findIndex((stage) => !stage.prompt.trim());
-    if (empty >= 0) return [`Describe clip ${empty + 1} before generating.`];
+    if (empty >= 0)
+      return [`Describe ${piece} ${empty + 1} before generating.`];
   }
   if (stages.length > limits.maxStages) {
-    return [`Reduce the sequence to ${limits.maxStages} clips or fewer.`];
+    return [`Reduce the ${whole} to ${limits.maxStages} ${piece}s or fewer.`];
   }
   if (limits.maxFramesPerClip != null) {
     const cap = limits.maxFramesPerClip;
     const oversized = stages.findIndex((stage) => stage.frames > cap);
     if (oversized >= 0) {
-      return [`Reduce clip ${oversized + 1} to ${cap} frames or fewer.`];
+      return [`Reduce ${piece} ${oversized + 1} to ${cap} frames or fewer.`];
     }
   }
   if (limits.frameStep != null) {
@@ -204,14 +224,14 @@ export function sequenceValidation(
     );
     if (offGrid >= 0) {
       return [
-        `Change clip ${offGrid + 1} to the ${step}k+${offset} frame grid.`,
+        `Change ${piece} ${offGrid + 1} to the ${step}k+${offset} frame grid.`,
       ];
     }
   }
   const total = sequenceDuration(stages, 1, limits.motionTailFrames).frames;
   if (total > limits.maxTotalFrames) {
     return [
-      `Reduce clip durations to ${limits.maxTotalFrames} total frames or fewer.`,
+      `Reduce ${piece} durations to ${limits.maxTotalFrames} total frames or fewer.`,
     ];
   }
   return [];

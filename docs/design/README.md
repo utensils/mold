@@ -249,10 +249,12 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   the one-shot prompt, and in clip mode the field holds the selected scene's
   words. Rewriting a scene is a different feature, so the control stands down
   rather than silently retargeting.
-- **The plan validator says "clip N", not "scene N".** Its wording lives in
-  `studio/lib/sequence.ts` and is what web reads too. One shared sentence beats
-  a desktop-only copy that would drift; only the surfaces desktop owns say
-  scene.
+- **The plan validator takes the caller's words.** Its sentences live in
+  `studio/lib/sequence.ts`, shared with web and the phone, which say clip and
+  sequence (the default); desktop hands it `scene` and `clip`
+  (`desktop/src/lib/sequenceWording.ts`), so "Describe scene 2 before
+  generating." reads under a lane labelled scenes. One shared sentence with a
+  wording parameter beats a desktop-only copy that would drift.
 - **The seam chip is built in `SceneLane.vue`.** Web renders it from the shared
   `ClipRail`, but the lane's blocks are time-proportional and its seam floats on
   the join, so the geometry is desktop's. The words are still the shared

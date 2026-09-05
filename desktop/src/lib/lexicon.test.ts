@@ -7,6 +7,7 @@ import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import createHeaderSource from "../components/create/CreateHeader.vue?raw";
 import clipModeStripSource from "../components/create/ClipModeStrip.vue?raw";
 import modelsViewSource from "../views/ModelsView.vue?raw";
+import outputKindDoorSource from "../composables/useOutputKindDoor?raw";
 import appSource from "../App.vue?raw";
 import chainJobsSource from "../stores/chainJobs.ts?raw";
 import expandSource from "../components/generate/ExpandControl.vue?raw";
@@ -275,7 +276,8 @@ describe("lexicon — how the clip gets made", () => {
   it("filters Styles by the kinds Create offers, in the same words", () => {
     // Styles said Pictures · Clips against Create's Still picture | Short
     // clip, and had no 3-D kind. Both read `OUTPUT_KIND_LABEL` now.
-    expect(createHeaderSource).toContain("label: OUTPUT_KIND_LABEL.still");
+    expect(outputKindDoorSource).toContain("label: OUTPUT_KIND_LABEL.still");
+    expect(createHeaderSource).toContain("useOutputKindDoor(");
     expect(modelsViewSource).toContain("OUTPUT_KIND_LABEL[MEDIA_TYPE_KIND[value]]");
     for (const old of ['label: "Pictures"', 'label: "Clips"']) {
       expect(modelsViewSource).not.toContain(old);
@@ -447,6 +449,12 @@ describe("lexicon — view copy and assistive labels", () => {
     for (const banned of [/\bmodel\b/i, /\bcheckpoint\b/i]) {
       expect(banned.test(text), String(banned)).toBe(false);
     }
+  });
+
+  it("hands the shared validator desktop's own words", () => {
+    // The validator is studio's, shared with web and the phone, and said
+    // "Describe clip 1 before generating." under a lane labelled scenes.
+    expect(sequenceComposer).toContain("wording: DESKTOP_SEQUENCE_WORDING");
   });
 
   it("refuses a clip in the words of a style, on both sides of the seam", () => {

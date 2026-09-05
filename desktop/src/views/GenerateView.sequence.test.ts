@@ -536,6 +536,71 @@ describe("GenerateView — sequence output", () => {
     },
   );
 
+  /*
+   * The palette's Make a short clip and File ▸ New Clip open the SHORT CLIP
+   * DOOR through an intent — the same door the toolbar's segment opens, onto
+   * the remembered way and the remembered style — whether or not New image
+   * was already open. The old `?output=sequence` deep link landed in Scenes
+   * when the door opens onto Simple, and did nothing from inside New image,
+   * where the query is consumed only on mount.
+   */
+  it("opens the Short clip door from the palette while New image is already open", async () => {
+    readyLocal();
+    installedPayload = [imageModel, videoModel];
+    useModelStore().all = [imageModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    mountView();
+    await flushPromises();
+
+    useUiStore().shortClip();
+    await flushPromises();
+
+    // Simple: the clip style in the one-shot output, not Scenes.
+    expect(draft.output).toBe("single");
+    expect(form.model).toBe(videoModel.name);
+    expect(draft.lastStillModel).toBe(imageModel.name);
+  });
+
+  it("opens the Short clip door onto Scenes when that is the remembered way", async () => {
+    readyLocal();
+    installedPayload = [imageModel, videoModel];
+    useModelStore().all = [imageModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.clipMode = "scenes";
+    // Scenes is the inspector's swap; the shallow mount stubs the inspector,
+    // so this stub records what the door handed it.
+    const setOutputMode = vi.fn();
+    mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+      global: {
+        stubs: {
+          SequenceComposer: true,
+          ComposerCard: true,
+          InspectorPanel: {
+            name: "InspectorPanel",
+            template: "<div />",
+            setup: () => ({ setOutputMode }),
+          },
+        },
+      },
+    });
+    await flushPromises();
+
+    useUiStore().shortClip();
+    await flushPromises();
+    expect(setOutputMode).toHaveBeenCalledWith("sequence");
+    expect(form.model).toBe(imageModel.name);
+  });
+
   it("consumes ?output=sequence without leaking the one-shot prompt, then strips the query", async () => {
     readyLocal();
     installedPayload = [videoModel];
@@ -1521,7 +1586,7 @@ describe("GenerateView — what locks the one composer in clip mode", () => {
     await flushPromises();
     expect(composerProps(wrapper)).toEqual({
       disabled: true,
-      reason: "Describe clip 2 before generating.",
+      reason: "Describe scene 2 before generating.",
     });
   });
 

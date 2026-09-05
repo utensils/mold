@@ -370,7 +370,7 @@ describe("SequenceComposer — plan and tools", () => {
     seedDraft(["described", ""]);
     const wrapper = mountComposer();
     expect(wrapper.emitted("update:blockedReason")?.at(-1)).toEqual([
-      "Describe clip 2 before generating.",
+      "Describe scene 2 before generating.",
     ]);
   });
 

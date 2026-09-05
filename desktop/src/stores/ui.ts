@@ -4,7 +4,13 @@ export type CatalogLayout = "grid" | "table";
 
 /** The intents New image owns. Every raiser routes to `/create`. */
 export type CreateIntent =
-  "newGeneration" | "generate" | "makeVariations" | "expand" | "randomizeSeed" | "clipScenes";
+  | "newGeneration"
+  | "generate"
+  | "makeVariations"
+  | "expand"
+  | "randomizeSeed"
+  | "clipScenes"
+  | "shortClip";
 
 const INTENT_TICK = {
   newGeneration: "newGenerationTick",
@@ -13,6 +19,7 @@ const INTENT_TICK = {
   expand: "expandTick",
   randomizeSeed: "randomizeSeedTick",
   clipScenes: "clipScenesTick",
+  shortClip: "shortClipTick",
 } as const satisfies Record<CreateIntent, string>;
 
 /**
@@ -38,6 +45,7 @@ export const useUiStore = defineStore("ui", {
     expandTick: 0,
     randomizeSeedTick: 0,
     clipScenesTick: 0,
+    shortClipTick: 0,
     copySeedTick: 0,
     consumedTicks: {
       newGeneration: 0,
@@ -46,6 +54,7 @@ export const useUiStore = defineStore("ui", {
       expand: 0,
       randomizeSeed: 0,
       clipScenes: 0,
+      shortClip: 0,
     } as Record<CreateIntent, number>,
     catalogLayout: "table" as CatalogLayout,
   }),
@@ -84,6 +93,11 @@ export const useUiStore = defineStore("ui", {
     /** Take the clip apart into scenes — the palette's door to the timeline. */
     clipScenes() {
       this.clipScenesTick++;
+    },
+    /** Open the Short clip door — the palette's Make a short clip and File ▸
+     *  New Clip — onto its remembered way, exactly as the toolbar's segment. */
+    shortClip() {
+      this.shortClipTick++;
     },
     copySeed() {
       this.copySeedTick++;

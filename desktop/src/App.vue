@@ -277,7 +277,8 @@ async function listenForMenu() {
         ui.newGeneration();
         return void router.push("/create");
       case "new-sequence":
-        return void router.push({ path: "/create", query: { output: "sequence" } });
+        ui.shortClip();
+        return void router.push("/create");
       // New image consumes these intents, so every raiser has to route there:
       // an intent left pending would fire on the next visit instead.
       case "generate":

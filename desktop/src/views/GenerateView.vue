@@ -59,6 +59,7 @@ import {
 import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import { outputKindFor, outputKindForModel } from "../composables/useCreateOutputKind";
+import { useOutputKindDoor } from "../composables/useOutputKindDoor";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
@@ -5393,6 +5394,19 @@ onCreateIntent(
   "clipScenes",
   () => ui.clipScenesTick,
   () => setClipMode("scenes"),
+);
+
+// Palette's Make a short clip and File ▸ New Clip — the Short clip door,
+// exactly as the toolbar's segment opens it (remembered way, remembered
+// style), whether or not New image was already open.
+const outputKindDoor = useOutputKindDoor(
+  () => form,
+  (mode) => inspectorRef.value?.setOutputMode(mode),
+);
+onCreateIntent(
+  "shortClip",
+  () => ui.shortClipTick,
+  () => outputKindDoor.setOutputKind("clip"),
 );
 
 // ⌥↩ / palette — the picture on the canvas, made four more times.
