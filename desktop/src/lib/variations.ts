@@ -53,9 +53,9 @@ export function batchLockedForRequest(
  * one, so the action would promise four and make exactly one.
  */
 export function canRepeatPrint(
-  job: { status: string; result: CompleteEvent | null } | null | undefined,
+  job: { status: string; result: CompleteEvent | null; repeatable?: boolean } | null | undefined,
   batchLocked: boolean,
 ): boolean {
-  if (batchLocked || job?.status !== "complete") return false;
+  if (batchLocked || job?.status !== "complete" || job.repeatable === false) return false;
   return !job.result?.video_frames && !isAudioCompletion(job.result) && !isMeshArtifact(job.result);
 }

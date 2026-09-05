@@ -70,7 +70,8 @@ function printStatus(job: Job, context?: QueueRowContext): string {
   if (job.cancelling) return "Stopping…";
   switch (job.status) {
     case "denoising":
-      if (context?.queuePaused) return `Paused at pass ${job.step} of ${job.total}`;
+      // A paused queue holds dispatch; the print on the GPU keeps going, so
+      // its own line never says "paused" — the waiting rows and the header do.
       return context?.etaSeconds == null
         ? `Adding detail — pass ${job.step} of ${job.total}`
         : `Adding detail — about ${formatEta(context.etaSeconds)} left`;

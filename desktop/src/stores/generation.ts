@@ -63,7 +63,10 @@ import {
   type DurableMediaCapabilities,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
-import { createRetainedSourceMediaReuseSession } from "@studio/api/gallerySourceMedia";
+import {
+  createRetainedSourceMediaReuseSession,
+  retainedSourceMediaDisclosable,
+} from "@studio/api/gallerySourceMedia";
 import {
   buildGenerationBatchStatusRequest,
   chunkGenerationBatchTrackers,
@@ -600,6 +603,8 @@ export const useGenerationStore = defineStore("generation", {
           const dismissed = record.effectReceipts.includes(dismissalReceipt(summary.index));
           const job = createStoreJob(
             {
+              // A placeholder, never the words the print was made from: this
+              // job's request cannot repeat it (see Job.repeatable below).
               prompt: "Recovered generation",
               model: summary.model,
               width: summary.width,
@@ -614,6 +619,7 @@ export const useGenerationStore = defineStore("generation", {
           if (dismissed) durableHiddenJobIds.add(job.clientId);
           else this.jobs.push(job);
           job.batchId = localBatchId;
+          job.repeatable = false;
           job.hostId = record.tracker.hostId;
           job.hostLabel = record.hostLabel;
           job.remote = record.hostKind === "remote";
@@ -1366,6 +1372,9 @@ export const useGenerationStore = defineStore("generation", {
       const jobs = plans.map((plan) => {
         const job = this.startJob(plan);
         job.batchId = batchId;
+        // A retained-media relay hands the host an authority the request does
+        // not carry, so the request alone cannot make this print again.
+        if (requestOptions.retainedSource) job.repeatable = false;
         if (route) {
           job.hostId = route.hostId;
           job.hostLabel = route.label;
@@ -1871,6 +1880,19 @@ export const useGenerationStore = defineStore("generation", {
       const format = requestFormat(print.filename, meta.output_format ?? "png");
       const frames = meta.frames ?? meta.video_frames ?? null;
       const job = createStoreJob(request, this.nextClientId++);
+      // The request is the form's snapshot at hand-off, taken before any
+      // source, mask, face or reference bytes are restored into it. A print
+      // that recorded such conditioning is repeatable only if the snapshot
+      // already carries it; otherwise four variations would be unconditioned.
+      job.repeatable =
+        !retainedSourceMediaDisclosable(meta) ||
+        Boolean(
+          request.source_image ||
+          request.id_image ||
+          (request.edit_images?.length ?? 0) > 0 ||
+          request.source_video ||
+          (request.keyframes?.length ?? 0) > 0,
+        );
       job.batchId = this.nextBatchId++;
       job.id = meta.job_id ?? "";
       job.hostId = print.hostId;

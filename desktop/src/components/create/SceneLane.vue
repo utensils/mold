@@ -173,6 +173,12 @@ function onBlockKeydown(event: KeyboardEvent, clip: RailClip, index: number) {
     if (!next) return;
     event.preventDefault();
     emit("select", next.id);
+    // Focus moves with the selection: left on the old block, the next arrow
+    // would count from the old index and Delete would remove the old scene.
+    const block = (event.currentTarget as HTMLElement | null)?.parentElement?.querySelector(
+      `[data-clip-id="${CSS.escape(next.id)}"]`,
+    );
+    if (block instanceof HTMLElement) block.focus();
   } else if (event.key === "Enter" || event.key === " ") {
     if (index === 0) return;
     event.preventDefault();

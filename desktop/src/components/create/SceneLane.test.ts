@@ -7,7 +7,7 @@ function clip(id: string, prompt: string, frames: number): RailClip {
   return { id, prompt, frames, transition: "smooth", fadeFrames: 8 };
 }
 
-function make(props: Record<string, unknown> = {}) {
+function make(props: Record<string, unknown> = {}, attach = false) {
   return mount(SceneLane, {
     props: {
       clips: [clip("c0", "rain on the gutter", 50), clip("c1", "the boat sets off", 100)],
@@ -16,6 +16,7 @@ function make(props: Record<string, unknown> = {}) {
       fps: 25,
       ...props,
     },
+    ...(attach ? { attachTo: document.body } : {}),
   });
 }
 
@@ -144,10 +145,13 @@ describe("SceneLane — seams and keys", () => {
   });
 
   it("moves the selection with the arrows and opens a seam with Enter", async () => {
-    const wrapper = make();
+    const wrapper = make({}, true);
     const first = wrapper.findAll("[data-test='scene-block']")[0]!;
     await first.trigger("keydown", { key: "ArrowRight" });
     expect(wrapper.emitted("select")?.at(-1)).toEqual(["c1"]);
+    // Focus follows the selection, so the next arrow counts from the block
+    // the user is looking at and Delete removes THAT scene, not the first.
+    expect(document.activeElement?.getAttribute("data-clip-id")).toBe("c1");
 
     const second = wrapper.findAll("[data-test='scene-block']")[1]!;
     await second.trigger("keydown", { key: "Enter" });

@@ -40,6 +40,13 @@ export interface Job {
   clientId: number;
   /** Exact submitted sibling request, used when a queue/history row is selected. */
   request?: GenerateRequest;
+  /** Whether `request` alone can make this print again. False when the
+   *  print's media authority lived outside the request (a retained-media
+   *  relay), when a gallery print was restored with conditioning its snapshot
+   *  never held, or when the job was recovered after a restart under a
+   *  placeholder prompt — Make 4 variations stands down rather than making
+   *  four unrelated or unconditioned pictures. */
+  repeatable: boolean;
   /** Groups sibling jobs submitted together as one batch. */
   batchId: number;
   /** Server-assigned id from the Queued event (empty until it arrives). */
@@ -135,6 +142,7 @@ export function newJob(req: GenerateRequest): Job {
   return {
     clientId: 0,
     request: req,
+    repeatable: true,
     batchId: 0,
     id: "",
     prompt: req.prompt,

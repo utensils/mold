@@ -259,6 +259,25 @@ describe("GenerateView — where Make 4 variations is offered", () => {
     expect(document.querySelector("[data-test='canvas-variations']")).not.toBeNull();
   });
 
+  /**
+   * `job.request` is the print's recipe only when it carries everything the
+   * print was made from. A job whose media authority lived OUTSIDE the request
+   * (a same-host retained-media relay), a print restored from the gallery
+   * with conditioning its snapshot never held, or a job recovered after a
+   * restart under a placeholder prompt would repeat as four unrelated or
+   * unconditioned pictures. Such a job is not repeatable, and says so.
+   */
+  it("is hidden for a job whose request cannot reproduce the print", async () => {
+    await mountWithAPrint(false);
+    finishPrint();
+    await flushPromises();
+    expect(document.querySelector("[data-test='canvas-variations']")).not.toBeNull();
+    const shown = useGenerationStore().active!;
+    shown.repeatable = false;
+    await flushPromises();
+    expect(document.querySelector("[data-test='canvas-variations']")).toBeNull();
+  });
+
   it("is hidden for a clip, which has no batch", async () => {
     await mountWithAPrint(false);
     finishPrint({ video_frames: 97 });

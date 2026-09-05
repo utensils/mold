@@ -122,10 +122,20 @@ describe("queue rows speak the lexicon", () => {
     ).toBe("Waiting — model not installed");
   });
 
-  it("says a print being made under a paused queue is paused, at the pass it reached", () => {
+  /** `POST /api/queue/pause` holds DISPATCH; the job already on the GPU
+   *  finishes (`queue.rs`: "in-flight worker jobs continue"). Calling the
+   *  print "paused" told the user the GPU had stopped when it had not. The
+   *  pause is the queue's word, said once on the waiting rows and the header. */
+  it("keeps a print being made honest under a paused queue", () => {
     expect(rowStatusLine(print({ status: "denoising", step: 18 }), { queuePaused: true })).toBe(
-      "Paused at pass 18 of 28",
+      "Adding detail — pass 18 of 28",
     );
+    expect(
+      rowStatusLine(print({ status: "denoising", step: 18 }), {
+        queuePaused: true,
+        etaSeconds: 30,
+      }),
+    ).toBe("Adding detail — about 30s left");
   });
 
   it("shortens the rail's dash to a middot while the full view keeps it", () => {
