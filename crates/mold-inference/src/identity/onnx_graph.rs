@@ -7,24 +7,12 @@
 //! filename or any parent component, regular files only, canonical
 //! traversal — and decodes the retained descriptor's bytes.
 //!
-//! Retaining the descriptor is necessary but not sufficient. The bytes must
-//! also be read from it exactly **once**: hashing the descriptor and then
-//! reading it is two passes, and on shared storage an in-place write between
-//! them authenticates one set of bytes and executes another. [`AuthenticatedBytes`]
-//! is the whole answer — it performs the single read, hashes what it read, and
-//! offers no way to obtain a digest and a buffer that did not come from the
-//! same call.
-//!
-//! That read is also bounded. A digest cannot be computed from bytes that were
-//! never read, so an unbounded read of a replacement file the size of the disk
-//! exhausts memory before the mismatch it was about to find can be reported.
-//! The manifest pins each artifact's exact length, so the descriptor is
-//! `fstat`ed first and the read is capped regardless — see
-//! [`ArtifactSizeError`] and [`UNPINNED_MAX_BYTES`].
-//!
-//! Permissions are deliberately NOT checked: a model artifact on shared
-//! storage with a collaborative umask is valid (see CLAUDE.md, "Model storage
-//! permissions invariant"). Authenticity comes from the content digest.
+//! Installed loading reads the retained descriptor once into a bounded private
+//! buffer, checks metadata stability, and decodes it without hashing. New
+//! downloads are verified before publication. The explicit verification entry
+//! point hashes that same buffer and compares the declared pin. Both paths
+//! enforce exact manifest lengths (or [`UNPINNED_MAX_BYTES`]) and format checks.
+//! Shared model permissions remain supported; runtime trusts complete installs.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -46,7 +34,7 @@ use sha2::{Digest, Sha256};
 pub struct LoadedOnnxModel {
     /// The decoded graph.
     pub model: ModelProto,
-    /// Lowercase hex SHA-256 of the file the graph came from.
+    /// Observed SHA-256 when available; empty for an unverified local installation.
     pub sha256: String,
     /// Encoded size in bytes.
     pub bytes: usize,
@@ -258,7 +246,7 @@ pub fn load_onnx_model(path: &Path, pin: Option<PinnedArtifact>) -> Result<Loade
     let mut file = open_regular_file_no_follow(path)
         .with_context(|| format!("failed to open the ONNX model at {}", path.display()))?;
     let authenticated =
-        AuthenticatedBytes::read_once(&mut file, path, pin.as_ref().map(|p| p.size_bytes))?;
+        LoadedBytes::read_once(&mut file, path, pin.as_ref().map(|p| p.size_bytes))?;
     authenticated.verify(pin.as_ref().map(|p| p.sha256.as_ref()), path)?;
     let mut model = ModelProto::decode(authenticated.bytes())
         .with_context(|| format!("failed to decode the ONNX model at {}", path.display()))?;
@@ -267,6 +255,34 @@ pub fn load_onnx_model(path: &Path, pin: Option<PinnedArtifact>) -> Result<Loade
         bytes: authenticated.bytes().len(),
         sha256: authenticated.into_sha256(),
         model,
+    })
+}
+
+/// Load installed graphs without checksum work. Retain read bounds, descriptor
+/// identity and parser checks; explicit load_onnx_model remains a verifying probe.
+pub(crate) fn load_installed_onnx_model(
+    path: &Path,
+    pin: Option<PinnedArtifact>,
+) -> Result<LoadedOnnxModel> {
+    let mut file = open_regular_file_no_follow(path)?;
+    let before = mold_core::download::installed_artifact_identity_from_file(path, &file)?;
+    let loaded = LoadedBytes::read_bounded_with_policy(
+        &mut file,
+        path,
+        pin.as_ref().map(|pin| pin.size_bytes),
+        UNPINNED_MAX_BYTES,
+        false,
+    )?;
+    anyhow::ensure!(
+        mold_core::download::installed_artifact_identity_from_file(path, &file)? == before,
+        "installed ONNX changed while loading"
+    );
+    let mut model = ModelProto::decode(loaded.bytes())?;
+    normalize_empty_optional_resize_inputs(&mut model);
+    Ok(LoadedOnnxModel {
+        model,
+        sha256: before.observed_sha256().unwrap_or_default().into(),
+        bytes: loaded.bytes().len(),
     })
 }
 
@@ -287,12 +303,12 @@ pub fn load_onnx_model(path: &Path, pin: Option<PinnedArtifact>) -> Result<Loade
 /// unused here for the same reason — it takes a `&File` and hashes it, which
 /// necessarily leaves the bytes to be fetched by a second read.
 #[derive(Debug)]
-struct AuthenticatedBytes {
+struct LoadedBytes {
     bytes: Vec<u8>,
     sha256: String,
 }
 
-impl AuthenticatedBytes {
+impl LoadedBytes {
     /// Read the whole descriptor exactly once, within a bound, and hash what
     /// was read.
     ///
@@ -316,6 +332,16 @@ impl AuthenticatedBytes {
         path: &Path,
         expected_len: Option<u64>,
         unpinned_cap: u64,
+    ) -> Result<Self> {
+        Self::read_bounded_with_policy(file, path, expected_len, unpinned_cap, true)
+    }
+
+    fn read_bounded_with_policy(
+        file: &mut File,
+        path: &Path,
+        expected_len: Option<u64>,
+        unpinned_cap: u64,
+        verify: bool,
     ) -> Result<Self> {
         // `fstat` on the retained descriptor, never a `stat` on the path —
         // the point of holding the descriptor is that this describes the same
@@ -368,11 +394,15 @@ impl AuthenticatedBytes {
             .into());
         }
 
-        let digest = Sha256::digest(&bytes);
-        Ok(Self {
-            bytes,
-            sha256: format!("{digest:x}"),
-        })
+        let sha256 = if verify {
+            let mut observation =
+                mold_core::download::ArtifactHashObservation::new("explicit_onnx_verification");
+            observation.read(bytes.len() as u64);
+            format!("{:x}", Sha256::digest(&bytes))
+        } else {
+            String::new()
+        };
+        Ok(Self { bytes, sha256 })
     }
 
     fn bytes(&self) -> &[u8] {
@@ -538,7 +568,7 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
 
         let mut file = open_regular_file_no_follow(&path).unwrap();
-        let authenticated = AuthenticatedBytes::read_once(&mut file, &path, None).unwrap();
+        let authenticated = LoadedBytes::read_once(&mut file, &path, None).unwrap();
         assert_eq!(authenticated.bytes(), content.as_slice());
         assert_eq!(
             authenticated.sha256,
@@ -558,7 +588,7 @@ mod tests {
         let path = dir.path().join("empty.bin");
         std::fs::write(&path, b"").unwrap();
         let mut file = open_regular_file_no_follow(&path).unwrap();
-        let authenticated = AuthenticatedBytes::read_once(&mut file, &path, None).unwrap();
+        let authenticated = LoadedBytes::read_once(&mut file, &path, None).unwrap();
         assert!(authenticated.bytes().is_empty());
         assert_eq!(
             authenticated.sha256,
@@ -566,7 +596,7 @@ mod tests {
         );
     }
 
-    /// Structural guard for the invariant [`AuthenticatedBytes`] is shaped
+    /// Structural guard for the invariant [`LoadedBytes`] is shaped
     /// around: the module must contain exactly ONE read of the descriptor, and
     /// must not reach for a hasher that takes a `&File` — which would
     /// necessarily leave the bytes to a second read, reopening the window
@@ -656,7 +686,7 @@ mod tests {
         std::fs::write(&path, vec![0u8; 4096]).unwrap();
 
         let mut file = open_regular_file_no_follow(&path).unwrap();
-        let err = AuthenticatedBytes::read_bounded(&mut file, &path, None, 1024).unwrap_err();
+        let err = LoadedBytes::read_bounded(&mut file, &path, None, 1024).unwrap_err();
         match err.downcast_ref::<ArtifactSizeError>() {
             Some(ArtifactSizeError::OverCap { found, cap, .. }) => {
                 assert_eq!(*found, 4096);
@@ -667,7 +697,7 @@ mod tests {
 
         // At the ceiling the same file reads normally.
         let mut file = open_regular_file_no_follow(&path).unwrap();
-        let ok = AuthenticatedBytes::read_bounded(&mut file, &path, None, 4096).unwrap();
+        let ok = LoadedBytes::read_bounded(&mut file, &path, None, 4096).unwrap();
         assert_eq!(ok.bytes().len(), 4096);
     }
 
@@ -699,6 +729,20 @@ mod tests {
             pinned_sha256(ModelComponent::FaceDetector),
             Some(detector.sha256.as_ref())
         );
+    }
+
+    #[test]
+    fn installed_onnx_uses_size_and_parser_without_pin_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = write_proto(dir.path(), "installed.onnx", false);
+        let wrong = "0".repeat(64);
+        let loaded = load_installed_onnx_model(&path, Some(pin(&wrong, len_of(&path)))).unwrap();
+        assert!(
+            loaded.sha256.is_empty(),
+            "must not invent an observed digest"
+        );
+        assert!(load_installed_onnx_model(&path, Some(pin(&wrong, len_of(&path) + 1))).is_err());
+        assert!(load_onnx_model(&path, Some(pin(&wrong, len_of(&path)))).is_err());
     }
 
     #[test]

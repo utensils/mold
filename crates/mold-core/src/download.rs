@@ -707,7 +707,11 @@ const SHA256_MARKER_LEN_PREFIX: &str = "len=";
 /// stub under the download's sidecar and stayed "downloaded" for two days.
 pub fn write_sha256_marker(path: &Path, digest: &str) -> std::io::Result<()> {
     let marker = sha256_marker_path(path);
-    let tmp = marker.with_extension(format!("sha256-verified.tmp.{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+    let tmp = marker.with_extension(format!(
+        "sha256-verified.tmp.{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let mut body = format!("{digest}\n");
     if let Ok(metadata) = std::fs::metadata(path) {
         body.push_str(&format!("{SHA256_MARKER_LEN_PREFIX}{}\n", metadata.len()));
@@ -1729,6 +1733,19 @@ fn find_existing_placed_file(
         return Ok(Some(canonical_path));
     }
 
+    // Published HF caches are legacy installations too. Normalize their
+    // expected snapshot symlink, then reuse without acquiring or hashing.
+    if let Some(cached) =
+        cached_file_path_existing_only(models_dir, &file.hf_repo, &file.hf_filename, None)
+            .and_then(|path| path.canonicalize().ok())
+            .filter(|path| installed_file_is_complete(path, Some(file.size_bytes)))
+    {
+        let stage = AcquisitionStage::new(&canonical_path)?;
+        hardlink_or_copy(&cached, &stage.path)?;
+        stage.publish(&canonical_path)?;
+        return Ok(Some(canonical_path));
+    }
+
     Ok(None)
 }
 
@@ -2500,7 +2517,7 @@ pub fn download_single_file_sync(
         hf_filename,
         target_subdir,
         progress,
-        None,
+        SingleFileAcquisition::ReuseInstalled,
     )
 }
 
@@ -2522,7 +2539,7 @@ pub fn download_single_file_sync_with_progress(
         hf_filename,
         target_subdir,
         SyncCallbackProgress::new(callback),
-        None,
+        SingleFileAcquisition::ReuseInstalled,
     )
 }
 
@@ -2544,7 +2561,7 @@ pub fn download_single_file_sync_with_progress_in(
         hf_filename,
         target_subdir,
         SyncCallbackProgress::new(callback),
-        None,
+        SingleFileAcquisition::ReuseInstalled,
     )
 }
 
@@ -2563,7 +2580,7 @@ pub fn download_pinned_file_sync_with_progress_in(
         hf_filename,
         Some(target_subdir),
         SyncCallbackProgress::new(callback),
-        pin,
+        SingleFileAcquisition::Repair { pin },
     )
 }
 
@@ -2588,13 +2605,21 @@ pub fn planned_single_file_path_in(
     models_root.join(target_subdir).join(leaf)
 }
 
+enum SingleFileAcquisition<'a> {
+    ReuseInstalled,
+    /// The caller already checked expected size/completion and owns repair.
+    Repair {
+        pin: Option<(&'a str, &'a str)>,
+    },
+}
+
 fn download_single_file_sync_with_adapter<P>(
     models_root: &Path,
     hf_repo: &str,
     hf_filename: &str,
     target_subdir: Option<&str>,
     progress: P,
-    pin: Option<(&str, &str)>,
+    policy: SingleFileAcquisition<'_>,
 ) -> Result<PathBuf, DownloadError>
 where
     P: hf_hub::api::Progress,
@@ -2603,6 +2628,30 @@ where
     // future internal caller bypassing the public wrappers. The wrappers also
     // check before constructing progress adapters or resolving managed paths.
     require_single_file_acquisition(hf_repo, hf_filename, target_subdir)?;
+
+    if matches!(policy, SingleFileAcquisition::ReuseInstalled) {
+        if let Some(cached) =
+            cached_file_path_existing_only(models_root, hf_repo, hf_filename, target_subdir)
+        {
+            let cached = cached.canonicalize()?;
+            if installed_file_is_complete(&cached, None) {
+                if let Some(subdir) = target_subdir {
+                    let target = planned_single_file_path_in(models_root, hf_filename, subdir);
+                    if target != cached {
+                        let stage = AcquisitionStage::new(&target)?;
+                        hardlink_or_copy(&cached, &stage.path)?;
+                        stage.publish(&target)?;
+                        return Ok(target);
+                    }
+                }
+                return Ok(cached);
+            }
+        }
+    }
+    let pin = match policy {
+        SingleFileAcquisition::Repair { pin } => pin,
+        SingleFileAcquisition::ReuseInstalled => None,
+    };
 
     use hf_hub::api::sync::ApiBuilder;
 
@@ -4579,6 +4628,55 @@ mod tests {
         assert_eq!(pinned_digest_hash_count_for(&path), before);
         assert!(path.exists());
         assert!(!has_sha256_marker(&path));
+    }
+
+    #[test]
+    fn direct_sync_callers_reuse_installed_files_without_network_or_hashes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("shared/camera/control.safetensors");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"complete local camera adapter").unwrap();
+        for _ in 0..3 {
+            let result = download_single_file_sync_with_adapter(
+                root.path(),
+                "invalid/no-network",
+                "control.safetensors",
+                Some("shared/camera"),
+                (),
+                SingleFileAcquisition::ReuseInstalled,
+            )
+            .unwrap();
+            assert_eq!(result, target);
+            assert_eq!(pinned_digest_hash_count_for(&target), 0);
+        }
+        assert!(!root.path().join(".hf-acquisition-cache").exists());
+    }
+
+    #[test]
+    fn old_published_cache_migrates_without_acquisition_or_hashing() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path().join(".hf-cache"))
+            .repo(hf_file_repo("legacy/model", "control.bin"));
+        let old = cache.pointer_path("abc123").join("control.bin");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"installed").unwrap();
+        cache.create_ref("abc123").unwrap();
+        let result = download_single_file_sync_with_adapter(
+            root.path(),
+            "legacy/model",
+            "control.bin",
+            Some("shared/new-layout"),
+            (),
+            SingleFileAcquisition::ReuseInstalled,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&result).unwrap(), b"installed");
+        assert!(!root.path().join(".hf-acquisition-cache").exists());
+        assert_eq!(pinned_digest_hash_count_for(&result), 0);
+        assert!(
+            !has_sha256_marker(&result),
+            "migration must not invent a verified digest"
+        );
     }
 
     #[test]

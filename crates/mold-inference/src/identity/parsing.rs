@@ -388,7 +388,7 @@ pub struct BiSeNetParser {
 
 impl BiSeNetParser {
     /// Assemble the modules. Private: the only entry point is
-    /// [`Self::from_authenticated`], so no caller can arrive here holding a
+    /// [`Self::from_installed`], so no caller can arrive here holding a
     /// `VarBuilder` it built from an unverified pathname.
     ///
     /// `device` is HONOURED as of #1227 phase 2, which moved the whole
@@ -416,14 +416,14 @@ impl BiSeNetParser {
     /// an entry needs write permission on the parent directory, which
     /// `CLAUDE.md`'s model-storage rule allows a shared model root to grant —
     /// so a loader that hashed a path and then reopened it could execute
-    /// weights nobody vouched for. `AuthenticatedArtifact` maps the descriptor
+    /// weights nobody vouched for. `LoadedArtifact` maps the descriptor
     /// once and hashes that mapping, and this reads the same mapping.
     /// `the_parser_cannot_be_loaded_from_a_bare_path` pins the shape.
     ///
     /// `pub(crate)` because the handle it takes is: there is deliberately no
     /// way for a caller outside this crate to build a parser at all.
-    pub(crate) fn from_authenticated(
-        artifact: &crate::encoders::pickle_convert::AuthenticatedArtifact,
+    pub(crate) fn from_installed(
+        artifact: &crate::encoders::pickle_convert::LoadedArtifact,
         device: &Device,
     ) -> Result<Self> {
         let vb = VarBuilder::from_slice_safetensors(artifact.bytes(), DType::F32, device)
@@ -710,7 +710,7 @@ mod tests {
         assert!(code.contains("fn from_var_builder"));
         assert!(!code.contains("pub fn from_var_builder"));
         assert!(!code.contains("pub(crate) fn from_var_builder"));
-        assert!(code.contains("fn from_authenticated"));
+        assert!(code.contains("fn from_installed"));
     }
 
     #[test]
@@ -799,7 +799,7 @@ mod tests {
         // The same authenticated handle production uses, so the tests exercise
         // the loader that ships rather than a shortcut around it.
         let artifact = open_authenticated(&destination, BISENET_DERIVED).unwrap();
-        Some(BiSeNetParser::from_authenticated(&artifact, &Device::Cpu).unwrap())
+        Some(BiSeNetParser::from_installed(&artifact, &Device::Cpu).unwrap())
     }
 
     /// The parser's own output, against `facexlib`'s.

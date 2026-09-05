@@ -360,7 +360,7 @@ impl SdxlPulidAdapter {
     /// `identity::extraction`. The descriptor-retention rule exists for a
     /// loader that has just authenticated bytes and would otherwise throw that
     /// authentication away by reopening a name — the EVA02-CLIP and BiSeNet
-    /// conversions, whose `pickle_convert::AuthenticatedArtifact` hashes a
+    /// conversions, whose `pickle_convert::LoadedArtifact` hashes a
     /// private copy and publishes through `renameat`. There is no fresher
     /// authentication here to discard: the adapter is a manifest file whose
     /// pinned digest the download verified when it wrote the

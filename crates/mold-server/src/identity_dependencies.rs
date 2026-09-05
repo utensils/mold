@@ -437,14 +437,17 @@ mod tests {
     /// a 1.14 GB preimage of a fixed digest. It is the ATTACK: a group-writable
     /// models root, which the model-storage invariant explicitly supports, lets
     /// anyone who can drop weights also drop the sidecar that vouches for them.
-    /// Every use below asserts that mold refuses it.
+    /// Complete sparse local files exercise the deliberate runtime trust policy.
     fn install_forged_bundle(config: &Config) {
         let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let models_dir = config.resolved_models_dir();
         for file in &manifest.files {
             let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"identity asset").unwrap();
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(file.size_bytes)
+                .unwrap();
             mold_core::download::write_sha256_marker(&path, file.sha256.unwrap()).unwrap();
         }
     }
@@ -798,17 +801,11 @@ mod tests {
         ));
     }
 
-    /// A bundle that is merely PRESENT is not installed. Presence plus a
-    /// self-served attestation is what an attacker with write access to a
-    /// shared models root can manufacture; only bytes that hash to the
-    /// manifest pin count.
-    ///
-    /// The read-only preview says so by planning the download anyway, and
-    /// admission says so by refusing. Neither is allowed to read the sidecar
-    /// and call it installed.
+    /// Complete local files need no digest receipt to satisfy a preview. A
+    /// writable sidecar is completion metadata, never cryptographic evidence.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn a_forged_attestation_never_makes_a_bundle_count_as_installed() {
+    async fn complete_local_bundle_is_installed_without_digest_verification() {
         let models = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         let _env = EnvGuard::new(home.path(), models.path());
@@ -830,8 +827,8 @@ mod tests {
 
         assert_eq!(
             prepared.pending_downloads_for_device("cuda:0").len(),
-            5,
-            "unproven bytes are not evidence that nothing needs downloading"
+            0,
+            "complete installed bytes need no acquisition"
         );
         // The preview stays read-only about them: nothing deleted, nothing
         // attested, nothing refused.
@@ -946,15 +943,11 @@ mod tests {
         assert!(require_identity_licenses(manifest, models.path(), None).is_err());
     }
 
-    /// Every identity asset is SHA-256 pinned in the manifest, and this is the
-    /// only place that pin is enforced for them — the single-file downloader
-    /// resolves the repo's mutable `main` revision, and the frozen plan proves
-    /// only that the path is local. A file on disk that is not the pinned
-    /// bytes must therefore fail admission by name, be removed, and never be
-    /// frozen into an execution plan.
+    /// Admission trusts complete installations and preserves their bytes even
+    /// when they do not match a manifest digest. Acquisition enforces the pin.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn a_tampered_identity_asset_fails_admission_and_is_removed() {
+    async fn complete_local_identity_assets_survive_admission_without_hashing() {
         let models = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         let _env = EnvGuard::new(home.path(), models.path());
@@ -966,9 +959,8 @@ mod tests {
         .unwrap();
         install_forged_bundle(&config);
 
-        // The adapter's bytes are not its pin, and its forged marker is left
-        // deliberately IN PLACE — the whole point is that the sidecar buys the
-        // attacker nothing.
+        // Sparse bytes intentionally differ from the manifest pin. The marker
+        // reports size only for runtime completeness; no digest claim is made.
         let manifest = mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux);
         let adapter_file = manifest
             .files
@@ -981,10 +973,10 @@ mod tests {
         assert_eq!(
             mold_core::download::recorded_sha256_marker(&adapter).as_deref(),
             adapter_file.sha256,
-            "the fixture must present a marker that vouches for the pin"
+            "fixture marker contains a pin, which runtime does not treat as observed"
         );
 
-        let error = prepare_inputs_for_devices(
+        let prepared = prepare_inputs_for_devices(
             None,
             "admission",
             &request(None, true),
@@ -995,18 +987,12 @@ mod tests {
             DependencyPreparationContext::default(),
         )
         .await
-        .expect_err("a tampered identity asset must fail admission");
+        .expect("complete installed assets are trusted");
 
-        assert!(error.contains("pulid_flux_v0.9.1.safetensors"), "{error}");
-        assert!(error.contains(adapter_file.sha256.unwrap()), "{error}");
-        assert!(error.contains("mold pull pulid-flux"), "{error}");
-        assert!(
-            !adapter.exists(),
-            "the rejected asset must be removed so a repair re-downloads it"
-        );
+        assert!(prepared.pending_downloads_for_device("cuda:0").is_empty());
+        assert!(adapter.exists(), "installed bytes are preserved");
 
-        // The other three assets are untouched: only the file that failed its
-        // own pin is rejected.
+        // Every other installed asset is preserved too.
         for file in &manifest.files {
             if file.component == ModelComponent::IdentityAdapter {
                 continue;

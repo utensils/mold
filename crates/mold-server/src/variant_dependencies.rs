@@ -144,6 +144,7 @@ fn download_dependency_sync(
     filename: &str,
     subdir: &str,
     callback: mold_core::download::DownloadProgressCallback,
+    pin: Option<(&str, &str)>,
 ) -> Result<PathBuf, String> {
     #[cfg(test)]
     if let Some(adapter) = TEST_DOWNLOAD_ADAPTERS
@@ -153,14 +154,20 @@ fn download_dependency_sync(
         .get(repo)
         .cloned()
     {
-        return adapter(models_root, repo, filename, subdir);
+        let path = adapter(models_root, repo, filename, subdir)?;
+        if let Some((sha256, model)) = pin {
+            mold_core::download::verify_pinned_file(&path, sha256, filename, model)
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(path);
     }
 
-    mold_core::download::download_single_file_sync_with_progress_in(
+    mold_core::download::download_pinned_file_sync_with_progress_in(
         models_root,
         repo,
         filename,
-        Some(subdir),
+        subdir,
+        pin,
         callback,
     )
     .map_err(|error| error.to_string())
@@ -217,57 +224,6 @@ fn send_dependency_wait(
     }
 }
 
-/// What an already-present copy of a pinned dependency is worth.
-enum CachedDependencyVerdict {
-    /// Unpinned, or proven to be the pinned bytes.
-    Usable,
-    /// Pinned, present, and NOT the pinned bytes. Under `Admission` the file
-    /// has already been removed, so a retry re-downloads.
-    Rejected(String),
-    /// Pinned and present, but this policy may not prove it. Only a read-only
-    /// preview reaches this.
-    Unproven,
-}
-
-/// Prove an already-placed dependency against its manifest pin.
-///
-/// Admission is the enforcing policy: it hashes the file's current bytes,
-/// deletes a file that does not match, and attests one that does. A read-only
-/// placement preview must not delete, must not attest, and must not refuse —
-/// it only decides whether the copy on disk counts as evidence that nothing
-/// needs downloading.
-///
-/// Neither policy reads the `.sha256-verified` marker as proof. Content
-/// authentication cannot come from a sidecar anyone who can write the artifact
-/// can also write.
-fn verify_cached_dependency(
-    path: &Path,
-    filename: &str,
-    expected_sha256: Option<PinnedDigest<'_>>,
-    policy: DependencyMaterializationPolicy,
-) -> CachedDependencyVerdict {
-    let Some(pin) = expected_sha256 else {
-        return CachedDependencyVerdict::Usable;
-    };
-    if policy == DependencyMaterializationPolicy::ExistingOnly {
-        // Read-only planning may consume an existing trusted memo, but it must
-        // not create one by reading tens of gigabytes before the request can
-        // queue. Never the `.sha256-verified` marker — it is a writable
-        // sidecar in a models root the model-storage invariant lets a group
-        // write, so it attests nothing about content. A cold copy remains
-        // pending until admission authenticates it after queue ownership.
-        return if mold_core::download::pinned_file_matches_attested(path, pin.sha256) {
-            CachedDependencyVerdict::Usable
-        } else {
-            CachedDependencyVerdict::Unproven
-        };
-    }
-    match mold_core::download::verify_pinned_file(path, pin.sha256, filename, pin.repair_model) {
-        Ok(()) => CachedDependencyVerdict::Usable,
-        Err(error) => CachedDependencyVerdict::Rejected(error.to_string()),
-    }
-}
-
 pub(crate) async fn ensure_downloaded(
     state: Option<&AppState>,
     work_id: &str,
@@ -287,6 +243,12 @@ pub(crate) async fn ensure_downloaded(
         subdir,
     } = dependency;
     let install_model = expected_sha256.map(|pin| pin.repair_model.to_string());
+    let key = DownloadKey {
+        models_root: normalized_download_root(models_root)?,
+        repo: repo.to_string(),
+        filename: filename.to_string(),
+        subdir: subdir.to_string(),
+    };
     let cached = if policy == DependencyMaterializationPolicy::ExistingOnly {
         mold_core::download::cached_file_path_existing_only(
             models_root,
@@ -298,14 +260,13 @@ pub(crate) async fn ensure_downloaded(
         mold_core::download::cached_file_path_in(models_root, repo, filename, Some(subdir))
     };
     if let Some(path) = cached {
-        match verify_cached_dependency(&path, filename, expected_sha256, policy) {
-            CachedDependencyVerdict::Usable => return Ok(ResolvedDependency::Available(path)),
-            CachedDependencyVerdict::Rejected(error) => return Err(error),
-            // A read-only preview neither deletes the file nor writes an
-            // attestation for it, so an unproven copy is simply not usable
-            // evidence — it falls through and is reported as a pending
-            // download that admission will verify for real.
-            CachedDependencyVerdict::Unproven => {}
+        // Hold the flight registry across the cheap completeness check: a
+        // concurrent creator cannot publish unverified bytes between checks.
+        let active = downloads().lock().unwrap_or_else(|e| e.into_inner());
+        if !active.contains_key(&key)
+            && mold_core::download::installed_file_is_complete(&path, expected_bytes)
+        {
+            return Ok(ResolvedDependency::Available(path));
         }
     }
     if policy == DependencyMaterializationPolicy::ExistingOnly {
@@ -351,12 +312,6 @@ pub(crate) async fn ensure_downloaded(
         }));
     }
 
-    let key = DownloadKey {
-        models_root: normalized_download_root(models_root)?,
-        repo: repo.to_string(),
-        filename: filename.to_string(),
-        subdir: subdir.to_string(),
-    };
     let (shared, creator) = {
         let mut active = downloads()
             .lock()
@@ -479,28 +434,19 @@ pub(crate) async fn ensure_downloaded(
                 }
             });
             let result = tokio::task::spawn_blocking(move || {
-                download_dependency_sync(&models_root, &repo, &filename, &subdir, callback)
+                download_dependency_sync(
+                    &models_root,
+                    &repo,
+                    &filename,
+                    &subdir,
+                    callback,
+                    pin.as_ref()
+                        .map(|(digest, model)| (digest.as_str(), model.as_str())),
+                )
             })
             .await
             .map_err(|error| format!("encoder dependency task failed: {error}"))
-            .and_then(|result| result)
-            .and_then(|path| {
-                // Hugging Face `main` is mutable and this downloader resolves
-                // the branch, not a commit, so "the download succeeded" is not
-                // "the manifest's bytes landed". A mismatch removes the file
-                // here, before any caller can freeze the path into a plan.
-                let Some((sha256, repair_model)) = pin.as_ref() else {
-                    return Ok(path);
-                };
-                mold_core::download::verify_pinned_file(
-                    &path,
-                    sha256,
-                    &key_for_task.filename,
-                    repair_model,
-                )
-                .map(|()| path)
-                .map_err(|error| error.to_string())
-            });
+            .and_then(|result| result);
             *shared
                 .result
                 .lock()
@@ -2851,8 +2797,8 @@ mod tests {
             observed.fetch_add(1, Ordering::SeqCst);
         }));
 
-        publish_preparation_progress(Some(&sink), "Verifying model files", 0, 100);
-        publish_preparation_progress(Some(&sink), "Verifying model files", 1, 100);
+        publish_preparation_progress(Some(&sink), "Resolving installed model", 0, 100);
+        publish_preparation_progress(Some(&sink), "Resolving installed model", 1, 100);
         assert_eq!(
             notifications.load(Ordering::SeqCst),
             1,
@@ -3395,133 +3341,19 @@ mod tests {
     /// content. Neither policy may accept it, and a stale one left behind by a
     /// replaced file must not resurrect the replacement either.
     #[tokio::test]
-    async fn a_forged_attestation_beside_wrong_bytes_is_refused_by_both_policies() {
+    async fn installed_dependencies_are_reused_without_attestation_or_hashing() {
         let cache = TempDir::new().unwrap();
-        let repo = unique_test_repo("mold-pin-forged");
+        let repo = unique_test_repo("mold-installed");
         let path = mold_core::download::planned_single_file_path_in(
             cache.path(),
             "pinned.safetensors",
             "shared/pin-test",
         );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let forge = || {
-            std::fs::write(&path, TAMPERED_CONTENT).unwrap();
-            mold_core::download::write_sha256_marker(&path, PINNED_CONTENT_SHA256).unwrap();
-        };
-        forge();
-
-        // Read-only: the forged attestation buys nothing, and the preview
-        // still neither deletes nor refuses.
-        let resolved = ensure_downloaded(
-            None,
-            "placement-preview",
-            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
-            None,
-            DependencyMaterializationPolicy::ExistingOnly,
-        )
-        .await
-        .expect("a preview never refuses");
-        assert!(
-            matches!(resolved, ResolvedDependency::Pending(_)),
-            "a self-served attestation is not evidence the file is installed"
-        );
-        assert!(path.exists());
-
-        // Admission: refused on the bytes, and the lying sidecar goes with the
-        // file it lied about. No download adapter is installed, so reaching
-        // the downloader would be real network I/O — the cached branch must
-        // refuse first.
-        forge();
-        let error = ensure_downloaded(
-            None,
-            "admission",
-            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
-            None,
-            DependencyMaterializationPolicy::Admission,
-        )
-        .await
-        .err()
-        .expect("a forged attestation must not authenticate the bytes beside it");
-        assert!(error.contains(PINNED_CONTENT_SHA256), "{error}");
-        assert!(error.contains(TAMPERED_CONTENT_SHA256), "{error}");
-        assert!(!path.exists());
-        assert!(!mold_core::download::has_sha256_marker(&path));
-    }
-
-    /// A copy already on disk is not evidence of anything until it is proven:
-    /// the cache lookup happens before the downloader, so an attacker who can
-    /// write into the models root would otherwise bypass the pin entirely by
-    /// pre-placing the file.
-    #[tokio::test]
-    async fn a_pre_existing_unattested_copy_is_verified_before_it_is_reused() {
-        let cache = TempDir::new().unwrap();
-        let repo = unique_test_repo("mold-pin-preplaced");
-        let path = mold_core::download::planned_single_file_path_in(
-            cache.path(),
-            "pinned.safetensors",
-            "shared/pin-test",
-        );
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"pre-placed").unwrap();
-
-        // No download adapter is installed, so reaching the downloader at all
-        // would attempt real network I/O. The cached branch must refuse first.
-        let error = ensure_downloaded(
-            None,
-            "admission",
-            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
-            None,
-            DependencyMaterializationPolicy::Admission,
-        )
-        .await
-        .err()
-        .expect("a pre-placed file that is not the pinned bytes must be refused");
-        assert!(error.contains(PINNED_CONTENT_SHA256), "{error}");
-        assert!(!path.exists(), "the rejected copy must be removed");
-
-        // A read-only preview must neither delete nor refuse — it reports the
-        // unproven copy as work admission still has to do.
-        std::fs::write(&path, b"pre-placed").unwrap();
-        let resolved = ensure_downloaded(
-            None,
-            "placement-preview",
-            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
-            None,
-            DependencyMaterializationPolicy::ExistingOnly,
-        )
-        .await
-        .expect("a preview never refuses");
-        assert!(
-            matches!(resolved, ResolvedDependency::Pending(_)),
-            "an unproven copy is not evidence that nothing needs downloading"
-        );
-        assert!(
-            path.exists(),
-            "a read-only preview must not delete the file it could not prove"
-        );
-        assert!(
-            !mold_core::download::has_sha256_marker(&path),
-            "a read-only preview must not write an attestation either"
-        );
-
-        // A cold preview reports even the correct bytes as pending rather than
-        // hashing them synchronously. Admission proves the copy; subsequent
-        // previews may consume that trusted memo without reading the body.
-        std::fs::write(&path, PINNED_CONTENT).unwrap();
-        let cold_preview = ensure_downloaded(
-            None,
-            "cold-preview",
-            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
-            None,
-            DependencyMaterializationPolicy::ExistingOnly,
-        )
-        .await
-        .expect("a preview never refuses");
-        assert!(matches!(cold_preview, ResolvedDependency::Pending(_)));
-
+        std::fs::write(&path, TAMPERED_CONTENT).unwrap();
         for policy in [
-            DependencyMaterializationPolicy::Admission,
             DependencyMaterializationPolicy::ExistingOnly,
+            DependencyMaterializationPolicy::Admission,
         ] {
             let resolved = ensure_downloaded(
                 None,
@@ -3531,9 +3363,23 @@ mod tests {
                 policy,
             )
             .await
-            .expect("pinned bytes already on disk are reused");
+            .unwrap();
             assert!(matches!(resolved, ResolvedDependency::Available(_)));
+            assert!(path.exists());
+            assert!(!mold_core::download::has_sha256_marker(&path));
         }
+        std::fs::write(&path, b"partial").unwrap();
+        let resolved = ensure_downloaded(
+            None,
+            "preview",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resolved, ResolvedDependency::Pending(_)));
+        assert!(path.exists());
     }
 
     #[tokio::test]

@@ -179,13 +179,9 @@ impl IdentityExtractor {
     /// Load from explicit model paths. Used by tests, which hold the files
     /// without a configured mold home.
     ///
-    /// Both graphs are authenticated against the manifest's SHA-256 pins
-    /// before they are decoded — the paths may be arbitrary, but the bytes at
-    /// them may not. There is deliberately no unverified variant of this
-    /// constructor: an extractor built from a graph nobody vouched for is the
-    /// thing the pin exists to prevent. Tools that inspect arbitrary graphs
-    /// call [`onnx_graph::load_onnx_model`] with `None` instead, and get no
-    /// extractor out of it.
+    /// Installed graphs retain size, descriptor and parser checks without a
+    /// checksum pass. Downloads verify before publication; explicit inspection
+    /// can use [`onnx_graph::load_onnx_model`] to verify a supplied pin.
     pub fn from_paths(detector: &Path, recognizer: &Path) -> Result<Self> {
         Self::from_paths_on_device(detector, recognizer, &candle_core::Device::Cpu)
     }
@@ -196,11 +192,11 @@ impl IdentityExtractor {
         recognizer: &Path,
         device: &candle_core::Device,
     ) -> Result<Self> {
-        let det = onnx_graph::load_onnx_model(
+        let det = onnx_graph::load_installed_onnx_model(
             detector,
             onnx_graph::pinned_artifact(ModelComponent::FaceDetector),
         )?;
-        let rec = onnx_graph::load_onnx_model(
+        let rec = onnx_graph::load_installed_onnx_model(
             recognizer,
             onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer),
         )?;

@@ -69,7 +69,7 @@ use super::private_qualification::validate_private_presentation_scope;
 use super::private_qualification::validate_private_presentation_scope_against_evidence;
 use super::private_qualification::H3PrivateArtifactQualificationReport;
 #[cfg(feature = "mp4")]
-use super::private_qualification::{qualify_private_artifacts_with_control, H3QualifiedArtifact};
+use super::private_qualification::{resolve_installed_artifacts_with_control, H3QualifiedArtifact};
 #[cfg(feature = "mp4")]
 use super::private_qwen::{
     open_authorized_private_qwen_authority, released_h3_private_qwen_loader_memory_authority,
@@ -139,7 +139,7 @@ pub(crate) fn valid_stable_cuda_device_id(value: &str) -> bool {
 const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] =
     &["f624f71ce1eba7ebb75a13801da855a92f5eec0fccbcb9783f547479c7abfce5"];
 
-const H3_ARTIFACT_VERIFICATION_PROGRESS: &str = "Verifying MiniMax H3 artifacts";
+const H3_ARTIFACT_VERIFICATION_PROGRESS: &str = "Resolving installed MiniMax H3 artifacts";
 const H3_VAE_ARTIFACT_VERIFICATION_PROGRESS: &str = "Verifying MiniMax H3 VAE artifacts";
 
 /// Report whether this binary contains at least one reviewed private-runtime
@@ -2174,7 +2174,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     #[cfg(not(feature = "h3"))]
     precheck_private_h3_record_canvas(&precheck_envelope, request.width, request.height)?;
     timeline.enter(admission_phase::ARTIFACTS);
-    let artifact_report = qualify_private_artifacts_with_control(
+    let artifact_report = resolve_installed_artifacts_with_control(
         paths.models_root,
         partition_model,
         paths.authorization_record,
@@ -2415,7 +2415,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         device_id,
         device_ordinal,
         compute_capability,
-        &qwen_artifact.sha256,
+        &qwen_artifact.expected_sha256,
         qwen_header_identity,
         qwen_policy_identity,
     )?;
@@ -2623,7 +2623,7 @@ fn private_h3_component_digests(
             H3FactoryComponentRole::Conditioner => {
                 for value in [
                     support.support_identity_sha256(),
-                    qwen_artifact.sha256.as_str(),
+                    qwen_artifact.expected_sha256.as_str(),
                     qwen_artifact
                         .header_identity_sha256
                         .as_deref()
@@ -2762,6 +2762,9 @@ const fn private_h3_component_role_id(role: H3FactoryComponentRole) -> &'static 
 
 #[cfg(feature = "mp4")]
 fn update_private_h3_qualified_artifact(digest: &mut Sha256, artifact: &H3QualifiedArtifact) {
+    if let Some(identity) = &artifact.installed_identity {
+        update_string(digest, &identity.cache_key());
+    }
     for value in [
         artifact.relative_path.as_str(),
         artifact.component,
@@ -3325,7 +3328,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         private_compute_capability,
     )?;
 
-    let artifact_report = qualify_private_artifacts_with_control(
+    let artifact_report = resolve_installed_artifacts_with_control(
         paths.models_root,
         frozen_route.partition_model,
         paths.authorization_record,
@@ -3489,7 +3492,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &owner_fence.device_id,
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
-        &qwen_artifact.sha256,
+        &qwen_artifact.expected_sha256,
         qwen_header_identity,
         qwen_policy_identity,
     )?;
@@ -3795,7 +3798,7 @@ fn exact_qualified_qwen_artifact(
     let mut matches = report
         .artifacts
         .iter()
-        .filter(|artifact| artifact.sha256 == H3_QWEN_NVFP4_AWQ_SHA256);
+        .filter(|artifact| artifact.expected_sha256 == H3_QWEN_NVFP4_AWQ_SHA256);
     let artifact = matches
         .next()
         .ok_or_else(|| anyhow!("private H3 qualification omits the released Qwen artifact"))?;
@@ -8362,7 +8365,7 @@ mod tests {
             .find("precheck_private_h3_prepared_rows(")
             .expect("admission must precheck the prepared rows");
         let artifacts = body
-            .find("qualify_private_artifacts_with_control(")
+            .find("resolve_installed_artifacts_with_control(")
             .expect("admission must qualify the artifacts");
         assert!(
             precheck < artifacts,
@@ -10410,7 +10413,7 @@ mod tests {
             .unwrap();
         let route_check = admission.find(".validate_route(").unwrap();
         let artifact_qualification = admission
-            .find("qualify_private_artifacts_with_control")
+            .find("resolve_installed_artifacts_with_control")
             .unwrap();
         assert!(runtime_open < route_check && route_check < artifact_qualification);
         let prepare_start = source
@@ -10427,7 +10430,7 @@ mod tests {
             .unwrap();
         let route_check = prepare.find(".validate_route(").unwrap();
         let artifact_qualification = prepare
-            .find("qualify_private_artifacts_with_control")
+            .find("resolve_installed_artifacts_with_control")
             .unwrap();
         assert!(runtime_open < route_check && route_check < artifact_qualification);
 

@@ -364,7 +364,7 @@ impl EvaClipVisionTower {
     /// authenticated.
     ///
     /// The production entry point, and deliberately not a path: see
-    /// [`super::pickle_convert::AuthenticatedArtifact`] for why a loader that
+    /// [`super::pickle_convert::LoadedArtifact`] for why a loader that
     /// hashed a pathname and then reopened it would be re-resolving a name a
     /// shared model root lets another member rename. [`Self::new`] stays for
     /// the golden test, which builds a `VarBuilder` over a file it converted
@@ -378,8 +378,8 @@ impl EvaClipVisionTower {
     /// this tower narrow too (`PuLID/pulid/pipeline_flux.py:60` casts it to
     /// `weight_dtype`, bf16 in `app_flux.py:45`), so the narrow arm is
     /// upstream's own behaviour and the wide one is mold's CPU concession.
-    pub(crate) fn from_authenticated(
-        artifact: &super::pickle_convert::AuthenticatedArtifact,
+    pub(crate) fn from_installed(
+        artifact: &super::pickle_convert::LoadedArtifact,
         device: &Device,
         dtype: candle_core::DType,
     ) -> Result<Self> {

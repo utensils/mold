@@ -20,31 +20,15 @@
 //! which candle's reader handles as data (`candle-core/src/pickle.rs:240-246`,
 //! `:636-645`). candle never evaluates arbitrary opcodes.
 //!
-//! ## The three things that authenticate a load
+//! ## Installation and loading contracts
 //!
-//! 1. **The source is read through a private copy, in a private place.**
-//!    candle's `PthTensors` re-opens its file by pathname for every tensor, so
-//!    hashing a descriptor and then handing candle a pathname authenticates
-//!    nothing. The bytes are copied out of the retained descriptor into an
-//!    exclusively created 0o700 directory and hashed on that same stream, so
-//!    the digest and the parse observe identical bytes by construction. That
-//!    directory lives under a root no other user can rename entries in — NOT
-//!    the model root, which `CLAUDE.md` allows to be group-writable. See
-//!    [`stage_private_copy`] and [`private_staging_root_candidates`].
-//! 2. **Every publish is a `renameat` between two retained directory
-//!    descriptors.** `rename` replaces a symlink instead of following it, and
-//!    binding both endpoints to descriptors means a group-writable model root
-//!    cannot have our staging directory renamed away and substituted between
-//!    the hash and the publish. See [`publish`] and [`super::secure_dir`].
-//! 3. **Reuse is authenticated by a compiled-in pin, not by the sidecar.**
-//!    See [`EVA_DERIVED_SHA256`] and [`BISENET_DERIVED_SHA256`]. And the pin is
-//!    checked on the bytes a consumer will actually read:
-//!    [`AuthenticatedArtifact`] reads the retained descriptor ONCE into private
-//!    memory, hashes that buffer, and hands the buffer itself to the loader, so
-//!    neither a rename nor an in-place write can put different bytes in front
-//!    of a `VarBuilder` than the ones that satisfied the pin. Every loader
-//!    downstream takes that handle; none of them takes a path, and none of them
-//!    sees a shared mapping.
+//! Source conversion retains a descriptor and copies into a private directory
+//! before Candle parses by pathname. Existing source bytes are trusted; new
+//! derived outputs are hashed against their compiled pin before publication.
+//! Publication uses retained directory descriptors and atomic rename.
+//! Installed outputs are read once into bounded private memory, with metadata
+//! stability and format checks. Runtime reuse does not hash model bytes.
+//! Explicit verification retains a separate digest-checking entry point.
 
 // The PuLID pipeline that consumes this module lands with the FLUX
 // integration (milestone "PuLID-FLUX: functional"); issue #1229 delivers the
@@ -467,6 +451,16 @@ fn stage_private_copy(
     name: &str,
     expected_sha256: &str,
 ) -> Result<PathBuf> {
+    stage_private_copy_with_policy(retained, staging, name, expected_sha256, true)
+}
+
+fn stage_private_copy_with_policy(
+    retained: &File,
+    staging: &PrivateStagingDir,
+    name: &str,
+    expected_sha256: &str,
+    verify: bool,
+) -> Result<PathBuf> {
     let mut source = retained
         .try_clone()
         .context("failed to clone the source descriptor")?;
@@ -475,6 +469,8 @@ fn stage_private_copy(
         .context("failed to rewind the source descriptor")?;
 
     let mut target = staging.create_private_file(name)?;
+    let mut observation = verify
+        .then(|| mold_core::download::ArtifactHashObservation::new("explicit_conversion_source"));
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
@@ -484,7 +480,10 @@ fn stage_private_copy(
         if read == 0 {
             break;
         }
-        digest.update(&buffer[..read]);
+        if let Some(observation) = observation.as_mut() {
+            observation.read(read as u64);
+            digest.update(&buffer[..read]);
+        }
         target
             .write_all(&buffer[..read])
             .with_context(|| format!("failed to write the private {name} copy"))?;
@@ -496,7 +495,7 @@ fn stage_private_copy(
 
     let actual = format!("{:x}", digest.finalize());
     ensure!(
-        actual == expected_sha256,
+        !verify || actual == expected_sha256,
         "the source is not the pinned EVA02-CLIP release (sha256 {actual})"
     );
     // Nothing outside this process can reach the staging directory, so handing
@@ -551,6 +550,15 @@ fn write_atomically_with_hook(
     destination: &Path,
     before_publish: &dyn Fn(),
 ) -> Result<String> {
+    write_atomically_checked(tensors, destination, None, before_publish)
+}
+
+fn write_atomically_checked(
+    tensors: &[RawTensor],
+    destination: &Path,
+    expected: Option<&str>,
+    before_publish: &dyn Fn(),
+) -> Result<String> {
     const STAGED: &str = "weights.safetensors";
     let staging = PrivateStagingDir::create_beside(destination)?;
 
@@ -568,11 +576,17 @@ fn write_atomically_with_hook(
     // `publish` renames this same descriptor's entry.
     let digest = {
         let file = staging.dir().open_file(STAGED)?;
-        let sha = sha256_open_file(&file)?;
+        let sha = mold_core::download::hash_open_artifact(&file, "derived_acquisition")?;
         file.sync_all().context("failed to fsync the staged file")?;
         sha
     };
 
+    if let Some(expected) = expected {
+        ensure!(
+            digest == expected,
+            "new derived artifact differs from its release pin"
+        );
+    }
     before_publish();
     publish(&staging, STAGED, destination)?;
     Ok(digest)
@@ -614,7 +628,7 @@ fn write_sidecar(destination: &Path, source_sha256: &str, derived_sha256: &str) 
          \"derived_sha256\": \"{derived_sha256}\",\n  \
          \"derived_filename\": \"{derived_filename}\",\n  \
          \"note\": \"Provenance only. Mold authenticates this artifact with a \
-         compiled-in pin, never with this file.\"\n}}\n"
+         checksum at creation. Runtime trusts the installed file.\"\n}}\n"
     );
     publish_bytes(body.as_bytes(), &sidecar_path(destination))
 }
@@ -639,6 +653,8 @@ struct PickleConversion {
     /// The SHA-256 the source must have. A conversion refuses anything else
     /// even when it is handed a path directly.
     source_sha256: &'static str,
+    /// Expected output digest, checked before atomic publication.
+    derived_sha256: &'static str,
     /// `Some(output_name)` keeps a tensor under that name; `None` drops it.
     select: fn(&str) -> Option<String>,
 }
@@ -650,9 +666,27 @@ fn convert_pickle(
     source: &Path,
     destination: &Path,
 ) -> Result<String> {
+    convert_pickle_with_policy(conversion, source, destination, true)
+}
+
+fn convert_installed_pickle(
+    conversion: &PickleConversion,
+    source: &Path,
+    destination: &Path,
+) -> Result<String> {
+    convert_pickle_with_policy(conversion, source, destination, false)
+}
+
+fn convert_pickle_with_policy(
+    conversion: &PickleConversion,
+    source: &Path,
+    destination: &Path,
+    verify_source: bool,
+) -> Result<String> {
     let PickleConversion {
         label,
         source_sha256,
+        derived_sha256,
         select,
     } = conversion;
 
@@ -675,8 +709,14 @@ fn convert_pickle(
         .context("failed to stat the source")?
         .len();
     let staging = PrivateStagingDir::create_in_private_root(source_bytes)?;
-    let private_source = stage_private_copy(&retained, &staging, "source.pt", source_sha256)
-        .with_context(|| format!("{} failed its pin", source.display()))?;
+    let private_source = stage_private_copy_with_policy(
+        &retained,
+        &staging,
+        "source.pt",
+        source_sha256,
+        verify_source,
+    )
+    .with_context(|| format!("{} failed its pin", source.display()))?;
     drop(retained);
 
     // 3. Parse the private copy. candle re-opens by pathname per tensor, which
@@ -752,8 +792,12 @@ fn convert_pickle(
     );
     drop(staging);
 
-    let derived = write_atomically(&tensors, destination)?;
-    write_sidecar(destination, source_sha256, &derived)?;
+    let derived = write_atomically_checked(&tensors, destination, Some(derived_sha256), &|| {})?;
+    write_sidecar(
+        destination,
+        if verify_source { source_sha256 } else { "" },
+        &derived,
+    )?;
     Ok(derived)
 }
 
@@ -765,30 +809,32 @@ fn convert_pickle(
 /// source, because a half-written or edited artifact must never be loaded as
 /// weights. If the source itself fails its own pin the conversion errors rather
 /// than falling back to whatever is on disk.
+fn materialize_derived(
+    conversion: &PickleConversion,
+    source: &Path,
+    destination: &Path,
+    pin: PinnedDerived,
+) -> Result<()> {
+    if mold_core::download::installed_file_is_complete(destination, Some(pin.size_bytes)) {
+        return Ok(());
+    }
+    static DERIVATION: Mutex<()> = Mutex::new(());
+    let _guard = DERIVATION.lock().unwrap_or_else(|e| e.into_inner());
+    if mold_core::download::installed_file_is_complete(destination, Some(pin.size_bytes)) {
+        return Ok(());
+    }
+    convert_installed_pickle(conversion, source, destination)?;
+    Ok(())
+}
+
 fn ensure_derived(
     conversion: &PickleConversion,
     source: &Path,
     destination: &Path,
     pin: PinnedDerived,
-) -> Result<AuthenticatedArtifact> {
-    if let Ok(artifact) = open_authenticated(destination, pin) {
-        return Ok(artifact);
-    }
-    let derived = convert_pickle(conversion, source, destination)?;
-    let derived_sha256 = pin.sha256;
-    // A fresh conversion that does not reproduce the pin means the pin and the
-    // converter have diverged. Say so once, loudly, instead of silently
-    // reconverting on every later call.
-    ensure!(
-        derived == derived_sha256,
-        "converting {} produced sha256 {derived}, but this build pins \
-         {derived_sha256}",
-        source.display()
-    );
-    // Re-read rather than trusted: `convert_pickle` returns the digest of what
-    // it published, and this is the buffer a loader will read. They agree in
-    // the ordinary case and must not be assumed to.
-    open_authenticated(destination, pin)
+) -> Result<LoadedArtifact> {
+    materialize_derived(conversion, source, destination, pin)?;
+    open_installed(destination, pin)
 }
 
 /// The EVA02-CLIP vision tower: keep `visual.*`, drop the duplicated per-block
@@ -798,6 +844,7 @@ fn ensure_derived(
 const EVA_CLIP_VISION: PickleConversion = PickleConversion {
     label: "EVA02-CLIP",
     source_sha256: EVA_SOURCE_SHA256,
+    derived_sha256: EVA_DERIVED_SHA256,
     select: |name| {
         (name.starts_with(VISION_PREFIX) && !is_duplicate_rope_buffer(name))
             .then(|| name.trim_start_matches(VISION_PREFIX).to_string())
@@ -814,6 +861,7 @@ const EVA_CLIP_VISION: PickleConversion = PickleConversion {
 const BISENET_PARSER: PickleConversion = PickleConversion {
     label: "BiSeNet face parser",
     source_sha256: BISENET_SOURCE_SHA256,
+    derived_sha256: BISENET_DERIVED_SHA256,
     select: |name| Some(name.to_string()),
 };
 
@@ -913,13 +961,13 @@ pub(crate) fn derived_parser_path(paths: &PulidPaths) -> PathBuf {
 /// parser — charged in [`crate::identity::extraction::EXTRACTION_HOST_PEAK_BYTES`]
 /// and released as soon as the module is built. Mapping instead would save it
 /// and would not be authentication.
-pub(crate) struct AuthenticatedArtifact {
+pub(crate) struct LoadedArtifact {
     bytes: Vec<u8>,
     display_path: PathBuf,
     sha256: String,
 }
 
-impl AuthenticatedArtifact {
+impl LoadedArtifact {
     /// The verified bytes. Hand these to `VarBuilder::from_slice_safetensors`.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -930,15 +978,15 @@ impl AuthenticatedArtifact {
         &self.display_path
     }
 
-    /// The digest of [`Self::bytes`].
+    /// Observed digest when available; empty for an unverified local installation.
     pub(crate) fn sha256(&self) -> &str {
         &self.sha256
     }
 }
 
-impl std::fmt::Debug for AuthenticatedArtifact {
+impl std::fmt::Debug for LoadedArtifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthenticatedArtifact")
+        f.debug_struct("LoadedArtifact")
             .field("path", &self.display_path)
             .field("sha256", &self.sha256)
             .field("bytes", &self.bytes.len())
@@ -1057,7 +1105,7 @@ type VerifiedArtifacts = Mutex<HashSet<(ArtifactIdentity, &'static str)>>;
 /// This is `mold_core::download::pinned_file_digest`'s memo applied to the one
 /// artifact that reads its bytes privately rather than hashing a descriptor in
 /// place — the same shape, the same key material, and (see below) the same
-/// residual. The private-copy contract in [`AuthenticatedArtifact`] is
+/// residual. The private-copy contract in [`LoadedArtifact`] is
 /// unchanged, because the copy is what the `VarBuilder` reads and the memo only
 /// ever removes the SHA-256 pass over it.
 ///
@@ -1134,10 +1182,15 @@ pub(crate) fn forget_verified_artifacts() {
 /// Everything else here runs every time: the descriptor is re-resolved, the
 /// size is re-checked, and the bytes are re-read into a fresh private buffer,
 /// because that buffer is what the caller builds from.
-pub(crate) fn open_authenticated(
-    destination: &Path,
-    pin: PinnedDerived,
-) -> Result<AuthenticatedArtifact> {
+pub(crate) fn open_authenticated(destination: &Path, pin: PinnedDerived) -> Result<LoadedArtifact> {
+    open_artifact(destination, pin, true)
+}
+
+fn open_installed(destination: &Path, pin: PinnedDerived) -> Result<LoadedArtifact> {
+    open_artifact(destination, pin, false)
+}
+
+fn open_artifact(destination: &Path, pin: PinnedDerived, verify: bool) -> Result<LoadedArtifact> {
     let parent = destination
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1186,19 +1239,31 @@ pub(crate) fn open_authenticated(
     // Both readings must agree AND the timestamps must be fine-grained enough
     // to have noticed a write between them. A coarse filesystem is never
     // memoized, in either direction.
+    ensure!(
+        identity_before == identity_after,
+        "installed artifact changed while loading"
+    );
     let stable = identity_before == identity_after && identity_after.is_fine_grained();
     let memoized = stable
         && artifact_verified()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains(&(identity_after, pin.sha256));
-    let sha256 = if memoized {
+    let sha256 = if !verify {
+        mold_core::download::installed_artifact_identity_from_file(destination, &file)?
+            .observed_sha256()
+            .unwrap_or_default()
+            .to_string()
+    } else if memoized {
         // Proven earlier in this process, from a file that has not been
         // written or replaced since. `pin.sha256` is what the digest would
         // have been; recording it as the artifact's digest keeps
-        // `AuthenticatedArtifact::sha256` meaning exactly what it meant before.
+        // `LoadedArtifact::sha256` meaning exactly what it meant before.
         pin.sha256.to_string()
     } else {
+        let mut observation =
+            mold_core::download::ArtifactHashObservation::new("explicit_derived_verification");
+        observation.read(bytes.len() as u64);
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         ARTIFACT_FULL_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
         ensure!(
@@ -1221,7 +1286,7 @@ pub(crate) fn open_authenticated(
         destination.display()
     );
 
-    Ok(AuthenticatedArtifact {
+    Ok(LoadedArtifact {
         bytes,
         display_path: destination.to_path_buf(),
         sha256,
@@ -1241,6 +1306,28 @@ fn artifact_is_authentic(destination: &Path, expected_sha256: &str) -> bool {
     sha256_open_file(&file).ok().as_deref() == Some(expected_sha256)
 }
 
+/// Materialize missing derived outputs before resolving embedding cache keys.
+/// Existing outputs only cost metadata checks, never a model read.
+pub(crate) fn prepare_derived_files(paths: &PulidPaths) -> Result<()> {
+    for (conversion, source, destination, pin) in [
+        (
+            &EVA_CLIP_VISION,
+            &paths.vision_encoder_source,
+            derived_vision_path(paths),
+            EVA_DERIVED,
+        ),
+        (
+            &BISENET_PARSER,
+            &paths.face_parser_source,
+            derived_parser_path(paths),
+            BISENET_DERIVED,
+        ),
+    ] {
+        materialize_derived(conversion, source, &destination, pin)?;
+    }
+    Ok(())
+}
+
 /// Materialize the vision tower's safetensors, converting on first use.
 ///
 /// This is the entry point admission calls once it has resolved a complete
@@ -1248,9 +1335,7 @@ fn artifact_is_authentic(destination: &Path, expected_sha256: &str) -> bool {
 /// convert-on-first-use rather than a download post-hook: the bundle's install
 /// flow is being built concurrently (#1220 / dependency planning), and hanging
 /// an 856 MB pickle read off the download path would couple the two.
-pub(crate) fn ensure_eva_clip_vision_safetensors(
-    paths: &PulidPaths,
-) -> Result<AuthenticatedArtifact> {
+pub(crate) fn ensure_eva_clip_vision_safetensors(paths: &PulidPaths) -> Result<LoadedArtifact> {
     ensure_derived(
         &EVA_CLIP_VISION,
         &paths.vision_encoder_source,
@@ -1263,9 +1348,7 @@ pub(crate) fn ensure_eva_clip_vision_safetensors(
 ///
 /// Same contract, and a much cheaper one: the release is 53 MB rather than
 /// 856 MB, so the transient private copy is negligible.
-pub(crate) fn ensure_bisenet_parser_safetensors(
-    paths: &PulidPaths,
-) -> Result<AuthenticatedArtifact> {
+pub(crate) fn ensure_bisenet_parser_safetensors(paths: &PulidPaths) -> Result<LoadedArtifact> {
     ensure_derived(
         &BISENET_PARSER,
         &paths.face_parser_source,
@@ -1374,6 +1457,36 @@ mod tests {
                 size_bytes: bytes.len() as u64,
             },
         )
+    }
+
+    #[test]
+    fn a_failed_derived_checksum_never_publishes_an_install() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("derived.safetensors");
+        assert!(write_atomically_checked(
+            &[raw("x", &[1.0], &[1])],
+            &destination,
+            Some("wrong"),
+            &|| {}
+        )
+        .is_err());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn installed_derived_artifact_never_hashes_even_on_first_load() {
+        let _guard = memo_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut pin) = pinned_file(dir.path(), "derived.bin", b"installed");
+        pin.sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+        let before = artifact_verification_count();
+        for _ in 0..2 {
+            let loaded = open_installed(&path, pin).unwrap();
+            assert_eq!(loaded.bytes(), b"installed");
+            assert!(loaded.sha256().is_empty());
+        }
+        assert_eq!(artifact_verification_count(), before);
+        assert!(open_authenticated(&path, pin).is_err());
     }
 
     /// The whole of #1227 phase 2's first win: `pulid-perf.md` §4 measured the
@@ -1692,6 +1805,27 @@ mod tests {
     /// candle's re-open-by-pathname reader would otherwise expose — cannot
     /// reach it, because after `stage_private_copy` the original pathname is
     /// never used again.
+    #[test]
+    fn legacy_conversion_stages_installed_source_without_digest_check() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.bin");
+        std::fs::write(&path, b"installed source").unwrap();
+        let file = open_regular_file_no_follow(&path).unwrap();
+        let staging = PrivateStagingDir::create_beside(&root.path().join("derived.bin")).unwrap();
+        let copy = stage_private_copy_with_policy(
+            &file,
+            &staging,
+            "copy.bin",
+            "not-the-source-digest",
+            false,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(copy).unwrap(), b"installed source");
+        assert!(
+            stage_private_copy(&file, &staging, "verified.bin", "not-the-source-digest").is_err()
+        );
+    }
+
     #[test]
     fn the_parsed_bytes_are_the_hashed_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2312,8 +2446,8 @@ mod tests {
 
     /// Structural guard, matching `onnx_graph`'s. The type system already
     /// stops a consumer loading a DERIVED artifact by pathname — `ensure_*`
-    /// hands out an [`AuthenticatedArtifact`] and never a `PathBuf` — but
-    /// [`AuthenticatedArtifact::display_path`] is a way back to a name, and it
+    /// hands out an [`LoadedArtifact`] and never a `PathBuf` — but
+    /// [`LoadedArtifact::display_path`] is a way back to a name, and it
     /// exists only so a loader can quote one in an error. If the extraction
     /// ever names it, someone has reintroduced the round trip.
     ///
@@ -2337,7 +2471,7 @@ mod tests {
 
         // And nothing in the chain may reintroduce a shared mapping: a mapping
         // is a live view of a file other members may write, which is the whole
-        // reason `AuthenticatedArtifact` owns a private `Vec`.
+        // reason `LoadedArtifact` owns a private `Vec`.
         // Split so this test's own source is not what the scan finds.
         let mapping = concat!("Mm", "ap");
         for (label, source) in [
