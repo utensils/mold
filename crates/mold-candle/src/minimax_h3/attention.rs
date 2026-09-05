@@ -28,7 +28,7 @@ pub const H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS: u64 = 4 * 1024 * 1024;
 /// 256 Mi elements is 1 GiB at F32 — comfortably inside every Apple Silicon
 /// `maxBufferLength` while keeping the chunk count low enough that the loop
 /// overhead does not dominate. The unchunked matrix at released geometry is
-/// `56 x 40k x 40k` elements (~358 TiB), so the bound is what makes the path
+/// `56 x 40k x 40k` elements (~358 GB), so the bound is what makes the path
 /// exist at all rather than a tuning preference.
 pub const H3_METAL_DENSE_CHUNK_MAX_SCORE_ELEMENTS: u64 = 256 * 1024 * 1024;
 /// Upper bound on one Metal query chunk, mirroring `crate::attention`'s
@@ -707,7 +707,7 @@ impl H3AttentionRuntimeAuthority {
     ///
     /// The bounded synthetic path exists to prove the dense arithmetic on a
     /// toy shape; it cannot freeze a production sequence, because one
-    /// `N x N` score matrix at released geometry is ~358 TiB. Metal has no
+    /// `N x N` score matrix at released geometry is ~358 GB. Metal has no
     /// FlashAttention kernel to escape to, so this backend keeps the identical
     /// arithmetic and executes it over query chunks — the same answer, in
     /// slices that fit a Metal buffer. Throughput is deliberately unqualified.
@@ -1740,6 +1740,17 @@ fn dense_attention(
     let attended = if chunk >= rows {
         dense_attention_pass(&q, &keys, &v, scale)?
     } else {
+        // Allocate the Metal result before any score buffers exist. A small
+        // chunk result can reuse a large pooled score allocation; retaining
+        // those results in `parts` would keep one oversized buffer per chunk.
+        let metal_output = if q.device().is_metal() {
+            Some(
+                Tensor::zeros(q.shape(), DType::F32, q.device())
+                    .map_err(|error| kernel_error("dense output allocation", error))?,
+            )
+        } else {
+            None
+        };
         let mut parts = Vec::with_capacity(rows.div_ceil(chunk));
         let mut start = 0usize;
         while start < rows {
@@ -1748,10 +1759,32 @@ fn dense_attention(
                 .narrow(2, start, height)
                 .and_then(|tensor| tensor.contiguous())
                 .map_err(|error| kernel_error("dense query chunk", error))?;
-            parts.push(dense_attention_pass(&slice, &keys, &v, scale)?);
+            let part = dense_attention_pass(&slice, &keys, &v, scale)?;
+            if let Some(output) = &metal_output {
+                output
+                    .slice_set(&part, 2, start)
+                    .map_err(|error| kernel_error("dense chunk assembly", error))?;
+            } else {
+                parts.push(part.clone());
+            }
+            drop(part);
+            drop(slice);
+            // Metal command buffers retain the score/softmax temporaries even
+            // after their Tensor handles die. Complete each bounded pass before
+            // enqueueing another, or the chunks accumulate into an unbounded
+            // in-flight working set. CUDA FlashAttention never takes this path.
+            if q.device().is_metal() {
+                q.device()
+                    .synchronize()
+                    .map_err(|error| kernel_error("dense chunk completion", error))?;
+            }
             start += height;
         }
-        Tensor::cat(&parts, 2).map_err(|error| kernel_error("dense chunk concatenation", error))?
+        match metal_output {
+            Some(output) => output,
+            None => Tensor::cat(&parts, 2)
+                .map_err(|error| kernel_error("dense chunk concatenation", error))?,
+        }
     };
     attended
         .to_dtype(output_dtype)
@@ -2533,6 +2566,37 @@ mod tests {
             .to_scalar::<f32>()
             .unwrap();
         assert!(max <= 1e-4, "metal chunked max difference {max}");
+    }
+
+    /// Run alone: native allocation accounting is process-wide. This bounded
+    /// synthetic case needs no model weights and keeps its scores below 256 MiB.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "exclusive Metal allocation qualification"]
+    fn metal_attention_releases_chunk_temporaries_before_return() {
+        let metal = Device::new_metal(0).unwrap();
+        let native = metal.as_metal_device().unwrap().device();
+        let q = Tensor::zeros((1, 2048, 4, 8), DType::F32, &metal).unwrap();
+        let v = Tensor::ones((1, 2048, 4, 8), DType::F32, &metal).unwrap();
+        metal.synchronize().unwrap();
+        let baseline = native.current_allocated_size();
+        let output = dense_attention(&q, &q, &v, 1.0 / 8f32.sqrt(), Some(512)).unwrap();
+        let retained = native.current_allocated_size().saturating_sub(baseline);
+        eprintln!("H3_METAL_ATTENTION_RETAINED_BYTES={retained}");
+        // Four 16-MiB score chunks must not survive together. The live inputs,
+        // prepared Q/K/V, output parts and final output need under 8 MiB here.
+        assert!(
+            retained < 32 << 20,
+            "chunk temporaries retained {retained} bytes"
+        );
+        let values = output
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert!(values.iter().all(|value| (*value - 1.0).abs() < 1e-5));
     }
 
     #[test]
