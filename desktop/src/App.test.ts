@@ -110,6 +110,25 @@ describe("App — launch", () => {
   });
 });
 
+/*
+ * The shell root is not a scroll container. `overflow: hidden` still lets a
+ * programmatic scroll (focus() on a field, scrollIntoView) move the box, and
+ * every `.sr-only` span in a view is `position: absolute` against the root
+ * because nothing nearer is positioned — the Machines page's styles list gave
+ * the root a 4900px scroll height, and focusing the Connect dialog's address
+ * field shifted the whole chrome up by 8px. `overflow: clip` clips the same
+ * way and can never scroll.
+ */
+describe("App — the shell root never scrolls", () => {
+  it("clips its overflow rather than hiding it", async () => {
+    const wrapper = await mountApp();
+    const rootEl = wrapper.element as HTMLElement;
+    expect(rootEl.className).toContain("overflow-clip");
+    expect(rootEl.className).not.toContain("overflow-hidden");
+    expect(wrapper.get("main").element.className).toContain("overflow-clip");
+  });
+});
+
 describe("App — keys the shell swallows", () => {
   function pressBackspace(): KeyboardEvent {
     const event = new KeyboardEvent("keydown", {

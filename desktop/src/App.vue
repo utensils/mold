@@ -405,15 +405,24 @@ onUnmounted(() => {
   jobs.stopPolling();
   hostStatus.stop();
 });
+
+/*
+ * The shell root is `overflow-clip`, never `overflow-hidden`: hidden is still
+ * a scroll container that a focus() or scrollIntoView can move, and every
+ * view's `.sr-only` spans are positioned against this root because nothing
+ * nearer is positioned, so a long list under a view's own scroller gave the
+ * root thousands of pixels of scrollable overflow and one focused field
+ * shifted the whole chrome up. Pinned by App.test.ts.
+ */
 </script>
 
 <template>
-  <div class="relative flex h-full flex-col overflow-hidden bg-bg">
+  <div class="relative flex h-full flex-col overflow-clip bg-bg">
     <TitleBar />
     <UpdateBanner />
     <div class="flex min-h-0 flex-1 overflow-hidden">
       <Sidebar />
-      <main class="min-h-0 min-w-0 flex-1 overflow-hidden">
+      <main class="min-h-0 min-w-0 flex-1 overflow-clip">
         <router-view />
       </main>
     </div>
