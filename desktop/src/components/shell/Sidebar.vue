@@ -133,7 +133,7 @@ onBeforeUnmount(() => {
 
     <!-- MAKE -->
     <div v-if="!collapsed" class="ms-group-label shrink-0 px-[9px] pt-1.5 pb-1 uppercase">Make</div>
-    <div class="flex flex-col gap-0.5">
+    <div class="flex shrink-0 flex-col gap-0.5">
       <NavItem
         v-for="d in MAKE"
         :key="d.route"
@@ -161,7 +161,7 @@ onBeforeUnmount(() => {
     <div v-if="!collapsed" class="ms-group-label mt-3 shrink-0 px-[9px] pt-1.5 pb-1 uppercase">
       Setup
     </div>
-    <div class="flex flex-col gap-0.5" :class="collapsed ? 'mt-2' : ''">
+    <div class="flex shrink-0 flex-col gap-0.5" :class="collapsed ? 'mt-2' : ''">
       <div v-for="d in SETUP" :key="d.route" class="relative">
         <span
           v-if="collapsed && d.route === '/machines' && machinesErrored"

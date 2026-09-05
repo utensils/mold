@@ -982,3 +982,22 @@ describe("Sidebar machine card", () => {
     expect(card.get("[data-test='machine-memory']").text()).toBe("31.6 / 51.5 GB graphics memory");
   });
 });
+
+describe("Sidebar nav groups", () => {
+  // The nav is a column flex beside a flex-1 queue rail inside an
+  // overflow-hidden aside. The rows carry a min-height, but the GROUP
+  // wrappers around them were shrinkable, so a short window clipped a nav
+  // row instead of squeezing the queue. The mock pins every nav row
+  // flex-shrink:0; the wrapper is where that has to live.
+  it("never lets a nav group shrink below its rows", async () => {
+    const wrapper = await mountAt("/create");
+    for (const label of ["New image", "Styles"]) {
+      const button = navButton(wrapper, label);
+      expect(button, label).toBeTruthy();
+      // NavItem may wrap its button; the group is the nearest column stack.
+      const group = button!.element.closest(".flex-col");
+      expect(group, `${label} group`).toBeTruthy();
+      expect(group!.classList.contains("shrink-0"), `${label} group`).toBe(true);
+    }
+  });
+});
