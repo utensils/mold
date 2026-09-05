@@ -53,7 +53,7 @@ jobs:
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 
       - name: Install release-plz
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: release-plz@0.3.162
 
