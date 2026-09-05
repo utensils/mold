@@ -176,11 +176,28 @@ pub(crate) fn finish_linear(
     chunks: Vec<Tensor>,
     bias: Option<&Tensor>,
     output_dtype: DType,
+    output_shape: Vec<usize>,
+    out_features: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    finish_linear_output(
+        Tensor::cat(&chunks, 1)?,
+        bias,
+        output_dtype,
+        output_shape,
+        out_features,
+        device,
+    )
+}
+
+fn finish_linear_output(
+    mut output: Tensor,
+    bias: Option<&Tensor>,
+    output_dtype: DType,
     mut output_shape: Vec<usize>,
     out_features: usize,
     device: &Device,
 ) -> Result<Tensor> {
-    let mut output = Tensor::cat(&chunks, 1)?;
     if let Some(bias) = bias {
         ensure_floating(bias.dtype(), "quantized linear bias")?;
         if bias.dims() != [out_features] {
@@ -774,6 +791,17 @@ impl ComfyInt8ConvRotLinear {
             return cuda::native_int8_linear(&rotated, &weight, &weight_scale, output_dtype)?
                 .reshape(&*output_shape);
         }
+        // Keep one destination on Metal: small row results can otherwise
+        // retain full-width pooled activation buffers until concatenation.
+        let metal_output = if device.is_metal() {
+            Some(Tensor::zeros(
+                (flat.dim(0)?, self.out_features),
+                output_dtype,
+                device,
+            )?)
+        } else {
+            None
+        };
         let input_scale = rotated
             .abs()?
             .max_keepdim(1)?
@@ -797,15 +825,29 @@ impl ComfyInt8ConvRotLinear {
                 .to_device(device)?
                 .reshape((1, width))?;
             let scale = input_scale.broadcast_mul(&weight_scale)?;
-            chunks.push(
-                quantized_input
-                    .matmul(&quantized_weight.t()?.contiguous()?)?
-                    .broadcast_mul(&scale)?
-                    .to_dtype(output_dtype)?,
-            );
+            let part = quantized_input
+                .matmul(&quantized_weight.t()?.contiguous()?)?
+                .broadcast_mul(&scale)?
+                .to_dtype(output_dtype)?;
+            if let Some(output) = &metal_output {
+                output.slice_set(&part, 1, start)?;
+                drop(part);
+                drop(scale);
+                drop(weight_scale);
+                drop(quantized_weight);
+                // Dropping tensors does not retire resources referenced by
+                // an asynchronous command buffer. Bound one row pass at a time.
+                device.synchronize()?;
+            } else {
+                chunks.push(part);
+            }
         }
-        finish_linear(
-            chunks,
+        let output = match metal_output {
+            Some(output) => output,
+            None => Tensor::cat(&chunks, 1)?,
+        };
+        finish_linear_output(
+            output,
             bias,
             output_dtype,
             output_shape,
@@ -994,6 +1036,80 @@ mod tests {
             (3, columns),
             device,
         )
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_reference_row_chunks_match_unchunked_with_bias_and_tail() -> Result<()> {
+        let device = Device::new_metal(0)?;
+        let (linear, bias) = fixture(&Device::Cpu)?;
+        for dtype in [DType::F32, DType::BF16] {
+            let input = activation(&Device::Cpu)?.to_dtype(dtype)?;
+            for bias in [None, Some(&bias)] {
+                // CPU matmul does not support BF16; use the single-pass Metal
+                // result for that dtype and an independent CPU oracle for F32.
+                let reference_input = if dtype == DType::BF16 {
+                    input.to_device(&device)?
+                } else {
+                    input.clone()
+                };
+                // The public forward keeps biased accumulation in F32 and
+                // narrows once after adding the bias.
+                let linear_dtype = if bias.is_some() { DType::F32 } else { dtype };
+                let expected = linear
+                    .forward_reference(&reference_input, bias, linear_dtype, 8)?
+                    .to_dtype(dtype)?
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let actual = linear
+                    .forward_reference(&input.to_device(&device)?, bias, linear_dtype, 3)?
+                    .to_dtype(dtype)?
+                    .to_dtype(DType::F32)?
+                    .to_device(&Device::Cpu)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let tolerance = if dtype == DType::F32 { 1e-4 } else { 1e-2 };
+                for (actual, expected) in actual.iter().zip(expected) {
+                    assert!(
+                        (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
+                        "{dtype:?}: chunked {actual}, reference {expected}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Native accounting is process-wide; run this model-free probe alone.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "exclusive Metal allocation qualification"]
+    fn metal_reference_releases_row_chunk_temporaries() -> Result<()> {
+        let device = Device::new_metal(0)?;
+        let native = device.as_metal_device()?.device();
+        let linear = ComfyInt8ConvRotLinear::new(
+            Tensor::zeros((4096, 1024), DType::U8, &Device::Cpu)?,
+            Tensor::ones((4096, 1), DType::F32, &Device::Cpu)?,
+        )?;
+        let input = Tensor::ones((1024, 1024), DType::F32, &device)?;
+        device.synchronize()?;
+        let baseline = native.current_allocated_size();
+        let output = linear.forward_reference(&input, None, DType::F32, 64)?;
+        let retained = native.current_allocated_size().saturating_sub(baseline);
+        eprintln!("COMFY_INT8_METAL_RETAINED_BYTES={retained}");
+        // The result is 16 MiB. Sixty-four row chunks must not retain a
+        // full-width activation allocation each while awaiting concatenation.
+        assert!(retained < 64 << 20, "row chunks retained {retained} bytes");
+        assert_eq!(output.dims(), &[1024, 4096]);
+        assert!(output
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .iter()
+            .all(|value| *value == 0.0));
+        Ok(())
     }
 
     #[test]

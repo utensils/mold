@@ -59,12 +59,19 @@ and a hummingbird with synchronized water, wings, foliage, chimes, and score.
 Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
 release can run the compact FL2VA **and** Ref2VA models for the supported
 request profiles below; the Apple Silicon Metal route below is admitted and
-shipped but not yet hardware-qualified.
+shipped with a retained reduced-size FL2VA smoke render; the default-resolution path remains unqualified.
 The CPU backend remains unavailable. Broader request
 shapes also remain unavailable until those paths are implemented and
 tested; Mold reports that limitation normally rather than treating it as a
 licensing or authorization failure.
 :::
+
+`mold run --local` accepts one FL2VA request and prepares a single-use owned
+attempt with the same request, device, memory, and output checks as the server.
+Local H3 batches and chains are refused before preparation; use the server
+for those requests and for Ref2VA reference uploads. These limits also apply
+when a remote command falls back to local execution. This routing fix does
+not change the hardware qualification limits below.
 
 ::: info Apple Metal is a correctness-only path in progress
 The Apple Silicon execution path exists as of #1164; family-scoped BF16, a
@@ -75,13 +82,21 @@ advertised as **correctness-only**, the same tier Wan and LTX-2 landed on
 before their performance qualification. Admission now accepts a Metal device,
 the public runtime profile is `supported-compact-fl2va-cuda-sm89-or-metal`, and
 the released macOS builds carry the `h3` feature. The route exists in a
-shipped binary. What is still missing is hardware qualification:
-no H3 checkpoint has ever completed a render on Metal. A Metal attempt is
-refused below a unified-memory floor that the compact stack's ~42.5 GB working
-set puts out of reach of a 48 GB machine, so lifting this tier needs a
-64 GB-class Apple Silicon host. Expect Metal to be slow when it is qualified (the reference MLX
-port measures minutes per step at 5 s) so this is a portability path, not a
-speed one.
+shipped binary. A guarded 256×256, 107-frame FL2VA Turbo 4-step render with
+a first frame and stereo audio completed on a 48 GiB Mac. This is reduced-size
+smoke evidence; the default-resolution H3 Metal path remains unqualified.
+See the [memory qualification record](https://github.com/utensils/mold/blob/main/docs/qualification/minimax-h3-metal-memory.md). The compact stack's
+~42.5 GB download size is not its simultaneous memory requirement: Metal
+streams Qwen language layers and DiT blocks, and admission sums host and device
+memory within each phase before selecting the peak. A 48 GB machine's fit
+therefore depends on the request and live headroom.
+Metal attention completes each query chunk and copies its result into one
+preallocated output so temporary score allocations cannot accumulate across
+chunks. Portable INT8 row chunks use the same bounded assembly and completion
+rule. `mold system metal-memory status` reports the local budget, including
+`iogpu.wired_limit_mb` when available; this system setting is not a process
+memory cap or an OOM guarantee. See [Metal memory](../guide/metal-memory.md). The reduced-size run took about 21 minutes including admission and setup, so
+this remains a slow portability path.
 :::
 
 ## Compact variants
