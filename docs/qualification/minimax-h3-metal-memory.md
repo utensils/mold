@@ -1,6 +1,6 @@
 # H3 Metal memory audit — 2026-09-05
 
-Status: **component regression fixed; end-to-end Metal render unqualified**.
+Status: **attention and INT8 regressions fixed; reduced-size Metal FL2VA render retained**.
 Tracks [#1164](https://github.com/utensils/mold/issues/1164) and
 [#1542](https://github.com/utensils/mold/issues/1542). Audited base:
 `e1bf871c799fd6dc88628dc69fcbb98fbd43c692`; Candle:
@@ -153,12 +153,67 @@ one-shot runnable attempt separately. This is a dispatch integration
 failure, not evidence that the checkpoint exceeds memory. Kernel pressure
 remained normal and swap did not grow. No video was produced.
 
+## Retained reduced-size Metal render
+
+The corrected production code (equivalent to `4f74f8e7`; the instrumented
+binary was built before that commit) completed the same server-route request
+on an **Apple M4 Max with 48 GiB unified memory**:
+
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, first-frame conditioned,
+  256×256, 107 frames, 24 fps, seed 42, guidance 0, five sigma points/four evaluations.
+- 1,286.3 seconds wall time including admission; archived generation time
+  1,080.1 seconds.
+- H.264 video: 107 frames, 4.458333 seconds. AAC audio: stereo 32 kHz,
+  4.458344 seconds. Both streams decode without errors.
+- Highest reported native Metal allocation: **7,757,168,640 bytes**; the
+  independent allocation ceiling remained **8 GiB**. The reported sample is
+  not a process-RSS peak. Minimum observed host availability:
+  **17,138,401,280 bytes (15.96 GiB)**. No swap growth, kernel pressure change,
+  allocation refusal, or non-completed Metal command was recorded.
+- The sampled frames preserve the synthetic sky/ground/sun composition and
+  show the requested moving cloud. Faint colored artifacts remain at this
+  reduced size, which is below the tier's recommended resolutions. This is
+  an execution smoke test, not a default-resolution quality endorsement.
+- Audio is non-silent (overall RMS about −49.2 dBFS), with no NaNs or
+  infinities. Signal validation is not a listening evaluation.
+
+The build initially left too little available memory for the unchanged
+24 GiB starting guard. Releasing the filesystem cache with macOS `purge`
+restored headroom; no application/service was stopped and no sysctl changed.
+The successful attempt is retained under
+`/Volumes/ExternalStorage/mold-h3-metal-qualification/evidence/server-first-frame-256-int8-cold/`.
+The clip is `mold-guarded-int8-256.mp4` in that qualification root, SHA-256
+`280284c009f3cdb9e5466ee81b69ee92e1e03ad93b5f98edec5a42c106cb3c4f`.
+Its pipeline provenance is
+`d1e10963a4ef3ea9430df9389d989341ad7e67cbaa4eaaae52a1a288117031e8`.
+
+On HAL9000's RTX 4090, the uninstrumented `4f74f8e7` CUDA build passed
+**20 H3 attention tests and 9 INT8 tests**. A non-skipping, model-free
+257-row H3 FlashAttention probe created a CUDA device and measured maximum
+absolute error **0.00390625** against the CPU dense reference (limit 0.02).
+These checks exercise CUDA kernels.
+
+The matching first-frame request also completed on HAL9000's existing CUDA
+server (`10ebd23a`, SM89 RTX 4090), using the same installed checkpoint,
+adapter, prompt, source image, seed, dimensions and schedule. The differences
+between that server's H3 execution source and this branch are the Metal-only
+fixes, timing reporting and installed-artifact verification changes; this
+comparison is not a run of a newly deployed CUDA server. Its archived runtime
+was **94.837 seconds**. Both outputs contain the same 107 video frames and
+matching 32 kHz stereo durations. Whole-video SSIM is **0.988634** and PSNR
+**37.762865 dB**. Decoded audio correlation is **0.973562**, with RMS difference
+**0.00080596** over 285,334 interleaved samples. Sampled CUDA frames show the
+same scene, cloud motion and faint colored artifacts. These are measured
+comparisons for one reduced-size fixture, not bit-exactness or general quality
+thresholds. The reference and its batch identity are retained in the sibling
+`hal9000-cuda/` evidence directory.
+
 ## Remaining acceptance
 
 - Complete per-phase runtime measurements for the intended Turbo/default shape; the small base admission budget above is established.
-- Qualify real conditioner, DiT and VAE phases under an exclusive hardware
-  reservation, allocation ceiling, and external host-pressure watchdog.
-- Retain a complete conditioned FL2VA video with audio, inspect its output,
-  compare an equivalent CUDA/reference case, and record peak memory.
+- Extend the completed reduced-size conditioner, DiT and VAE evidence to
+  default-resolution requests under the same safety controls.
+- Qualify default-resolution quality and memory separately from the completed
+  reduced-size CUDA/Metal comparison.
 - Keep both issues open and `CorrectnessOnly` until the relevant evidence
   exists; do not infer a 48 GiB fit from disk sizes or component tests.

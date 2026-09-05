@@ -210,7 +210,7 @@ const requiredH3DownloadFacts = [
   '2 to 50 terminal-inclusive sampler grid points',
   // Metal stopped being an unimplemented backend in #1164 and, since #1323, is
   // admitted by the frozen contract and shipped in the macOS artifacts -- but
-  // no retained end-to-end Metal render is qualified. Pin the qualification
+  // only a reduced-size render is retained. Pin the default-resolution
   // caveat and phase-streaming facts so disk size is not described as residency.
   'The CPU backend remains unavailable',
   // Both compact task partitions execute since #825. Pinned because the
@@ -220,7 +220,7 @@ const requiredH3DownloadFacts = [
   'Supported Ref2VA request',
   'order is authority',
   'correctness-only',
-  'no retained H3 end-to-end Metal render has been qualified',
+  'the default-resolution H3 Metal path remains unqualified',
   'streams Qwen language layers and DiT blocks',
   'every territory',
   'shared-server, and hosted paths',
