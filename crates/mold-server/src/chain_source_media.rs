@@ -346,6 +346,7 @@ mod tests {
             references: vec![],
         };
         ChainRequest {
+            offload: None,
             model: "ltx-2-19b-distilled:fp8".into(),
             stages: vec![
                 stage("one", Some(vec![1, 2, 3])),

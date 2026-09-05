@@ -355,6 +355,7 @@ pub(crate) struct ChainHdrInputs {
 impl ChainInputs {
     pub(crate) fn to_chain_request(&self) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -438,6 +439,9 @@ pub async fn run_chain(
     // before the first stage renders, exactly as the single-clip path does
     // (#1050).
     let mut req = req;
+    if offload {
+        req.offload = Some(true);
+    }
     // Script/repeated CLI prompts are raw here. Auto-expanded prompts carry
     // `original_prompt` and are already canonical model output, so only the
     // raw CLI shapes take the one normalization pass.
@@ -1447,6 +1451,7 @@ pub(crate) fn build_request_from_script(
     script: &mold_core::chain::ChainScript,
 ) -> anyhow::Result<ChainRequest> {
     Ok(ChainRequest {
+        offload: None,
         collection: None,
         tags: None,
         title: None,
@@ -1564,6 +1569,7 @@ pub async fn run_from_sugar(
 
     // Geometry, timing, and the denoise recipe all come from the model.
     let req = ChainRequest {
+        offload: None,
         collection: None,
         tags: None,
         title: None,
@@ -1834,6 +1840,7 @@ mod tests {
     /// are always spelled out at the call site.
     fn empty_chain_request() -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -2535,6 +2542,7 @@ mod tests {
     #[test]
     fn exact_fit_shrinks_the_last_stage_to_the_requested_total() {
         let mut req = ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -2591,6 +2599,7 @@ mod tests {
             for total in (105..=1537).step_by(8) {
                 let clip = 97u32;
                 let mut req = ChainRequest {
+                    offload: None,
                     collection: None,
                     tags: None,
                     title: None,
@@ -2649,6 +2658,7 @@ mod tests {
     #[test]
     fn exact_fit_refuses_a_layout_the_lattice_cannot_close() {
         let mut req = ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,

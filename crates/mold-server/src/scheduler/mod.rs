@@ -3308,6 +3308,7 @@ impl Coordinator {
                     .iter()
                     .find(|worker| worker_device_id(worker) == device.id.as_str())?;
                 Some(crate::execution_plan::DeviceFact {
+                    cuda_peak_baseline: worker.wan_context_baseline(),
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
                     backend: worker.gpu.backend,
@@ -3386,8 +3387,8 @@ impl Coordinator {
                     .unwrap_or_else(|| pending.job.request.model.clone());
                     let model_fingerprint = pending.job.request.model.clone();
                     let components = BTreeMap::new();
-                    let engine_config = mold_inference::FrozenEngineConfig::resolve(
-                        &pending.job.request.model,
+                    let engine_config = mold_inference::FrozenEngineConfig::resolve_for_request(
+                        &pending.job.request,
                         &config,
                     );
                     let determinism_class =
@@ -3415,6 +3416,7 @@ impl Coordinator {
                     );
                     let equivalence = environment.fingerprint();
                     crate::execution_plan::ResolvedExecutionPlan {
+                        cuda_peak_baseline: None,
                         device_id: device.id,
                         device_ordinal: device.ordinal,
                         device_backend: device.backend,
@@ -4664,14 +4666,17 @@ impl Coordinator {
                             // the warm figure here would admit those stages
                             // without the host RAM their prompt encode needs.
                             let host_bytes = plan.admission_host_demand_bytes();
-                            estimate_candidate(
+                            let candidate = estimate_candidate(
                                 DeviceId::new(plan.device_id.clone()),
                                 Some(worker.as_ref()),
                                 &plan.execution_fingerprint,
-                                plan.admission_vram_demand_bytes(),
+                                plan.total_vram_demand_bytes(),
                                 host_bytes,
                                 true,
-                            )
+                            );
+                            let demand =
+                                plan.incremental_vram_demand(candidate.predicted_vram_bytes);
+                            candidate.with_vram(demand)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -4791,7 +4796,7 @@ impl Coordinator {
                             });
                         let static_estimate = static_generation_estimate_with_projection(
                             &pending.job.request,
-                            plan.admission_vram_demand_bytes(),
+                            plan.total_vram_demand_bytes(),
                             plan.admission_host_demand_bytes(),
                             pending
                                 .job
@@ -4804,13 +4809,14 @@ impl Coordinator {
                             timing_with_static_floors(estimate, static_estimate);
                         let host_bytes =
                             candidate_host_demand_bytes(warm_resident, &plan, &estimate);
+                        let incremental_vram = plan.incremental_vram_demand(estimate.vram_bytes);
                         let candidate = CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
                             host_bytes,
                         )
                         .with_execution_equivalence(plan.execution_equivalence_fingerprint)
-                        .with_vram(estimate.vram_bytes)
+                        .with_vram(incremental_vram)
                         .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                         .with_device_available_vram(plan.admitted_available_vram_bytes);
                         if generation_uses_frozen_device_capacity(
@@ -5308,7 +5314,7 @@ impl Coordinator {
                 );
                 let static_estimate = static_generation_estimate(
                     request,
-                    plan.admission_vram_demand_bytes(),
+                    plan.total_vram_demand_bytes(),
                     plan.admission_host_demand_bytes(),
                 );
                 let estimate = self.estimates.estimate(&key, static_estimate);
@@ -5319,13 +5325,14 @@ impl Coordinator {
                     wire_estimate_confidence(estimate.confidence),
                 );
                 let host_bytes = candidate_host_demand_bytes(warm_resident, &plan, &estimate);
+                let incremental_vram = plan.incremental_vram_demand(estimate.vram_bytes);
                 let candidate = CandidatePlacement::new(
                     DeviceId::new(plan.device_id),
                     ExecutionFingerprint::new(plan.execution_fingerprint),
                     host_bytes,
                 )
                 .with_execution_equivalence(plan.execution_equivalence_fingerprint)
-                .with_vram(estimate.vram_bytes)
+                .with_vram(incremental_vram)
                 .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                 .with_device_available_vram(plan.admitted_available_vram_bytes);
                 Some(
@@ -8073,7 +8080,7 @@ fn candidate_host_demand_bytes(
     }
 }
 
-/// `vram_bytes` must be the plan's `admission_vram_demand_bytes`, not its raw
+/// `vram_bytes` must be the plan's `total_vram_demand_bytes`, not its raw
 /// device peak. `host_bytes` must be `admission_host_demand_bytes`, never its raw
 /// `predicted_host_increment_bytes`: on Metal the host claim already rides
 /// `admission_vram_demand_bytes` against the one unified pool, and charging it
@@ -8892,6 +8899,7 @@ mod tests {
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
@@ -9787,6 +9795,7 @@ mod tests {
             &config,
             &generation.request,
             vec![crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: worker_device_id(&worker),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -12701,6 +12710,7 @@ mod tests {
     fn generation_device_facts_apply_ordinal_and_stable_worker_constraints() {
         let facts = vec![
             crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:stable-small".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -12708,6 +12718,7 @@ mod tests {
                 available_vram_bytes: 8 << 30,
             },
             crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:stable-large".to_string(),
                 ordinal: 1,
                 backend: mold_core::GpuBackend::Cuda,
@@ -13115,6 +13126,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:exact".into(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -13955,6 +13967,7 @@ mod tests {
             OwnerWork::ChainStage(stage) if stage.execution_plan.is_some()
         ));
 
+        let before_rejection = monotonic_ms();
         coordinator.handle_worker_event(
             WorkerEvent::Rejected {
                 device_id: device_id.clone(),
@@ -13976,7 +13989,7 @@ mod tests {
             .expect("same durable stage is requeued");
         assert!(retry
             .retry_not_before_ms
-            .is_some_and(|at| at > monotonic_ms()));
+            .is_some_and(|at| at >= before_rejection.saturating_add(PLAN_INVALIDATION_BACKOFF_MS)));
         retry.retry_not_before_ms = Some(0);
         assert!(matches!(
             result_rx.try_recv(),
@@ -16054,6 +16067,7 @@ mod tests {
             crate::job_registry::JobLifecycle::Running
         );
 
+        let before_rejection = monotonic_ms();
         coordinator.handle_worker_event(
             WorkerEvent::Rejected {
                 device_id: device_id.clone(),
@@ -16099,7 +16113,8 @@ mod tests {
         assert!(
             coordinator.pending["plan-invalidated"]
                 .retry_not_before_ms
-                .is_some_and(|deadline| deadline > monotonic_ms()),
+                .is_some_and(|deadline| deadline
+                    >= before_rejection.saturating_add(PLAN_INVALIDATION_BACKOFF_MS)),
             "the invalidated plan must back off before redispatch"
         );
         coordinator
@@ -17001,6 +17016,7 @@ mod tests {
         let signature = Coordinator::preparation_refresh_signature(
             &prepared,
             &[crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:1".to_string(),
                 ordinal: 1,
                 backend: mold_core::GpuBackend::Cuda,
@@ -17096,6 +17112,7 @@ mod tests {
         let (worker, _worker_rx) = test_worker(0);
         let stable_id = worker_device_id(&worker);
         let device = crate::execution_plan::DeviceFact {
+            cuda_peak_baseline: None,
             id: stable_id.clone(),
             ordinal: 0,
             backend: mold_core::GpuBackend::Cuda,
@@ -17220,6 +17237,7 @@ mod tests {
         let stable_id1 = worker_device_id(&worker1);
         let devices = vec![
             crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: stable_id0.clone(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -17227,6 +17245,7 @@ mod tests {
                 available_vram_bytes: 24 << 30,
             },
             crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: stable_id1.clone(),
                 ordinal: 1,
                 backend: mold_core::GpuBackend::Cuda,
@@ -17369,6 +17388,7 @@ mod tests {
             &request,
             vec![
                 crate::execution_plan::DeviceFact {
+                    cuda_peak_baseline: None,
                     id: stable_id.clone(),
                     ordinal: 0,
                     backend: mold_core::GpuBackend::Cuda,
@@ -17376,6 +17396,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
+                    cuda_peak_baseline: None,
                     id: stable_id1.clone(),
                     ordinal: 1,
                     backend: mold_core::GpuBackend::Cuda,
@@ -17388,6 +17409,7 @@ mod tests {
         .unwrap();
         let device_facts = vec![
             crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: stable_id.clone(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -17395,6 +17417,7 @@ mod tests {
                 available_vram_bytes: 24 << 30,
             },
             crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: stable_id1.clone(),
                 ordinal: 1,
                 backend: mold_core::GpuBackend::Cuda,
@@ -17563,6 +17586,7 @@ mod tests {
             &request,
             vec![
                 crate::execution_plan::DeviceFact {
+                    cuda_peak_baseline: None,
                     id: stable_id0.clone(),
                     ordinal: 0,
                     backend: mold_core::GpuBackend::Cuda,
@@ -17570,6 +17594,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
+                    cuda_peak_baseline: None,
                     id: stable_id1.clone(),
                     ordinal: 1,
                     backend: mold_core::GpuBackend::Cuda,

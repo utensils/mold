@@ -645,6 +645,7 @@ mod tests {
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -885,6 +886,7 @@ mod tests {
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(crate::gpu_pool::GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: mold_inference::device::DiscoveredGpu {
                 ordinal,
@@ -13778,6 +13780,8 @@ mod tests {
         assert!(downloads.queued.is_empty());
     }
 
+    // The public H3 feature lifts the filename-based artifact gate.
+    #[cfg(not(feature = "h3"))]
     #[tokio::test]
     async fn configured_h3_artifact_path_is_rejected_before_queueing() {
         let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());

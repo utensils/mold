@@ -782,8 +782,10 @@ comparable quality, not the same frames faster — skipping steps changes the
 trajectory. The conditional and unconditional passes keep independent caches
 and the cache resets at the A14B expert swap. It refuses (with a message rather
 than a silent no-op) on the 4-step Lightning distill tiers and on schedules
-under 12 steps — neither has redundant steps to skip. `off` is bit-identical
-to the uncached engine.
+under 12 steps — neither has redundant steps to skip. Wan 1.3B also refuses
+both `auto` and explicit positive thresholds: its cached default render can
+collapse into noise, so it always runs every transformer block. `off` is
+bit-identical to the uncached engine.
 
 The 0.10 threshold was tuned on A14B at 33f/832x480, and it holds there: an
 A/B on `wan22-t2v-a14b:q8` renders comparable detail at 1.46x on an L40S. It is
@@ -794,8 +796,10 @@ it was tuned is worth an A/B against `off` before trusting it.
 `off` is the default. Approximate reuse must be selected explicitly with `auto`
 or a numeric threshold: a controlled Metal 1.3B qualification produced a
 coherent scene with full denoising and saturated fields with the cache enabled.
-The cache's retained residuals and distance-check transients are still charged
-against the activation estimate whenever it is enabled.
+Wan 1.3B refuses reuse even when explicitly requested. The memory engaging the
+cache holds — the retained residuals per trajectory, and the transients around
+the distance check — is charged against the same activation estimate that
+admission and the block-offload policy both read.
 
 ### Long clips and `--frames`
 

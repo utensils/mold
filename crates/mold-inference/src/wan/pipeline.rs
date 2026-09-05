@@ -1843,6 +1843,7 @@ impl WanEngine {
                 dtype,
                 &loras,
                 denoise_activation_bytes(req, &files, config, distill_is_active(paths)),
+                req.offload,
             )?;
             progress.phase_done(
                 ProgressPhase::ModelLoad,
@@ -1899,6 +1900,7 @@ impl WanEngine {
                 config,
                 distill_is_active(paths),
             ),
+            req.offload,
         )
     }
 
@@ -2246,7 +2248,7 @@ impl WanEngine {
         // Live previews project the working latent through the checkpoint
         // generation's own factor table, selected by latent channel count.
         let previewer = crate::latent_preview::LatentPreviewer::wan(vae_config.z_dim);
-        // First-block residual reuse (#801). Off unless asked for, and refused
+        // First-block residual reuse (#801). Auto by default, and refused
         // outright on the schedules where it cannot help -- a distill adapter
         // active, or too few steps to have redundant ones. A refusal is
         // disclosed: a silently ignored knob reads as "the feature does not
@@ -2259,6 +2261,7 @@ impl WanEngine {
             crate::wan::step_cache::requested_threshold()?,
             steps,
             distill_is_active,
+            transformer_config.dim as u64,
         );
         if let Some(refusal) = refusal {
             progress.info(refusal.message());
@@ -3208,6 +3211,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

@@ -655,16 +655,21 @@ mod tests {
     /// peak would refuse the tier's own shipped default — 53 frames measures
     /// 23,975 MiB, which is 95% of a 24 GB card and ran.
     #[test]
-    fn eighty_one_frames_is_refused_where_fifty_three_is_admitted_on_24gb() {
+    fn math_attention_eighty_one_frames_is_refused_where_fifty_three_is_admitted_on_24gb() {
         const CARD_BYTES: u64 = 24_564 * 1024 * 1024;
         const A14B_Q5_VAE_BYTES: u64 = 500_000_000;
         let geometry = WanActivationGeometry::a14b();
         let peak = |frames: u32| {
             (WAN_A14B_Q5_EXPERT_BYTES + A14B_Q5_VAE_BYTES).max(WAN_UMT5_FP16_BYTES)
-                + wan_activation_bytes(
-                    WanShapeHint::from_request(&request(832, 480, frames, 3.5)),
+                + mold_inference::device::wan_calibrated_activation_bytes_for(
+                    832,
+                    480,
+                    frames,
                     geometry,
+                    true,
+                    4,
                     MEASURED_WITH_CACHE_OFF,
+                    mold_inference::attention::AttentionBackend::Math,
                 )
         };
         assert!(

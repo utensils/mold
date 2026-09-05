@@ -364,6 +364,7 @@ pub(crate) fn resident_model_display_name(cache_key: &str) -> &str {
 
 /// Per-GPU worker state. Each GPU gets its own model cache, load lock, and health tracking.
 pub struct GpuWorker {
+    pub(crate) cuda_peak: crate::cuda_peak::OwnerContext,
     pub owner_epoch: u64,
     pub gpu: DiscoveredGpu,
     pub model_cache: Arc<Mutex<ModelCache>>,
@@ -1605,6 +1606,7 @@ impl WorkerSet {
 
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch,
             gpu,
             model_cache: Arc::new(Mutex::new(ModelCache::new(factory.max_cached))),
@@ -2123,6 +2125,7 @@ mod tests {
     ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(2);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
@@ -3031,5 +3034,47 @@ mod tests {
         assert!(record_reduced_vram_grant("model", "shape", 0, 0).is_none());
         assert_eq!(reduced_vram_grant("model", "shape", 0), None);
         clear_model_cuda_ooms_for_tests();
+    }
+}
+
+impl GpuWorker {
+    pub(crate) fn wan_context_baseline(&self) -> Option<crate::cuda_peak::CertifiedBaseline> {
+        if self.poisoned.load(Ordering::SeqCst) || self.in_flight.load(Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let active = self.model_cache.try_lock().ok()?.active_vram_bytes();
+        self.cuda_peak.snapshot(
+            self.owner_epoch,
+            crate::resources::current_process_vram_bytes(&self.gpu),
+            active,
+        )
+    }
+
+    pub(crate) fn incremental_wan_peak(
+        &self,
+        total: u64,
+        admitted: Option<crate::cuda_peak::CertifiedBaseline>,
+        active_credit: u64,
+    ) -> u64 {
+        let Some(admitted) = admitted else {
+            return total;
+        };
+        if self.poisoned.load(Ordering::SeqCst) {
+            return total;
+        }
+        self.cuda_peak
+            .snapshot(
+                self.owner_epoch,
+                crate::resources::current_process_vram_bytes(&self.gpu),
+                active_credit,
+            )
+            .filter(|fresh| fresh.owner_epoch == admitted.owner_epoch)
+            .map_or(total, |fresh| {
+                crate::cuda_peak::CertifiedBaseline {
+                    bytes: fresh.bytes.min(admitted.bytes),
+                    ..fresh
+                }
+                .incremental_peak(total)
+            })
     }
 }

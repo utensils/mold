@@ -156,6 +156,8 @@ mold serve                                      # GPU machine
 MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 ```
 
+`--offload` also applies to remote renders and durable sequences on GPU hosts.
+
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides. Use
 `mold queue` to manage remote work and `mold library` to browse and organize

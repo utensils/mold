@@ -2237,6 +2237,17 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         return;
     }
 
+    if request.offload.is_some() {
+        drop(request);
+        durable_generation_settlement::fail_async(
+            job,
+            DurableDisposition::Hold { retryable: true },
+            "request-scoped offload requires a GPU worker on the host".to_string(),
+        )
+        .await;
+        return;
+    }
+
     // Send "now processing" event (position 0). `id` echoes the
     // server-assigned UUID so reconnecting clients can match progress
     // updates to their persisted card.
@@ -4081,6 +4092,7 @@ pub(crate) fn build_observed_dispatch(
                     crate::scheduler::worker_device_id(worker) == device.id.as_str()
                 })?;
                 Some(crate::execution_plan::DeviceFact {
+                    cuda_peak_baseline: None,
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
                     backend: worker.gpu.backend,
@@ -4841,6 +4853,7 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -4970,6 +4983,7 @@ mod tests {
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(channel_size);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,

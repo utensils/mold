@@ -206,6 +206,18 @@ ComfyUI CUDA oracle for those rows, and
 under the gitignored `tmp/`. Like the Metal capture, these are UAT tooling: they
 ship nothing and delete no models or renders.
 
+Both CUDA capture scripts require an explicit existing `MOLD_HOME` and
+`MOLD_MODELS_DIR`; the model store may live under `MOLD_HOME/models`. Set
+`LTX25_GPU_INDEX` to the physical GPU to observe (default 0), and start the
+scratch mold server with `CUDA_VISIBLE_DEVICES` set to that GPU's full UUID.
+The runner verifies this binding; the ComfyUI capture sets it for its own
+process. Keep the production service separate from this scratch server.
+The ComfyUI preflight requires 50% **or** 64 GiB available host memory and
+aborts below both 20% and 16 GiB, while retaining its 48 GiB process RSS and
+one-hour runtime limits. Test gates clear `MOLD_*` settings and isolate the
+configuration directory. Reports accept filesystem-identical bind-mount
+aliases and still verify every retained checksum.
+
 The compact-checkpoint reference row is Mold versus ComfyUI on MPS. On the
 qualification host, ComfyUI loaded the exact INT8 ConvRot weights and reached
 the official sampler, but PyTorch sent `aten::_int_mm` to CPU and the run

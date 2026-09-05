@@ -1663,7 +1663,7 @@ pub fn wan_step_cache_bytes_for(
 ) -> u64 {
     use crate::wan::step_cache::{WanStepCachePolicy, WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS};
 
-    let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
+    let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled, geometry.dim);
     if !policy.is_on() {
         return 0;
     }
@@ -3578,7 +3578,8 @@ mod tests {
 
         for steps in [4u32, 11, 12, 20, 50] {
             for distilled in [false, true] {
-                let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
+                let (policy, _) =
+                    WanStepCachePolicy::resolve(requested, steps, distilled, a14b.dim);
                 let charged = wan_step_cache_bytes(832, 480, 53, a14b, true, steps, distilled) > 0;
                 assert_eq!(
                     charged,
@@ -3586,6 +3587,30 @@ mod tests {
                     "steps={steps} distilled={distilled}: the charge and the policy disagree"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn wan_1_3b_does_not_charge_the_cache_that_corrupts_its_default_render() {
+        for threshold in [
+            None,
+            Some(crate::wan::step_cache::AUTO_THRESHOLD),
+            Some(0.05),
+        ] {
+            assert_eq!(
+                wan_step_cache_bytes_for(
+                    832,
+                    480,
+                    81,
+                    WanActivationGeometry::t2v_1_3b(),
+                    true,
+                    30,
+                    false,
+                    threshold,
+                ),
+                0,
+                "1.3B cache must stay disabled until its output is qualified"
+            );
         }
     }
 

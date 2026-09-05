@@ -467,6 +467,7 @@ fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        offload: chain.offload,
         mesh: None,
         video_only: None,
         collection: None,
@@ -755,6 +756,7 @@ mod tests {
 
     fn chain_req(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -1365,6 +1367,7 @@ mod tests {
         // build_auto_expand_stages produce exactly `count` stages for
         // total_frames = 97 * count (no ceil rounding complication).
         let req = ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,

@@ -2671,20 +2671,32 @@ mod fail_closed_tests {
             }))
             .unwrap()
         };
+        // Exercise pressure relative to the selected kernel's resident peak.
+        // FlashAttention fits 81 frames in the old fixed 24 GB test budget.
+        let device_budget = estimate_generation_memory_for_request(
+            &request(81),
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            None,
+            false,
+            false,
+        )
+        .peak_memory_bytes
+        .saturating_sub(1024 * 1024 * 1024);
         let budget = |req: &GenerateRequest, paths: &ModelPaths| {
             estimate_generation_memory_for_request(
                 req,
                 paths,
                 activation,
                 offload(AdmissionPolicy::Automatic),
-                Some(24_000_000_000),
+                Some(device_budget),
                 false,
                 false,
             )
         };
 
-        // 81 frames is the shape block offload exists for: it does not fit
-        // resident, so the engine parks and the plan must say so.
+        // At this budget 81 frames cannot stay resident; the plan must name parking.
         let parks = budget(&request(81), &model_paths);
         assert!(
             parks.wan_block_offload,
@@ -2710,7 +2722,7 @@ mod fail_closed_tests {
             &model_paths,
             activation,
             offload(AdmissionPolicy::Disabled),
-            Some(24_000_000_000),
+            Some(device_budget),
             false,
             false,
         );
@@ -2728,7 +2740,7 @@ mod fail_closed_tests {
             &model_paths,
             activation,
             offload(AdmissionPolicy::ForcedFinite(1)),
-            Some(24_000_000_000),
+            Some(device_budget),
             false,
             false,
         );
@@ -2741,7 +2753,7 @@ mod fail_closed_tests {
             &model_paths,
             activation,
             offload(AdmissionPolicy::ForcedFinite(40)),
-            Some(24_000_000_000),
+            Some(device_budget),
             false,
             false,
         );

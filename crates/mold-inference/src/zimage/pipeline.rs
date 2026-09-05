@@ -2938,6 +2938,7 @@ mod tests {
             CachedTensor::from_tensor(&cap_feats).unwrap(),
         );
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

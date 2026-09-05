@@ -289,7 +289,7 @@ if wants contracts; then
                   regression-matrix-family-sizing regression-matrix-source-image \
                   regression-matrix-transient-retry wan-regression-matrix \
                   ltx25-comfy-metal-reference ltx25-metal-verification \
-                  ltx25-comfy-cuda-reference ltx25-cuda-verification \
+                  ltx25-comfy-cuda-reference ltx25-cuda-verification h3-cuda-server-tests \
                   ltx25-comfy-oracle-provision hunyuan3d-metal-uat build-clean; do
     script="scripts/tests/${contract}.sh"
     if [ -f "$script" ]; then
@@ -364,24 +364,8 @@ if wants gpu; then
           --bin h3_runtime_qualification_record -- -D warnings
         step "gpu: CUDA private H3 server bridge" \
           cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
-        # The step above type-checks the bridge's test module but never RUNS
-        # it, and no CI job runs it either, so its assertions about the
-        # reviewed Turbo tier table drifted silently until a tier was added
-        # (#1361). Run them. The recipe names `h3-cuda`, never the bare family
-        # feature: the reviewed public build graph in
-        # `crates/mold-server/build_support/h3_server_features.rs` requires the
-        # CUDA device and the SM89 attention edge, so the bare feature fails at
-        # the build script before a single test compiles (and the attention
-        # release contract refuses that recipe here anyway).
-        #
-        # The filter is the MODULE path alone: `h3_private_bridge` already
-        # selects every test in the module, `turbo_variants_ride` included.
-        # This runs only in the local gpu lane — GitHub CI still only
-        # `cargo check`s this graph (.github/workflows/ci.yml, "Check the
-        # private MiniMax H3 UAT server build"), so the same drift can recur
-        # on a PR nobody runs ci-local against. Closing that is #1361's scope.
-        step "gpu: CUDA public H3 server bridge tests" \
-          cargo test -p mold-ai-server --lib --features h3-cuda -- h3_private_bridge
+        step "gpu: hermetic CUDA H3 server suite" \
+          bash scripts/test-h3-cuda-server.sh
         # The conditioner cache is INERT under `h3-private-uat`, so the rust
         # lane's H3 foundations step never exercises an enabled cache. It runs
         # here under the shipping `h3-cuda` edge (the attention release contract

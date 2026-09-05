@@ -726,6 +726,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,

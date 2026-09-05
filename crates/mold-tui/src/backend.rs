@@ -1667,6 +1667,7 @@ pub(crate) fn build_request(
     });
 
     Ok(GenerateRequest {
+        offload: None,
         // Absent-until-touched, like every optional block: an untouched form
         // ships no `mesh` at all (the recipe's defaults apply), and the
         // capability sync already cleared the block on any recipe whose

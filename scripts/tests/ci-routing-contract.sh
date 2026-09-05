@@ -45,6 +45,11 @@ extract_filter() {
 rust_job=$(extract_job "$ci" rust)
 windows_rust_job=$(extract_job "$ci" windows-rust)
 cuda_job=$(extract_job "$ci" cuda-check)
+flash_job=$(extract_job "$ci" flash-attn-check)
+grep -Fq 'needs.changes.outputs.h3_cuda_server' <<< "$flash_job" \
+  || fail "H3 CUDA server tests are not path-gated on PRs"
+grep -Fq 'bash scripts/test-h3-cuda-server.sh' <<< "$flash_job" \
+  || fail "CUDA toolkit job does not run the full hermetic H3 server suite"
 producer_command='cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda --bin h3_runtime_qualification_record -- -D warnings'
 if grep -Fq -- "$producer_command" <<< "$rust_job"; then
   fail "the CUDA-backed H3 runtime-record producer runs in the CPU Rust job"

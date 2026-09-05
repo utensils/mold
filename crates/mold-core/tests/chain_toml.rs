@@ -95,6 +95,7 @@ fn write_then_read_is_identity() {
 fn normalised_request_survives_round_trip() {
     // Build a ChainRequest → normalise → project to ChainScript → TOML → back → compare.
     let req = ChainRequest {
+        offload: None,
         collection: None,
         tags: None,
         title: None,

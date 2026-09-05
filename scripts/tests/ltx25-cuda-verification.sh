@@ -17,6 +17,7 @@ fail() {
 
 bash -n "$runner"
 python3 -m py_compile "$validator"
+python3 "$repo_root/scripts/tests/ltx25-evidence-paths.py"
 [[ -x "$validator" ]] || fail "validator is not executable"
 jq -e '
   .properties.schema_version.const == "mold.ltx25.cuda.verification.v1"
@@ -64,6 +65,10 @@ real_git="$(command -v git)"
 cat >"$tmp/bin/git" <<FAKE
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "\$1" == -c && "\$2" == safe.directory=* ]]; then
+  [[ "\$2" == "safe.directory=\$4" ]] || exit 1
+  shift 2
+fi
 if [[ "\$1" == -C && "\$2" == "$refs/"* ]]; then
   if [[ "\$3" == status && "\$4" == --porcelain ]]; then
     exit 0
@@ -95,6 +100,8 @@ FAKE
 cat >"$tmp/bin/nvidia-smi" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${1:-}" == -i && "${2:-}" == 2 ]] || { echo "unscoped GPU probe" >&2; exit 1; }
+shift 2
 case "${1:-}" in
   --query-gpu=*)
     echo 'GPU-11111111-2222-3333-4444-555555555555, NVIDIA GeForce RTX 4090, 8.9, 580.142, 24564' ;;
@@ -316,7 +323,7 @@ run_seal() {
     MOLD_HOME="$mold_home" MOLD_MODELS_DIR="${MODELS_DIR_OVERRIDE-$models_dir}" \
     MOLD_DB_PATH="$mold_home/mold.db" \
     LTX25_METAL_REFERENCE_ROOT="${METAL_REF_OVERRIDE-$metal_ref}" \
-    LTX25_ALLOW_TEST_HOME=1 LTX25_CONTRACT_TEST=1 LTX25_SKIP_GATES=1 \
+    LTX25_GPU_INDEX=2 LTX25_ALLOW_TEST_HOME=1 LTX25_CONTRACT_TEST=1 LTX25_SKIP_GATES=1 \
     LTX25_REFERENCES_ROOT="$refs" LTX25_CAMPAIGN="$campaign" \
     LTX25_MOLD_BIN="${MOLD_BIN_OVERRIDE-$tmp/bin/mold}" LTX25_BUILD_JSON="$build_json" \
     LTX25_COMFY_INT8_MANIFEST="$comfy_int8" LTX25_COMFY_GGUF_MANIFEST="$comfy_gguf" \
@@ -481,10 +488,9 @@ if PATH="$tmp/bin:$PATH" MOLD_HOME="$mold_home" MOLD_MODELS_DIR="" MOLD_DB_PATH=
   "$runner" --seal >/dev/null 2>&1; then
   fail "runner ran without MOLD_MODELS_DIR"
 fi
-mkdir -p "$mold_home/models"
-if MODELS_DIR_OVERRIDE="$mold_home/models" run_seal --seal >/dev/null 2>&1; then
-  fail "runner accepted MOLD_MODELS_DIR colliding with MOLD_HOME/models"
-fi
+ln -s "$models_dir" "$mold_home/models"
+MODELS_DIR_OVERRIDE="$mold_home/models" run_seal --seal >/dev/null \
+  || fail "runner refused a valid model store under MOLD_HOME/models"
 
 cat >"$tmp/bin/mold-wrong" <<'FAKE'
 #!/usr/bin/env bash

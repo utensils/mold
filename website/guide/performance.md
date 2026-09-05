@@ -115,6 +115,9 @@ only); it engages automatically when the render's activation budget exceeds
 free VRAM, `--offload`/`MOLD_OFFLOAD=1` parks every block, and
 `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count exactly (0 disables).
 
+The CLI carries `--offload` to the remote host for both single renders and
+durable sequences. An omitted flag inherits the host policy.
+
 Use it when a model otherwise would not fit. Do not use it when the model
 already fits comfortably in VRAM. Progress output reports resident blocks,
 streamed blocks, resident GB, streamed GB per denoise pass, and reserved

@@ -630,6 +630,7 @@ impl Ltx2Engine {
         };
 
         Ok(Ltx2GeneratePlan {
+            offload: req.offload,
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
             hdr_exr_window: None,
@@ -2197,6 +2198,7 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -2529,6 +2531,7 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -2611,6 +2614,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -2843,6 +2847,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

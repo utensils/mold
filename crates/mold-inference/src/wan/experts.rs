@@ -187,7 +187,7 @@ pub(crate) fn load_transformer(
     dtype: DType,
     loras: &WanLoraRegistry,
 ) -> Result<WanTransformer> {
-    load_transformer_with_offload(files, config, device, dtype, loras, None)
+    load_transformer_with_offload(files, config, device, dtype, loras, None, None)
 }
 
 /// [`load_transformer`] that may park blocks in host RAM to fit the render
@@ -203,12 +203,20 @@ pub(crate) fn load_transformer_with_offload(
     dtype: DType,
     loras: &WanLoraRegistry,
     activation_bytes: Option<u64>,
+    offload: Option<bool>,
 ) -> Result<WanTransformer> {
     let first = files
         .first()
         .ok_or_else(|| anyhow::anyhow!("Wan: no transformer weight files supplied"))?;
     let transformer = if is_gguf(first) {
-        WanTransformer::from_gguf_with_offload(first, config, device, loras, activation_bytes)
+        WanTransformer::from_gguf_with_offload(
+            first,
+            config,
+            device,
+            loras,
+            activation_bytes,
+            offload,
+        )
     } else {
         WanTransformer::from_safetensors_with_loras(files, config, device, dtype, loras)
     };
@@ -325,6 +333,7 @@ pub(crate) struct WanExpertState {
     /// wired for single-expert checkpoints only, and silently skipped for
     /// the pair that actually needs it.
     activation_bytes: Option<u64>,
+    offload: Option<bool>,
 }
 
 impl WanExperts {
@@ -346,6 +355,7 @@ impl WanExperts {
         dtype: DType,
         low_noise_config: WanTransformerConfig,
         activation_bytes: Option<u64>,
+        offload: Option<bool>,
     ) -> Result<Self> {
         if low_noise_config != config {
             bail!(
@@ -369,6 +379,7 @@ impl WanExperts {
             resident: None,
             prefetch: None,
             activation_bytes,
+            offload,
         })))
     }
 
@@ -422,6 +433,7 @@ impl WanExperts {
                     resident,
                     prefetch,
                     activation_bytes,
+                    offload,
                 } = state.as_mut();
                 let role = pair.role_for(timestep);
                 if resident.as_ref().map(|(current, _)| *current) != Some(role) {
@@ -450,6 +462,7 @@ impl WanExperts {
                             *dtype,
                             &slot.loras,
                             *activation_bytes,
+                            *offload,
                         )?;
                     progress.phase_done(ProgressPhase::ModelLoad, &stage, started.elapsed());
                     if swapping {
@@ -558,17 +571,32 @@ mod tests {
         let device = Device::Cpu;
         let high = WanTransformerConfig::t2v_14b();
         let low = WanTransformerConfig::i2v_14b();
-        let error = WanExperts::pair(pair(false), high.clone(), &device, DType::F32, low, None)
-            .err()
-            .expect("a 16-channel expert does not pair with a 36-channel one")
-            .to_string();
+        let error = WanExperts::pair(
+            pair(false),
+            high.clone(),
+            &device,
+            DType::F32,
+            low,
+            None,
+            None,
+        )
+        .err()
+        .expect("a 16-channel expert does not pair with a 36-channel one")
+        .to_string();
         assert!(error.contains("high.gguf"), "{error}");
         assert!(error.contains("low.gguf"), "{error}");
         assert!(error.contains("different architectures"), "{error}");
 
-        assert!(
-            WanExperts::pair(pair(false), high.clone(), &device, DType::F32, high, None).is_ok()
-        );
+        assert!(WanExperts::pair(
+            pair(false),
+            high.clone(),
+            &device,
+            DType::F32,
+            high,
+            None,
+            None
+        )
+        .is_ok());
     }
 
     fn tiny_config() -> WanTransformerConfig {
@@ -659,6 +687,7 @@ mod tests {
             DType::F32,
             config.clone(),
             None,
+            None,
         )
         .unwrap();
 
@@ -722,6 +751,7 @@ mod tests {
             &device,
             DType::F32,
             config,
+            None,
             None,
         )
         .unwrap();
@@ -809,6 +839,7 @@ mod tests {
             &device,
             DType::F32,
             config,
+            None,
             None,
         )
         .unwrap();

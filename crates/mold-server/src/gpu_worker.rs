@@ -182,6 +182,7 @@ impl PlannedEngineMode {
 
 #[derive(Clone, Copy)]
 struct PlannedLoadContract<'a> {
+    cuda_peak_baseline: Option<crate::cuda_peak::CertifiedBaseline>,
     mode: PlannedEngineMode,
     predicted_vram_peak_bytes: u64,
     /// Decayed observed high-water envelope for this estimate bucket. Zero
@@ -879,6 +880,9 @@ fn run_gpu_owner_loop(
     // A poisoned primary context is never touched again. In that case keep
     // the cache intact so no container operation can trigger a CUDA-backed
     // destructor; process teardown reclaims it.
+    if !worker.poisoned.load(Ordering::SeqCst) {
+        worker.cuda_peak.release_on_owner();
+    }
     tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
 }
 
@@ -889,6 +893,7 @@ fn run_legacy_gpu_owner_loop(
     cache_idle_ttl: Duration,
     idle_poll: Duration,
 ) {
+    worker.cuda_peak.invalidate();
     if worker
         .owner_thread_id
         .set(std::thread::current().id())
@@ -1215,6 +1220,24 @@ fn process_owner_work(
             };
         }
     }
+    let wan_only = match &grant.work {
+        OwnerWork::Generation(job) => {
+            job.request.upscale_model.is_none()
+                && job
+                    .execution_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.model_family == "wan")
+        }
+        OwnerWork::ChainStage(job) => job
+            .execution_plan
+            .as_ref()
+            .is_some_and(|plan| plan.model_family == "wan"),
+        _ => false,
+    };
+    if !wan_only {
+        worker.cuda_peak.invalidate();
+    }
+
     // This is intentionally later than both owner-thread validation and the
     // second pre-CUDA plan fence, but earlier than any model/cache allocation.
     // The private feature atomically prepares an opaque one-shot value here;
@@ -2556,6 +2579,7 @@ fn worker_unavailable(worker: &GpuWorker, model_name: &str) -> Option<WorkerUnav
 }
 
 pub(crate) fn quarantine_poisoned_worker(worker: &GpuWorker) {
+    worker.cuda_peak.contain_poisoned();
     // Retain the durable queue first. This function is the process-restart
     // initiator for a fatal context or an inference panic, and everything that
     // follows it drops jobs.
@@ -4175,6 +4199,7 @@ fn process_job_with_sink(
         .filter(|_| planned_host_increment_bytes > 0)
         .and_then(|lease| event_sink.host_headroom_for_lease(lease));
     let planned_load = job.execution_plan.as_ref().map(|plan| PlannedLoadContract {
+        cuda_peak_baseline: plan.cuda_peak_baseline,
         mode: PlannedEngineMode::from_plan(plan),
         predicted_vram_peak_bytes: plan.predicted_vram_peak_bytes,
         learned_vram_envelope_bytes: plan.learned_vram_envelope_bytes,
@@ -4457,6 +4482,14 @@ fn process_job_with_sink(
         }
         if restore.reclassified_to_parked {
             worker.set_resident_model(None);
+        }
+        if matches!(&result, Ok(Ok(_)))
+            && job
+                .execution_plan
+                .as_ref()
+                .is_some_and(|plan| plan.model_family == "wan")
+        {
+            certify_wan_context_after_render(worker, &model_name);
         }
     }
 
@@ -5003,7 +5036,8 @@ fn finish_generation_cancelled(job: GpuJob, user_requested: bool) {
 /// `worker.model_load_lock`, which keeps a concurrent generation from slotting
 /// a fresh load into the context between our reclaim and the actual load.
 #[derive(Clone, Copy)]
-struct WorkerPreflightPolicy {
+struct WorkerPreflightPolicy<'a> {
+    cuda_peak_baseline: Option<(&'a GpuWorker, crate::cuda_peak::CertifiedBaseline)>,
     hint: Option<crate::model_manager::ActivationHint>,
     planned_peak_bytes: Option<u64>,
     request_has_lora: bool,
@@ -5015,7 +5049,7 @@ fn preflight_memory_guard_with_eviction(
     model_name: &str,
     paths: &ModelPaths,
     ordinal: usize,
-    policy: WorkerPreflightPolicy,
+    policy: WorkerPreflightPolicy<'_>,
 ) -> Result<(), crate::routes::ApiError> {
     if let Some(predicted_peak_bytes) = policy.planned_peak_bytes {
         return preflight_planned_memory_guard_with_eviction(
@@ -5026,6 +5060,7 @@ fn preflight_memory_guard_with_eviction(
             predicted_peak_bytes,
             policy.hint,
             None,
+            policy.cuda_peak_baseline,
         );
     }
 
@@ -5086,6 +5121,7 @@ fn preflight_planned_memory_guard_with_eviction(
     predicted_peak_bytes: u64,
     hint: Option<crate::model_manager::ActivationHint>,
     active_vram_credit_cap: Option<u64>,
+    cuda_peak_baseline: Option<(&GpuWorker, crate::cuda_peak::CertifiedBaseline)>,
 ) -> Result<(), crate::routes::ApiError> {
     preflight_planned_memory_guard_with_eviction_using(
         cache_lock,
@@ -5096,7 +5132,9 @@ fn preflight_planned_memory_guard_with_eviction(
         |active_vram| {
             crate::memory_preflight::preflight_planned_memory_guard(
                 model_name,
-                predicted_peak_bytes,
+                cuda_peak_baseline.map_or(predicted_peak_bytes, |(worker, baseline)| {
+                    worker.incremental_wan_peak(predicted_peak_bytes, Some(baseline), active_vram)
+                }),
                 active_vram,
                 ordinal,
                 hint,
@@ -5407,6 +5445,7 @@ fn ensure_model_ready_sync_inner(
     request_has_lora: bool,
     planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<ModelLoadDisposition> {
+    let cuda_peak_baseline = planned_load.and_then(|planned| planned.cuda_peak_baseline);
     let planned_mode = planned_load.map(|planned| planned.mode);
     let planned_peak_bytes = planned_load.map(|planned| {
         planned_recheck_peak_bytes(
@@ -5463,6 +5502,7 @@ fn ensure_model_ready_sync_inner(
                     predicted_peak_bytes,
                     hint,
                     Some(process_vram),
+                    cuda_peak_baseline.map(|baseline| (worker, baseline)),
                 )
                 .map_err(|e| anyhow::anyhow!(e.error))?;
             } else {
@@ -5532,6 +5572,7 @@ fn ensure_model_ready_sync_inner(
                 paths,
                 worker.gpu.ordinal,
                 WorkerPreflightPolicy {
+                    cuda_peak_baseline: cuda_peak_baseline.map(|baseline| (worker, baseline)),
                     hint,
                     planned_peak_bytes,
                     request_has_lora,
@@ -5552,7 +5593,7 @@ fn ensure_model_ready_sync_inner(
                 Some(predicted_peak_bytes) => {
                     crate::memory_preflight::preflight_planned_memory_guard_after_drop(
                         model_name,
-                        predicted_peak_bytes,
+                        worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
                         worker.gpu.ordinal,
                         hint,
                     )
@@ -5774,6 +5815,7 @@ fn ensure_model_ready_sync_inner(
         &paths,
         worker.gpu.ordinal,
         WorkerPreflightPolicy {
+            cuda_peak_baseline: cuda_peak_baseline.map(|baseline| (worker, baseline)),
             hint,
             planned_peak_bytes,
             request_has_lora,
@@ -5792,7 +5834,7 @@ fn ensure_model_ready_sync_inner(
         Some(predicted_peak_bytes) => {
             crate::memory_preflight::preflight_planned_memory_guard_after_drop(
                 model_name,
-                predicted_peak_bytes,
+                worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
                 worker.gpu.ordinal,
                 hint,
             )
@@ -6337,6 +6379,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
         load.config,
         load.hint,
         Some(PlannedLoadContract {
+            cuda_peak_baseline: load.plan.cuda_peak_baseline,
             mode: PlannedEngineMode::from_plan(load.plan),
             predicted_vram_peak_bytes: load.plan.predicted_vram_peak_bytes,
             learned_vram_envelope_bytes: load.plan.learned_vram_envelope_bytes,
@@ -8725,6 +8768,7 @@ mod tests {
         // and calls `engine.load()` — that's where the sleep widens the window.
         cache.insert(FakeSlowEngine::boxed(model, load_sleep), 0);
         Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -8842,6 +8886,7 @@ mod tests {
     ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(capacity);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
@@ -9040,6 +9085,7 @@ mod tests {
     fn worker_rejects_stale_generation_before_touching_inference() {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(1);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -9835,6 +9881,7 @@ mod tests {
             0,
         );
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -10684,6 +10731,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:00000000000000000000000000000001".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -10826,6 +10874,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -10959,6 +11008,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -11079,6 +11129,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -13413,4 +13464,67 @@ mod tests {
             "cache must be completely empty after a failed load"
         );
     }
+}
+
+/// One-time owner-only measurement. Parked Wan engines still own GPU prompt
+/// tensors, so release the sole engine before attributing bytes to context.
+fn certify_wan_context_after_render(worker: &GpuWorker, model: &str) {
+    #[cfg(feature = "cuda")]
+    {
+        if worker.gpu.backend != mold_core::GpuBackend::Cuda
+            || !worker.cuda_peak.needs_certificate()
+            || worker.in_flight.load(Ordering::SeqCst) != 1
+            || ensure_owner_thread(worker).is_err()
+        {
+            return;
+        }
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if cache.len() != 1 || !cache.contains(model) {
+            return;
+        }
+        let Ok(context) = cudarc::driver::CudaContext::new(worker.gpu.ordinal) else {
+            worker.cuda_peak.invalidate();
+            return;
+        };
+        let Some(engine) = cache.remove(model) else {
+            return;
+        };
+        drop(cache);
+        worker.set_resident_model(None);
+        if teardown_inference_engines_safely(
+            worker,
+            std::iter::once(engine),
+            "Wan context certification",
+        )
+        .is_err()
+        {
+            std::mem::forget(context);
+            worker.cuda_peak.invalidate();
+            return;
+        }
+        if context.synchronize().is_err() {
+            std::mem::forget(context);
+            quarantine_poisoned_worker(worker);
+            return;
+        }
+        let bytes = crate::cuda_peak::context_only_bytes(
+            &context,
+            crate::resources::current_process_vram_bytes(&worker.gpu),
+        );
+        if let Some(bytes) = bytes {
+            worker.cuda_peak.certify(worker.owner_epoch, bytes, context);
+            tracing::info!(
+                gpu = worker.gpu.ordinal,
+                baseline_bytes = bytes,
+                "certified retained Wan CUDA context after releasing engine tensors"
+            );
+        } else {
+            worker.cuda_peak.invalidate();
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = (worker, model);
 }

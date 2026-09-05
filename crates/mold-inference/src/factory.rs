@@ -95,6 +95,11 @@ pub struct FrozenEngineConfig {
 }
 
 impl FrozenEngineConfig {
+    pub fn resolve_for_request(request: &mold_core::GenerateRequest, config: &Config) -> Self {
+        let mut frozen = Self::resolve(&request.model, config);
+        frozen.runtime_environment = frozen.runtime_environment.with_offload(request.offload);
+        frozen
+    }
     pub fn resolve(model_name: &str, config: &Config) -> Self {
         let model_cfg = config.resolved_model_config(model_name);
         let runtime_environment = crate::runtime_env::snapshot();

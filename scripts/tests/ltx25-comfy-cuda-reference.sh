@@ -70,6 +70,10 @@ guard() {
 [[ "$(guard 50 50331649 0 100)" == server_rss ]] || fail "server RSS above 48 GiB must abort"
 [[ "$(guard 50 0 3601 100)" == timeout ]] || fail "one hour must abort"
 [[ -z "$(guard 50 50331648 3600 100)" ]] || fail "healthy readings must not abort"
+[[ -z "$(LTX25_TEST_AVAIL_BYTES=137438953472 guard 10 0 0 100)" ]] \
+  || fail "128 GiB available on a large host must not trigger a percentage-only abort"
+[[ "$(LTX25_TEST_AVAIL_BYTES=8589934592 guard 10 0 0 100)" == host_memory ]] \
+  || fail "low absolute and relative headroom must still abort"
 
 grep -Fq 'mold.ltx25.comfy-cuda-reference.v1' "$runner" || fail "runner lost the CUDA manifest schema"
 grep -Fq 'backend:"CUDA"' "$runner" || fail "runner lost the CUDA backend attestation"

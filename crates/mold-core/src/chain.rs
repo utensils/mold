@@ -171,6 +171,8 @@ pub struct ChainStage {
 /// former so downstream code only deals with `stages`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload: Option<bool>,
     #[schema(example = "ltx-2-19b-distilled:fp8")]
     pub model: String,
 
@@ -852,6 +854,7 @@ impl ChainRequest {
                 .join("\n")
         };
         GenerateRequest {
+            offload: self.offload,
             mesh: None,
             video_only: None,
             // A sequence has exactly one gallery print — the stitched output.
@@ -1565,6 +1568,7 @@ mod tests {
         source_image: Option<Vec<u8>>,
     ) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -1597,6 +1601,7 @@ mod tests {
 
     fn canonical_request(stages: Vec<ChainStage>, motion_tail_frames: u32) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -2215,6 +2220,7 @@ mod tests {
     #[test]
     fn chain_script_projects_from_request() {
         let req = ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -2404,6 +2410,7 @@ mod tests {
 
     fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,

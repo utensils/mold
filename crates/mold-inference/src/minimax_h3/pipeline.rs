@@ -1816,6 +1816,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

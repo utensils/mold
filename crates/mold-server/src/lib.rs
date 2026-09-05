@@ -6,6 +6,7 @@ pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
 mod chain_source_media;
+mod cuda_peak;
 pub(crate) mod dir_sync;
 mod durable_admission_authority;
 mod durable_disposition;
@@ -490,6 +491,7 @@ pub async fn run_server(
         for gpu in startup_devices {
             let (job_tx, job_rx) = std::sync::mpsc::sync_channel(per_worker_channel_size);
             let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
+                cuda_peak: Default::default(),
                 owner_epoch: 1,
                 gpu: gpu.clone(),
                 model_cache: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2484,6 +2486,7 @@ mod tests {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         (
             Arc::new(GpuWorker {
+                cuda_peak: Default::default(),
                 owner_epoch: 1,
                 gpu: DiscoveredGpu {
                     ordinal: 0,

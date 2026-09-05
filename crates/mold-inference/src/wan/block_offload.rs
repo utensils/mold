@@ -165,9 +165,15 @@ impl ParkedBlock {
 /// `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count exactly, including `0` to force
 /// the policy off, and wins over the family-wide flag.
 pub(crate) fn forced_block_count() -> Option<usize> {
+    forced_block_count_for_request(None)
+}
+
+pub(crate) fn forced_block_count_for_request(offload: Option<bool>) -> Option<usize> {
     resolve_forced_block_count(
         crate::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS").as_deref(),
-        crate::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        offload
+            .map(|value| if value { "1" } else { "0" })
+            .or(crate::runtime_env::value("MOLD_OFFLOAD").as_deref()),
     )
 }
 

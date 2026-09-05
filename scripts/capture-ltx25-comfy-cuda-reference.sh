@@ -19,7 +19,8 @@ export PATH
 hash -r
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mold_home="${MOLD_HOME:-/mnt/storage20tb/AI/mold}"
+mold_home="${MOLD_HOME:-}"
+gpu_index="${LTX25_GPU_INDEX:-0}"
 models_dir="${MOLD_MODELS_DIR:-}"
 comfy_root="${LTX25_COMFY_ROOT:-$repo_root/tmp/comfyui-upstream}"
 python="${LTX25_COMFY_PYTHON:-$repo_root/tmp/comfyui-venv/bin/python}"
@@ -95,6 +96,8 @@ monitor_pid=""
 # the Metal script's 70% preflight. The RSS ceiling is 48 GiB on a 64 GB host.
 readonly preflight_avail_percent=50
 readonly abort_avail_percent=20
+readonly preflight_avail_bytes=$((64 * 1024 * 1024 * 1024))
+readonly abort_avail_bytes=$((16 * 1024 * 1024 * 1024))
 readonly max_server_rss_kib=50331648
 readonly max_seconds=3600
 
@@ -103,11 +106,13 @@ resource_guard_cause() {
   local rss_kib="$2"
   local elapsed="$3"
   local gpu_used_mib="$4"
-  if [[ ! "$avail_percent" =~ ^[0-9]+$ ]]; then
+  local avail_bytes="${5:-0}"
+  if [[ ! "$avail_percent" =~ ^[0-9]+$ || ! "$avail_bytes" =~ ^[0-9]+$ ]]; then
     echo "pressure_unreadable"
   elif [[ ! "$gpu_used_mib" =~ ^[0-9]+$ ]]; then
     echo "gpu_unreadable"
-  elif ((avail_percent < abort_avail_percent)); then
+  elif ((avail_percent < abort_avail_percent)) \
+    && ((avail_bytes < abort_avail_bytes)); then
     echo "host_memory"
   elif [[ "$rss_kib" =~ ^[0-9]+$ ]] && ((rss_kib > max_server_rss_kib)); then
     echo "server_rss"
@@ -116,12 +121,12 @@ resource_guard_cause() {
   fi
 }
 
-host_avail_percent() {
-  free -b | awk '/^Mem:/ { if ($2 > 0) printf "%d\n", ($7 * 100) / $2 }'
+host_available() {
+  free -b | awk '/^Mem:/ { if ($2 > 0) printf "%d %.0f\n", ($7 * 100) / $2, $7 }'
 }
 
 gpu_used_mib() {
-  nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+  nvidia-smi -i "$gpu_index" --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
     | head -1 | tr -d '[:space:]'
 }
 
@@ -145,7 +150,7 @@ stop_owned_server_and_wait() {
 if [[ "${LTX25_COMFY_TEST_GUARD:-0}" == 1 ]]; then
   resource_guard_cause \
     "${LTX25_TEST_AVAIL_PERCENT-50}" "${LTX25_TEST_RSS_KIB-0}" \
-    "${LTX25_TEST_ELAPSED-0}" "${LTX25_TEST_GPU_USED_MIB-0}"
+    "${LTX25_TEST_ELAPSED-0}" "${LTX25_TEST_GPU_USED_MIB-0}" "${LTX25_TEST_AVAIL_BYTES-0}"
   exit 0
 fi
 
@@ -205,8 +210,12 @@ for command in curl ffprobe free git jq nvidia-smi ps sha256sum; do
 done
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] \
   || fail "runtime capture is restricted to Linux x86_64 CUDA"
-[[ "$mold_home" == /mnt/storage20tb/AI/mold ]] \
-  || fail "MOLD_HOME must be /mnt/storage20tb/AI/mold"
+[[ "$mold_home" == /* && -d "$mold_home" ]] \
+  || fail "MOLD_HOME must name an existing absolute directory"
+[[ "$gpu_index" =~ ^[0-9]+$ ]] || fail "LTX25_GPU_INDEX must be a physical GPU index"
+gpu_uuid="$(nvidia-smi -i "$gpu_index" --query-gpu=uuid --format=csv,noheader)"
+[[ "$gpu_uuid" == GPU-* && "$gpu_uuid" != *$'\n'* ]] || fail "GPU selection did not identify one device"
+export CUDA_VISIBLE_DEVICES="$gpu_uuid"
 [[ -n "$models_dir" ]] || fail "MOLD_MODELS_DIR is required (the model store is separate from MOLD_HOME)"
 [[ -x "$python" ]] || fail "missing retained ComfyUI Python environment: $python"
 [[ -f "$comfy_root/main.py" ]] || fail "missing ComfyUI reference checkout: $comfy_root"
@@ -239,10 +248,11 @@ for model in "${required_models[@]}"; do
     || fail "missing retained model or SHA marker: $model"
 done
 
-avail_percent="$(host_avail_percent)"
+read -r avail_percent avail_bytes <<<"$(host_available)" || fail "cannot read host memory"
+[[ "$avail_percent" =~ ^[0-9]+$ && "$avail_bytes" =~ ^[0-9]+$ ]] || fail "cannot read host memory"
 [[ "$avail_percent" =~ ^[0-9]+$ ]] || fail "could not read host memory from free -b"
-((avail_percent >= preflight_avail_percent)) \
-  || fail "resource preflight requires at least ${preflight_avail_percent}% available host memory; found $avail_percent%"
+((avail_percent >= preflight_avail_percent || avail_bytes >= preflight_avail_bytes)) \
+  || fail "resource preflight requires at least ${preflight_avail_percent}% or 64 GiB available host memory; found $avail_percent% / $avail_bytes bytes"
 [[ "$(gpu_used_mib)" =~ ^[0-9]+$ ]] || fail "could not read GPU memory from nvidia-smi"
 curl --fail --silent --max-time 2 "$base_url/system_stats" >/dev/null 2>&1 \
   && fail "port $port already has a ComfyUI server; refusing to control an unrelated process"
@@ -258,7 +268,7 @@ seal_operator_deferred() {
   local cause="$1" reason blocking_operator upstream_progress prompt_id="${2:-}"
   case "$cause" in
     pressure_unreadable) reason="host memory became unreadable from free -b" ;;
-    host_memory) reason="available host memory fell below the ${abort_avail_percent}% safety floor" ;;
+    host_memory) reason="available host memory fell below both ${abort_avail_percent}% and 16 GiB" ;;
     server_rss) reason="ComfyUI server RSS exceeded the 48 GiB safety ceiling" ;;
     timeout) reason="official ComfyUI CUDA workflow exceeded the 60-minute resource budget" ;;
     gpu_unreadable) reason="GPU memory became unreadable from nvidia-smi" ;;
@@ -282,6 +292,8 @@ seal_operator_deferred() {
     --arg guard_cause "$cause" --arg blocking_operator "$blocking_operator" \
     --arg upstream_progress "$upstream_progress" \
     --argjson preflight "$preflight_avail_percent" --argjson abort_below "$abort_avail_percent" \
+    --argjson preflight_bytes "$preflight_avail_bytes" --argjson abort_bytes "$abort_avail_bytes" \
+    --arg gpu_uuid "$gpu_uuid" --argjson gpu_index "$gpu_index" \
     --argjson max_rss "$max_server_rss_kib" --argjson max_seconds "$max_seconds" \
     --slurpfile system "$evidence_dir/system-stats.json" \
     '{schema_version:"mold.ltx25.comfy-cuda-reference.v1", status:"operator_deferred",
@@ -298,7 +310,9 @@ seal_operator_deferred() {
         upstream_progress:(if $upstream_progress == "" then null else $upstream_progress end),
         blocking_operator:(if $blocking_operator == "" then null else $blocking_operator end)},
       preservation:{downloaded_models_deleted:false,rendered_media_deleted:false},
+      gpu:{physical_index:$gpu_index,uuid:$gpu_uuid},
       resource_guard:{minimum_preflight_percent:$preflight,abort_below_percent:$abort_below,
+        minimum_preflight_bytes:$preflight_bytes,abort_below_bytes:$abort_bytes,
         max_server_rss_kib:$max_rss,max_seconds:$max_seconds}}' >"$manifest"
   echo "$manifest"
 }
@@ -329,8 +343,7 @@ cleanup() {
     wait "$monitor_pid" >/dev/null 2>&1 || true
   fi
   if [[ -n "$server_pid" ]]; then
-    kill -TERM "$server_pid" >/dev/null 2>&1 || true
-    wait "$server_pid" >/dev/null 2>&1 || true
+    stop_owned_server_and_wait "$server_pid"
   fi
   exit "$status"
 }
@@ -364,16 +377,17 @@ jq -e '.devices[] | select((.type | ascii_downcase) == "cuda")' \
 (
   started="$(date +%s)"
   while kill -0 "$server_pid" >/dev/null 2>&1; do
-    avail="$(host_avail_percent)"
+    avail=""; avail_bytes=""
+    read -r avail avail_bytes <<<"$(host_available)" || true
     rss_kib="$(ps -o rss= -p "$server_pid" | tr -d ' ')"
     elapsed="$(($(date +%s) - started))"
     gpu_mib="$(gpu_used_mib)"
-    cause="$(resource_guard_cause "$avail" "$rss_kib" "$elapsed" "$gpu_mib")"
+    cause="$(resource_guard_cause "$avail" "$rss_kib" "$elapsed" "$gpu_mib" "$avail_bytes")"
     if [[ -n "$cause" ]]; then
       jq -n --arg cause "$cause" --arg avail "$avail" --arg rss_kib "$rss_kib" \
-        --arg elapsed "$elapsed" --arg gpu_mib "$gpu_mib" \
+        --arg elapsed "$elapsed" --arg gpu_mib "$gpu_mib" --arg avail_bytes "$avail_bytes" \
         --arg stopped_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{cause:$cause,available_percent:($avail | tonumber?),
+        '{cause:$cause,available_percent:($avail | tonumber?),available_bytes:($avail_bytes | tonumber?),
           server_rss_kib:($rss_kib | tonumber?),elapsed_seconds:($elapsed | tonumber),
           gpu_memory_used_mib:($gpu_mib | tonumber?),stopped_at:$stopped_at}' >"$abort_marker"
       kill -TERM "$server_pid" >/dev/null 2>&1 || true
@@ -427,14 +441,21 @@ jq -e '.streams[] | select(.codec_type == "video" and .width == 256 and .height 
 jq -e '.streams[] | select(.codec_type == "audio" and .sample_rate == "48000" and .channels == 2)' \
   "$evidence_dir/ffprobe.json" >/dev/null || fail "ComfyUI output is missing stereo 48 kHz audio"
 
+# Freeze the log only after the process has finished writing it.
+stop_owned_server_and_wait "$server_pid"
+server_pid=""
+
 jq -n \
   --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg prompt_id "$prompt_id" \
   --arg checkpoint "$checkpoint" \
   --arg video "$video" --arg video_sha256 "$(sha256sum "$video" | awk '{print $1}')" \
   --arg graph "$queued_graph" --arg graph_sha256 "$(sha256sum "$queued_graph" | awk '{print $1}')" \
   --arg history "$history_json" --arg server_log "$server_log" \
+  --arg server_log_sha256 "$(sha256sum "$server_log" | awk '{print $1}')" \
   --argjson preflight "$preflight_avail_percent" --argjson abort_below "$abort_avail_percent" \
-  --argjson max_rss "$max_server_rss_kib" --argjson max_seconds "$max_seconds" \
+  --argjson preflight_bytes "$preflight_avail_bytes" --argjson abort_bytes "$abort_avail_bytes" \
+    --arg gpu_uuid "$gpu_uuid" --argjson gpu_index "$gpu_index" \
+    --argjson max_rss "$max_server_rss_kib" --argjson max_seconds "$max_seconds" \
   --slurpfile system "$evidence_dir/system-stats.json" --slurpfile probe "$evidence_dir/ffprobe.json" \
   --slurpfile torch "$evidence_dir/torch-cuda-probe.json" \
   '{schema_version:"mold.ltx25.comfy-cuda-reference.v1", status:"passed", captured_at:$captured_at,
@@ -442,9 +463,11 @@ jq -n \
     prompt_id:$prompt_id, settings:{width:256,height:256,frames:9,fps:24,
       stage1_seed:25026,stage2_seed:42,video_cfg:1,audio_cfg:1},
     graph:{path:$graph,sha256:$graph_sha256}, history_path:$history,
-    server_log_path:$server_log, video:{path:$video,sha256:$video_sha256,ffprobe:$probe[0]},
+    server_log_path:$server_log, server_log_sha256:$server_log_sha256, video:{path:$video,sha256:$video_sha256,ffprobe:$probe[0]},
     system_stats:$system[0], torch:$torch[0], retained_in_library:true,
-    resource_guard:{minimum_preflight_percent:$preflight,abort_below_percent:$abort_below,
+    gpu:{physical_index:$gpu_index,uuid:$gpu_uuid},
+      resource_guard:{minimum_preflight_percent:$preflight,abort_below_percent:$abort_below,
+        minimum_preflight_bytes:$preflight_bytes,abort_below_bytes:$abort_bytes,
       max_server_rss_kib:$max_rss,max_seconds:$max_seconds}}' >"$manifest"
 
 echo "$manifest"

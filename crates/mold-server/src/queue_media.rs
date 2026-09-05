@@ -575,6 +575,7 @@ fn extract_request_fields(
     // Intentionally exhaustive: adding any GenerateRequest field fails this
     // build until it is classified as retained JSON or extracted authority.
     let mold_core::GenerateRequest {
+        offload,
         // Plain settings, retained in the durable JSON like `enable_audio`.
         // `mesh` carries no media of its own — it is five scalars — so it
         // survives a restart on the request rather than through the encrypted
@@ -761,6 +762,7 @@ fn extract_request_fields(
     )?;
 
     let sanitized = mold_core::GenerateRequest {
+        offload,
         prompt,
         negative_prompt,
         model,
