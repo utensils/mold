@@ -4,10 +4,12 @@ import {
   outputKindFor,
   outputKindForModel,
   OUTPUT_KIND_BROWSE_TARGET,
+  OUTPUT_KIND_LABEL,
   OUTPUT_KIND_EMPTY,
   OUTPUT_KIND_SECTION_LABEL,
   type OutputKind,
 } from "./useCreateOutputKind";
+import { mediaTypeFromQuery } from "../lib/modelAvailability";
 
 /*
  * The New image view has three sections — Still picture | Short clip | 3-D
@@ -91,10 +93,25 @@ describe("modelsForOutputKind", () => {
 });
 
 describe("what each section says about itself", () => {
-  it("names the section in the menu's kicker, the lexicon word being style", () => {
+  /*
+   * ONE set of words for the three kinds, wherever a kind is chosen or
+   * filtered: the Create toolbar's control and the Styles view's kind filter
+   * both read it, so a person learns the mapping once. The Styles filter used
+   * to say Pictures · Clips against Still picture | Short clip, and had no
+   * 3-D kind at all.
+   */
+  it("names the three kinds once, in the Create toolbar's words", () => {
+    expect(OUTPUT_KIND_LABEL).toEqual({
+      still: "Still picture",
+      clip: "Short clip",
+      mesh: "3-D object",
+    });
+  });
+
+  it("names the section in the menu's kicker from the same words, the lexicon word being style", () => {
     expect(OUTPUT_KIND_SECTION_LABEL.still).toBe("still picture styles");
-    expect(OUTPUT_KIND_SECTION_LABEL.clip).toBe("clip styles");
-    expect(OUTPUT_KIND_SECTION_LABEL.mesh).toBe("3-D styles");
+    expect(OUTPUT_KIND_SECTION_LABEL.clip).toBe("short clip styles");
+    expect(OUTPUT_KIND_SECTION_LABEL.mesh).toBe("3-D object styles");
     for (const label of Object.values(OUTPUT_KIND_SECTION_LABEL)) {
       expect(label).not.toMatch(/model/i);
     }
@@ -113,9 +130,11 @@ describe("what each section says about itself", () => {
     // `?type=` and its values are `mediaTypeFromQuery`'s — never invented here.
     expect(OUTPUT_KIND_BROWSE_TARGET.still).toBe("/models?type=image");
     expect(OUTPUT_KIND_BROWSE_TARGET.clip).toBe("/models?type=video");
-    // The Styles view has no 3-D kind, so 3-D opens it unfiltered rather than
-    // promising a filter that does not exist.
-    expect(OUTPUT_KIND_BROWSE_TARGET.mesh).toBe("/models");
+    expect(OUTPUT_KIND_BROWSE_TARGET.mesh).toBe("/models?type=mesh");
+    for (const target of Object.values(OUTPUT_KIND_BROWSE_TARGET)) {
+      const type = new URL(target, "http://x").searchParams.get("type");
+      expect(mediaTypeFromQuery({ type })).toBe(type);
+    }
   });
 });
 

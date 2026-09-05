@@ -509,7 +509,7 @@ describe("StylePicker — the menu holds one section", () => {
 
     useSequenceDraftStore().output = "sequence";
     await flushPromises();
-    expect(wrapper.get('[data-test="model-picker-kicker"]').text()).toBe("clip styles");
+    expect(wrapper.get('[data-test="model-picker-kicker"]').text()).toBe("short clip styles");
   });
 
   it("names the empty section instead of the generic no-match line", async () => {
@@ -519,7 +519,7 @@ describe("StylePicker — the menu holds one section", () => {
     await wrapper.get('[data-test="style-chip"]').trigger("click");
 
     expect(wrapper.get('[data-test="model-picker-empty"]').text()).toBe(
-      "No clip styles on this machine.",
+      "No short clip styles on this machine.",
     );
     expect(wrapper.get('[data-test="browse-catalog"]').text()).toBe("Browse more →");
   });
@@ -558,6 +558,6 @@ describe("StylePicker — the menu holds one section", () => {
     await flushPromises();
     await wrapper.get('[data-test="style-chip"]').trigger("click");
     await wrapper.get('[data-test="browse-catalog"]').trigger("click");
-    expect(routerPush).toHaveBeenLastCalledWith("/models");
+    expect(routerPush).toHaveBeenLastCalledWith("/models?type=mesh");
   });
 });

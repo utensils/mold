@@ -198,7 +198,7 @@ describe("ModelsView segments", () => {
     expect(wrapper.find("[data-test='catalog-source-chips']").exists()).toBe(true);
     expect(wrapper.text()).toContain("flux-dev:q8");
     expect(wrapper.text()).toContain("LTX-2 Distilled");
-    const all = wrapper.get('[aria-label="Media type"]').findAll("button")[0]!;
+    const all = wrapper.get('[aria-label="What they make"]').findAll("button")[0]!;
     expect(all.attributes("aria-checked")).toBe("true");
   });
 });
@@ -352,13 +352,23 @@ describe("ModelsView media-type filter", () => {
 
   it("updates the route query when a media-type chip is selected", async () => {
     const wrapper = await mountView();
-    const chips = wrapper.get('[aria-label="Media type"]').findAll("button");
-    expect(chips.map((c) => c.text())).toEqual(["All", "Pictures", "Clips"]);
+    const chips = wrapper.get('[aria-label="What they make"]').findAll("button");
+    // The Create toolbar's words, plus the 3-D kind Styles used to lack.
+    expect(chips.map((c) => c.text())).toEqual([
+      "All",
+      "Still picture",
+      "Short clip",
+      "3-D object",
+    ]);
 
     await chips[2]!.trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.query.type).toBe("video");
     expect(wrapper.text()).not.toContain("flux-dev:q8");
+
+    await chips[3]!.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.query.type).toBe("mesh");
 
     await chips[0]!.trigger("click");
     await flushPromises();

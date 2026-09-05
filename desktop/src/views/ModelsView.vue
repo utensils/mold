@@ -20,7 +20,8 @@ import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
-import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
+import { MEDIA_TYPE_KIND, mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
+import { OUTPUT_KIND_LABEL } from "../composables/useCreateOutputKind";
 import { mergeInstalledAcrossFleet } from "../lib/models";
 
 const conn = useConnectionStore();
@@ -38,10 +39,15 @@ type Segment = "installed" | "discover";
 const legacyDiscover = route.query.tab === "catalog" || route.query.tab === "discover";
 const segment = ref<Segment>(legacyDiscover ? "discover" : "installed");
 
+// The kind filter speaks the Create toolbar's words — Still picture | Short
+// clip | 3-D object — from the one label table, so what a person picks there
+// is what they filter by here.
 const MEDIA_TYPES: SegmentOption<MediaType>[] = [
   { value: "all", label: "All" },
-  { value: "image", label: "Pictures" },
-  { value: "video", label: "Clips" },
+  ...(Object.keys(MEDIA_TYPE_KIND) as Exclude<MediaType, "all">[]).map((value) => ({
+    value,
+    label: OUTPUT_KIND_LABEL[MEDIA_TYPE_KIND[value]],
+  })),
 ];
 
 const mediaType = computed(() => mediaTypeFromQuery(route.query));
@@ -122,7 +128,7 @@ onUnmounted(() => {
       <SegmentedControl
         :model-value="mediaType"
         :options="MEDIA_TYPES"
-        label="Media type"
+        label="What they make"
         compact
         @update:model-value="setMediaType"
       />

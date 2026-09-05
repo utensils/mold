@@ -24,6 +24,18 @@ export function outputKindFor(output: OutputMode, family: string | null | undefi
   return outputKindForModel({ family: family ?? "" });
 }
 
+/**
+ * The three kinds' names — ONE set of words wherever a kind is chosen or
+ * filtered. The Create toolbar's Still picture | Short clip | 3-D object
+ * control and the Styles view's kind filter both read it, so a person learns
+ * the mapping once: what you pick in Create is what you filter by in Styles.
+ */
+export const OUTPUT_KIND_LABEL: Readonly<Record<OutputKind, string>> = {
+  still: "Still picture",
+  clip: "Short clip",
+  mesh: "3-D object",
+};
+
 /** The view's mono title in the unified toolbar. */
 export const OUTPUT_KIND_TITLE: Readonly<Record<OutputKind, string>> = {
   still: "New image",
@@ -75,28 +87,27 @@ export function modelsForOutputKind<M extends SectionModel>(
 
 /** The menu's mono kicker — what this section holds, in the binding lexicon. */
 export const OUTPUT_KIND_SECTION_LABEL: Readonly<Record<OutputKind, string>> = {
-  still: "still picture styles",
-  clip: "clip styles",
-  mesh: "3-D styles",
+  still: `${OUTPUT_KIND_LABEL.still.toLowerCase()} styles`,
+  clip: `${OUTPUT_KIND_LABEL.clip.toLowerCase()} styles`,
+  mesh: `${OUTPUT_KIND_LABEL.mesh} styles`,
 };
 
 /** The menu's sentence when the section holds nothing on any machine. */
 export const OUTPUT_KIND_EMPTY: Readonly<Record<OutputKind, string>> = {
-  still: "No still picture styles on this machine.",
-  clip: "No clip styles on this machine.",
-  mesh: "No 3-D styles on this machine.",
+  still: `No ${OUTPUT_KIND_SECTION_LABEL.still} on this machine.`,
+  clip: `No ${OUTPUT_KIND_SECTION_LABEL.clip} on this machine.`,
+  mesh: `No ${OUTPUT_KIND_SECTION_LABEL.mesh} on this machine.`,
 };
 
 /**
  * Where **Browse more** goes from each section — the Styles view filtered to
- * the same kind. The values are `mediaTypeFromQuery`'s own (`image` / `video`)
- * and nothing else; the Styles view has no 3-D kind, so 3-D opens it
- * unfiltered rather than promising a filter that does not exist.
+ * the same kind. The values are `mediaTypeFromQuery`'s own (`image` / `video`
+ * / `mesh`) and nothing else.
  */
 export const OUTPUT_KIND_BROWSE_TARGET: Readonly<Record<OutputKind, string>> = {
   still: "/models?type=image",
   clip: "/models?type=video",
-  mesh: "/models",
+  mesh: "/models?type=mesh",
 };
 
 /** The live output kind, read from the sequence draft and the form store. */
