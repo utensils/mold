@@ -46,13 +46,6 @@ impl PipelineKind {
         }
     }
 
-    pub(crate) fn requires_distilled_checkpoint(self) -> bool {
-        matches!(
-            self,
-            Self::Distilled | Self::IcLora | Self::Retake | Self::LipDub
-        )
-    }
-
     /// Whether the lip-dub IC-LoRA's in-context reference video has to be
     /// re-encoded for every denoise stage.
     ///
@@ -108,8 +101,6 @@ pub(crate) struct Ltx2GeneratePlan {
     /// leave this unset and load both namespaces from `checkpoint_path`.
     pub(crate) audio_components_path: Option<String>,
     pub(crate) text_projection_path: Option<String>,
-    #[allow(dead_code)]
-    pub(crate) distilled_checkpoint_path: Option<String>,
     pub(crate) distilled_lora_path: Option<String>,
     pub(crate) spatial_upsampler_path: Option<String>,
     pub(crate) temporal_upsampler_path: Option<String>,
@@ -118,8 +109,6 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) duration_head_path: Option<String>,
     pub(crate) auto_duration: Option<mold_core::ltx2_duration::AutoDurationBounds>,
     pub(crate) gemma_root: String,
-    #[allow(dead_code)]
-    pub(crate) output_path: String,
     pub(crate) prompt: String,
     pub(crate) negative_prompt: Option<String>,
     pub(crate) prompt_tokens: EncodedPromptPair,
@@ -130,8 +119,6 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) frame_rate: u32,
     pub(crate) num_inference_steps: u32,
     pub(crate) guidance: f64,
-    #[allow(dead_code)]
-    pub(crate) quantization: Option<String>,
     pub(crate) streaming_prefetch_count: Option<u32>,
     pub(crate) conditioning: StagedConditioning,
     /// Still-image conditioning preprocessing contract, resolved from the
