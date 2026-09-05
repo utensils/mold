@@ -8,6 +8,7 @@ use console::Term;
 use hf_hub::api::tokio::{Api, ApiBuilder, ApiError, Progress};
 use hf_hub::{Cache, Repo, RepoType};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::manifest::{paths_from_downloads, ModelComponent, ModelFile, ModelManifest};
@@ -401,13 +402,199 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
+/// Identity of an installed artifact. Local tokens are metadata identities,
+/// never claims that model bytes match an upstream SHA-256.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum InstalledArtifactIdentity {
+    Sha256(String),
+    LocalInstallation(String),
+}
+
+impl InstalledArtifactIdentity {
+    pub fn observed_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Sha256(value) => Some(value),
+            Self::LocalInstallation(_) => None,
+        }
+    }
+    /// Domain-separated cache key, including for legacy/local installations.
+    pub fn cache_key(&self) -> String {
+        match self {
+            Self::Sha256(value) => format!("sha256:{value}"),
+            Self::LocalInstallation(value) => format!("local:{value}"),
+        }
+    }
+}
+
+/// Resolve an installed regular file without reading its body. Receipt failures
+/// never trigger verification. The representation is frozen for the process;
+/// after 4096 distinct identities the deterministic local fallback bounds memory.
+pub fn installed_artifact_identity(path: &Path) -> anyhow::Result<InstalledArtifactIdentity> {
+    let file = crate::secure_file::open_regular_file_no_follow(path)?;
+    installed_artifact_identity_from_file(path, &file)
+}
+
+pub fn installed_artifact_identity_from_file(
+    path: &Path,
+    file: &std::fs::File,
+) -> anyhow::Result<InstalledArtifactIdentity> {
+    use sha2::{Digest, Sha256};
+    type Registry = std::sync::Mutex<
+        std::collections::HashMap<(PathBuf, PinnedFileIdentity), InstalledArtifactIdentity>,
+    >;
+    static REGISTRY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+    static SCOPE: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "installed artifact is not a regular file"
+    );
+    let identity = pinned_file_identity(file)?;
+    let current = crate::secure_file::open_regular_file_no_follow(path)?;
+    anyhow::ensure!(
+        pinned_file_identity(&current)? == identity,
+        "installed artifact changed while opening"
+    );
+    let absolute = crate::secure_file::absolute_lexical_path(path)?;
+    let key = (absolute.clone(), identity);
+    let mut registry = REGISTRY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(value) = registry.get(&key) {
+        return Ok(value.clone());
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"mold.local-installation.v1\0");
+    hash.update(SCOPE.get_or_init(uuid::Uuid::new_v4).as_bytes());
+    hash.update(absolute.as_os_str().as_encoded_bytes());
+    hash.update(serde_json::to_vec(&identity)?);
+    let local = InstalledArtifactIdentity::LocalInstallation(format!("{:x}", hash.finalize()));
+    if registry.len() >= 4096 {
+        return Ok(local);
+    }
+    let value = read_durable_pinned_digest(&absolute, identity)
+        .map(InstalledArtifactIdentity::Sha256)
+        .unwrap_or(local);
+    registry.insert(key, value.clone());
+    Ok(value)
+}
+
+/// Metadata-only resolution result. Format validation remains with the owning
+/// loader/header probe; no variant initiates a content read or repair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstalledFileState {
+    Missing,
+    Incomplete,
+    Invalid(String),
+    Complete { bytes: u64 },
+}
+
+pub fn resolve_installed_file(path: &Path, expected_size: Option<u64>) -> InstalledFileState {
+    let file = match crate::secure_file::open_regular_file_no_follow(path) {
+        Ok(file) => file,
+        Err(error) => {
+            return if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                InstalledFileState::Missing
+            } else {
+                InstalledFileState::Invalid(error.to_string())
+            }
+        }
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => return InstalledFileState::Invalid(error.to_string()),
+    };
+    if metadata.len() == 0
+        || expected_size
+            .filter(|size| *size != 0)
+            .is_some_and(|size| size != metadata.len())
+        || recorded_sha256_marker_len(path).is_some_and(|len| len != metadata.len())
+    {
+        return InstalledFileState::Incomplete;
+    }
+    InstalledFileState::Complete {
+        bytes: metadata.len(),
+    }
+}
+
+/// The caller retains its acquisition lock/partial ownership and format checks.
+pub fn installed_file_is_complete(path: &Path, expected_size: Option<u64>) -> bool {
+    matches!(
+        resolve_installed_file(path, expected_size),
+        InstalledFileState::Complete { .. }
+    )
+}
+
+/// Counters count actual model integrity work, including failed/partial scans.
+static ARTIFACT_HASH_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ARTIFACT_HASH_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn artifact_hash_work() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        ARTIFACT_HASH_ATTEMPTS.load(Relaxed),
+        ARTIFACT_HASH_BYTES.load(Relaxed),
+    )
+}
+
+pub struct ArtifactHashObservation {
+    purpose: &'static str,
+    started: std::time::Instant,
+    bytes: u64,
+}
+impl ArtifactHashObservation {
+    pub fn new(purpose: &'static str) -> Self {
+        ARTIFACT_HASH_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            purpose,
+            started: std::time::Instant::now(),
+            bytes: 0,
+        }
+    }
+    pub fn read(&mut self, bytes: u64) {
+        self.bytes = self.bytes.saturating_add(bytes);
+        ARTIFACT_HASH_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+impl Drop for ArtifactHashObservation {
+    fn drop(&mut self) {
+        tracing::info!(
+            purpose = self.purpose,
+            bytes = self.bytes,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "model artifact integrity scan"
+        );
+    }
+}
+
 /// Compute the SHA-256 hex digest of a file.
 pub fn compute_sha256(path: &std::path::Path) -> anyhow::Result<String> {
-    use sha2::{Digest, Sha256};
+    let file = std::fs::File::open(path)?;
+    hash_open_artifact(&file, "explicit_verification")
+}
 
-    let mut file = std::fs::File::open(path)?;
+/// Hash a newly acquired or explicitly checked model file. The retained
+/// descriptor is read from offset zero; runtime resolution never calls this.
+pub fn hash_open_artifact(file: &std::fs::File, purpose: &'static str) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut observation = ArtifactHashObservation::new(purpose);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        observation.read(read as u64);
+        hasher.update(&buffer[..read]);
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -520,7 +707,11 @@ const SHA256_MARKER_LEN_PREFIX: &str = "len=";
 /// stub under the download's sidecar and stayed "downloaded" for two days.
 pub fn write_sha256_marker(path: &Path, digest: &str) -> std::io::Result<()> {
     let marker = sha256_marker_path(path);
-    let tmp = marker.with_extension(format!("sha256-verified.tmp.{}", std::process::id()));
+    let tmp = marker.with_extension(format!(
+        "sha256-verified.tmp.{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let mut body = format!("{digest}\n");
     if let Ok(metadata) = std::fs::metadata(path) {
         body.push_str(&format!("{SHA256_MARKER_LEN_PREFIX}{}\n", metadata.len()));
@@ -551,22 +742,16 @@ fn verify_file_integrity(
     if skip_verify {
         return Ok(());
     }
-    let actual = match pinned_file_digest(clean_path) {
-        Ok(d) => d,
-        Err(e) => {
-            // I/O failure during hashing — log and move on without a marker.
-            // The downstream `manifest_files_exist` check will report the
-            // file incomplete, prompting a retry rather than a silent pass.
-            eprintln!(
-                "warning: failed to verify SHA-256 for {}: {e}",
-                file.hf_filename
-            );
-            return Ok(());
-        }
-    };
+    let actual = pinned_file_digest(clean_path).map_err(|error| {
+        DownloadError::Other(format!(
+            "cannot verify newly acquired {}: {error:#}",
+            file.hf_filename
+        ))
+    })?;
     if let Some(expected) = file.sha256 {
         if !actual.eq_ignore_ascii_case(expected) {
             let _ = std::fs::remove_file(clean_path);
+            let _ = std::fs::remove_file(sha256_marker_path(clean_path));
             return Err(DownloadError::Sha256Mismatch {
                 filename: file.hf_filename.clone(),
                 expected: expected.to_string(),
@@ -627,7 +812,48 @@ fn pinned_file_identity(file: &std::fs::File) -> std::io::Result<PinnedFileIdent
             ],
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO,
+        };
+        let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        let mut basic = std::mem::MaybeUninit::<FILE_BASIC_INFO>::uninit();
+        let handle = file.as_raw_handle() as _;
+        // SAFETY: both buffers have the API's exact layout and the retained
+        // file owns the handle throughout both calls.
+        if unsafe { GetFileInformationByHandle(handle, info.as_mut_ptr()) } == 0
+            || unsafe {
+                GetFileInformationByHandleEx(
+                    handle,
+                    FileBasicInfo,
+                    basic.as_mut_ptr().cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+            } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: successful Win32 calls initialized both buffers.
+        let (info, basic) = unsafe { (info.assume_init(), basic.assume_init()) };
+        return Ok(PinnedFileIdentity {
+            len: metadata.len(),
+            platform: [
+                u64::from(info.dwVolumeSerialNumber),
+                (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+                basic.ChangeTime as u64,
+                basic.LastWriteTime as u64,
+                basic.CreationTime as u64,
+                u64::from(basic.FileAttributes),
+                0,
+                0,
+                0,
+            ],
+        });
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         // No inode identity is available here, so the memo degrades to
         // (size, mtime). That is weaker, never wrong-in-the-unsafe-direction
@@ -747,7 +973,7 @@ fn private_attestation_dir(create: bool) -> Option<PathBuf> {
             tracing::warn!(
                 path = ?attempted,
                 env = DURABLE_PINNED_DIGEST_DIR_ENV,
-                "persistent artifact attestations are unavailable; unchanged pinned models will be rehashed after restart"
+                "persistent artifact attestations are unavailable; installed models will use local identities after restart"
             );
         });
     }
@@ -1024,6 +1250,7 @@ pub fn pinned_file_digest_from_open_file(
     use std::io::{Read, Seek, SeekFrom};
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
+    let mut observation = ArtifactHashObservation::new("acquisition");
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut read_total = 0_u64;
@@ -1033,6 +1260,7 @@ pub fn pinned_file_digest_from_open_file(
         if read == 0 {
             break;
         }
+        observation.read(read as u64);
         hash.update(&buffer[..read]);
         read_total = read_total
             .checked_add(read as u64)
@@ -1472,26 +1700,14 @@ impl hf_hub::api::Progress for SyncCallbackProgress {
     }
 }
 
-/// Returns `true` if the file already exists at `clean_path` with the correct
-/// size and (if a SHA-256 is available) the correct digest.
-///
-/// **Side-effect**: if the file exists with matching size but failing integrity,
-/// `verify_file_integrity` will delete the corrupted file before returning `false`.
+/// Reuse a complete installed file without hashing it, even on a cold process.
 fn is_already_placed(
-    clean_path: &std::path::Path,
+    clean_path: &Path,
     file: &ModelFile,
-    model_name: &str,
-    skip_verify: bool,
+    _model_name: &str,
+    _skip_verify: bool,
 ) -> bool {
-    let size_ok = clean_path
-        .metadata()
-        .map(|m| m.len() == file.size_bytes)
-        .unwrap_or(false);
-    if !size_ok {
-        return false;
-    }
-    // Verify integrity — a same-size but corrupted file must not be accepted
-    verify_file_integrity(clean_path, file, model_name, skip_verify).is_ok()
+    installed_file_is_complete(clean_path, Some(file.size_bytes))
 }
 
 /// Return an existing valid clean path for a manifest file, migrating from a
@@ -1512,8 +1728,21 @@ fn find_existing_placed_file(
         }
         if candidate_path != canonical_path {
             hardlink_or_copy(&candidate_path, &canonical_path)?;
-            verify_file_integrity(&canonical_path, file, &manifest.name, skip_verify)?;
+            // Migration reuses installed bytes; it is not a new acquisition.
         }
+        return Ok(Some(canonical_path));
+    }
+
+    // Published HF caches are legacy installations too. Normalize their
+    // expected snapshot symlink, then reuse without acquiring or hashing.
+    if let Some(cached) =
+        cached_file_path_existing_only(models_dir, &file.hf_repo, &file.hf_filename, None)
+            .and_then(|path| path.canonicalize().ok())
+            .filter(|path| installed_file_is_complete(path, Some(file.size_bytes)))
+    {
+        let stage = AcquisitionStage::new(&canonical_path)?;
+        hardlink_or_copy(&cached, &stage.path)?;
+        stage.publish(&canonical_path)?;
         return Ok(Some(canonical_path));
     }
 
@@ -1582,6 +1811,11 @@ fn required_download_bytes_in(
         let cached = managed_cache
             .repo(hf_file_repo(&file.hf_repo, &file.hf_filename))
             .get(&file.hf_filename)
+            .or_else(|| {
+                Cache::new(models_root.join(".hf-acquisition-cache"))
+                    .repo(hf_file_repo(&file.hf_repo, &file.hf_filename))
+                    .get(&file.hf_filename)
+            })
             .and_then(|path| {
                 path.metadata()
                     .ok()
@@ -1690,7 +1924,8 @@ async fn pull_model_with_hf_token(
     require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
-    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    let mut builder =
+        ApiBuilder::from_env().with_cache_dir(models_dir().join(".hf-acquisition-cache"));
     if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
@@ -1762,7 +1997,8 @@ async fn pull_model_with_callback_and_hf_token(
     require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
-    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    let mut builder =
+        ApiBuilder::from_env().with_cache_dir(models_dir().join(".hf-acquisition-cache"));
     if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
@@ -1787,7 +2023,7 @@ async fn pull_model_with_callback_and_hf_token(
             .map(|(i, file)| {
                 cb(DownloadProgressEvent::Status {
                     message: format!(
-                        "Verifying file [{}/{}] {}...",
+                        "Resolving installed file [{}/{}] {}...",
                         i + 1,
                         total,
                         file.hf_filename
@@ -1890,7 +2126,8 @@ async fn pull_model_files_only_with_hf_token(
     require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
-    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    let mut builder =
+        ApiBuilder::from_env().with_cache_dir(models_dir().join(".hf-acquisition-cache"));
     if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
@@ -1941,7 +2178,8 @@ async fn pull_model_files_only_with_callback_and_hf_token(
     require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
-    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    let mut builder =
+        ApiBuilder::from_env().with_cache_dir(models_dir().join(".hf-acquisition-cache"));
     if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
@@ -1962,7 +2200,7 @@ async fn pull_model_files_only_with_callback_and_hf_token(
             .map(|(i, file)| {
                 cb(DownloadProgressEvent::Status {
                     message: format!(
-                        "Verifying file [{}/{}] {}...",
+                        "Resolving installed file [{}/{}] {}...",
                         i + 1,
                         total,
                         file.hf_filename
@@ -2083,6 +2321,97 @@ where
     operation.await
 }
 
+impl From<std::io::Error> for DownloadError {
+    fn from(error: std::io::Error) -> Self {
+        Self::FilePlacement(error.to_string())
+    }
+}
+
+/// Private sibling staging keeps full-length, unverified acquisitions invisible
+/// to every installed-file resolver, including after process interruption.
+struct AcquisitionStage {
+    dir: PathBuf,
+    path: PathBuf,
+}
+impl AcquisitionStage {
+    fn new(destination: &Path) -> Result<Self, DownloadError> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| DownloadError::FilePlacement("missing acquisition parent".into()))?;
+        std::fs::create_dir_all(parent)?;
+        let dir = parent.join(format!(".mold-acquiring-{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&dir)?;
+        Ok(Self {
+            path: dir.join("artifact"),
+            dir,
+        })
+    }
+    fn publish(&self, destination: &Path) -> Result<(), DownloadError> {
+        let digest = recorded_sha256_marker(&self.path);
+        let retained = crate::secure_file::open_regular_file_no_follow(&self.path)
+            .map_err(|error| DownloadError::FilePlacement(error.to_string()))?;
+        // Publication is the only point where installed readers can see bytes.
+        std::fs::rename(&self.path, destination)?;
+        if let Some(digest) = digest {
+            if let Err(error) = write_sha256_marker(destination, &digest) {
+                tracing::warn!(%error, "failed to record acquired artifact marker");
+            }
+            // Bind the receipt to our retained file, never a competing writer's
+            // replacement that happened to occupy the destination on reopen.
+            if let Err(error) = pinned_file_identity(&retained)
+                .and_then(|identity| write_durable_pinned_digest(destination, identity, &digest))
+            {
+                tracing::warn!(%error, "failed to record acquired artifact identity");
+            }
+        } else {
+            let _ = std::fs::remove_file(sha256_marker_path(destination));
+        }
+        Ok(())
+    }
+}
+impl Drop for AcquisitionStage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Mirror only verified acquisitions into the discoverable HF layout, retaining
+/// the real upstream revision so shared catalog companions reuse the install.
+fn publish_verified_hf_cache(
+    models_root: &Path,
+    repo: &str,
+    filename: &str,
+    hf_path: &Path,
+    verified: &Path,
+) -> Result<(), DownloadError> {
+    let mut snapshot = hf_path.to_path_buf();
+    for _ in Path::new(filename).components() {
+        snapshot.pop();
+    }
+    let revision = snapshot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DownloadError::FilePlacement("missing HF snapshot revision".into()))?;
+    let cache = Cache::new(models_root.join(".hf-cache")).repo(hf_file_repo(repo, filename));
+    let destination = cache.pointer_path(revision).join(filename);
+    let stage = AcquisitionStage::new(&destination)?;
+    hardlink_or_copy(verified, &stage.path)?;
+    if let Some(digest) = recorded_sha256_marker(verified) {
+        write_sha256_marker(&stage.path, &digest)?;
+    }
+    stage.publish(&destination)?;
+    if let Err(error) = cache.create_ref(revision) {
+        tracing::warn!(%error, "failed to update verified HF cache ref");
+    }
+    Ok(())
+}
+
 async fn download_and_place_file<P: Progress + Clone + Send + Sync + 'static>(
     api: &Api,
     file: &ModelFile,
@@ -2129,8 +2458,22 @@ async fn download_and_place_file<P: Progress + Clone + Send + Sync + 'static>(
             }
         };
 
-        hardlink_or_copy(&hf_path, clean_path)?;
-        verify_file_integrity(clean_path, file, model_name, skip_verify)?;
+        if installed_file_is_complete(clean_path, Some(file.size_bytes)) {
+            return Ok(clean_path.to_path_buf());
+        }
+        let stage = AcquisitionStage::new(clean_path)?;
+        hardlink_or_copy(&hf_path, &stage.path)?;
+        verify_file_integrity(&stage.path, file, model_name, skip_verify)?;
+        if let Err(error) = publish_verified_hf_cache(
+            &models_dir(),
+            &file.hf_repo,
+            &file.hf_filename,
+            &hf_path,
+            &stage.path,
+        ) {
+            tracing::warn!(%error, "failed to mirror verified acquisition into HF cache");
+        }
+        stage.publish(clean_path)?;
         Ok(clean_path.to_path_buf())
     })
     .await
@@ -2181,6 +2524,7 @@ pub fn download_single_file_sync(
         hf_filename,
         target_subdir,
         progress,
+        SingleFileAcquisition::ReuseInstalled,
     )
 }
 
@@ -2202,6 +2546,7 @@ pub fn download_single_file_sync_with_progress(
         hf_filename,
         target_subdir,
         SyncCallbackProgress::new(callback),
+        SingleFileAcquisition::ReuseInstalled,
     )
 }
 
@@ -2223,6 +2568,26 @@ pub fn download_single_file_sync_with_progress_in(
         hf_filename,
         target_subdir,
         SyncCallbackProgress::new(callback),
+        SingleFileAcquisition::ReuseInstalled,
+    )
+}
+
+/// Download and verify a pinned dependency before publishing its installed path.
+pub fn download_pinned_file_sync_with_progress_in(
+    models_root: &Path,
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: &str,
+    pin: Option<(&str, &str)>,
+    callback: DownloadProgressCallback,
+) -> Result<PathBuf, DownloadError> {
+    download_single_file_sync_with_adapter(
+        models_root,
+        hf_repo,
+        hf_filename,
+        Some(target_subdir),
+        SyncCallbackProgress::new(callback),
+        SingleFileAcquisition::Repair { pin },
     )
 }
 
@@ -2247,12 +2612,21 @@ pub fn planned_single_file_path_in(
     models_root.join(target_subdir).join(leaf)
 }
 
+enum SingleFileAcquisition<'a> {
+    ReuseInstalled,
+    /// The caller already checked expected size/completion and owns repair.
+    Repair {
+        pin: Option<(&'a str, &'a str)>,
+    },
+}
+
 fn download_single_file_sync_with_adapter<P>(
     models_root: &Path,
     hf_repo: &str,
     hf_filename: &str,
     target_subdir: Option<&str>,
     progress: P,
+    policy: SingleFileAcquisition<'_>,
 ) -> Result<PathBuf, DownloadError>
 where
     P: hf_hub::api::Progress,
@@ -2262,10 +2636,34 @@ where
     // check before constructing progress adapters or resolving managed paths.
     require_single_file_acquisition(hf_repo, hf_filename, target_subdir)?;
 
+    if matches!(policy, SingleFileAcquisition::ReuseInstalled) {
+        if let Some(cached) =
+            cached_file_path_existing_only(models_root, hf_repo, hf_filename, target_subdir)
+        {
+            let cached = cached.canonicalize()?;
+            if installed_file_is_complete(&cached, None) {
+                if let Some(subdir) = target_subdir {
+                    let target = planned_single_file_path_in(models_root, hf_filename, subdir);
+                    if target != cached {
+                        let stage = AcquisitionStage::new(&target)?;
+                        hardlink_or_copy(&cached, &stage.path)?;
+                        stage.publish(&target)?;
+                        return Ok(target);
+                    }
+                }
+                return Ok(cached);
+            }
+        }
+    }
+    let pin = match policy {
+        SingleFileAcquisition::Repair { pin } => pin,
+        SingleFileAcquisition::ReuseInstalled => None,
+    };
+
     use hf_hub::api::sync::ApiBuilder;
 
     let mut builder = ApiBuilder::from_env()
-        .with_cache_dir(models_root.join(".hf-cache"))
+        .with_cache_dir(models_root.join(".hf-acquisition-cache"))
         .with_progress(false);
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
@@ -2301,14 +2699,32 @@ where
             }
         })?;
 
-    // Place at clean path if target_subdir specified
-    if let Some(subdir) = target_subdir {
-        let clean_path = planned_single_file_path_in(models_root, hf_filename, subdir);
-        hardlink_or_copy(&hf_path, &clean_path)?;
-        Ok(clean_path)
+    // This cache is acquisition-private: ordinary cache discovery never sees
+    // a blob before its acquisition check has completed.
+    let clean_path = target_subdir
+        .map(|subdir| planned_single_file_path_in(models_root, hf_filename, subdir))
+        .unwrap_or_else(|| {
+            models_root.join("shared/acquired").join(format!(
+                "{:x}",
+                Sha256::digest(format!("{hf_repo}/{hf_filename}"))
+            ))
+        });
+    let stage = AcquisitionStage::new(&clean_path)?;
+    hardlink_or_copy(&hf_path, &stage.path)?;
+    if let Some((sha256, model)) = pin {
+        verify_pinned_file(&stage.path, sha256, hf_filename, model)?;
     } else {
-        Ok(hf_path)
+        let digest =
+            pinned_file_digest(&stage.path).map_err(|e| DownloadError::Other(e.to_string()))?;
+        write_sha256_marker(&stage.path, &digest)?;
     }
+    if let Err(error) =
+        publish_verified_hf_cache(models_root, hf_repo, hf_filename, &hf_path, &stage.path)
+    {
+        tracing::warn!(%error, "failed to mirror verified acquisition into HF cache");
+    }
+    stage.publish(&clean_path)?;
+    Ok(clean_path)
 }
 
 /// Check whether a file is present in mold's managed hf-hub cache
@@ -2678,29 +3094,14 @@ pub fn companion_present_on_disk(
 /// placed — used by both the catalog API's `installed: bool` predicate
 /// AND the `fetch_recipe_inner` skip path so they cannot drift apart.
 ///
-/// Acceptance rule:
-/// - `sha256` declared → `.sha256-verified` marker is the sole criterion.
-///   The marker is written only after cryptographic verification at download
-///   time, so it is more authoritative than `size_bytes` (which can be stale
-///   in the catalog DB when a model is re-uploaded under the same sha256 with
-///   a different compressed size).  A file at the exact declared size but
-///   without the marker is still rejected.
-/// - `sha256` absent, `size_bytes` known → on-disk length must equal declared.
-/// - Neither declared → marker is the only attestation; require it.
+/// A completion marker may carry a historical size; otherwise a declared size
+/// is sufficient for a legacy installation, whether or not a pin is declared.
 fn recipe_file_is_placed(dest: &Path, file: &RecipeFetchFile<'_>) -> bool {
-    if !dest.exists() {
-        return false;
-    }
     if has_sha256_marker(dest) {
-        return true;
+        return installed_file_is_complete(dest, recorded_sha256_marker_len(dest));
     }
-    match (file.sha256, file.size_bytes) {
-        (Some(_), _) => sha256_marker_path(dest).exists(),
-        (None, Some(expected)) => std::fs::metadata(dest)
-            .map(|m| m.len() == expected)
-            .unwrap_or(false),
-        (None, None) => sha256_marker_path(dest).exists(),
-    }
+    file.size_bytes
+        .is_some_and(|size| installed_file_is_complete(dest, Some(size)))
 }
 
 /// True iff every file in the recipe is present at its declared size (or,
@@ -3029,8 +3430,9 @@ async fn fetch_recipe_inner(
             });
         }
 
+        let stage = AcquisitionStage::new(dest_path)?;
         let mut bytes_downloaded: u64 = 0;
-        let mut out = std::fs::File::create(dest_path).map_err(|e| {
+        let mut out = std::fs::File::create(&stage.path).map_err(|e| {
             DownloadError::FilePlacement(format!("failed to create {}: {e}", dest_path.display()))
         })?;
         let mut resp = resp;
@@ -3102,7 +3504,7 @@ async fn fetch_recipe_inner(
         // Skipped under `skip_verify` — the user has explicitly asked us
         // not to read the file, so we have nothing to attest.
         if !opts.skip_verify {
-            let actual = pinned_file_digest(dest_path).map_err(|e| {
+            let actual = pinned_file_digest(&stage.path).map_err(|e| {
                 DownloadError::Other(format!(
                     "failed to compute SHA-256 for {}: {e}",
                     dest_path.display()
@@ -3110,7 +3512,7 @@ async fn fetch_recipe_inner(
             })?;
             if let Some(expected) = file.sha256 {
                 if !actual.eq_ignore_ascii_case(expected) {
-                    let _ = std::fs::remove_file(dest_path);
+                    let _ = std::fs::remove_file(&stage.path);
                     return Err(DownloadError::Sha256Mismatch {
                         filename: file.dest.to_string(),
                         expected: expected.to_string(),
@@ -3119,13 +3521,15 @@ async fn fetch_recipe_inner(
                     });
                 }
             }
-            if let Err(e) = write_sha256_marker(dest_path, &actual) {
+            if let Err(e) = write_sha256_marker(&stage.path, &actual) {
                 eprintln!(
                     "warning: failed to write .sha256-verified marker for {}: {e}",
                     file.dest
                 );
             }
         }
+
+        stage.publish(dest_path)?;
 
         if let Some(cb) = progress.as_deref() {
             cb(DownloadProgressEvent::FileDone {
@@ -4171,6 +4575,228 @@ mod tests {
     }
 
     #[test]
+    fn installed_identity_is_stable_without_receipts_and_changes_on_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.bin");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let before = pinned_digest_hash_count_for(&path);
+        let first = installed_artifact_identity(&path).unwrap();
+        assert!(matches!(
+            first,
+            InstalledArtifactIdentity::LocalInstallation(_)
+        ));
+        assert_eq!(installed_artifact_identity(&path).unwrap(), first);
+        assert_eq!(pinned_digest_hash_count_for(&path), before);
+        // Even a later explicit digest calculation must not change an active identity.
+        pinned_file_digest(&path).unwrap();
+        assert_eq!(installed_artifact_identity(&path).unwrap(), first);
+        std::fs::rename(&path, dir.path().join("old.bin")).unwrap();
+        std::fs::write(&path, b"bbbb").unwrap();
+        assert_ne!(installed_artifact_identity(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn installed_identity_survives_cold_child_process_without_hashing() {
+        const KEY: &str = "TEST_INSTALLED_ARTIFACT_CHILD";
+        if let Some(path) = std::env::var_os(KEY) {
+            let path = PathBuf::from(path);
+            assert_eq!(pinned_digest_hash_count(), 0);
+            assert!(installed_file_is_complete(&path, Some(15)));
+            assert!(matches!(
+                installed_artifact_identity(&path).unwrap(),
+                InstalledArtifactIdentity::LocalInstallation(_)
+            ));
+            assert_eq!(pinned_digest_hash_count(), 0);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.bin");
+        std::fs::write(&path, b"installed bytes").unwrap();
+        for _ in 0..2 {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "download::tests::installed_identity_survives_cold_child_process_without_hashing"])
+                .env(KEY, &path).status().unwrap();
+            assert!(status.success());
+        }
+    }
+
+    #[test]
+    fn existing_complete_model_never_hashes_or_deletes_bytes() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.bin");
+        std::fs::write(&path, b"installed bytes").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".into(),
+            hf_filename: "installed.bin".into(),
+            component: crate::manifest::ModelComponent::Transformer,
+            size_bytes: 15,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+        let before = pinned_digest_hash_count_for(&path);
+        assert!(is_already_placed(&path, &file, "test:q8", false));
+        assert_eq!(pinned_digest_hash_count_for(&path), before);
+        assert!(path.exists());
+        assert!(!has_sha256_marker(&path));
+    }
+
+    #[test]
+    fn direct_sync_callers_reuse_installed_files_without_network_or_hashes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("shared/camera/control.safetensors");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"complete local camera adapter").unwrap();
+        for _ in 0..3 {
+            let result = download_single_file_sync_with_adapter(
+                root.path(),
+                "invalid/no-network",
+                "control.safetensors",
+                Some("shared/camera"),
+                (),
+                SingleFileAcquisition::ReuseInstalled,
+            )
+            .unwrap();
+            assert_eq!(result, target);
+            assert_eq!(pinned_digest_hash_count_for(&target), 0);
+        }
+        assert!(!root.path().join(".hf-acquisition-cache").exists());
+    }
+
+    #[test]
+    fn old_published_cache_migrates_without_acquisition_or_hashing() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path().join(".hf-cache"))
+            .repo(hf_file_repo("legacy/model", "control.bin"));
+        let old = cache.pointer_path("abc123").join("control.bin");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"installed").unwrap();
+        cache.create_ref("abc123").unwrap();
+        let result = download_single_file_sync_with_adapter(
+            root.path(),
+            "legacy/model",
+            "control.bin",
+            Some("shared/new-layout"),
+            (),
+            SingleFileAcquisition::ReuseInstalled,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&result).unwrap(), b"installed");
+        assert!(!root.path().join(".hf-acquisition-cache").exists());
+        assert_eq!(pinned_digest_hash_count_for(&result), 0);
+        assert!(
+            !has_sha256_marker(&result),
+            "migration must not invent a verified digest"
+        );
+    }
+
+    #[test]
+    fn verified_acquisition_preserves_shared_hf_cache_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let hf = root
+            .path()
+            .join(".hf-acquisition-cache/models--org--model/snapshots/abc123/sub/model.bin");
+        std::fs::create_dir_all(hf.parent().unwrap()).unwrap();
+        std::fs::write(&hf, b"verified").unwrap();
+        let destination = root.path().join("shared/model.bin");
+        let stage = AcquisitionStage::new(&destination).unwrap();
+        hardlink_or_copy(&hf, &stage.path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"verified"));
+        verify_pinned_file(&stage.path, &digest, "model.bin", "test").unwrap();
+        assert!(
+            cached_file_path_existing_only(root.path(), "org/model", "sub/model.bin", None)
+                .is_none()
+        );
+        publish_verified_hf_cache(root.path(), "org/model", "sub/model.bin", &hf, &stage.path)
+            .unwrap();
+        let cached =
+            cached_file_path_existing_only(root.path(), "org/model", "sub/model.bin", None)
+                .unwrap();
+        assert!(cached.starts_with(root.path().join(".hf-cache")));
+        assert_eq!(std::fs::read(cached).unwrap(), b"verified");
+        stage.publish(&destination).unwrap();
+        assert!(installed_file_is_complete(&destination, Some(8)));
+    }
+
+    #[test]
+    fn published_acquisition_survives_auxiliary_marker_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("model.bin");
+        let stage = AcquisitionStage::new(&destination).unwrap();
+        std::fs::write(&stage.path, b"verified").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"verified"));
+        verify_pinned_file(&stage.path, &digest, "model.bin", "test").unwrap();
+        // A directory at the sidecar path deterministically rejects its rename.
+        std::fs::create_dir(sha256_marker_path(&destination)).unwrap();
+        stage.publish(&destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified");
+        assert!(installed_file_is_complete(&destination, Some(8)));
+    }
+
+    #[test]
+    fn published_acquisition_survives_auxiliary_hf_ref_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let hf = root
+            .path()
+            .join(".hf-acquisition-cache/models--org--model/snapshots/abc123/model.bin");
+        std::fs::create_dir_all(hf.parent().unwrap()).unwrap();
+        std::fs::write(&hf, b"verified").unwrap();
+        let destination = root.path().join("shared/model.bin");
+        let stage = AcquisitionStage::new(&destination).unwrap();
+        hardlink_or_copy(&hf, &stage.path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"verified"));
+        verify_pinned_file(&stage.path, &digest, "model.bin", "test").unwrap();
+        // Snapshot publication succeeds, but the cache ref cannot be written.
+        std::fs::create_dir_all(root.path().join(".hf-cache/models--org--model/refs/main"))
+            .unwrap();
+        publish_verified_hf_cache(root.path(), "org/model", "model.bin", &hf, &stage.path).unwrap();
+        stage.publish(&destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified");
+        assert!(installed_file_is_complete(&destination, Some(8)));
+    }
+
+    #[test]
+    fn staged_acquisition_is_invisible_until_verified_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("model.bin");
+        let stage = AcquisitionStage::new(&dest).unwrap();
+        std::fs::write(&stage.path, b"verified").unwrap();
+        // A second consumer sees no install even after the final byte lands.
+        assert_eq!(
+            resolve_installed_file(&dest, Some(8)),
+            InstalledFileState::Missing
+        );
+        let digest = format!("{:x}", Sha256::digest(b"verified"));
+        verify_pinned_file(&stage.path, &digest, "model.bin", "test").unwrap();
+        assert_eq!(
+            resolve_installed_file(&dest, Some(8)),
+            InstalledFileState::Missing
+        );
+        stage.publish(&dest).unwrap();
+        assert!(installed_file_is_complete(&dest, Some(8)));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"verified");
+    }
+
+    #[test]
+    fn rejected_or_interrupted_acquisition_never_becomes_an_install() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("model.bin");
+        let stage = AcquisitionStage::new(&dest).unwrap();
+        std::fs::write(&stage.path, b"badbytes").unwrap();
+        assert!(verify_pinned_file(&stage.path, &"0".repeat(64), "model.bin", "test").is_err());
+        assert!(!installed_file_is_complete(&dest, Some(8)));
+        let abandoned = AcquisitionStage::new(&dest).unwrap();
+        std::fs::write(&abandoned.path, b"badbytes").unwrap();
+        // Simulate process death leaving the private staging directory behind.
+        std::mem::forget(abandoned);
+        assert_eq!(
+            resolve_installed_file(&dest, Some(8)),
+            InstalledFileState::Missing
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
     fn verify_file_integrity_deletes_on_mismatch() {
         use crate::manifest::{ModelComponent, ModelFile};
         let dir = std::env::temp_dir().join("mold_test_integrity_mismatch");
@@ -5047,7 +5673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recipe_fetcher_refetches_when_sha256_declared_but_marker_missing() {
+    async fn recipe_fetcher_reuses_complete_legacy_file_without_marker() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -5058,9 +5684,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/m.safetensors"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_ref()))
-            // The pre-staged file has the right size but no marker, so the
-            // skip path must refuse it and re-fetch exactly once.
-            .expect(1)
+            // A complete legacy install must not start another download.
+            .expect(0)
             .mount(&server)
             .await;
 
@@ -5069,8 +5694,7 @@ mod tests {
         std::fs::create_dir_all(&subdir).unwrap();
         let dest = subdir.join("m.safetensors");
         // Pre-stage a file at the declared size — but NO marker, and bytes
-        // don't actually match the declared sha256. A size-only skip would
-        // accept this; the tightened predicate must not.
+        // do not match the declared SHA. Runtime trusts the local installation.
         std::fs::write(&dest, b"BADBYTE").unwrap();
         assert!(!sha256_marker_path(&dest).exists());
 
@@ -5093,9 +5717,9 @@ mod tests {
         .await
         .expect("fetch ok");
 
-        // After re-fetch the bytes match the server response and the marker exists.
-        assert_eq!(std::fs::read(&dest).unwrap(), body);
-        assert!(sha256_marker_path(&dest).exists());
+        // Existing bytes remain untouched; no verified receipt was invented.
+        assert_eq!(std::fs::read(&dest).unwrap(), b"BADBYTE");
+        assert!(!sha256_marker_path(&dest).exists());
         server.verify().await;
         let _ = std::fs::remove_dir_all(&models_dir);
     }
@@ -5370,7 +5994,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_entry_installed_requires_marker_when_sha256_declared() {
+    fn catalog_entry_installed_accepts_legacy_size_even_when_sha256_declared() {
         // Cross-consistency: catalog_entry_installed and the inline skip
         // path inside fetch_recipe_inner must agree on what "placed" means.
         // A file at the right size with no marker — and a declared sha256
@@ -5391,8 +6015,8 @@ mod tests {
         }];
 
         assert!(
-            !catalog_entry_installed(&models_dir, "cv:installed_k", &files),
-            "size matches but no marker AND sha256 declared — must refuse to claim install",
+            catalog_entry_installed(&models_dir, "cv:installed_k", &files),
+            "a complete legacy file must not be re-downloaded just to establish a receipt",
         );
         let _ = std::fs::remove_dir_all(&models_dir);
     }

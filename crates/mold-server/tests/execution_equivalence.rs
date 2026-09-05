@@ -38,6 +38,41 @@ fn fixture() -> (TempDir, Config, GenerateRequest) {
     (root, config, request)
 }
 
+// Receipt persistence is supported on Unix. Run receipt-specific assertions
+// in a fresh process with a private writable store, independent of the host's
+// MOLD_HOME and without changing environment variables under parallel tests.
+#[cfg(unix)]
+fn run_with_private_receipt_store(test: &str) -> bool {
+    if std::env::var("TEST_EQUIVALENCE_RECEIPTS_CHILD").as_deref() == Ok(test) {
+        return false;
+    }
+    let root = TempDir::new().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("TEST_EQUIVALENCE_RECEIPTS_CHILD", test)
+        .env(
+            "MOLD_ARTIFACT_ATTESTATIONS_DIR",
+            root.path().join("receipts"),
+        )
+        .status()
+        .unwrap();
+    assert!(status.success(), "receipt fixture subprocess failed");
+    true
+}
+
+// Simulate completed acquisition, not implicit runtime verification. Assert the
+// receipt is usable so these tests cannot accidentally compare local identities.
+#[cfg(unix)]
+fn record_verified_fixture(path: &Path) {
+    let digest = mold_core::download::pinned_file_digest(path).unwrap();
+    assert_eq!(
+        mold_core::download::installed_artifact_identity(path)
+            .unwrap()
+            .observed_sha256(),
+        Some(digest.as_str())
+    );
+}
+
 fn path(root: &Path, name: &str) -> String {
     root.join(name).display().to_string()
 }
@@ -262,8 +297,53 @@ fn frozen_engine_semantics_change_equivalence_identity() {
 }
 
 #[test]
-fn byte_identical_artifacts_at_different_paths_keep_sha_identity_but_not_runtime_route() {
+fn unverified_equal_bytes_keep_distinct_local_installation_identities() {
+    use mold_server::execution_plan::EquivalenceContentIdentity;
+    let (root, mut config, request) = fixture();
+    let devices = [device("cuda:0", GpuBackend::Cuda, Some((8, 6)))];
+    let original = resolve_execution_plans(&config, &request, &devices, false)
+        .unwrap()
+        .remove(0);
+    let copied = root.path().join("copied-q4.gguf");
+    std::fs::copy(root.path().join("transformer-q4.gguf"), &copied).unwrap();
+    config.models.get_mut("test:q4").unwrap().transformer = Some(copied.display().to_string());
+    let alias = resolve_execution_plans(&config, &request, &devices, false)
+        .unwrap()
+        .remove(0);
+    for plan in [&original, &alias] {
+        assert!(plan
+            .execution_environment
+            .components
+            .iter()
+            .all(|component| matches!(
+                component.content_fingerprint,
+                EquivalenceContentIdentity::LocalInstallation(_)
+            )));
+    }
+    assert_ne!(
+        original.execution_environment.components,
+        alias.execution_environment.components
+    );
+    assert_ne!(
+        original.execution_equivalence_fingerprint,
+        alias.execution_equivalence_fingerprint
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn verified_artifacts_at_different_paths_keep_sha_identity_but_not_runtime_route() {
+    if run_with_private_receipt_store(
+        "verified_artifacts_at_different_paths_keep_sha_identity_but_not_runtime_route",
+    ) {
+        return;
+    }
     let (root, config, request) = fixture();
+    // Equal SHA identities require acquisition evidence before runtime planning.
+    // Complete local fixtures without receipts intentionally get local identities.
+    for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+        record_verified_fixture(&root.path().join(name));
+    }
     let base = resolve_execution_plans(
         &config,
         &request,
@@ -277,6 +357,7 @@ fn byte_identical_artifacts_at_different_paths_keep_sha_identity_but_not_runtime
     std::fs::create_dir(&alias_root).unwrap();
     for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
         std::fs::copy(root.path().join(name), alias_root.join(name)).unwrap();
+        record_verified_fixture(&alias_root.join(name));
     }
     let mut aliased_config = config;
     let aliased = aliased_config.models.get_mut("test:q4").unwrap();
@@ -536,8 +617,14 @@ fn legacy_family_presets_remain_conservatively_model_qualified() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn sd_and_ltx_single_file_layout_routes_cannot_collapse_by_equal_bytes() {
+    if run_with_private_receipt_store(
+        "sd_and_ltx_single_file_layout_routes_cannot_collapse_by_equal_bytes",
+    ) {
+        return;
+    }
     let (root, mut config, mut request) = fixture();
     let template = config.models.remove("test:q4").unwrap();
     for name in [
@@ -546,6 +633,7 @@ fn sd_and_ltx_single_file_layout_routes_cannot_collapse_by_equal_bytes() {
         "split-vae.bin",
     ] {
         std::fs::write(root.path().join(name), b"identical runtime-layout bytes").unwrap();
+        record_verified_fixture(&root.path().join(name));
     }
 
     for family in ["sd15", "sdxl", "ltx-video"] {

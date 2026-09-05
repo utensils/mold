@@ -157,8 +157,8 @@ pub struct IdentityFeatures {
 pub struct IdentityExtractor {
     detector: ScrfdDetector,
     recognizer: ArcFaceRecognizer,
-    detector_sha256: String,
-    recognizer_sha256: String,
+    detector_sha256: Option<String>,
+    recognizer_sha256: Option<String>,
 }
 
 impl IdentityExtractor {
@@ -179,23 +179,16 @@ impl IdentityExtractor {
     /// Load from explicit model paths. Used by tests, which hold the files
     /// without a configured mold home.
     ///
-    /// Both graphs are authenticated against the manifest's SHA-256 pins
-    /// before they are decoded — the paths may be arbitrary, but the bytes at
-    /// them may not. There is deliberately no unverified variant of this
-    /// constructor: an extractor built from a graph nobody vouched for is the
-    /// thing the pin exists to prevent. Tools that inspect arbitrary graphs
-    /// call [`onnx_graph::load_onnx_model`] with `None` instead, and get no
-    /// extractor out of it.
+    /// Installed graphs retain size, descriptor and parser checks without a
+    /// checksum pass. Downloads verify before publication; explicit inspection
+    /// can use [`onnx_graph::load_onnx_model`] to verify a supplied pin.
     pub fn from_paths(detector: &Path, recognizer: &Path) -> Result<Self> {
         Self::from_paths_on_device(detector, recognizer, &candle_core::Device::Cpu)
     }
 
-    /// [`Self::from_paths`], placing both networks on `device`.
-    pub fn from_paths_on_device(
-        detector: &Path,
-        recognizer: &Path,
-        device: &candle_core::Device,
-    ) -> Result<Self> {
+    /// Explicitly verify both graph pins before decoding and loading on CPU.
+    /// Intended for qualification and parity tests, not routine generation.
+    pub fn from_paths_verified(detector: &Path, recognizer: &Path) -> Result<Self> {
         let det = onnx_graph::load_onnx_model(
             detector,
             onnx_graph::pinned_artifact(ModelComponent::FaceDetector),
@@ -204,24 +197,52 @@ impl IdentityExtractor {
             recognizer,
             onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer),
         )?;
+        Self::from_loaded_models(det, rec, &candle_core::Device::Cpu)
+    }
+
+    /// [`Self::from_paths`], placing both networks on `device`.
+    pub fn from_paths_on_device(
+        detector: &Path,
+        recognizer: &Path,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
+        let det = onnx_graph::load_installed_onnx_model(
+            detector,
+            onnx_graph::pinned_artifact(ModelComponent::FaceDetector),
+        )?;
+        let rec = onnx_graph::load_installed_onnx_model(
+            recognizer,
+            onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer),
+        )?;
+        Self::from_loaded_models(det, rec, device)
+    }
+
+    fn from_loaded_models(
+        det: onnx_graph::LoadedOnnxModel,
+        rec: onnx_graph::LoadedOnnxModel,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
+        let detector_sha256 = det.observed_sha256().map(str::to_owned);
+        let recognizer_sha256 = rec.observed_sha256().map(str::to_owned);
         Ok(Self {
             detector: ScrfdDetector::new_on_device(det.model, device)
                 .context("loading the SCRFD detector")?,
             recognizer: ArcFaceRecognizer::new_on_device(rec.model, device)
                 .context("loading the ArcFace recognizer")?,
-            detector_sha256: det.sha256,
-            recognizer_sha256: rec.sha256,
+            detector_sha256,
+            recognizer_sha256,
         })
     }
 
-    /// SHA-256 of the detector bytes this extractor decoded.
-    pub fn detector_sha256(&self) -> &str {
-        &self.detector_sha256
+    /// Observed detector digest, from explicit verification or a saved receipt.
+    /// `None` for a local installation without a receipt; routine loads do not hash.
+    pub fn detector_sha256(&self) -> Option<&str> {
+        self.detector_sha256.as_deref()
     }
 
-    /// SHA-256 of the recognizer bytes this extractor decoded.
-    pub fn recognizer_sha256(&self) -> &str {
-        &self.recognizer_sha256
+    /// Observed recognizer digest, with the same policy as [`Self::detector_sha256`].
+    pub fn recognizer_sha256(&self) -> Option<&str> {
+        self.recognizer_sha256.as_deref()
     }
 
     /// Extract identity features from encoded image bytes.

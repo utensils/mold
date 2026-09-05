@@ -202,3 +202,5 @@ licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the
 [model documentation](https://utensils.io/mold/models/). InsightFace identity
 weights require separate acceptance and are limited to non-commercial research
 use.
+
+Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.

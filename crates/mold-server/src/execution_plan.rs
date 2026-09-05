@@ -193,6 +193,8 @@ pub struct ContentFingerprint(pub String);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum EquivalenceContentIdentity {
     Sha256(String),
+    /// Complete local installation without an observed content digest.
+    LocalInstallation(String),
     /// A read-only preview dependency whose immutable registry identity is
     /// known but whose bytes have not landed yet. This domain is never used
     /// by admission or worker leases.
@@ -599,7 +601,7 @@ impl ExecutionEnvironmentDescriptor {
         let encoded = serde_json::to_vec(self)
             .expect("execution environment descriptor serialization is infallible");
         let mut hash = Sha256::new();
-        hash.update(b"mold.execution-equivalence.v3\0");
+        hash.update(b"mold.execution-equivalence.v4\0");
         hash.update(encoded);
         ExecutionEquivalenceFingerprint::new(format!("{:x}", hash.finalize()))
     }
@@ -2156,16 +2158,15 @@ pub(crate) fn preparation_authority_fingerprint(
     format!("{:x}", hash.finalize())
 }
 
-/// Populate metadata-bound byte-identity and format-fact caches during
+/// Populate metadata-bound installation-identity and format-fact caches during
 /// asynchronous dependency preparation.
 ///
 /// Execution-plan resolution runs in the scheduler coordinator and must only
 /// perform metadata checks plus cache lookups for normal prepared jobs. The
 /// caller is responsible for invoking this function through
-/// `tokio::task::spawn_blocking`, because unverified artifacts still require
-/// blocking content hashing and every artifact requires header probing.
-/// Verified downloads reuse their attested digest marker instead of rereading
-/// multi-gigabyte checkpoint bodies.
+/// `tokio::task::spawn_blocking` for bounded header probing. Artifact bodies
+/// are never read to establish runtime identity; missing receipts resolve to
+/// a process-local installed-file identity.
 pub(crate) fn warm_execution_equivalence_cache(
     config: &Config,
     request: &GenerateRequest,
@@ -2200,7 +2201,7 @@ pub(crate) fn warm_execution_equivalence_cache(
     let mut completed_bytes = 0_u64;
     crate::variant_dependencies::publish_preparation_progress(
         preparation_progress,
-        "Verifying model files",
+        "Resolving installed model",
         completed_bytes,
         total_bytes,
     );
@@ -2212,7 +2213,7 @@ pub(crate) fn warm_execution_equivalence_cache(
         let mut progress = |done: u64, _total: u64| {
             crate::variant_dependencies::publish_preparation_progress(
                 preparation_progress,
-                "Verifying model files",
+                "Resolving installed model",
                 completed_bytes.saturating_add(done.min(artifact_bytes)),
                 total_bytes,
             );
@@ -2222,7 +2223,7 @@ pub(crate) fn warm_execution_equivalence_cache(
         completed_bytes = completed_bytes.saturating_add(artifact_bytes);
         crate::variant_dependencies::publish_preparation_progress(
             preparation_progress,
-            "Verifying model files",
+            "Resolving installed model",
             completed_bytes,
             total_bytes,
         );
@@ -3346,7 +3347,7 @@ pub(crate) fn execution_environment_descriptor(
         })
         .collect();
     Ok(ExecutionEnvironmentDescriptor {
-        schema_version: 3,
+        schema_version: 4,
         backend: device.backend,
         architecture,
         attention_kernel_class: match attention_backend {
@@ -3933,21 +3934,6 @@ fn artifact_fingerprint_cache() -> &'static Mutex<ArtifactFingerprintCache> {
     })
 }
 
-#[cfg(not(any(unix, windows)))]
-fn hash_artifact_contents(path: &Path) -> std::io::Result<ContentFingerprint> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    Ok(ContentFingerprint(format!("{:x}", hash.finalize())))
-}
-
 fn fingerprint_path(path: &Path) -> ContentFingerprint {
     let Ok(before_metadata) = std::fs::metadata(path) else {
         let mut hash = Sha256::new();
@@ -3970,9 +3956,7 @@ fn fingerprint_path(path: &Path) -> ContentFingerprint {
 
     // Unix inode+ctime and Windows creation/file metadata are immutable
     // replacement identities and avoid reading multi-gigabyte checkpoints.
-    // Exotic platforms fall back to one cached content hash per metadata
-    // identity.
-    #[cfg(any(unix, windows))]
+    // Other platforms use their available metadata without body reads.
     let fingerprint = {
         let mut hash = Sha256::new();
         hash.update(path.as_os_str().as_encoded_bytes());
@@ -3982,13 +3966,6 @@ fn fingerprint_path(path: &Path) -> ContentFingerprint {
         }
         ContentFingerprint(format!("{:x}", hash.finalize()))
     };
-    #[cfg(not(any(unix, windows)))]
-    let fingerprint = hash_artifact_contents(path).unwrap_or_else(|error| {
-        let mut hash = Sha256::new();
-        hash.update(path.as_os_str().as_encoded_bytes());
-        hash.update(error.kind().to_string().as_bytes());
-        ContentFingerprint(format!("{:x}", hash.finalize()))
-    });
     if std::fs::metadata(path)
         .ok()
         .map(|metadata| artifact_metadata_identity(path, &metadata))
@@ -4499,12 +4476,16 @@ fn hash_equivalence_artifact_contents_with_progress(
     path: &Path,
     progress: impl FnMut(u64, u64) -> anyhow::Result<()>,
 ) -> anyhow::Result<EquivalenceContentIdentity> {
-    // Use the retained-descriptor verifier shared with downloads. It refuses
-    // symlinks and path replacement, single-flights concurrent callers, and
-    // persists an owner-private identity-bound attestation so an unchanged
-    // legacy artifact is read only once across process restarts.
-    mold_core::download::pinned_file_digest_with_progress(path, progress)
-        .map(EquivalenceContentIdentity::Sha256)
+    let identity = mold_core::download::installed_artifact_identity(path)?;
+    let _ = progress;
+    Ok(match identity {
+        mold_core::download::InstalledArtifactIdentity::Sha256(digest) => {
+            EquivalenceContentIdentity::Sha256(digest)
+        }
+        mold_core::download::InstalledArtifactIdentity::LocalInstallation(token) => {
+            EquivalenceContentIdentity::LocalInstallation(token)
+        }
+    })
 }
 
 fn unknown_equivalence_content(
@@ -7195,13 +7176,16 @@ mod tests {
         std::fs::write(&path, b"already verified model bytes").unwrap();
         let forged = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         mold_core::download::write_sha256_marker(&path, forged).unwrap();
-        let file = mold_core::secure_file::open_regular_file_no_follow(&path).unwrap();
-        let expected = mold_core::secure_file::sha256_open_file(&file).unwrap();
-
+        assert!(
+            matches!(
+                hash_equivalence_artifact_contents(&path).unwrap(),
+                EquivalenceContentIdentity::LocalInstallation(_)
+            ),
+            "writable marker must not manufacture an observed digest"
+        );
         assert_eq!(
-            hash_equivalence_artifact_contents(&path).unwrap(),
-            EquivalenceContentIdentity::Sha256(expected),
-            "placement preparation must authenticate current bytes through the durable pinned-digest authority"
+            std::fs::read(&path).unwrap(),
+            b"already verified model bytes"
         );
     }
 
@@ -7441,7 +7425,7 @@ mod tests {
         );
         assert!(matches!(
             equivalence_fingerprint_path(&path),
-            EquivalenceContentIdentity::Sha256(_)
+            EquivalenceContentIdentity::LocalInstallation(_)
         ));
     }
 
@@ -7519,6 +7503,22 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
+        // Isolate global work counters from unrelated acquisition tests, and
+        // execute twice to exercise re-preparation in fresh server processes.
+        const CHILD: &str = "TEST_ZERO_HASH_PREPARATION";
+        if std::env::var_os(CHILD).is_none() {
+            let state = TempDir::new().unwrap();
+            for _ in 0..2 {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "execution_plan::tests::prepared_descriptor_performs_zero_artifact_reads_after_warm", "--nocapture"])
+                    .env(CHILD, "1")
+                    .env("MOLD_ARTIFACT_ATTESTATIONS_DIR", state.path().join("receipts"))
+                    .status().unwrap();
+                assert!(status.success());
+            }
+            return;
+        }
+        let initial_work = mold_core::download::artifact_hash_work();
         let root = TempDir::new().unwrap();
         for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
             std::fs::write(root.path().join(name), b"prepared-format-cache").unwrap();
@@ -7560,9 +7560,58 @@ mod tests {
         let progress = progress
             .snapshot()
             .expect("warm pass reports its byte progress");
-        assert_eq!(progress.component, "Verifying model files");
+        assert_eq!(progress.component, "Resolving installed model");
         assert!(progress.bytes_total > 0);
         assert_eq!(progress.bytes_done, progress.bytes_total);
+
+        assert_eq!(mold_core::download::artifact_hash_work(), initial_work);
+        let artifact_paths = concrete_artifacts_for_family(
+            &paths,
+            "flux2",
+            &[],
+            &prepared.by_device["cuda:0"].engine_config,
+        )
+        .into_values()
+        .collect::<Vec<_>>();
+        let original = artifact_paths
+            .iter()
+            .map(|path| artifact_facts_path_with_policy(path, false).content)
+            .collect::<Vec<_>>();
+        // Explicit verification may create receipts between preparation and
+        // dispatch. Neither that nor cache eviction may change frozen identity.
+        for path in &artifact_paths {
+            mold_core::download::pinned_file_digest(path).unwrap();
+        }
+        let after_explicit = mold_core::download::artifact_hash_work();
+        for round in 0..3 {
+            for path in &artifact_paths {
+                artifact_fact_cache().lock().unwrap().remove_path(path);
+            }
+            if round == 1 {
+                let receipts = std::env::var_os("MOLD_ARTIFACT_ATTESTATIONS_DIR").unwrap();
+                if let Ok(entries) = std::fs::read_dir(receipts) {
+                    for entry in entries {
+                        std::fs::remove_file(entry.unwrap().path()).unwrap();
+                    }
+                }
+            }
+            warm_execution_equivalence_cache(&config, &request, &prepared, None);
+            let current = artifact_paths
+                .iter()
+                .map(|path| artifact_facts_path_with_policy(path, false).content)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                current, original,
+                "receipt changes and fact eviction preserve identity"
+            );
+            // Another model's artifacts warm between repeated A preparations.
+            let other = root.path().join("model-b.gguf");
+            if !other.exists() {
+                std::fs::write(&other, b"another installed model").unwrap();
+            }
+            artifact_facts_path_with_policy(&other, false);
+        }
+        assert_eq!(mold_core::download::artifact_hash_work(), after_explicit);
 
         let reads = Arc::new(AtomicUsize::new(0));
         let _guards = concrete_artifacts_for_family(
@@ -7835,10 +7884,10 @@ mod tests {
     }
 
     #[test]
-    fn execution_equivalence_v3_schema_and_hash_are_golden() {
+    fn execution_equivalence_v4_schema_and_hash_are_golden() {
         let content = EquivalenceContentIdentity::Sha256("00".repeat(32));
         let descriptor = ExecutionEnvironmentDescriptor {
-            schema_version: 3,
+            schema_version: 4,
             backend: GpuBackend::Cuda,
             architecture: DeviceArchitectureClass::CudaComputeCapability { major: 8, minor: 6 },
             attention_kernel_class: AttentionKernelClass::Math,
@@ -7904,11 +7953,11 @@ mod tests {
         let encoded = serde_json::to_string(&descriptor).unwrap();
         assert_eq!(
             encoded,
-            r#"{"schema_version":3,"backend":"cuda","architecture":{"CudaComputeCapability":{"major":8,"minor":6}},"attention_kernel_class":"Math","code":{"package_version":"0.20.2","source_revision":"0bacf81d","scope":"ImmutableBuild","process_discriminator":null},"semantic_config":{"family":"flux","is_schnell":false,"is_turbo":null,"scheduler":null,"t5_variant":"q4","qwen3_variant":null,"qwen2_variant":null,"qwen2_text_encoder_mode":null,"ltx2_gemma_variant":null,"attention_backend":"Math","attention_chunk":"Auto","vae_tiling":"Auto","vae_dtype":"Auto","runtime":[{"variable":"CfgPlus","value":{"Boolean":false}}]},"runtime_model_id":"flux-dev:bf16","runtime_artifact_paths":[{"role":"Transformer","path":{"Portable":"/models/transformer.safetensors"}}],"model_family":"flux","model_fingerprint":"model-content","components":[{"role":"Transformer","content_fingerprint":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"precision":{"storage":{"Unknown":{"reason":"UnsupportedContainer","content_discriminator":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}},"compute_dtype":"Bf16"},"dtype":"Bf16","quantization":null,"placement":"AssignedDevice","load_strategy":"Resident"}],"loras":[],"engine_load_strategy":"Eager","offload_mode":"None","output_format":"png","determinism_class":"CpuSeededCrossBackend"}"#
+            r#"{"schema_version":4,"backend":"cuda","architecture":{"CudaComputeCapability":{"major":8,"minor":6}},"attention_kernel_class":"Math","code":{"package_version":"0.20.2","source_revision":"0bacf81d","scope":"ImmutableBuild","process_discriminator":null},"semantic_config":{"family":"flux","is_schnell":false,"is_turbo":null,"scheduler":null,"t5_variant":"q4","qwen3_variant":null,"qwen2_variant":null,"qwen2_text_encoder_mode":null,"ltx2_gemma_variant":null,"attention_backend":"Math","attention_chunk":"Auto","vae_tiling":"Auto","vae_dtype":"Auto","runtime":[{"variable":"CfgPlus","value":{"Boolean":false}}]},"runtime_model_id":"flux-dev:bf16","runtime_artifact_paths":[{"role":"Transformer","path":{"Portable":"/models/transformer.safetensors"}}],"model_family":"flux","model_fingerprint":"model-content","components":[{"role":"Transformer","content_fingerprint":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"precision":{"storage":{"Unknown":{"reason":"UnsupportedContainer","content_discriminator":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}},"compute_dtype":"Bf16"},"dtype":"Bf16","quantization":null,"placement":"AssignedDevice","load_strategy":"Resident"}],"loras":[],"engine_load_strategy":"Eager","offload_mode":"None","output_format":"png","determinism_class":"CpuSeededCrossBackend"}"#
         );
         assert_eq!(
             descriptor.fingerprint().as_str(),
-            "8a7ad345c90e7dde228c90ee4a219986ad705a0958ead00d143ead84bef72be7"
+            "3081a2b5441911b29d103ba5d5a5433971f247956b844bdad8436f3db5901c88"
         );
     }
 

@@ -293,21 +293,8 @@ fn cache_put(key: String, value: CachedIdentity) {
     cache.truncate(IDENTITY_CACHE_ENTRIES);
 }
 
-/// Every asset digest this build's extraction will record, known before any of
-/// them is opened.
-///
-/// The adapter is family-specific, so the digest that enters the key is the
-/// family's own manifest pin — which is what keeps a FLUX identity and an SDXL
-/// identity for the SAME photograph two different cache entries. They are
-/// different IDFormers producing genuinely different tensors; a key that
-/// ignored the family would serve one render the other's face embedding.
-///
-/// A cache key needs the digests BEFORE the extraction runs, which is why they
-/// are resolved from the manifest pins and compiled-in constants here rather
-/// than from an [`IdentityAssetDigests`] a request has not produced yet. The
-/// two cannot disagree: the loaders refuse any file whose bytes do not hash to
-/// the pin, so a post-load digest that differed from this one would have
-/// failed the load instead of being recorded.
+/// Expected registry pins, for acquisition diagnostics. Runtime embedding
+/// caches use `installed_asset_identities`, never these unobserved expectations.
 pub fn pinned_asset_digests(family: IdentityFamily) -> IdentityAssetDigests {
     IdentityAssetDigests {
         adapter: adapter_sha256(family),
@@ -320,6 +307,22 @@ pub fn pinned_asset_digests(family: IdentityFamily) -> IdentityAssetDigests {
             .unwrap_or_else(|| "unpinned".to_string()),
         face_parser: BISENET_DERIVED_SHA256.to_string(),
     }
+}
+
+/// Runtime cache identities describe the actual installed files, not expected
+/// manifest pins. Local identities are explicitly domain tagged.
+fn installed_asset_identities(paths: &PulidPaths) -> Result<IdentityAssetDigests> {
+    use crate::encoders::pickle_convert::{derived_parser_path, derived_vision_path};
+    let key = |path: &std::path::Path| -> Result<String> {
+        Ok(mold_core::download::installed_artifact_identity(path)?.cache_key())
+    };
+    Ok(IdentityAssetDigests {
+        adapter: format!("{}|{}", paths.family.manifest(), key(&paths.adapter)?),
+        vision: key(&derived_vision_path(paths))?,
+        face_detector: key(&paths.face_detector)?,
+        face_recognizer: key(&paths.face_recognizer)?,
+        face_parser: key(&derived_parser_path(paths))?,
+    })
 }
 
 /// One lock per cache key, so concurrent callers asking for the SAME
@@ -504,7 +507,8 @@ pub fn extract_identity_embeddings(
     mold_core::identity::validate_id_images(images).map_err(IdentityError::Decode)?;
 
     let count = images.len();
-    let assets = pinned_asset_digests(paths.family);
+    crate::encoders::pickle_convert::prepare_derived_files(paths)?;
+    let assets = installed_asset_identities(paths)?;
     let sources: Vec<String> = images
         .iter()
         .map(|bytes| mold_core::identity::id_image_sha256(bytes))
@@ -651,6 +655,9 @@ pub fn extract_identity_embeddings(
     let tokens = mold_core::identity::average_identity_tokens(&per_image)
         .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
 
+    if installed_asset_identities(paths)? != assets {
+        return Err(anyhow::anyhow!("identity assets changed during extraction").into());
+    }
     let embedding = FrozenIdentityEmbedding::from_sources(&tokens, sources, assets)
         .map_err(|reason| IdentityError::Runtime(anyhow::anyhow!(reason)))?;
     let embedding = match uncond {
@@ -860,14 +867,14 @@ pub(crate) fn compose_identity_token_sets_observed(
         // The derived artifact arrives as verified private BYTES — never a
         // pathname a loader would resolve a second time, never a shared mapping
         // another writer could edit underneath it. See
-        // `pickle_convert::AuthenticatedArtifact`. Scoped to the build that
+        // `pickle_convert::LoadedArtifact`. Scoped to the build that
         // consumes it, so its 53 MB copy is released as soon as the parser owns
         // its tensors.
         let parser = {
             let started = std::time::Instant::now();
             let artifact = ensure_bisenet_parser_safetensors(paths)
                 .context("materializing the BiSeNet face parser")?;
-            let parser = BiSeNetParser::from_authenticated(&artifact, device)
+            let parser = BiSeNetParser::from_installed(&artifact, device)
                 .context("building the BiSeNet face parser")?;
             settle(device)?;
             observe(ComposeStage::ParserBuild, started.elapsed());
@@ -909,7 +916,7 @@ pub(crate) fn compose_identity_token_sets_observed(
                 .context("materializing the EVA02-CLIP vision tower")?;
             observe(ComposeStage::EvaAuthenticate, started.elapsed());
             let started = std::time::Instant::now();
-            let tower = EvaClipVisionTower::from_authenticated(&artifact, device, tower_dtype)
+            let tower = EvaClipVisionTower::from_installed(&artifact, device, tower_dtype)
                 .context("building the EVA02-CLIP-L-14-336 vision tower")?;
             settle(device)?;
             observe(ComposeStage::EvaConstruct, started.elapsed());
@@ -945,7 +952,7 @@ pub(crate) fn compose_identity_token_sets_observed(
     // MANIFEST file whose digest the download verified, not an artifact mold
     // derived and hashed moments ago. There is no fresher authentication here
     // to throw away by reopening a name (see `adapter_sha256`, and
-    // `pickle_convert::AuthenticatedArtifact` for the case that is different).
+    // `pickle_convert::LoadedArtifact` for the case that is different).
     // `pipeline_flux.py:99-109` and `pipeline_v1_1.py:151-163` both split the
     // checkpoint by leading module name; the IDFormer half is `pulid_encoder.*`
     // in the FLUX file and `id_adapter.*` in the SDXL v1.1 file. The two are
@@ -1277,6 +1284,49 @@ mod tests {
     /// failure `pulid-perf.md` §2 enumerates: a repair pull that swapped the
     /// adapter, or a code change to the arithmetic, silently serving the old
     /// answer.
+    #[test]
+    fn installed_asset_replacements_invalidate_embedding_keys() {
+        use crate::encoders::pickle_convert::{derived_parser_path, derived_vision_path};
+        let root = tempfile::tempdir().unwrap();
+        let mut paths = PulidPaths {
+            family: IdentityFamily::Flux,
+            adapter: root.path().join("adapter"),
+            vision_encoder_source: root.path().join("vision.pt"),
+            face_detector: root.path().join("detector"),
+            face_recognizer: root.path().join("recognizer"),
+            face_parser_source: root.path().join("parser.pt"),
+        };
+        let files = vec![
+            paths.adapter.clone(),
+            derived_vision_path(&paths),
+            paths.face_detector.clone(),
+            paths.face_recognizer.clone(),
+            derived_parser_path(&paths),
+        ];
+        for path in &files {
+            std::fs::write(path, b"aaa").unwrap();
+        }
+        for (index, path) in files.iter().enumerate() {
+            let before = installed_asset_identities(&paths).unwrap();
+            std::fs::rename(path, root.path().join(format!("old-{index}"))).unwrap();
+            std::fs::write(path, b"bbb").unwrap();
+            let after = installed_asset_identities(&paths).unwrap();
+            assert_ne!(
+                mold_core::identity::identity_cache_key("photo", &before),
+                mold_core::identity::identity_cache_key("photo", &after)
+            );
+            if index == 0 {
+                assert_ne!(before.adapter, after.adapter);
+            }
+        }
+        let flux = installed_asset_identities(&paths).unwrap();
+        paths.family = IdentityFamily::Sdxl;
+        assert_ne!(
+            flux.adapter,
+            installed_asset_identities(&paths).unwrap().adapter
+        );
+    }
+
     #[test]
     fn every_key_component_changes_the_key() {
         use mold_core::identity::identity_cache_key;

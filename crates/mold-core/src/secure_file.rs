@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-fn absolute_lexical_path(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolute_lexical_path(path: &Path) -> Result<PathBuf> {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {

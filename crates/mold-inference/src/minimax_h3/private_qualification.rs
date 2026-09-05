@@ -63,7 +63,11 @@ pub struct H3QualifiedArtifact {
     pub component: &'static str,
     pub source_revision: &'static str,
     pub size_bytes: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub sha256: String,
+    pub expected_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_identity: Option<mold_core::download::InstalledArtifactIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_identity_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +279,27 @@ pub(crate) fn qualify_private_artifacts_with_control(
     models_root: &Path,
     model: &str,
     authorization_record: &Path,
+    progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
+) -> Result<H3PrivateArtifactQualificationReport> {
+    inspect_artifacts_with_control(models_root, model, authorization_record, true, progress)
+}
+
+/// Runtime resolution trusts complete installed weights, retaining structure and
+/// authorization checks. Explicit qualification remains a separate full scan.
+pub(crate) fn resolve_installed_artifacts_with_control(
+    models_root: &Path,
+    model: &str,
+    authorization_record: &Path,
+    progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
+) -> Result<H3PrivateArtifactQualificationReport> {
+    inspect_artifacts_with_control(models_root, model, authorization_record, false, progress)
+}
+
+pub(crate) fn inspect_artifacts_with_control(
+    models_root: &Path,
+    model: &str,
+    authorization_record: &Path,
+    verify_contents: bool,
     mut progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
 ) -> Result<H3PrivateArtifactQualificationReport> {
     #[cfg(feature = "h3")]
@@ -307,13 +332,30 @@ pub(crate) fn qualify_private_artifacts_with_control(
         let expected_sha = artifact.file.sha256.ok_or_else(|| {
             anyhow!("private H3 manifest file {relative_path} has no pinned SHA-256")
         })?;
-        let (actual_sha, authenticated_identity) = hash_exact_file(
-            artifact,
-            expected_sha,
-            verified_before,
-            total_bytes,
-            &mut progress,
-        )?;
+        let (actual_sha, authenticated_identity, installed_identity) = if verify_contents {
+            let (sha, identity) = hash_exact_file(
+                artifact,
+                expected_sha,
+                verified_before,
+                total_bytes,
+                &mut progress,
+            )?;
+            (sha, identity, None)
+        } else {
+            let (identity, installed) = resolve_installed_exact_file(artifact)?;
+            progress(H3ArtifactHashProgress {
+                relative_path: relative_path.clone(),
+                artifact_bytes_verified: 0,
+                artifact_bytes_total: 0,
+                total_bytes_verified: 0,
+                total_bytes: 0,
+            })?;
+            (
+                installed.observed_sha256().unwrap_or_default().to_string(),
+                identity,
+                Some(installed),
+            )
+        };
         let structural = inspect_structure(artifact, task, published_transformer)?;
         require_artifact_identity(artifact, &authenticated_identity, "structural inspection")?;
         authenticated_identities.insert(artifact.relative_path.clone(), authenticated_identity);
@@ -328,6 +370,8 @@ pub(crate) fn qualify_private_artifacts_with_control(
             })?,
             size_bytes: artifact.file.size_bytes,
             sha256: actual_sha,
+            expected_sha256: expected_sha.to_string(),
+            installed_identity,
             header_identity_sha256: structural.header_identity_sha256,
             tensor_count: structural.tensor_count,
             structural_contract: structural.contract,
@@ -356,7 +400,9 @@ pub(crate) fn qualify_private_artifacts_with_control(
         } else {
             H3_PRIVATE_UAT_CLAIM_MARKER
         },
-        decision: if cfg!(feature = "h3") {
+        decision: if !verify_contents {
+            "resolved-installed-artifacts"
+        } else if cfg!(feature = "h3") {
             "verified-public-artifacts"
         } else {
             "qualified-private-artifacts"
@@ -908,6 +954,22 @@ fn require_regular_artifact(artifact: &ResolvedArtifact<'_>) -> Result<()> {
     Ok(())
 }
 
+fn resolve_installed_exact_file(
+    artifact: &ResolvedArtifact<'_>,
+) -> Result<(FileIdentity, mold_core::download::InstalledArtifactIdentity)> {
+    let file = mold_core::secure_file::open_regular_file_no_follow(&artifact.canonical_path)?;
+    let identity = FileIdentity::from_metadata(&file.metadata()?);
+    anyhow::ensure!(
+        identity.len == artifact.file.size_bytes,
+        "installed H3 artifact has incorrect length"
+    );
+    let installed = mold_core::download::installed_artifact_identity_from_file(
+        &artifact.canonical_path,
+        &file,
+    )?;
+    Ok((identity, installed))
+}
+
 fn hash_exact_file(
     artifact: &ResolvedArtifact<'_>,
     expected_sha: &str,
@@ -1280,6 +1342,9 @@ fn qualification_identity(
         digest.update(artifact.source_revision.as_bytes());
         digest.update(artifact.size_bytes.to_le_bytes());
         digest.update(artifact.sha256.as_bytes());
+        if let Some(identity) = &artifact.installed_identity {
+            digest.update(identity.cache_key().as_bytes());
+        }
         if let Some(header) = &artifact.header_identity_sha256 {
             digest.update(header.as_bytes());
         }
@@ -1359,6 +1424,30 @@ mod tests {
             Ok(())
         })?;
         Ok(reads)
+    }
+
+    #[test]
+    fn installed_h3_artifact_resolves_without_an_observed_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("legacy.bin");
+        let (file, _) = artifact_fixture(&path, &[7_u8; 4096]);
+        let artifact = ResolvedArtifact {
+            file: &file,
+            relative_path: "legacy.bin".into(),
+            canonical_path: path.clone(),
+        };
+        let (fence, first) = resolve_installed_exact_file(&artifact).unwrap();
+        assert!(matches!(
+            first,
+            mold_core::download::InstalledArtifactIdentity::LocalInstallation(_)
+        ));
+        assert_eq!(resolve_installed_exact_file(&artifact).unwrap().1, first);
+        std::fs::rename(&path, root.path().join("old.bin")).unwrap();
+        std::fs::write(&path, [9_u8; 4096]).unwrap();
+        assert_ne!(resolve_installed_exact_file(&artifact).unwrap().1, first);
+        assert!(require_artifact_identity(&artifact, &fence, "dispatch").is_err());
+        std::fs::write(&path, b"partial").unwrap();
+        assert!(resolve_installed_exact_file(&artifact).is_err());
     }
 
     /// The ~37 GB private artifact set must be hashed at most once per

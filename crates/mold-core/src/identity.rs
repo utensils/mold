@@ -1077,6 +1077,8 @@ pub const ID_EMBEDDING_VALUES: usize = ID_EMBEDDING_TOKENS * ID_EMBEDDING_DIM;
 /// worker actually holds instead of trusting that nothing was repaired
 /// underneath it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// Historical name retained for source compatibility. Runtime values are tagged
+// sha256: or local: identities; a local token is not an observed file digest.
 pub struct IdentityAssetDigests {
     /// `pulid_flux_v0.9.1.safetensors` — the IDFormer half.
     pub adapter: String,

@@ -174,3 +174,5 @@ For most users:
 1. use manifest-backed models first
 2. add per-model defaults in `config.toml`
 3. use env-path overrides only for debugging or special deployments
+
+Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
