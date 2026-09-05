@@ -980,7 +980,7 @@ defineExpose({ setOutputMode });
             placeholder="keep every detail"
             :value="form.mesh.targetFaces ?? ''"
             :aria-invalid="targetFacesError ? 'true' : undefined"
-            class="ms-seed__input ms-card__faces font-mono text-xs"
+            class="ms-seed__input ms-card__faces font-mono text-micro"
             @input="setTargetFaces(($event.target as HTMLInputElement).value)"
           />
         </div>
@@ -1218,17 +1218,22 @@ defineExpose({ setOutputMode });
   overflow-y: auto;
   padding: 14px;
 }
+/* The strip is exactly one view toolbar tall so its bottom rule meets the
+   header's at the divider; the tabs sit on the toolbar control height. */
 .ms-inspector__tabs {
-  flex: 0 0 auto;
+  height: var(--mold-shell-viewbar-h);
+  flex: 0 0 var(--mold-shell-viewbar-h);
   display: flex;
+  align-items: center;
   gap: 2px;
-  padding: 8px 10px;
+  padding: 0 10px;
   border-bottom: var(--mold-bw) solid var(--mold-border);
   background: var(--mold-bg);
 }
 .ms-inspector__tab {
   flex: 1;
-  padding: 6px 0;
+  height: var(--mold-ctl-md);
+  padding: 0;
   border: 0;
   border-radius: var(--mold-radius-2);
   background: transparent;
@@ -1339,9 +1344,12 @@ defineExpose({ setOutputMode });
    `.ms-seed__input`, whose rule is declared later, so at equal specificity a
    bare `.ms-card__faces` lost its width and height and the face budget
    rendered as a full-width 32px seed field. */
+/* Sized to its own placeholder ("keep every detail", 17 mono characters)
+   plus padding and WebKit's spin button, as the mock draws it — a fixed cap
+   clipped the words at the larger type scales. */
 .ms-seed__input.ms-card__faces {
-  width: auto;
-  max-width: 140px;
+  width: calc(17ch + 16px + 18px);
+  max-width: 100%;
   height: var(--mold-ctl-md);
 }
 .ms-card .ms-field__hint {
