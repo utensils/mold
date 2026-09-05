@@ -132,6 +132,21 @@ mod tests {
     }
 
     #[test]
+    fn metal_memory_increase_and_reset_retain_the_observed_recommendation() {
+        for limit in [
+            MetalWiredLimit::Explicit { mib: 32768 },
+            MetalWiredLimit::Automatic,
+        ] {
+            let mut s = sample(limit);
+            s.recommended_bytes = Some(16 * GIB);
+            let s = s.resolve();
+            assert_eq!(s.effective_capacity_bytes, Some(16 * GIB));
+            assert_eq!(s.allocation_headroom_bytes, Some(12 * GIB));
+            assert_eq!(s.with_reclaimable(4 * GIB), 16 * GIB);
+        }
+    }
+
+    #[test]
     fn metal_memory_small_host_and_allocations_above_limit_saturate() {
         let mut s = sample(MetalWiredLimit::Automatic);
         s.physical_bytes = Some(16 * GIB);

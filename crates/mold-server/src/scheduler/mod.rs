@@ -3275,7 +3275,7 @@ impl Coordinator {
                         .and_then(|snapshot| {
                             snapshot.gpus.iter().find(|gpu| {
                                 gpu.backend == mold_core::GpuBackend::Metal
-                                    && gpu.ordinal as usize == worker.gpu.ordinal
+                                    && gpu.ordinal == worker.gpu.ordinal
                             })
                         })
                         .and_then(|gpu| gpu.metal_memory.as_ref())
@@ -9051,6 +9051,16 @@ mod tests {
                 },
                 &mut immediate,
             );
+            if backend == mold_core::GpuBackend::Metal {
+                assert!(
+                    coordinator
+                        .generation_plans(&coordinator.pending["job"])
+                        .is_err(),
+                    "Metal must wait for its first policy observation"
+                );
+                publish_free_vram_for_lanes(&coordinator.state, &[(backend, 24 << 30)]);
+                coordinator.reconcile_resource_capacity(&mut immediate);
+            }
             let _ = coordinator.dispatch_ready().await;
             assert_eq!(recv_grant(&worker_rx).id, "job", "{backend:?}");
 
@@ -10251,14 +10261,27 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(ordinal, (backend, free_bytes))| mold_core::GpuSnapshot {
-                    metal_memory: None,
+                    metal_memory: (*backend == mold_core::GpuBackend::Metal).then(|| {
+                        mold_core::metal_memory::MetalMemorySnapshot {
+                            wired_limit: mold_core::metal_memory::MetalWiredLimit::Automatic,
+                            physical_bytes: Some(32 << 30),
+                            available_host_bytes: Some(free_bytes.saturating_add(8 << 30)),
+                            recommended_bytes: Some(TOTAL),
+                            allocated_bytes: Some(0),
+                            effective_capacity_bytes: None,
+                            allocation_headroom_bytes: None,
+                            error: None,
+                        }
+                        .resolve()
+                    }),
                     ordinal,
                     name: format!("gpu-{ordinal}"),
                     backend: *backend,
                     vram_total: TOTAL,
                     vram_used: TOTAL.saturating_sub(*free_bytes),
-                    vram_used_by_mold: Some(0),
-                    vram_used_by_other: Some(TOTAL.saturating_sub(*free_bytes)),
+                    vram_used_by_mold: (*backend == mold_core::GpuBackend::Cuda).then_some(0),
+                    vram_used_by_other: (*backend == mold_core::GpuBackend::Cuda)
+                        .then_some(TOTAL.saturating_sub(*free_bytes)),
                     gpu_utilization: Some(0),
                 })
                 .collect(),

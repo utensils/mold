@@ -2554,11 +2554,12 @@ pub fn total_vram_bytes(_ordinal: usize) -> Option<u64> {
 
 /// Bytes loaded onto the GPU since `baseline` was sampled.
 ///
-/// `baseline = vram_in_use_bytes(ordinal)` taken **before** loading a model;
-/// this returns `vram_in_use_bytes(ordinal).saturating_sub(baseline)` so the
-/// model cache records the new load's per-model footprint, not whatever the
-/// device was already using.
+/// `baseline = vram_load_baseline(ordinal)` taken **before** loading a model.
+/// Sweep unused Metal buffers again after loading so dtype-conversion and
+/// other load-time temporaries cannot inflate the resident cache credit.
+/// CUDA's sweep is a no-op and retains its existing measurement semantics.
 pub fn vram_load_delta(ordinal: usize, baseline: u64) -> u64 {
+    release_pooled_metal_memory(ordinal);
     vram_in_use_bytes(ordinal).saturating_sub(baseline)
 }
 

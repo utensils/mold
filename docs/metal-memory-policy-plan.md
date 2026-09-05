@@ -80,17 +80,17 @@ sysinfo RAM display separately; never derive policy headroom from its used bytes
 Keep Metal allocated bytes in the additive policy block, NOT the legacy
 `mold_used_bytes` field, whose population activates CUDA attribution/cache logic.
 
-| Consumer | Budget and accounting |
-| --- | --- |
-| Hardware inventory | Installed RAM remains total hardware memory |
-| Registry/scheduler | Policy incremental headroom plus bounded reclaimable cache credit, capped by current policy total; no CUDA attribution inference |
-| Terminal feasibility classifier | Current policy total, never worker startup RAM |
-| `free_vram_bytes` / `usable_free_vram_bytes` | Incremental policy headroom; existing optional user reserve is subtracted once |
-| H3 stable admission | Whole-process policy total, preserving its separate host check |
-| Server pre-drop guard | Incremental plus known reclaimable bytes, capped by policy total |
-| Server post-drop guard | Synchronize/sweep pool, then fresh incremental policy; zero cache credit |
-| LTX-2 adaptive residency | Incremental policy intersected with existing live host floor and dispatch grant |
-| Local/chain/warm paths | Trace their device facts and revalidate before generation; eager/CPU options cannot bypass the Metal policy for GPU allocations |
+| Consumer                                     | Budget and accounting                                                                                                            |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Hardware inventory                           | Installed RAM remains total hardware memory                                                                                      |
+| Registry/scheduler                           | Policy incremental headroom plus bounded reclaimable cache credit, capped by current policy total; no CUDA attribution inference |
+| Terminal feasibility classifier              | Current policy total, never worker startup RAM                                                                                   |
+| `free_vram_bytes` / `usable_free_vram_bytes` | Incremental policy headroom; existing optional user reserve is subtracted once                                                   |
+| H3 stable admission                          | Whole-process policy total, preserving its separate host check                                                                   |
+| Server pre-drop guard                        | Incremental plus known reclaimable bytes, capped by policy total                                                                 |
+| Server post-drop guard                       | Synchronize/sweep pool, then fresh incremental policy; zero cache credit                                                         |
+| LTX-2 adaptive residency                     | Incremental policy intersected with existing live host floor and dispatch grant                                                  |
+| Local/chain/warm paths                       | Trace their device facts and revalidate before generation; eager/CPU options cannot bypass the Metal policy for GPU allocations  |
 
 Pure tests must pin the credit cap; a 48 GiB injected host changes stable capacity
 from 40 GiB to 37.44 GiB, while a 16 GiB host retains the existing 8 GiB floor.
@@ -143,35 +143,35 @@ force/unsafe bypass is added. Automated tests never use real /Library paths.
 ## Milestones and acceptance criteria
 
 - [x] M0: Review this plan with requested Claude Fable; resolve valid findings
-  and record exact model and review evidence before implementation.
-- [ ] M1: TDD pure budget arithmetic and wire compatibility. Add native read-only
-  snapshot with automatic/explicit/unsupported/error states. Verify read-only
-  native results against sysctl and a lightweight Metal probe, without models.
-- [ ] M2: Route discovery capacity, free/incremental queries, stable large-model
-  capacity, streaming and server reclaim/dispatch through shared policy. Audit
-  ledger arithmetic to avoid double subtraction and preserve host/CUDA behavior.
-  Test limit reduction, allocations above limit, cache release, stale positive
-  override, unknown probes, saturated arithmetic and 16/48 GiB machines.
-- [ ] M3: Add local administrative CLI with injectable I/O for unprivileged
-  tests. Test parsing, root rejection, unsupported OS/key, unsafe sizes, write
-  failure, mismatched readback, reset and explicit local-host semantics.
-- [ ] M4: Add opt-in persistence with temporary-directory tests for atomic
-  replace, permissions, foreign file/symlink refusal, reset, concurrent writers,
-  rollback/partial failure. Verify generated plist with native plutil. Avoid
-  mutating this machine's real kernel or boot configuration during automated tests.
-- [ ] M5: Expose additive host telemetry through existing server/device status
-  authority and shared Studio contracts; render effective limit and available
-  headroom in existing GPU/device details on affected clients. Older hosts omit
-  the section; remote clients show host values, never local system values.
-  Keep CLI/TUI/MCP host inspection consistent where they project that authority.
-- [ ] M6: Update one changelog fragment, README, CLAUDE.md, CLI skill renderer,
-  website CLI/performance/API docs and affected app docs. All examples parse.
+      and record exact model and review evidence before implementation.
+- [x] M1: TDD pure budget arithmetic and wire compatibility. Add native read-only
+      snapshot with automatic/explicit/unsupported/error states. Verify read-only
+      native results against sysctl and a lightweight Metal probe, without models.
+- [x] M2: Route discovery capacity, free/incremental queries, stable large-model
+      capacity, streaming and server reclaim/dispatch through shared policy. Audit
+      ledger arithmetic to avoid double subtraction and preserve host/CUDA behavior.
+      Test limit reduction, allocations above limit, cache release, stale positive
+      override, unknown probes, saturated arithmetic and 16/48 GiB machines.
+- [x] M3: Add local administrative CLI with injectable I/O for unprivileged
+      tests. Test parsing, root rejection, unsupported OS/key, unsafe sizes, write
+      failure, mismatched readback, reset and explicit local-host semantics.
+- [x] M4: Add opt-in persistence with temporary-directory tests for atomic
+      replace, permissions, foreign file/symlink refusal, reset, concurrent writers,
+      rollback/partial failure. Verify generated plist with native plutil. Avoid
+      mutating this machine's real kernel or boot configuration during automated tests.
+- [x] M5: Expose additive host telemetry through existing server/device status
+      authority and shared Studio contracts; render effective limit and available
+      headroom in existing GPU/device details on affected clients. Older hosts omit
+      the section; remote clients show host values, never local system values.
+      Keep CLI/TUI/MCP host inspection consistent where they project that authority.
+- [x] M6: Update one changelog fragment, README, CLAUDE.md, CLI skill renderer,
+      website CLI/performance/API docs and affected app docs. All examples parse.
 - [ ] M7: Run scoped Nix tests/checks, CPU and Metal compilation, applicable local
-  CI routes, native read-only CLI UAT, rendered affected frontend UAT, independent
-  final diff review and resolve findings. Publish/update one PR and wait for
-  local checks on the final head. The user subsequently requested closing PR
-  #1592 to stop CI usage: keep it closed, continue on the same pushed branch,
-  and report completion without reopening or merging.
+      CI routes, native read-only CLI UAT, rendered affected frontend UAT, independent
+      final diff review and resolve findings. Publish/update one PR and wait for
+      local checks on the final head. The user subsequently requested closing PR
+      #1592 to stop CI usage: keep it closed, continue on the same pushed branch,
+      and report completion without reopening or merging.
 
 ## Validation details and remaining uncertainty
 

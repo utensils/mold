@@ -73,3 +73,22 @@ classification instead of building an entire canonical device snapshot.
 Stable and streaming helper tests now use injected policy observations. The
 native read-only qualification test is explicitly ignored in automated suites;
 no native GPU inference, kernel mutation or boot-policy installation was run.
+
+## Follow-up verdict
+
+Claude Fable 5.1 reviewed `86ff8c7dc..0b93dcbc1` and confirmed all six findings
+closed in substance, with no blocking issue. Two low-severity observations:
+
+- Accepted a second unused-buffer sweep before the post-load sample, keeping
+  load-time dtype-conversion temporaries out of resident cache credit.
+- The native server guard remains tested through its pure observation adapter.
+  Broader scheduler tests now supply actual Metal policy fixtures and exercise
+  first-observation readiness, transient external pressure, recovery/dispatch
+  and avoiding a duplicate host-memory reservation. A core regression pins
+  conservative recommendation handling after an increase or reset. These do
+  not claim end-to-end privileged or model-workload qualification.
+
+The full scheduler run caught two old fixtures that supplied no Metal policy;
+those fixtures are now updated to the new required authority rather than
+weakening the fail-closed production behavior. A redundant ordinal cast found
+by clippy was also removed.
