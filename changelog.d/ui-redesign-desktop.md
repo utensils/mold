@@ -105,3 +105,30 @@
   reads "Machine utility", and the phone-pairing panels paint
   from the theme's own colours instead of hard-coded greys, so they follow the
   six themes and stop failing contrast on the light ones.
+- **Every view fits its window, down to the smallest one.** The clip timeline
+  no longer pushes Generate off the bottom: the workbench reserves the canvas,
+  the drag handle and the composer before it gives the timeline any room. A
+  portrait print's Save, Make 4 variations and Make bigger step into the ⋯ menu
+  when the picture is too narrow to hold them. The My images toolbar, the
+  machine page's toolbar, Rent a GPU's console and the Storage and Downloads
+  pair all give way instead of clipping, and the composer's rewrite control is
+  one chip — Write more for me, with Remix and its source behind it — so
+  Generate stays on the first line.
+- **Controls paint what they mean.** The queue's pause button shows the queue
+  is paused, a tight or impossible memory estimate is amber or red instead of
+  grey, a developing clip's readout is live text, every slider fills up to its
+  handle, a size warning is amber, buttons show the hand, and the timeline's
+  closing time mark grows inward from the ruler's edge instead of being cut
+  off. Styles rows line up under their column header whether or not a style
+  has a description, the family is named once as the group heading, the source
+  mark sits small beside the id, the disk meter shows the four largest families
+  and one "other", and Ready to use and the title bar count the same set. A
+  rented GPU is listed once, "Downloads here" shows this device's downloads,
+  and Machines waits for its first scan before saying the network is empty.
+- **Settings keeps your values.** Tabbing through Advanced used to save every
+  row it passed, and clearing a numeric field wrote 0 to the engine; nothing is
+  written unless the value changed, and a blank or non-numeric entry is refused
+  and restored. Speed & memory shows its three scheduler settings, every
+  section is inset from its own border, the device cards no longer paint a
+  light-grey hairline on dark themes, and the engine's version and GPU lists
+  appear even when the app launches straight into Settings.
