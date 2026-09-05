@@ -27,6 +27,41 @@ pub enum SupervisedOutcome {
     Cancelled,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum UnobservedCompletion<'a> {
+    Saved,
+    Failed(&'a str),
+    Cancelled,
+}
+
+fn unobserved_completion(outcome: &SupervisedOutcome) -> UnobservedCompletion<'_> {
+    match outcome {
+        SupervisedOutcome::Finished(result) => match result.as_ref() {
+            Ok(_) => UnobservedCompletion::Saved,
+            Err(error) => UnobservedCompletion::Failed(error),
+        },
+        SupervisedOutcome::Cancelled => UnobservedCompletion::Cancelled,
+    }
+}
+
+fn report_unobserved_completion(job_id: &str, outcome: &SupervisedOutcome) {
+    match unobserved_completion(outcome) {
+        UnobservedCompletion::Saved => tracing::info!(
+            job = %job_id,
+            "generation finished without an attached observer; the output was still saved"
+        ),
+        UnobservedCompletion::Failed(error) => tracing::warn!(
+            job = %job_id,
+            %error,
+            "generation failed without an attached observer"
+        ),
+        UnobservedCompletion::Cancelled => tracing::info!(
+            job = %job_id,
+            "generation was cancelled without an attached observer"
+        ),
+    }
+}
+
 /// The two halves a submitting handler needs: the sender that rides along on
 /// the [`crate::state::GenerationJob`], and the receiver the handler awaits.
 pub struct SupervisedJob {
@@ -71,11 +106,8 @@ pub fn supervise_job(job_id: String, cancel: Arc<Notify>) -> SupervisedJob {
             }
         };
 
-        if outcome_tx.send(outcome).is_err() {
-            tracing::info!(
-                job = %job_id,
-                "generation finished after its client disconnected; the output was still saved"
-            );
+        if let Err(outcome) = outcome_tx.send(outcome) {
+            report_unobserved_completion(&job_id, &outcome);
         }
     });
 
@@ -88,6 +120,32 @@ pub fn supervise_job(job_id: String, cancel: Arc<Notify>) -> SupervisedJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard(self.0.clone())
+        }
+    }
 
     fn ok_result() -> Result<GenerationJobResult, String> {
         Err("stub".to_string())
@@ -133,6 +191,29 @@ mod tests {
             },
             _ => panic!("expected the worker outcome to reach the handler"),
         }
+    }
+
+    #[test]
+    fn unobserved_worker_error_logs_the_failure_instead_of_a_saved_output() {
+        let outcome = SupervisedOutcome::Finished(Box::new(Err(
+            "face-identity conditioning failed: no face was detected".to_string(),
+        )));
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            report_unobserved_completion("job-4", &outcome);
+        });
+
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains(" WARN "), "expected a warning: {output}");
+        assert!(output.contains("generation failed without an attached observer"));
+        assert!(output.contains("error=face-identity conditioning failed: no face was detected"));
+        assert!(!output.contains("output was still saved"));
     }
 
     #[tokio::test]
