@@ -4,7 +4,7 @@ export type CatalogLayout = "grid" | "table";
 
 /** The intents New image owns. Every raiser routes to `/create`. */
 export type CreateIntent =
-  "newGeneration" | "generate" | "makeVariations" | "expand" | "randomizeSeed";
+  "newGeneration" | "generate" | "makeVariations" | "expand" | "randomizeSeed" | "clipScenes";
 
 const INTENT_TICK = {
   newGeneration: "newGenerationTick",
@@ -12,6 +12,7 @@ const INTENT_TICK = {
   makeVariations: "makeVariationsTick",
   expand: "expandTick",
   randomizeSeed: "randomizeSeedTick",
+  clipScenes: "clipScenesTick",
 } as const satisfies Record<CreateIntent, string>;
 
 /**
@@ -36,6 +37,7 @@ export const useUiStore = defineStore("ui", {
     makeVariationsTick: 0,
     expandTick: 0,
     randomizeSeedTick: 0,
+    clipScenesTick: 0,
     copySeedTick: 0,
     consumedTicks: {
       newGeneration: 0,
@@ -43,6 +45,7 @@ export const useUiStore = defineStore("ui", {
       makeVariations: 0,
       expand: 0,
       randomizeSeed: 0,
+      clipScenes: 0,
     } as Record<CreateIntent, number>,
     catalogLayout: "table" as CatalogLayout,
   }),
@@ -77,6 +80,10 @@ export const useUiStore = defineStore("ui", {
     },
     randomizeSeed() {
       this.randomizeSeedTick++;
+    },
+    /** Take the clip apart into scenes — the palette's door to the timeline. */
+    clipScenes() {
+      this.clipScenesTick++;
     },
     copySeed() {
       this.copySeedTick++;

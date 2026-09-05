@@ -246,6 +246,13 @@
               <span onClick="{{ setClip }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabClip }}">Short clip</span>
               <span onClick="{{ setMesh }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabMesh }}">3-D object</span>
             </div>
+            <!-- How the clip gets made. Simple is the plain render — a prompt, a clip style and a length — and is where Short clip opens; Scenes is the timeline. Offered only while the kind IS a clip. -->
+            <sc-if value="{{ isClipKind }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
+                <span onClick="{{ setSimple }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabSimple }}">Simple</span>
+                <span onClick="{{ setScenes }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabScenes }}">Scenes</span>
+              </div>
+            </sc-if>
             <span style="width:var(--mold-bw);height:20px;background:var(--mold-border)"></span>
             <span style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
@@ -377,7 +384,20 @@
                   {{ styleChip }} <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">{{ styleId }}</span> ▼
                 </span>
                 <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">Square · 1024 ▼</span>
-                <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">{{ countChip }} ▼</span>
+                <!-- Length — the simple clip's own chip, the same frames the inspector's Clip card slider writes. The track snaps to the family's frame grid; the mono readout is the truth beside it. -->
+                <sc-if value="{{ isSimpleClip }}" hint-placeholder-val="{{ false }}">
+                  <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:8px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2)">
+                    Length
+                    <span style="position:relative;display:inline-flex;align-items:center;width:84px;height:4px;background:var(--mold-border-control)">
+                      <span style="position:absolute;left:0;top:0;bottom:0;width:38%;background:{{ accent }}"></span>
+                      <span style="position:absolute;left:38%;width:12px;height:12px;margin-left:-6px;border-radius:var(--mold-radius-1);background:var(--mold-text)"></span>
+                    </span>
+                    <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">97f · 4.0s</span>
+                  </span>
+                </sc-if>
+                <sc-if value="{{ showCountChip }}" hint-placeholder-val="{{ true }}">
+                  <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">{{ countChip }} ▼</span>
+                </sc-if>
                 <span style="display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;gap:6px;height:28px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.4 3.8L17 8.2l-3.6 1.4L12 13.4 10.6 9.6 7 8.2l3.6-1.4L12 3z"></path><path d="M18.5 14l.7 1.9 1.8.6-1.8.6-.7 1.9-.7-1.9-1.8-.6 1.8-.6.7-1.9z"></path><path d="M5.5 15l.6 1.5 1.4.5-1.4.5L5.5 19l-.6-1.5-1.4-.5 1.4-.5.6-1.5z"></path></svg>
                   Write more for me
@@ -1208,6 +1228,7 @@ class Component extends DCLogic {
     explainOpen: false,
     paused: false,
     output: "still",
+    clipMode: "simple",
     insTab: "settings",
     quality: "good",
     modelsTab: "installed",
@@ -1542,7 +1563,16 @@ class Component extends DCLogic {
       sidebarActive: s.paused ? "Paused at pass 18 of 28" : "Adding detail — about 12s left",
       statusLeft: s.paused ? "queue paused · 3 waiting" : "1 image being made · 3 waiting",
 
-      isClip: s.output === "clip",
+      // The timeline and the inspector's per-scene rows belong to Scenes; the
+      // Simple clip is the plain one-shot render with a length.
+      isClip: s.output === "clip" && s.clipMode === "scenes",
+      isClipKind: s.output === "clip",
+      isSimpleClip: s.output === "clip" && s.clipMode === "simple",
+      showCountChip: !(s.output === "clip" && s.clipMode === "scenes"),
+      setSimple: () => this.set({ clipMode: "simple" }),
+      setScenes: () => this.set({ clipMode: "scenes" }),
+      tabSimple: seg(s.clipMode === "simple"),
+      tabScenes: seg(s.clipMode === "scenes"),
       playing: s.playing,
       stopped: !s.playing,
       togglePlay: () => this.set({ playing: !s.playing }),
@@ -1592,9 +1622,15 @@ class Component extends DCLogic {
       tabMesh: seg(s.output === "mesh"),
       promptPlaceholder: {
         still: "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
-        clip: s.scene === 0 ? "Scene 1 — describe how the clip opens — “a paper boat sets off down a rainy gutter”" : `Scene ${s.scene + 1} — describe what happens next — “rain picks up, the camera drifts left”`,
+        clip:
+          s.clipMode === "simple"
+            ? "Describe the clip — “a paper boat sets off down a rainy gutter, the camera drifts left”"
+            : s.scene === 0
+              ? "Scene 1 — describe how the clip opens — “a paper boat sets off down a rainy gutter”"
+              : `Scene ${s.scene + 1} — describe what happens next — “rain picks up, the camera drifts left”`,
         mesh: "Attach a photo of one object, then name it — “a brass teapot, handle intact”",
       }[s.output],
+      // A chain has no batch, so Scenes hides Make outright (`showCountChip`).
       countChip: { still: "Make 4", clip: "Make 1 clip", mesh: "Make 1 object" }[s.output],
       estimate: {
         still: "about 20s each on studio-rack",

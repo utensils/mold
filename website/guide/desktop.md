@@ -150,13 +150,27 @@ the phone keep Create / Library / Models until their own redesign.
   audio/video modality scale, and guidance skip stride. Empty fields preserve
   the selected pipeline's constants; invalid values block Generate inline, and
   starting points plus **Use these settings** restore recorded overrides.
-- **Short clip** (inside New image): multi-clip video is a setting, not a place:
-  switch the view toolbar's control to **Short clip** (File → New Clip and
-  the ⌘K palette's **Make a short clip** land there too) and a timeline rises
-  above the composer. The
-  composer stays where it is: it now carries the selected scene's words —
-  "Scene 2 — describe what happens next" — the chip reads **Make 1 clip**, and
-  ⌘↩ makes the whole clip. The timeline is a transport (play the clip back once
+- **Short clip** (inside New image): video is a setting, not a place. Switch
+  the view toolbar's control to **Short clip** (File → New Clip and the ⌘K
+  palette's **Make a short clip** land there too) and a second control appears
+  beside it: **Simple | Scenes**.
+
+  **Simple** is where Short clip opens, and it is the plain render — describe
+  the clip, pick a clip style, drag the **Length** chip on the composer, press
+  Generate. The chip reads `97f · 4.0s` and snaps to the same frame grid the
+  inspector's Clip card slider offers, because the two are one control shown
+  twice; ask for more than one render's worth and Mold splits it into a
+  sequence for you. **Make** is an ordinary batch count here, so you can ask for
+  four clips at once wherever the style allows it.
+
+  **Scenes** is the second way, and it is what raises the timeline above the
+  composer. The composer stays where it is: it now carries the selected scene's
+  words — "Scene 2 — describe what happens next" — **Make** is hidden, because a
+  clip made scene by scene has no batch, and ⌘↩ makes the whole clip. Switching
+  from Simple seeds scene 1 with the words and the length you had already
+  written; switching back parks the scenes untouched, so nothing is lost either
+  way, and Mold remembers which way you were working. The palette's **Edit the
+  clip scene by scene** is the same door. The timeline is a transport (play the clip back once
   scenes have rendered, with the clock reading `0:06 / 0:20`, and **Add a
   scene**), a ruler in round seconds, and the scenes lane. Each block in the
   lane is as wide as the time it plays, so the lane always fits the window and
@@ -200,6 +214,7 @@ the phone keep Create / Library / Models until their own redesign.
   form exactly where one-shot source media lives (the header ↺ Reset clears it;
   the Advanced reset does not), and Advanced keeps the per-clip negative
   prompt and camera motion. Job and action failures stay visible inline.
+
 - **Queue** (⌘2): the same line the sidebar shows, at full width. Three counts
   — **Being made**, **Waiting**, **Done today** — one explainer, and a table
   with a sentence of status per row (Image · What's happening · Style ·

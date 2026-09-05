@@ -329,6 +329,15 @@ const staticCommands = computed<Command[]>(() => {
       },
     },
     {
+      id: "act-clip-scenes",
+      title: "Edit the clip scene by scene",
+      keywords: ["scenes", "clip", "sequence", "story", "shots"],
+      run: () => {
+        ui.clipScenes();
+        go("/create");
+      },
+    },
+    {
       id: "act-seed",
       title: "Surprise me — a new seed",
       keywords: ["seed", "randomize", "repeat this look"],

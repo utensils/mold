@@ -4,6 +4,7 @@ import { reactive } from "vue";
 import ComposerCard from "./ComposerCard.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import { MAX_BATCH_SIZE, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { recipeCapabilitiesSnapshot } from "../../lib/capabilities";
 import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
@@ -428,7 +429,7 @@ describe("ComposerCard — clip mode", () => {
     return mountComposer(form, {
       promptValue: "rain picks up",
       placeholder: "Scene 2 — describe what happens next",
-      countLabel: "Make 1 clip",
+      showCount: false,
       showExpand: false,
     });
   }
@@ -447,9 +448,11 @@ describe("ComposerCard — clip mode", () => {
     expect(form.prompt).toBe("a brass teapot");
   });
 
-  it("counts one clip and offers no rewrite of a scene", () => {
+  // Replaces the old "counts one clip" assertion: a chain has no batch at
+  // all, so the chip is gone rather than showing a number nothing reads.
+  it("hides Make on a chain and offers no rewrite of a scene", () => {
     const wrapper = clipMode(baseForm());
-    expect(wrapper.get("[data-test='batch-chip']").text()).toBe("Make 1 clip");
+    expect(wrapper.find("[data-test='batch-chip']").exists()).toBe(false);
     expect(wrapper.findComponent(ExpandControl).exists()).toBe(false);
   });
 
@@ -459,5 +462,90 @@ describe("ComposerCard — clip mode", () => {
       .get("textarea[aria-label='Prompt']")
       .trigger("keydown", { key: "Enter", metaKey: true });
     expect(wrapper.emitted("generate")).toHaveLength(1);
+  });
+});
+
+/*
+ * Length — the simple clip's own chip. It writes the SAME `form.frames` the
+ * inspector's Clip card slider writes, snapping to the family's request grid
+ * (LTX's `8k+1`, wan's `4k+1`) so the chip can never hand the validator a
+ * count it refuses.
+ */
+describe("ComposerCard — the Length chip", () => {
+  const ltx = {
+    name: "ltx-video",
+    family: "ltx-video",
+    default_frames: 97,
+    default_fps: 24,
+    min_frames: 9,
+    max_frames: 257,
+  };
+
+  function withLength(overrides: Record<string, unknown> = {}) {
+    return mountComposer(baseForm(), {
+      lengthContract: ltx,
+      lengthFrames: 97,
+      lengthFps: 24,
+      ...overrides,
+    });
+  }
+
+  it("shows nothing without a clip contract — a still has no length", () => {
+    const wrapper = mountComposer(baseForm());
+    expect(wrapper.find("[data-test='length-chip']").exists()).toBe(false);
+  });
+
+  it("reads the frames and the seconds on one mono line", () => {
+    const wrapper = withLength();
+    expect(wrapper.get("[data-test='length-readout']").text()).toBe("97f · 4.0s");
+    const slider = wrapper.get<HTMLInputElement>("[data-test='length-slider']");
+    expect(slider.attributes("aria-label")).toBe("How long the clip is");
+    expect(slider.attributes("aria-valuetext")).toBe("97f · 4.0s");
+  });
+
+  it("takes its bounds and its step from the family's own grid", () => {
+    const slider = withLength().get("[data-test='length-slider']");
+    expect(slider.attributes("min")).toBe("9");
+    expect(slider.attributes("step")).toBe("8");
+
+    // wan compresses time by four, so its grid is 4k+1, not 8k+1.
+    const wan = withLength({
+      lengthContract: { name: "wan21-t2v-1.3b", family: "wan", min_frames: 5, max_frames: 81 },
+    });
+    expect(wan.get("[data-test='length-slider']").attributes("step")).toBe("4");
+  });
+
+  it("snaps a dragged value onto the grid before it leaves the chip", async () => {
+    const wrapper = withLength();
+    const slider = wrapper.get<HTMLInputElement>("[data-test='length-slider']");
+    slider.element.value = "100";
+    await slider.trigger("input");
+    // 100 is not 8k+1; the nearest offered count is.
+    expect(wrapper.emitted("update:lengthFrames")?.at(-1)).toEqual([97]);
+  });
+
+  it("says an above-ceiling length as authored while the track stays in range", () => {
+    // 400 frames is the auto-chained long clip. The readout must tell the
+    // truth about what will be made; the slider itself cannot go there.
+    const wrapper = withLength({ lengthFrames: 401 });
+    expect(wrapper.get("[data-test='length-readout']").text()).toContain("401f");
+    const slider = wrapper.get<HTMLInputElement>("[data-test='length-slider']");
+    expect(Number(slider.element.value)).toBeLessThanOrEqual(Number(slider.attributes("max")));
+  });
+
+  it("mirrors the inspector's own slider, control for control", () => {
+    // Both write `form.frames` through the same authority, so a value the
+    // chip offers is a value the inspector offers.
+    const chip = withLength({ lengthFrames: 121 });
+    const inspector = mount(VideoDurationSlider, {
+      props: { frames: 121, fps: 24, model: ltx },
+    });
+    const chipSlider = chip.get("[data-test='length-slider']");
+    const inspectorSlider = inspector.get("input[type='range']");
+    for (const attribute of ["min", "max", "step", "value"]) {
+      expect(chipSlider.attributes(attribute), attribute).toBe(
+        inspectorSlider.attributes(attribute),
+      );
+    }
   });
 });

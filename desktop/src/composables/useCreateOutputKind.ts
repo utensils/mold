@@ -9,14 +9,19 @@ import { useGenerateFormStore } from "../stores/generateForm";
  * The three-way output kind the New image view is in — the one decision
  * behind the toolbar's Still picture | Short clip | 3-D object control, the
  * title bar's "New image" / "New clip" / "New 3-D object", and the print
- * title's placeholder. A clip is the AUTHORED output kind and outranks the
- * style's family; 3-D is a property of the chosen style.
+ * title's placeholder. An authored sequence is always a clip; otherwise the
+ * chosen style says which kind this is.
  */
 export type OutputKind = "still" | "clip" | "mesh";
 
 export function outputKindFor(output: OutputMode, family: string | null | undefined): OutputKind {
+  // A sequence is a clip whatever style is loaded (a moment mid-swap can hold
+  // a picture style). Everywhere else the STYLE decides, by the same partition
+  // the picker sorts its rows with — a one-shot on a clip style IS a clip, the
+  // Simple sub-mode, and calling that view "Still picture" is the mislabelling
+  // this one authority exists to end.
   if (output === "sequence") return "clip";
-  return isMeshFamily(family) ? "mesh" : "still";
+  return outputKindForModel({ family: family ?? "" });
 }
 
 /** The view's mono title in the unified toolbar. */

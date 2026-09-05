@@ -55,7 +55,8 @@ import {
   benchHeightCeiling,
   clampBenchHeight as clampBenchHeightWithin,
 } from "../lib/benchLayout";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
+import { outputKindFor } from "../composables/useCreateOutputKind";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
@@ -85,6 +86,8 @@ import {
   friendlySequenceError,
   modelSupportsSequence,
   modelsForOutput,
+  sequenceClipFrameCap,
+  sequenceFrameOptions,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
@@ -183,7 +186,7 @@ import {
   reconcileModelCapabilities,
 } from "../lib/generateForm";
 import { emptyMeshForm } from "@studio/lib/meshControls";
-import { videoFramesError } from "@studio/lib/videoDuration";
+import { videoFramesError, type VideoFrameContract } from "@studio/lib/videoDuration";
 import {
   advancedVideoValidationError,
   audioOutputValidationError,
@@ -4187,11 +4190,34 @@ const activeSceneIndex = computed(() => {
 const composerPrompt = computed(() =>
   isSequence.value ? (activeScene.value?.prompt ?? "") : null,
 );
+/** A one-shot on a clip style: the plain render the Simple sub-mode makes.
+ *  Read from the one section authority, never a second family list. */
+const isSimpleClip = computed(
+  () => !isSequence.value && outputKindFor(draft.output, form.family) === "clip",
+);
 const composerPlaceholder = computed(() => {
+  if (isSimpleClip.value) return "Describe the clip";
   if (!isSequence.value) return null;
   return activeSceneIndex.value === 0
     ? "Scene 1 — describe how the clip opens"
     : `Scene ${activeSceneIndex.value + 1} — describe what happens next`;
+});
+
+/**
+ * The Length chip's contract, which is the SAME row the inspector's Clip card
+ * reads — both write `form.frames`, so the chip and the slider are one control
+ * shown twice. Absent outside the simple clip: a sequence's lengths are
+ * per-scene and a still has none.
+ */
+const composerLengthContract = computed<VideoFrameContract | null>(() => {
+  if (!isSimpleClip.value || form.predictDuration) return null;
+  const entry = contractEntry.value;
+  return {
+    ...(entry ?? {}),
+    family: entry?.family ?? form.family,
+    name: entry?.name ?? form.model,
+    source_image: entry?.source_image ?? form.sourceImageCapability,
+  };
 });
 function writeScenePrompt(value: string) {
   const scene = activeScene.value;
@@ -5155,6 +5181,71 @@ function applySequenceReuse(metadata: OutputMetadata) {
   void loadChainLimits();
 }
 
+/**
+ * Simple | Scenes — the two ways of making a clip, from the toolbar toggle and
+ * from the palette. The sub-mode is a remembered preference on the draft; the
+ * switch itself moves the draft's OUTPUT, keeping the clip style either way.
+ *
+ * Nothing is destroyed in either direction. Going to Scenes seeds scene 1 from
+ * the words and the length already on the composer when no scene has been
+ * written yet; coming back parks the scenes exactly as they are — the
+ * timeline's own Clear the clip is the only eraser.
+ */
+function setClipMode(mode: ClipMode) {
+  draft.clipMode = mode;
+  if (mode === "simple") {
+    if (!isSequence.value) return;
+    draft.setOutput(
+      "single",
+      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+      sequenceDefaultFrames.value,
+    );
+    return;
+  }
+  if (isSequence.value) return;
+  const seedPrompt = form.prompt.trim();
+  const seedFrames = form.frames;
+  // Mirror the inspector's model rule, and swap BEFORE seeding clips: a style
+  // that cannot join scenes is parked and replaced by the first one that can,
+  // so the new clips default their length from the model that will render them.
+  const current = selectedEntry.value;
+  if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
+    draft.lastSingleModel = form.model || null;
+    const pick = sequenceCapableModels.value[0];
+    if (pick) formStore.applyModel(pick);
+  }
+  const unwritten = draft.clips.every((clip) => !clip.prompt.trim());
+  draft.setOutput(
+    "sequence",
+    { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+    sequenceDefaultFrames.value,
+  );
+  if (!unwritten) return;
+  const first = draft.clips[0];
+  if (!first) return;
+  if (seedPrompt) first.prompt = seedPrompt;
+  const seededLength = sceneLengthFor(seedFrames);
+  if (seededLength !== null) first.frames = seededLength;
+}
+
+/**
+ * The composer's length as ONE scene's length: the longest offered scene that
+ * does not exceed it. A simple clip may be longer than any single scene — that
+ * is the auto-chained one-shot — so it becomes the longest scene there is
+ * rather than a length the chain validator refuses. `null` = shorter than the
+ * shortest scene, so scene 1 keeps the model's own default.
+ */
+function sceneLengthFor(frames: number): number | null {
+  if (!Number.isFinite(frames) || frames <= 0) return null;
+  const options = sequenceFrameOptions(
+    sequenceClipFrameCap(selectedSequenceEntry.value, chainLimits.value),
+    sequenceMotionTail.value,
+    selectedSequenceEntry.value?.family,
+  );
+  const fits = options.filter((option) => option <= frames);
+  return fits.length > 0 ? fits[fits.length - 1]! : null;
+}
+
 /** A sequence handed over from elsewhere: Library ▸ History ▸ Sequences and
  *  the canvas hand over `edit`; a Library sequence print hands over `reuse`.
  *  One-shot — the slot is emptied on arrival so a back-nav cannot replay it. */
@@ -5250,6 +5341,13 @@ onCreateIntent(
   },
 );
 
+// Palette — take the clip apart into scenes.
+onCreateIntent(
+  "clipScenes",
+  () => ui.clipScenesTick,
+  () => setClipMode("scenes"),
+);
+
 // ⌥↩ / palette — the picture on the canvas, made four more times.
 onCreateIntent(
   "makeVariations",
@@ -5329,6 +5427,7 @@ onBeforeUnmount(() => {
         :form="form"
         @open-tab="inspectorTab = $event"
         @set-output="inspectorRef?.setOutputMode($event)"
+        @set-clip-mode="setClipMode"
       />
 
       <div
@@ -5922,11 +6021,15 @@ onBeforeUnmount(() => {
           :batch-locked="batchLocked"
           :prompt-value="composerPrompt"
           :placeholder="composerPlaceholder"
-          :count-label="isSequence ? 'Make 1 clip' : null"
+          :show-count="!isSequence"
+          :length-frames="form.frames"
+          :length-fps="form.fps"
+          :length-contract="composerLengthContract"
           :show-expand="!isSequence"
           @open-shape="inspectorTab = 'settings'"
           @prompt-authored="onPromptAuthored"
           @update:prompt-value="writeScenePrompt"
+          @update:length-frames="form.frames = $event"
           @generate="composerGenerate"
           @cancel="composerCancel"
           @expand="expandForCurrentBatch()"

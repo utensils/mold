@@ -716,7 +716,9 @@ describe("GenerateView — sequence output", () => {
     const composer = wrapper.findComponent({ name: "ComposerCard" });
     expect(composer.props("promptValue")).toBe("");
     expect(composer.props("placeholder")).toContain("Scene 2");
-    expect(composer.props("countLabel")).toBe("Make 1 clip");
+    // A chain has no batch, so Make is hidden outright rather than showing a
+    // count nothing reads.
+    expect(composer.props("showCount")).toBe(false);
 
     composer.vm.$emit("update:promptValue", "the rain picks up");
     await flushPromises();
@@ -1712,5 +1714,163 @@ describe("GenerateView — an intent raised on the way here", () => {
     mountView();
     await flushPromises();
     expect(submit).toHaveBeenCalledTimes(1);
+  });
+});
+
+/*
+ * Simple | Scenes — the two ways of making a clip. Simple is the plain
+ * one-shot render (a prompt, a clip style, a length) and is the default;
+ * Scenes is the authored sequence. Switching either way destroys nothing.
+ */
+describe("GenerateView — Simple | Scenes", () => {
+  /** A clip style selected with the output still one shot: the Simple mode. */
+  async function simpleClip() {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    form.prompt = "a kingfisher drops off the branch";
+    form.frames = 97;
+    form.fps = 24;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    const wrapper = mountView();
+    await flushPromises();
+    return { wrapper, draft, form };
+  }
+
+  function chainPosts() {
+    return apiFetchTo.mock.calls.filter(
+      ([, path, init]) =>
+        path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
+    );
+  }
+
+  it("submits Simple as one ordinary print carrying the clip's length", async () => {
+    const { wrapper, form } = await simpleClip();
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
+    apiFetchTo.mockClear();
+
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    const request = submit.mock.calls[0]![0];
+    expect(request.model).toBe(videoModel.name);
+    expect(request.prompt).toBe(form.prompt);
+    expect(request.frames).toBe(97);
+    // No chain job: the plain render is one call to the ordinary door.
+    expect(chainPosts()).toHaveLength(0);
+  });
+
+  it("submits Scenes as a durable chain job, never an ordinary print", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    useGenerateFormStore().form.model = videoModel.name;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "the gate opens";
+    draft.clips[1]!.prompt = "the road bends away";
+    apiFetchTo.mockResolvedValue(Response.json({ job_id: "scenes-job" }));
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
+
+    const wrapper = mountView();
+    await flushPromises();
+    apiFetchTo.mockClear();
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("generate");
+    await flushPromises();
+
+    expect(chainPosts()).toHaveLength(1);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("offers the Length chip in Simple and hides Make in Scenes", async () => {
+    const { wrapper, draft } = await simpleClip();
+    let composer = wrapper.findComponent({ name: "ComposerCard" });
+    expect(composer.props("lengthContract")).not.toBeNull();
+    expect(composer.props("lengthFrames")).toBe(97);
+    expect(composer.props("showCount")).toBe(true);
+    expect(composer.props("placeholder")).toBe("Describe the clip");
+
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    await flushPromises();
+    composer = wrapper.findComponent({ name: "ComposerCard" });
+    // A sequence's lengths are per-scene, and a chain has no batch at all.
+    expect(composer.props("lengthContract")).toBeNull();
+    expect(composer.props("showCount")).toBe(false);
+  });
+
+  it("writes the Length chip through to the same field the inspector writes", async () => {
+    const { wrapper, form } = await simpleClip();
+    wrapper.findComponent({ name: "ComposerCard" }).vm.$emit("update:lengthFrames", 121);
+    await flushPromises();
+    expect(form.frames).toBe(121);
+  });
+
+  it("seeds scene 1 from the words and the length already on the composer", async () => {
+    const { wrapper, draft, form } = await simpleClip();
+
+    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "scenes");
+    await flushPromises();
+
+    expect(draft.output).toBe("sequence");
+    expect(draft.clipMode).toBe("scenes");
+    expect(draft.clips[0]?.prompt).toBe(form.prompt);
+    // The seeded length is a real scene length on the family's grid.
+    expect((draft.clips[0]?.frames ?? 0) % 8).toBe(1);
+    expect(draft.clips[0]?.frames).toBeLessThanOrEqual(97);
+    // The one-shot's own words are untouched: the two are separate authorities.
+    expect(form.prompt).toBe("a kingfisher drops off the branch");
+  });
+
+  it("leaves written scenes alone rather than overwriting scene 1", async () => {
+    const { wrapper, draft } = await simpleClip();
+    draft.ensureClips(97);
+    draft.clips[0]!.prompt = "the gate opens";
+
+    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "scenes");
+    await flushPromises();
+
+    expect(draft.clips[0]?.prompt).toBe("the gate opens");
+  });
+
+  it("parks the scenes when the switch goes back to Simple", async () => {
+    const { wrapper, draft } = await simpleClip();
+    draft.output = "sequence";
+    draft.ensureClips(97);
+    draft.clips[0]!.prompt = "the gate opens";
+    draft.clips[1]!.prompt = "the road bends away";
+    await flushPromises();
+
+    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "simple");
+    await flushPromises();
+
+    expect(draft.output).toBe("single");
+    expect(draft.clipMode).toBe("simple");
+    // Nothing destroyed — the timeline's own Clear the clip is the only eraser.
+    expect(draft.clips.map((clip) => clip.prompt)).toEqual([
+      "the gate opens",
+      "the road bends away",
+    ]);
+    // And the clip style stays: Simple is still a clip.
+    expect(useGenerateFormStore().form.model).toBe(videoModel.name);
+  });
+
+  it("takes the palette's own door into Scenes", async () => {
+    const { draft } = await simpleClip();
+    useUiStore().clipScenes();
+    await flushPromises();
+    expect(draft.output).toBe("sequence");
+    expect(draft.clipMode).toBe("scenes");
   });
 });

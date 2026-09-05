@@ -63,6 +63,19 @@ function draftStorage(): DraftStorage | null {
   }
 }
 
+/**
+ * How a clip is being made. `simple` is the plain one-shot render — a prompt,
+ * a clip style and a length — and is the default; `scenes` is the authored
+ * multi-scene sequence. It rides on the draft rather than in the toolbar that
+ * toggles it, so leaving New image cannot lose the choice.
+ *
+ * `output` stays the authority for what is on screen: a sequence is always
+ * `scenes`, which the store keeps true wherever `output` is written. This ref
+ * is the remembered PREFERENCE the Short clip door reads when it decides
+ * which of the two to open.
+ */
+export type ClipMode = "simple" | "scenes";
+
 export interface SequenceEditSession {
   jobId: string;
   hostId: string;
@@ -91,6 +104,13 @@ interface PersistedDraftV1 {
   lastSingleModel: string | null;
   lastStillModel?: string | null;
   sequenceModel?: string | null;
+  clipMode?: ClipMode;
+}
+
+/** Two or more scenes somebody actually wrote — how a pre-sub-mode draft
+ *  says it was being authored scene by scene. */
+function authoredScenes(clips: readonly { prompt: string }[]): boolean {
+  return clips.filter((clip) => clip.prompt.trim().length > 0).length >= 2;
 }
 
 function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
@@ -143,6 +163,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
    *  in the toolbar that parks it, so leaving New image cannot lose it. */
   const lastStillModel = ref<string | null>(null);
   const sequenceModel = ref<string | null>(null);
+  const clipMode = ref<ClipMode>("simple");
   const hydrated = ref(false);
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -188,6 +209,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
       lastSingleModel: lastSingleModel.value,
       lastStillModel: lastStillModel.value,
       sequenceModel: sequenceModel.value,
+      clipMode: clipMode.value,
     };
     try {
       draftStorage()?.setItem(SEQUENCE_DRAFT_KEY, JSON.stringify(draft));
@@ -210,6 +232,13 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     lastSingleModel.value = saved.lastSingleModel ?? null;
     lastStillModel.value = saved.lastStillModel ?? null;
     sequenceModel.value = saved.sequenceModel ?? null;
+    // A draft written before the sub-mode existed carries the answer in what
+    // it holds: a sequence, or scenes somebody actually wrote.
+    clipMode.value =
+      saved.clipMode ??
+      (saved.output === "sequence" || authoredScenes(saved.clips)
+        ? "scenes"
+        : "simple");
   }
 
   async function restorePersistedMedia() {
@@ -550,7 +579,22 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     openingImage.value = null;
     editing.value = null;
     output.value = "single";
+    clipMode.value = "simple";
   }
+
+  // A sequence IS the scene-by-scene way of working, however it arrived —
+  // `setOutput`, an edit session, a reuse that assigns `output` directly, or a
+  // restored draft. Leaving a sequence does NOT clear the preference: Still
+  // picture and 3-D park the sub-mode rather than resetting it.
+  // Sync flush: this is an invariant, not a side effect, so a caller that
+  // reads `clipMode` on the next line must never see the stale answer.
+  watch(
+    output,
+    (mode) => {
+      if (mode === "sequence") clipMode.value = "scenes";
+    },
+    { flush: "sync" },
+  );
 
   // Sync flush so the debounce timer arms on the mutation itself (the
   // callback only re-arms a setTimeout — cheap enough for every keystroke).
@@ -563,6 +607,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
       lastSingleModel,
       lastStillModel,
       sequenceModel,
+      clipMode,
     ],
     () => schedulePersist(),
     { deep: true, flush: "sync" },
@@ -579,6 +624,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     lastSingleModel,
     lastStillModel,
     sequenceModel,
+    clipMode,
     hydrated,
     hydrate,
     ensureClips,

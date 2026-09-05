@@ -92,6 +92,18 @@ function outputSegments(wrapper: ReturnType<typeof mount>) {
   return wrapper.get("[data-test='output-kind']").findAll("button");
 }
 
+function clipModeSegments(wrapper: ReturnType<typeof mount>) {
+  return wrapper.get("[data-test='clip-mode']").findAll("button");
+}
+
+/** A form already holding a clip style — the Simple sub-mode on screen. */
+function clipForm(): GenerateForm {
+  const f = form();
+  f.model = clipModel.name;
+  f.family = clipModel.family;
+  return f;
+}
+
 /*
  * The toolbar must hold one row at every width the window can reach
  * (`minWidth: 1080` in src-tauri/tauri.conf.json, minus the sidebar and a
@@ -180,12 +192,62 @@ describe("CreateHeader", () => {
       ]);
     });
 
-    it("hands Short clip to the inspector, which owns the model swap", async () => {
+    /*
+     * Short clip opens onto the REMEMBERED sub-mode. With no clip style on the
+     * machine there is nothing Simple could select, so the door still opens
+     * onto Scenes, which owns that empty state and says where to get one.
+     */
+    it("hands Short clip to the inspector when the machine has no clip style", async () => {
       readyLocal();
       installLocal([stillModel]);
       const wrapper = mount(CreateHeader, { props: { form: form() } });
       await outputSegments(wrapper)[1]!.trigger("click");
       expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
+    });
+
+    it("hands Short clip to the inspector when Scenes is the remembered way", async () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      useSequenceDraftStore().clipMode = "scenes";
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
+    });
+
+    /*
+     * Simple is the plain render: the output stays one shot and the STYLE is
+     * what makes it a clip, so the header adopts one the way the 3-D door
+     * adopts a 3-D style. Handing the inspector `single` would have restored a
+     * PICTURE style, which is the opposite of what the door was asked for.
+     */
+    it("adopts a clip style in place for Simple, without an output switch", async () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[1]!.trigger("click");
+
+      expect(wrapper.emitted("set-output")).toBeUndefined();
+      expect(store.form.model).toBe(clipModel.name);
+      expect(useSequenceDraftStore().output).toBe("single");
+    });
+
+    it("restores the parked picture style on the way back out of a simple clip", async () => {
+      readyLocal();
+      const otherStill = { ...stillModel, name: "sdxl-base:fp16", family: "sdxl" } as ModelEntry;
+      installLocal([otherStill, clipModel, stillModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(store.form.model).toBe(clipModel.name);
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
     });
 
     it("returns a clip draft to one shot", async () => {
@@ -272,6 +334,92 @@ describe("CreateHeader", () => {
 
       await outputSegments(wrapper)[0]!.trigger("click");
       expect(store.form.model).toBe(stillModel.name);
+    });
+  });
+
+  /*
+   * Simple | Scenes — how the clip gets made. It is offered only once the kind
+   * IS a clip, and what is on screen answers it, so the toggle and the view can
+   * never disagree.
+   */
+  describe("how to make the clip", () => {
+    it("offers the toggle only while the kind is a clip", () => {
+      readyLocal();
+      installLocal([stillModel, clipModel, meshModel]);
+
+      const still = mount(CreateHeader, { props: { form: form() } });
+      expect(still.find("[data-test='clip-mode']").exists()).toBe(false);
+
+      const mesh = form();
+      mesh.family = meshModel.family;
+      const threeD = mount(CreateHeader, { props: { form: mesh } });
+      expect(threeD.find("[data-test='clip-mode']").exists()).toBe(false);
+
+      const clip = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(clip.find("[data-test='clip-mode']").exists()).toBe(true);
+      expect(clipModeSegments(clip).map((b) => b.text())).toEqual(["Simple", "Scenes"]);
+      expect(clip.get("[data-test='clip-mode']").attributes("aria-label")).toBe(
+        "How to make the clip",
+      );
+    });
+
+    it("names Short clip the kind a one-shot on a clip style already is", () => {
+      // The form holds a clip style with the output still one shot: that is
+      // the Simple sub-mode, and calling it Still picture is the mislabelling
+      // the section rule exists to end.
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+      const on = outputSegments(wrapper).find((b) => b.attributes("aria-checked") === "true");
+      expect(on?.text()).toBe("Short clip");
+    });
+
+    it("reads Simple for a fresh draft and Scenes for a sequence", () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const simple = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(
+        clipModeSegments(simple)
+          .find((b) => b.attributes("aria-checked") === "true")
+          ?.text(),
+      ).toBe("Simple");
+
+      useSequenceDraftStore().output = "sequence";
+      const scenes = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(
+        clipModeSegments(scenes)
+          .find((b) => b.attributes("aria-checked") === "true")
+          ?.text(),
+      ).toBe("Scenes");
+    });
+
+    it("lands a reused clip print in Scenes", () => {
+      // `composer.setSequence` and an edit session both put the draft in
+      // `sequence`, and the store keeps the sub-mode true to it.
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const draft = useSequenceDraftStore();
+      draft.output = "sequence";
+      expect(draft.clipMode).toBe("scenes");
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(
+        clipModeSegments(wrapper)
+          .find((b) => b.attributes("aria-checked") === "true")
+          ?.text(),
+      ).toBe("Scenes");
+    });
+
+    it("hands the switch to the view, which seeds and parks the draft", async () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+
+      await clipModeSegments(wrapper)[1]!.trigger("click");
+      expect(wrapper.emitted("set-clip-mode")).toEqual([["scenes"]]);
+
+      // Picking what is already on screen changes nothing.
+      await clipModeSegments(wrapper)[0]!.trigger("click");
+      expect(wrapper.emitted("set-clip-mode")).toEqual([["scenes"]]);
     });
   });
 

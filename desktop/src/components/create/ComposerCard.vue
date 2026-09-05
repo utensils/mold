@@ -2,6 +2,14 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { promptPlaceholder } from "@studio/lib/promptRequirement";
 import { promptTransformBlockedReason } from "@studio/lib/promptTransform";
+import {
+  clampVideoFrames,
+  formatVideoDuration,
+  maxVideoFrames,
+  minVideoFrames,
+  videoFrameStep,
+  type VideoFrameContract,
+} from "@studio/lib/videoDuration";
 import { outputFamilyLabel } from "@studio/lib/outputShape";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import Icon from "@ui/components/Icon.vue";
@@ -21,8 +29,8 @@ import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 /**
  * The composer (README §04): the prompt line carries the estimate on its
- * right; the control row below carries the chips — Style, Shape, Make N,
- * Write more for me — then Generate. Style is the ONE style picker and is
+ * right; the control row below carries the chips — Style, Shape, Length,
+ * Make N, Write more for me — then Generate. Style is the ONE style picker and is
  * supplied through the `style` slot, so this component stays presentational.
  * Advisory text never shares a row with controls. Owns the prompt textarea and its editing affordances — ⌘↵
  * generate, ⌘E expand, ↑/↓ shell-style prompt history, autogrow. The view
@@ -58,9 +66,18 @@ const props = withDefaults(
     promptValue?: string | null;
     /** Clip mode's own invitation — "Scene 2 — describe what happens next". */
     placeholder?: string | null;
-    /** Stands in for the Make stepper where the recipe makes exactly one
-     * thing: "Make 1 clip". */
-    countLabel?: string | null;
+    /** A chain has no batch, so the scene-by-scene clip hides Make outright
+     * rather than showing a count nothing reads. */
+    showCount?: boolean;
+    /**
+     * The clip's length, as the chip beside Shape. `lengthContract` absent
+     * hides it — a still has no length, and a sequence's lengths are
+     * per-scene. It is the same `form.frames` the inspector's Clip card
+     * slider writes, so the two are one control shown twice.
+     */
+    lengthFrames?: number | null;
+    lengthFps?: number;
+    lengthContract?: VideoFrameContract | null;
     /** Rewriting reaches the one-shot prompt only, so a scene has no expander. */
     showExpand?: boolean;
   }>(),
@@ -71,7 +88,10 @@ const props = withDefaults(
     batchLocked: false,
     promptValue: null,
     placeholder: null,
-    countLabel: null,
+    showCount: true,
+    lengthFrames: null,
+    lengthFps: 24,
+    lengthContract: null,
     showExpand: true,
   },
 );
@@ -87,6 +107,8 @@ const emit = defineEmits<{
   "prompt-authored": [value: string, source: PromptAuthoringSource];
   /** Clip mode: the selected scene's new words. */
   "update:promptValue": [value: string];
+  /** The Length chip's new frame count, already on the family's grid. */
+  "update:lengthFrames": [frames: number];
   "update:remixSource": [value: "original" | "current"];
   /** The Shape chip is a door to the inspector's Settings tab. Style is not:
    *  its chip opens the picker itself, in the `style` slot. */
@@ -130,6 +152,39 @@ const shapeLabel = computed(() => {
   const size = width === height ? `${width}` : `${width}×${height}`;
   return `${family === "1:1" ? "Square" : family} · ${size}`;
 });
+
+/*
+ * Length — the clip as a chip. Every bound comes from the shared video-duration
+ * authority, so the chip snaps to exactly the grid the request validator
+ * enforces and the inspector's slider offers. An intentional above-ceiling
+ * count (the auto-chained long clip) is shown as authored while the slider
+ * itself stays inside the one-render range, which is `VideoDurationSlider`'s
+ * own rule.
+ */
+const lengthRate = computed(() => Math.max(1, Math.round(props.lengthFps) || 24));
+const lengthMin = computed(() => minVideoFrames(props.lengthContract));
+const lengthMax = computed(() => maxVideoFrames(props.lengthContract, lengthRate.value));
+const lengthStep = computed(() => videoFrameStep(props.lengthContract));
+const lengthValue = computed(() =>
+  clampVideoFrames(props.lengthFrames ?? lengthMin.value, lengthRate.value, props.lengthContract),
+);
+const lengthShown = computed(() =>
+  (props.lengthFrames ?? 0) > lengthMax.value ? props.lengthFrames! : lengthValue.value,
+);
+const lengthReadout = computed(
+  () => `${lengthShown.value}f · ${formatVideoDuration(lengthShown.value, lengthRate.value)}`,
+);
+const lengthFill = computed(() => {
+  const span = lengthMax.value - lengthMin.value;
+  if (span <= 0) return "100%";
+  return `${Math.round(((lengthValue.value - lengthMin.value) / span) * 100)}%`;
+});
+function setLength(raw: string) {
+  emit(
+    "update:lengthFrames",
+    clampVideoFrames(Number(raw), lengthRate.value, props.lengthContract),
+  );
+}
 
 const promptEl = ref<HTMLTextAreaElement | null>(null);
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
@@ -241,11 +296,25 @@ defineExpose({ focus, expand, record });
         >
           {{ shapeLabel }} <span class="ms-chip__caret">▼</span>
         </button>
-        <span v-if="countLabel" class="ms-chip ms-chip--locked" data-test="batch-chip">{{
-          countLabel
-        }}</span>
+        <span v-if="lengthContract" class="ms-chip ms-chip--slider" data-test="length-chip">
+          <span>Length</span>
+          <input
+            type="range"
+            class="ms-chip__slider"
+            data-test="length-slider"
+            :min="lengthMin"
+            :max="lengthMax"
+            :step="lengthStep"
+            :value="lengthValue"
+            :style="{ '--ms-chip-slider-fill': lengthFill }"
+            aria-label="How long the clip is"
+            :aria-valuetext="lengthReadout"
+            @input="setLength(($event.target as HTMLInputElement).value)"
+          />
+          <span class="ms-chip__id" data-test="length-readout">{{ lengthReadout }}</span>
+        </span>
         <span
-          v-else
+          v-if="showCount"
           class="ms-chip ms-chip--stepper"
           data-test="batch-chip"
           :class="{ 'ms-chip--locked': batchLocked }"
@@ -415,6 +484,50 @@ defineExpose({ focus, expand, record });
 .ms-chip__caret {
   font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
+}
+/* The chip IS the track's frame: no label row, no ticks, the mono readout
+ * beside it. The full control stays in the inspector's Clip card. */
+.ms-chip--slider {
+  cursor: default;
+  gap: 8px;
+}
+/* Same track vocabulary as the kit's SliderRow — accent behind the thumb,
+ * control ink ahead of it — so the chip and the inspector's slider read as
+ * the one control they are. */
+.ms-chip__slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 84px;
+  height: 4px;
+  margin: 0;
+  padding: 0;
+  background: var(--mold-border-control);
+  background-image: linear-gradient(
+    to right,
+    var(--mold-blue) var(--ms-chip-slider-fill, 0%),
+    transparent var(--ms-chip-slider-fill, 0%)
+  );
+  cursor: pointer;
+}
+.ms-chip__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
+  cursor: pointer;
+}
+.ms-chip__slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
+  cursor: pointer;
+}
+.ms-chip__slider:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: 2px;
 }
 .ms-chip--stepper {
   cursor: default;

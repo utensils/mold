@@ -57,7 +57,7 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 | Connect a machine · Rent a GPU · billing begins now      | Add host, Provision pod                 | Machines             |
 | My images · albums · Favourites · Everything             | Library, collections, gallery, Prints   | Nav, My images       |
 | Ready to use \| Browse more · Get it · ● ready           | Installed \| Discover, Pull, installed  | Styles               |
-| Short clip · scenes · Length · Smoothness                | Sequence, clips, frames, fps (primary)  | Clip mode            |
+| Short clip · Simple \| Scenes · Length · Smoothness      | Sequence, clips, frames, fps, timeline  | Clip toolbar         |
 
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).
@@ -106,9 +106,20 @@ Decisions worth keeping:
 - **A section only offers styles it can make.** Still picture | Short clip |
   3-D object partitions the installed styles, and the picker shows one part of
   it: a picture section never lists a clip or 3-D style, and no style belongs to
-  nowhere. The menu names the section it is showing and its Browse more opens
+  nowhere. The style is what decides — a one-shot on a clip style IS Short clip,
+  which is why the simple clip is not filed under Still picture. The menu names the section it is showing and its Browse more opens
   Styles filtered to the same kind. A clip style that cannot join scenes stays
   in the clip section, disabled with the reason on the row.
+- **A clip is made the simple way unless the person asks for scenes.** Short
+  clip opens onto **Simple**: a prompt, a clip style, a Length slider on the
+  composer, Generate. **Scenes** is the second segment on the same toolbar and
+  is what raises the timeline. The choice is remembered with the draft, so
+  Short clip opens where it was left; switching either way destroys nothing —
+  going to Scenes seeds scene 1 from the words and the length already written,
+  coming back parks the scenes exactly as they are, and the timeline's own
+  Clear the clip stays the only eraser. Simple keeps the ordinary one-shot
+  output, so Make is a real batch count there and is hidden outright in Scenes,
+  where a chain has no batch.
 - **The view title names what is being made.** On New image the mono title
   follows the output kind — New image · New clip · New 3-D object — and the
   subtitle is the queue count alone. The sidebar's destination stays New image.
@@ -128,6 +139,7 @@ Decisions worth keeping:
 | Group / table label | mono `--mold-fs-micro`, tracked, dim; uppercase is the caller's call                     | `.ms-group-label`                                                        |
 | Primary action      | 32px, accent fill, `--mold-on-accent` ink, mono shortcut. One word, `white-space:nowrap` | `--mold-radius-2`                                                        |
 | Chip (filter/tag)   | 24px, 1px border, mono count at 70%                                                      | active: accent tint + inset ring                                         |
+| Chip (slider)       | 28px composer chip: plain label, an 84px bare track, mono readout (`97f · 4.0s`)         | Length; same track ink as `SliderRow`, snapped to the family frame grid  |
 | Machine card        | dot · mono name · sentence · meter · two mono readouts                                   | target machine gets a 1px accent border                                  |
 | Queue: active card  | 52px thumb, sentence status, meter + pause/stop, "What's this?"                          | `--mold-panel-raised` + inset accent ring                                |
 | Queue: row          | 38px thumb, title, one-line status, ⋯                                                    | glyph placeholder for images that don't exist yet                        |

@@ -4,6 +4,7 @@ import routerSource from "../router.ts?raw";
 import sidebarSource from "../components/shell/Sidebar.vue?raw";
 import paletteSource from "../components/shell/CommandPalette.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
+import createHeaderSource from "../components/create/CreateHeader.vue?raw";
 import appSource from "../App.vue?raw";
 import chainJobsSource from "../stores/chainJobs.ts?raw";
 import expandSource from "../components/generate/ExpandControl.vue?raw";
@@ -254,6 +255,39 @@ describe("lexicon — the composer", () => {
 
   it("says the queue depth beside Generate rather than in the button", () => {
     expect(generateViewSource).toContain("`+${generation.pending.length} queued`");
+  });
+});
+
+/*
+ * The clip's two ways of working are Simple and Scenes — plain words for what
+ * a person is choosing, never the tool's own vocabulary. "Editor", "timeline",
+ * and "mode" are exactly the jargon this lexicon exists to keep out.
+ */
+describe("lexicon — how the clip gets made", () => {
+  it("names the two ways Simple and Scenes, on a control that says what it picks", () => {
+    expect(createHeaderSource).toContain('label: "Simple"');
+    expect(createHeaderSource).toContain('label: "Scenes"');
+    expect(createHeaderSource).toContain('label="How to make the clip"');
+  });
+
+  it("keeps the tool's own words off both surfaces", () => {
+    const surfaces: [string, string][] = [
+      ["CreateHeader", templateText(createHeaderSource)],
+      ["CommandPalette", quoted(paletteSource).join(" ")],
+    ];
+    for (const [name, text] of surfaces) {
+      for (const banned of [/\beditor\b/i, /\btimeline\b/i, /\bmode\b/i]) {
+        expect(banned.test(text), `${name}: ${banned}`).toBe(false);
+      }
+    }
+  });
+
+  it("says the palette's door in plain words", () => {
+    expect(paletteSource).toContain('"Edit the clip scene by scene"');
+  });
+
+  it("invites the words a clip is described with", () => {
+    expect(generateViewSource).toContain('"Describe the clip"');
   });
 });
 

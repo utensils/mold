@@ -246,6 +246,26 @@ describe("CommandPalette shortcut column and mock groups", () => {
     wrapper.unmount();
   });
 
+  /*
+   * The clip's scene-by-scene way of working is a sub-mode of New image, not a
+   * place, so the palette raises the intent and goes to Create rather than
+   * deep-linking a query the view only reads while it is mounting.
+   */
+  it("opens the clip scene by scene, as one make command", async () => {
+    const wrapper = await openPalette();
+    const ui = useUiStore();
+    await wrapper.get("input").setValue("scene by scene");
+    const row = rowFor(wrapper, "Edit the clip scene by scene")!;
+    expect(row.exists()).toBe(true);
+    expect(columns(row).group).toBe("make");
+
+    await row.trigger("click");
+    expect(ui.clipScenesTick).toBe(1);
+    expect(routerPush).toHaveBeenCalledWith("/create");
+    expect(ui.paletteOpen).toBe(false);
+    wrapper.unmount();
+  });
+
   it("generates from the words already in the composer, exactly as the Generate menu item does", async () => {
     const wrapper = await openPalette();
     const ui = useUiStore();

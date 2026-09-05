@@ -26,6 +26,12 @@ function freshStore() {
   return useSequenceDraftStore();
 }
 
+/** `setOutput`'s retained bridge argument; prompts are deliberately never
+ *  copied across an output switch, so nothing reads it. */
+function noBridge() {
+  return { getPrompt: () => "", setPrompt: () => {} };
+}
+
 describe("sequence draft store", () => {
   beforeEach(() => {
     localStorage = memoryStorage();
@@ -538,6 +544,114 @@ describe("sequence draft store", () => {
     expect(store.clips[0]!.id).toBe(head.id);
     const tail = store.insertClip(99, 97);
     expect(store.clips[store.clips.length - 1]!.id).toBe(tail.id);
+  });
+
+  /*
+   * The clip sub-mode. `simple` is the plain one-shot render and the default;
+   * `scenes` is the authored sequence. It lives on the draft so leaving New
+   * image cannot lose it, and a sequence — however it arrived — is always the
+   * scene-by-scene way.
+   */
+  describe("how a clip is being made", () => {
+    it("starts simple and survives a reload", () => {
+      const store = freshStore();
+      store.hydrate();
+      expect(store.clipMode).toBe("simple");
+
+      store.clipMode = "scenes";
+      vi.advanceTimersByTime(1000);
+      expect(
+        JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!).clipMode,
+      ).toBe("scenes");
+
+      const reloaded = freshStore();
+      reloaded.hydrate();
+      expect(reloaded.clipMode).toBe("scenes");
+    });
+
+    it("keeps the preference when the draft leaves the clip kind", () => {
+      // Still picture and 3-D park the sub-mode; only Simple itself clears it.
+      const store = freshStore();
+      store.hydrate();
+      store.clipMode = "scenes";
+      store.setOutput("single", noBridge(), 97);
+      expect(store.clipMode).toBe("scenes");
+    });
+
+    it("calls a sequence the scene-by-scene way however it arrived", () => {
+      const viaSetOutput = freshStore();
+      viaSetOutput.hydrate();
+      viaSetOutput.setOutput("sequence", noBridge(), 97);
+      expect(viaSetOutput.clipMode).toBe("scenes");
+
+      // Reuse of a sequence print assigns `output` directly.
+      const viaReuse = freshStore();
+      viaReuse.hydrate();
+      viaReuse.output = "sequence";
+      expect(viaReuse.clipMode).toBe("scenes");
+
+      // An edit session loads a durable job.
+      const viaEdit = freshStore();
+      viaEdit.hydrate();
+      viaEdit.ensureClips(97);
+      viaEdit.loadFromJob(
+        {
+          jobId: "c9",
+          hostId: "plato",
+          baseline: viaEdit.clips.map((c) => ({ ...c })),
+          completedStages: 0,
+        },
+        viaEdit.clips.map((c) => ({ ...c })),
+        false,
+      );
+      expect(viaEdit.clipMode).toBe("scenes");
+    });
+
+    it("reads a draft written before the sub-mode existed from what it holds", () => {
+      // No `clipMode` key: two scenes somebody actually wrote is the answer,
+      // and a parked one-shot draft is not.
+      localStorage.setItem(
+        SEQUENCE_DRAFT_KEY,
+        JSON.stringify({
+          version: 1,
+          output: "single",
+          clips: [
+            { id: "a", prompt: "the gate opens", frames: 97 },
+            { id: "b", prompt: "the road bends", frames: 97 },
+          ],
+          enableAudio: false,
+          lastSingleModel: null,
+        }),
+      );
+      const authored = freshStore();
+      authored.hydrate();
+      expect(authored.clipMode).toBe("scenes");
+
+      localStorage.setItem(
+        SEQUENCE_DRAFT_KEY,
+        JSON.stringify({
+          version: 1,
+          output: "single",
+          clips: [
+            { id: "a", prompt: "", frames: 97 },
+            { id: "b", prompt: "", frames: 97 },
+          ],
+          enableAudio: false,
+          lastSingleModel: null,
+        }),
+      );
+      const blank = freshStore();
+      blank.hydrate();
+      expect(blank.clipMode).toBe("simple");
+    });
+
+    it("returns to simple on a full reset", () => {
+      const store = freshStore();
+      store.hydrate();
+      store.clipMode = "scenes";
+      store.reset();
+      expect(store.clipMode).toBe("simple");
+    });
   });
 
   it("tracks an edit session without persisting it", () => {

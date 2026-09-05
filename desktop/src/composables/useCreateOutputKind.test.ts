@@ -119,7 +119,7 @@ describe("what each section says about itself", () => {
   });
 });
 
-describe("outputKindFor — the view's own kind is unchanged", () => {
+describe("outputKindFor — the view's own kind", () => {
   it("lets an authored sequence outrank the style's family", () => {
     expect(outputKindFor("sequence", "flux")).toBe("clip");
     expect(outputKindFor("sequence", "hunyuan3d")).toBe("clip");
@@ -128,8 +128,30 @@ describe("outputKindFor — the view's own kind is unchanged", () => {
   it("reads a one-shot from the style's family", () => {
     expect(outputKindFor("single", "hunyuan3d")).toBe("mesh");
     expect(outputKindFor("single", "flux")).toBe("still");
-    // A one-shot video print is still the Still-picture view today: the kind
-    // is the AUTHORED output, and only `sequence` authors a clip.
-    expect(outputKindFor("single", "ltx-video")).toBe("still");
+  });
+
+  /*
+   * The Simple sub-mode: a one-shot on a clip style. It renders a clip, so
+   * the toolbar shows Short clip and the title bar says New clip. The old
+   * rule — only `sequence` authors a clip — put that view under a Still
+   * picture label and offered it nothing but picture styles.
+   */
+  it("calls a one-shot on a clip style a clip", () => {
+    expect(outputKindFor("single", "ltx-video")).toBe("clip");
+    expect(outputKindFor("single", "ltx2")).toBe("clip");
+    expect(outputKindFor("single", "wan")).toBe("clip");
+    expect(outputKindFor("single", "minimax-h3")).toBe("clip");
+  });
+
+  it("answers the same question the picker's partition does", () => {
+    for (const family of ["flux", "ltx-video", "hunyuan3d", "some-future-family"]) {
+      expect(outputKindFor("single", family), family).toBe(outputKindForModel(style(family)));
+    }
+  });
+
+  it("reads an empty or absent family as a still picture", () => {
+    expect(outputKindFor("single", "")).toBe("still");
+    expect(outputKindFor("single", null)).toBe("still");
+    expect(outputKindFor("single", undefined)).toBe("still");
   });
 });
