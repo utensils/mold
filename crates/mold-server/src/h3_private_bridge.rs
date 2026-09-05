@@ -1031,7 +1031,14 @@ fn reviewed_h3_private_generation_profile_for(
         mold_core::minimax_h3::COMPACT_MAX_STEPS
     };
     recipe.steps.step = 1;
-    recipe.steps.recommended = vec![steps];
+    // The same three-rung ladder every other adjustable recipe advertises
+    // (half, default, one and a half times, clamped to the envelope); a fixed
+    // Turbo tier keeps its one distilled rung, as `steps_ladder` documents.
+    recipe.steps.recommended = if fixed_steps {
+        vec![steps]
+    } else {
+        mold_core::generation_profile::steps_ladder(recipe.steps.min, steps, recipe.steps.max)
+    };
     recipe.steps.mode = if fixed_steps {
         ControlMode::Fixed
     } else {
@@ -2420,6 +2427,18 @@ mod presentation_tests {
                 recipe.steps.mode,
                 mold_core::generation_profile::ControlMode::Adjustable
             );
+            // The adjustable base tier advertises the same three-rung ladder
+            // every other adjustable recipe does, so the Quality rows read
+            // Draft / Good / Best here too instead of one lonely rung.
+            assert_eq!(
+                recipe.steps.recommended,
+                mold_core::generation_profile::steps_ladder(
+                    recipe.steps.min,
+                    recipe.steps.default,
+                    recipe.steps.max
+                )
+            );
+            assert!(recipe.steps.recommended.len() >= 2);
         }
     }
 
@@ -2562,6 +2581,7 @@ mod presentation_tests {
             assert_eq!(recipe.steps.min, tier.steps, "{}", tier.model);
             assert_eq!(recipe.steps.max, tier.steps, "{}", tier.model);
             assert_eq!(recipe.steps.default, tier.steps, "{}", tier.model);
+            assert_eq!(recipe.steps.recommended, vec![tier.steps], "{}", tier.model);
             assert_eq!(
                 recipe.steps.mode,
                 mold_core::generation_profile::ControlMode::Fixed,

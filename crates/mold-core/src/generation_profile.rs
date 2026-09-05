@@ -1595,7 +1595,7 @@ fn fixed_dmd_steps_note(ladder: crate::manifest::WanDmdLadder) -> String {
 /// A FIXED control never comes here: a wan DMD tier and an H3 Turbo tier are
 /// distilled onto one schedule length, and a second rung would advertise a
 /// render they cannot perform.
-fn steps_ladder(min: u32, default: u32, max: u32) -> Vec<u32> {
+pub fn steps_ladder(min: u32, default: u32, max: u32) -> Vec<u32> {
     let mut rungs = vec![
         default.div_ceil(2).max(min),
         default,
