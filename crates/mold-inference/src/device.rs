@@ -5177,8 +5177,8 @@ mod tests {
 
     // ── vram_load_delta ──────────────────────────────────────────────────
 
-    /// `vram_load_delta` must be a pure `saturating_sub` against the
-    /// post-load reading. When the device has no CUDA (the test environment),
+    /// In the CPU test environment, `vram_load_delta` performs a no-op pool
+    /// sweep followed by `saturating_sub`. When the device has no CUDA,
     /// `vram_in_use_bytes` returns 0, so the delta is always 0 — but the
     /// function shape (saturating_sub, not panic on underflow) must hold
     /// regardless of the live reading.

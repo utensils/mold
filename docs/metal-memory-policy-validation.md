@@ -69,3 +69,11 @@ and Metal (6) configurations; the Metal native snapshot test stayed ignored.
 The warm-cache admission regression also passed in a Metal-enabled server.
 After updating obsolete RAM-only Metal fixtures, the broader scheduler suite
 passed all 150 tests and the memory-preflight suite passed all 27 tests.
+
+Final refresh on implementation commit `32152e7bf`: core policy 8/8, CPU
+inference filter 8/8, Metal injected filter 6/6 (one native probe ignored),
+CPU workspace and Metal package all-targets clippy with warnings denied, and
+Rust formatting all passed. The full device-registry suite also passed 14/14.
+Fable's final review of the follow-up returned no findings and verified the
+actual pinned Candle revision. The completion commit only records this
+evidence, closes the checklist and corrects a test comment.

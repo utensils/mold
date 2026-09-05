@@ -166,8 +166,9 @@ force/unsafe bypass is added. Automated tests never use real /Library paths.
       Keep CLI/TUI/MCP host inspection consistent where they project that authority.
 - [x] M6: Update one changelog fragment, README, CLAUDE.md, CLI skill renderer,
       website CLI/performance/API docs and affected app docs. All examples parse.
-- [ ] M7: Run scoped Nix tests/checks, CPU and Metal compilation, applicable local
-      CI routes, native read-only CLI UAT, rendered affected frontend UAT, independent
+- [x] M7: Run scoped Nix tests/checks, CPU and Metal compilation, applicable local
+      CI routes, read-only native research and CLI black-box UAT, rendered affected
+      frontend UAT, independent
       final diff review and resolve findings. Publish/update one PR and wait for
       local checks on the final head. The user subsequently requested closing PR
       #1592 to stop CI usage: keep it closed, continue on the same pushed branch,

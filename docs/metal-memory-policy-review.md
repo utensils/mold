@@ -92,3 +92,13 @@ The full scheduler run caught two old fixtures that supplied no Metal policy;
 those fixtures are now updated to the new required authority rather than
 weakening the fail-closed production behavior. A redundant ordinal cast found
 by clippy was also removed.
+
+## Final closure
+
+Claude Fable 5.1 reviewed `0b93dcbc1..32152e7bf` and returned **No findings**.
+The reviewer rechecked both the pool sweep and constructor against this
+branch's actual Candle pin `744ae3b83cfac18db28107a353c449cc9b80d4ec`, confirming
+the preceding closures at that revision. The final validation refresh passed
+CPU workspace and Metal all-targets clippy, core policy tests and injected
+inference tests. A stale test-comment description was corrected afterward;
+there are no further implementation changes or outstanding review findings.
