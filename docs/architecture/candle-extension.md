@@ -84,29 +84,28 @@ Do not add a second Candle source, a duplicate git revision, or a local copy of
 a Candle backend. `cargo tree -d` should not report Candle packages from
 multiple sources, and Flash Attention must compile without a private cfg flag.
 
-## crates.io boundary
+## Distribution boundary
 
-Every Candle dependency in the tree is a bare `git`+`rev` pin with no `version`
-key, and cargo refuses to publish a crate whose dependencies carry no version
-requirement. `mold-ai-candle` is therefore publishable only once each of its
-`candle-*` lines gains a `version` beside `git`/`rev` — the one shape
-`candle-single-identity.sh` deliberately permits, since the git source still
-wins for every local build. Keep `mold-ai-candle` independently packageable
-against Candle's public API; backend behavior that depends on the fork
-revision is available only to workspace/source builds until the corresponding
-upstream release lands.
+Mold no longer publishes workspace crates to crates.io. Releases use GitHub
+artifacts, Nix/FlakeHub, Docker, AUR, and source builds, which preserve the pinned
+backend. Existing registry versions are historical, not a current installation
+channel.
 
-`scripts/release/publish-crates.sh` is the publication authority. It lists every
-publishable Mold workspace crate in dependency order, skips an exact version
-that already exists during partial-release recovery, and waits until each crate
-is resolvable from the crates.io index before publishing a dependent. Adding a
-workspace crate requires adding it to that list; the crates publication
-contract test checks completeness and topological order.
+Cargo strips Git sources when publishing and requires registry version
+requirements instead. Adding those requirements alone is insufficient: the
+fork revision may not be published, and upstream registry packages such as
+`candle-flash-attn` use a different Candle package identity. Substituting them
+would break the shared Tensor type and discard backend fixes.
+
+The obsolete registry publisher and tag-triggered publish job are removed.
+`scripts/tests/crates-publish-contract.sh` guards against restoring registry
+publication or installation instructions while preserving supported release
+jobs. release-plz retains version PRs and tags with registry publishing disabled.
 
 ## Compatibility revision lifecycle
 
 The current compatibility source is revision
-`5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4` of `utensils/candle`, which publishes
+`744ae3b83cfac18db28107a353c449cc9b80d4ec` of `utensils/candle`, which contains
 the renamed `candle-core-mold` / `candle-nn-mold` / `candle-transformers-mold`
 packages every Mold cargo root pins. No manifest names a branch — the identity
 script rejects a `branch =` source outright — so moving the compatibility source

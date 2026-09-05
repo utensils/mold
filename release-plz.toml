@@ -1,12 +1,12 @@
 # release-plz drives the release PR (workspace version bump) and the vX.Y.Z
 # tag ONLY. Everything downstream — GitHub release with binaries + desktop DMG,
-# crates.io, Docker, AUR, FlakeHub — stays in the tag-triggered release.yml and
+# Docker, AUR, FlakeHub — stays in the tag-triggered release.yml and
 # desktop-distribution.yml, so publishing and GitHub releases are deliberately
 # disabled here. (Same split as utensils/nxv.)
 
 [workspace]
-# release.yml publishes to crates.io on tag push; release-plz still creates
-# the git tag with publishing disabled.
+# crates.io distribution is retired: the Git-pinned backend cannot be
+# represented by registry dependencies. Keep version PRs and tags enabled.
 publish = false
 
 # release.yml creates the GitHub release (softprops/action-gh-release) and

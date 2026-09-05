@@ -356,7 +356,6 @@ fi
 require_text "flake.nix" 'extra-substituters = [ "https://mold.cachix.org" ];'
 require_text "flake.nix" \
   '"mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="'
-require_release_job_need "publish" "release-version"
 require_release_job_need "publish-aur" "release-native"
 require_release_job_text "release-latest" \
   'Include latest completed Windows artifacts'
