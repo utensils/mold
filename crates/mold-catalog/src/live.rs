@@ -145,6 +145,8 @@ pub enum LiveSearchError {
     Network(#[from] reqwest::Error),
     #[error("decode: {0}")]
     Decode(#[from] serde_json::Error),
+    #[error("{host} search is still scanning locally-filtered results")]
+    Incomplete { host: &'static str },
     #[error("upstream {host}: HTTP {status} {body}")]
     Upstream {
         host: &'static str,
@@ -423,7 +425,9 @@ const MAX_SEARCH_RETRY_DELAY: Duration = Duration::from_secs(15);
 fn upstream_retry_after(error: &LiveSearchError) -> Option<Duration> {
     match error {
         LiveSearchError::Upstream { retry_after, .. } => *retry_after,
-        _ => None,
+        LiveSearchError::Network(_)
+        | LiveSearchError::Decode(_)
+        | LiveSearchError::Incomplete { .. } => None,
     }
 }
 
@@ -450,7 +454,9 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 
 fn retryable_search_error(error: &LiveSearchError) -> bool {
     match error {
-        LiveSearchError::Network(_) | LiveSearchError::Decode(_) => true,
+        LiveSearchError::Network(_)
+        | LiveSearchError::Decode(_)
+        | LiveSearchError::Incomplete { .. } => true,
         LiveSearchError::Upstream { status, .. } => {
             matches!(status, 408 | 425 | 429 | 500..=599)
         }
@@ -494,6 +500,10 @@ fn provider_error(source: Source, error: &LiveSearchError) -> CatalogProviderErr
         Source::Civitai => "Civitai",
     };
     let (code, message) = match error {
+        LiveSearchError::Incomplete { .. } => (
+            Some("scan-incomplete"),
+            format!("{provider} is still scanning matching models. Try again shortly."),
+        ),
         LiveSearchError::Upstream { status: 429, .. } => (
             Some("rate-limited"),
             format!("{provider} is handling too many requests right now. Try again shortly."),
@@ -502,7 +512,11 @@ fn provider_error(source: Source, error: &LiveSearchError) -> CatalogProviderErr
             Some("overloaded"),
             "Civitai is busy right now. Try again in a few seconds.".into(),
         ),
-        _ => (None, format!("{provider} is temporarily unavailable.")),
+        LiveSearchError::Network(_)
+        | LiveSearchError::Decode(_)
+        | LiveSearchError::Upstream { .. } => {
+            (None, format!("{provider} is temporarily unavailable."))
+        }
     };
     CatalogProviderError {
         source,
@@ -970,6 +984,16 @@ async fn civitai_search_paged(
                 chain.next_page += 1;
                 result = Some(page_result);
             }
+            if result.is_none() {
+                // An open cursor is not an empty logical page. Preserve the
+                // cursor and ask the bounded retry driver to resume the scan;
+                // if its own budget is exhausted, callers receive an explicit
+                // retryable provider notice rather than false exhaustion.
+                cache.put_chain(key.clone(), chain);
+                return Err(LiveSearchError::Incomplete {
+                    host: "civitai.com",
+                });
+            }
             break;
         }
         let take = page_size.min(chain.leftover.len());
@@ -1070,10 +1094,15 @@ async fn civitai_fetch_window(
         // below — the response is broader but cards land on screen.
         if trimmed_q.is_none() {
             if let Some(family) = opts.family {
-                for bm in CIVITAI_BASE_MODELS
-                    .iter()
-                    .filter(|bm| matches!(map_base_model(bm), Some((f, _, _)) if f == family))
-                {
+                for bm in CIVITAI_BASE_MODELS.iter().filter(|bm| {
+                    matches!(
+                        map_base_model(bm),
+                        Some((mapped, _, _))
+                            if mapped == family
+                                || (family == Family::QwenImageEdit
+                                    && mapped == Family::QwenImage)
+                    )
+                }) {
                     q.append_pair("baseModels", bm);
                 }
             }
@@ -1186,6 +1215,7 @@ fn hf_family_search_term(family: Family) -> &'static str {
         Family::Wan => "wan2",
         Family::MinimaxH3 => "minimax-h3",
         Family::QwenImage => "qwen-image",
+        Family::QwenImageEdit => "qwen-image-edit",
         Family::Wuerstchen => "wuerstchen",
         Family::Hunyuan3d => "hunyuan3d",
     }
@@ -1425,6 +1455,22 @@ fn looks_like_minimax_h3(id_lower: &str) -> bool {
         })
 }
 
+/// Match Qwen as a repository-name token, including the ecosystem's compact
+/// `QwenImage*` spelling, without treating an arbitrary image-edit repository
+/// as Qwen merely because the edit classifier is being evaluated.
+fn looks_like_qwen(id_lower: &str) -> bool {
+    id_lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .any(|word| {
+            word.strip_prefix("qwen").is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix.chars().all(|ch| ch.is_ascii_digit())
+                    || suffix.starts_with("image")
+            })
+        })
+}
+
 /// Wan's sub-family, inferred from a repo id.
 ///
 /// The HF normalizers pass `sub_family: None` on the grounds that single-file
@@ -1452,7 +1498,7 @@ pub fn wan_sub_family_from_id(repo_id: &str) -> Option<String> {
 pub fn family_from_hf(
     repo_id: &str,
     tags: &[String],
-    _pipeline_tag: Option<&str>,
+    pipeline_tag: Option<&str>,
 ) -> Option<(Family, FamilyRole)> {
     let id_lower = repo_id.to_ascii_lowercase();
     let role_for = |id: &str, family: Family| -> FamilyRole {
@@ -1467,6 +1513,21 @@ pub fn family_from_hf(
     // Repo-id substring match — the load-bearing path. HF doesn't
     // expose a canonical "model family" tag, so id-substring + curated
     // seed list is the cleanest signal.
+    let qwen_edit_pipeline = tags.iter().any(|tag| {
+        matches!(
+            tag.to_ascii_lowercase().as_str(),
+            "diffusers:qwenimageeditpipeline" | "diffusers:qwenimageeditpluspipeline"
+        )
+    });
+    let qwen_context = looks_like_qwen(&id_lower);
+    let qwen_edit_name = qwen_context
+        && crate::civitai_map::refine_family_from_names(Family::QwenImage, repo_id, None)
+            == Family::QwenImageEdit;
+    let qwen_image_name = qwen_context
+        && (id_lower.contains("qwen-image")
+            || id_lower.contains("qwen_image")
+            || id_lower.contains("qwenimage"));
+
     let family = if looks_like_minimax_h3(&id_lower) {
         Family::MinimaxH3
     } else if id_lower.contains("flux.2") || id_lower.contains("flux-2") {
@@ -1487,7 +1548,13 @@ pub fn family_from_hf(
         Family::Wan
     } else if id_lower.contains("z-image") || id_lower.contains("zimage") {
         Family::ZImage
-    } else if id_lower.contains("qwen-image") || id_lower.contains("qwen_image") {
+    } else if qwen_edit_name
+        || (qwen_image_name
+            && qwen_edit_pipeline
+            && pipeline_tag.is_none_or(|tag| tag.eq_ignore_ascii_case("image-to-image")))
+    {
+        Family::QwenImageEdit
+    } else if qwen_image_name {
         Family::QwenImage
     } else if id_lower.contains("wuerstchen") {
         Family::Wuerstchen
@@ -1523,6 +1590,8 @@ pub fn family_from_hf(
                     // a repo that tags itself `wan` is claiming the family.
                     "wan" => Some(Family::Wan),
                     "minimax-h3" | "minimax_h3" | "minimaxh3" => Some(Family::MinimaxH3),
+                    "qwen-image-edit" | "qwen_image_edit" => Some(Family::QwenImageEdit),
+                    "qwen-image" | "qwen_image" => Some(Family::QwenImage),
                     _ => continue,
                 }
             };
@@ -1840,6 +1909,101 @@ mod tests {
         }
     }
 
+    struct SparseQwenEditResponder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Respond for SparseQwenEditResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let is_edit = call == MAX_WINDOW_FETCHES;
+            let name = if is_edit {
+                "Community Qwen Image Edit"
+            } else {
+                "Community Qwen Image"
+            };
+            let version_name = if is_edit { "QwenImageEdit2511" } else { "v1" };
+            let metadata = if is_edit {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "nextCursor": format!("c{}", call + 1) })
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{
+                    "id": 200_000 + call,
+                    "name": name,
+                    "type": "Checkpoint",
+                    "nsfw": false,
+                    "creator": { "username": "alice" },
+                    "stats": { "downloadCount": 100 },
+                    "tags": [],
+                    "modelVersions": [{
+                        "id": 300_000 + call,
+                        "name": version_name,
+                        "baseModel": "Qwen",
+                        "baseModelType": "Standard",
+                        "files": [{
+                            "id": 400_000 + call,
+                            "name": "model.safetensors",
+                            "sizeKB": 100,
+                            "downloadCount": 1,
+                            "metadata": { "format": "SafeTensor" },
+                            "downloadUrl": "https://civitai.example/model.safetensors",
+                            "hashes": { "SHA256": "deadbeef" }
+                        }],
+                        "images": []
+                    }]
+                }],
+                "metadata": metadata
+            }))
+        }
+    }
+
+    struct SparseDeepPageResponder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Respond for SparseDeepPageResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let is_edit = call == 0 || call >= MAX_WINDOW_FETCHES;
+            let name = if is_edit {
+                "Community Qwen Image Edit"
+            } else {
+                "Community Qwen Image"
+            };
+            let version_name = if is_edit { "QwenImageEdit2511" } else { "v1" };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{
+                    "id": 500_000 + call,
+                    "name": name,
+                    "type": "Checkpoint",
+                    "nsfw": false,
+                    "creator": { "username": "alice" },
+                    "stats": { "downloadCount": 100 },
+                    "tags": [],
+                    "modelVersions": [{
+                        "id": 600_000 + call,
+                        "name": version_name,
+                        "baseModel": "Qwen",
+                        "baseModelType": "Standard",
+                        "files": [{
+                            "id": 700_000 + call,
+                            "name": "model.safetensors",
+                            "sizeKB": 100,
+                            "downloadCount": 1,
+                            "metadata": { "format": "SafeTensor" },
+                            "downloadUrl": "https://civitai.example/model.safetensors",
+                            "hashes": { "SHA256": "deadbeef" }
+                        }],
+                        "images": []
+                    }]
+                }],
+                "metadata": { "nextCursor": format!("c{}", call + 1) }
+            }))
+        }
+    }
+
     fn test_cache() -> LiveCache {
         LiveCache::new(Duration::from_secs(300), 256)
     }
@@ -1976,6 +2140,7 @@ mod tests {
             (Family::Wan, "wan2"),
             (Family::MinimaxH3, "minimax-h3"),
             (Family::QwenImage, "qwen-image"),
+            (Family::QwenImageEdit, "qwen-image-edit"),
             (Family::Wuerstchen, "wuerstchen"),
             (Family::Hunyuan3d, "hunyuan3d"),
         ];
@@ -2081,6 +2246,38 @@ mod tests {
             result.entries[0].source_id,
             "city96/stable-diffusion-3.5-medium-gguf"
         );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn hf_qwen_edit_filter_uses_the_specific_upstream_term_and_metadata() {
+        let server = MockServer::start().await;
+        let hits = vec![serde_json::json!({
+            "id": "Qwen/Qwen-Image-2511",
+            "tags": ["diffusers", "diffusers:QwenImageEditPlusPipeline"],
+            "pipeline_tag": "image-to-image"
+        })];
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .and(query_param("search", "qwen-image-edit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(hits))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = hf_search(
+            &server.uri(),
+            &LiveSearchOpts {
+                family: Some(Family::QwenImageEdit),
+                source: Some(Source::Hf),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Qwen edit family page");
+
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].family, Family::QwenImageEdit);
         server.verify().await;
     }
 
@@ -2393,6 +2590,78 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             MAX_WINDOW_FETCHES,
             "the partial page must be served from the page cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_sparse_qwen_edit_scan_does_not_return_a_false_empty_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(SparseQwenEditResponder {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let result = search_page(
+            &server.uri(),
+            "https://unused.example",
+            &test_cache(),
+            &LiveSearchOpts {
+                family: Some(Family::QwenImageEdit),
+                page_size: 1,
+                source: Some(Source::Civitai),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded scan should resume until the first matching edit row");
+
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].family, Family::QwenImageEdit);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES + 1,
+            "the retry resumes at the stored cursor rather than restarting"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_deep_sparse_scan_does_not_return_empty_mid_intermediate_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(SparseDeepPageResponder {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let result = search_page(
+            &server.uri(),
+            "https://unused.example",
+            &test_cache(),
+            &LiveSearchOpts {
+                family: Some(Family::QwenImageEdit),
+                page: 2,
+                page_size: 2,
+                source: Some(Source::Civitai),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded scan should resume an incomplete intermediate page");
+
+        assert_eq!(result.entries.len(), 2);
+        assert!(result
+            .entries
+            .iter()
+            .all(|entry| entry.family == Family::QwenImageEdit));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES + 3,
+            "the retry resumes with the buffered edit row and stored cursor"
         );
     }
 

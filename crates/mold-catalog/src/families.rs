@@ -19,6 +19,7 @@ pub enum Family {
     Wan,
     MinimaxH3,
     QwenImage,
+    QwenImageEdit,
     Wuerstchen,
     Hunyuan3d,
 }
@@ -35,6 +36,7 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::Wan,
     Family::MinimaxH3,
     Family::QwenImage,
+    Family::QwenImageEdit,
     Family::Wuerstchen,
     Family::Hunyuan3d,
 ];
@@ -73,6 +75,7 @@ impl Family {
             Family::Wan => "wan",
             Family::MinimaxH3 => "minimax-h3",
             Family::QwenImage => "qwen-image",
+            Family::QwenImageEdit => "qwen-image-edit",
             Family::Wuerstchen => "wuerstchen",
             Family::Hunyuan3d => "hunyuan3d",
         }
@@ -98,6 +101,7 @@ impl Family {
             | Family::Sd3
             | Family::ZImage
             | Family::QwenImage
+            | Family::QwenImageEdit
             | Family::Wuerstchen
             | Family::Hunyuan3d => false,
         }
@@ -126,6 +130,7 @@ impl Family {
             | Family::Wan
             | Family::MinimaxH3
             | Family::QwenImage
+            | Family::QwenImageEdit
             | Family::Wuerstchen => false,
         }
     }
@@ -144,6 +149,7 @@ impl Family {
             "wan" => Family::Wan,
             "minimax-h3" | "minimax_h3" | "minimaxh3" => Family::MinimaxH3,
             "qwen-image" => Family::QwenImage,
+            "qwen-image-edit" | "qwen_image_edit" => Family::QwenImageEdit,
             "wuerstchen" => Family::Wuerstchen,
             "hunyuan3d" | "hunyuan-3d" => Family::Hunyuan3d,
             other => return Err(UnknownFamily(other.to_string())),
@@ -187,5 +193,17 @@ mod tests {
             assert!(!family.is_video());
         }
         assert!(active_families().any(|family| family == Family::Sd3));
+    }
+
+    #[test]
+    fn qwen_image_edit_is_a_distinct_raster_family() {
+        for alias in ["qwen-image-edit", "qwen_image_edit"] {
+            let family = Family::from_str(alias).unwrap();
+            assert_eq!(family, Family::QwenImageEdit);
+            assert_eq!(family.as_str(), "qwen-image-edit");
+            assert!(!family.is_video());
+            assert!(!family.is_mesh());
+        }
+        assert!(active_families().any(|family| family == Family::QwenImageEdit));
     }
 }

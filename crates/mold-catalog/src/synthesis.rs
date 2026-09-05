@@ -288,7 +288,7 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         | Family::LtxVideo
         | Family::Wan
         | Family::MinimaxH3 => false,
-        Family::QwenImage | Family::Wuerstchen => false,
+        Family::QwenImage | Family::QwenImageEdit | Family::Wuerstchen => false,
         // Hunyuan3D bundles the shape VAE inside the single checkpoint under
         // the `vae.` prefix, unconditionally and across every published tier
         // (2.0, 2.0-turbo, 2.0-mini, 2mv, 2.1). There is nothing to probe for
@@ -462,6 +462,28 @@ mod tests {
         let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
         let names: Vec<&str> = intent.companions.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["qwen-image-runtime"]);
+    }
+
+    #[test]
+    fn synthesize_intent_preserves_qwen_edit_family_and_runtime_companion() {
+        let mut entry = flux_unet_only_entry();
+        entry.id = CatalogId::from("cv:2110044");
+        entry.source_id = "2110044".into();
+        entry.family = Family::QwenImageEdit;
+        entry.download_recipe.files[0].dest =
+            "{family}/civitai/2110044/qwenImageEdit_fp8.safetensors".into();
+
+        let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
+        assert_eq!(intent.family, "qwen-image-edit");
+        assert_eq!(
+            intent
+                .companions
+                .iter()
+                .map(|companion| companion.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qwen-image-runtime"]
+        );
+        assert!(!family_bundles_vae_unconditionally(Family::QwenImageEdit));
     }
 
     #[test]

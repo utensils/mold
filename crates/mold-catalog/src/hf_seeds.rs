@@ -45,6 +45,7 @@ pub fn seeds_for(family: Family) -> &'static [&'static str] {
         ],
         MinimaxH3 => &["MiniMaxAI/MiniMax-H3", "Comfy-Org/MiniMax-H3"],
         QwenImage => &["Qwen/Qwen-Image"],
+        QwenImageEdit => &["Qwen/Qwen-Image-Edit-2511"],
         Wuerstchen => &["warp-ai/wuerstchen"],
         // Tencent's own releases. `Hunyuan3D-2` carries the 1.1B shape
         // checkpoints and the 2.0 paint stack; `-2mini` the 0.6B tier;
