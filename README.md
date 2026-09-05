@@ -39,6 +39,10 @@ The installer selects a compatible build and verifies its checksum. See the
 Arch, Windows, Android, and source builds.
 GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
+Mold no longer publishes new versions to crates.io. Existing registry versions
+are historical; use GitHub releases, Nix/FlakeHub, Docker, AUR, or a source build
+for current versions.
+
 ## Quick start
 
 ```bash

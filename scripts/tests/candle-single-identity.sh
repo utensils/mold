@@ -101,9 +101,8 @@ for manifest in "${manifests[@]}"; do
     grep -Fq "rev = \"$authority_rev\"" <<<"$line" ||
       fail "$manifest pins $name to a different revision than $authority_rev; every candle crate must come from one fork revision or its \`Tensor\` type stops unifying"
     # `version` is permitted BESIDE git+rev and nowhere else: cargo ignores it
-    # while resolving locally (the git source wins) and crates.io requires it
-    # of any dependency in a published manifest, so banning it outright would
-    # forbid the only shape `cargo package -p mold-ai-candle` can accept.
+    # as a source selector (the git source wins). Registry distribution is
+    # retired; permitting a version here does not authorize publication.
     # `branch`, `tag`, and `path` are different sources, so they stay banned.
     if grep -Eq '(branch|tag|path) = "[^"]+"' <<<"$line"; then
       fail "$manifest gives $name a branch, tag, or path source; only an exact \`rev\` pin on the fork keeps one package identity"

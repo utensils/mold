@@ -379,9 +379,9 @@ require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
 require_text crates/mold-inference/build.rs \
   'collect_native_toolchain_identity()' \
   "the private H3 identity does not invalidate when a native compiler is replaced"
-# mold-ai-server is published to crates.io, and a published `.crate` carries
-# only its own crate directory, so its build script cannot read the inference
-# copy of this list. The two are separate files on purpose; they must not drift,
+# The server retains crate-local build support originally introduced for
+# registry package isolation. Registry distribution is now retired, but the
+# two existing copies must not drift,
 # because one enforces the campaign feature set and the other hashes it into the
 # runtime-code identity.
 canonical_features_of() {

@@ -166,7 +166,7 @@ pub fn image_tag_for_gpu_name(
 /// Image tag base embedded by release CI.
 ///
 /// Main-branch rolling binaries set this to `latest`; tagged official builds
-/// set the exact tag. Source, crates.io, and Nix builds intentionally use the
+/// set the exact tag. Source and Nix builds intentionally use the
 /// mutable rolling channel unless their build system explicitly supplies an
 /// official distribution version. A local Cargo package version is not
 /// evidence that the matching container was published.

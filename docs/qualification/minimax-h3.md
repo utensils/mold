@@ -506,9 +506,9 @@ private server build separately rejects any feature set beyond the canonical
 CUDA, private bridge/runtime, MP4, and NVML campaign edge, and that canonical
 server feature set is itself part of the composite identity. That validation
 lives in `crates/mold-server/build_support/` rather than being shared from
-`mold-inference`, because `mold-ai-server` is published to crates.io and a
-published `.crate` cannot carry a sibling crate's files; the release contract
-fails if the two copies of the canonical feature set drift.
+`mold-inference`, retaining crate-local build support originally introduced
+for package isolation. crates.io distribution is now retired; the release
+contract still fails if the two copies of the canonical feature set drift.
 
 Configuration paths are not compiler identities. `CUDA_HOME` and the host
 compiler variables record _where_ the toolchain is, so a toolkit upgraded in

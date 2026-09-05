@@ -1,5 +1,9 @@
 # Mold CLI workflows
 
+Current Mold versions are distributed through GitHub releases, Nix/FlakeHub,
+Docker, AUR, and source builds. crates.io publishing is retired; registry
+versions are historical and should not be recommended for installation.
+
 Read `mold <command> --help` before using an unfamiliar or high-impact option.
 The installed CLI is authoritative over examples in this bundle.
 
