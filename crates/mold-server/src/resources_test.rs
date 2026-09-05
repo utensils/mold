@@ -9,6 +9,7 @@ fn fake_snapshot() -> ResourceSnapshot {
         hostname: "test".into(),
         timestamp: 1_700_000_000_000,
         gpus: vec![GpuSnapshot {
+            metal_memory: None,
             ordinal: 0,
             name: "fake".into(),
             backend: GpuBackend::Cuda,

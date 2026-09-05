@@ -341,6 +341,7 @@ pub(crate) mod nvml_source {
                         .ok()
                         .map(|usage| usage.gpu.min(100) as u8);
                     Some(GpuSnapshot {
+                        metal_memory: None,
                         ordinal: target.logical_ordinal,
                         name,
                         backend: GpuBackend::Cuda,
@@ -395,6 +396,7 @@ pub(crate) mod nvml_source {
                 // Cheap — this is just a driver query, not a counter reset.
                 let gpu_util = dev.utilization_rates().ok().map(|u| u.gpu.min(100) as u8);
                 out.push(GpuSnapshot {
+                    metal_memory: None,
                     ordinal: ordinal as usize,
                     name,
                     backend: GpuBackend::Cuda,
@@ -489,8 +491,12 @@ use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 /// derives headroom from `total - used`, so that subtraction must recover
 /// exactly the available bytes the host snapshot reports.
 #[cfg(any(test, target_os = "macos"))]
-pub(crate) fn metal_snapshot_from_ram(ram: &RamSnapshot) -> GpuSnapshot {
+pub(crate) fn metal_snapshot_from_ram(
+    ram: &RamSnapshot,
+    metal_memory: Option<mold_core::metal_memory::MetalMemorySnapshot>,
+) -> GpuSnapshot {
     GpuSnapshot {
+        metal_memory,
         ordinal: 0,
         name: "Apple Metal GPU".into(),
         backend: GpuBackend::Metal,
@@ -513,7 +519,10 @@ pub(crate) fn metal_snapshot_from_ram(ram: &RamSnapshot) -> GpuSnapshot {
 pub fn metal_snapshot() -> Vec<GpuSnapshot> {
     #[cfg(target_os = "macos")]
     {
-        vec![metal_snapshot_from_ram(&ram_snapshot())]
+        vec![metal_snapshot_from_ram(
+            &ram_snapshot(),
+            mold_inference::metal_memory::snapshot(0),
+        )]
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -683,6 +692,7 @@ impl SmiSource {
                     .iter()
                     .find(|sample| target_accepts_nvidia_uuid(target, &sample.uuid))?;
                 Some(GpuSnapshot {
+                    metal_memory: None,
                     ordinal: target.logical_ordinal,
                     name: sample.name.clone(),
                     backend: GpuBackend::Cuda,
@@ -702,6 +712,7 @@ impl SmiSource {
             .filter_map(|l| {
                 let (ordinal, name, total, used) = parse_nvidia_smi_line(l)?;
                 Some(GpuSnapshot {
+                    metal_memory: None,
                     ordinal,
                     name,
                     backend: GpuBackend::Cuda,
@@ -796,7 +807,10 @@ fn collect_gpus(inventory: Option<&[TelemetryTarget]>, ram: &RamSnapshot) -> Vec
     {
         // One sample feeds both host and device telemetry, not two reads of
         // a shared physical pool taken at different moments.
-        let snapshots = vec![metal_snapshot_from_ram(ram)];
+        let snapshots = vec![metal_snapshot_from_ram(
+            ram,
+            mold_inference::metal_memory::snapshot(0),
+        )];
         return match inventory {
             Some(inventory)
                 if !inventory

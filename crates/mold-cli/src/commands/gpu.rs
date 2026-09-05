@@ -218,6 +218,9 @@ fn project_local_devices(
                     .compute_capability
                     .map(|(major, minor)| format!("{major}.{minor}")),
                 memory: DeviceMemoryInfo {
+                    metal_memory: (device.backend == mold_core::GpuBackend::Metal)
+                        .then(|| mold_inference::metal_memory::snapshot(device.ordinal))
+                        .flatten(),
                     total_bytes: total,
                     used_bytes: used,
                     mold_used_bytes: None,
@@ -334,6 +337,7 @@ mod tests {
             pci_bus_id: None,
             compute_capability: None,
             memory: DeviceMemoryInfo {
+                metal_memory: None,
                 total_bytes: Some(24),
                 used_bytes: Some(0),
                 mold_used_bytes: Some(0),

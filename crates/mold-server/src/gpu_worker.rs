@@ -5395,7 +5395,10 @@ fn ensure_model_ready_sync_inner(
         cache.touch(cache_key);
         drop(cache);
         if let Some(predicted_peak_bytes) = planned_peak_bytes {
-            if let Some(process_vram) = crate::resources::current_process_vram_bytes(&worker.gpu) {
+            let process_vram = crate::resources::current_process_vram_bytes(&worker.gpu)
+                .or_else(|| mold_inference::metal_memory::snapshot(worker.gpu.ordinal)
+                    .map(|sample| sample.allocated_bytes.unwrap_or(0)));
+            if let Some(process_vram) = process_vram {
                 preflight_planned_memory_guard_with_eviction(
                     &worker.model_cache,
                     cache_key,

@@ -26,8 +26,8 @@ pub fn snapshot(ordinal: usize) -> Option<MetalMemorySnapshot> {
                             Some("Metal reported an unavailable working-set recommendation".into());
                     }
                     (
-                        (recommended > 0).then_some(recommended),
-                        Some(device.current_allocated_size()),
+                        (recommended > 0).then_some(recommended as u64),
+                        Some(device.current_allocated_size() as u64),
                     )
                 }
                 Err(e) => {

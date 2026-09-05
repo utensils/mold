@@ -329,9 +329,9 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
             let total = total_system_memory_bytes()
                 .or_else(available_system_memory_bytes)
                 .unwrap_or(0);
-            let free = available_system_memory_bytes()
-                .or_else(free_system_memory_bytes)
-                .unwrap_or(0);
+            // Eager read-only device probe: a lazy probe would leave the first
+            // job unable to establish its budget. No models are loaded here.
+            let free = free_vram_bytes(0).unwrap_or(0);
             gpus.push(DiscoveredGpu {
                 ordinal: 0,
                 stable_id: Some("metal:default".to_string()),
@@ -2169,6 +2169,9 @@ pub fn total_system_memory_bytes() -> Option<u64> {
 /// `max(15%, 8 GiB)` floor as the host ledger. If installed memory cannot be
 /// queried, retain the live sample unchanged.
 pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u64 {
+    if let Some(sample) = crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)) {
+        return sample.effective_capacity_bytes.unwrap_or(0);
+    }
     total_system_memory_bytes().map_or(live_available_bytes, |total| {
         let safety_floor = total.saturating_mul(15).saturating_div(100).max(8 << 30);
         total.saturating_sub(safety_floor)
@@ -2185,7 +2188,10 @@ pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u6
 pub fn metal_live_allocation_budget(live_available_bytes: u64) -> u64 {
     let total = total_system_memory_bytes().unwrap_or(live_available_bytes);
     let safety_floor = total.saturating_mul(15).saturating_div(100).max(8 << 30);
-    live_available_bytes.min(total).saturating_sub(safety_floor)
+    let host_budget = live_available_bytes.min(total).saturating_sub(safety_floor);
+    crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)).map_or(host_budget, |sample| {
+        host_budget.min(sample.allocation_headroom_bytes.unwrap_or(0))
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2348,6 +2354,9 @@ pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryErro
 /// remains useful to inference components that want a conservative observation.
 #[cfg(not(feature = "cuda"))]
 pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    // Metal's allocated-byte reading includes Candle's retained buffer pool.
+    // Only synchronize at this explicit post-drop boundary, never in telemetry.
+    release_pooled_metal_memory(ordinal);
     usable_free_vram_bytes(ordinal).ok_or_else(|| DeviceMemoryError::Unavailable {
         operation: "free GPU memory query",
         message: "this backend does not expose a memory sample".to_string(),
@@ -2377,7 +2386,12 @@ pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
 /// would actually fit, forcing a BF16 fallback that doesn't fit either.
 /// On other non-CUDA platforms, no VRAM info available.
 #[cfg(not(feature = "cuda"))]
-pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
+pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
+    if let Some(sample) = crate::metal_memory::snapshot(ordinal) {
+        // Preserve zero on a failed supported probe so compatibility callers
+        // cannot turn an unknown budget into an unbounded allocation fallback.
+        return Some(sample.allocation_headroom_bytes.unwrap_or(0));
+    }
     available_system_memory_bytes().or_else(free_system_memory_bytes)
 }
 
@@ -3870,7 +3884,7 @@ mod tests {
     /// On macOS (unified memory), free_vram_bytes should return available memory
     /// (free + inactive), not just free pages. This ensures variant selection
     /// doesn't reject quantized encoders that would actually fit.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "metal")))]
     #[test]
     fn free_vram_returns_available_not_just_free_on_macos() {
         let vram = free_vram_bytes(0).unwrap();
@@ -3897,7 +3911,7 @@ mod tests {
     /// which discovery also set to a transient availability reading rather than
     /// installed RAM, so every LTX-2 plan was rejected before a weight was read
     /// ("metal:default needs ~13.9 GB of ~10.1 GB usable").
-    #[cfg(all(target_os = "macos", not(feature = "cuda")))]
+    #[cfg(all(target_os = "macos", feature = "metal", not(feature = "cuda")))]
     #[test]
     fn metal_discovery_budgets_on_reclaimable_memory() {
         let gpus = discover_gpus();
@@ -3905,7 +3919,7 @@ mod tests {
             .iter()
             .find(|gpu| gpu.backend == GpuBackend::Metal)
             .expect("macOS exposes a Metal device");
-        let available = available_system_memory_bytes().expect("macOS VM statistics");
+        let available = free_vram_bytes(0).expect("Metal policy sample");
         let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
 
         // Separate syscalls sample live VM state, so compare with drift room.
@@ -3944,10 +3958,11 @@ mod tests {
     fn large_metal_capacity_retains_the_canonical_host_safety_floor() {
         let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
         let floor = (installed.saturating_mul(15) / 100).max(8 << 30);
-        assert_eq!(
-            metal_unified_capacity_with_safety_floor(1),
-            installed.saturating_sub(floor)
-        );
+        let expected = crate::metal_memory::snapshot(0)
+            .map_or(installed.saturating_sub(floor), |sample| {
+                sample.effective_capacity_bytes.unwrap_or(0)
+            });
+        assert_eq!(metal_unified_capacity_with_safety_floor(1), expected);
         assert!(floor >= 8 << 30);
     }
 
@@ -3957,7 +3972,7 @@ mod tests {
         let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
         let floor = (installed.saturating_mul(15) / 100).max(8 << 30);
         let live = installed.saturating_sub(4 << 30);
-        assert_eq!(metal_live_allocation_budget(live), live - floor);
+        assert!(metal_live_allocation_budget(live) <= live - floor);
         assert_eq!(metal_live_allocation_budget(floor), 0);
         assert_eq!(metal_live_allocation_budget(floor / 2), 0);
     }

@@ -1030,6 +1030,17 @@ pub(crate) fn preflight_memory_guard_for_request(
 
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, active_vram_bytes)? {
+            return preflight_memory_guard_with_available_on_gpu_for_request(
+                model_name,
+                paths,
+                0,
+                available,
+                gpu_ordinal,
+                hint,
+                request_has_lora,
+            );
+        }
         // macOS unified memory: query system memory and add reclaimable footprint.
         if let Some(available) = mold_inference::device::available_system_memory_bytes() {
             if available > 0 {
@@ -1077,6 +1088,15 @@ pub(crate) fn preflight_planned_memory_guard(
 
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, active_vram_bytes)? {
+            return check_planned_memory_budget_with_resident(
+                model_name,
+                predicted_peak_bytes,
+                available,
+                0,
+                rejection_suggestion(hint),
+            );
+        }
         if let Some(available) = mold_inference::device::available_system_memory_bytes()
             .filter(|available| *available > 0)
         {
@@ -1133,6 +1153,18 @@ pub(crate) fn preflight_memory_guard_after_drop_for_request(
     }
     #[cfg(not(feature = "cuda"))]
     {
+        mold_inference::device::release_pooled_metal_memory(gpu_ordinal);
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, 0)? {
+            return preflight_memory_guard_with_available_on_gpu_for_request(
+                model_name,
+                paths,
+                0,
+                available,
+                gpu_ordinal,
+                hint,
+                request_has_lora,
+            );
+        }
         // Metal's unified-memory admission already used available system
         // memory plus the active engine's reclaimable footprint in the first
         // guard. A second instantaneous sample after `unload()` can lag page
@@ -1169,6 +1201,15 @@ pub(crate) fn preflight_planned_memory_guard_after_drop(
 
     #[cfg(not(feature = "cuda"))]
     {
+        mold_inference::device::release_pooled_metal_memory(gpu_ordinal);
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, 0)? {
+            return check_planned_memory_budget(
+                model_name,
+                predicted_peak_bytes,
+                available,
+                rejection_suggestion(hint),
+            );
+        }
         let _ = (model_name, predicted_peak_bytes, gpu_ordinal, hint);
         Ok(())
     }
@@ -1192,9 +1233,36 @@ pub(crate) fn effective_load_available_bytes(
     }
 
     #[cfg(not(feature = "cuda"))]
-    Ok(mold_inference::device::available_system_memory_bytes()
-        .filter(|available| *available > 0)
-        .map(|available| available.saturating_add(active_vram_bytes)))
+    {
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, active_vram_bytes)? {
+            return Ok(Some(available));
+        }
+        Ok(mold_inference::device::available_system_memory_bytes()
+            .filter(|available| *available > 0)
+            .map(|available| available.saturating_add(active_vram_bytes)))
+    }
+}
+
+/// Credit only measured, reclaimable Metal allocations, and never exceed the
+/// current total policy. A failed supported probe must not use the RAM fallback.
+#[cfg(not(feature = "cuda"))]
+fn metal_available_after_reclaim(
+    ordinal: usize,
+    reclaimable: u64,
+) -> Result<Option<u64>, ApiError> {
+    let Some(sample) = mold_inference::metal_memory::snapshot(ordinal) else {
+        return Ok(None);
+    };
+    if sample.allocation_headroom_bytes.is_none() {
+        return Err(ApiError::insufficient_memory(format!(
+            "Metal memory admission unavailable: {}",
+            sample
+                .error
+                .as_deref()
+                .unwrap_or("could not measure the working-set budget"),
+        )));
+    }
+    Ok(Some(sample.with_reclaimable(reclaimable)))
 }
 
 #[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]

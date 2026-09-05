@@ -1837,6 +1837,15 @@ pub(crate) async fn ensure_model_ready(
                         "recreating loaded engine for request-specific offload policy"
                     );
                 } else {
+                    // A live Metal limit can shrink while an engine remains
+                    // cached. Recheck the request peak with its resident credit
+                    // (bounded by native allocation in the shared guard).
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
+                    if let Some(paths) = entry.engine.model_paths() {
+                        preflight_memory_guard_for_request(
+                            model_name, paths, active_vram, 0, hint, request_has_lora,
+                        )?;
+                    }
                     // Already loaded: nothing is about to be loaded, so there
                     // is no load progress to report. Leave the engine with no
                     // callback — the generation installs its own and clears it

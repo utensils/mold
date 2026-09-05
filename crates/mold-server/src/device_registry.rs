@@ -130,6 +130,8 @@ pub(crate) struct SchedulerDeviceProjection {
     pub activity: DeviceActivity,
     pub schedulable: bool,
     pub sampled_free_vram_bytes: u64,
+    pub capacity_bytes: u64,
+    pub metal_allocated_bytes: Option<u64>,
     pub sampled_mold_vram_bytes: Option<u64>,
     pub discovered_free_vram_bytes: u64,
     /// A generation registry row currently owns this device. This remains
@@ -746,7 +748,13 @@ impl DeviceRegistry {
                 } else {
                     activity
                 };
-                let schedulable = admin_state == DeviceAdminState::Enabled
+                let metal_memory = telemetry.and_then(|sample| sample.metal_memory.as_ref());
+                let metal_budget_unavailable = metal_memory.is_some_and(|sample| {
+                    sample.effective_capacity_bytes.is_none()
+                        || sample.allocation_headroom_bytes.is_none()
+                });
+                let schedulable = !metal_budget_unavailable
+                    && admin_state == DeviceAdminState::Enabled
                     && health == DeviceHealth::Healthy
                     && worker_ref.is_some()
                     && worker_ref.is_some_and(|worker| {
@@ -757,7 +765,9 @@ impl DeviceRegistry {
                                 == crate::gpu_pool::DRAIN_RUNNING
                     });
                 let unschedulable_reason = (!schedulable).then(|| {
-                    if admin_state == DeviceAdminState::StartupExcluded {
+                    if metal_budget_unavailable {
+                        "metal_memory_unavailable"
+                    } else if admin_state == DeviceAdminState::StartupExcluded {
                         "device_startup_excluded"
                     } else if admin_state == DeviceAdminState::Starting {
                         "device_starting"
@@ -806,6 +816,7 @@ impl DeviceRegistry {
                         .compute_capability
                         .map(|(major, minor)| format!("{major}.{minor}")),
                     memory: DeviceMemoryInfo {
+                        metal_memory: metal_memory.cloned(),
                         total_bytes: telemetry
                             .map(|snapshot| snapshot.vram_total)
                             .or(device.total_memory_bytes),
@@ -838,6 +849,10 @@ impl DeviceRegistry {
                         .as_ref()
                         .map_or(0, |gpu| gpu.free_vram_bytes);
                     SchedulerDeviceProjection {
+                        metal_allocated_bytes: metal_memory
+                            .map(|sample| sample.allocated_bytes.unwrap_or(0)),
+                        capacity_bytes: metal_memory
+                            .map_or(total, |sample| sample.effective_capacity_bytes.unwrap_or(0)),
                         id,
                         backend: device.backend,
                         ordinal,
@@ -846,12 +861,16 @@ impl DeviceRegistry {
                         health: info.health,
                         activity: info.activity,
                         schedulable: info.schedulable,
-                        sampled_free_vram_bytes: info
-                            .memory
-                            .used_bytes
-                            .map_or(discovered_free_vram_bytes, |used| {
-                                total.saturating_sub(used)
-                            }),
+                        sampled_free_vram_bytes: metal_memory.map_or_else(
+                            || {
+                                info.memory
+                                    .used_bytes
+                                    .map_or(discovered_free_vram_bytes, |used| {
+                                        total.saturating_sub(used)
+                                    })
+                            },
+                            |sample| sample.allocation_headroom_bytes.unwrap_or(0),
+                        ),
                         sampled_mold_vram_bytes: info.memory.mold_used_bytes,
                         discovered_free_vram_bytes,
                         active_work: info.active_work_id.is_some(),
@@ -1310,6 +1329,7 @@ mod tests {
                 pci_bus_id: None,
                 compute_capability: Some("8.6".into()),
                 memory: DeviceMemoryInfo {
+                    metal_memory: None,
                     total_bytes: Some(24 * 1024 * 1024 * 1024),
                     used_bytes: Some(8 * 1024 * 1024 * 1024),
                     mold_used_bytes: None,
@@ -1483,6 +1503,75 @@ mod tests {
                 .unwrap()
                 .device_kind,
             DeviceKind::Metal
+        );
+
+        // Deliberately contradictory legacy sysinfo figures: admission must
+        // read the policy's Mach sample, not total minus legacy used RAM.
+        let policy = mold_core::metal_memory::MetalMemorySnapshot {
+            wired_limit: mold_core::metal_memory::MetalWiredLimit::Explicit { mib: 16384 },
+            physical_bytes: Some(32 << 30),
+            available_host_bytes: Some(24 << 30),
+            recommended_bytes: Some(24 << 30),
+            allocated_bytes: Some(4 << 30),
+            effective_capacity_bytes: None,
+            allocation_headroom_bytes: None,
+            error: None,
+        }
+        .resolve();
+        let mut resources = mold_core::ResourceSnapshot {
+            hostname: "metal-test".into(),
+            timestamp: 1,
+            cpu: None,
+            system_ram: mold_core::RamSnapshot {
+                total: 32 << 30,
+                used: 1 << 30,
+                available: Some(31 << 30),
+                reclaimable_zfs_arc: None,
+                used_by_mold: 0,
+                used_by_other: 1 << 30,
+            },
+            gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: Some(policy.clone()),
+                ordinal: 0,
+                name: "Apple GPU".into(),
+                backend: GpuBackend::Metal,
+                vram_total: 32 << 30,
+                vram_used: 1 << 30,
+                vram_used_by_mold: None,
+                vram_used_by_other: None,
+                gpu_utilization: None,
+            }],
+        };
+        let pool = GpuPool {
+            workers: Vec::new().into(),
+        };
+        let jobs = crate::job_registry::JobRegistry::new();
+        let snapshot = registry.canonical_snapshot(&pool, Some(&resources), &jobs);
+        assert_eq!(
+            snapshot.scheduler_devices[0].sampled_free_vram_bytes,
+            12 << 30
+        );
+        assert_eq!(snapshot.scheduler_devices[0].capacity_bytes, 16 << 30);
+        assert_eq!(
+            snapshot.device_state.devices[0].memory.total_bytes,
+            Some(32 << 30)
+        );
+        assert_eq!(
+            snapshot.device_state.devices[0].memory.metal_memory,
+            Some(policy)
+        );
+        assert_eq!(snapshot.scheduler_devices[0].sampled_mold_vram_bytes, None);
+        let policy = resources.gpus[0].metal_memory.as_mut().unwrap();
+        policy.effective_capacity_bytes = None;
+        policy.allocation_headroom_bytes = None;
+        let unavailable = registry.canonical_snapshot(&pool, Some(&resources), &jobs);
+        assert_eq!(unavailable.scheduler_devices[0].capacity_bytes, 0);
+        assert_eq!(unavailable.scheduler_devices[0].sampled_free_vram_bytes, 0);
+        assert_eq!(
+            unavailable.device_state.devices[0]
+                .unschedulable_reason
+                .as_deref(),
+            Some("metal_memory_unavailable")
         );
     }
 

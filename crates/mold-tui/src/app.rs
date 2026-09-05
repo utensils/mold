@@ -21181,6 +21181,7 @@ mod tests {
                 pci_bus_id: None,
                 compute_capability: Some("10.0".into()),
                 memory: mold_core::DeviceMemoryInfo {
+                    metal_memory: None,
                     total_bytes: Some(24 * 1024_u64.pow(3)),
                     used_bytes: Some(ordinal as u64 * 1024),
                     mold_used_bytes: None,
