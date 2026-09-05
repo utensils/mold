@@ -485,6 +485,23 @@ pub fn parse_nvidia_smi_line(line: &str) -> Option<(usize, String, u64, u64)> {
 use mold_core::{CpuSnapshot, RamSnapshot};
 use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 
+/// Project one host sample onto Metal's shared physical pool. The scheduler
+/// derives headroom from `total - used`, so that subtraction must recover
+/// exactly the available bytes the host snapshot reports.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn metal_snapshot_from_ram(ram: &RamSnapshot) -> GpuSnapshot {
+    GpuSnapshot {
+        ordinal: 0,
+        name: "Apple Metal GPU".into(),
+        backend: GpuBackend::Metal,
+        vram_total: ram.total,
+        vram_used: ram.total.saturating_sub(ram.available_or_estimate()),
+        vram_used_by_mold: None,
+        vram_used_by_other: None,
+        gpu_utilization: None,
+    }
+}
+
 /// Metal unified-memory snapshot — macOS only. Off-Darwin returns an empty
 /// Vec so callers on Linux/CUDA hosts can unconditionally call this.
 ///
@@ -496,22 +513,7 @@ use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 pub fn metal_snapshot() -> Vec<GpuSnapshot> {
     #[cfg(target_os = "macos")]
     {
-        let mut sys = sysinfo::System::new_with_specifics(
-            sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
-        );
-        sys.refresh_memory();
-        let total = sys.total_memory();
-        let used = sys.used_memory();
-        vec![GpuSnapshot {
-            ordinal: 0,
-            name: "Apple Metal GPU".to_string(),
-            backend: GpuBackend::Metal,
-            vram_total: total,
-            vram_used: used,
-            vram_used_by_mold: None,
-            vram_used_by_other: None,
-            gpu_utilization: None,
-        }]
+        vec![metal_snapshot_from_ram(&ram_snapshot())]
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -519,8 +521,9 @@ pub fn metal_snapshot() -> Vec<GpuSnapshot> {
     }
 }
 
-/// Build a single `RamSnapshot` for host admission: the `sysinfo` reading
-/// with the evictable ZFS ARC credit recorded beside `MemAvailable` (#1439).
+/// Build a single `RamSnapshot` for host admission: macOS uses the worker's
+/// free + inactive authority; other hosts use `sysinfo`, with evictable ZFS
+/// ARC credit recorded beside `MemAvailable` (#1439).
 ///
 /// This is the ONE place the credit enters a sample. Every consumer that
 /// spends host memory — the scheduler ledger, H3 admission, the reclaim
@@ -538,6 +541,22 @@ pub fn ram_snapshot() -> RamSnapshot {
 /// RSS-only probes (`used_by_mold` before/after an unload), which have no
 /// business reading arcstats. Admission goes through [`ram_snapshot`].
 pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
+    ram_snapshot_from_system_with_available(|sys| {
+        // Metal admission and worker preflight spend the same free + inactive
+        // authority. Preserve a failed query as unavailable, not zero capacity.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = sys;
+            mold_inference::device::available_system_memory_bytes()
+        }
+        #[cfg(not(target_os = "macos"))]
+        Some(sys.available_memory())
+    })
+}
+
+pub(crate) fn ram_snapshot_from_system_with_available(
+    sample_available: impl FnOnce(&System) -> Option<u64>,
+) -> RamSnapshot {
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing()
             .with_memory(sysinfo::MemoryRefreshKind::everything())
@@ -552,13 +571,13 @@ pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
     );
     let total = sys.total_memory();
     let used = sys.used_memory();
-    let available = sys.available_memory();
+    let available = sample_available(&sys);
     let used_by_mold = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
     let used_by_other = used.saturating_sub(used_by_mold);
     RamSnapshot {
         total,
         used,
-        available: Some(available.min(total)),
+        available: available.map(|bytes| bytes.min(total)),
         reclaimable_zfs_arc: None,
         used_by_mold,
         used_by_other,
@@ -723,8 +742,8 @@ fn build_snapshot_inner(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let gpus = collect_gpus(inventory);
     let system_ram = ram_snapshot();
+    let gpus = collect_gpus(inventory, &system_ram);
 
     ResourceSnapshot {
         hostname,
@@ -769,11 +788,15 @@ impl Default for CpuSampler {
 }
 
 #[allow(clippy::needless_return)]
-fn collect_gpus(inventory: Option<&[TelemetryTarget]>) -> Vec<GpuSnapshot> {
+fn collect_gpus(inventory: Option<&[TelemetryTarget]>, ram: &RamSnapshot) -> Vec<GpuSnapshot> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = ram;
     // Darwin: Metal is the only GPU path.
     #[cfg(target_os = "macos")]
     {
-        let snapshots = metal_snapshot();
+        // One sample feeds both host and device telemetry, not two reads of
+        // a shared physical pool taken at different moments.
+        let snapshots = vec![metal_snapshot_from_ram(ram)];
         return match inventory {
             Some(inventory)
                 if !inventory

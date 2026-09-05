@@ -3638,7 +3638,7 @@ impl Coordinator {
             &pending.work,
             OwnerWork::ChainStage(job) if job.expected_model_fingerprint.is_some()
         );
-        let plans = crate::execution_plan::resolve_execution_plans_for_coordinator(
+        let mut plans = crate::execution_plan::resolve_execution_plans_for_coordinator(
             config,
             request,
             &self.device_facts(),
@@ -3673,6 +3673,27 @@ impl Coordinator {
                     ));
                 }
             }
+        }
+        // The resolver's raw device peak may fit while Metal's encoder phase
+        // plus concurrent host bytes does not. Preserve a typed refusal here:
+        // owner work must reach reclaim and bounded settlement, not wait
+        // forever with no lease and no recorded memory block.
+        let mut rejections = Vec::new();
+        plans.retain(|plan| {
+            let demand = plan.admission_vram_demand_bytes();
+            if demand <= plan.admitted_available_vram_bytes {
+                return true;
+            }
+            rejections.push(crate::execution_plan::DeviceInfeasibility {
+                device_id: plan.device_id.clone(),
+                predicted_peak_bytes: demand,
+                available_bytes: plan.admitted_available_vram_bytes,
+                advice: None,
+            });
+            false
+        });
+        if plans.is_empty() && !rejections.is_empty() {
+            return Err(crate::execution_plan::insufficient_vram_error(&rejections));
         }
         Ok(plans)
     }
@@ -4620,7 +4641,7 @@ impl Coordinator {
                                 DeviceId::new(plan.device_id.clone()),
                                 Some(worker.as_ref()),
                                 &plan.execution_fingerprint,
-                                plan.predicted_vram_peak_bytes,
+                                plan.admission_vram_demand_bytes(),
                                 host_bytes,
                                 true,
                             )
@@ -4743,7 +4764,7 @@ impl Coordinator {
                             });
                         let static_estimate = static_generation_estimate_with_projection(
                             &pending.job.request,
-                            plan.predicted_vram_peak_bytes,
+                            plan.admission_vram_demand_bytes(),
                             plan.admission_host_demand_bytes(),
                             pending
                                 .job
@@ -5260,7 +5281,7 @@ impl Coordinator {
                 );
                 let static_estimate = static_generation_estimate(
                     request,
-                    plan.predicted_vram_peak_bytes,
+                    plan.admission_vram_demand_bytes(),
                     plan.admission_host_demand_bytes(),
                 );
                 let estimate = self.estimates.estimate(&key, static_estimate);
@@ -5896,34 +5917,24 @@ impl Coordinator {
                         };
                         ExecutionFingerprint::new(exact.execution_fingerprint())
                     } else if utility.work.chain_plan_inputs().is_some() {
-                        let planned_execution =
-                            owner_plan_cache.get(&work_id).into_iter().flatten().find(
-                                |execution| {
-                                    execution.device_id == device_id
-                                        && execution.execution_fingerprint
-                                            == lease.placement.execution_fingerprint.as_str()
-                                        && execution.predicted_vram_peak_bytes
-                                            == lease.placement.predicted_vram_bytes
-                                        && execution.predicted_host_increment_bytes
-                                            == lease.placement.incremental_host_ram_bytes
-                                },
-                            );
+                        // Reservation bytes are an admission envelope, not
+                        // execution identity (unified phases and learned
+                        // floors can raise them above the raw prediction).
+                        let planned_execution = owner_plan_cache
+                            .get(&work_id)
+                            .and_then(|plans| exact_leased_execution_plan(plans, lease));
                         let current_execution = self
                             .owner_plans(utility)
                             .ok()
-                            .into_iter()
-                            .flatten()
-                            .find(|execution| execution.device_id == device_id);
-                        if planned_execution.is_none()
-                            || current_execution.as_ref() != planned_execution
-                        {
+                            .and_then(|plans| exact_leased_execution_plan(&plans, lease));
+                        let (Some(planned), Some(current)) = (planned_execution, current_execution)
+                        else {
+                            return false;
+                        };
+                        if !same_execution_contract(&planned, &current) {
                             return false;
                         }
-                        ExecutionFingerprint::new(
-                            current_execution
-                                .expect("checked equal owner execution plans")
-                                .execution_fingerprint,
-                        )
+                        ExecutionFingerprint::new(current.execution_fingerprint)
                     } else {
                         ExecutionFingerprint::new(utility.model_fingerprint.clone())
                     }
@@ -8035,7 +8046,8 @@ fn candidate_host_demand_bytes(
     }
 }
 
-/// `host_bytes` must be the plan's `admission_host_demand_bytes`, never its raw
+/// `vram_bytes` must be the plan's `admission_vram_demand_bytes`, not its raw
+/// device peak. `host_bytes` must be `admission_host_demand_bytes`, never its raw
 /// `predicted_host_increment_bytes`: on Metal the host claim already rides
 /// `admission_vram_demand_bytes` against the one unified pool, and charging it
 /// again to the host ledger is the #1038 double-count.
@@ -8592,6 +8604,8 @@ mod true_cfg_estimate_tests {
 
 #[cfg(test)]
 mod tests {
+    include!("unified_memory_tests.rs");
+
     use super::*;
     use crate::gpu_pool::GpuPool;
     use crate::model_cache::ModelCache;

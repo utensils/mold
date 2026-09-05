@@ -27,6 +27,14 @@ Lower the resolution before the frame count: attention cost grows with the
 square of the token count, and tokens scale with area × latent frames. See
 [Memory on 24 GB cards](/models/ltx2#memory-on-24-gb-cards).
 
+On Apple Silicon, the server queue, sequence stages, and placement preview
+budget CPU and GPU allocations against one unified memory pool. A CPU-parked
+text encoder still needs memory: admission charges the larger of its encoding
+phase and the denoising peak, plus host allocations that overlap that peak.
+Moving the encoder to the CPU does not create another memory pool. The server
+and worker preflight use the same macOS free-plus-inactive memory authority;
+closing other applications can restore headroom for queued work.
+
 ## Which Model Fits My GPU?
 
 | GPU VRAM | Good Starting Choices                                                                                      |

@@ -156,6 +156,39 @@ fn metal_snapshot_is_empty_off_darwin() {
 }
 
 #[test]
+fn metal_telemetry_spends_the_host_samples_available_pool() {
+    let mut ram = fake_snapshot().system_ram;
+    // Deliberately disagree with total - used: the immediate pressure sample
+    // excludes pages a broader sysinfo estimate might count as reclaimable.
+    for available in [0, 7 << 30, 19 << 30] {
+        ram.available = Some(available);
+        let gpu = crate::resources::metal_snapshot_from_ram(&ram);
+        assert_eq!(gpu.vram_total - gpu.vram_used, available);
+        assert_eq!(gpu.vram_total, ram.total);
+        assert_eq!(gpu.vram_used_by_mold, None);
+    }
+}
+
+#[test]
+fn unavailable_unified_sample_is_not_zero_capacity() {
+    let ram = crate::resources::ram_snapshot_from_system_with_available(|_| None);
+    assert_eq!(ram.available, None, "a failed query is not a measured zero");
+    let gpu = crate::resources::metal_snapshot_from_ram(&ram);
+    assert_eq!(
+        gpu.vram_used, ram.used,
+        "retain the existing estimated fallback"
+    );
+
+    let zero = crate::resources::ram_snapshot_from_system_with_available(|_| Some(0));
+    assert_eq!(zero.available, Some(0));
+    let gpu = crate::resources::metal_snapshot_from_ram(&zero);
+    assert_eq!(
+        gpu.vram_used, gpu.vram_total,
+        "a successful zero sample must block"
+    );
+}
+
+#[test]
 fn ram_snapshot_satisfies_invariants() {
     let ram = crate::resources::ram_snapshot();
     assert!(ram.total > 0, "total RAM should be >0 on any host");

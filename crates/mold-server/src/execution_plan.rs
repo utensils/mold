@@ -4851,6 +4851,26 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
 }
 
 #[cfg(test)]
+pub(crate) fn sparse_admission_test_file(path: &Path, bytes: u64) {
+    let file = std::fs::File::create(path).unwrap();
+    file.set_len(bytes).unwrap();
+    drop(file);
+    mold_core::download::write_sha256_marker(path, &format!("{bytes:064x}")).unwrap();
+    // Admission tests use logical multi-GiB sparse zero files solely for
+    // their metadata length. Seed their synthetic identity so unrelated
+    // memory-planning tests do not spend minutes hashing hole ranges.
+    let metadata = std::fs::metadata(path).unwrap();
+    artifact_fact_cache().lock().unwrap().insert(
+        path.to_path_buf(),
+        artifact_metadata_identity(path, &metadata),
+        ArtifactFacts {
+            content: EquivalenceContentIdentity::Sha256(format!("{bytes:064x}")),
+            format: ArtifactFormatFact::CacheMiss,
+        },
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4957,24 +4977,7 @@ mod tests {
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
-    fn sparse_file(path: &Path, bytes: u64) {
-        let file = std::fs::File::create(path).unwrap();
-        file.set_len(bytes).unwrap();
-        drop(file);
-        mold_core::download::write_sha256_marker(path, &format!("{bytes:064x}")).unwrap();
-        // Admission tests use logical multi-GiB sparse zero files solely for
-        // their metadata length. Seed their synthetic identity so unrelated
-        // memory-planning tests do not spend minutes hashing hole ranges.
-        let metadata = std::fs::metadata(path).unwrap();
-        artifact_fact_cache().lock().unwrap().insert(
-            path.to_path_buf(),
-            artifact_metadata_identity(path, &metadata),
-            ArtifactFacts {
-                content: EquivalenceContentIdentity::Sha256(format!("{bytes:064x}")),
-                format: ArtifactFormatFact::CacheMiss,
-            },
-        );
-    }
+    use super::sparse_admission_test_file as sparse_file;
 
     fn config(root: &Path, family: &str, persisted: Option<DevicePlacement>) -> Config {
         let mut config = Config::default();
