@@ -13,9 +13,15 @@ if grep -En 'cargo[[:space:]]+publish|CARGO_REGISTRY_TOKEN|publish-crates\.sh' .
 fi
 grep -qx 'publish = false' release-plz.toml \
   || fail "release-plz must keep registry publishing disabled"
-if grep -En 'cargo install mold-ai([[:space:]]|$)' README.md website/guide/installation.md .github/workflows/release.yml; then
-  fail "installation instructions advertise the retired registry distribution"
-fi
+# Track the canonical docs, including nested website and agent references.
+# Git's file list avoids scanning generated site output or node_modules.
+while IFS= read -r doc; do
+  if grep -En 'cargo[[:space:]]+install[[:space:]]+mold-ai([^[:alnum:]_-]|$)' "$doc"; then
+    fail "$doc advertises the retired registry distribution"
+  fi
+done < <(git ls-files -- README.md CLAUDE.md '.claude/rules/*.md' \
+  'website/*.md' 'docs/*.md' 'crates/mold-cli/src/skill/*.md' \
+  '.github/workflows/*.yml')
 if grep -Eq '^[[:space:]]*publish[[:space:]]*=[[:space:]]*true' release-plz.toml; then
   fail "release-plz must not override registry publishing for a package"
 fi
