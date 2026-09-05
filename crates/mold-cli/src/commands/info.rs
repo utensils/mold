@@ -7,25 +7,13 @@ use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
 use mold_core::{
     build_model_catalog, classify_server_error, Config, ModelPaths, MoldClient, ServerAvailability,
 };
-use sha2::{Digest, Sha256};
 
 use crate::fs_util::dir_stats;
 use crate::theme;
 use crate::ui::{col_width, format_disk_size, format_family, format_family_padded};
 
 fn compute_sha256(path: &str) -> Result<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20]; // 1MB buffer
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    mold_core::download::compute_sha256(std::path::Path::new(path))
 }
 
 fn resolve_file_path(
