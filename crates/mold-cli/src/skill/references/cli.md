@@ -170,3 +170,11 @@ different backend; improve the image instead.
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support
 is simulated until hardware-qualified.
+
+## macOS Metal memory
+
+`mold system metal-memory status [--json]` inspects this machine, ignoring
+`MOLD_HOST`. Explicit root-only `set <MiB> [--persist]` and `reset [--persist]`
+administer its system-wide limit; never run the server as root. Use
+`mold gpu list --json` for the inference host's effective capacity and headroom.
+Zero means automatic; increases may require restarting an idle inference process.
