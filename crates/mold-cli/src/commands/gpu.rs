@@ -66,13 +66,17 @@ pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
     } else {
         device.backend.as_str().to_ascii_uppercase()
     };
-    let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
-        (Some(used), Some(total)) => format!(
-            "{:.1}/{:.1} GiB",
-            used as f64 / 1024_f64.powi(3),
-            total as f64 / 1024_f64.powi(3)
-        ),
-        _ => "—".into(),
+    let vram = if let Some(memory) = &device.memory.metal_memory {
+        memory.budget_label()
+    } else {
+        match (device.memory.used_bytes, device.memory.total_bytes) {
+            (Some(used), Some(total)) => format!(
+                "{:.1}/{:.1} GiB",
+                used as f64 / 1024_f64.powi(3),
+                total as f64 / 1024_f64.powi(3)
+            ),
+            _ => "—".into(),
+        }
     };
     let utilization = device
         .telemetry

@@ -2173,7 +2173,7 @@ pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u6
         return sample.effective_capacity_bytes.unwrap_or(0);
     }
     total_system_memory_bytes().map_or(live_available_bytes, |total| {
-        let safety_floor = total.saturating_mul(15).saturating_div(100).max(8 << 30);
+        let safety_floor = mold_core::metal_memory::host_safety_floor(total);
         total.saturating_sub(safety_floor)
     })
 }
@@ -2187,7 +2187,7 @@ pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u6
 /// reclaiming the memory needed by the desktop and other applications.
 pub fn metal_live_allocation_budget(live_available_bytes: u64) -> u64 {
     let total = total_system_memory_bytes().unwrap_or(live_available_bytes);
-    let safety_floor = total.saturating_mul(15).saturating_div(100).max(8 << 30);
+    let safety_floor = mold_core::metal_memory::host_safety_floor(total);
     let host_budget = live_available_bytes.min(total).saturating_sub(safety_floor);
     crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)).map_or(host_budget, |sample| {
         host_budget.min(sample.allocation_headroom_bytes.unwrap_or(0))
@@ -2349,9 +2349,8 @@ pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryErro
     )
 }
 
-/// Metal has unified memory and no CUDA stream to drain. The server deliberately
-/// does not use this as a second post-drop admission gate; this implementation
-/// remains useful to inference components that want a conservative observation.
+/// At an explicit Metal post-drop boundary, release pooled buffers before
+/// sampling incremental policy headroom. Telemetry never performs this sweep.
 #[cfg(not(feature = "cuda"))]
 pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryError> {
     // Metal's allocated-byte reading includes Candle's retained buffer pool.
@@ -2379,12 +2378,9 @@ pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
         .map(|(free, _total)| free as u64)
 }
 
-/// On macOS (unified memory), return available system memory (free + inactive).
-///
-/// macOS reclaims inactive pages trivially with no I/O, so free-only is too
-/// conservative for variant selection — it can reject quantized encoders that
-/// would actually fit, forcing a BF16 fallback that doesn't fit either.
-/// On other non-CUDA platforms, no VRAM info available.
+/// On Metal, return policy headroom after native allocations and host floor.
+/// A failed supported probe returns zero to close legacy unbounded fallbacks.
+/// Builds without Metal preserve the existing host-memory fallback.
 #[cfg(not(feature = "cuda"))]
 pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
     if let Some(sample) = crate::metal_memory::snapshot(ordinal) {
@@ -3380,6 +3376,9 @@ fn preflight_check_budget(
 /// On macOS: "Memory: X.X GB free / Y.Y GB available"
 /// Returns None if no memory info is available.
 pub fn memory_status_string() -> Option<String> {
+    if let Some(memory) = crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)) {
+        return Some(memory.budget_label());
+    }
     #[cfg(feature = "cuda")]
     {
         if let Some(free) = free_vram_bytes(0) {

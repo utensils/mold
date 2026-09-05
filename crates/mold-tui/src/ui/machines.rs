@@ -619,10 +619,16 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         format!("{marker} {ordinal} · {} · {kind} · {state}", device.name),
         style,
     )));
-    let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
-        (Some(used), Some(total)) => vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2)),
-        (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
-        _ => "VRAM unavailable".to_string(),
+    let vram = if let Some(memory) = &device.memory.metal_memory {
+        memory.budget_label()
+    } else {
+        match (device.memory.used_bytes, device.memory.total_bytes) {
+            (Some(used), Some(total)) => {
+                vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2))
+            }
+            (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
+            _ => "VRAM unavailable".to_string(),
+        }
     };
     let utilization = device
         .telemetry

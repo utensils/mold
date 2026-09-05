@@ -169,7 +169,9 @@ force/unsafe bypass is added. Automated tests never use real /Library paths.
 - [ ] M7: Run scoped Nix tests/checks, CPU and Metal compilation, applicable local
   CI routes, native read-only CLI UAT, rendered affected frontend UAT, independent
   final diff review and resolve findings. Publish/update one PR and wait for
-  exact-head checks; keep it open for review (merge has not been requested).
+  local checks on the final head. The user subsequently requested closing PR
+  #1592 to stop CI usage: keep it closed, continue on the same pushed branch,
+  and report completion without reopening or merging.
 
 ## Validation details and remaining uncertainty
 

@@ -131,7 +131,7 @@ pub(crate) struct SchedulerDeviceProjection {
     pub schedulable: bool,
     pub sampled_free_vram_bytes: u64,
     pub capacity_bytes: u64,
-    pub metal_allocated_bytes: Option<u64>,
+    pub metal_memory: Option<mold_core::metal_memory::MetalMemorySnapshot>,
     pub sampled_mold_vram_bytes: Option<u64>,
     pub discovered_free_vram_bytes: u64,
     /// A generation registry row currently owns this device. This remains
@@ -849,8 +849,7 @@ impl DeviceRegistry {
                         .as_ref()
                         .map_or(0, |gpu| gpu.free_vram_bytes);
                     SchedulerDeviceProjection {
-                        metal_allocated_bytes: metal_memory
-                            .map(|sample| sample.allocated_bytes.unwrap_or(0)),
+                        metal_memory: metal_memory.cloned(),
                         capacity_bytes: metal_memory
                             .map_or(total, |sample| sample.effective_capacity_bytes.unwrap_or(0)),
                         id,
@@ -955,6 +954,9 @@ impl DeviceRegistry {
     /// registry projection. This must never query CUDA from an HTTP handler.
     pub fn legacy_memory_status(devices: &DeviceState) -> Option<String> {
         let device = devices.devices.iter().find(|device| device.schedulable)?;
+        if let Some(memory) = device.memory.metal_memory.as_ref() {
+            return Some(memory.budget_label());
+        }
         let free = device
             .memory
             .total_bytes?

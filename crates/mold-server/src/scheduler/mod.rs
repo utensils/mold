@@ -3170,11 +3170,6 @@ impl Coordinator {
                     measured_cache_bytes,
                     device.sampled_mold_vram_bytes,
                 );
-                let reclaimable_cache_bytes = device
-                    .metal_allocated_bytes
-                    .map_or(reclaimable_cache_bytes, |allocated| {
-                        reclaimable_cache_bytes.min(allocated)
-                    });
                 let mut warm = BTreeSet::new();
                 if let Some(fingerprint) = worker.and_then(|worker| {
                     worker
@@ -3217,12 +3212,17 @@ impl Coordinator {
                     },
                     available_at_ms: active_lease.map(|lease| lease.estimated_finish_ms),
                     worker_generation: ready.map_or(0, |ready| ready.generation),
-                    available_vram_bytes: schedulable_available_vram_bytes(
-                        device.sampled_free_vram_bytes,
-                        reclaimable_cache_bytes,
-                        device.sampled_mold_vram_bytes,
-                        has_active_work,
-                        device.capacity_bytes,
+                    available_vram_bytes: device.metal_memory.as_ref().map_or_else(
+                        || {
+                            schedulable_available_vram_bytes(
+                                device.sampled_free_vram_bytes,
+                                reclaimable_cache_bytes,
+                                device.sampled_mold_vram_bytes,
+                                has_active_work,
+                                device.capacity_bytes,
+                            )
+                        },
+                        |sample| sample.with_reclaimable(reclaimable_cache_bytes),
                     ),
                     warm_execution_fingerprints: warm,
                 }

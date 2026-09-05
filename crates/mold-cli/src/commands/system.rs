@@ -67,7 +67,7 @@ fn status(json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "scope": "local_machine", "supported": raw.is_some(),
+                "scope": "local_machine", "supported": if !cfg!(target_os = "macos") { Some(false) } else if error.is_some() { None } else { Some(raw.is_some()) },
                 "wired_limit_mib": raw, "error": error,
                 "persistent_limit_mib": persistent, "persistence_error": persistence_error,
                 "memory": memory,
@@ -78,6 +78,7 @@ fn status(json: bool) -> Result<()> {
         match raw {
             Some(0) => println!("Kernel setting: automatic"),
             Some(mib) => println!("Kernel setting: {mib} MiB"),
+            None if error.is_none() => println!("Kernel setting: unsupported"),
             None => println!(
                 "Kernel setting: unavailable{}",
                 error
@@ -160,7 +161,7 @@ impl super::metal_memory_admin::WiredLimitAccess for Kernel {
 #[cfg(target_os = "macos")]
 fn change(value: u32, persist: bool) -> Result<()> {
     use super::metal_memory_admin::{
-        restore_if_unchanged, set_verified, validate_limit, WiredLimitAccess,
+        apply_verified, require_root, validate_limit, WiredLimitAccess,
     };
     use super::metal_memory_persistence::{Store, DIRECTORY};
     use anyhow::Context;
@@ -182,24 +183,12 @@ fn change(value: u32, persist: bool) -> Result<()> {
     }
     // Also serializes non-persistent changes. No user/config/environment path.
     let store = Store::open(std::path::Path::new(DIRECTORY), 0)?;
-    let previous_policy = store.read()?;
-    if persist {
-        unregister_owned_boot_policy(previous_policy.is_some())?;
-    }
-    let previous = set_verified(&mut kernel, value).map_err(anyhow::Error::msg)?;
-    let target_policy = (value != 0).then_some(value);
-    if persist {
-        if let Err(error) = store.replace(target_policy, previous_policy) {
-            let policy_restore = match store.read() {
-                Ok(current) if current == previous_policy => Ok(()),
-                Ok(current) if current == target_policy => store.replace(previous_policy, current),
-                _ => Err(anyhow::anyhow!(
-                    "boot policy changed externally; left untouched"
-                )),
-            };
-            let live_restore = restore_if_unchanged(&mut kernel, value, previous);
-            bail!("boot-policy update failed: {error}; boot-policy rollback: {policy_restore:?}; kernel rollback: {live_restore:?}. Inspect status before retrying");
-        }
+    let result = apply_verified(&mut kernel, &mut BootPolicy(store), value, persist)
+        .map_err(anyhow::Error::msg)?;
+    let previous = result.previous;
+    let previous_policy = result.previous_policy;
+    if let Some(warning) = result.policy_warning {
+        eprintln!("Boot policy left untouched; inspection failed: {warning}");
     }
     println!(
         "Verified local iogpu.wired_limit_mb: {previous} → {value}{}",
@@ -209,7 +198,11 @@ fn change(value: u32, persist: bool) -> Result<()> {
         println!(
             "Boot policy: {}",
             if value == 0 {
-                "removed"
+                if previous_policy.is_some() {
+                    "removed"
+                } else {
+                    "none (already absent)"
+                }
             } else {
                 "installed for subsequent boots"
             }
@@ -223,7 +216,25 @@ fn change(value: u32, persist: bool) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn unregister_owned_boot_policy(owned_file: bool) -> Result<()> {
+struct BootPolicy(super::metal_memory_persistence::Store);
+
+#[cfg(target_os = "macos")]
+impl super::metal_memory_admin::BootPolicyAccess for BootPolicy {
+    fn read(&mut self) -> Result<Option<u32>, String> {
+        self.0.read().map_err(|error| error.to_string())
+    }
+    fn replace(&mut self, value: Option<u32>, expected: Option<u32>) -> Result<(), String> {
+        self.0
+            .replace(value, expected)
+            .map_err(|error| error.to_string())
+    }
+    fn unregister(&mut self, owned_file: bool) -> Result<bool, String> {
+        unregister_owned_boot_policy(owned_file).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn unregister_owned_boot_policy(owned_file: bool) -> Result<bool> {
     use super::metal_memory_persistence::LABEL;
     let domain = format!("system/{LABEL}");
     let state = std::process::Command::new("/bin/launchctl")
@@ -234,7 +245,7 @@ fn unregister_owned_boot_policy(owned_file: bool) -> Result<()> {
         if state.status.code() == Some(113)
             && stderr.contains(&format!("Could not find service \"{LABEL}\""))
         {
-            return Ok(());
+            return Ok(false);
         }
         bail!(
             "cannot inspect Mold boot-policy registration: {}",
@@ -242,7 +253,7 @@ fn unregister_owned_boot_policy(owned_file: bool) -> Result<()> {
         );
     }
     if !owned_file {
-        bail!("a boot-policy registration exists without Mold's owned file; refusing to remove an unverified service")
+        bail!("a boot-policy registration exists without Mold's owned file; refusing to remove an unverified service. Inspect it with /bin/launchctl print system/io.utensils.mold.metal-memory; an administrator can remove a verified stale registration with /bin/launchctl bootout system/io.utensils.mold.metal-memory")
     }
     let output = std::process::Command::new("/bin/launchctl")
         .args(["bootout", &domain])
@@ -253,7 +264,7 @@ fn unregister_owned_boot_policy(owned_file: bool) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

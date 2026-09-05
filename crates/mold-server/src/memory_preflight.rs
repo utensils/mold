@@ -1000,9 +1000,9 @@ fn ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
 /// when the request is obviously infeasible; the second catches an optimistic
 /// recorded footprint or unrecovered "ghost" VRAM.
 ///
-/// On macOS (unified memory) the same additive `available + active_vram`
-/// budget applies because tensors freed during `unload()` return to the
-/// system page cache.
+/// On Metal, the shared policy bounds reclaim credit by native allocations,
+/// the working-set capacity and live host headroom. A fresh post-drop sample
+/// verifies the released buffers before a replacement is loaded.
 /// On other platforms with no memory query available, the guard is a no-op.
 pub(crate) fn preflight_memory_guard_for_request(
     model_name: &str,
@@ -1165,10 +1165,7 @@ pub(crate) fn preflight_memory_guard_after_drop_for_request(
                 request_has_lora,
             );
         }
-        // Metal's unified-memory admission already used available system
-        // memory plus the active engine's reclaimable footprint in the first
-        // guard. A second instantaneous sample after `unload()` can lag page
-        // reclamation and falsely reject a swap.
+        // Preserve the no-backend behavior when no native Metal policy exists.
         let _ = (model_name, paths, gpu_ordinal, hint, request_has_lora);
         Ok(())
     }
@@ -1176,10 +1173,8 @@ pub(crate) fn preflight_memory_guard_after_drop_for_request(
 
 /// Authoritative post-drop recheck for a frozen scheduler plan.
 ///
-/// CUDA must prove the exact planned peak still physically fits the driver's
-/// fresh free-memory sample. Metal retains the existing single-gate behavior:
-/// its unified-memory reclamation can lag the engine drop, so a second sample
-/// is not authoritative there.
+/// Both CUDA and Metal prove the exact peak against a fresh sample; Metal
+/// releases the buffer pool first and never credits the old engine twice.
 pub(crate) fn preflight_planned_memory_guard_after_drop(
     model_name: &str,
     predicted_peak_bytes: u64,

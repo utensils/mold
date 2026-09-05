@@ -8,8 +8,11 @@ use std::path::{Path, PathBuf};
 
 pub const LABEL: &str = "io.utensils.mold.metal-memory";
 pub const FILE_NAME: &str = "io.utensils.mold.metal-memory.plist";
+#[cfg(target_os = "macos")]
 pub const DIRECTORY: &str = "/Library/LaunchDaemons";
 
+// The exact v1 format is an ownership contract. Never change these bytes
+// without accepting/migrating the frozen v1 fixture in read_policy as well.
 pub fn render_plist(mib: u32) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -36,20 +39,15 @@ pub struct Store {
 impl Store {
     pub fn open(directory: &Path, owner: u32) -> Result<Self> {
         trusted_directory(directory, owner)?;
-        let path = directory.join(".io.utensils.mold.metal-memory.lock");
-        if let Ok(meta) = std::fs::symlink_metadata(&path) {
-            trusted_file(&meta, owner)?;
-        }
+        // Lock the trusted directory itself; ordinary live-only changes leave
+        // no lock artifact in LaunchDaemons. Never follow a replaced symlink.
         let lock = OpenOptions::new()
-            .create(true)
             .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)?;
-        trusted_file(&lock.metadata()?, owner)?;
-        if lock.metadata()?.permissions().mode() & 0o077 != 0 {
-            bail!("administration lock must have mode 0600")
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(directory)?;
+        let meta = lock.metadata()?;
+        if !meta.is_dir() || meta.uid() != owner || meta.permissions().mode() & 0o022 != 0 {
+            bail!("boot-policy directory changed while acquiring lock")
         }
         lock.try_lock().map_err(|error| {
             anyhow::anyhow!("another Metal-memory administrator holds the lock: {error}")
@@ -174,6 +172,7 @@ mod tests {
         let (dir, uid) = fixture();
         let store = Store::open(dir.path(), uid).unwrap();
         assert_eq!(store.read().unwrap(), None);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         store.replace(Some(16384), None).unwrap();
         assert_eq!(store.read().unwrap(), Some(16384));
         assert_eq!(
@@ -227,6 +226,7 @@ mod tests {
     #[test]
     fn metal_memory_persistence_only_runs_fixed_sysctl_at_boot() {
         let plist = render_plist(16384);
+        assert_eq!(plist, include_str!("fixtures/metal-memory-boot-v1.plist"));
         assert!(plist.contains("<string>/usr/sbin/sysctl</string>"));
         assert!(plist.contains("<string>iogpu.wired_limit_mb=16384</string>"));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));

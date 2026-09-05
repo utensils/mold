@@ -63,11 +63,38 @@ impl MetalMemorySnapshot {
         self.allocation_headroom_bytes
             .zip(self.effective_capacity_bytes)
             .zip(self.allocated_bytes)
-            .map_or(0, |((headroom, capacity), allocated)| {
-                headroom
-                    .saturating_add(reclaimable.min(allocated))
-                    .min(capacity)
-            })
+            .zip(self.available_host_bytes.zip(self.physical_bytes))
+            .map_or(
+                0,
+                |(((headroom, capacity), allocated), (available, physical))| {
+                    let credit = reclaimable.min(allocated);
+                    headroom
+                        .saturating_add(credit)
+                        .min(capacity.saturating_sub(allocated.saturating_sub(credit)))
+                        .min(
+                            available
+                                .min(physical)
+                                .saturating_add(credit)
+                                .min(physical)
+                                .saturating_sub(host_safety_floor(physical)),
+                        )
+                },
+            )
+    }
+
+    /// Shared compact host-status wording for CLI, TUI and MCP projections.
+    pub fn budget_label(&self) -> String {
+        let gib = |value: Option<u64>| {
+            value.map_or_else(
+                || "unavailable".into(),
+                |bytes| format!("{:.1} GiB", bytes as f64 / (1_u64 << 30) as f64),
+            )
+        };
+        format!(
+            "Metal: {} capacity, {} headroom",
+            gib(self.effective_capacity_bytes),
+            gib(self.allocation_headroom_bytes)
+        )
     }
 }
 
@@ -111,7 +138,17 @@ mod tests {
         s.available_host_bytes = Some(15 * GIB);
         assert_eq!(s.clone().resolve().effective_capacity_bytes, Some(8 * GIB));
         s.allocated_bytes = Some(9 * GIB);
-        assert_eq!(s.resolve().allocation_headroom_bytes, Some(0));
+        let s = s.resolve();
+        assert_eq!(s.allocation_headroom_bytes, Some(0));
+        assert_eq!(s.with_reclaimable(GIB), 0);
+        assert_eq!(s.with_reclaimable(2 * GIB), GIB);
+    }
+
+    #[test]
+    fn metal_memory_reclaim_must_first_recover_missing_host_floor() {
+        let mut s = sample(MetalWiredLimit::Automatic);
+        s.available_host_bytes = Some(2 * GIB);
+        assert_eq!(s.resolve().with_reclaimable(4 * GIB), 0);
     }
 
     #[test]

@@ -1843,7 +1843,12 @@ pub(crate) async fn ensure_model_ready(
                     #[cfg(all(target_os = "macos", feature = "metal"))]
                     if let Some(paths) = entry.engine.model_paths() {
                         preflight_memory_guard_for_request(
-                            model_name, paths, active_vram, 0, hint, request_has_lora,
+                            model_name,
+                            paths,
+                            active_vram,
+                            0,
+                            hint,
+                            request_has_lora,
                         )?;
                     }
                     // Already loaded: nothing is about to be loaded, so there
@@ -3984,15 +3989,14 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     #[test]
-    fn metal_unified_memory_has_no_second_post_drop_admission_gate() {
+    fn no_gpu_backend_has_no_post_drop_admission_gate() {
         let (_dir, paths) = flux_shaped_paths_with_sizes(100, 10, 20, 5);
         let result = preflight_memory_guard_after_drop("metal-swap", &paths, 0, None);
         assert!(
             result.is_ok(),
-            "Metal uses the additive unified-memory guard before unload; an \
-             instantaneous post-drop sample must not add a spurious second gate"
+            "a build without GPU telemetry preserves its existing no-op post-drop guard"
         );
     }
 

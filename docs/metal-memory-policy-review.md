@@ -22,3 +22,29 @@ implementation. Findings and dispositions:
 
 No kernel setting or inference job was changed/run for the review. Raw reviewer
 output is retained locally in ignored `tmp/metal-memory-review/plan-fable.txt`.
+
+## Intermediate administration review
+
+Claude Fable reviewed the local administration implementation on 2026-09-04
+(`claude --model fable --effort high`, read-only, no MCP servers). Accepted:
+
+- Extract kernel/boot-policy orchestration behind injectable traits; cover
+  bootout failure, kernel failure after bootout, persistence rollback and reset.
+- A foreign boot-policy file is a warning for live-only changes, while persistent
+  mutations still refuse it.
+- Distinguish unsupported (false) from failed reads (null) in top-level status.
+- Lock the trusted directory descriptor without leaving a lock artifact.
+- Freeze the exact v1 plist in a golden fixture so future changes must preserve
+  or explicitly migrate existing owned files.
+- Gate the macOS directory constant and improve rollback/recovery messages.
+
+Two proposals were intentionally not adopted. A mismatched kernel readback can
+also mean another administrator changed the setting; blindly restoring the old
+value would overwrite that action. Report requested/observed/previous values
+and require inspection instead. Conditional rollback is reserved for a value
+still equal to Mold's verified write. Native writes stay in the explicit CLI
+administration module; moving a mutation helper into read-only inference
+telemetry would weaken the architectural boundary without improving the ABI.
+The conservative exact not-loaded launchctl classification is retained; other
+errors must never be mistaken for an absent service. A stale unverified service
+gets concrete inspection/recovery commands rather than automatic deletion.
