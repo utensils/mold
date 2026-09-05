@@ -22,8 +22,28 @@ export function useReuseStillPrint() {
   const toasts = useToastStore();
 
   return function reuseStillPrint(entry: MergedPrint) {
-    const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
-    const target = gallery.targetOf(entry.sourceKey);
+    // The bucket's authority may be unresolved (this device before its engine
+    // answers); the recipe still restores, and the canvas says the media
+    // cannot load rather than the whole reuse refusing.
+    let target: ReturnType<typeof gallery.targetOf> = null;
+    try {
+      target = gallery.targetOf(entry.sourceKey);
+    } catch {
+      target = null;
+    }
+    // The settings AND the picture they made: the prefill names the print so
+    // the canvas shows it once the recipe has landed in the form.
+    const retainedVersion = composer.beginRetainedSourceReuse({
+      metadata: entry.item.metadata,
+      print: {
+        filename: entry.item.filename,
+        metadata: entry.item.metadata,
+        hostId: entry.sourceKey === "local" ? null : entry.sourceKey,
+        hostLabel: entry.hostLabel,
+        target,
+        settledAtMs: entry.item.timestamp * 1000,
+      },
+    });
     if (!target) return;
     // Always ask — the host is the only authority on what it retained, and the
     // metadata under-reports inline video/audio/mask bytes. But a text-to-image

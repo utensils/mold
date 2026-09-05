@@ -216,6 +216,101 @@ function readyRemote(): void {
   } as never;
 }
 
+/*
+ * "Use these settings again" shows the picture too. A print from My images
+ * lands on the canvas as the settled job it once was — selected, historical
+ * (no fresh-completion toast, no mirror), its media fetched from the print's
+ * own bucket — with a completion synthesized from the saved metadata that
+ * carries exactly what the canvas probes on: the container, the frame count,
+ * the poster kind.
+ */
+describe("showGalleryPrint", () => {
+  const metadata = {
+    prompt: "a lighthouse at dusk",
+    model: "flux-dev:q8",
+    seed: 42,
+    steps: 28,
+    guidance: 3.5,
+    width: 1024,
+    height: 768,
+    job_id: "job-9",
+  };
+  const print = {
+    filename: "mold-flux-dev-q8-1.png",
+    metadata,
+    hostId: "hal9000-7680",
+    hostLabel: "hal9000",
+    target: { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+    settledAtMs: 1_700_000_000_000,
+  };
+
+  it("puts the print on the canvas as a selected, settled, historical job", async () => {
+    const store = useGenerationStore();
+    streamableMediaUrl.mockResolvedValue("https://hal9000/media/mold-flux-dev-q8-1.png");
+    const job = store.showGalleryPrint(print, request());
+    await flushPromises();
+
+    expect(store.active).toBe(job);
+    expect(job).toMatchObject({
+      status: "complete",
+      id: "job-9",
+      hostId: "hal9000-7680",
+      hostLabel: "hal9000",
+      remote: true,
+      mirrorRemoteOutput: false,
+      suppressFreshCompletion: true,
+      visualSeed: "42",
+      settledAtMs: 1_700_000_000_000,
+      resultUrl: "https://hal9000/media/mold-flux-dev-q8-1.png",
+    });
+    expect(job.result).toMatchObject({
+      format: "png",
+      width: 1024,
+      height: 768,
+      seed_used: 42,
+      model: "flux-dev:q8",
+      filename: "mold-flux-dev-q8-1.png",
+    });
+    expect(job.result?.video_frames).toBeUndefined();
+    expect(store.targetForJob(job.clientId)).toEqual(print.target);
+    // Fetched from the print's own bucket, as a durable completion's is.
+    expect(streamableMediaUrl.mock.calls[0]?.[1]).toMatchObject({ target: print.target });
+  });
+
+  it("carries the container and frame count the canvas probes on", () => {
+    const store = useGenerationStore();
+    const clip = store.showGalleryPrint(
+      {
+        ...print,
+        filename: "clip.mp4",
+        metadata: { ...metadata, frames: 97, fps: 24, output_format: "mp4" as const },
+      },
+      request(),
+    );
+    expect(clip.result).toMatchObject({ format: "mp4", video_frames: 97, video_fps: 24 });
+
+    const mesh = store.showGalleryPrint(
+      { ...print, filename: "object.glb", metadata: { ...metadata, frames: null } },
+      request(),
+    );
+    expect(mesh.result?.format).toBe("glb");
+    expect(mesh.result?.video_frames).toBeUndefined();
+
+    const sound = store.showGalleryPrint({ ...print, filename: "song.wav" }, request());
+    expect(sound.result).toMatchObject({ format: "wav", audio_sample_rate: 0 });
+  });
+
+  it("shows a print whose bucket has no HTTP authority, saying the media cannot load", async () => {
+    const store = useGenerationStore();
+    const job = store.showGalleryPrint({ ...print, hostId: null, target: null }, request());
+    await flushPromises();
+    expect(store.active).toBe(job);
+    expect(job.remote).toBe(false);
+    expect(job.resultUrl).toBeNull();
+    expect(job.resultError).toContain("no longer available");
+  });
+});
+
 describe("generation store multi-host routing", () => {
   it("tags jobs with their host and admits against its target", async () => {
     const store = useGenerationStore();

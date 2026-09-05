@@ -884,7 +884,12 @@ describe("LibraryView Use these settings retained source media", () => {
 
     expect(retainedInventoryMock).toHaveBeenCalledWith(t2i.filename, plato);
     expect(useToastStore().items.length).toBe(toastsBefore);
-    expect(useComposerStore().prefill).toEqual({ metadata: t2i.metadata });
+    // The settings AND the picture: the prefill names the print so the
+    // canvas shows it once the recipe lands.
+    expect(useComposerStore().prefill).toMatchObject({
+      metadata: t2i.metadata,
+      print: { filename: t2i.filename, metadata: t2i.metadata, target: plato },
+    });
     expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
     expect(router.currentRoute.value.path).toBe("/create");
     wrapper.unmount();
@@ -1030,7 +1035,10 @@ describe("LibraryView Use these settings retained source media", () => {
     await flushPromises();
 
     expect(retainedInventoryMock).toHaveBeenCalledWith("remote-img2img.png", plato);
-    expect(useComposerStore().prefill).toEqual({ metadata: img2img.metadata });
+    expect(useComposerStore().prefill).toMatchObject({
+      metadata: img2img.metadata,
+      print: { filename: "remote-img2img.png", target: plato },
+    });
     expect(useComposerStore().retainedSource?.filename).toBe("remote-img2img.png");
     expect(router.currentRoute.value.path).toBe("/create");
     wrapper.unmount();

@@ -146,6 +146,7 @@ import {
   needsHostRoute,
   suggestOutputFilename,
   type BatchRequestOptions,
+  type GalleryPrintOnCanvas,
   type Job,
 } from "../stores/generation";
 import { useGenerateFormStore } from "../stores/generateForm";
@@ -4695,6 +4696,31 @@ function invalidateRetainedRestore(): void {
   composer.invalidateRetainedSource();
 }
 
+/**
+ * "Use these settings again" shows the picture too. The restored recipe is
+ * already in the form, so the canvas job carries the request that recipe
+ * builds — which is what Make 4 variations and Make bigger read — and the
+ * print's own media, fetched from its bucket. A recipe the form cannot yet
+ * build (a model no machine has, an unrestorable source) still shows the
+ * picture; the request falls back to the print's own words and model.
+ */
+function showRestoredPrint(print: GalleryPrintOnCanvas): void {
+  let request: GenerateRequest;
+  try {
+    request = buildRequest(form);
+  } catch {
+    request = {
+      prompt: print.metadata.prompt,
+      model: print.metadata.model,
+      width: print.metadata.width,
+      height: print.metadata.height,
+      steps: print.metadata.steps,
+      seed: print.metadata.seed,
+    };
+  }
+  generation.showGalleryPrint(print, request);
+}
+
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
@@ -4736,6 +4762,7 @@ function applyPrefill() {
   }
   applyPrefillToForm(form, prefill, installedModels.value);
   inspectSelectedQueueRender("metadata" in prefill ? prefill.queueSelection : undefined);
+  if ("metadata" in prefill && prefill.print) showRestoredPrint(prefill.print);
   discloseMissingRestoredModel();
   if ("metadata" in prefill && prefill.metadata) {
     // A first/last-frame print restores every knob except its closing still:

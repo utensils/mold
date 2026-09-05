@@ -2,14 +2,34 @@ import type {
   ChainProgressEvent,
   CompleteEvent,
   GenerateRequest,
+  OutputMetadata,
   SseChainCompleteEvent,
 } from "./api/types";
+import type { ApiTarget } from "@studio/api/client";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { requestWarningsFromCompleteEvent } from "@studio/lib/requestWarnings";
 import { generationProgressCopy, type GenerationWorkPhase } from "@studio/lib/generationProgress";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
+
+/**
+ * A print from My images the canvas is asked to show
+ * (`generation.showGalleryPrint`). "Use these settings again" restores the
+ * recipe; this names the picture that recipe made, so the canvas can show it.
+ */
+export interface GalleryPrintOnCanvas {
+  filename: string;
+  metadata: OutputMetadata;
+  /** The bucket's host; null for this device. */
+  hostId: string | null;
+  hostLabel: string | null;
+  /** Auth target the print's media is fetched from; null when the bucket has
+   *  no HTTP authority, in which case the canvas says the media cannot load. */
+  target: ApiTarget | null;
+  /** When the print was made — the gallery row's own clock. */
+  settledAtMs: number;
+}
 
 /**
  * One client-owned generation stream. Desktop and mobile both keep every

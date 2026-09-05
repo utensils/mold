@@ -238,6 +238,46 @@ describe("GenerateView source-fit submit path", () => {
     expect(composer.isRetainedSourceCurrent(version)).toBe(true);
   });
 
+  /*
+   * "Use these settings again" shows the picture too: a Recent row and the
+   * Lightbox both hand the print in with the metadata, and once the recipe
+   * has landed in the form the canvas holds that print as a settled job whose
+   * request is the recipe the form now builds — what Make 4 variations reads.
+   */
+  it("puts the reused print on the canvas once its recipe has landed", async () => {
+    primeForm();
+    const metadata = {
+      prompt: "a lighthouse at dusk",
+      model: model.name,
+      seed: 42,
+      steps: 20,
+      guidance: 7,
+      width: 512,
+      height: 512,
+      version: "test",
+    } as OutputMetadata;
+    useComposerStore().beginRetainedSourceReuse({
+      metadata,
+      print: {
+        filename: "mold-lighthouse.png",
+        metadata,
+        hostId: null,
+        hostLabel: "This device",
+        target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+        settledAtMs: 1_700_000_000_000,
+      },
+    });
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+
+    const shown = useGenerationStore().active;
+    expect(shown?.status).toBe("complete");
+    expect(shown?.result?.filename).toBe("mold-lighthouse.png");
+    expect(shown?.request?.prompt).toBe("a lighthouse at dusk");
+    expect(shown?.request?.seed).toBe(42);
+  });
+
   it("keeps slow inventory authoritative after metadata replaces staged media", async () => {
     const form = primeForm();
     form.identityImage = { filename: "old-face.png", base64: "OLD_FACE" };

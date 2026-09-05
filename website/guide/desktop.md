@@ -97,7 +97,8 @@ the phone keep Create / Library / Models until their own redesign.
   Short clip or 3-D object — is the one control in the view toolbar. **Starters**
   shows your saved starting points as cards, with the manager behind Edit…, and
   **Recent** lists the pictures you have made; clicking one brings back
-  everything it was made with. A finished picture's caption names its file and
+  everything it was made with and puts the picture itself on the canvas, exactly
+  as **Use these settings again** does from My images. A finished picture's caption names its file and
   size and offers Save, **Make 4 variations** (⌥↩), **Make bigger**, and the
   rest behind ⋯. Styles are
   selected and shown throughout the queue, downloads, print metadata, and

@@ -1577,6 +1577,10 @@ export interface MetadataPrefill {
    * to show that exact server-owned render while the canonical Library reuse
    * mapper restores the settings. */
   queueSelection?: import("@studio/api/generationSelection").SelectedQueuePreviewSource;
+  /** Present when My images supplied the metadata (the Lightbox's "Use these
+   * settings again", the Recent tab): the print itself, so the canvas shows
+   * the picture the restored recipe made. */
+  print?: import("./generationJob").GalleryPrintOnCanvas;
 }
 
 /** Exact queued request, including advanced and media inputs. */

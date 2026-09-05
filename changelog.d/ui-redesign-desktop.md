@@ -52,7 +52,8 @@
   Normal and Fine with the octree number beside it, and everything a clip needs
   is one card. Starting points are picture cards with the manager behind Edit…,
   and Recent lists the pictures you have made — clicking one brings back
-  everything it was made with. Under a finished picture the caption names its
+  everything it was made with and shows the picture on the canvas, exactly as
+  **Use these settings again** does from My images. Under a finished picture the caption names its
   file and size and offers **Make 4 variations** (⌥↩) and **Make bigger**
   beside Save.
 - **A short clip is a timeline you can see the whole of.** Choosing Short clip
@@ -153,3 +154,12 @@
   same model's single clip had sound; both now render with it. Turning **Add
   sound** off is remembered and sent explicitly, so a silent clip stays silent,
   and a model with no audio to give stays silent and says so.
+- **Use a face can pick from My images, and ⌘K stops correcting you.** The
+  identity well offers Choose from gallery… beside drop and pick, through the
+  same picker the source well opens, and a picked print is admitted exactly as
+  a dropped photo is. The command palette turns off macOS text replacement,
+  autocapitalization and spell-check on its query field, so typing "theme"
+  and pressing Return runs the command rather than accepting a correction.
+  The inspector tab strip lines up with the view toolbar, the Still picture |
+  Short clip | 3-D object control keeps one height and one width in every
+  theme, and the 3-D card's Simplify to field no longer clips its placeholder.
