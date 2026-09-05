@@ -984,7 +984,7 @@ async fn civitai_search_paged(
                 chain.next_page += 1;
                 result = Some(page_result);
             }
-            if result.is_none() && chain.leftover.is_empty() {
+            if result.is_none() {
                 // An open cursor is not an empty logical page. Preserve the
                 // cursor and ask the bounded retry driver to resume the scan;
                 // if its own budget is exhausted, callers receive an explicit
@@ -1959,6 +1959,51 @@ mod tests {
         }
     }
 
+    struct SparseDeepPageResponder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Respond for SparseDeepPageResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let is_edit = call == 0 || call >= MAX_WINDOW_FETCHES;
+            let name = if is_edit {
+                "Community Qwen Image Edit"
+            } else {
+                "Community Qwen Image"
+            };
+            let version_name = if is_edit { "QwenImageEdit2511" } else { "v1" };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{
+                    "id": 500_000 + call,
+                    "name": name,
+                    "type": "Checkpoint",
+                    "nsfw": false,
+                    "creator": { "username": "alice" },
+                    "stats": { "downloadCount": 100 },
+                    "tags": [],
+                    "modelVersions": [{
+                        "id": 600_000 + call,
+                        "name": version_name,
+                        "baseModel": "Qwen",
+                        "baseModelType": "Standard",
+                        "files": [{
+                            "id": 700_000 + call,
+                            "name": "model.safetensors",
+                            "sizeKB": 100,
+                            "downloadCount": 1,
+                            "metadata": { "format": "SafeTensor" },
+                            "downloadUrl": "https://civitai.example/model.safetensors",
+                            "hashes": { "SHA256": "deadbeef" }
+                        }],
+                        "images": []
+                    }]
+                }],
+                "metadata": { "nextCursor": format!("c{}", call + 1) }
+            }))
+        }
+    }
+
     fn test_cache() -> LiveCache {
         LiveCache::new(Duration::from_secs(300), 256)
     }
@@ -2579,6 +2624,44 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             MAX_WINDOW_FETCHES + 1,
             "the retry resumes at the stored cursor rather than restarting"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_deep_sparse_scan_does_not_return_empty_mid_intermediate_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(SparseDeepPageResponder {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let result = search_page(
+            &server.uri(),
+            "https://unused.example",
+            &test_cache(),
+            &LiveSearchOpts {
+                family: Some(Family::QwenImageEdit),
+                page: 2,
+                page_size: 2,
+                source: Some(Source::Civitai),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded scan should resume an incomplete intermediate page");
+
+        assert_eq!(result.entries.len(), 2);
+        assert!(result
+            .entries
+            .iter()
+            .all(|entry| entry.family == Family::QwenImageEdit));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES + 3,
+            "the retry resumes with the buffered edit row and stored cursor"
         );
     }
 
