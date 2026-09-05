@@ -36,17 +36,32 @@ describe("qualityPresets", () => {
     ]);
   });
 
-  it("offers nothing for a recipe that pins its steps, or whose ladder has one rung", () => {
+  it("offers nothing for a recipe that pins its steps", () => {
     expect(qualityPresets(steps({ mode: "fixed", default: 4, recommended: [4] }))).toEqual([]);
-    expect(qualityPresets(steps({ default: 20, recommended: [20] }))).toEqual([]);
     expect(qualityPresets(null)).toEqual([]);
   });
 
-  /** A host older than the ladder advertises no `recommended` at all; the
-   *  rows stay away rather than inventing a ladder of their own. */
-  it("offers nothing when the recipe advertises no ladder", () => {
-    const { recommended: _dropped, ...withoutLadder } = steps();
-    expect(qualityPresets(withoutLadder)).toEqual([]);
+  /**
+   * A host older than the ladder advertises one rung, or none at all — every
+   * 0.27.x server does, and a remote-only style would lose the group entirely.
+   * An absent additive field means an OLDER SERVER, never "no choice offered"
+   * (the supports_strength lesson), so the client stands in with the profile's
+   * own formula: half, default, one and a half times, clamped into the
+   * control's bounds — never the raw floor or ceiling.
+   */
+  it("stands in for a host older than the ladder with the profile's own formula", () => {
+    expect(qualityPresets(steps({ default: 20, recommended: [20] })).map((p) => p.steps)).toEqual([
+      10, 20, 30,
+    ]);
+    const { recommended: _dropped, ...withoutLadder } = steps({ default: 4, min: 1, max: 100 });
+    expect(qualityPresets(withoutLadder).map((p) => p.steps)).toEqual([2, 4, 6]);
+    // Clamped into the control's bounds, then deduped, exactly as the host does.
+    expect(qualityPresets(steps({ default: 9, min: 8, max: 12, recommended: [9] }))).toEqual([
+      { key: "draft", label: "Draft", steps: 8 },
+      { key: "good", label: "Good", steps: 9 },
+      { key: "best", label: "Best", steps: 12 },
+    ]);
+    expect(qualityPresets(steps({ default: 4, min: 4, max: 4, recommended: [4] }))).toEqual([]);
   });
 });
 
