@@ -163,3 +163,45 @@
   The inspector tab strip lines up with the view toolbar, the Still picture |
   Short clip | 3-D object control keeps one height and one width in every
   theme, and the 3-D card's Simplify to field no longer clips its placeholder.
+- **Make 4 variations repeats the picture on screen, and Save works.** Variations
+  are the selected print's own recipe made again on the machine that made it,
+  even after the prompt or style has been edited since; Save and Copy image
+  read the print the host holds, so they are offered for every finished
+  picture. Draft / Good / Best now come from a real ladder the host advertises
+  (half, the recipe's default, one and a half times) instead of the one-pass
+  floor and hundred-pass ceiling, and a machine running an older mold gets the
+  same three rungs. The Generate button says Update clip while a finished clip
+  is being amended, and a style preset saved in a pre-redesign template no
+  longer rewrites prompts invisibly.
+- **Short clip opens the simple way.** Choosing Short clip gives one prompt, a
+  clip style and a Length chip beside Shape; a Simple | Scenes control on the
+  view toolbar switches to the scene-by-scene timeline, seeding scene 1 from
+  the words and length already on the composer, and Edit the clip scene by
+  scene is in the palette. Delete on a scene never leaves the page: at the
+  two-scene floor it says why, and a bare Backspace outside a field is never
+  read as Back.
+- **The queue and the shell tell the truth.** The picture count, Done today and
+  Recent are loaded at launch rather than after the first visit to My images;
+  Space pauses only on a machine that can pause; the rail's active card pauses
+  the machine the picture is on; Stop everything asks first, from the rail,
+  the Queue and ⌘K alike, and names the pictures and machines it will stop;
+  Settings sections load as you scroll to them; a hand-typed machine can be
+  named when it is connected.
+- **My images filters do what they show.** The chips narrow the Trash and the
+  Albums shelf too, hidden albums stay hidden until one is opened, the
+  Favourites count no longer changes with the scope you stand in, Escape in
+  the History search stays in the field, export reports its progress, and a
+  print in the Trash cannot be reused until it is restored.
+- **Dialogs stack, and the shared kit holds on web and the phone.** Only the
+  topmost dialog answers Escape, so a confirm over the Lightbox no longer
+  closes both; dialogs paint above the clip timeline's chrome; the compact
+  segmented control, the modal ground and the thumbnail slider's touch target
+  render correctly on web and the phone; the strength slider's ends read the
+  right way round for every style (LTX-2 keeps more of the photo as it
+  rises), and the phone regains reduced motion, scroll containment and
+  text-selection rules. Settings ▸ Style licences shows each licence's name
+  with its pinned and project terms as real links.
+- **A remote clip's sound is the host's call.** `mold run --script` and the
+  prompt sugar no longer stamp this binary's own mp4 support onto a chain sent
+  to another machine; the host resolves the recipe's default, and a dry run or
+  `mold chain validate` says "decided by the host" for an unset choice.

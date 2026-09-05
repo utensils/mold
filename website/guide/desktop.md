@@ -90,7 +90,8 @@ the phone keep Create / Library / Models until their own redesign.
   add-on looks, img2img source/mask/control, video frames/fps/audio). It reads
   as groups rather than knobs: Start from a photo with **Paint a mask** and
   **Use a face** beneath it, a **Quality** row of Draft / Good / Best built
-  from the model's own step range, the sliders, **Add-on looks**, a **3-D
+  from the ladder the model recommends (about half, its default, and one and a
+  half times), the sliders, **Add-on looks**, a **3-D
   object** card offering Rough / Normal / Fine, a **Clip** card holding length
   and sound (and Smoothness in clip mode), **Repeat this look**, and **Where it
   runs**. What to make — Still picture,
@@ -221,7 +222,7 @@ the phone keep Create / Library / Models until their own redesign.
   Machine). Drag a row to reorder it, or **Jump the line** on the one you need
   first; a waiting row's ⋯ offers Pause and Resume where the machine supports
   holding one job. **Pause queue** and **Stop everything** sit in the view
-  toolbar, and Space pauses or resumes the queue from anywhere outside a field —
+  toolbar (Stop everything asks first and names what it will stop), and Space pauses or resumes the queue from anywhere outside a field —
   on a machine that offers it, which is also where the status bar shows the hint.
   Closing the window keeps the queue running.
 - **My images** (⌘3): a justified, virtualized contact-sheet grid, with a
