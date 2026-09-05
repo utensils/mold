@@ -15,7 +15,7 @@ export type DeviceActivity =
   | "stopping";
 
 export interface DeviceMemory {
-  metal_memory?: MetalMemory;
+  metal_memory?: MetalMemory | undefined;
   total_bytes: number | null;
   used_bytes: number | null;
   mold_used_bytes: number | null;

@@ -1119,7 +1119,7 @@ pub(crate) fn preflight_planned_memory_guard(
 /// reclaimable active footprint: anything the driver still reports as used is
 /// unavailable pressure, regardless of whether Mold expected the drop to
 /// release it.
-#[cfg(all(test, not(feature = "cuda")))]
+#[cfg(all(test, not(any(feature = "cuda", feature = "metal"))))]
 pub(crate) fn preflight_memory_guard_after_drop(
     model_name: &str,
     paths: &ModelPaths,

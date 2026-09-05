@@ -186,6 +186,7 @@ mod tests {
         value: Option<u32>,
         foreign: bool,
         fail_replace: bool,
+        fail_after_replace: bool,
         fail_unregister: bool,
         unloaded: bool,
         replacements: usize,
@@ -205,6 +206,10 @@ mod tests {
                 return Err("disk full".into());
             }
             self.value = value;
+            if self.fail_after_replace {
+                self.fail_after_replace = false;
+                return Err("directory sync failed after replacement".into());
+            }
             Ok(())
         }
         fn unregister(&mut self, _: bool) -> Result<bool, String> {
@@ -220,6 +225,7 @@ mod tests {
             value: Some(12288),
             foreign: false,
             fail_replace: false,
+            fail_after_replace: false,
             fail_unregister: false,
             unloaded: false,
             replacements: 0,
@@ -279,5 +285,15 @@ mod tests {
         assert_eq!(outcome.previous_policy, Some(12288));
         assert_eq!(k.value, 0);
         assert_eq!(b.value, None);
+    }
+    #[test]
+    fn metal_memory_admin_partial_file_update_restores_both_verified_states() {
+        let (mut k, mut b) = (kernel(), boot());
+        b.fail_after_replace = true;
+        let error = apply_verified(&mut k, &mut b, 16384, true).err().unwrap();
+        assert_eq!(k.value, 12288);
+        assert_eq!(b.value, Some(12288));
+        assert_eq!(b.replacements, 2);
+        assert!(error.contains("boot-policy rollback: previous state restored"));
     }
 }

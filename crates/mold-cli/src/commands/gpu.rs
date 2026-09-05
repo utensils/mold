@@ -71,11 +71,11 @@ pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
     } else {
         match (device.memory.used_bytes, device.memory.total_bytes) {
             (Some(used), Some(total)) => format!(
-                "{:.1}/{:.1} GiB",
+                "VRAM {:.1}/{:.1} GiB",
                 used as f64 / 1024_f64.powi(3),
                 total as f64 / 1024_f64.powi(3)
             ),
-            _ => "—".into(),
+            _ => "VRAM —".into(),
         }
     };
     let utilization = device
@@ -84,7 +84,7 @@ pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
         .map(|value| format!("{value}%"))
         .unwrap_or_else(|| "—".into());
     format!(
-        "{}  {}  {}  {}  {}  VRAM {}  util {}",
+        "{}  {}  {}  {}  {}  {}  util {}",
         device.id,
         ordinal,
         device.name,

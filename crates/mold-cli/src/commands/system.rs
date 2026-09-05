@@ -116,7 +116,12 @@ fn status(json: bool) -> Result<()> {
             "Boot policy: {}",
             persistent
                 .map(|mib| format!("{mib} MiB"))
-                .unwrap_or_else(|| "none".into())
+                .unwrap_or_else(|| if persistence_error.is_some() {
+                    "unavailable"
+                } else {
+                    "none"
+                }
+                .into())
         );
         if let Some(error) = persistence_error {
             println!("Boot policy inspection: {error}");
@@ -166,11 +171,7 @@ fn change(value: u32, persist: bool) -> Result<()> {
     use super::metal_memory_persistence::{Store, DIRECTORY};
     use anyhow::Context;
     // SAFETY: geteuid has no pointer arguments or side effects.
-    if unsafe { libc::geteuid() } != 0 {
-        bail!(
-            "changing this machine-wide setting requires root; run this explicit command with sudo"
-        );
-    }
+    require_root(unsafe { libc::geteuid() }).map_err(anyhow::Error::msg)?;
     let mut kernel = Kernel;
     kernel.read().map_err(anyhow::Error::msg)?;
     if value != 0 {

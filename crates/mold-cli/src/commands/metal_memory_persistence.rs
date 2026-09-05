@@ -46,7 +46,11 @@ impl Store {
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
             .open(directory)?;
         let meta = lock.metadata()?;
-        if !meta.is_dir() || meta.uid() != owner || meta.permissions().mode() & 0o022 != 0 {
+        if !meta.is_dir()
+            || meta.uid() != owner
+            || meta.permissions().mode() & 0o022 != 0
+            || (owner == 0 && meta.gid() != 0)
+        {
             bail!("boot-policy directory changed while acquiring lock")
         }
         lock.try_lock().map_err(|error| {
@@ -139,7 +143,11 @@ pub fn read_policy(directory: &Path, owner: u32) -> Result<Option<u32>> {
 
 fn trusted_directory(directory: &Path, owner: u32) -> Result<()> {
     let meta = std::fs::symlink_metadata(directory)?;
-    if !meta.is_dir() || meta.uid() != owner || meta.permissions().mode() & 0o022 != 0 {
+    if !meta.is_dir()
+        || meta.uid() != owner
+        || meta.permissions().mode() & 0o022 != 0
+        || (owner == 0 && meta.gid() != 0)
+    {
         bail!("boot-policy directory must be an owned directory without group/other write access or symlinks")
     }
     Ok(())

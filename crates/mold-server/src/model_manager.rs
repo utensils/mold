@@ -20,7 +20,7 @@ use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
 
-#[cfg(all(test, not(feature = "cuda")))]
+#[cfg(all(test, not(any(feature = "cuda", feature = "metal"))))]
 pub(crate) use crate::memory_preflight::preflight_memory_guard_after_drop;
 pub use crate::memory_preflight::ActivationHint;
 #[cfg(test)]
