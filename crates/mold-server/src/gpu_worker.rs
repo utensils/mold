@@ -5395,7 +5395,12 @@ fn ensure_model_ready_sync_inner(
         cache.touch(cache_key);
         drop(cache);
         if let Some(predicted_peak_bytes) = planned_peak_bytes {
-            if let Some(process_vram) = crate::resources::current_process_vram_bytes(&worker.gpu) {
+            let process_vram =
+                crate::resources::current_process_vram_bytes(&worker.gpu).or_else(|| {
+                    mold_inference::metal_memory::snapshot(worker.gpu.ordinal)
+                        .map(|sample| sample.allocated_bytes.unwrap_or(0))
+                });
+            if let Some(process_vram) = process_vram {
                 preflight_planned_memory_guard_with_eviction(
                     &worker.model_cache,
                     cache_key,
@@ -5615,7 +5620,7 @@ fn ensure_model_ready_sync_inner(
                 model = %model_name,
                 "recreating cached engine for exact execution plan..."
             );
-            let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
+            let vram_baseline = device::vram_load_baseline(worker.gpu.ordinal);
             let engine = match load_engine_safely(worker, engine, load_request) {
                 Ok(engine) => engine,
                 Err(err) if worker.poisoned.load(Ordering::SeqCst) => {
@@ -5656,7 +5661,7 @@ fn ensure_model_ready_sync_inner(
         );
         // Sample VRAM baseline before load so we can record the new model's
         // per-load delta rather than the device-global usage.
-        let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
+        let vram_baseline = device::vram_load_baseline(worker.gpu.ordinal);
         let engine = load_engine_safely(worker, engine, load_request)?;
 
         let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
@@ -5796,7 +5801,7 @@ fn ensure_model_ready_sync_inner(
     );
     // Sample VRAM baseline before load so we can record the new model's
     // per-load delta rather than the device-global usage.
-    let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
+    let vram_baseline = device::vram_load_baseline(worker.gpu.ordinal);
     let engine = load_engine_safely(worker, engine, load_request)?;
 
     let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);

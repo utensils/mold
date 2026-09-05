@@ -1657,6 +1657,7 @@ mod tests {
         inventory.devices[4].device_kind = mold_core::DeviceKind::Mig;
         inventory.devices[4].mig_profile = Some("1g.23gb".into());
         inventory.devices[5].memory = mold_core::DeviceMemoryInfo {
+            metal_memory: None,
             total_bytes: None,
             used_bytes: None,
             mold_used_bytes: None,

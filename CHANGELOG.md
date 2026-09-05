@@ -11,6 +11,32 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-09-05
+
+- **Account for unified memory in Metal server admission.** Queues and placement
+  previews include CPU-parked encoders and concurrent host allocations in the
+  device budget. Chain stages retain consistent lease accounting, and server
+  memory samples use the same available-memory authority as worker preflight
+  ([#1059](https://github.com/utensils/mold/issues/1059)).
+- **Retire crates.io distribution.** New releases use GitHub artifacts,
+  Nix/FlakeHub, Docker, AUR, or source builds. Remove the repeatedly failing
+  registry publisher and obsolete registry installation instructions; existing
+  crates.io versions remain historical.
+- **LTX-2 audit cleanup.** Correct the per-stage prompt documentation and remove unused planning fields and test-only helpers while preserving the live sampler and retake paths ([#603](https://github.com/utensils/mold/issues/603)).
+- **Correct Qwen-Image-Edit catalog routing.** Discoveries from Hugging Face
+  and Civitai now retain the distinct `qwen-image-edit` family through search,
+  installation, sidecar storage, and runtime resolution instead of being
+  misrouted as Qwen-Image
+  ([#1569](https://github.com/utensils/mold/issues/1569)).
+- **Reject invalid face-identity requests before downloads.** Forced-local
+  generation now refuses an unqualified PuLID model before resolution, repair,
+  or pull; server admission is pinned to return before durable or download queues
+  ([#1305](https://github.com/utensils/mold/issues/1305)).
+- **Honor phone-photo orientation throughout MiniMax H3.** Reference images and
+  FL2VA endpoints now share the EXIF- and ICC-aware bounded decoder, while CLI,
+  TUI, and server descriptors report the same upright dimensions the model sees
+  ([#1431](https://github.com/utensils/mold/issues/1431)).
+
 ## [0.27.0] - 2026-09-04
 
 - **Desktop WebP exports.** Desktop builds now include animated WebP export for
@@ -4236,7 +4262,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/utensils/mold/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/utensils/mold/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/utensils/mold/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/utensils/mold/compare/v0.24.0...v0.25.0

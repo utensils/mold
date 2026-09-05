@@ -854,3 +854,12 @@ App Review in App Store Connect.
 Release PRs synchronize `apps/mobile/src-tauri/Cargo.toml`, its lockfile, and
 `tauri.conf.json` through `scripts/release/sync-release-pr.sh`. Do not hand-bump
 mobile versions independently of the workspace release.
+
+## Metal host memory
+
+The shared device panel displays a connected Metal host's effective capacity,
+allocation headroom and kernel mode when its server advertises that telemetry.
+Older hosts omit this section. Shared RAM remains separate from the Metal
+budget. Kernel changes are local-only `mold system metal-memory` commands on
+that Mac; the app has no remote privileged control. See the
+[Metal memory guide](../../website/guide/metal-memory.md).

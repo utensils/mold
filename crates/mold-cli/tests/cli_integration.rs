@@ -1251,3 +1251,59 @@ fn prompt_flag_alone_still_works() {
         .assert()
         .stderr(predicate::str::contains("cannot combine").not());
 }
+
+// This blackbox status test intentionally uses a build without Metal so it
+// never opens a GPU; native probes are a separate, read-only qualification.
+#[cfg(not(feature = "metal"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn metal_memory_status_is_local_and_skips_config_and_database() {
+    let env = TestEnv::new();
+    let server = wiremock::MockServer::start().await;
+    let missing_home = env.home.join("offline-drive");
+    let result = env
+        .cmd()
+        .env("MOLD_HOME", &missing_home)
+        .env("MOLD_HOST", server.uri())
+        .args(["system", "metal-memory", "status", "--json"])
+        .assert()
+        .success();
+    let output: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(output["scope"], "local_machine");
+    assert!(
+        !missing_home.exists(),
+        "status must not initialize config or DB"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn metal_memory_cli_rejects_invalid_limits_without_initializing_home() {
+    let env = TestEnv::new();
+    let missing_home = env.home.join("offline-drive");
+    for value in ["0", "-1", "4294967296", "16384;whoami"] {
+        env.cmd()
+            .env("MOLD_HOME", &missing_home)
+            .args(["system", "metal-memory", "set", value])
+            .assert()
+            .failure();
+    }
+    assert!(!missing_home.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_memory_cli_refuses_unprivileged_mutation_before_config() {
+    // Never attempt a write in a root test environment.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let env = TestEnv::new();
+    let missing_home = env.home.join("offline-drive");
+    env.cmd()
+        .env("MOLD_HOME", &missing_home)
+        .args(["system", "metal-memory", "set", "16384", "--persist"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires root"));
+    assert!(!missing_home.exists());
+}

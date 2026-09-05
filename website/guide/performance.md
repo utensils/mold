@@ -208,3 +208,11 @@ time mold run flux-dev:q4 "a product photo" --seed 42
 For remote setups, also compare local CLI latency against the server’s
 `generation_time_ms` from the SSE `complete` event to separate network time from
 pure inference time.
+
+## macOS Metal memory
+
+`mold system metal-memory status [--json]` inspects this machine, ignoring
+`MOLD_HOST`. Explicit root-only `set <MiB> [--persist]` and `reset [--persist]`
+administer its system-wide limit; never run the server as root. Use
+`mold gpu list --json` for the inference host's effective capacity and headroom.
+Zero means automatic; increases may require restarting an idle inference process.

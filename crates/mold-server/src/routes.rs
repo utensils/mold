@@ -11491,6 +11491,7 @@ mod tests {
             referenced.contains("ReferenceImagesProfile"),
             "the generation profile must still carry the reference-images block"
         );
+        assert!(referenced.contains("MetalMemorySnapshot"));
 
         let dangling: Vec<&String> = referenced.difference(&defined).collect();
         assert!(

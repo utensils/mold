@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-candle"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "candle-core-mold",
  "candle-flash-attn",
@@ -4015,7 +4015,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-catalog"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "mold-ai-core",
  "reqwest 0.12.28",
@@ -4029,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-core"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4058,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-db"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "anyhow",
  "fs2",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-inference"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4100,6 +4100,7 @@ dependencies = [
  "mold-ai-core",
  "moxcms",
  "mp4",
+ "objc2-metal",
  "openh264",
  "png 0.18.1",
  "prost",
@@ -4123,11 +4124,11 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-scheduler"
-version = "0.27.0"
+version = "0.27.1"
 
 [[package]]
 name = "mold-ai-server"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "aead-stream",
  "anyhow",
@@ -4181,7 +4182,7 @@ dependencies = [
 
 [[package]]
 name = "mold-desktop"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -177,6 +177,13 @@ frame count, fps, and ordered references, so agents and the expander follow one
 set of rules. Hunyuan3D's base guide is the one that tells an agent NOT to
 write a prompt.
 
+## macOS Metal memory
+
+Use `mold system metal-memory status` to inspect this Mac, or `mold gpu list --json`
+for a running host. Explicit root-only `set <MiB>` / `reset` commands support an
+optional boot policy with `--persist`. See the [Metal memory guide](website/guide/metal-memory.md)
+for budget accounting, local-only administration and rollback semantics.
+
 ## Project
 
 Mold is a Rust workspace built on

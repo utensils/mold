@@ -502,6 +502,7 @@ mod tests {
             gpus: gpus
                 .iter()
                 .map(|(ordinal, total, used)| mold_core::GpuSnapshot {
+                    metal_memory: None,
                     ordinal: *ordinal,
                     name: format!("estimate-gpu-{ordinal}"),
                     backend: mold_core::GpuBackend::Cuda,
@@ -3011,6 +3012,7 @@ mod tests {
             hostname: "gpu-host".into(),
             timestamp: 1,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "test-gpu-0".into(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -11861,6 +11863,7 @@ mod tests {
             hostname: "gpu-host".to_string(),
             timestamp: 1,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 1,
                 name: "test-gpu-1".to_string(),
                 backend: mold_core::GpuBackend::Cuda,

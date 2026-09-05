@@ -1,3 +1,4 @@
+import { parseMetalMemory, type MetalMemory } from "./metalMemory";
 import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
 
 export type DeviceBackend = "cuda" | "metal";
@@ -14,6 +15,7 @@ export type DeviceActivity =
   | "stopping";
 
 export interface DeviceMemory {
+  metal_memory?: MetalMemory | undefined;
   total_bytes: number | null;
   used_bytes: number | null;
   mold_used_bytes: number | null;
@@ -219,6 +221,12 @@ function parseDevice(
 
   return {
     ...(value as unknown as DeviceInfo),
+    memory: {
+      ...(memory as unknown as DeviceMemory),
+      metal_memory: parseMetalMemory(
+        isRecord(memory) ? memory.metal_memory : undefined,
+      ),
+    },
     restart_required:
       typeof value.restart_required === "boolean"
         ? value.restart_required

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DeviceInfo } from "../api/devices";
+import { metalBytes, metalLimitLabel } from "../api/metalMemory";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import { normalizeBlockedReason } from "../lib/queuePosition";
 import {
@@ -274,7 +275,10 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="device-card__metrics">
-          <span>GPU memory {{ memoryLabel(device) }}</span>
+          <span
+            >{{ device.backend === "metal" ? "Shared RAM" : "GPU memory" }}
+            {{ memoryLabel(device) }}</span
+          >
           <span>
             GPU use
             {{
@@ -283,6 +287,39 @@ onBeforeUnmount(() => {
                 : `${Math.round(device.telemetry.utilization_percent)}%`
             }}
           </span>
+        </div>
+        <div
+          v-if="device.memory.metal_memory"
+          class="device-card__metrics"
+          data-test="metal-memory"
+        >
+          <span
+            >Metal capacity
+            {{
+              metalBytes(device.memory.metal_memory.effective_capacity_bytes)
+            }}</span
+          >
+          <span
+            >Allocation headroom
+            {{
+              metalBytes(device.memory.metal_memory.allocation_headroom_bytes)
+            }}</span
+          >
+          <span
+            >Kernel limit
+            {{ metalLimitLabel(device.memory.metal_memory) }}</span
+          >
+          <span
+            >Metal recommendation
+            {{ metalBytes(device.memory.metal_memory.recommended_bytes) }}</span
+          >
+          <span
+            >Mold allocated
+            {{ metalBytes(device.memory.metal_memory.allocated_bytes) }}</span
+          >
+          <span v-if="device.memory.metal_memory.error">{{
+            device.memory.metal_memory.error
+          }}</span>
         </div>
         <div v-if="device.loaded_models.length" class="device-card__line">
           <span class="device-card__line-label">Loaded</span>

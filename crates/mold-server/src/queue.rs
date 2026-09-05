@@ -4079,13 +4079,15 @@ pub(crate) fn build_observed_dispatch(
                     .into_iter()
                     .filter(|plan| !failed.contains(&plan.device_ordinal))
                     .map(|plan| {
+                        let vram_bytes = plan.admission_vram_demand_bytes();
+                        let host_bytes = plan.admission_host_demand_bytes();
                         mold_scheduler::CandidatePlacement::new(
                             plan.device_id,
                             plan.execution_fingerprint,
-                            plan.predicted_host_increment_bytes,
+                            host_bytes,
                         )
                         .with_execution_equivalence(plan.execution_equivalence_fingerprint)
-                        .with_vram(plan.predicted_vram_peak_bytes)
+                        .with_vram(vram_bytes)
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
                         .with_static_timing(mold_scheduler::WorkKind::Generation)
                     })
@@ -4985,6 +4987,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -5053,6 +5056,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -5123,6 +5127,7 @@ mod tests {
             gpus: [0, 1]
                 .into_iter()
                 .map(|ordinal| mold_core::GpuSnapshot {
+                    metal_memory: None,
                     ordinal,
                     name: format!("gpu{ordinal}"),
                     backend: mold_core::GpuBackend::Cuda,
@@ -5200,6 +5205,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -5295,6 +5301,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,

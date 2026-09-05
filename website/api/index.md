@@ -2429,3 +2429,21 @@ To disable image persistence (TUI gallery will not function):
 ```bash
 MOLD_OUTPUT_DIR="" mold serve
 ```
+
+## Optional Metal memory telemetry
+
+`GET /api/devices` adds optional `memory.metal_memory` to each Metal device.
+GPU samples in resource snapshots carry the same optional `metal_memory` block.
+All values describe the inference host; handlers consume background telemetry.
+Older hosts and builds without Metal omit the block.
+
+The block contains `wired_limit` (`{ "mode": "automatic" }`,
+`{ "mode": "explicit", "mib": 16384 }`, `unsupported`, or `unavailable`),
+nullable byte counts `physical_bytes`, `available_host_bytes`,
+`recommended_bytes`, `allocated_bytes`, `effective_capacity_bytes`,
+`allocation_headroom_bytes`, and nullable `error`. Missing observations are
+null, never fabricated zeros. Clients should ignore unsupported optional block
+shapes without rejecting the rest of the device inventory. Existing total/used
+memory fields remain shared-RAM telemetry, not a new GPU allocation estimate.
+There is no HTTP or MCP mutation API for the kernel setting; administration is
+an explicit local `mold system metal-memory` command.

@@ -10,6 +10,8 @@ on:
   push:
     branches: [main]
     paths:
+      # Changelog-only release repairs still need exact-SHA Apple qualification.
+      - "CHANGELOG.md"
       - "desktop/src/*.ts"
       - "desktop/src/*.vue"
       - "desktop/src/assets/**"
