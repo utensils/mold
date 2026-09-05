@@ -10,6 +10,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import {
   defaultClipFrames,
   modelSupportsSequence,
@@ -391,6 +392,7 @@ const { installedModels, stickyTarget, selectedModel, contractModel, targetModel
 
 // ── Output (One shot | Sequence) — a setting, not a place ────────────────────
 const draft = useSequenceDraftStore();
+const lastUsed = useLastUsedStylesStore();
 const isSequence = computed(() => draft.output === "sequence");
 const canPredictDuration = computed(
   () =>
@@ -436,7 +438,7 @@ function setOutputMode(mode: string | number) {
     const current = selectedModel.value;
     if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
       draft.lastSingleModel = props.form.model || null;
-      const pick = sequenceCapableModels.value[0];
+      const pick = lastUsed.pick("clip", sequenceCapableModels.value);
       if (pick) formStore.applyModel(pick);
       else {
         props.form.model = "";
@@ -456,7 +458,7 @@ function setOutputMode(mode: string | number) {
       parked ??
       (current && stillModels.value.some((m) => m.name === current.name)
         ? null
-        : (stillModels.value[0] ?? null));
+        : lastUsed.pick("still", stillModels.value));
     if (restored) formStore.applyModel(restored);
     draft.lastSingleModel = null;
   }

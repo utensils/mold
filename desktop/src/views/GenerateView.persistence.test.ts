@@ -9,6 +9,7 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useGenerationStore } from "../stores/generation";
 import type { ModelEntry } from "../lib/api/types";
+import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
@@ -235,5 +236,129 @@ describe("GenerateView form persistence", () => {
 
     expect(wrapper.findComponent({ name: "StarterCards" }).exists()).toBe(true);
     expect(wrapper.find('[data-test="generate-layout"]').exists()).toBe(false);
+  });
+});
+
+/*
+ * Each section keeps the style it was last used with, across a restart. A
+ * fresh launch used to open on FLUX or the first style installed whatever the
+ * person had been using; now it opens on the style — and so the section —
+ * they left, once the machine that has it has reported in.
+ */
+describe("GenerateView opens on the style last used", () => {
+  const still = model;
+  const clip = {
+    ...model,
+    name: "ltx-video",
+    family: "ltx-video",
+    default_width: 1024,
+    default_height: 576,
+  } as ModelEntry;
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    apiJson.mockReset();
+    apiJson.mockResolvedValue([]);
+    apiJsonTo.mockReset();
+    apiJsonTo.mockResolvedValue([]);
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" };
+    conn.status = "ready";
+    useHostsStore().initialized = true;
+  });
+  afterEach(() => (document.body.innerHTML = ""));
+
+  it("lands on the style and section left last, not the first installed", async () => {
+    useLastUsedStylesStore().remember("still", still.name);
+    useLastUsedStylesStore().remember("clip", clip.name);
+    useModelStore().all = [still, clip];
+    useHostModelsStore().byHost.local = {
+      entries: [still, clip],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    mountView();
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe(clip.name);
+  });
+
+  it("falls back to the usual pick when nothing was remembered", async () => {
+    useModelStore().all = [clip, still];
+    useHostModelsStore().byHost.local = {
+      entries: [clip, still],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    mountView();
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe(still.name);
+  });
+
+  it("waits for a machine still reporting before giving up on the remembered style", async () => {
+    // The remembered clip style lives on plato, which answers after this
+    // device. Picking FLUX from the first list to arrive would lock the form
+    // before plato's inventory could restore what the person was using.
+    useLastUsedStylesStore().remember("clip", clip.name);
+    useModelStore().all = [still];
+    useHostModelsStore().byHost.local = { entries: [still], fetchedAt: Date.now(), error: null };
+    useHostsStore().extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    // plato's inventory is in flight until the test lets it land.
+    let landPlato: (entries: ModelEntry[]) => void = () => {};
+    apiJsonTo.mockImplementation((target: unknown, path: unknown) => {
+      if (
+        path === "/api/models" &&
+        (target as { baseUrl?: string }).baseUrl === "http://plato:7680"
+      ) {
+        return new Promise<ModelEntry[]>((resolve) => (landPlato = resolve));
+      }
+      return Promise.resolve([]);
+    });
+
+    mountView();
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe("");
+
+    landPlato([clip]);
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe(clip.name);
+  });
+
+  it("settles for the usual pick once every machine has reported without it", async () => {
+    useLastUsedStylesStore().remember("clip", "wan22-ti2v-5b:dmd");
+    useModelStore().all = [still];
+    useHostModelsStore().byHost.local = { entries: [still], fetchedAt: Date.now(), error: null };
+    mountView();
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe(still.name);
+  });
+
+  it("remembers the style as it changes, under the section the style belongs to", async () => {
+    useModelStore().all = [still, clip];
+    useHostModelsStore().byHost.local = {
+      entries: [still, clip],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    mountView();
+    await flushPromises();
+    const memory = useLastUsedStylesStore();
+    expect(memory.bySection.still).toBe(still.name);
+
+    const form = useGenerateFormStore().form;
+    form.model = clip.name;
+    form.family = clip.family;
+    await flushPromises();
+    expect(memory.bySection.clip).toBe(clip.name);
+    expect(memory.bySection.still).toBe(still.name);
+    expect(memory.lastSection).toBe("clip");
   });
 });

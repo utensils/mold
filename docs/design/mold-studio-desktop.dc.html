@@ -246,13 +246,6 @@
               <span onClick="{{ setClip }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabClip }}">Short clip</span>
               <span onClick="{{ setMesh }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabMesh }}">3-D object</span>
             </div>
-            <!-- How the clip gets made. Simple is the plain render — a prompt, a clip style and a length — and is where Short clip opens; Scenes is the timeline. Offered only while the kind IS a clip. -->
-            <sc-if value="{{ isClipKind }}" hint-placeholder-val="{{ false }}">
-              <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
-                <span onClick="{{ setSimple }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabSimple }}">Simple</span>
-                <span onClick="{{ setScenes }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabScenes }}">Scenes</span>
-              </div>
-            </sc-if>
             <span style="width:var(--mold-bw);height:20px;background:var(--mold-border)"></span>
             <span style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:var(--mold-fs-xs);font-weight:500;white-space:nowrap;color:var(--mold-text-2);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
@@ -270,6 +263,17 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </span>
           </div>
+
+          <!-- How the clip gets made. Simple is the plain render — a prompt, a clip style and a length — and is where Short clip opens; Scenes is the timeline. A strip of its own under the toolbar, offered only while the kind IS a clip: beside the kind control it pushed the toolbar's right-hand cluster left whenever Short clip was chosen. One sentence beside it says what the chosen way does. -->
+          <sc-if value="{{ isClipKind }}" hint-placeholder-val="{{ false }}">
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+              <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg);border:var(--mold-bw) solid var(--mold-border)">
+                <span onClick="{{ setSimple }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabSimple }}">Simple</span>
+                <span onClick="{{ setScenes }}" style="padding:5px 13px;border-radius:var(--mold-radius-1);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ tabScenes }}">Scenes</span>
+              </div>
+              <span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ clipWayHint }}</span>
+            </div>
+          </sc-if>
 
           <div style="flex:1;min-height:320px;display:flex;align-items:center;justify-content:center;padding:28px;background:var(--mold-bg-crust);overflow:hidden">
             <div onClick="{{ openLightbox }}" style="position:relative;height:100%;max-width:100%;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:zoom-in">
@@ -1573,6 +1577,8 @@ class Component extends DCLogic {
       setScenes: () => this.set({ clipMode: "scenes" }),
       tabSimple: seg(s.clipMode === "simple"),
       tabScenes: seg(s.clipMode === "scenes"),
+      clipWayHint:
+        s.clipMode === "scenes" ? "Scene by scene, joined into one clip." : "One prompt, one clip.",
       playing: s.playing,
       stopped: !s.playing,
       togglePlay: () => this.set({ playing: !s.playing }),
