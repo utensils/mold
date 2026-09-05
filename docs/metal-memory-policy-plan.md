@@ -41,6 +41,10 @@ persistence through a fixed root-owned LaunchDaemon, not SMAppService packaging.
   `max(15% RAM, 8 GiB)` but does not clamp to Metal's recommendation.
 - Callers include LTX-2 adaptive streaming, scheduler reclaim, execution-plan
   preparation, variant dependencies, and H3 worker post-drop validation.
+- Ordinary scheduler capacity actually comes from `resources::metal_snapshot`
+  through `device_registry::SchedulerDeviceProjection`, then
+  `schedulable_available_vram_bytes`; its terminal failure classifier separately
+  reads `total_vram_bytes_by_device_id`. Both ceilings must become policy-aware.
 
 ## Shared contract and accounting
 
@@ -52,11 +56,16 @@ means automatic. Keep installed RAM visible as hardware inventory.
 The snapshot describes raw sysctl MiB (and read status), physical RAM, live
 available RAM, Metal recommended working set, this Mold Metal device's allocated
 bytes, host safety floor, effective total capacity and incremental headroom.
-Unavailable recommendation must conservatively prevent Metal work from being
-admitted as though RAM were the GPU budget; CPU-only builds and non-Mac platforms
-remain usable. Explicit positive raw limits can further clamp a stale Metal
-recommendation, never increase it. Checked conversion to bytes; unknown/negative
-driver sentinels are not unsigned huge values.
+Probe eagerly during Metal discovery (no models or tensor allocations), using
+the memoized device, and refresh from the background sampler. Distinguish no
+Metal build, non-macOS, and a failed supported probe. CPU-only/non-Mac paths retain
+their existing behavior. A failed supported Metal probe prevents that device's
+admission with explicit unavailable diagnostics; eager discovery removes the
+lazy-start deadlock. Fable suggested a RAM fallback; this is intentionally not
+accepted because it would defeat an administrator's smaller limit exactly when
+it cannot be read. A missing optional sysctl can still use a valid recommendation.
+Explicit positive raw limits further clamp a stale recommendation, never increase
+it. Sysctl is unsigned 32-bit MiB (verify native ABI); conversion is checked.
 
 Total policy capacity = min(Metal recommendation, explicit positive sysctl limit
 when present, RAM minus host safety floor). Incremental headroom is separately
@@ -65,6 +74,28 @@ Streaming additionally preserves the existing live host floor. A resident-byte
 charge must occur exactly once: scheduler reservations and cache credits must
 be traced before choosing the total or incremental accessor at each call site.
 Do not infer other applications' GPU allocations from this process's Metal API.
+Use Mach `free + inactive` as this feature's ONE live host-available sample in
+both native inference and registry policy telemetry. Preserve existing generic
+sysinfo RAM display separately; never derive policy headroom from its used bytes.
+Keep Metal allocated bytes in the additive policy block, NOT the legacy
+`mold_used_bytes` field, whose population activates CUDA attribution/cache logic.
+
+| Consumer | Budget and accounting |
+| --- | --- |
+| Hardware inventory | Installed RAM remains total hardware memory |
+| Registry/scheduler | Policy incremental headroom plus bounded reclaimable cache credit, capped by current policy total; no CUDA attribution inference |
+| Terminal feasibility classifier | Current policy total, never worker startup RAM |
+| `free_vram_bytes` / `usable_free_vram_bytes` | Incremental policy headroom; existing optional user reserve is subtracted once |
+| H3 stable admission | Whole-process policy total, preserving its separate host check |
+| Server pre-drop guard | Incremental plus known reclaimable bytes, capped by policy total |
+| Server post-drop guard | Synchronize/sweep pool, then fresh incremental policy; zero cache credit |
+| LTX-2 adaptive residency | Incremental policy intersected with existing live host floor and dispatch grant |
+| Local/chain/warm paths | Trace their device facts and revalidate before generation; eager/CPU options cannot bypass the Metal policy for GPU allocations |
+
+Pure tests must pin the credit cap; a 48 GiB injected host changes stable capacity
+from 40 GiB to 37.44 GiB, while a 16 GiB host retains the existing 8 GiB floor.
+Update affected `device.rs` tests, H3 plan fixtures and `variant_dependencies`
+tests to use injected samples instead of depending on this developer's sysctl.
 
 Use the memoized Candle device (`device::metal_device`) for samples so allocated
 bytes refer to the device used for inference. Discovery must not recurse into
@@ -90,8 +121,9 @@ Use an explicit local `mold system metal-memory` command group:
 
 Parse and handle this group before DB/config migrations and model initialization,
 so running the administrative command as root cannot create root-owned user
-state or accidentally launch inference. Local scope is explicit in help/output;
-MOLD_HOST never redirects a privileged operation or silently mutates a remote host.
+state or accidentally launch inference. Follow the existing `Commands::Skill`
+early-return precedent for the entire group including status. Do not load Config
+or read MOLD_HOST at all; local scope is explicit in help/output.
 
 Persistence uses a fixed label and path in `/Library/LaunchDaemons`, fixed
 `/usr/sbin/sysctl` ProgramArguments, a decimal validated value and RunAtLoad.
@@ -103,10 +135,14 @@ report partial state if live and persistent updates cannot both be completed.
 Validate plist with plutil. Prefer a boot-only policy loaded at next boot over
 launchctl kickstart races and a daemon that continuously overwrites settings.
 Reset removes the owned file, leaving unrelated system services intact.
+For an already-bootstrapped owned job, reset also boots out exactly its fixed
+label; classify the documented not-loaded result separately from real failures.
+The validated maximum is min(u32::MAX MiB, RAM minus max(15% RAM, 8 GiB)); no
+force/unsafe bypass is added. Automated tests never use real /Library paths.
 
 ## Milestones and acceptance criteria
 
-- [ ] M0: Review this plan with requested Claude Fable; resolve valid findings
+- [x] M0: Review this plan with requested Claude Fable; resolve valid findings
   and record exact model and review evidence before implementation.
 - [ ] M1: TDD pure budget arithmetic and wire compatibility. Add native read-only
   snapshot with automatic/explicit/unsupported/error states. Verify read-only
@@ -153,3 +189,15 @@ the new value. Feature-detect this sysctl; do not promise undocumented kernel AB
 availability across all macOS releases or mutate related low-watermark keys.
 
 Maintain this checklist and PR evidence as milestones are committed/pushed.
+
+## Plan review disposition
+
+Claude Fable 5.1 (`claude-fable-5-1`) reviewed the original plan against
+`c6b925473`; findings are recorded in `docs/metal-memory-policy-review.md`.
+Accepted: real scheduler/terminal-classifier routing, one Mach live sample,
+in-engine free accessor, eager discovery probe, separate allocation attribution,
+pool sweep, per-site accounting table, deterministic fixtures, early CLI return,
+unsigned sysctl bounds, bootout, lenient client telemetry and docs obligations.
+Two recommendations are intentionally adapted: an actual failed Metal probe
+stays fail-closed after eager discovery, rather than silently using RAM; and
+all milestones stay in ONE PR as explicitly requested, with separate commits.
