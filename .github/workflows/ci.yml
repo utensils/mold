@@ -232,6 +232,8 @@ jobs:
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
+              - 'scripts/build-clean.sh'
+              - 'scripts/tests/build-clean.sh'
               - 'scripts/tests/candle-single-identity.sh'
               - 'scripts/tests/desktop-candle-lock-sync.sh'
               - 'scripts/tests/desktop-candle-nix-source-hash.sh'
@@ -465,6 +467,7 @@ jobs:
           bash scripts/tests/ci-coverage-disk-guard.sh
           bash scripts/tests/ci-routing-contract.sh
           bash scripts/tests/docker-web-context.sh
+          bash scripts/tests/build-clean.sh
           bash scripts/tests/candle-single-identity.sh
           bash scripts/tests/desktop-candle-lock-sync.sh
           bash scripts/tests/desktop-candle-nix-source-hash.sh

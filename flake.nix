@@ -1253,6 +1253,15 @@
               }
               {
                 category = "build";
+                name = "build-clean";
+                help = "remove every build artifact, backend and frontend (--dry-run, --node-modules)";
+                command = ''
+                  repo_dir="''${PRJ_ROOT:-$(git rev-parse --show-toplevel)}"
+                  exec "$repo_dir/scripts/build-clean.sh" "$@"
+                '';
+              }
+              {
+                category = "build";
                 name = "build-release";
                 help = "shipping mold build with the full feature set and embedded web UI";
                 command = ''
