@@ -98,16 +98,11 @@ function openTerms(url: string) {
   void props.openExternal(url);
 }
 
-/** A pending licence opens the terms it still needs; anything else — accepted,
- * or blocking no bundle this host knows about — just shows what it says. */
+/** A licence with nothing outstanding has no action — its two links are the
+ * whole row. A pending one opens the ONE dialog its bundle needs. */
 function act(license: ThirdPartyLicenseStatus) {
   const pending = requirementsFor(license);
   if (pending.length > 0) void review(pending);
-  else openTerms(license.url);
-}
-
-function actionLabel(license: ThirdPartyLicenseStatus): string {
-  return requirementsFor(license).length > 0 ? "Read & accept" : "View terms";
 }
 
 onMounted(load);
@@ -149,8 +144,28 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
         :key="license.id"
         class="license-settings__row"
       >
-        <span class="license-settings__id"
-          >{{ license.id }} · {{ license.summary }}</span
+        <span class="license-settings__id">{{ license.id }}</span>
+        <span class="license-settings__name"
+          >{{ license.name }} · {{ license.summary }}</span
+        >
+        <!-- Both the terms this build pinned and the project's current ones:
+             an agreement nobody can read is not an agreement. The shell opens
+             them, so the app is never navigated away from. -->
+        <a
+          class="license-settings__link"
+          :href="license.url"
+          target="_blank"
+          rel="noreferrer"
+          @click.prevent="openTerms(license.url)"
+          >Pinned terms</a
+        >
+        <a
+          class="license-settings__link"
+          :href="license.canonical"
+          target="_blank"
+          rel="noreferrer"
+          @click.prevent="openTerms(license.canonical)"
+          >Project terms</a
         >
         <span
           class="license-settings__state"
@@ -161,8 +176,13 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
           "
           >{{ license.accepted ? "Accepted" : "Needs your OK" }}</span
         >
-        <button class="ms-toolbar-button" type="button" @click="act(license)">
-          {{ actionLabel(license) }}
+        <button
+          v-if="requirementsFor(license).length > 0"
+          class="ms-toolbar-button"
+          type="button"
+          @click="act(license)"
+        >
+          Read &amp; accept
         </button>
       </div>
     </template>
@@ -204,12 +224,26 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   line-height: var(--mold-lh-body);
 }
 .license-settings__id {
-  flex: 1;
-  min-width: 0;
+  flex-shrink: 0;
   font-family: var(--mold-font-mono);
   font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   overflow-wrap: anywhere;
+}
+.license-settings__name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--mold-fs-sm);
+  line-height: var(--mold-lh-body);
+}
+.license-settings__link {
+  flex-shrink: 0;
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-blue);
+  text-decoration: none;
+}
+.license-settings__link:hover {
+  text-decoration: underline;
 }
 .license-settings__state {
   flex-shrink: 0;

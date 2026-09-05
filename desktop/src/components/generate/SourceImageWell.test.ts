@@ -6,6 +6,7 @@ import SourceImageWell from "./SourceImageWell.vue";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
 import ReferenceCropEditor from "@studio/components/ReferenceCropEditor.vue";
+import SliderRow from "@ui/components/SliderRow.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 
 vi.mock("../../lib/api/client", () => ({
@@ -515,5 +516,34 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
 
     await wrapper.get("[data-test='end-frame-remove']").trigger("click");
     expect(form.endFrame).toBeNull();
+  });
+});
+
+describe("SourceImageWell strength direction", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+  afterEach(() => (document.body.innerHTML = ""));
+
+  function strengthEnds(family: string) {
+    const form = formFor(family);
+    form.sourceImage = "SRC";
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+    const row = wrapper
+      .findAllComponents(SliderRow)
+      .find((slider) => slider.props("label") === "How much to change it");
+    return { row, wrapper };
+  }
+
+  it("names the ends of the track the way the family actually reads it", () => {
+    const sd = strengthEnds("sd15");
+    expect(sd.row?.props("low")).toBe("Keep the photo");
+    expect(sd.row?.props("high")).toBe("Start fresh");
+    sd.wrapper.unmount();
+
+    // LTX-2 inverts it: 1.0 pins the opening frame, so the HIGH end is the
+    // one that keeps the photo. Fixed end labels lied on this family.
+    const ltx = strengthEnds("ltx2");
+    expect(ltx.row?.props("low")).toBe("Start fresh");
+    expect(ltx.row?.props("high")).toBe("Keep the photo");
+    ltx.wrapper.unmount();
   });
 });

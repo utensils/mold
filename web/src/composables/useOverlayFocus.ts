@@ -16,12 +16,18 @@
  * to the element that wraps its panel. Keep it here rather than in `ui/`: the
  * kit is shared with the desktop and iPhone shells, which have their own
  * focus-restoration rules.
+ *
+ * Which overlay is on top is NOT one of those per-surface rules, so that half
+ * comes from the kit's shared register (`@ui/lib/overlayStack`) — the same one
+ * `ModalPanel` reads. A private stack here answered only for the overlays this
+ * composable happened to wrap, and an overlay from the kit stacked on top of
+ * one of them was invisible to it.
  */
 import { onBeforeUnmount, watch, type Ref } from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
 
 let bodyScrollLocks = 0;
 let previousBodyOverflow = "";
-const overlayFocusStack: symbol[] = [];
 
 function lockBodyScroll() {
   if (typeof document === "undefined") return;
@@ -80,7 +86,7 @@ export function useOverlayFocus(
 ) {
   let opener: HTMLElement | null = null;
   let engaged = false;
-  const stackToken = Symbol("overlay-focus");
+  const { isTop } = useOverlayStack(open, "overlay-focus");
 
   function restore() {
     const target = opener;
@@ -125,11 +131,7 @@ export function useOverlayFocus(
   }
 
   function onDocumentKeydown(event: KeyboardEvent) {
-    if (
-      !open.value ||
-      overlayFocusStack[overlayFocusStack.length - 1] !== stackToken
-    )
-      return;
+    if (!open.value || !isTop()) return;
     if (event.key === "Escape" && close) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -146,7 +148,6 @@ export function useOverlayFocus(
     if (engaged || typeof document === "undefined") return;
     engaged = true;
     lockBodyScroll();
-    overlayFocusStack.push(stackToken);
     document.addEventListener("keydown", onDocumentKeydown, true);
   }
 
@@ -154,8 +155,6 @@ export function useOverlayFocus(
     if (!engaged || typeof document === "undefined") return;
     engaged = false;
     document.removeEventListener("keydown", onDocumentKeydown, true);
-    const index = overlayFocusStack.lastIndexOf(stackToken);
-    if (index >= 0) overlayFocusStack.splice(index, 1);
     unlockBodyScroll();
   }
 

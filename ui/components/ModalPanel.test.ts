@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import ModalPanel from "./ModalPanel.vue";
+import ModalPanelSource from "./ModalPanel.vue?raw";
+
+/* The kit's tests are run from `desktop/` (they have no runner of their own),
+ * and `import.meta.url` for a file outside that Vite root is not a file URL —
+ * so the sheet is found by walking up from the working directory. */
+const desktopTokens = (() => {
+  for (const candidate of ["../ui/mold-desktop.css", "ui/mold-desktop.css"]) {
+    const path = resolve(process.cwd(), candidate);
+    if (existsSync(path)) return readFileSync(path, "utf8");
+  }
+  throw new Error("mold-desktop.css not found from " + process.cwd());
+})();
 
 function make(
   props: Record<string, unknown> = {},
@@ -160,5 +174,108 @@ describe("ModalPanel", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(document.activeElement).toBe(wrapper.find("[role=dialog]").element);
     wrapper.unmount();
+  });
+});
+
+describe("ModalPanel stacking", () => {
+  function open(label: string) {
+    return mount(ModalPanel, {
+      props: { open: true, label },
+      slots: { default: `<input data-test="${label}" />` },
+      attachTo: document.body,
+    });
+  }
+
+  it("only the topmost dialog answers Escape, and it stops the key there", () => {
+    const under = open("under");
+    const over = open("over");
+    const heardBelow: string[] = [];
+    const witness = () => heardBelow.push("window");
+    window.addEventListener("keydown", witness);
+
+    // A key no dialog claims still reaches everything below — the fence
+    // below is about Escape, not about the listener never firing.
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "a",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(heardBelow).toEqual(["window"]);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(over.emitted("close")).toHaveLength(1);
+    expect(under.emitted("close")).toBeUndefined();
+    expect(heardBelow).toEqual(["window"]);
+
+    over.unmount();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(under.emitted("close")).toHaveLength(1);
+
+    window.removeEventListener("keydown", witness);
+    under.unmount();
+  });
+
+  it("only the topmost dialog keeps Tab", () => {
+    const under = open("under");
+    const over = open("over");
+    const underField = under.get("[data-test='under']").element as HTMLElement;
+    const overField = over.get("[data-test='over']").element as HTMLElement;
+
+    underField.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    // The lower dialog stands down; the top one pulls focus into itself.
+    expect(document.activeElement).toBe(overField);
+
+    over.unmount();
+    under.unmount();
+  });
+
+  it("a dialog closed by its prop hands Escape back to the one below it", async () => {
+    const under = open("under");
+    const over = open("over");
+    await over.setProps({ open: false });
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(under.emitted("close")).toHaveLength(1);
+    over.unmount();
+    under.unmount();
+  });
+});
+
+describe("ModalPanel layering and ground", () => {
+  /*
+   * The dialog is `position: absolute` inside its frame, so without a
+   * z-index it painted UNDER the Create bench resizer and the clip lane's
+   * seam chip — "Clear the clip?" showed the bar through its own scrim.
+   */
+  it("paints above every in-view layer, with a fallback for a host without the token", () => {
+    expect(ModalPanelSource).toMatch(
+      /\.ms-modal \{[^}]*z-index: var\(--mold-z-modal, 100\)/s,
+    );
+    expect(desktopTokens).toMatch(/--mold-z-modal:\s*100;/);
+  });
+
+  /*
+   * The panel's ground is the raised surface role, so cards inside a dialog
+   * still read as cards. On a host without the desktop role it falls back to
+   * the app background rather than to the same colour as its own contents.
+   */
+  it("stands the panel on the raised-surface role", () => {
+    expect(ModalPanelSource).toMatch(
+      /\.ms-modal__panel \{[^}]*background: var\(--mold-panel-raised, var\(--mold-bg\)\)/s,
+    );
   });
 });

@@ -1228,3 +1228,49 @@ describe("LibraryView history drawer", () => {
     wrapper.unmount();
   });
 });
+
+describe("scope counts and Escape in a text field", () => {
+  async function openLightbox() {
+    const mounted = await mountView();
+    await mounted.wrapper.get(".ms-lib-tile").trigger("click");
+    await mounted.wrapper.get(".ms-lib-tile").trigger("dblclick");
+    await flushPromises();
+    expect(mounted.wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    return mounted;
+  }
+
+  it("the Favourites count reads the whole library, whatever scope is open", async () => {
+    const { wrapper, gallery } = await mountView(undefined, (g) => {
+      g.buckets.local!.items = [{ ...prints[0]!, favorite: true }, prints[1]!];
+      g.trashBuckets.local = { items: [], loading: false, error: null, loaded: true };
+    });
+    const counts = () =>
+      wrapper.getComponent({ name: "LibraryHeader" }).props("counts") as Record<string, number>;
+    expect(counts().favorites).toBe(1);
+    gallery.scope = "trash";
+    await flushPromises();
+    expect(counts().favorites).toBe(1);
+    wrapper.unmount();
+  });
+
+  it("Escape typed in a text field never closes the lightbox behind it", async () => {
+    const { wrapper } = await openLightbox();
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    field.remove();
+    wrapper.unmount();
+  });
+
+  it("an Escape an overlay above the grid already handled is not handled twice", async () => {
+    const { wrapper } = await openLightbox();
+    const handled = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    handled.preventDefault();
+    window.dispatchEvent(handled);
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    wrapper.unmount();
+  });
+});

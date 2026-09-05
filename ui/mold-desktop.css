@@ -36,6 +36,11 @@
   --mold-ctl-md: 26px; /* toolbar buttons, segmented items  */
   --mold-ctl-lg: 32px; /* primary action, form fields       */
   --mold-row-h: 36px; /* nav row / list row minimum hit target */
+
+  /* ── Layer ─────────────────────────────────────────────────────── */
+  /* Dialogs sit above every in-view layer and below the command palette
+   * (120) and the toast shelf (130). */
+  --mold-z-modal: 100;
   --mold-row-h-table: 52px;
 
   /* ── Semantic surface roles (aliases, no new colour) ───────────── */

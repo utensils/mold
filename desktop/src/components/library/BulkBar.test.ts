@@ -159,3 +159,19 @@ describe("BulkBar (Trash)", () => {
     expect(wrapper.emitted("deleteForever")).toHaveLength(1);
   });
 });
+
+describe("BulkBar export progress", () => {
+  it("says Exporting… while the batch runs, and never borrows the delete label", () => {
+    const wrapper = mountBar({ exporting: true });
+    const button = wrapper.get("[data-test='bulk-export']");
+    expect(button.text()).toBe("Exporting…");
+    expect(button.attributes("disabled")).toBeDefined();
+    // The delete button keeps its own wording — exporting is not deleting.
+    expect(wrapper.get("[data-test='bulk-delete']").text()).not.toContain("Deleting");
+  });
+
+  it("reads Export… when no batch is running", () => {
+    const wrapper = mountBar();
+    expect(wrapper.get("[data-test='bulk-export']").text()).toBe("Export…");
+  });
+});

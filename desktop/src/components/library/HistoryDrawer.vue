@@ -61,6 +61,7 @@ import type { MergedPrint } from "../../stores/gallery";
 import type { GalleryImage } from "../../lib/api/types";
 import { dragWidth } from "../../lib/panelResize";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useReuseStillPrint } from "../../composables/useReuseStillPrint";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -78,6 +79,7 @@ const models = useModelStore();
 const toasts = useToastStore();
 const contextMenu = useContextMenuStore();
 const appPrefs = useAppPrefsStore();
+const reuseStillPrint = useReuseStillPrint();
 
 const draftDrawerWidth = ref<number | null>(null);
 const drawerWidth = computed(() => draftDrawerWidth.value ?? appPrefs.historyDrawerWidth);
@@ -188,8 +190,14 @@ function runMeta(img: GalleryImage): string {
   return `${model} · ${size} · seed ${seed} · ${runTime(img)}`;
 }
 
-function useRun(img: GalleryImage) {
-  composer.set({ metadata: img.metadata });
+/**
+ * "Use these settings" on a past run. It takes the SAME road the Lightbox and
+ * the Create view's Recent tab take — `composer.set` restored the numbers and
+ * dropped the photo the print was made from, because it invalidates
+ * retained-source authority. Sequences keep `composer.setSequence`.
+ */
+function useRun(entry: MergedPrint) {
+  reuseStillPrint(entry);
   emit("close");
   void router.push("/create");
 }
@@ -216,7 +224,7 @@ async function useRunAsSource(entry: MergedPrint) {
 function runMenu(entry: MergedPrint): MenuEntry[] {
   const img = entry.item;
   return [
-    { label: "Use these settings", action: () => useRun(img) },
+    { label: "Use these settings", action: () => useRun(entry) },
     {
       label: "Use as source",
       disabled: !canUseGalleryEntryAsSource(img),
@@ -696,7 +704,7 @@ async function cleanUpDiskConfirmed() {
             type="button"
             data-test="run-row"
             class="border-border flex w-full items-center gap-2.5 rounded-control border p-2.5 text-left hover:bg-surface"
-            @click="useRun(entry.item)"
+            @click="useRun(entry)"
             @contextmenu="contextMenu.open($event, runMenu(entry))"
           >
             <div

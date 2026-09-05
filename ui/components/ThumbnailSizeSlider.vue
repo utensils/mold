@@ -114,13 +114,15 @@ function onInput(event: Event) {
 }
 
 /* The real control: invisible, but the only thing that takes the pointer,
-   the keyboard, and the accessibility tree. */
+   the keyboard, and the accessibility tree. The visible track is a 4px
+   hairline, so this is the whole hit area — 24px, centred on the track
+   (4px tall from top 0, so -10px puts the two centres together). */
 .ms-thumbnail-size__input {
   position: absolute;
-  top: -8px;
+  top: -10px;
   left: -7px;
   width: calc(100% + 14px);
-  height: 20px;
+  height: 24px;
   margin: 0;
   -webkit-appearance: none;
   appearance: none;
@@ -131,7 +133,7 @@ function onInput(event: Event) {
 
 .ms-thumbnail-size__input::-webkit-slider-thumb {
   width: 14px;
-  height: 20px;
+  height: 24px;
   -webkit-appearance: none;
   border: 0;
   background: transparent;
@@ -139,7 +141,7 @@ function onInput(event: Event) {
 
 .ms-thumbnail-size__input::-moz-range-thumb {
   width: 14px;
-  height: 20px;
+  height: 24px;
   border: 0;
   background: transparent;
 }

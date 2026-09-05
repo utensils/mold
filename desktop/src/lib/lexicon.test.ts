@@ -11,6 +11,10 @@ import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import loraSource from "../components/generate/LoraStack.vue?raw";
 import generateViewSource from "../views/GenerateView.vue?raw";
 import strengthSource from "@studio/lib/strengthSemantics.ts?raw";
+import sequenceOpeningWellSource from "../components/create/SequenceOpeningImageWell.vue?raw";
+import mobileSequenceOpeningSource from "../mobile/MobileSequenceOpeningImage.vue?raw";
+import sourceImageWellSource from "../components/generate/SourceImageWell.vue?raw";
+import mobileSourceControlsSource from "../mobile/MobileSourceControls.vue?raw";
 import { ENGINE_KEY_SCHEMAS, SECTIONS } from "./settingsSchema";
 
 /**
@@ -259,6 +263,30 @@ describe("lexicon — how much to change it", () => {
     for (const old of ["Denoise strength", "Source strength"]) {
       expect(strengthSource, old).not.toContain(old);
     }
+  });
+
+  /*
+   * Every well that shows the strength slider must take its wording from
+   * that one helper. Three of them spelled "Source strength" into the
+   * template instead, which is both the retired word and — on LTX-2 — the
+   * wrong direction, because the helper is also what knows which end of the
+   * track keeps the photo.
+   */
+  const wells: [string, string][] = [
+    ["SourceImageWell", sourceImageWellSource],
+    ["SequenceOpeningImageWell", sequenceOpeningWellSource],
+    ["MobileSequenceOpeningImage", mobileSequenceOpeningSource],
+    ["MobileSourceControls", mobileSourceControlsSource],
+    [
+      "SequenceOpeningImagePanel (web)",
+      readFileSync("../web/src/components/create/SequenceOpeningImagePanel.vue", "utf8"),
+    ],
+  ];
+
+  it.each(wells.map(([name]) => name))("%s never spells the label itself", (name) => {
+    const source = wells.find(([well]) => well === name)![1];
+    expect(source).not.toContain("Source strength");
+    expect(source).toContain("strengthSemantics");
   });
 });
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
@@ -263,6 +264,10 @@ const showOrganization = computed(() => props.canOrganize && props.organization 
 // Focus the close button on open and hand focus back to the opener on teardown,
 // so the lightbox is keyboard-operable and doesn't strand focus when dismissed.
 const closeBtn = ref<HTMLButtonElement | null>(null);
+// The lightbox is an overlay in its own right: it joins the shared register
+// for its whole life, so a question it opens (delete forever, the export
+// sheets) sits ABOVE it and takes Escape on its own.
+useOverlayStack(ref(true), "lightbox");
 let restoreFocusEl: HTMLElement | null = null;
 onMounted(() => {
   restoreFocusEl = document.activeElement as HTMLElement | null;
@@ -353,11 +358,19 @@ function imageMenu(): MenuEntry[] {
       disabled: props.video || props.audio || props.mesh,
       action: () => void copyImage(),
     },
-    {
-      label: "Use as source",
-      disabled: props.audio || props.mesh,
-      action: () => emit("useSource"),
-    },
+    // A trashed print is on its way to being purged: it is neither a recipe
+    // to pick up nor a photo that will still be there. The grid's own tile
+    // menu is already gated this way; Upscale and the delete block below read
+    // the same `fromTrash`.
+    ...(fromTrash.value
+      ? []
+      : [
+          {
+            label: "Use as source",
+            disabled: props.audio || props.mesh,
+            action: () => emit("useSource"),
+          },
+        ]),
     {
       label: "Copy file path",
       action: () =>
@@ -591,6 +604,7 @@ async function performVideoExport(options: VideoExportOptions) {
         {{ saveBusy ? "Saving…" : "Save a copy" }}
       </button>
       <button
+        v-if="!fromTrash"
         type="button"
         data-test="lightbox-primary-action"
         class="ms-toolbar-button ms-toolbar-button--on h-[28px] font-semibold"
@@ -928,7 +942,7 @@ async function performVideoExport(options: VideoExportOptions) {
         <!-- the secondary actions -->
         <div class="mt-auto flex flex-col gap-2 pt-2">
           <button
-            v-if="canEditSequence"
+            v-if="canEditSequence && !fromTrash"
             type="button"
             data-test="lightbox-duplicate-sequence"
             class="ms-toolbar-button justify-center"
@@ -938,6 +952,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </button>
           <div class="flex gap-2">
             <button
+              v-if="!fromTrash"
               type="button"
               data-test="lightbox-use-source"
               class="ms-toolbar-button flex-1 justify-center"

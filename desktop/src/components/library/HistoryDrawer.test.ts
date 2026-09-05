@@ -32,6 +32,14 @@ vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
   ipc: { localGalleryList: vi.fn().mockResolvedValue({ images: [], target: null }) },
 }));
+// "Use these settings" asks the producing host what source media it kept.
+const retainedInventory = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ availability: "available", members: [] }),
+);
+vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@studio/api/gallerySourceMedia")>();
+  return { ...actual, retainedSourceMediaInventory: retainedInventory };
+});
 
 import HistoryDrawer from "./HistoryDrawer.vue";
 import DrawerPanel from "@ui/components/DrawerPanel.vue";
@@ -198,11 +206,13 @@ describe("HistoryDrawer runs", () => {
     expect(rows[0]!.text()).toContain("Use these settings");
   });
 
-  it("reuses a run's full settings including the seed", async () => {
+  it("reuses a run down the retained-source road, print and all", async () => {
     const wrapper = await mountDrawer();
     await wrapper.get("[data-test='run-row']").trigger("click");
     await flushPromises();
     const composer = useComposerStore();
+    // A bare `composer.set` restored the numbers and dropped the photo the
+    // print was made from — this is the same road the Lightbox takes.
     expect(composer.prefill).toEqual({
       metadata: expect.objectContaining({
         prompt: "a lighthouse at dusk",
@@ -210,7 +220,9 @@ describe("HistoryDrawer runs", () => {
         width: 1024,
         height: 768,
       }),
+      print: expect.objectContaining({ filename: "a.png", hostId: null }),
     });
+    expect(retainedInventory).toHaveBeenCalledWith("a.png", expect.anything());
     expect(router.currentRoute.value.path).toBe("/create");
   });
 

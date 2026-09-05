@@ -4,6 +4,7 @@ import SliderRow from "@ui/components/SliderRow.vue";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
@@ -35,6 +36,11 @@ function patch(next: Partial<GenerateFormState>) {
 
 const draft = useSequenceDraftStore();
 const uploadError = ref<string | null>(null);
+/** The one label policy for the shared `strength` field — it also owns which
+ *  end of the track keeps the photo (LTX-2 reads it the other way round). */
+const strength = computed(() =>
+  strengthSemantics(props.modelValue.modelFamily),
+);
 const mimeType = computed(() =>
   /\.jpe?g$/i.test(draft.openingImage?.filename ?? "")
     ? "image/jpeg"
@@ -124,15 +130,20 @@ function setFit(mode: SourceFitMode) {
 
     <template v-if="draft.openingImage">
       <SliderRow
-        label="Source strength"
+        :label="strength.label"
         :model-value="modelValue.strength"
         :min="0"
         :max="1"
         :step="0.01"
         :value-label="modelValue.strength.toFixed(2)"
+        :low="strength.higherMeansSource ? 'Start fresh' : 'Keep the photo'"
+        :high="strength.higherMeansSource ? 'Keep the photo' : 'Start fresh'"
         data-test="sequence-source-strength"
         @update:model-value="patch({ strength: $event })"
       />
+      <p class="soi__hint" data-test="sequence-source-strength-hint">
+        {{ strength.hint }}
+      </p>
       <div class="soi__field">
         <label class="soi__label" for="sequence-source-fit"
           >Fit to video frame</label

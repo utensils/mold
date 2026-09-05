@@ -13,6 +13,7 @@ import {
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { fileToBase64 } from "../../lib/image";
 import { useToastStore } from "../../stores/toasts";
 
@@ -42,6 +43,9 @@ const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).
 const upscalerAvailable = computed(() =>
   Boolean(props.form.upscaleModel || props.upscalers[0]?.name),
 );
+/** The one label policy for the shared `strength` field — and the only thing
+ *  that knows which end of the track keeps the photo (LTX-2 inverts it). */
+const strength = computed(() => strengthSemantics(props.form.family));
 
 function setSourceFit(mode: SourceFitMode) {
   props.form.sourceFit = sourceFitPolicyForMode(mode, {
@@ -99,7 +103,7 @@ async function onOpeningImageFile(file: File) {
     <div v-if="draft.openingImage" class="ms-source-controls">
       <label class="ms-range">
         <span>
-          Source strength
+          {{ strength.label }}
           <output class="font-mono text-xs">{{ form.strength.toFixed(2) }}</output>
         </span>
         <input
@@ -111,6 +115,9 @@ async function onOpeningImageFile(file: File) {
           data-test="sequence-source-strength"
         />
       </label>
+      <p class="ms-source-hint" data-test="sequence-source-strength-hint">
+        {{ strength.hint }}
+      </p>
       <label class="ms-field">
         <span>Fit to video frame</span>
         <select
@@ -170,6 +177,11 @@ async function onOpeningImageFile(file: File) {
 .ms-range input {
   width: 100%;
   accent-color: var(--mold-blue);
+}
+.ms-source-hint {
+  margin: -4px 0 0;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-micro);
 }
 .ms-input {
   width: 100%;

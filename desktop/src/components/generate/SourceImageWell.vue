@@ -715,8 +715,8 @@ function setSourceFitMode(e: Event) {
         :step="0.05"
         :label="strength.label"
         :value-label="form.strength.toFixed(2)"
-        low="Keep the photo"
-        high="Start fresh"
+        :low="strength.higherMeansSource ? 'Start fresh' : 'Keep the photo'"
+        :high="strength.higherMeansSource ? 'Keep the photo' : 'Start fresh'"
         @update:model-value="form.strength = $event"
       />
       <p class="mt-1 text-micro text-fg-dim">{{ strength.hint }}</p>

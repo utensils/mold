@@ -3343,7 +3343,10 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
 }
 .gal__thumbnail-size {
-  flex: 0 0 136px;
+  /* Its own width — a 13px glyph, a gap, and a 74px track. A fixed basis
+     reserved room it never used and clipped it when the kit's own width
+     grew. */
+  flex: 0 0 auto;
 }
 
 /* Below 640px the scope control spans the row over the grid. */

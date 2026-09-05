@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ThumbnailSizeSlider from "./ThumbnailSizeSlider.vue";
+import ThumbnailSizeSliderSource from "./ThumbnailSizeSlider.vue?raw";
 
 describe("ThumbnailSizeSlider", () => {
   it("is a bare track led by a 13px grid glyph, with no box of its own", () => {
@@ -47,5 +48,30 @@ describe("ThumbnailSizeSlider", () => {
     (input.element as HTMLInputElement).value = "280";
     await input.trigger("input");
     expect(wrapper.emitted("update:modelValue")).toEqual([[280]]);
+  });
+});
+
+describe("ThumbnailSizeSlider hit area", () => {
+  /*
+   * The visible track is a 4px hairline, so the only thing a pointer can
+   * actually grab is the invisible range input over it. At 20px it was
+   * under every pointer-target floor; it is 24px now, and re-centred on the
+   * track rather than merely made taller downwards.
+   */
+  it("gives the real control a 24px grab area centred on the track", () => {
+    expect(ThumbnailSizeSliderSource).toMatch(
+      /\.ms-thumbnail-size__input \{[^}]*top: -10px;[^}]*height: 24px;/s,
+    );
+    for (const thumb of ["-webkit-slider-thumb", "-moz-range-thumb"]) {
+      expect(ThumbnailSizeSliderSource, thumb).toMatch(
+        new RegExp(`::${thumb} \\{[^}]*height: 24px;`, "s"),
+      );
+    }
+  });
+
+  it("still renders the 4px track it is centred on", () => {
+    expect(ThumbnailSizeSliderSource).toMatch(
+      /\.ms-thumbnail-size__track \{[^}]*height: 4px;/s,
+    );
   });
 });

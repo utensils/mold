@@ -479,13 +479,16 @@ export const useGalleryStore = defineStore("gallery", {
     trashCount(): number {
       return this.trashMerged.length;
     },
-    /** Trash grid: host chip → kind → query, like `filtered`. */
+    /** Trash grid: host chip → kind → query → the same tag/favourite chips the
+     *  live grid uses. The chip row is present in every scope, so the chips
+     *  must narrow every scope — a tag chip that did nothing in the Trash was
+     *  a control that lied. */
     trashFiltered(): MergedPrint[] {
       let entries = this.trashMerged;
       if (this.filter !== "all" && this.sources.some((s) => s.key === this.filter)) {
         entries = entries.filter((e) => e.availableOn.some((s) => s.key === this.filter));
       }
-      return this.narrowByKindAndQuery(entries);
+      return this.narrowByKindAndQuery(entries).filter(this.matchesOrganizationFilters);
     },
     // ── Organization capability (from /api/capabilities) ──────────────────
     /** Titles / favorites / tags / collections can be edited on this bucket's
@@ -600,13 +603,19 @@ export const useGalleryStore = defineStore("gallery", {
         );
       };
     },
+    /** The album currently drilled into, or null (every other scope, and the
+     *  Albums shelf itself). A stale slug left behind by a scope switch is not
+     *  an open album. */
+    openCollectionSlug(): string | null {
+      return this.scope === "collections" ? this.collectionSlug : null;
+    },
     /**
-     * The live grid's two scopes. Favourites is Everything with one filter on
-     * top, so it keeps every default-grid rule — hidden collections excluded,
-     * chip counts computed over the same set.
+     * Hidden albums are hidden until one is OPEN — in Everything, Favourites,
+     * the Albums shelf and the Trash alike. Only the drill-in reveals them,
+     * which is the whole point of hiding an album.
      */
-    inDefaultGrid(): boolean {
-      return this.scope === "prints" || this.scope === "favorites";
+    hidesHiddenAlbums(): boolean {
+      return this.openCollectionSlug === null;
     },
     /** ★ Favourites scope — only favourites (union over every copy). */
     favoritesOnly(): boolean {
@@ -622,19 +631,32 @@ export const useGalleryStore = defineStore("gallery", {
       const organizationOf = this.organizationOf;
       return (entry) => !organizationOf(entry).collections.some((slug) => hiddenSlugs.has(slug));
     },
-    /** Logical prints available to default filter-chip counts. */
+    /** The live grid minus hidden albums — the library's own size, whatever
+     *  scope is open. The shell's picture count reads this. */
+    defaultLibraryPrints(): MergedPrint[] {
+      return this.merged.filter(this.visibleInDefaultLibrary);
+    },
+    /**
+     * The set the filter chips describe: the SCOPE'S OWN prints (the Trash
+     * counts its trash), minus hidden albums unless one is open. A chip
+     * labelled with the live grid's count while the Trash is on screen names
+     * prints the user cannot see.
+     */
     basePrints(): MergedPrint[] {
-      return this.inDefaultGrid ? this.merged.filter(this.visibleInDefaultLibrary) : this.merged;
+      const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
+      return this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
     },
-    /** Header/chip count before host, kind, search, and organization narrowing. */
+    /** Header count before host, kind, search, and organization narrowing —
+     *  scope-independent, so switching to the Trash never rewrites it. */
     basePrintCount(): number {
-      return this.basePrints.length;
+      return this.defaultLibraryPrints.length;
     },
-    /** Exact tag counts over the same logical prints as the default grid. */
+    /** Exact tag counts over the same logical prints the scope renders. */
     filterChipTags(): TagCount[] {
+      const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
       const visible = this.basePrints;
-      const excluded = this.inDefaultGrid
-        ? this.merged.filter((entry) => !this.visibleInDefaultLibrary(entry))
+      const excluded = this.hidesHiddenAlbums
+        ? scoped.filter((entry) => !this.visibleInDefaultLibrary(entry))
         : [];
       return visibleTagCounts(
         this.mergedTags,
@@ -734,29 +756,37 @@ export const useGalleryStore = defineStore("gallery", {
      */
     filtered(): MergedPrint[] {
       let entries = this.narrowByKindAndQuery(this.hostFiltered);
+      const slug = this.openCollectionSlug;
+      if (this.hidesHiddenAlbums) entries = entries.filter(this.visibleInDefaultLibrary);
+      entries = entries.filter(this.matchesOrganizationFilters);
+      if (!slug) return entries;
+      const organizationOf = this.organizationOf;
+      return entries.filter((entry) => organizationOf(entry).collections.includes(slug));
+    },
+    /**
+     * The Favourites scope and the tag chips, as ONE predicate — the live grid
+     * and the Trash both apply it, so a chip means the same thing in both.
+     */
+    matchesOrganizationFilters(): (entry: MergedPrint) => boolean {
       const wantsFavorites = this.favoritesOnly;
       const tagKeys = this.tagFilter.map((t) => tagKey(t)).filter((k) => k.length > 0);
-      const slug = this.scope === "collections" ? this.collectionSlug : null;
-      if (this.inDefaultGrid) entries = entries.filter(this.visibleInDefaultLibrary);
-      if (!wantsFavorites && tagKeys.length === 0 && !slug) return entries;
+      if (!wantsFavorites && tagKeys.length === 0) return () => true;
       const organizationOf = this.organizationOf;
-      entries = entries.filter((entry) => {
+      return (entry) => {
         const org = organizationOf(entry);
         if (wantsFavorites && !org.favorite) return false;
         if (tagKeys.length > 0) {
           const have = new Set(org.tags.map((t) => t.toLowerCase()));
           if (!tagKeys.every((k) => have.has(k))) return false;
         }
-        if (slug && !org.collections.includes(slug)) return false;
         return true;
-      });
-      return entries;
+      };
     },
     /** Per-kind counts for the All/Images/Video/Audio chips. Computed over
      *  the host-chip-filtered set only, so chip labels stay stable while the
      *  kind chip or search narrows the grid. */
     kindCounts(): GalleryKindCounts {
-      const entries = this.inDefaultGrid
+      const entries = this.hidesHiddenAlbums
         ? this.hostFiltered.filter(this.visibleInDefaultLibrary)
         : this.hostFiltered;
       let video = 0;
@@ -788,7 +818,7 @@ export const useGalleryStore = defineStore("gallery", {
       return this.sources.map((source) => {
         const items = this.buckets[source.key]?.items ?? [];
         const count =
-          this.inDefaultGrid && hiddenSlugs.size > 0
+          this.hidesHiddenAlbums && hiddenSlugs.size > 0
             ? items.filter((item) => !hidesInDefault(item)).length
             : items.length;
         return { key: source.key, label: source.label, count };
@@ -860,6 +890,22 @@ export const useGalleryStore = defineStore("gallery", {
       }
       const host = this.hostFor(sourceKey);
       return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+    },
+    /**
+     * The same answer as {@link targetOf}, except that a bucket which cannot
+     * name its authority reads as "no authority" instead of throwing.
+     *
+     * `targetOf` throws on purpose: an operation that is about to write to a
+     * host must never quietly aim somewhere else. A RENDER has no such stake —
+     * it draws the row it has and says the picture cannot load — and a throw
+     * inside one takes the whole surrounding view down with it.
+     */
+    targetOfOrNull(sourceKey: string): ApiTarget | null {
+      try {
+        return this.targetOf(sourceKey);
+      } catch {
+        return null;
+      }
     },
     ensureBucket(key: string): GalleryBucket {
       if (!this.buckets[key]) this.buckets[key] = emptyBucket();

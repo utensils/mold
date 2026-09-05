@@ -155,7 +155,7 @@ function onKeydown(event: KeyboardEvent) {
   padding: 2px;
 }
 .ms-seg--compact .ms-seg__btn {
-  height: calc(var(--mold-ctl-md) - 4px - 2 * var(--mold-bw));
+  height: calc(var(--mold-ctl-md, 26px) - 4px - 2 * var(--mold-bw));
   padding: 0 12px;
   justify-content: center;
 }

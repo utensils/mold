@@ -826,10 +826,14 @@ function applyMask(mask: string): void {
             max="1"
             step="0.05"
             :aria-label="strength.label"
-            :title="strength.hint"
             data-test="mobile-source-strength"
           />
         </label>
+        <!-- The direction is the whole point of the hint, and a `title` is
+             invisible on a phone: there is no pointer to hover with. -->
+        <p class="mobile-source-note" data-test="mobile-source-strength-hint">
+          {{ strength.hint }}
+        </p>
 
         <!-- A canvasless (3-D) recipe fits the source to no canvas at all. -->
         <label v-if="!canvasless" class="field">

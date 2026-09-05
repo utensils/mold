@@ -513,6 +513,30 @@ describe("bulk bar", () => {
     wrapper.unmount();
   });
 
+  it("says Exporting… while the batch runs and names the total in the toast", async () => {
+    const { wrapper } = await mountView();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    saveGalleryMedia.mockImplementation(async () => {
+      await gate;
+      return { filename: "saved.png", path: "/Pictures/saved.png", directory: "Pictures" };
+    });
+    await wrapper.get('[aria-label="Toggle select mode"]').trigger("click");
+    await wrapper.get("[data-test='bulk-select-all']").trigger("click");
+    await wrapper.get("[data-test='bulk-export']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='bulk-export']").text()).toBe("Exporting…");
+
+    release();
+    await flushPromises();
+    expect(useToastStore().items.at(-1)!.message).toBe(
+      `Exported ${live.length} of ${live.length} pictures`,
+    );
+    wrapper.unmount();
+  });
+
   it("enters selection naturally with Command-click and Shift-click", async () => {
     const { wrapper } = await mountView();
     await tileFor(wrapper, smurf04.filename).trigger("click");

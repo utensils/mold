@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
@@ -967,5 +968,19 @@ describe("LibraryPage multi-host identity", () => {
     expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
       "studio-7680|twin.png",
     );
+  });
+});
+
+describe("LibraryPage toolbar layout", () => {
+  const source = readFileSync("src/pages/LibraryPage.vue", "utf8");
+
+  /*
+   * The size control's own width is a 13px glyph, a 7px gap, and a 74px
+   * track. A fixed 136px basis reserved toolbar room it does not use and
+   * clipped it whenever the kit's intrinsic width grew, so the basis is the
+   * control's own.
+   */
+  it("lets the thumbnail-size control take its own width in the toolbar", () => {
+    expect(source).toMatch(/\.gal__thumbnail-size \{[^}]*flex: 0 0 auto;/s);
   });
 });

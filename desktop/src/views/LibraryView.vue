@@ -250,8 +250,12 @@ const scopeCounts = computed(() => {
 const trashBytes = computed(() =>
   gallery.trashMerged.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0),
 );
+/** The whole library's favourites, not the open scope's — the header count
+ *  beside Favourites must not change when the Trash is on screen. */
 const favoritesCount = computed(
-  () => gallery.basePrints.filter((entry) => isFavorite(entry)).length,
+  () =>
+    gallery.merged.filter((entry) => gallery.visibleInDefaultLibrary(entry) && isFavorite(entry))
+      .length,
 );
 const sourceLabel = (key: string) => gallery.sources.find((s) => s.key === key)?.label ?? key;
 /** "This Mac · plato" — every organize-capable host, for the fan-out notes. */
@@ -344,9 +348,13 @@ async function exportSelected(targets: MergedPrint[]) {
   }
   const ok = targets.length - failed;
   if (ok > 0) {
-    toasts.push(`Exported ${ok} ${ok === 1 ? "picture" : "pictures"}`, "info", {
-      ...(saved ? { description: `To ${saved.directory}` } : {}),
-    });
+    // "N of M" — a batch that lost a picture says so in the count itself,
+    // not only in the error toast beside it.
+    toasts.push(
+      `Exported ${ok} of ${targets.length} ${targets.length === 1 ? "picture" : "pictures"}`,
+      "info",
+      { ...(saved ? { description: `To ${saved.directory}` } : {}) },
+    );
   }
   if (firstError) toasts.push(firstError, "error");
 }
@@ -2199,7 +2207,13 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     if (selected.value) lightboxOpen.value = !lightboxOpen.value;
   } else if (e.key === "Escape") {
+    // An overlay above the grid (a ModalPanel over the Lightbox) that already
+    // handled this Escape has handled it for everyone.
+    if (e.defaultPrevented) return;
     if (closeTransient()) return;
+    // A text field owns its own Escape — the History search clears itself and
+    // the lightbox behind it stays open.
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     if (lightboxOpen.value) lightboxOpen.value = false;
     else if (selectMode.value) setSelectMode(false);
   }
@@ -2852,7 +2866,8 @@ onUnmounted(() => {
       :organize-blocked-reason="selectionOrganizeBlockedReason"
       :trash="selectionTrashCapable"
       :confirming="confirmingBulkDelete"
-      :busy="bulkDeleting || organizeBusy || exportBusy"
+      :busy="bulkDeleting || organizeBusy"
+      :exporting="exportBusy"
       :collections="gallery.mergedCollections"
       :collection-selected="selectionOrganization.collectionsAll"
       :collection-mixed="selectionOrganization.collectionsSome"

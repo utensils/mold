@@ -10,8 +10,15 @@
  * `aria-modal`, so focus can be anywhere in the app when the key arrives, and
  * a dialog that closes only while it happens to hold focus is a trap. Tab is
  * kept inside the panel for the same reason.
+ *
+ * Only the TOP dialog acts. Every open overlay hears the same document-level
+ * Escape, so a confirm opened over a lightbox used to close both — the
+ * picture the question was about disappeared with the question. The shared
+ * register in `../lib/overlayStack` says which one is on top, and the top one
+ * stops the key there so nothing underneath ever sees it.
  */
-import { onBeforeUnmount, ref, useSlots, watch } from "vue";
+import { onBeforeUnmount, ref, toRef, useSlots, watch } from "vue";
+import { useOverlayStack } from "../lib/overlayStack";
 import { useRootFocusOnOpen } from "../lib/useRootFocusOnOpen";
 
 const props = withDefaults(
@@ -40,13 +47,16 @@ const emit = defineEmits<{ close: [] }>();
 const slots = useSlots();
 const root = ref<HTMLElement | null>(null);
 useRootFocusOnOpen(root, () => props.open);
+const { isTop } = useOverlayStack(toRef(props, "open"), "modal-panel");
 
 const FOCUSABLE =
   'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 function onDocumentKeydown(e: KeyboardEvent) {
+  if (!isTop()) return;
   if (e.key === "Escape") {
     e.preventDefault();
+    e.stopImmediatePropagation();
     emit("close");
     return;
   }
@@ -127,6 +137,10 @@ onBeforeUnmount(() =>
 .ms-modal {
   position: absolute;
   inset: 0;
+  /* Above every in-view layer (the Create bench resizer, the clip lane's
+     seam chip and trim grip), below the command palette and the toasts. The
+     fallback keeps the rule true on a host without the desktop tokens. */
+  z-index: var(--mold-z-modal, 100);
   background: var(--mold-scrim);
   display: flex;
   align-items: center;
@@ -137,7 +151,10 @@ onBeforeUnmount(() =>
 .ms-modal__panel {
   max-width: 92%;
   box-sizing: border-box;
-  background: var(--mold-surface);
+  /* The raised-surface role, so cards inside a dialog still read as cards.
+     Without the desktop role, the app background — never the same colour as
+     the panel's own contents. */
+  background: var(--mold-panel-raised, var(--mold-bg));
   border: var(--mold-bw) solid var(--mold-border);
   border-radius: var(--mold-radius-3);
   box-shadow: var(--mold-shadow-md);

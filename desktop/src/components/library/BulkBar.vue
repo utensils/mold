@@ -38,6 +38,9 @@ const props = withDefaults(
      *  context menu and keyboard can arm it too). */
     confirming?: boolean;
     busy?: boolean;
+    /** An export batch is running — the Export button says so and stands
+     *  down. Separate from `busy` so it never borrows the delete wording. */
+    exporting?: boolean;
     collections?: readonly MergedCollection[];
     /** Slugs every selected print is in. */
     collectionSelected?: readonly string[];
@@ -60,6 +63,7 @@ const props = withDefaults(
     trash: false,
     confirming: false,
     busy: false,
+    exporting: false,
     collections: () => [],
     collectionSelected: () => [],
     collectionMixed: () => [],
@@ -295,11 +299,11 @@ defineExpose({ openCollections, openTags, closePopovers });
       <button
         type="button"
         class="ms-bb"
-        :disabled="none || busy"
+        :disabled="none || busy || exporting"
         data-test="bulk-export"
         @click="emit('export')"
       >
-        Export…
+        {{ exporting ? "Exporting…" : "Export…" }}
       </button>
       <button
         type="button"
