@@ -319,3 +319,12 @@ All of these derive `Serialize`/`Deserialize` (and utoipa `ToSchema`) and are th
 - Also `mold_core::client` is a ready-made HTTP client (already used by mold-discord/mold-tui) that a Tauri backend could reuse instead of hand-rolling requests.
 
 A few wire structs live in **mold-server** (not reusable without depending on the server crate): `routes::{LoadModelBody, UnloadRequest, CreateDownloadBody, CreateDownloadResponse}`, `job_registry::{JobEntry, QueueListing, JobLifecycle}`, `chain_limits::ChainLimits`, and `catalog_api::CompanionJob`. These are simple enough to mirror if the Tauri backend only depends on `mold-core`.
+
+## Metal host memory
+
+The shared device panel displays a connected Metal host's effective capacity,
+allocation headroom and kernel mode when its server advertises that telemetry.
+Older hosts omit this section. Shared RAM remains separate from the Metal
+budget. Kernel changes are local-only `mold system metal-memory` commands on
+that Mac; the app has no remote privileged control. See the
+[Metal memory guide](../../website/guide/metal-memory.md).

@@ -42,6 +42,32 @@ function device(index: number, patch: Partial<DeviceInfo> = {}): DeviceInfo {
 }
 
 describe("DevicePanel", () => {
+  it("separates a remote Metal budget from installed shared RAM", () => {
+    const metal = device(0, { backend: "metal", device_kind: "metal" });
+    metal.memory.metal_memory = {
+      wired_limit: { mode: "explicit", mib: 16384 },
+      physical_bytes: 48 * 1024 ** 3,
+      available_host_bytes: 32 * 1024 ** 3,
+      recommended_bytes: 37 * 1024 ** 3,
+      allocated_bytes: 4 * 1024 ** 3,
+      effective_capacity_bytes: 16 * 1024 ** 3,
+      allocation_headroom_bytes: 12 * 1024 ** 3,
+      error: null,
+    };
+    const wrapper = mount(DevicePanel, { props: { devices: [metal] } });
+    expect(wrapper.text()).toContain("Metal capacity 16.0 GiB");
+    expect(wrapper.text()).toContain("Allocation headroom 12.0 GiB");
+    expect(wrapper.text()).toContain("Kernel limit 16384 MiB");
+    expect(wrapper.text()).toContain("Shared RAM");
+    expect(wrapper.text()).not.toContain("sudo");
+    metal.memory.metal_memory.effective_capacity_bytes = null;
+    metal.memory.metal_memory.allocation_headroom_bytes = null;
+    metal.memory.metal_memory.error = "Cannot read Metal device";
+    const failed = mount(DevicePanel, { props: { devices: [metal] } });
+    expect(failed.text()).toContain("Metal capacity unavailable");
+    expect(failed.text()).toContain("Cannot read Metal device");
+  });
+
   for (const count of [1, 2, 8, 64]) {
     it(`renders all ${count} devices without a cardinality ceiling`, () => {
       const wrapper = mount(DevicePanel, {
