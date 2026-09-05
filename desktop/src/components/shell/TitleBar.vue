@@ -9,16 +9,15 @@ import Icon from "@ui/components/Icon.vue";
 import NotificationsCenter from "@studio/components/NotificationsCenter.vue";
 import { useUiStore } from "../../stores/ui";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import { useShellSubtitle } from "../../composables/useShellSubtitle";
+import { useShellSubtitle, useShellTitle } from "../../composables/useShellSubtitle";
 import { PLATFORM_UI, shortcutLabel } from "../../lib/platform";
 
 const route = useRoute();
 const router = useRouter();
 const ui = useUiStore();
 const appPrefs = useAppPrefsStore();
+const title = useShellTitle();
 const subtitle = useShellSubtitle();
-
-const title = computed(() => (route.meta.title as string | undefined) ?? "");
 
 // Vue Router records back/forward availability on the history state it
 // manages; the buttons mirror it so neither is ever a dead end.

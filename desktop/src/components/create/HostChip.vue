@@ -7,11 +7,11 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 
 /**
- * The generation-host chip (extracted from the Create header so the chain
- * composer shares it): a live status chip that, with more than one host,
- * opens the routing menu — Auto (least busy), Most capable ("capable"
- * sentinel), or a sticky host — writing the same persisted
- * `generateTargetHost` contract as always.
+ * Where it runs — the last chip on the New image view toolbar: a live status
+ * chip that, with more than one host, opens the routing menu — Auto (least
+ * busy), Most capable ("capable" sentinel), or a sticky host — writing the
+ * same persisted `generateTargetHost` contract as always. With one host it
+ * is a plain status label; there is nothing to choose between.
  */
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
@@ -95,6 +95,11 @@ function toggle() {
         :aria-expanded="hosts.multiHost ? popoverOpen : undefined"
         :aria-haspopup="hosts.multiHost ? 'menu' : undefined"
         :tabindex="hosts.multiHost ? 0 : -1"
+        :title="
+          hosts.multiHost
+            ? 'Where it runs — Auto picks whichever machine has the style'
+            : 'Where it runs'
+        "
         @click="toggle"
       >
         <span
@@ -164,6 +169,8 @@ function toggle() {
 .ms-hostchip {
   flex-shrink: 0;
 }
+/* Sized to the view toolbar's row: the doors beside it are `--mold-ctl-md`
+   tall, and a shorter chip read as a stray label. */
 .ms-hostchip__chip {
   font-family: var(--mold-font-mono);
   font-size: var(--mold-fs-micro);
@@ -171,22 +178,24 @@ function toggle() {
   display: flex;
   align-items: center;
   gap: 6px;
+  height: var(--mold-ctl-md);
   background: transparent;
   border: 0;
-  padding: 4px 0;
+  padding: 0;
+  white-space: nowrap;
 }
 .ms-hostchip__chip--button {
   cursor: pointer;
-  border: 1px solid var(--mold-border);
+  border: var(--mold-bw) solid var(--mold-border);
   border-radius: var(--mold-radius-2);
-  padding: 4px 10px;
+  padding: 0 10px;
   transition:
     color var(--mold-dur-quick) var(--mold-ease-out),
     border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-hostchip__chip--button:hover {
   color: var(--mold-text);
-  border-color: var(--mold-border-control);
+  border-color: var(--mold-border-focus);
 }
 .ms-hostchip__chev {
   color: var(--mold-text-dim);

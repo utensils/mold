@@ -255,6 +255,13 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.5 15a9 9 0 102.1-9.4L1 10"></path></svg>
               Use these settings again
             </span>
+            <span style="width:var(--mold-bw);height:20px;background:var(--mold-border)"></span>
+            <!-- Where it runs: chrome, not a setting. It was the last row of the inspector's Settings list and nobody found it there. -->
+            <span title="Where it runs — Auto picks whichever machine has the style" style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);white-space:nowrap;color:var(--mold-text-dim);cursor:pointer" style-hover="border-color:var(--mold-border-focus);color:var(--mold-text)">
+              <span style="width:6px;height:6px;border-radius:50%;background:var(--mold-success)"></span>
+              Auto · ready
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </span>
           </div>
 
           <div style="flex:1;min-height:320px;display:flex;align-items:center;justify-content:center;padding:28px;background:var(--mold-bg-crust);overflow:hidden">
@@ -528,14 +535,6 @@
                 <div style="display:flex;align-items:center;justify-content:space-between">
                   <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">Save every result</span>
                   <span style="width:36px;height:20px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;justify-content:flex-end;background:{{ accent }}"><span style="width:16px;height:16px;border-radius:var(--mold-radius-1);background:var(--mold-bg-deep)"></span></span>
-                </div>
-
-                <div style="display:flex;align-items:center;justify-content:space-between">
-                  <div style="display:flex;flex-direction:column;gap:2px">
-                    <span style="font-size:var(--mold-fs-sm);font-weight:500;color:var(--mold-text)">Where it runs</span>
-                    <span style="font-size:var(--mold-fs-micro);color:var(--mold-text-dim)">Auto picks whichever machine has the style</span>
-                  </div>
-                  <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-2);text-align:right">Auto ▼<br>studio-rack now</span>
                 </div>
               </div>
             </sc-if>
@@ -1504,9 +1503,9 @@ class Component extends DCLogic {
             : "box-shadow:inset 0 0 0 1px var(--mold-border)",
         pick: () => this.set({ theme: th.id }),
       })),
-      title: { create: "New image", queue: "Queue", library: "My images", models: "Styles", machines: "Machines", settings: "Settings" }[v],
+      title: { create: { still: "New image", clip: "New clip", mesh: "New 3-D object" }[s.output], queue: "Queue", library: "My images", models: "Styles", machines: "Machines", settings: "Settings" }[v],
       subtitle: {
-        create: { still: "Still picture · 3 waiting", clip: "Short clip · 3 waiting", mesh: "3-D object · 3 waiting" }[s.output],
+        create: "3 waiting",
         queue: "3 waiting · 1 being made",
         library: "312 pictures · 6 albums",
         models: "6 ready · 1 downloading",

@@ -189,6 +189,22 @@ describe("CreateHeader", () => {
     });
   });
 
+  it("carries Where it runs as the toolbar's last chip, after the doors", () => {
+    // The routing pick used to sit at the foot of the inspector's Settings
+    // list, where nobody found it. It is chrome now: always on screen, last
+    // on the row, so the machine a print goes to is one glance away.
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    const chip = wrapper.get("[data-test='host-chip']");
+    expect(chip.text()).toContain("This device");
+    const header = wrapper.get("[data-test='create-header']").element;
+    const order = Array.from(header.querySelectorAll("[data-test]")).map((el) =>
+      el.getAttribute("data-test"),
+    );
+    expect(order.indexOf("host-chip")).toBeGreaterThan(order.indexOf("open-recent"));
+    expect(order.at(-1)).toBe("host-chip");
+  });
+
   it("opens the inspector's Starters and Recent tabs instead of floating a popover", async () => {
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
@@ -282,6 +298,17 @@ describe("CreateHeader", () => {
       expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(true);
       expect(reopened.attributes("aria-invalid")).toBe("true");
       expect(wrapper.get("[data-test='print-title-error']").text()).toContain("120");
+    });
+
+    it("uses the 3-D placeholder for a 3-D style", async () => {
+      readyLocal();
+      const f = form();
+      f.family = "hunyuan3d";
+      const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      expect(wrapper.get("[data-test='print-title-input']").attributes("placeholder")).toBe(
+        "Untitled 3-D object",
+      );
     });
 
     it("uses the clip placeholder for a sequence draft", async () => {

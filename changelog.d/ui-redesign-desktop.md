@@ -132,3 +132,9 @@
   section is inset from its own border, the device cards no longer paint a
   light-grey hairline on dark themes, and the engine's version and GPU lists
   appear even when the app launches straight into Settings.
+- **Where it runs is on the toolbar.** The machine picker (Auto, Most capable,
+  or a named machine) is the last chip on the New image toolbar instead of the
+  last row of the inspector's Settings list, so it is on screen in every tab.
+  The title bar now says New image, New clip, or New 3-D object to match the
+  output you chose, and the composer's Make count sits inside its chip instead
+  of painting a second box over it.

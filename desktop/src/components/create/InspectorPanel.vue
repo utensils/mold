@@ -36,7 +36,6 @@ import LoraStack from "../generate/LoraStack.vue";
 import TemplatesPanel from "../generate/TemplatesPanel.vue";
 import StarterList from "./StarterList.vue";
 import RecentPrints from "./RecentPrints.vue";
-import HostChip from "./HostChip.vue";
 import { INSPECTOR_TABS, type InspectorTab } from "./inspectorTabs";
 import type { GenerationTemplate } from "../../lib/generationTemplates";
 import IdentityWell from "./IdentityWell.vue";
@@ -1109,14 +1108,8 @@ defineExpose({ setOutputMode });
         </p>
       </div>
 
-      <!-- Where it runs -->
-      <div class="ms-field ms-field--row" data-test="inspector-host">
-        <div>
-          <div class="ms-field__label ms-field__label--inline">Where it runs</div>
-          <p class="ms-field__hint">Auto picks whichever machine has the style</p>
-        </div>
-        <HostChip />
-      </div>
+      <!-- Where it runs is the view toolbar's last chip (CreateHeader), not
+           an inspector row: at the foot of this list nobody found it. -->
 
       <!-- File under — where this print lands in the Library, decided before
            Generate rather than discovered after it. -->

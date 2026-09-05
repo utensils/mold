@@ -589,11 +589,13 @@ describe("InspectorPanel — tabs", () => {
     );
   });
 
-  it("names the machine the print runs on in the Settings tab", () => {
+  it("leaves Where it runs to the view toolbar", () => {
+    // Buried at the foot of the Settings list the routing pick was hard to
+    // find; it is a toolbar chip now (CreateHeader), never an inspector row.
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
-    const row = wrapper.get('[data-test="inspector-host"]');
-    expect(row.text()).toContain("Where it runs");
-    expect(row.find('[data-test="host-chip"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="inspector-host"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="host-chip"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Where it runs");
   });
 });
 

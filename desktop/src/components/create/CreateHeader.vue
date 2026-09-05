@@ -7,15 +7,26 @@ import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import type { GenerateForm } from "../../lib/generateForm";
 import { findInstalledModel } from "../../lib/generateModels";
+import {
+  OUTPUT_KIND_PLACEHOLDER,
+  outputKindFor,
+  type OutputKind,
+} from "../../composables/useCreateOutputKind";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useHostModelsStore } from "../../stores/hostModels";
+import HostChip from "./HostChip.vue";
 import type { InspectorTab } from "./inspectorTabs";
 
 /**
  * The New image view toolbar (README §04): the editable print title, the
  * output kind as a segmented control — Still picture | Short clip | 3-D
- * object — and the two inspector doors, Starting points and Use these
- * settings again. Nothing floats over the canvas.
+ * object — the two inspector doors, Starting points and Use these settings
+ * again, and last the Where it runs chip. Nothing floats over the canvas.
+ *
+ * Where it runs is chrome, not a setting: at the foot of the inspector's
+ * Settings list nobody found it, and which machine a print goes to is
+ * something to know at a glance, so the chip stays on screen in every tab
+ * and every output kind.
  *
  * The title is `form.title` (Library organization, D5): click to edit, Enter
  * or blur commits, Escape reverts; the value ships as `GenerateRequest.title`
@@ -33,15 +44,13 @@ const draft = useSequenceDraftStore();
 const formStore = useGenerateFormStore();
 const hostModels = useHostModelsStore();
 
-export type OutputKind = "still" | "clip" | "mesh";
-
 const isSequence = computed(() => draft.output === "sequence");
 const isMesh = computed(() => isMeshFamily(props.form.family));
 const meshModels = computed(() => hostModels.unionInstalled.filter((m) => isMeshFamily(m.family)));
 
-const outputKind = computed<OutputKind>(() =>
-  isSequence.value ? "clip" : isMesh.value ? "mesh" : "still",
-);
+// The same decision the title bar reads (`useCreateOutputKind`), from this
+// form rather than the store so the header answers for the form it renders.
+const outputKind = computed<OutputKind>(() => outputKindFor(draft.output, props.form.family));
 const outputOptions = computed(() => [
   { value: "still" as const, label: "Still picture" },
   { value: "clip" as const, label: "Short clip" },
@@ -79,7 +88,7 @@ function setOutputKind(kind: string | number) {
   }
 }
 
-const placeholder = computed(() => (isSequence.value ? "Untitled clip" : "Untitled picture"));
+const placeholder = computed(() => OUTPUT_KIND_PLACEHOLDER[outputKind.value]);
 const title = computed(() => props.form.title?.trim() ?? "");
 
 const editing = ref(false);
@@ -206,6 +215,10 @@ function onBlur() {
       <Icon name="reuse" :size="14" />
       <span class="ms-header__door-label">Use these settings again</span>
     </button>
+
+    <span class="ms-header__divider" aria-hidden="true" />
+
+    <HostChip />
   </header>
 </template>
 

@@ -98,6 +98,14 @@ Decisions worth keeping:
   slack and clips (`overflow:hidden`), so nothing can escape its region.
 - **No floating popovers for primary controls.** Templates / starting points
   are an inspector tab, not a hovering button.
+- **Where it runs is chrome, not a setting.** The routing chip (Auto · Most
+  capable · a named machine) is the last item on the New image view toolbar,
+  after the two doors, so the machine a print goes to is one glance away in
+  every tab and every output kind. It began as the last row of the inspector's
+  Settings list, where nobody found it.
+- **The view title names what is being made.** On New image the mono title
+  follows the output kind — New image · New clip · New 3-D object — and the
+  subtitle is the queue count alone. The sidebar's destination stays New image.
 - **The status bar answers "which machine, how full, how deep is the queue"** so
   those questions never require a view change. Key hints sit on the right, mono,
   accent-coloured keycaps.

@@ -246,7 +246,7 @@ function onKeydown(event: KeyboardEvent) {
 .ms-stepper--compact .ms-stepper__btn {
   width: 22px;
   height: 22px;
-  font-size: 15px;
+  font-size: var(--mold-fs-md);
 }
 
 .ms-stepper--compact .ms-stepper__value {

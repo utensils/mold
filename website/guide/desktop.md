@@ -622,8 +622,8 @@ wire types as the CLI and web UI:
 - **Several hosts at once**: alongside this device, any number of remote
   hosts can be live simultaneously (**Connect a machine** in Machines, or
   **Connect** beside a machine found on your network). With more than one live
-  machine, the inspector's **Where it runs** group grows a
-  machine chip: pick one explicitly, leave it on **Auto** to route
+  machine, the **Where it runs** chip at the right end of the New image
+  toolbar opens a machine menu: pick one explicitly, leave it on **Auto** to route
   each batch to the least-busy machine by live queue depth, or choose **Most
   capable** to always target the strongest GPU (CUDA over Metal, then most
   VRAM, then shallowest queue). Both automatic modes prefer machines that

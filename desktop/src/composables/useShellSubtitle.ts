@@ -1,19 +1,32 @@
 import { computed, type ComputedRef } from "vue";
 import { useRoute } from "vue-router";
-import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useDownloadsStore } from "../stores/downloads";
 import { useGalleryStore } from "../stores/gallery";
-import { useGenerateFormStore } from "../stores/generateForm";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { mergeInstalledAcrossFleet } from "../lib/models";
+import { OUTPUT_KIND_TITLE, useCreateOutputKind } from "./useCreateOutputKind";
 import { useQueueActivity } from "./useQueueActivity";
 
 /** "3 waiting" / "nothing waiting" — the plural-aware count phrase. */
 export function countPhrase(count: number, noun: string, plural = `${noun}s`): string {
   return `${count} ${count === 1 ? noun : plural}`;
+}
+
+/**
+ * The view's mono title: the route's title, except on New image, where it
+ * follows the output kind — "New image", "New clip", "New 3-D object" — so
+ * the bar names what is being made, not the door that was clicked. The
+ * sidebar's destination stays "New image"; the route is the same.
+ */
+export function useShellTitle(): ComputedRef<string> {
+  const route = useRoute();
+  const outputKind = useCreateOutputKind();
+  return computed(() => {
+    if (route.path === "/create") return OUTPUT_KIND_TITLE[outputKind.value];
+    return (route.meta.title as string | undefined) ?? "";
+  });
 }
 
 /**
@@ -23,10 +36,8 @@ export function countPhrase(count: number, noun: string, plural = `${noun}s`): s
  */
 export function useShellSubtitle(): ComputedRef<string> {
   const route = useRoute();
-  const draft = useSequenceDraftStore();
   const downloads = useDownloadsStore();
   const gallery = useGalleryStore();
-  const generateForm = useGenerateFormStore();
   const hostModels = useHostModelsStore();
   const hosts = useHostsStore();
   const models = useModelStore();
@@ -40,17 +51,10 @@ export function useShellSubtitle(): ComputedRef<string> {
       return `${countPhrase(hosts.all.filter((h) => h.status === "ready").length, "machine")} connected`;
     }
     switch (route.path) {
-      case "/create": {
-        // The same three-way control CreateHeader draws: a clip is the
-        // authored output kind, and 3-D is a property of the chosen style.
-        const output =
-          draft.output === "sequence"
-            ? "Short clip"
-            : isMeshFamily(generateForm.form.family)
-              ? "3-D object"
-              : "Still picture";
-        return `${output} · ${countPhrase(waiting, "waiting", "waiting")}`;
-      }
+      // The output kind is the title's job now (`useShellTitle`); saying it
+      // twice on one bar is noise.
+      case "/create":
+        return countPhrase(waiting, "waiting", "waiting");
       case "/queue":
         return `${countPhrase(waiting, "waiting", "waiting")} · ${making} being made`;
       case "/library":
