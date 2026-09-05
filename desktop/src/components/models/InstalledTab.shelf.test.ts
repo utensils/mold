@@ -218,8 +218,14 @@ describe("InstalledTab shelf", () => {
    */
   it("folds the Speed column away before the name column collapses", () => {
     expect(installedTabSource).toMatch(/\.model-table\s*\{[^}]*container-type:\s*inline-size/s);
+    // A container query cannot restyle its own container: the five-track
+    // axis has to land on the header and the rows, never on `.model-table`,
+    // or the cells hide while their track stays.
     expect(installedTabSource).toMatch(
-      /@container[^{]*\(max-width:[^)]*\)\s*\{[\s\S]*?--model-row-columns:\s*minmax\(0,\s*1fr\) 7\.5rem 12rem 8rem 10\.5rem/s,
+      /@container[^{]*\(max-width:[^)]*\)\s*\{[\s\S]*?\.model-table__header,\s*\.model-table :deep\(\.model-table-row\)\s*\{\s*--model-row-columns:\s*minmax\(0,\s*1fr\) 7\.5rem 12rem 8rem 10\.5rem/s,
+    );
+    expect(installedTabSource).not.toMatch(
+      /@container[^{]*\{[\s\S]*?\.model-table\s*\{[^}]*--model-row-columns/s,
     );
     expect(installedTabSource).toMatch(/model-table__speed[\s\S]*display:\s*none/s);
   });

@@ -528,7 +528,11 @@ async function unload(m: LibraryModelEntry) {
    row's cell together, so the axis keeps one track per cell — and the pinned
    axis drops back to the five tracks it had before the column existed. */
 @container styles-shelf (max-width: 60rem) {
-  .model-table {
+  /* A container query cannot restyle its own container, so the five-track
+     axis is set on the header and on every row rather than on `.model-table`
+     — otherwise the cells would hide while their 4.5rem track stayed. */
+  .model-table__header,
+  .model-table :deep(.model-table-row) {
     --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 8rem 10.5rem;
   }
 
