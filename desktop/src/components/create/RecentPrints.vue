@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { formatGenerationTime } from "@studio/lib/generationTime";
 import { displayTitle } from "@studio/lib/libraryOrganization";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { galleryMediaPath } from "../../lib/gallery/media";
@@ -12,8 +13,9 @@ import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
  * again", so a row hands the print back to the same reuse path the Lightbox
  * uses — never a bare prompt string.
  *
- * There is no "took 4.0s" beside the style: `OutputMetadata` records no
- * generation time, so the mono line says only what the print actually knows.
+ * The mono line is the style, then `· 4.0s` when the print knows how long it
+ * took (`OutputMetadata.generation_time_ms`, additive) and only the style when
+ * it does not — never "0.0s".
  */
 const props = defineProps<{
   prints: readonly MergedPrint[];
@@ -33,7 +35,12 @@ const rows = computed(() =>
       entry,
       key: `${entry.sourceKey}::${entry.item.filename}`,
       title: displayTitle(entry.item),
-      meta: modelDisplayNameForId(entry.item.metadata.model, props.models ?? []),
+      meta: [
+        modelDisplayNameForId(entry.item.metadata.model, props.models ?? []),
+        formatGenerationTime(entry.item.metadata.generation_time_ms),
+      ]
+        .filter(Boolean)
+        .join(" · "),
       // No authority, no picture: a "local" path here would read the
       // filesystem directly while the local server may well be running.
       path: target ? galleryMediaPath(entry.item.filename, "host", true) : null,

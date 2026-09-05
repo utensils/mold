@@ -1911,7 +1911,9 @@ export const useGenerationStore = defineStore("generation", {
         width: meta.width,
         height: meta.height,
         seed_used: meta.seed,
-        generation_time_ms: 0,
+        // The saved metadata carries the render time when the host recorded
+        // it; zero is the wire's "not measured" and the caption shows nothing.
+        generation_time_ms: meta.generation_time_ms ?? 0,
         model: meta.model,
         filename: print.filename,
         metadata: meta,

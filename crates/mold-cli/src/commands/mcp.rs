@@ -6277,6 +6277,7 @@ mod tests {
                 collection: None,
                 tags: None,
                 title: None,
+                generation_time_ms: None,
                 source_fit: None,
                 guidance_overrides: None,
                 sample_shift: None,

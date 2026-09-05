@@ -270,10 +270,19 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   connected remote's gallery is polled, so the toolbar keeps one explicit way to
   ask every machine again.
 
+- **A print says how long it took, in one spelling everywhere.**
+  `OutputMetadata.generation_time_ms` (additive; the gallery row fills it for
+  a print made before the field) is read through `studio/lib/generationTime.ts`
+  — `4.0s` under a minute, `1m 12s` above — on the canvas caption, the Recent
+  row (`flux-dev:q8 · 4.0s`), and the Lightbox's **Took** fact; a print that
+  does not know shows nothing, never `0.0s`. The Styles shelf's **Speed**
+  column is derived, not served: `studio/lib/styleSpeed.ts` takes the median
+  of the newest ten timed prints per style (`~20s`), and a style nobody has
+  timed shows an empty cell rather than a guess.
+
 ### Named absences (no backend, not oversights)
 
-Save every result · a per-print generation time on a Recent row · the mock's
-SPEED column · an hourly rate in the Rent-this-GPU confirm · a friendly name
-for a licence, which is its id and summary · pausing the job that is already
-running. Each needs a field or an API that does not exist, so the surface says
-nothing rather than guessing.
+Save every result · an hourly rate in the Rent-this-GPU confirm · a friendly
+name for a licence, which is its id and summary · pausing the job that is
+already running. Each needs a field or an API that does not exist, so the
+surface says nothing rather than guessing.

@@ -49,6 +49,8 @@ import { startCatalogDownload } from "../../lib/api/catalog";
 import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
 import { mediaTypeMatches, type MediaType } from "../../lib/modelAvailability";
+import { useGalleryStore } from "../../stores/gallery";
+import { formatTypicalTime, typicalGenerationTimes } from "@studio/lib/styleSpeed";
 import type { ModelEntry } from "../../lib/api/types";
 import type { HostView } from "../../stores/hosts";
 
@@ -84,6 +86,14 @@ const filtered = computed(() => {
   return searched.filter((m) => !isUtilityModel(m) && mediaTypeMatches(type, m.family));
 });
 const groups = computed(() => groupInstalledModels(filtered.value));
+
+// SPEED has no field on `ModelEntry`: a style's typical time is read from
+// the prints already made with it, across every machine's gallery, once per
+// gallery change — never per row (the Library performance invariant).
+const gallery = useGalleryStore();
+const typicalTimes = computed(() =>
+  typicalGenerationTimes(gallery.merged.map((entry) => entry.item.metadata)),
+);
 
 /** Family groups plus a trailing helper section, as [heading, models] rows. */
 const UTILITY_HEADING = "SHARED / UTILITY";
@@ -351,6 +361,7 @@ async function unload(m: LibraryModelEntry) {
       <span>Name</span>
       <span>Good for</span>
       <span>Size</span>
+      <span class="model-table__speed">Speed</span>
       <span>Machine</span>
       <span />
     </div>
@@ -373,6 +384,8 @@ async function unload(m: LibraryModelEntry) {
             :host-labels="hostLabels(m)"
             machines-column
             note-column
+            speed-column
+            :speed="formatTypicalTime(typicalTimes.get(m.name))"
             :page-url="pageUrl(m)"
             :note="m.description || null"
             :size-primary="
@@ -494,16 +507,38 @@ async function unload(m: LibraryModelEntry) {
 </template>
 
 <style scoped>
-/* The shelf's one axis: name · good for · size · machine · actions. Fixed
+/* The shelf's one axis: name · good for · size · speed · machine · actions. Fixed
    tracks (not `auto`) are what make separate rows line up — each row is its
    own grid, so only identical track sizes share an axis. */
 .model-table {
-  --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 8rem 10.5rem;
+  --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 4.5rem 8rem 10.5rem;
+  container-type: inline-size;
+  container-name: styles-shelf;
 }
 
 .model-table__header {
   display: grid;
   grid-template-columns: var(--model-row-columns);
   gap: 12px;
+}
+
+/* At the app's minimum window with the sidebar open the shelf is ~810px, and
+   42.5rem of fixed tracks would leave the name track with the residency star
+   alone. Speed is the column that folds first — its header cell and every
+   row's cell together, so the axis keeps one track per cell — and the pinned
+   axis drops back to the five tracks it had before the column existed. */
+@container styles-shelf (max-width: 60rem) {
+  /* A container query cannot restyle its own container, so the five-track
+     axis is set on the header and on every row rather than on `.model-table`
+     — otherwise the cells would hide while their 4.5rem track stayed. */
+  .model-table__header,
+  .model-table :deep(.model-table-row) {
+    --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 8rem 10.5rem;
+  }
+
+  .model-table__speed,
+  .model-table :deep(.model-table-row__speed) {
+    display: none;
+  }
 }
 </style>

@@ -755,6 +755,10 @@ export interface OutputMetadata {
   prompt: string;
   /** Creation-time print title; the gallery row is the editable authority. */
   title?: string | null;
+  /** How long the render took, wall clock, in ms. Additive: an older host, a
+   * synthesized row, or a print made before it was recorded carries none, and
+   * the server's zero means "not measured". Render nothing for either. */
+  generation_time_ms?: number | null;
   /** Tags the print was filed under at creation, exactly as applied. The
    * gallery row's tag links are the editable authority once it exists. */
   tags?: string[] | null;

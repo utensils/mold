@@ -148,6 +148,7 @@ describe("Lightbox metadata panel", () => {
     format: "mp4",
     size_bytes: 12_500_000,
     metadata: {
+      generation_time_ms: 72_400,
       prompt: "a ship in a storm",
       negative_prompt: "calm seas",
       original_prompt: "a ship",
@@ -206,6 +207,7 @@ describe("Lightbox metadata panel", () => {
     expect(wrapper.get("[data-test='lightbox-video']").text()).toContain("121");
     expect(wrapper.get("[data-test='lightbox-video']").text()).toContain("30 fps");
     expect(wrapper.get("[data-test='lightbox-pipeline']").text()).toContain("two-stage-hq");
+    expect(wrapper.get("[data-test='lightbox-took']").text()).toContain("1m 12s");
     expect(wrapper.get("[data-test='lightbox-file-size']").text()).toContain("12.5 MB");
     expect(wrapper.get("[data-test='lightbox-format']").text()).toContain("MP4");
     const loras = wrapper.findAll("[data-test='lightbox-lora']");

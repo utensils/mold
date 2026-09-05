@@ -212,6 +212,19 @@ describe("ModelTableRow", () => {
     expect(cells(withNote)).toBe(5);
   });
 
+  it("emits the speed cell on every row when the table pins a speed column", () => {
+    const timed = mountRow({ speedColumn: true, speed: "~20s" });
+    expect(timed.get("[data-test='row-speed']").text()).toBe("~20s");
+    const untimed = mountRow({ speedColumn: true });
+    expect(untimed.get("[data-test='row-speed']").text()).toBe("");
+    expect(untimed.get("[data-test='model-table-row']").classes()).toContain(
+      "model-table-row--has-speed",
+    );
+    // Unpinned rows keep sizing their own tracks: no speed, no cell, no track.
+    const unpinned = mountRow();
+    expect(unpinned.find("[data-test='row-speed']").exists()).toBe(false);
+  });
+
   /**
    * The mock's identity cell is star + name. The source mark stays — the brand
    * marks are wanted — but small and on the mono line, never a 44px colour

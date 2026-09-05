@@ -85,6 +85,9 @@ export interface OutputMetadata {
   /** User-authored print title as it was at creation (D5). Embedded so
    * mirrors carry it; the gallery row's editable title wins for display. */
   title?: string | null;
+  /** How long the render took, wall clock, in ms. Additive; absent on an
+   * older host or a print made before it was recorded, zero = not measured. */
+  generation_time_ms?: number | null;
   /** Tags the print was filed under at creation ("File under"), exactly as
    * the host applied them. The gallery row's links are the editable
    * authority once the print exists. Additive. */

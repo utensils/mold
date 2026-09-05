@@ -51,6 +51,12 @@ const props = withDefaults(
     /** The table pins a note track: emit the cell on every row, empty or not,
      * so a row without a description cannot shift the columns after it. */
     noteColumn?: boolean;
+    /** How long the style typically takes (`~20s`), read from the prints
+     * already made with it; null when nobody has timed it. */
+    speed?: string | null;
+    /** The table pins a speed track: emit the cell on every row, empty or
+     * not, for the same reason as `noteColumn`. */
+    speedColumn?: boolean;
     /** Right-aligned size block: primary line + smaller secondary line. */
     sizePrimary?: string | null;
     sizeSecondary?: string | null;
@@ -75,6 +81,8 @@ const props = withDefaults(
     pageUrl: null,
     note: null,
     noteColumn: false,
+    speed: null,
+    speedColumn: false,
     sizePrimary: null,
     sizeSecondary: null,
     barPercent: null,
@@ -108,6 +116,7 @@ const showId = computed(() =>
 const showMonoLine = computed(() => showId.value || Boolean(familyChip.value));
 /** One cell per pinned track: the note is emitted whenever its track exists. */
 const showNoteCell = computed(() => props.noteColumn || props.note != null);
+const showSpeedCell = computed(() => props.speedColumn || props.speed != null);
 
 /**
  * The machines cell is ONE line — the mock's row is 52px and every other cell
@@ -136,6 +145,7 @@ function onRowKeydown(event: KeyboardEvent): void {
       clickable ? 'cursor-pointer focus-visible:outline-2 focus-visible:outline-accent' : '',
       barPercent != null ? 'model-table-row--has-footprint' : '',
       showNoteCell ? 'model-table-row--has-note' : '',
+      showSpeedCell ? 'model-table-row--has-speed' : '',
       machinesColumn ? 'model-table-row--has-machines' : '',
       slots.actions ? 'model-table-row--has-actions' : '',
       selected ? 'model-table-row--selected' : '',
@@ -280,6 +290,16 @@ function onRowKeydown(event: KeyboardEvent): void {
       </span>
     </div>
 
+    <!-- Typical time from the prints already made with this style. -->
+    <span
+      v-if="showSpeedCell"
+      class="model-table-row__speed truncate text-right font-mono text-xs text-fg-2"
+      :title="speed ? 'Typical time over your recent prints with this style' : undefined"
+      data-test="row-speed"
+    >
+      {{ speed }}
+    </span>
+
     <div v-if="machinesColumn" class="model-table-row__machines">
       <span
         v-for="label in machinesShown"
@@ -312,13 +332,14 @@ function onRowKeydown(event: KeyboardEvent): void {
    --model-row-columns pins every row (and its header) to one axis. */
 .model-table-row {
   --mtr-note: ;
+  --mtr-speed: ;
   --mtr-machines: ;
   --mtr-actions: ;
   container-type: inline-size;
   display: grid;
   grid-template-columns: var(
     --model-row-columns,
-    minmax(0, 1fr) var(--mtr-note) auto var(--mtr-machines) var(--mtr-actions)
+    minmax(0, 1fr) var(--mtr-note) auto var(--mtr-speed) var(--mtr-machines) var(--mtr-actions)
   );
   align-items: center;
   gap: 12px;
@@ -328,6 +349,10 @@ function onRowKeydown(event: KeyboardEvent): void {
 
 .model-table-row--has-note {
   --mtr-note: minmax(8rem, 13rem);
+}
+
+.model-table-row--has-speed {
+  --mtr-speed: auto;
 }
 
 .model-table-row--has-machines {
@@ -407,6 +432,14 @@ function onRowKeydown(event: KeyboardEvent): void {
 
   .model-table-row--has-note {
     --mtr-note: ;
+  }
+
+  .model-table-row__speed {
+    display: none;
+  }
+
+  .model-table-row--has-speed {
+    --mtr-speed: ;
   }
 
   .model-table-row--has-footprint .model-table-row__footprint {

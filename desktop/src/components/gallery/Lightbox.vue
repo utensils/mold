@@ -42,6 +42,7 @@ import {
 import type { TagCount } from "@studio/lib/api/galleryOrganization";
 import { saveGalleryMedia, showSavedMediaToast } from "../../lib/mediaSave";
 import { suggestedSaveName } from "../../lib/gallery/saveName";
+import { formatGenerationTime } from "@studio/lib/generationTime";
 import {
   meshAnimationExportFormats,
   meshExportFilename,
@@ -275,6 +276,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
+/** How long the render took, when the print knows (additive metadata). */
+const took = computed(() => formatGenerationTime(meta.value.generation_time_ms));
 const meta = computed(() => props.item.metadata);
 // An LTX-2 print's `strength` is source preservation, not denoise (#1055).
 // Family resolves through the live inventory (sequences record strength but
@@ -863,6 +866,10 @@ async function performVideoExport(options: VideoExportOptions) {
             <div v-if="pipeline" class="lightbox-fact" data-test="lightbox-pipeline">
               <dt>Pipeline</dt>
               <dd>{{ pipeline }}</dd>
+            </div>
+            <div v-if="took" class="lightbox-fact" data-test="lightbox-took">
+              <dt>Took</dt>
+              <dd>{{ took }}</dd>
             </div>
             <div
               v-for="l in loraStack"

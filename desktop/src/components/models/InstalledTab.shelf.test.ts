@@ -24,10 +24,12 @@ vi.mock("../../lib/openExternal", () => ({
 }));
 
 import InstalledTab from "./InstalledTab.vue";
+import installedTabSource from "./InstalledTab.vue?raw";
 import { formatGB } from "../../lib/format";
 import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
 import { useHostStatusStore } from "../../stores/hostStatus";
 import { useModelStore } from "../../stores/models";
+import { useGalleryStore } from "../../stores/gallery";
 
 function model(part: Partial<ModelEntry> = {}): ModelEntry {
   return {
@@ -124,11 +126,13 @@ describe("InstalledTab shelf", () => {
 
     const headers = wrapper.findAll("[data-test='styles-columns']");
     expect(headers).toHaveLength(1);
-    // SPEED is in the mock but nothing on ModelEntry times a render.
+    // SPEED has no field on ModelEntry; it is read from the prints already
+    // made with the style (`typicalGenerationTimes`).
     expect(headers[0]!.findAll("span").map((c) => c.text())).toEqual([
       "Name",
       "Good for",
       "Size",
+      "Speed",
       "Machine",
       "",
     ]);
@@ -160,6 +164,70 @@ describe("InstalledTab shelf", () => {
       expect(row.find("[data-test='row-note']").exists()).toBe(true);
       expect(row.element.children.length).toBe(header.element.children.length);
     }
+  });
+
+  /**
+   * The mock's SPEED column: `~20s` from the prints already made with the
+   * style, the median of the newest few timed ones, and an empty cell — never
+   * a guess — for a style nobody has timed. The cell is emitted either way so
+   * the pinned axis holds.
+   */
+  it("reads each style's typical time off its recent prints", async () => {
+    useModelStore().all = [model(), model({ name: "sdxl-base:fp16", family: "sdxl" })];
+    const gallery = useGalleryStore();
+    const print = (model: string, ms: number | undefined, n: number) =>
+      ({
+        filename: `p-${n}.png`,
+        timestamp: 1_000 - n,
+        metadata: {
+          prompt: "x",
+          model,
+          seed: n,
+          ...(ms == null ? {} : { generation_time_ms: ms }),
+        },
+      }) as unknown as import("../../lib/api/types").GalleryImage;
+    gallery.buckets.local = {
+      items: [
+        print("flux-dev:q4", 4_000, 1),
+        print("flux-dev:q4", 40_000, 2),
+        print("flux-dev:q4", 5_000, 3),
+        print("sdxl-base:fp16", undefined, 4),
+      ],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+
+    const speeds = wrapper.findAll("[data-test='row-speed']").map((c) => c.text());
+    expect(speeds).toEqual(["~5s", ""]);
+    const header = wrapper.get("[data-test='styles-columns']");
+    for (const row of wrapper.findAll("[data-test='model-table-row']")) {
+      expect(row.element.children.length).toBe(header.element.children.length);
+    }
+  });
+
+  /**
+   * The pinned axis is 42.5rem of fixed tracks plus gaps. At the app's own
+   * minimum window (1080px) with the 270px sidebar open, the shelf is about
+   * 810px wide and the name track would be left with the residency star and
+   * nothing else. The shelf is a size container: below the width where a
+   * name still fits, Speed folds away — header cell and row cell together,
+   * so the axis keeps one track per cell — before the name collapses.
+   */
+  it("folds the Speed column away before the name column collapses", () => {
+    expect(installedTabSource).toMatch(/\.model-table\s*\{[^}]*container-type:\s*inline-size/s);
+    // A container query cannot restyle its own container: the five-track
+    // axis has to land on the header and the rows, never on `.model-table`,
+    // or the cells hide while their track stays.
+    expect(installedTabSource).toMatch(
+      /@container[^{]*\(max-width:[^)]*\)\s*\{[\s\S]*?\.model-table__header,\s*\.model-table :deep\(\.model-table-row\)\s*\{\s*--model-row-columns:\s*minmax\(0,\s*1fr\) 7\.5rem 12rem 8rem 10\.5rem/s,
+    );
+    expect(installedTabSource).not.toMatch(
+      /@container[^{]*\{[\s\S]*?\.model-table\s*\{[^}]*--model-row-columns/s,
+    );
+    expect(installedTabSource).toMatch(/model-table__speed[\s\S]*display:\s*none/s);
   });
 
   it("names a family group once, in words, never a second wire slug per row", async () => {
