@@ -5113,6 +5113,9 @@ fn planned_active_vram_credit(measured_active_vram: u64, credit_cap: Option<u64>
 /// active cache measurement because their post-drop sample is authoritative.
 /// Hot-cache paths cap that measurement at fresh process-attributed VRAM so a
 /// stale/global load delta cannot become fictitious reusable capacity.
+// Keep active-model credit and the certified context basis explicit: they
+// are mutually exclusive and must not be collapsed into a capacity number.
+#[allow(clippy::too_many_arguments)]
 fn preflight_planned_memory_guard_with_eviction(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
     cache_key: &str,
