@@ -13,9 +13,40 @@ export interface LicenseAcceptance {
   sha256: string;
 }
 
+/** A style a licence gates, in the registry's own words (additive). */
+export interface LicensedStyle {
+  name: string;
+  description: string;
+}
+
 export interface ThirdPartyLicenseStatus extends LicenseTerms {
   accepted: boolean;
   required_by: string[];
+  /** The same styles as `required_by`, each with its plain description, so a
+   * row can lead with what the licence unlocks. Absent on an older host. */
+  required_by_styles?: LicensedStyle[] | null;
+}
+
+/**
+ * What a licence row leads with: the styles it unlocks, in the registry's
+ * plain words when the host lists them, else their ids, else the licence's
+ * own name. The licence id never leads — it is the machine's handle.
+ */
+export function licenseFriendlyLine(license: ThirdPartyLicenseStatus): string {
+  const styles = license.required_by_styles ?? [];
+  const described = styles
+    .map((style) => style.description.trim())
+    .filter((description) => description.length > 0);
+  if (described.length > 0) return described.join(" · ");
+  if (license.required_by.length > 0) return license.required_by.join(" · ");
+  return license.name;
+}
+
+/** The mono line under the friendly one: the licence's name and its summary
+ * when styles lead, or the id and summary when the name itself leads. */
+export function licenseDetailLine(license: ThirdPartyLicenseStatus): string {
+  const leadsWithName = licenseFriendlyLine(license) === license.name;
+  return `${leadsWithName ? license.id : license.name} · ${license.summary}`;
 }
 
 export interface LicenseListing {

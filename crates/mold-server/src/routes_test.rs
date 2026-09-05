@@ -21713,6 +21713,248 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// `?view=trash` reads the trashed bytes even after a NEW live print has
+    /// taken the same name — the case the live-first resolution could not
+    /// serve — and never falls back to that twin; a bad view is refused.
+    #[tokio::test]
+    async fn gallery_media_routes_take_a_trash_view() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "twin.png", None);
+        let trashed_bytes = std::fs::read(dir.path().join("twin.png")).unwrap();
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/twin.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // A new live print lands under the same name.
+        let live_bytes = b"a different, newer print".to_vec();
+        std::fs::write(dir.path().join("twin.png"), &live_bytes).unwrap();
+
+        let body_of = |resp: axum::response::Response| async move {
+            axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec()
+        };
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/image/twin.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_of(resp).await, live_bytes, "live-first by default");
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/image/twin.png?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_of(resp).await,
+            trashed_bytes,
+            "the trash view reads the trash"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/thumbnail/twin.png?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the trash view has a thumbnail"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/image/twin.png?view=wat"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown view is refused as the listing refuses it"
+        );
+
+        // The trashed file gone: the trash view 404s rather than answering
+        // with the live twin.
+        std::fs::remove_file(
+            crate::batch_transaction::gallery_trash_dir(dir.path()).join("twin.png"),
+        )
+        .unwrap();
+        let resp = app
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/image/twin.png?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// "Save every result" off: the print is published exactly as any other
+    /// and then moved straight to the trash — row flagged, bytes in
+    /// `.trash/`, live path gone — so the library never lists it while the
+    /// trash keeps it until retention empties.
+    #[tokio::test]
+    async fn save_to_gallery_off_publishes_then_trashes() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "throwaway.png", None);
+        let names = crate::queue::SavedOutputNames {
+            output: Some("throwaway.png".into()),
+            original: None,
+        };
+        {
+            let _writer = state.gallery_publication_gate.write().await;
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir.path(),
+                &names,
+                db.as_ref().as_ref(),
+                &state.gallery_publication_gate,
+                None,
+            );
+        }
+        let row = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "throwaway.png")
+            .unwrap()
+            .expect("the row survives, flagged");
+        assert!(row.trashed_at_ms.is_some());
+        assert!(!dir.path().join("throwaway.png").is_file());
+        assert!(crate::batch_transaction::gallery_trash_dir(dir.path())
+            .join("throwaway.png")
+            .is_file());
+        // Nothing saved (an aborted render): nothing to trash, no panic.
+        let _writer = state.gallery_publication_gate.write().await;
+        crate::gallery_trash::trash_published_outputs_blocking(
+            dir.path(),
+            &crate::queue::SavedOutputNames::default(),
+            db.as_ref().as_ref(),
+            &state.gallery_publication_gate,
+            None,
+        );
+    }
+
+    /// An opt-out print is announced as TRASHED, not removed: a client's
+    /// Trash scope must receive it, and `gallery_removed` would drop it from
+    /// both scopes as if it had been purged.
+    #[tokio::test]
+    async fn save_to_gallery_off_announces_a_trashed_print() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "throwaway.png", None);
+        let mut events = state.events.subscribe();
+        let names = crate::queue::SavedOutputNames {
+            output: Some("throwaway.png".into()),
+            original: None,
+        };
+        {
+            let _writer = state.gallery_publication_gate.write().await;
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir.path(),
+                &names,
+                db.as_ref().as_ref(),
+                &state.gallery_publication_gate,
+                Some(state.events.as_ref()),
+            );
+        }
+        let announced = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("an event is published")
+            .expect("the channel stays open");
+        match announced {
+            mold_core::ServerEvent::GalleryTrashed { filename } => {
+                assert_eq!(filename, "throwaway.png");
+            }
+            other => panic!("expected gallery_trashed, got {other:?}"),
+        }
+
+        // Nothing moves the second time, so nothing is announced.
+        {
+            let _writer = state.gallery_publication_gate.write().await;
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir.path(),
+                &names,
+                db.as_ref().as_ref(),
+                &state.gallery_publication_gate,
+                Some(state.events.as_ref()),
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err(),
+            "an already-trashed print announces nothing"
+        );
+    }
+
+    /// A trash-view preview is served only while the filename is
+    /// unambiguous. The sidecar is keyed by name alone, so once a NEW live
+    /// print takes the name the cache cannot say which bytes it depicts.
+    #[tokio::test]
+    async fn trash_view_preview_refuses_a_shared_sidecar() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "clip.mp4", None);
+        let trash = crate::batch_transaction::gallery_trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::rename(dir.path().join("clip.mp4"), trash.join("clip.mp4")).unwrap();
+        let preview_dir = crate::routes::server_preview_gif_dir();
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        std::fs::write(
+            preview_dir.join(mold_core::media_paths::preview_gif_filename("clip.mp4")),
+            b"GIF89a",
+        )
+        .unwrap();
+        let app = app_with_state(state);
+
+        // Only the trashed copy exists: the sidecar is unambiguously its own.
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/preview/clip.mp4?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A new live print takes the name: the sidecar can no longer be
+        // attributed, so the trash view misses rather than serving the
+        // live print's pixels under a trashed row.
+        std::fs::write(dir.path().join("clip.mp4"), b"a different, newer clip").unwrap();
+        let resp = app
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/preview/clip.mp4?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Every new organization/trash mutator and listing must wait behind
     /// the atomic publication writer exactly like the historical routes.
     #[tokio::test]

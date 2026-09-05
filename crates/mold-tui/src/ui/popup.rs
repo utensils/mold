@@ -2038,6 +2038,7 @@ mod tests {
             summary: "Research only.".into(),
             accepted,
             required_by,
+            required_by_styles: Vec::new(),
         }
     }
 

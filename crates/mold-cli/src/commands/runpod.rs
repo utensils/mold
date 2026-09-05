@@ -443,24 +443,33 @@ pub async fn run_gpus(json: bool, all: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<28}{:<6}{:<20}{:<10}",
+        "{:<28}{:<6}{:<20}{:<10}{:<12}{:<12}",
         "GPU".bold(),
         "VRAM".bold(),
         "stock".bold(),
-        "secure".bold()
+        "secure".bold(),
+        "$/hr secure".bold(),
+        "$/hr comm.".bold()
     );
     for g in filtered {
         let stock = g.stock_status.as_deref().unwrap_or("—");
         let stock_colored = color_stock(stock);
         let secure = if g.secure_cloud { "yes" } else { "no" };
+        let rate = |cloud: &str| {
+            g.hourly_price(cloud)
+                .map(|price| format!("{price:.2}"))
+                .unwrap_or_else(|| "—".into())
+        };
         println!(
-            "{:<28}{:<6}{:<20}{:<10}",
+            "{:<28}{:<6}{:<20}{:<10}{:<12}{:<12}",
             g.display_name,
             g.memory_in_gb
                 .map(|memory| format!("{memory}G"))
                 .unwrap_or_else(|| "—".into()),
             stock_colored,
-            secure
+            secure,
+            rate("SECURE"),
+            rate("COMMUNITY")
         );
     }
     Ok(())
@@ -1790,6 +1799,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         control_model: None,
         control_scale: 1.0,
         expand: None,
+        save_to_gallery: None,
         original_prompt: None,
         prompt_transform: None,
         batch_id: None,

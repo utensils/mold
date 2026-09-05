@@ -554,6 +554,8 @@ mod tests {
             community_cloud: false,
             stock_status: Some("High".into()),
             available: true,
+            secure_price: None,
+            community_price: None,
         }
     }
 

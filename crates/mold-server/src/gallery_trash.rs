@@ -60,6 +60,36 @@ pub(crate) struct GalleryDeleteQuery {
     pub(crate) permanent: Option<bool>,
 }
 
+/// `?view=trash` on the media, thumbnail, and preview routes: ask for the
+/// `.trash/` bytes even when a NEW live file has since landed under the same
+/// name. The native `mold-local:` protocol already took the same switch; the
+/// HTTP routes resolved live-first with no way to ask otherwise, so a Trash
+/// row on a remote machine could show its live twin's pixels.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct GalleryMediaQuery {
+    #[serde(default)]
+    pub(crate) view: Option<String>,
+}
+
+impl GalleryMediaQuery {
+    pub(crate) fn reads_trash(&self) -> Result<bool, ApiError> {
+        Ok(crate::routes::GalleryView::parse(self.view.as_deref())?
+            == crate::routes::GalleryView::Trash)
+    }
+}
+
+/// Where a gallery filename's bytes live for the view the client asked for:
+/// the trash view answers ONLY `<dir>/.trash/<name>` (so a missing trashed
+/// file 404s rather than falling back to a live twin); the library view is
+/// [`resolve_gallery_media_source`]'s live-then-trash answer.
+pub(crate) fn resolve_gallery_media_for_view(dir: &Path, name: &str, from_trash: bool) -> PathBuf {
+    if from_trash {
+        batch_transaction::gallery_trash_dir(dir).join(name)
+    } else {
+        resolve_gallery_media_source(dir, name)
+    }
+}
+
 /// Where a gallery filename's bytes live right now: the live path when it
 /// exists, else `<dir>/.trash/<name>`. Media, thumbnail, and preview routes
 /// resolve through this so a trashed print still renders.
@@ -154,6 +184,62 @@ fn ensure_row_for_live_file(db: &MetadataDb, dir: &Path, name: &str, live_path: 
     record.file_size_bytes = size_bytes;
     record.metadata_synthetic = synthetic;
     db.upsert(&record).is_ok()
+}
+
+/// "Save every result" off: move a just-published print (and its
+/// pre-upscale original, when one was kept) straight to the trash. Caller
+/// holds the gallery writer, exactly as for a user's own Delete. A failure
+/// is logged and never fails the render: the print reached the gallery, and
+/// a stray live copy is the lesser wrong.
+pub(crate) fn trash_published_outputs_blocking(
+    dir: &Path,
+    saved: &crate::queue::SavedOutputNames,
+    db: Option<&MetadataDb>,
+    gate: &GalleryPublicationGate,
+    events: Option<&crate::events::EventBroadcaster>,
+) {
+    let Some(db) = db else {
+        tracing::warn!("save_to_gallery=false: no metadata DB, the print stays live");
+        return;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    for name in [saved.output.as_deref(), saved.original.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        match trash_print_blocking(dir, name, db, gate, now_ms) {
+            // The SAME event a user's own Delete publishes, mapped from the
+            // same outcome: `gallery_trashed` means "moved, recoverable" and
+            // is what puts the row in a client's Trash scope, while
+            // `gallery_removed` means "gone" and drops it from both scopes.
+            // Announcing a removal here made an opt-out print vanish from
+            // desktop state as if it had been purged.
+            Ok(TrashOutcome::Trashed) => {
+                if let Some(events) = events {
+                    events.publish(mold_core::ServerEvent::GalleryTrashed {
+                        filename: name.to_string(),
+                    });
+                }
+            }
+            // Already trashed: nothing moved, so nothing to announce.
+            Ok(TrashOutcome::AlreadyTrashed) => {}
+            // The bytes were gone from both places and the stale row was
+            // dropped — that IS a removal.
+            Ok(TrashOutcome::Vanished) => {
+                if let Some(events) = events {
+                    events.publish(mold_core::ServerEvent::GalleryRemoved {
+                        filename: name.to_string(),
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(filename = name, error = %error.error, "save_to_gallery=false: could not move the print to the trash");
+            }
+        }
+    }
 }
 
 /// Move one print to the trash. Caller holds the gallery writer.
@@ -1014,5 +1100,38 @@ mod tests {
             resolve_gallery_media_source(dir.path(), "missing.png"),
             dir.path().join("missing.png")
         );
+    }
+
+    /// `?view=trash` reads the trash even when a live twin exists, and never
+    /// falls back to that twin when the trashed file is gone.
+    #[test]
+    fn trash_view_reads_only_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = batch_transaction::gallery_trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(dir.path().join("twin.png"), b"new live").unwrap();
+        std::fs::write(trash.join("twin.png"), b"old trashed").unwrap();
+
+        assert_eq!(
+            resolve_gallery_media_for_view(dir.path(), "twin.png", true),
+            trash.join("twin.png")
+        );
+        assert_eq!(
+            resolve_gallery_media_for_view(dir.path(), "twin.png", false),
+            dir.path().join("twin.png")
+        );
+        assert_eq!(
+            resolve_gallery_media_for_view(dir.path(), "gone.png", true),
+            trash.join("gone.png")
+        );
+        assert!(!resolve_gallery_media_for_view(dir.path(), "gone.png", true).is_file());
+
+        let query = |view: Option<&str>| GalleryMediaQuery {
+            view: view.map(str::to_string),
+        };
+        assert!(!query(None).reads_trash().unwrap());
+        assert!(!query(Some("library")).reads_trash().unwrap());
+        assert!(query(Some("trash")).reads_trash().unwrap());
+        assert!(query(Some("wat")).reads_trash().is_err());
     }
 }

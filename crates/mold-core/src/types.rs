@@ -1717,6 +1717,16 @@ pub struct GenerateRequest {
     /// Request server-side prompt expansion before generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<bool>,
+    /// "Save every result" off. Additive; absent means save. `false` keeps
+    /// every durable invariant — the print is published to the gallery
+    /// exactly as any other — and then moves it STRAIGHT to the trash, where
+    /// retention purges it, so a throwaway does not clutter the library yet
+    /// stays recoverable until the trash empties. A sequence has no such
+    /// switch: its stitched print is the durable job's whole deliverable. A
+    /// requested Framewise upscale is unaffected — it is enqueued first and
+    /// pins its source by hard link, so the print is trashed all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_to_gallery: Option<bool>,
     /// Original user prompt before expansion (set by client when expanding locally).
     #[serde(
         default,
@@ -1892,6 +1902,12 @@ pub struct GenerateRequest {
 }
 
 impl GenerateRequest {
+    /// Whether this print stays in the library once published. Only an
+    /// explicit `save_to_gallery: false` says no; absent is the default yes.
+    pub fn saves_to_gallery(&self) -> bool {
+        self.save_to_gallery.unwrap_or(true)
+    }
+
     /// Whether durable admission must extract request-owned media or media
     /// provenance before persisting the JSON request. Ordered MiniMax H3
     /// references count: their descriptors stay on the request while their
@@ -4004,6 +4020,10 @@ pub struct ServerStatus {
     /// older servers or when the mount cannot be determined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models_disk: Option<DiskUsage>,
+    /// What this machine's gallery takes on disk, from the metadata DB's own
+    /// per-row sizes. Absent on older servers and when the DB is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gallery_storage: Option<GalleryStorage>,
     /// Host-RAM telemetry from the scheduler's admission ledger. Absent on
     /// older servers and wherever that ledger does not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4013,6 +4033,22 @@ pub struct ServerStatus {
     /// configuration rather than a degradation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_media: Option<DurableMediaStatus>,
+}
+
+/// Bytes and prints this machine's gallery holds, live and in the trash,
+/// summed from the metadata DB's per-row `file_size_bytes` — the "pictures
+/// take 12.4 GB" line on a machine's Storage card. Rows whose size the DB
+/// never recorded count as prints but add no bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryStorage {
+    #[schema(example = 1203_u64)]
+    pub prints: u64,
+    #[schema(example = 13314398208_u64)]
+    pub bytes: u64,
+    #[schema(example = 12_u64)]
+    pub trash_prints: u64,
+    #[schema(example = 104857600_u64)]
+    pub trash_bytes: u64,
 }
 
 /// Total/free bytes for the filesystem backing a directory (currently the
@@ -5466,6 +5502,35 @@ mod tests {
     /// Additive: a print written before the field parses to `None`, and the
     /// field never appears in JSON unless it was measured, so older clients
     /// and older files keep their exact bytes.
+    /// Absent means save, and only an explicit `false` says otherwise; the
+    /// field never rides the wire unless a client set it.
+    #[test]
+    fn save_to_gallery_is_additive_and_defaults_to_saving() {
+        let base = serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q8",
+            "width": 8,
+            "height": 8,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        });
+        let req: GenerateRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(req.saves_to_gallery());
+        assert!(serde_json::to_value(&req)
+            .unwrap()
+            .get("save_to_gallery")
+            .is_none());
+        let mut off_json = base;
+        off_json["save_to_gallery"] = serde_json::Value::Bool(false);
+        let off: GenerateRequest = serde_json::from_value(off_json).unwrap();
+        assert!(!off.saves_to_gallery());
+        assert_eq!(
+            serde_json::to_value(&off).unwrap()["save_to_gallery"],
+            false
+        );
+    }
+
     #[test]
     fn output_metadata_generation_time_is_additive() {
         let legacy = r#"{"prompt":"a cat","model":"flux-dev:q8","seed":1,"steps":4,"guidance":1.0,"width":8,"height":8,"version":"0.1"}"#;
@@ -6599,6 +6664,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -6851,6 +6917,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -6931,6 +6998,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7214,6 +7282,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: Some("prepared-batch-1".to_string()),
@@ -7545,6 +7614,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7792,6 +7862,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7869,6 +7940,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -7949,6 +8021,7 @@ mod tests {
             control_model: Some("controlnet-canny-sd15".to_string()),
             control_scale: 0.8,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -8747,6 +8820,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -8830,6 +8904,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -8926,6 +9001,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -9007,6 +9083,7 @@ mod tests {
             control_model: Some("controlnet-canny-sd15".to_string()),
             control_scale: 0.8,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -9109,6 +9186,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
+            save_to_gallery: None,
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -9258,6 +9336,7 @@ mod tests {
             queue_paused: Some(true),
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: Some(DurableMediaStatus {
                 available: false,
@@ -11757,6 +11836,13 @@ pub struct ThirdPartyLicenseStatus {
     /// Manifest names that cannot be downloaded until this is accepted.
     #[serde(default)]
     pub required_by: Vec<String>,
+    /// The same styles as `required_by`, each with the plain words the
+    /// registry describes it by, so a licence row can lead with what it
+    /// unlocks ("FLUX.1 Dev Q4 — smaller/faster, good quality") rather than
+    /// a licence id. Additive; an older server omits it and a client falls
+    /// back to `required_by`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_by_styles: Vec<LicensedStyle>,
 }
 
 /// Response body of `GET /api/licenses`.
@@ -11766,6 +11852,15 @@ pub struct ThirdPartyLicenseStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LicenseListing {
     pub licenses: Vec<ThirdPartyLicenseStatus>,
+}
+
+/// A style a licence gates, in the registry's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LicensedStyle {
+    /// The manifest name — the id every API call addresses the style by.
+    pub name: String,
+    /// The manifest's plain-words description, for the row's friendly line.
+    pub description: String,
 }
 
 /// One license the user accepted, carrying the EXACT terms they were shown.

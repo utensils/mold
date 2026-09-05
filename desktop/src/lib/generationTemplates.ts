@@ -180,6 +180,10 @@ function parseTemplates(raw: string | null): GenerationTemplate[] {
       form: {
         ...template.form,
         guidanceOverrides: template.form.guidanceOverrides ?? emptyGuidanceOverrides(),
+        // A template saved before "Save every result" existed carries no
+        // preference, and the form's default is to save. Hydrating it
+        // `undefined` would leave `buildRequest` reading a missing value.
+        saveResult: template.form.saveResult ?? true,
       },
     }));
   } catch {

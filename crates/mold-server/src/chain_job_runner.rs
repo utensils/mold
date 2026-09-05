@@ -3603,6 +3603,7 @@ pub(crate) fn build_stage_generate_request(
         control_model: None,
         control_scale: 1.0,
         expand: None,
+        save_to_gallery: None,
         original_prompt: chain.original_prompt.clone(),
         prompt_transform: chain.prompt_transform.clone(),
         batch_id: chain.batch_id.clone(),

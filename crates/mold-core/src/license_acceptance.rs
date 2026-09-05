@@ -236,6 +236,25 @@ pub fn manifests_requiring(license: &ThirdPartyLicense) -> Vec<String> {
         .collect()
 }
 
+/// The styles `manifests_requiring(license)` names, each with the plain
+/// words the registry describes it by — the friendly line a licence row
+/// leads with. Same order as `required_by`.
+pub fn styles_requiring(license: &ThirdPartyLicense) -> Vec<crate::types::LicensedStyle> {
+    crate::manifest::known_manifests()
+        .iter()
+        .filter(|manifest| {
+            manifest.files.iter().any(|file| {
+                licenses_for_manifest_file(&manifest.name, &file.hf_filename)
+                    .any(|found| found.id == license.id)
+            })
+        })
+        .map(|manifest| crate::types::LicensedStyle {
+            name: manifest.name.clone(),
+            description: manifest.description.clone(),
+        })
+        .collect()
+}
+
 /// Every known license plus this root's acceptance state, for `GET /api/licenses`.
 pub fn license_statuses(mold_home: &Path) -> Vec<crate::types::ThirdPartyLicenseStatus> {
     THIRD_PARTY_LICENSES
@@ -249,6 +268,7 @@ pub fn license_statuses(mold_home: &Path) -> Vec<crate::types::ThirdPartyLicense
             summary: license.summary.to_string(),
             accepted: is_accepted(mold_home, license),
             required_by: manifests_requiring(license),
+            required_by_styles: styles_requiring(license),
         })
         .collect()
 }
@@ -609,6 +629,41 @@ mod tests {
                 license.id
             );
         }
+    }
+
+    /// The friendly line is the registry's own description of each gated
+    /// style, one per `required_by` entry in the same order, never empty —
+    /// a row that led with a blank would be worse than one that led with
+    /// the id.
+    #[test]
+    fn every_status_names_the_styles_it_gates_in_plain_words() {
+        let home = tempfile::tempdir().unwrap();
+        for status in license_statuses(home.path()) {
+            assert_eq!(
+                status
+                    .required_by_styles
+                    .iter()
+                    .map(|style| style.name.as_str())
+                    .collect::<Vec<_>>(),
+                status
+                    .required_by
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                "{}",
+                status.id
+            );
+            for style in &status.required_by_styles {
+                assert!(
+                    !style.description.trim().is_empty(),
+                    "{} gates {} which has no description",
+                    status.id,
+                    style.name
+                );
+            }
+        }
+        let json = serde_json::to_value(license_statuses(home.path())).unwrap();
+        assert!(json[0]["required_by_styles"][0]["description"].is_string());
     }
 
     #[test]

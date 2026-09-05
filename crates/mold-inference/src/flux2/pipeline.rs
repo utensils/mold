@@ -2730,6 +2730,7 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
+            save_to_gallery: None,
         };
 
         let err = engine.generate_sequential(&req).unwrap_err().to_string();

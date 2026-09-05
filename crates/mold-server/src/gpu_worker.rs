@@ -4896,6 +4896,26 @@ fn finish_generation_success(
         }
     }
 
+    // "Save every result" off: published exactly as any other print (so
+    // settlement, replay and provenance are untouched), then moved straight to
+    // the trash. It runs AFTER the Framewise enqueue above on purpose — that
+    // enqueue hard-links the source into its own pinned work dir, so the
+    // follow-up keeps rendering from the same inode while the gallery entry
+    // moves, and the preference is honoured with no print left live
+    // indefinitely.
+    if !job.request.saves_to_gallery() {
+        if let Some(dir) = job.output_dir.as_deref() {
+            let _gallery_writer = job.gallery_publication_gate.blocking_write();
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir,
+                &saved_names,
+                job.metadata_db.as_ref().as_ref(),
+                &job.gallery_publication_gate,
+                Some(job.events.as_ref()),
+            );
+        }
+    }
+
     // Settle the durable row on what actually reached the gallery, not on the
     // fact that inference returned. Settled here rather than on the ticket's
     // ordinary drop so a shutdown racing the last microseconds of delivery

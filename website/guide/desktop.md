@@ -350,7 +350,8 @@ the phone keep Create / Library / Models until their own redesign.
 - **Waiting on this machine** (inside each machine): running and waiting jobs,
   pause/resume, cancellation, and queue capacity live with the machine that
   owns them; the **Queue** view (⌘2) is the same line across every machine.
-- **RunPod** (inside Machines): secure account setup, balance and live spend, GPU and
+- **RunPod** (inside Machines): secure account setup, balance and live spend, RunPod's
+  own hourly rate on every card in the picker and in the "billing begins now" confirm, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
   volume create/select/rename/grow/delete. A selected volume is remembered,
   forces Secure Cloud in its datacenter, replaces the ordinary workspace disk,
@@ -375,7 +376,8 @@ the phone keep Create / Library / Models until their own redesign.
   Mold home, with connecting and forgetting other machines living in the
   Machines workspace; **Styles & disk** holds where styles are kept, where
   finished pictures are written, and how full that disk is; Style licences
-  lists each licence as one row with its state and a single action; Speed &
+  lists each licence as one row led by the styles it unlocks, in plain words,
+  with its state and a single action; Speed &
   memory exposes the `MOLD_*` engine knobs as real controls, applied on engine
   restart; Accounts & tokens keeps Hugging Face and Civitai keys in an
   owner-only local file under the app's data directory (no Keychain prompts;
@@ -596,7 +598,10 @@ wire types as the CLI and web UI:
 - **Generation controls** (**Shape** and **Resolution** quick-select common,
   per-family model-native sizes (with manual width/height for anything else);
   **Repeat this look** is an explicit **Keep | Surprise me** pair with the seed
-  in mono beside it and one-click "lock last"; the style picker offers only
+  in mono beside it and one-click "lock last"; **Save every result** is on by
+  default, and switched off it sends each print straight to the trash after
+  it lands, so a throwaway never clutters My images yet stays recoverable
+  until the trash empties (not offered for a sequence); the style picker offers only
   the styles the section you are in can make — picture styles under **Still
   picture**, clip styles under **Short clip**, 3-D styles under **3-D
   object** — names that section above the list, marks each
@@ -669,7 +674,8 @@ wire types as the CLI and web UI:
 
 - **A machine's own page**: click a machine in the Machines workspace to open it:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
-  styles, every GPU's utilization, VRAM and lifecycle state, current queue
+  styles and what its pictures take (live and in the trash, from the machine's
+  own records), every GPU's utilization, VRAM and lifecycle state, current queue
   state, active download progress, and a freshly fetched inventory of
   the styles on that machine. Its toolbar says the machine in one plain
   sentence — `RTX 4090 · CUDA · on your network · up 6 days` — beside **Make

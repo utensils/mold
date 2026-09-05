@@ -587,6 +587,37 @@ impl MetadataDb {
         Ok(n > 0)
     }
 
+    /// What the gallery takes on disk, live and trashed, from the rows' own
+    /// recorded sizes — one aggregate query, never a directory walk. A row
+    /// with no recorded size counts as a print and adds no bytes.
+    pub fn storage_totals(&self) -> Result<mold_core::GalleryStorage> {
+        let conn = self.conn.lock().expect("metadata db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT trashed_at_ms IS NOT NULL, COUNT(*), COALESCE(SUM(MAX(file_size_bytes, 0)), 0)
+             FROM generations GROUP BY trashed_at_ms IS NOT NULL",
+        )?;
+        let mut totals = mold_core::GalleryStorage::default();
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, bool>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })? {
+            let (trashed, prints, bytes) = row?;
+            let prints = prints.max(0) as u64;
+            let bytes = bytes.max(0) as u64;
+            if trashed {
+                totals.trash_prints = prints;
+                totals.trash_bytes = bytes;
+            } else {
+                totals.prints = prints;
+                totals.bytes = bytes;
+            }
+        }
+        Ok(totals)
+    }
+
     /// Total row count — used by tests and by the reconcile path's "kept" tally.
     pub fn count(&self) -> Result<i64> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
@@ -1190,6 +1221,52 @@ mod tests {
 
         assert!(db.upsert_batch(&[first, second]).is_err());
         assert_eq!(db.count().unwrap(), 0);
+    }
+
+    /// The Storage card's "pictures take N GB": live and trashed rows summed
+    /// separately from their own recorded sizes; a row that never recorded
+    /// one still counts as a print.
+    #[test]
+    fn storage_totals_sum_live_and_trashed_rows_separately() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        assert_eq!(
+            db.storage_totals().unwrap(),
+            mold_core::GalleryStorage::default()
+        );
+
+        let mut a = rec();
+        a.file_size_bytes = Some(1_000);
+        db.upsert(&a).unwrap();
+        let mut b = rec();
+        b.filename = "b.png".into();
+        b.file_size_bytes = Some(2_500);
+        db.upsert(&b).unwrap();
+        let mut c = rec();
+        c.filename = "c.png".into();
+        c.file_size_bytes = None;
+        db.upsert(&c).unwrap();
+        assert_eq!(
+            db.storage_totals().unwrap(),
+            mold_core::GalleryStorage {
+                prints: 3,
+                bytes: 3_500,
+                trash_prints: 0,
+                trash_bytes: 0,
+            }
+        );
+
+        assert!(db
+            .mark_trashed(Path::new("/tmp/out"), "b.png", 5_000)
+            .unwrap());
+        assert_eq!(
+            db.storage_totals().unwrap(),
+            mold_core::GalleryStorage {
+                prints: 2,
+                bytes: 1_000,
+                trash_prints: 1,
+                trash_bytes: 2_500,
+            }
+        );
     }
 
     #[test]

@@ -66,10 +66,16 @@ describe("LicenseSettingsPanel", () => {
     );
   });
 
-  it("renders one row per licence: mono id, the licence's name, a state word", async () => {
+  it("renders one row per licence: what it unlocks, the licence in mono, a state word", async () => {
     fetchLicenseListing.mockResolvedValue({
       licenses: [
-        { ...terms("a", ["bundle-a"]), accepted: true },
+        {
+          ...terms("a", ["bundle-a"]),
+          accepted: true,
+          required_by_styles: [
+            { name: "bundle-a", description: "Faces that stay themselves" },
+          ],
+        },
         terms("b", ["bundle-b"]),
       ],
     });
@@ -85,11 +91,23 @@ describe("LicenseSettingsPanel", () => {
       .findAll(".license-settings__row")
       .filter((row) => row.find(".license-settings__id").exists());
     expect(rows).toHaveLength(2);
-    expect(rows[0]!.get(".license-settings__id").text()).toBe("a");
-    // The licence's own name is what a person recognizes; the id is the
-    // machine's handle for it, and neither stands in for the other.
+    // The row leads with what the licence unlocks, in the registry's plain
+    // words; the licence's own name and summary sit under it in mono, and
+    // the id — the machine's handle — rides the tooltip.
     expect(rows[0]!.get(".license-settings__name").text()).toBe(
+      "Faces that stay themselves",
+    );
+    expect(rows[0]!.get(".license-settings__id").text()).toBe(
       "Terms a · Restricted use.",
+    );
+    expect(rows[0]!.get(".license-settings__what").attributes("title")).toBe(
+      "a",
+    );
+    // An older host lists no styles: the style ids lead instead, and the
+    // licence's name and summary still sit beneath them.
+    expect(rows[1]!.get(".license-settings__name").text()).toBe("bundle-b");
+    expect(rows[1]!.get(".license-settings__id").text()).toBe(
+      "Terms b · Restricted use.",
     );
     expect(rows[0]!.get(".license-settings__state").text()).toBe("Accepted");
     // Nothing to accept — the row is its two links and nothing else.

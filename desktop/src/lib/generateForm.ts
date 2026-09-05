@@ -213,6 +213,10 @@ export interface GenerateForm {
    * never clears it (a named session wants its siblings and re-rolls to share
    * the name); only the explicit ⌘N "new print" (`clearComposer`) does. */
   title: string;
+  /** "Save every result" — on by default. Off, a print is published and then
+   * moved straight to the trash on the host (`save_to_gallery: false`), so a
+   * throwaway never clutters the library yet stays recoverable. */
+  saveResult: boolean;
   /** "File under" — the Create-time Library filing draft (ghost-tag opt-out,
    * typed tags, collection pick). Reducers live in `@studio/lib/fileUnder`;
    * `buildRequest` materializes it into the additive `tags` / `collection`
@@ -388,6 +392,7 @@ export function newGenerateForm(): GenerateForm {
     prompt: "",
     originalPrompt: null,
     title: "",
+    saveResult: true,
     fileUnder: emptyFileUnderState(),
     fileUnderAutoTag: false,
     fileUnderMatch: null,
@@ -1094,6 +1099,11 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // header refuses to commit one, so this only guards stale snapshots).
   const title = validatePrintTitle(form.title ?? "");
   if (title.ok && title.value) req.title = title.value;
+  // Only an EXPLICIT opt-out rides the wire. Never `!form.saveResult`: a
+  // template saved before this field existed hydrates it `undefined`, and
+  // treating that as an opt-out would send every print from a legacy starting
+  // point straight to the trash.
+  if (form.saveResult === false) req.save_to_gallery = false;
   // "File under" rides every request built from this form, so a Batch N
   // sibling and a prepared variation file exactly like the one-shot does.
   // Both fields stay ABSENT when nothing is filed.

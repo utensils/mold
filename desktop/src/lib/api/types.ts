@@ -117,6 +117,14 @@ export interface ServerStatus {
   instance_id?: string | null;
   /** Disk stats for the filesystem holding the models dir; absent on older servers. */
   models_disk?: { total_bytes: number; free_bytes: number } | null;
+  /** What this machine's gallery takes on disk, live and trashed, from the
+   * metadata DB's own per-row sizes; absent on older servers and DB-off hosts. */
+  gallery_storage?: {
+    prints: number;
+    bytes: number;
+    trash_prints: number;
+    trash_bytes: number;
+  } | null;
   /** Host-RAM ledger snapshot; absent on older servers. This is the FRESHER
    * copy — the queue plan only republishes its mirror when a plan is emitted
    * for some other reason. Read it through `hostMemoryLevel`, which validates
@@ -611,6 +619,9 @@ export interface GenerateRequest {
    * server embeds it into `OutputMetadata.title`, seeds the gallery row, and
    * folds a lossy slug into the output filename. Absent = untitled. */
   title?: string;
+  /** "Save every result" off: the host publishes the print, then moves it
+   * straight to the trash. Additive; absent means save. */
+  save_to_gallery?: boolean;
   /** Creation-time filing ("File under"): tags applied to the print the
    * moment it lands. Additive and ABSENT when nothing is filed — never `[]`.
    * Normalized and capped server-side; `mold_core::MAX_REQUEST_TAGS`. */

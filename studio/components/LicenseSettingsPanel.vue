@@ -4,6 +4,8 @@ import { fetchLicenseListing } from "../api/licenseAcceptance";
 import type { ApiTarget } from "../api/client";
 import { useLicenseAcceptance } from "../composables/useLicenseAcceptance";
 import {
+  licenseDetailLine,
+  licenseFriendlyLine,
   licenseRequirements,
   type LicenseRequirement,
   type ThirdPartyLicenseStatus,
@@ -144,10 +146,17 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
         :key="license.id"
         class="license-settings__row"
       >
-        <span class="license-settings__id">{{ license.id }}</span>
-        <span class="license-settings__name"
-          >{{ license.name }} · {{ license.summary }}</span
-        >
+        <!-- Leads with what the licence unlocks, in plain words, over the
+             licence's own name and summary in mono; the id is the machine's
+             handle and rides the tooltip. -->
+        <span class="license-settings__what" :title="license.id">
+          <span class="license-settings__name">{{
+            licenseFriendlyLine(license)
+          }}</span>
+          <span class="license-settings__id">{{
+            licenseDetailLine(license)
+          }}</span>
+        </span>
         <!-- Both the terms this build pinned and the project's current ones:
              an agreement nobody can read is not an agreement. The shell opens
              them, so the app is never navigated away from. -->
@@ -223,18 +232,24 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   font-size: var(--mold-fs-sm);
   line-height: var(--mold-lh-body);
 }
+.license-settings__what {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
 .license-settings__id {
-  flex-shrink: 0;
   font-family: var(--mold-font-mono);
   font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);
   overflow-wrap: anywhere;
 }
 .license-settings__name {
-  flex: 1;
   min-width: 0;
   font-size: var(--mold-fs-sm);
   line-height: var(--mold-lh-body);
+  color: var(--mold-text);
 }
 .license-settings__link {
   flex-shrink: 0;

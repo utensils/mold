@@ -677,6 +677,38 @@ describe("HostDetailView storage and queue", () => {
     expect(wrapper.find("[data-test='storage-card']").exists()).toBe(false);
   });
 
+  it("says what the pictures take, from the host's own gallery totals", async () => {
+    // `gallery_storage` is additive: the host sums its DB rows' sizes, so the
+    // card states a number without any client walking the gallery, and an
+    // older server that omits it simply draws no line.
+    installApi({
+      models_disk: { total_bytes: 2_000_000_000_000, free_bytes: 500_000_000_000 },
+      gallery_storage: {
+        prints: 1203,
+        bytes: 13_300_000_000,
+        trash_prints: 4,
+        trash_bytes: 120_000_000,
+      },
+    });
+    const wrapper = await mountView();
+    const line = wrapper.get("[data-test='gallery-storage']").text();
+    expect(line).toContain("Pictures take 13.3 GB");
+    expect(line).toContain("1,203 pictures");
+    expect(line).toContain("trash 0.1 GB");
+  });
+
+  it("draws the pictures line without models_disk, and no trash note when the trash is empty", async () => {
+    installApi({
+      gallery_storage: { prints: 1, bytes: 4_000_000, trash_prints: 0, trash_bytes: 0 },
+    });
+    const wrapper = await mountView();
+    const card = wrapper.get("[data-test='storage-card']");
+    expect(card.find("[role='meter']").exists()).toBe(false);
+    expect(card.get("[data-test='gallery-storage']").text()).toBe(
+      "Pictures take 0.0 GB · 1 picture",
+    );
+  });
+
   it("shows queue depth/capacity and loaded-model chips", async () => {
     installApi({ queue_depth: 3, queue_capacity: 8 });
     const wrapper = await mountView();

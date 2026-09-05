@@ -453,6 +453,8 @@ pub struct AppState {
     /// Refreshed off the request path — statvfs can hang outright on a
     /// wedged FUSE mount, so the handler must never wait on a disk scan.
     pub models_disk_cache: Arc<ModelsDiskCache>,
+    /// `/api/status.gallery_storage`, refreshed off the request path.
+    pub gallery_storage_cache: Arc<GalleryStorageCache>,
 }
 
 /// TTL for the cached models-disk snapshot. Matches the ~10s status poll
@@ -465,28 +467,46 @@ pub const MODELS_DISK_TTL: std::time::Duration = std::time::Duration::from_secs(
 /// `spawn_blocking` refresh; everyone else keeps serving the last-good value.
 /// A hung statvfs therefore costs one leaked blocking-pool thread and a stale
 /// stat, never a parked runtime worker.
-#[derive(Default)]
-pub struct ModelsDiskCache {
-    inner: std::sync::Mutex<ModelsDiskSnapshot>,
+pub type ModelsDiskCache = RefreshCache<mold_core::DiskUsage>;
+/// The same single-flight snapshot for the gallery's storage totals, which
+/// are an aggregate DB query rather than a statvfs but share the rule: never
+/// on the request path, one refresher at a time, the last good value served.
+pub type GalleryStorageCache = RefreshCache<mold_core::GalleryStorage>;
+
+/// A last-good snapshot of one status fact, refreshed at most once per
+/// [`MODELS_DISK_TTL`] by whichever reader wins the claim.
+pub struct RefreshCache<T> {
+    inner: std::sync::Mutex<RefreshSnapshot<T>>,
     refreshing: std::sync::atomic::AtomicBool,
 }
 
-#[derive(Default)]
-struct ModelsDiskSnapshot {
-    usage: Option<mold_core::DiskUsage>,
+struct RefreshSnapshot<T> {
+    usage: Option<T>,
     fetched_at: Option<Instant>,
 }
 
-impl ModelsDiskCache {
+impl<T> Default for RefreshCache<T> {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(RefreshSnapshot {
+                usage: None,
+                fetched_at: None,
+            }),
+            refreshing: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl<T: Clone> RefreshCache<T> {
     /// Current snapshot plus whether the caller won the refresh claim.
     /// Returns `true` at most once per stale period — the winner must call
-    /// [`ModelsDiskCache::store`] (or [`ModelsDiskCache::release`]) to let
-    /// the next refresh happen.
-    pub fn read(&self) -> (Option<mold_core::DiskUsage>, bool) {
+    /// [`RefreshCache::store`] (or [`RefreshCache::release`]) to let the
+    /// next refresh happen.
+    pub fn read(&self) -> (Option<T>, bool) {
         self.read_at(Instant::now())
     }
 
-    fn read_at(&self, now: Instant) -> (Option<mold_core::DiskUsage>, bool) {
+    fn read_at(&self, now: Instant) -> (Option<T>, bool) {
         let (usage, stale) = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let stale = inner
@@ -504,7 +524,7 @@ impl ModelsDiskCache {
     }
 
     /// Publish a fresh snapshot and release the refresh claim.
-    pub fn store(&self, usage: Option<mold_core::DiskUsage>) {
+    pub fn store(&self, usage: Option<T>) {
         {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.usage = usage;
@@ -698,6 +718,7 @@ impl AppState {
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             models_disk_cache: Arc::new(ModelsDiskCache::default()),
+            gallery_storage_cache: Arc::new(GalleryStorageCache::default()),
         }
     }
 
@@ -770,6 +791,7 @@ impl AppState {
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             models_disk_cache: Arc::new(ModelsDiskCache::default()),
+            gallery_storage_cache: Arc::new(GalleryStorageCache::default()),
         }
     }
 
@@ -855,6 +877,7 @@ impl AppState {
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             models_disk_cache: Arc::new(ModelsDiskCache::default()),
+            gallery_storage_cache: Arc::new(GalleryStorageCache::default()),
         }
     }
 
@@ -907,6 +930,7 @@ impl AppState {
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             models_disk_cache: Arc::new(ModelsDiskCache::default()),
+            gallery_storage_cache: Arc::new(GalleryStorageCache::default()),
         };
         (state, rx)
     }
@@ -956,6 +980,7 @@ impl AppState {
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             models_disk_cache: Arc::new(ModelsDiskCache::default()),
+            gallery_storage_cache: Arc::new(GalleryStorageCache::default()),
         }
     }
 
@@ -1053,6 +1078,34 @@ mod tests {
         let (usage, refresh) = cache.read_at(later);
         assert_eq!(usage, Some(stats));
         assert!(!refresh);
+    }
+
+    /// A refresh that FAILED must release rather than publish `None`:
+    /// storing the emptiness would overwrite the last-good totals and mark
+    /// them fresh, so `/api/status.gallery_storage` would vanish for a whole
+    /// TTL over one transient DB error.
+    #[test]
+    fn a_failed_refresh_keeps_the_last_good_snapshot() {
+        let cache = GalleryStorageCache::default();
+        let (_, refresh) = cache.read();
+        assert!(refresh);
+        let totals = mold_core::GalleryStorage {
+            prints: 12,
+            bytes: 3_400,
+            trash_prints: 1,
+            trash_bytes: 100,
+        };
+        cache.store(Some(totals.clone()));
+
+        let later = Instant::now() + MODELS_DISK_TTL;
+        let (served, refresh) = cache.read_at(later);
+        assert_eq!(served, Some(totals.clone()));
+        assert!(refresh, "the stale snapshot hands out one claim");
+        // The refresher failed: release, do not publish.
+        cache.release();
+        let (served, refresh) = cache.read_at(later);
+        assert_eq!(served, Some(totals), "the last good totals still serve");
+        assert!(refresh, "and the next reader may retry");
     }
 
     #[test]

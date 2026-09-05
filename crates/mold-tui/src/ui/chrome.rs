@@ -506,6 +506,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory,
             durable_media: None,
         }
@@ -577,6 +578,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         };

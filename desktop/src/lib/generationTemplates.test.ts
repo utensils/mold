@@ -234,6 +234,52 @@ describe("save / load round-trip", () => {
     });
   });
 
+  /**
+   * A template saved before "Save every result" existed carries no
+   * preference. Hydrating it `undefined` let `buildRequest`'s falsy check
+   * read it as an opt-out and send every print from a legacy starting point
+   * straight to the trash.
+   */
+  it("hydrates Save every result on for legacy templates", () => {
+    const legacyForm: Partial<GenerateForm> = newGenerateForm();
+    delete legacyForm.saveResult;
+    localStorage.setItem(
+      GENERATION_TEMPLATES_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: "legacy",
+          name: "Legacy",
+          createdAt: 1,
+          updatedAt: 1,
+          form: legacyForm,
+          mediaReferences: [],
+        },
+      ]),
+    );
+
+    expect(loadGenerationTemplates()[0]?.form.saveResult).toBe(true);
+  });
+
+  it("keeps an explicit opt-out saved in a template", () => {
+    const form = newGenerateForm();
+    form.saveResult = false;
+    localStorage.setItem(
+      GENERATION_TEMPLATES_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: "opted-out",
+          name: "Throwaways",
+          createdAt: 1,
+          updatedAt: 1,
+          form,
+          mediaReferences: [],
+        },
+      ]),
+    );
+
+    expect(loadGenerationTemplates()[0]?.form.saveResult).toBe(false);
+  });
+
   it("strips video, keyframe, and conditioning-audio media", () => {
     const form = formWith({
       prompt: "a river",

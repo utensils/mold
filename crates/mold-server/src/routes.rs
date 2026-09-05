@@ -5790,6 +5790,31 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
         let cache = state.models_disk_cache.clone();
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
+    // The gallery's bytes are one aggregate query on the metadata DB — cheap,
+    // but a DB call all the same, so it takes the same cached, single-flight
+    // road as the disk stats rather than running on every poll.
+    let (gallery_storage, needs_storage_refresh) = state.gallery_storage_cache.read();
+    if needs_storage_refresh {
+        let cache = state.gallery_storage_cache.clone();
+        let db = state.metadata_db.clone();
+        tokio::task::spawn_blocking(move || {
+            // A transient DB error RELEASES the claim rather than publishing
+            // `None`: storing it would overwrite the last-good totals and
+            // mark the emptiness fresh, so `gallery_storage` would vanish
+            // from status for a whole TTL over one failed query. A host with
+            // no DB at all publishes `None` once, which is the true answer.
+            match db.as_ref().as_ref() {
+                None => cache.store(None),
+                Some(db) => match db.storage_totals() {
+                    Ok(totals) => cache.store(Some(totals)),
+                    Err(error) => {
+                        tracing::warn!(%error, "gallery storage totals refresh failed; keeping the last good snapshot");
+                        cache.release();
+                    }
+                },
+            }
+        });
+    }
 
     // `queue_capacity` is only the hydrated runtime window. Route selection
     // needs the total waiting load, including SQLite-owned work that has not
@@ -5893,6 +5918,7 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
+        gallery_storage,
         host_memory: state.scheduled_work.host_memory(),
         durable_media: state
             .queue_journal
@@ -10041,7 +10067,11 @@ async fn get_gallery_image(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
+    // Not `Option<Query<_>>`: an unknown `?view=` must be refused (422, as
+    // the listing refuses it), never the live view by accident.
+    Query(query): Query<crate::gallery_trash::GalleryMediaQuery>,
 ) -> Result<axum::response::Response, ApiError> {
+    let from_trash = query.reads_trash()?;
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
@@ -10062,7 +10092,10 @@ async fn get_gallery_image(
 
     // A trashed print still streams: resolve the live path first, then
     // `<dir>/.trash/<name>`, so the trash view and a restore preview render.
-    let path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
+    // `?view=trash` asks for the trashed bytes outright, so a Trash row whose
+    // name a NEW live print has since taken shows its own pixels.
+    let path =
+        crate::gallery_trash::resolve_gallery_media_for_view(&output_dir, &clean_name, from_trash);
     let content_type = content_type_for_filename(&clean_name);
     serve_media_file(&path, &headers, content_type, "image not found").await
 }
@@ -10222,6 +10255,8 @@ fn content_type_for_filename(name: &str) -> &'static str {
 struct ThumbnailQuery {
     size: Option<u32>,
     fmt: Option<String>,
+    /// `trash` reads the `.trash/` bytes even when a live twin exists.
+    view: Option<String>,
 }
 
 /// Names the rendition the server UNDERSTOOD (`256-png`, `512-jpg`), so a
@@ -10242,7 +10277,9 @@ async fn get_gallery_thumbnail(
 ) -> Result<Response, ApiError> {
     let variant = crate::thumbnails::ThumbnailVariant::from_query(query.size, query.fmt.as_deref())
         .map_err(ApiError::validation)?;
-    let mut response = render_gallery_thumbnail(state, headers, filename, variant).await?;
+    let from_trash = crate::gallery_trash::GalleryMediaQuery { view: query.view }.reads_trash()?;
+    let mut response =
+        render_gallery_thumbnail(state, headers, filename, variant, from_trash).await?;
     if let Ok(value) = header::HeaderValue::from_str(&variant.rendition_label()) {
         response.headers_mut().insert(
             header::HeaderName::from_static(THUMBNAIL_RENDITION_HEADER),
@@ -10257,6 +10294,7 @@ async fn render_gallery_thumbnail(
     headers: HeaderMap,
     filename: String,
     variant: crate::thumbnails::ThumbnailVariant,
+    from_trash: bool,
 ) -> Result<Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
@@ -10275,7 +10313,8 @@ async fn render_gallery_thumbnail(
         return Err(ApiError::validation("invalid filename"));
     }
 
-    let source_path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
+    let source_path =
+        crate::gallery_trash::resolve_gallery_media_for_view(&output_dir, &clean_name, from_trash);
     if !source_path.is_file() {
         return Err(ApiError::not_found(format!(
             "image not found: {clean_name}"
@@ -10547,7 +10586,9 @@ fn thumbnail_response(
 async fn get_gallery_preview(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
+    Query(query): Query<crate::gallery_trash::GalleryMediaQuery>,
 ) -> Result<axum::response::Response, ApiError> {
+    let from_trash = query.reads_trash()?;
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
@@ -10572,7 +10613,8 @@ async fn get_gallery_preview(
     // orphaned and must not be served.
     // Check the source file first and 404 before touching the cache so a
     // stale `.preview.gif` never leaks deleted content.
-    let source_path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
+    let source_path =
+        crate::gallery_trash::resolve_gallery_media_for_view(&output_dir, &clean_name, from_trash);
     if !tokio::fs::metadata(&source_path)
         .await
         .map(|m| m.is_file())
@@ -10583,6 +10625,17 @@ async fn get_gallery_preview(
         )));
     }
 
+    // The sidecar is keyed by FILENAME alone, so one name has one preview.
+    // Trashing keeps that sidecar, and a new live print under the same name
+    // overwrites it — at which point the cache cannot say which bytes it
+    // depicts. A trash-view request therefore serves it only while the name
+    // is unambiguous (no live twin); otherwise it is a plain miss and the
+    // caller falls back to the media route, which resolves the view exactly.
+    if from_trash && output_dir.join(&clean_name).is_file() {
+        return Err(ApiError::not_found(format!(
+            "preview not found: {clean_name}"
+        )));
+    }
     let preview_path =
         server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&clean_name));
     let meta = match tokio::fs::metadata(&preview_path).await {

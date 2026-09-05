@@ -402,6 +402,16 @@ const ram = computed(() => snapshot.value?.system_ram ?? null);
  *  show the same numbers twice, so unified hosts render one Memory row. */
 const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const modelsDisk = computed(() => status.value?.models_disk ?? null);
+/** What the gallery takes on disk, from the host's own DB totals (additive;
+ *  absent on an older server, and then the line is simply not drawn). */
+const galleryStorage = computed(() => status.value?.gallery_storage ?? null);
+const galleryStorageLabel = computed(() => {
+  const g = galleryStorage.value;
+  if (!g) return null;
+  const prints = g.prints === 1 ? "1 picture" : `${g.prints.toLocaleString()} pictures`;
+  const trash = g.trash_bytes > 0 ? ` · trash ${formatGB(g.trash_bytes)}` : "";
+  return `Pictures take ${formatGB(g.bytes)} · ${prints}${trash}`;
+});
 const diskUsedPct = computed(() => {
   const d = modelsDisk.value;
   return d ? percent(d.total_bytes - d.free_bytes, d.total_bytes) : 0;
@@ -842,25 +852,41 @@ async function forget() {
                 {{ formatGBPair(ram.used, ram.total) }}
               </span>
             </div>
-            <div v-if="modelsDisk" class="tile ms-card-edge" data-test="storage-card">
+            <div
+              v-if="modelsDisk || galleryStorage"
+              class="tile ms-card-edge"
+              data-test="storage-card"
+            >
               <span class="ms-group-label uppercase">Disk for styles</span>
-              <span class="text-lg font-semibold text-fg">{{ Math.round(diskUsedPct) }}%</span>
-              <span
-                class="block h-[5px] overflow-hidden bg-surface"
-                role="meter"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                :aria-valuenow="Math.round(diskUsedPct)"
-                aria-label="Disk for styles"
-              >
+              <template v-if="modelsDisk">
+                <span class="text-lg font-semibold text-fg">{{ Math.round(diskUsedPct) }}%</span>
                 <span
-                  class="block h-full transition-[width] duration-300"
-                  :class="diskUsedPct >= 92 ? 'bg-error' : 'bg-mauve'"
-                  :style="{ width: `${Math.round(diskUsedPct)}%` }"
-                />
-              </span>
-              <span class="font-mono text-micro text-fg-dim">
-                {{ formatGB(modelsDisk.free_bytes) }} free of {{ formatGB(modelsDisk.total_bytes) }}
+                  class="block h-[5px] overflow-hidden bg-surface"
+                  role="meter"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="Math.round(diskUsedPct)"
+                  aria-label="Disk for styles"
+                >
+                  <span
+                    class="block h-full transition-[width] duration-300"
+                    :class="diskUsedPct >= 92 ? 'bg-error' : 'bg-mauve'"
+                    :style="{ width: `${Math.round(diskUsedPct)}%` }"
+                  />
+                </span>
+                <span class="font-mono text-micro text-fg-dim">
+                  {{ formatGB(modelsDisk.free_bytes) }} free of
+                  {{ formatGB(modelsDisk.total_bytes) }}
+                </span>
+              </template>
+              <!-- The mock's "pictures take 12.4 GB": the host's own gallery
+                   totals, summed from its DB rather than walked. -->
+              <span
+                v-if="galleryStorageLabel"
+                class="font-mono text-micro text-fg-dim"
+                data-test="gallery-storage"
+              >
+                {{ galleryStorageLabel }}
               </span>
             </div>
           </div>

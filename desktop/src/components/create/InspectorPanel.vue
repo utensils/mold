@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import ToggleControl from "../settings/ToggleControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import Stepper from "@ui/components/Stepper.vue";
@@ -1135,6 +1136,25 @@ defineExpose({ setOutputMode });
               lock last ({{ lastSeed }})
             </button></template
           >
+        </p>
+      </div>
+
+      <!-- Save every result — off, the host publishes the print and moves it
+           straight to the trash, so a throwaway never clutters My images yet
+           stays recoverable until the trash empties. Hidden for a sequence,
+           whose stitched clip is the durable job's whole deliverable. -->
+      <div v-if="!isSequence" class="ms-field" data-test="save-result-field">
+        <div class="ms-field__head">
+          <span class="ms-field__label ms-field__label--inline">Save every result</span>
+          <ToggleControl
+            :model-value="form.saveResult"
+            aria-label="Save every result"
+            data-test="save-result"
+            @commit="form.saveResult = $event"
+          />
+        </div>
+        <p v-if="!form.saveResult" class="ms-field__hint" data-test="save-result-hint">
+          Results go straight to the trash, where they stay until it empties.
         </p>
       </div>
 

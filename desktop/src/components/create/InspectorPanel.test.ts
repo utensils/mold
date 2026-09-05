@@ -644,6 +644,30 @@ describe("InspectorPanel — seed mode", () => {
   });
 });
 
+/*
+ * Save every result — on by default; off, the host publishes the print and
+ * moves it straight to the trash. A sequence has no such switch: its
+ * stitched clip is the durable job's whole deliverable.
+ */
+describe("InspectorPanel — save every result", () => {
+  it("is on by default and flips the form with a hint when off", async () => {
+    const form = formFor("flux");
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const toggle = wrapper.get('[data-test="save-result"]');
+    expect(toggle.attributes("aria-checked")).toBe("true");
+    expect(wrapper.find('[data-test="save-result-hint"]').exists()).toBe(false);
+    await toggle.trigger("click");
+    expect(form.saveResult).toBe(false);
+    expect(wrapper.get('[data-test="save-result-hint"]').text()).toContain("straight to the trash");
+  });
+
+  it("is hidden for a sequence", () => {
+    useSequenceDraftStore().output = "sequence";
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("ltx-video") } });
+    expect(wrapper.find('[data-test="save-result-field"]').exists()).toBe(false);
+  });
+});
+
 describe("InspectorPanel — advanced", () => {
   it("passes the selected generation machine to the one-shot LoRA picker", async () => {
     const connection = useConnectionStore();

@@ -130,9 +130,38 @@ pub struct GpuType {
     pub stock_status: Option<String>,
     #[serde(default)]
     pub available: bool,
+    /// On-demand price per GPU-hour in USD on the secure cloud, as RunPod's
+    /// `gpuTypes.securePrice` reports it. Additive; absent when the provider
+    /// omits it, and never guessed.
+    #[serde(
+        rename = "securePrice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secure_price: Option<f64>,
+    /// The same on the community cloud (`communityPrice`).
+    #[serde(
+        rename = "communityPrice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub community_price: Option<f64>,
 }
 
 impl GpuType {
+    /// The hourly rate for one cloud type (`SECURE` / `COMMUNITY`), so a
+    /// "billing begins now" confirm can state a number before the pod
+    /// exists. `None` when the provider reported no price for that cloud —
+    /// the surface says nothing rather than a guess.
+    pub fn hourly_price(&self, cloud_type: &str) -> Option<f64> {
+        let price = match cloud_type.trim().to_ascii_uppercase().as_str() {
+            "SECURE" => self.secure_price,
+            "COMMUNITY" => self.community_price,
+            _ => None,
+        };
+        price.filter(|value| value.is_finite() && *value > 0.0)
+    }
+
     /// Provider identity accepted by the Pod API. GraphQL normally supplies
     /// `id`; older/alternate inventory shapes may supply `gpuId` instead.
     pub fn authoritative_type_id(&self) -> Option<&str> {
@@ -632,7 +661,7 @@ impl RunPodClient {
     /// Stock status is aggregated: the highest stock level across all DCs.
     pub async fn gpu_types(&self) -> Result<Vec<GpuType>> {
         let query = serde_json::json!({
-            "query": "query { gpuTypes { id displayName memoryInGb secureCloud communityCloud } dataCenters { gpuAvailability { displayName stockStatus } } }"
+            "query": "query { gpuTypes { id displayName memoryInGb secureCloud communityCloud securePrice communityPrice } dataCenters { gpuAvailability { displayName stockStatus } } }"
         });
         let body = self.graphql(&query).await?;
         let data = body
@@ -898,6 +927,34 @@ pub const GPU_PREFERENCE: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rent confirm states RunPod's own on-demand rate for the cloud the
+    /// pod will run on; a missing, zero, or non-finite price says nothing.
+    #[test]
+    fn gpu_type_hourly_price_follows_the_cloud_type() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "NVIDIA L40S",
+            "displayName": "L40S",
+            "securePrice": 1.44,
+            "communityPrice": 0.79
+        }))
+        .unwrap();
+        assert_eq!(gpu.hourly_price("SECURE"), Some(1.44));
+        assert_eq!(gpu.hourly_price("community"), Some(0.79));
+        assert_eq!(gpu.hourly_price("what"), None);
+
+        let unpriced: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "x",
+            "displayName": "x",
+            "securePrice": 0.0
+        }))
+        .unwrap();
+        assert_eq!(unpriced.hourly_price("SECURE"), None);
+        assert_eq!(unpriced.hourly_price("COMMUNITY"), None);
+        // Absent on the wire stays absent when re-serialized for a client.
+        let json = serde_json::to_value(&unpriced).unwrap();
+        assert!(json.get("communityPrice").is_none());
+    }
 
     #[test]
     fn gpu_type_authority_prefers_id_then_gpu_id_and_rejects_blank_values() {

@@ -1323,6 +1323,7 @@ mod tests {
             queue_paused: None,
             instance_id: instance_id.map(String::from),
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         })

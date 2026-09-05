@@ -648,6 +648,7 @@ fn extract_request_fields(
         distill_strength_high,
         distill_strength_low,
         placement,
+        save_to_gallery,
     } = request;
 
     let mut records = Vec::new();
@@ -829,6 +830,7 @@ fn extract_request_fields(
         distill_strength_high,
         distill_strength_low,
         placement,
+        save_to_gallery,
     };
     let request_json = serde_json::to_string(&sanitized).map_err(QueueMediaError::Serialize)?;
     ensure_json_is_authority_free(&request_json)?;
