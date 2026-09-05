@@ -14,3 +14,8 @@
 - **A machine's Storage card says what the pictures take.** `/api/status`
   carries the gallery's bytes and print count, live and trashed, summed from
   the host's own records.
+- **Save every result can be switched off.** With the new inspector toggle
+  off, each print is published and then moved straight to the trash on the
+  host, so a throwaway never clutters My images yet stays recoverable until
+  the trash empties. Not offered for a sequence; a requested Framewise
+  upscale still runs, and its own result still saves.
