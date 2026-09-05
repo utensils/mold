@@ -210,9 +210,8 @@ const requiredH3DownloadFacts = [
   '2 to 50 terminal-inclusive sampler grid points',
   // Metal stopped being an unimplemented backend in #1164 and, since #1323, is
   // admitted by the frozen contract and shipped in the macOS artifacts -- but
-  // no H3 checkpoint has ever completed a render on it. All three strings are
-  // pinned because the interesting way this doc goes wrong is describing Metal
-  // as qualified, or quietly dropping the caveat.
+  // no retained end-to-end Metal render is qualified. Pin the qualification
+  // caveat and phase-streaming facts so disk size is not described as residency.
   'The CPU backend remains unavailable',
   // Both compact task partitions execute since #825. Pinned because the
   // interesting way this doc goes wrong is leaving the old "Ref2VA executes on
@@ -221,7 +220,8 @@ const requiredH3DownloadFacts = [
   'Supported Ref2VA request',
   'order is authority',
   'correctness-only',
-  'no H3 checkpoint has ever completed a render on Metal',
+  'no retained H3 end-to-end Metal render has been qualified',
+  'streams Qwen language layers and DiT blocks',
   'every territory',
   'shared-server, and hosted paths',
   'model distribution or redistribution',
