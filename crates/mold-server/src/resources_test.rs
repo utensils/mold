@@ -163,7 +163,7 @@ fn metal_telemetry_spends_the_host_samples_available_pool() {
     // excludes pages a broader sysinfo estimate might count as reclaimable.
     for available in [0, 7 << 30, 19 << 30] {
         ram.available = Some(available);
-        let gpu = crate::resources::metal_snapshot_from_ram(&ram);
+        let gpu = crate::resources::metal_snapshot_from_ram(&ram, |_, _| None);
         assert_eq!(gpu.vram_total - gpu.vram_used, available);
         assert_eq!(gpu.vram_total, ram.total);
         assert_eq!(gpu.vram_used_by_mold, None);
@@ -174,7 +174,7 @@ fn metal_telemetry_spends_the_host_samples_available_pool() {
 fn unavailable_unified_sample_is_not_zero_capacity() {
     let ram = crate::resources::ram_snapshot_from_system_with_available(|_| None);
     assert_eq!(ram.available, None, "a failed query is not a measured zero");
-    let gpu = crate::resources::metal_snapshot_from_ram(&ram);
+    let gpu = crate::resources::metal_snapshot_from_ram(&ram, |_, _| None);
     assert_eq!(
         gpu.vram_used, ram.used,
         "retain the existing estimated fallback"
@@ -182,7 +182,7 @@ fn unavailable_unified_sample_is_not_zero_capacity() {
 
     let zero = crate::resources::ram_snapshot_from_system_with_available(|_| Some(0));
     assert_eq!(zero.available, Some(0));
-    let gpu = crate::resources::metal_snapshot_from_ram(&zero);
+    let gpu = crate::resources::metal_snapshot_from_ram(&zero, |_, _| None);
     assert_eq!(
         gpu.vram_used, gpu.vram_total,
         "a successful zero sample must block"
@@ -447,5 +447,42 @@ fn live_nvml_join_matches_every_visible_full_cuda_gpu_by_uuid() {
             });
         assert_eq!(snapshot.backend, GpuBackend::Cuda);
         assert!(snapshot.vram_total >= snapshot.vram_used);
+    }
+}
+
+#[test]
+fn metal_policy_receives_the_shared_host_observation_without_estimated_fallback() {
+    use mold_core::metal_memory::{MetalMemorySnapshot, MetalWiredLimit};
+    let gib = 1 << 30;
+    let mut ram = fake_snapshot().system_ram;
+    ram.total = 32 * gib;
+    ram.used = gib;
+    for (available, expected) in [
+        (Some(0), Some(0)),
+        (Some(19 * gib), Some(11 * gib)),
+        (None, None),
+    ] {
+        ram.available = available;
+        let gpu = crate::resources::metal_snapshot_from_ram(&ram, |physical, observed| {
+            assert_eq!(physical, Some(32 * gib));
+            assert_eq!(observed, available);
+            Some(
+                MetalMemorySnapshot {
+                    wired_limit: MetalWiredLimit::Automatic,
+                    physical_bytes: physical,
+                    available_host_bytes: observed,
+                    recommended_bytes: Some(24 * gib),
+                    allocated_bytes: Some(4 * gib),
+                    effective_capacity_bytes: None,
+                    allocation_headroom_bytes: None,
+                    error: None,
+                }
+                .resolve(),
+            )
+        });
+        assert_eq!(
+            gpu.metal_memory.unwrap().allocation_headroom_bytes,
+            expected
+        );
     }
 }

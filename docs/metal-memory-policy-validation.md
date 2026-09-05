@@ -1,9 +1,10 @@
 # Metal memory policy validation
 
-Branch: `feat/metal-memory-policy`. Implementation base: `c6b925473`.
-PR [#1592](https://github.com/utensils/mold/pull/1592) is closed, unmerged, at the
-user's request. Its running CI was cancelled; subsequent validation is local.
-No replacement PR or automatic CI run is required for this delivery.
+Branch: `feat/metal-memory-policy`. Original implementation base: `c6b925473`;
+rebased onto patch repair `087f779af`. Delivery uses the existing
+PR [#1592](https://github.com/utensils/mold/pull/1592), reopened after v0.27.1
+publication. Required sequencing: patch first, then exact-head feature checks
+and merge, with branch protection unchanged.
 
 ## Completed local checks
 
@@ -77,3 +78,16 @@ Rust formatting all passed. The full device-registry suite also passed 14/14.
 Fable's final review of the follow-up returned no findings and verified the
 actual pinned Candle revision. The completion commit only records this
 evidence, closes the checklist and corrects a test comment.
+
+## Patch-base integration
+
+The rebase preserves #1593's shared host-memory observation and unified phase
+budgets. Metal policy collection now accepts that same host observation, so
+server telemetry does not take a second Mach sample or substitute an estimated
+available value when the authoritative observation is missing. A regression
+covers zero, known and unavailable host headroom. The newer unified scheduler
+fixtures provide the Metal policy that admission now requires.
+
+Before these adjustments, the rebased server tests failed to compile at the
+new snapshot field and helper call sites. Afterward, all 3 unified-memory
+tests, the new shared-host regression, and all 18 resource tests passed.

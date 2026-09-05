@@ -29,6 +29,28 @@ pub fn snapshot(ordinal: usize) -> Option<MetalMemorySnapshot> {
     }
     #[cfg(all(target_os = "macos", feature = "metal"))]
     {
+        snapshot_with_host(
+            ordinal,
+            crate::device::total_system_memory_bytes(),
+            crate::device::available_system_memory_bytes(),
+        )
+    }
+    #[cfg(not(all(target_os = "macos", feature = "metal")))]
+    {
+        let _ = ordinal;
+        None
+    }
+}
+
+/// Observe Metal against an existing authoritative host sample. Server resource
+/// collection uses this so the host and device budgets share one Mach reading.
+pub fn snapshot_with_host(
+    ordinal: usize,
+    physical_bytes: Option<u64>,
+    available_host_bytes: Option<u64>,
+) -> Option<MetalMemorySnapshot> {
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
         let wired = read_wired_limit().map_err(|error| error.to_string());
         let metal = crate::device::metal_device(ordinal)
             .and_then(|device| {
@@ -42,13 +64,13 @@ pub fn snapshot(ordinal: usize) -> Option<MetalMemorySnapshot> {
         Some(from_readings(
             wired,
             metal,
-            crate::device::total_system_memory_bytes(),
-            crate::device::available_system_memory_bytes(),
+            physical_bytes,
+            available_host_bytes,
         ))
     }
     #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
-        let _ = ordinal;
+        let _ = (ordinal, physical_bytes, available_host_bytes);
         None
     }
 }

@@ -487,16 +487,20 @@ pub fn parse_nvidia_smi_line(line: &str) -> Option<(usize, String, u64, u64)> {
 use mold_core::{CpuSnapshot, RamSnapshot};
 use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 
-/// Project one host sample onto Metal's shared physical pool. The scheduler
-/// derives headroom from `total - used`, so that subtraction must recover
-/// exactly the available bytes the host snapshot reports.
+/// Project one host sample onto Metal's shared physical pool and pass that
+/// same observation to its working-set policy. The legacy `total - used`
+/// projection still recovers host availability; admission reads the separate
+/// Metal policy and never replaces an unavailable host observation with an estimate.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn metal_snapshot_from_ram(
     ram: &RamSnapshot,
-    metal_memory: Option<mold_core::metal_memory::MetalMemorySnapshot>,
+    sample_policy: impl FnOnce(
+        Option<u64>,
+        Option<u64>,
+    ) -> Option<mold_core::metal_memory::MetalMemorySnapshot>,
 ) -> GpuSnapshot {
     GpuSnapshot {
-        metal_memory,
+        metal_memory: sample_policy((ram.total > 0).then_some(ram.total), ram.available),
         ordinal: 0,
         name: "Apple Metal GPU".into(),
         backend: GpuBackend::Metal,
@@ -521,7 +525,9 @@ pub fn metal_snapshot() -> Vec<GpuSnapshot> {
     {
         vec![metal_snapshot_from_ram(
             &ram_snapshot(),
-            mold_inference::metal_memory::snapshot(0),
+            |total, available| {
+                mold_inference::metal_memory::snapshot_with_host(0, total, available)
+            },
         )]
     }
     #[cfg(not(target_os = "macos"))]
@@ -807,10 +813,9 @@ fn collect_gpus(inventory: Option<&[TelemetryTarget]>, ram: &RamSnapshot) -> Vec
     {
         // One sample feeds both host and device telemetry, not two reads of
         // a shared physical pool taken at different moments.
-        let snapshots = vec![metal_snapshot_from_ram(
-            ram,
-            mold_inference::metal_memory::snapshot(0),
-        )];
+        let snapshots = vec![metal_snapshot_from_ram(ram, |total, available| {
+            mold_inference::metal_memory::snapshot_with_host(0, total, available)
+        })];
         return match inventory {
             Some(inventory)
                 if !inventory
