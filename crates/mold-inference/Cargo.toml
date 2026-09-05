@@ -26,7 +26,7 @@ cuda = [
     "mold-candle/cuda",
     "dep:cudarc",
 ]
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "mold-candle/metal"]
+metal = ["dep:objc2-metal", "candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "mold-candle/metal"]
 # FlashAttention v2 dispatch path. Implies `cuda` (flash-attn is CUDA-only).
 # Off by default — pulls in the candle-flash-attn build, which requires the
 # CUDA toolkit. Tensors that aren't CUDA + fp16/bf16 transparently fall back
@@ -209,3 +209,6 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 zeroize = "=1.8.2"
 fdk-aac = { version = "0.8", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = ["std", "MTLDevice"] }

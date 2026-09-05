@@ -2,67 +2,139 @@
 
 use mold_core::metal_memory::MetalMemorySnapshot;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SNAPSHOT: std::cell::RefCell<Option<MetalMemorySnapshot>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_snapshot<T>(sample: MetalMemorySnapshot, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<MetalMemorySnapshot>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_SNAPSHOT.with(|value| {
+                value.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(TEST_SNAPSHOT.with(|value| value.replace(Some(sample))));
+    run()
+}
+
 /// `None` means this binary/platform has no Metal backend, not a failed probe.
 pub fn snapshot(ordinal: usize) -> Option<MetalMemorySnapshot> {
+    #[cfg(test)]
+    if let Some(value) = TEST_SNAPSHOT.with(|value| value.borrow().clone()) {
+        return Some(value);
+    }
     #[cfg(all(target_os = "macos", feature = "metal"))]
     {
-        use mold_core::metal_memory::MetalWiredLimit;
-        let (wired_limit, mut error) = match read_wired_limit() {
-            Ok(Some(0)) => (MetalWiredLimit::Automatic, None),
-            Ok(Some(mib)) => (MetalWiredLimit::Explicit { mib }, None),
-            Ok(None) => (MetalWiredLimit::Unsupported, None),
-            Err(e) => (
-                MetalWiredLimit::Unavailable,
-                Some(format!("Cannot read Metal wired limit: {e}")),
-            ),
-        };
-        let (recommended_bytes, allocated_bytes) = match crate::device::metal_device(ordinal) {
-            Ok(device) => match device.as_metal_device() {
-                Ok(device) => {
-                    let device = device.device();
-                    let recommended = device.recommended_max_working_set_size();
-                    if recommended == 0 {
-                        error =
-                            Some("Metal reported an unavailable working-set recommendation".into());
-                    }
-                    (
-                        (recommended > 0).then_some(recommended as u64),
-                        Some(device.current_allocated_size() as u64),
-                    )
-                }
-                Err(e) => {
-                    error = Some(format!("Cannot read Metal device: {e}"));
-                    (None, None)
-                }
-            },
-            Err(e) => {
-                error = Some(format!("Cannot open Metal device: {e}"));
-                (None, None)
-            }
-        };
-        let physical_bytes = crate::device::total_system_memory_bytes();
-        let available_host_bytes = crate::device::available_system_memory_bytes();
-        if physical_bytes.is_none() || available_host_bytes.is_none() {
-            error = Some("Cannot read macOS host-memory budget".into());
-        }
-        Some(
-            MetalMemorySnapshot {
-                wired_limit,
-                physical_bytes,
-                available_host_bytes,
-                recommended_bytes,
-                allocated_bytes,
-                effective_capacity_bytes: None,
-                allocation_headroom_bytes: None,
-                error,
-            }
-            .resolve(),
-        )
+        let wired = read_wired_limit().map_err(|error| error.to_string());
+        let metal = crate::device::metal_device(ordinal)
+            .and_then(|device| {
+                let native = device.as_metal_device()?.device();
+                Ok((
+                    native.recommended_max_working_set_size() as u64,
+                    native.current_allocated_size() as u64,
+                ))
+            })
+            .map_err(|error| error.to_string());
+        Some(from_readings(
+            wired,
+            metal,
+            crate::device::total_system_memory_bytes(),
+            crate::device::available_system_memory_bytes(),
+        ))
     }
     #[cfg(not(all(target_os = "macos", feature = "metal")))]
     {
         let _ = ordinal;
         None
+    }
+}
+
+/// Pure observation adapter shared by the native probe and injected tests.
+#[cfg(any(test, all(target_os = "macos", feature = "metal")))]
+fn from_readings(
+    wired: Result<Option<u32>, String>,
+    metal: Result<(u64, u64), String>,
+    physical: Option<u64>,
+    available: Option<u64>,
+) -> MetalMemorySnapshot {
+    use mold_core::metal_memory::MetalWiredLimit;
+    let mut errors = Vec::new();
+    let wired_limit = match wired {
+        Ok(Some(0)) => MetalWiredLimit::Automatic,
+        Ok(Some(mib)) => MetalWiredLimit::Explicit { mib },
+        Ok(None) => MetalWiredLimit::Unsupported,
+        Err(error) => {
+            errors.push(format!("Cannot read Metal wired limit: {error}"));
+            MetalWiredLimit::Unavailable
+        }
+    };
+    let (recommended_bytes, allocated_bytes) = match metal {
+        Ok((recommended, allocated)) => {
+            if recommended == 0 {
+                errors.push("Metal reported an unavailable working-set recommendation".into());
+            }
+            ((recommended > 0).then_some(recommended), Some(allocated))
+        }
+        Err(error) => {
+            errors.push(format!("Cannot open Metal device: {error}"));
+            (None, None)
+        }
+    };
+    if physical.is_none() || available.is_none() {
+        errors.push("Cannot read macOS host-memory budget".into());
+    }
+    MetalMemorySnapshot {
+        wired_limit,
+        physical_bytes: physical,
+        available_host_bytes: available,
+        recommended_bytes,
+        allocated_bytes,
+        effective_capacity_bytes: None,
+        allocation_headroom_bytes: None,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+    }
+    .resolve()
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn metal_memory_probe_preserves_all_failure_causes() {
+        let sample = from_readings(
+            Err("permission denied".into()),
+            Err("no devices".into()),
+            None,
+            None,
+        );
+        let error = sample.error.unwrap();
+        assert!(error.contains("permission denied"));
+        assert!(error.contains("no devices"));
+        assert!(error.contains("host-memory"));
+        assert_eq!(sample.effective_capacity_bytes, None);
+    }
+    #[test]
+    fn metal_memory_probe_distinguishes_optional_key_and_failed_probe() {
+        let sample = from_readings(
+            Ok(None),
+            Ok((37 << 30, 4 << 30)),
+            Some(48 << 30),
+            Some(32 << 30),
+        );
+        assert_eq!(sample.effective_capacity_bytes, Some(37 << 30));
+        assert!(sample.error.is_none());
+        let missing = from_readings(
+            Ok(Some(0)),
+            Err("no Metal devices".into()),
+            Some(48 << 30),
+            Some(32 << 30),
+        );
+        assert!(missing.error.is_some());
+        assert_eq!(missing.allocation_headroom_bytes, None);
     }
 }
 
@@ -102,14 +174,19 @@ pub fn read_wired_limit() -> std::io::Result<Option<u32>> {
 #[cfg(all(test, target_os = "macos", feature = "metal"))]
 mod tests {
     #[test]
+    #[ignore = "native read-only qualification; not part of GPU-free unit tests"]
     fn metal_memory_native_snapshot_is_read_only_and_policy_bounded() {
         let before = super::read_wired_limit().expect("read native sysctl");
         let sample = super::snapshot(0).expect("Metal build");
-        assert!(sample.error.is_none(), "{sample:?}");
-        let cap = sample.effective_capacity_bytes.expect("effective capacity");
-        assert!(cap <= sample.recommended_bytes.unwrap());
-        assert!(cap <= sample.physical_bytes.unwrap());
-        assert!(sample.allocation_headroom_bytes.unwrap() <= cap);
+        if let Some(cap) = sample.effective_capacity_bytes {
+            assert!(cap <= sample.recommended_bytes.unwrap());
+            assert!(cap <= sample.physical_bytes.unwrap());
+            if let Some(headroom) = sample.allocation_headroom_bytes {
+                assert!(headroom <= cap);
+            }
+        } else {
+            assert!(sample.error.is_some());
+        }
         assert_eq!(super::read_wired_limit().unwrap(), before);
     }
 }

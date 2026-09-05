@@ -749,10 +749,12 @@ impl DeviceRegistry {
                     activity
                 };
                 let metal_memory = telemetry.and_then(|sample| sample.metal_memory.as_ref());
-                let metal_budget_unavailable = metal_memory.is_some_and(|sample| {
-                    sample.effective_capacity_bytes.is_none()
-                        || sample.allocation_headroom_bytes.is_none()
-                });
+                let metal_budget_unavailable = (device.backend == GpuBackend::Metal
+                    && metal_memory.is_none())
+                    || metal_memory.is_some_and(|sample| {
+                        sample.effective_capacity_bytes.is_none()
+                            || sample.allocation_headroom_bytes.is_none()
+                    });
                 let schedulable = !metal_budget_unavailable
                     && admin_state == DeviceAdminState::Enabled
                     && health == DeviceHealth::Healthy
@@ -850,8 +852,14 @@ impl DeviceRegistry {
                         .map_or(0, |gpu| gpu.free_vram_bytes);
                     SchedulerDeviceProjection {
                         metal_memory: metal_memory.cloned(),
-                        capacity_bytes: metal_memory
-                            .map_or(total, |sample| sample.effective_capacity_bytes.unwrap_or(0)),
+                        capacity_bytes: metal_memory.map_or(
+                            if device.backend == GpuBackend::Metal {
+                                0
+                            } else {
+                                total
+                            },
+                            |sample| sample.effective_capacity_bytes.unwrap_or(0),
+                        ),
                         id,
                         backend: device.backend,
                         ordinal,
@@ -862,6 +870,9 @@ impl DeviceRegistry {
                         schedulable: info.schedulable,
                         sampled_free_vram_bytes: metal_memory.map_or_else(
                             || {
+                                if device.backend == GpuBackend::Metal {
+                                    return 0;
+                                }
                                 info.memory
                                     .used_bytes
                                     .map_or(discovered_free_vram_bytes, |used| {
@@ -1548,6 +1559,15 @@ mod tests {
             workers: Vec::new().into(),
         };
         let jobs = crate::job_registry::JobRegistry::new();
+        let waiting = registry.canonical_snapshot(&pool, None, &jobs);
+        assert_eq!(waiting.scheduler_devices[0].capacity_bytes, 0);
+        assert_eq!(waiting.scheduler_devices[0].sampled_free_vram_bytes, 0);
+        assert_eq!(
+            waiting.device_state.devices[0]
+                .unschedulable_reason
+                .as_deref(),
+            Some("metal_memory_unavailable")
+        );
         let snapshot = registry.canonical_snapshot(&pool, Some(&resources), &jobs);
         assert_eq!(
             snapshot.scheduler_devices[0].sampled_free_vram_bytes,

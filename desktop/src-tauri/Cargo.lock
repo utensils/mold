@@ -4100,6 +4100,7 @@ dependencies = [
  "mold-ai-core",
  "moxcms",
  "mp4",
+ "objc2-metal",
  "openh264",
  "png 0.18.1",
  "prost",

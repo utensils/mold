@@ -1989,7 +1989,7 @@ pub(crate) async fn ensure_model_ready(
             let load_start = std::time::Instant::now();
             // Sample VRAM baseline before load so we can record the new
             // model's per-load delta rather than the device-global usage.
-            let vram_baseline = mold_inference::device::vram_in_use_bytes(0);
+            let vram_baseline = mold_inference::device::vram_load_baseline(0);
             let join_result = tokio::task::spawn_blocking(move || {
                 tracing::info!(model = %model_log, "reloading cached engine...");
                 if let Err(e) = engine.load() {
@@ -2230,7 +2230,7 @@ async fn create_and_load_engine(
     let load_start = std::time::Instant::now();
     // Sample VRAM baseline before load so we can record the new model's
     // per-load delta rather than the device-global usage.
-    let vram_baseline = mold_inference::device::vram_in_use_bytes(0);
+    let vram_baseline = mold_inference::device::vram_load_baseline(0);
     new_engine = tokio::task::spawn_blocking(move || {
         tracing::info!(model = %model_log, "loading model...");
         new_engine.load().map_err(|e| {

@@ -1245,7 +1245,18 @@ fn metal_available_after_reclaim(
     ordinal: usize,
     reclaimable: u64,
 ) -> Result<Option<u64>, ApiError> {
-    let Some(sample) = mold_inference::metal_memory::snapshot(ordinal) else {
+    metal_available_from_sample(
+        mold_inference::metal_memory::snapshot(ordinal).as_ref(),
+        reclaimable,
+    )
+}
+
+#[cfg(not(feature = "cuda"))]
+fn metal_available_from_sample(
+    sample: Option<&mold_core::metal_memory::MetalMemorySnapshot>,
+    reclaimable: u64,
+) -> Result<Option<u64>, ApiError> {
+    let Some(sample) = sample else {
         return Ok(None);
     };
     if sample.allocation_headroom_bytes.is_none() {
@@ -3280,5 +3291,52 @@ mod fail_closed_tests {
             !ComponentRole::IdentityAdapter.is_host_only_for_test(),
             "the cross-attention adapter is resident on the generation device"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "cuda")))]
+mod metal_policy_tests {
+    use super::*;
+    use mold_core::metal_memory::{MetalMemorySnapshot, MetalWiredLimit};
+
+    #[test]
+    fn metal_memory_warm_admission_credits_weights_once_and_rechecks_changed_policy() {
+        let gib = 1 << 30;
+        let mut sample = MetalMemorySnapshot {
+            wired_limit: MetalWiredLimit::Automatic,
+            physical_bytes: Some(48 * gib),
+            available_host_bytes: Some(32 * gib),
+            recommended_bytes: Some(37 * gib),
+            allocated_bytes: Some(25 * gib),
+            effective_capacity_bytes: None,
+            allocation_headroom_bytes: None,
+            error: None,
+        }
+        .resolve();
+        // Same native delta recorded by the loader: 25 GiB after - 1 GiB before.
+        let resident = 24 * gib;
+        let admits = |sample: &MetalMemorySnapshot, credit| {
+            let available = metal_available_from_sample(Some(sample), credit)?.unwrap();
+            check_planned_memory_budget_with_resident("warm", 30 * gib, available, 0, "")
+        };
+        assert!(admits(&sample, resident).is_ok());
+        assert!(
+            admits(&sample, 0).is_err(),
+            "missing loader attribution double-charges weights"
+        );
+        sample.wired_limit = MetalWiredLimit::Explicit { mib: 16 * 1024 };
+        sample = sample.resolve();
+        assert!(
+            admits(&sample, resident).is_err(),
+            "resident credit must not defeat a lowered policy"
+        );
+        sample.wired_limit = MetalWiredLimit::Unavailable;
+        sample.error = Some("permission denied".into());
+        sample = sample.resolve();
+        assert!(admits(&sample, resident)
+            .unwrap_err()
+            .error
+            .contains("permission denied"));
+        assert_eq!(metal_available_from_sample(None, resident).unwrap(), None);
     }
 }

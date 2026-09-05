@@ -3214,12 +3214,15 @@ impl Coordinator {
                     worker_generation: ready.map_or(0, |ready| ready.generation),
                     available_vram_bytes: device.metal_memory.as_ref().map_or_else(
                         || {
+                            if device.backend == mold_core::GpuBackend::Metal {
+                                return device.capacity_bytes;
+                            }
                             schedulable_available_vram_bytes(
                                 device.sampled_free_vram_bytes,
                                 reclaimable_cache_bytes,
                                 device.sampled_mold_vram_bytes,
                                 has_active_work,
-                                device.capacity_bytes,
+                                worker.map_or(0, |worker| worker.gpu.total_vram_bytes),
                             )
                         },
                         |sample| sample.with_reclaimable(reclaimable_cache_bytes),
@@ -3260,26 +3263,27 @@ impl Coordinator {
     /// to a pinned request's terminal/transient verdict.
     fn total_vram_bytes_by_device_id(&self) -> BTreeMap<String, u64> {
         let resources = self.state.resources.latest();
-        let canonical = self.state.device_registry.canonical_snapshot(
-            &self.state.gpu_pool,
-            resources.as_ref(),
-            &self.state.job_registry,
-        );
-        let capacities = canonical
-            .scheduler_devices
-            .into_iter()
-            .map(|device| (device.id, device.capacity_bytes))
-            .collect::<BTreeMap<_, _>>();
         self.state
             .gpu_pool
             .workers
             .iter()
             .map(|worker| {
                 let id = worker_device_id(&worker);
-                let capacity = capacities
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(worker.gpu.total_vram_bytes);
+                let capacity = if worker.gpu.backend == mold_core::GpuBackend::Metal {
+                    resources
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            snapshot.gpus.iter().find(|gpu| {
+                                gpu.backend == mold_core::GpuBackend::Metal
+                                    && gpu.ordinal as usize == worker.gpu.ordinal
+                            })
+                        })
+                        .and_then(|gpu| gpu.metal_memory.as_ref())
+                        .and_then(|sample| sample.effective_capacity_bytes)
+                        .unwrap_or(0)
+                } else {
+                    worker.gpu.total_vram_bytes
+                };
                 (id, capacity)
             })
             .collect()

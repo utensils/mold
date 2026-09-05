@@ -625,14 +625,40 @@ pub fn release_pooled_metal_memory(ordinal: usize) {
     }
 }
 
+#[cfg(any(test, all(target_os = "macos", feature = "metal")))]
+fn checked_metal_open<T>(
+    ordinal: usize,
+    count: usize,
+    open: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        ordinal < count,
+        "Metal device {ordinal} is unavailable ({count} devices found)"
+    );
+    open()
+}
+
 /// Open Metal `ordinal`, reusing this process's existing device for that GPU.
 ///
 /// Every Metal device construction in Mold must go through here. Calling
 /// `Device::new_metal` directly reintroduces the split-identity bug above.
 pub fn metal_device(ordinal: usize) -> anyhow::Result<candle_core::Device> {
     memoized(METAL_DEVICES.get_or_init(Default::default), ordinal, || {
-        candle_core::Device::new_metal(ordinal)
-            .map_err(|error| anyhow::anyhow!("failed to open Metal device {ordinal}: {error}"))
+        let open = || {
+            candle_core::Device::new_metal(ordinal)
+                .map_err(|error| anyhow::anyhow!("failed to open Metal device {ordinal}: {error}"))
+        };
+        // Candle indexes with swap_remove before returning Result. Validate
+        // inside the memoized constructor so invalid ordinals cannot panic
+        // while holding (and poison) the process-wide device cache.
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            checked_metal_open(ordinal, objc2_metal::MTLCopyAllDevices().len(), open)
+        }
+        #[cfg(not(all(target_os = "macos", feature = "metal")))]
+        {
+            open()
+        }
     })
 }
 
@@ -2165,9 +2191,9 @@ pub fn total_system_memory_bytes() -> Option<u64> {
 /// allocation, so that sample falls sharply from the verification I/O itself
 /// and can make a 48 GB Mac report only ~20 GB even though the reviewed 33.9 GB
 /// runtime fits while retaining the canonical host safety floor. For this
-/// explicit large-model path, use installed unified memory minus the same
-/// `max(15%, 8 GiB)` floor as the host ledger. If installed memory cannot be
-/// queried, retain the live sample unchanged.
+/// explicit large-model path, use the shared policy total (including the
+/// Metal recommendation, explicit kernel cap and host floor). A failed native
+/// probe returns zero. Only builds without Metal retain the host fallback.
 pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u64 {
     if let Some(sample) = crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)) {
         return sample.effective_capacity_bytes.unwrap_or(0);
@@ -2186,12 +2212,18 @@ pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u6
 /// busy Mac retains fewer model blocks and streams the remainder instead of
 /// reclaiming the memory needed by the desktop and other applications.
 pub fn metal_live_allocation_budget(live_available_bytes: u64) -> u64 {
+    if let Some(sample) = crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)) {
+        return sample.physical_bytes.map_or(0, |total| {
+            live_available_bytes
+                .min(total)
+                .saturating_sub(mold_core::metal_memory::host_safety_floor(total))
+                .min(sample.allocation_headroom_bytes.unwrap_or(0))
+        });
+    }
     let total = total_system_memory_bytes().unwrap_or(live_available_bytes);
-    let safety_floor = mold_core::metal_memory::host_safety_floor(total);
-    let host_budget = live_available_bytes.min(total).saturating_sub(safety_floor);
-    crate::metal_memory::snapshot(thread_gpu_ordinal().unwrap_or(0)).map_or(host_budget, |sample| {
-        host_budget.min(sample.allocation_headroom_bytes.unwrap_or(0))
-    })
+    live_available_bytes
+        .min(total)
+        .saturating_sub(mold_core::metal_memory::host_safety_floor(total))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2478,10 +2510,21 @@ pub fn vram_in_use_bytes(ordinal: usize) -> u64 {
         .unwrap_or(0)
 }
 
-/// Non-CUDA stub — no VRAM tracking available.
+/// Metal records native allocated bytes for per-load resident attribution.
+/// No-backend builds retain zero; telemetry keeps this separate from CUDA's
+/// legacy process-attribution fields.
 #[cfg(not(feature = "cuda"))]
-pub fn vram_in_use_bytes(_ordinal: usize) -> u64 {
-    0
+pub fn vram_in_use_bytes(ordinal: usize) -> u64 {
+    crate::metal_memory::snapshot(ordinal)
+        .and_then(|sample| sample.allocated_bytes)
+        .unwrap_or(0)
+}
+
+/// Load boundaries sweep unused Metal buffers before establishing the baseline,
+/// so allocator reuse cannot turn a newly resident engine into a zero delta.
+pub fn vram_load_baseline(ordinal: usize) -> u64 {
+    release_pooled_metal_memory(ordinal);
+    vram_in_use_bytes(ordinal)
 }
 
 /// Total VRAM (bytes) physically present on the specified GPU ordinal.
@@ -3952,28 +3995,35 @@ mod tests {
         used_system_swap_bytes().expect("macOS reports vm.swapusage");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn large_metal_capacity_retains_the_canonical_host_safety_floor() {
-        let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
-        let floor = (installed.saturating_mul(15) / 100).max(8 << 30);
-        let expected = crate::metal_memory::snapshot(0)
-            .map_or(installed.saturating_sub(floor), |sample| {
-                sample.effective_capacity_bytes.unwrap_or(0)
-            });
-        assert_eq!(metal_unified_capacity_with_safety_floor(1), expected);
-        assert!(floor >= 8 << 30);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn live_metal_budget_preserves_the_floor_under_current_pressure() {
-        let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
-        let floor = (installed.saturating_mul(15) / 100).max(8 << 30);
-        let live = installed.saturating_sub(4 << 30);
-        assert!(metal_live_allocation_budget(live) <= live - floor);
-        assert_eq!(metal_live_allocation_budget(floor), 0);
-        assert_eq!(metal_live_allocation_budget(floor / 2), 0);
+    fn metal_memory_stable_and_live_helpers_obey_the_same_injected_policy() {
+        use mold_core::metal_memory::{MetalMemorySnapshot, MetalWiredLimit};
+        let gib = 1 << 30;
+        let sample = MetalMemorySnapshot {
+            wired_limit: MetalWiredLimit::Explicit { mib: 16 * 1024 },
+            physical_bytes: Some(48 * gib),
+            available_host_bytes: Some(32 * gib),
+            recommended_bytes: Some(37 * gib),
+            allocated_bytes: Some(10 * gib),
+            effective_capacity_bytes: None,
+            allocation_headroom_bytes: None,
+            error: None,
+        }
+        .resolve();
+        crate::metal_memory::with_test_snapshot(sample.clone(), || {
+            assert_eq!(metal_unified_capacity_with_safety_floor(1), 16 * gib);
+            assert_eq!(metal_live_allocation_budget(32 * gib), 6 * gib);
+            assert_eq!(metal_live_allocation_budget(1), 0);
+        });
+        let failed = MetalMemorySnapshot {
+            wired_limit: MetalWiredLimit::Unavailable,
+            ..sample
+        }
+        .resolve();
+        crate::metal_memory::with_test_snapshot(failed, || {
+            assert_eq!(metal_unified_capacity_with_safety_floor(48 * gib), 0);
+            assert_eq!(metal_live_allocation_budget(48 * gib), 0);
+        });
     }
 
     // --- should_use_gpu: Metal always GPU ---
@@ -5087,6 +5137,43 @@ mod tests {
         unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
     }
 
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn metal_memory_load_delta_records_resident_weights() {
+        let sample = mold_core::metal_memory::MetalMemorySnapshot {
+            wired_limit: mold_core::metal_memory::MetalWiredLimit::Automatic,
+            physical_bytes: Some(48 << 30),
+            available_host_bytes: Some(32 << 30),
+            recommended_bytes: Some(37 << 30),
+            allocated_bytes: Some(25 << 30),
+            effective_capacity_bytes: None,
+            allocation_headroom_bytes: None,
+            error: None,
+        }
+        .resolve();
+        crate::metal_memory::with_test_snapshot(sample.clone(), || {
+            assert_eq!(vram_in_use_bytes(0), 25 << 30);
+            let recorded = vram_load_delta(0, 1 << 30);
+            assert_eq!(recorded, 24 << 30);
+            assert_eq!(sample.with_reclaimable(recorded), 36 << 30);
+            assert!(sample.allocation_headroom_bytes.unwrap() < 30 << 30);
+        });
+    }
+
+    #[test]
+    fn metal_memory_missing_ordinal_does_not_enter_candle_constructor() {
+        for (ordinal, count) in [(0, 0), (1, 1), (usize::MAX, 1)] {
+            let entered = std::cell::Cell::new(false);
+            assert!(checked_metal_open(ordinal, count, || {
+                entered.set(true);
+                Ok(())
+            })
+            .is_err());
+            assert!(!entered.get());
+        }
+        assert_eq!(checked_metal_open(0, 1, || Ok(7)).unwrap(), 7);
+    }
+
     // ── vram_load_delta ──────────────────────────────────────────────────
 
     /// `vram_load_delta` must be a pure `saturating_sub` against the
@@ -5094,6 +5181,7 @@ mod tests {
     /// `vram_in_use_bytes` returns 0, so the delta is always 0 — but the
     /// function shape (saturating_sub, not panic on underflow) must hold
     /// regardless of the live reading.
+    #[cfg(not(feature = "metal"))]
     #[test]
     fn vram_load_delta_is_saturating_sub() {
         // Without CUDA, vram_in_use_bytes(0) == 0, and 0.saturating_sub(N) == 0

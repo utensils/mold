@@ -6,19 +6,19 @@ Reviewer: Claude Fable 5.1 (`claude-fable-5-1`), via local Claude Code CLI,
 Fable found the total/incremental model sound but requested corrections before
 implementation. Findings and dispositions:
 
-| Finding | Disposition |
-| --- | --- |
-| Scheduler uses resource sampler/registry and a separate terminal-classification ceiling | Accepted; explicitly route both through policy |
-| Registry sysinfo and inference Mach available RAM differ | Accepted; use Mach free + inactive for policy in both |
-| In-engine free accessor is the critical choke point | Accepted; clamp it, not only discovery |
-| Lazy discovery plus unknown-budget refusal can deadlock startup | Accepted eager device probe; retain explicit refusal for actual supported-probe failure rather than RAM fallback |
-| Metal allocated count includes retained pool and should not activate legacy CUDA attribution | Accepted; separate additive policy field, sweep before post-drop sample |
-| Per-site total/incremental choices need a concrete table | Accepted in revised plan |
-| Stable H3 numbers and tests change | Accepted; injected samples and revised expectations |
-| Privileged group must return before Config/DB/log initialization | Accepted, including status |
-| Sysctl width, safety floor and registered daemon reset must be specified | Accepted; u32 MiB, existing floor, fixed-label bootout |
-| Read-only status, lenient client parsing and manual docs obligations | Accepted |
-| Split accounting and privileged administration into two PRs | Declined to honor user's explicit one-branch, one-PR requirement; isolate milestones in commits |
+| Finding                                                                                      | Disposition                                                                                                      |
+| -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Scheduler uses resource sampler/registry and a separate terminal-classification ceiling      | Accepted; explicitly route both through policy                                                                   |
+| Registry sysinfo and inference Mach available RAM differ                                     | Accepted; use Mach free + inactive for policy in both                                                            |
+| In-engine free accessor is the critical choke point                                          | Accepted; clamp it, not only discovery                                                                           |
+| Lazy discovery plus unknown-budget refusal can deadlock startup                              | Accepted eager device probe; retain explicit refusal for actual supported-probe failure rather than RAM fallback |
+| Metal allocated count includes retained pool and should not activate legacy CUDA attribution | Accepted; separate additive policy field, sweep before post-drop sample                                          |
+| Per-site total/incremental choices need a concrete table                                     | Accepted in revised plan                                                                                         |
+| Stable H3 numbers and tests change                                                           | Accepted; injected samples and revised expectations                                                              |
+| Privileged group must return before Config/DB/log initialization                             | Accepted, including status                                                                                       |
+| Sysctl width, safety floor and registered daemon reset must be specified                     | Accepted; u32 MiB, existing floor, fixed-label bootout                                                           |
+| Read-only status, lenient client parsing and manual docs obligations                         | Accepted                                                                                                         |
+| Split accounting and privileged administration into two PRs                                  | Declined to honor user's explicit one-branch, one-PR requirement; isolate milestones in commits                  |
 
 No kernel setting or inference job was changed/run for the review. Raw reviewer
 output is retained locally in ignored `tmp/metal-memory-review/plan-fable.txt`.
@@ -48,3 +48,28 @@ telemetry would weaken the architectural boundary without improving the ABI.
 The conservative exact not-loaded launchctl classification is retained; other
 errors must never be mistaken for an absent service. A stale unverified service
 gets concrete inspection/recovery commands rather than automatic deletion.
+
+## Full implementation review and corrections
+
+Claude Fable 5.1 reviewed `c6b925473..bdacbb0f0`, also inspecting the follow-up
+`86ff8c7dc`. Two high-severity findings were accepted:
+
+- Metal's pre-existing `vram_in_use_bytes` stub returned zero, making every
+  resident cache credit zero. Native allocated-byte deltas now populate that
+  ledger. Load baselines first release unused Candle pool buffers so recycled
+  allocations cannot erase the measured footprint. Injected regression tests
+  fail on the old stub and pass with the real observation; warm admission
+  accepts the recorded footprint once and still refuses a subsequently reduced
+  kernel policy.
+- Candle's constructor indexes its device list with `swap_remove`, which panics
+  for a missing ordinal. Validate the native device count before invoking that
+  constructor, returning an ordinary error without poisoning the shared cache.
+  An injected constructor proves missing ordinals never enter Candle.
+
+Also accepted: preserve simultaneous kernel/device/host probe errors; mark the
+pre-telemetry Metal budget unavailable; preserve CUDA's original no-worker
+capacity fallback; and read the latest capacity directly for terminal
+classification instead of building an entire canonical device snapshot.
+Stable and streaming helper tests now use injected policy observations. The
+native read-only qualification test is explicitly ignored in automated suites;
+no native GPU inference, kernel mutation or boot-policy installation was run.
