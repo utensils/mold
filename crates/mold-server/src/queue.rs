@@ -4079,13 +4079,15 @@ pub(crate) fn build_observed_dispatch(
                     .into_iter()
                     .filter(|plan| !failed.contains(&plan.device_ordinal))
                     .map(|plan| {
+                        let vram_bytes = plan.admission_vram_demand_bytes();
+                        let host_bytes = plan.admission_host_demand_bytes();
                         mold_scheduler::CandidatePlacement::new(
                             plan.device_id,
                             plan.execution_fingerprint,
-                            plan.predicted_host_increment_bytes,
+                            host_bytes,
                         )
                         .with_execution_equivalence(plan.execution_equivalence_fingerprint)
-                        .with_vram(plan.predicted_vram_peak_bytes)
+                        .with_vram(vram_bytes)
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
                         .with_static_timing(mold_scheduler::WorkKind::Generation)
                     })
