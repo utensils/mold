@@ -559,9 +559,7 @@ mod tests {
         let mut req = req("ltx-2.3-22b-distilled:fp8");
         req.enable_audio = Some(false);
         let temp_dir = tempfile::tempdir().unwrap();
-        let plan = engine
-            .materialize_request(&req, temp_dir.path(), &temp_dir.path().join("out.mp4"))
-            .unwrap();
+        let plan = engine.materialize_request(&req, temp_dir.path()).unwrap();
         assert_eq!(plan.preset.name, "ltx-2.3-22b");
         assert_eq!(plan.execution_graph.preset_name, "ltx-2.3-22b");
         assert_eq!(

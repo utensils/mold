@@ -209,12 +209,6 @@ pub(crate) fn normalize_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
         .unwrap_or_default()
 }
 
-pub(crate) fn camera_control_preset(
-    name: &str,
-) -> Option<&'static mold_core::ltx2_camera::Ltx2CameraControlPreset> {
-    mold_core::ltx2_camera::resolve_camera_control_preset(name).ok()
-}
-
 pub(crate) fn resolve_camera_control_preset_path(
     paths: &mold_core::ModelPaths,
     name: &str,
@@ -429,16 +423,6 @@ mod tests {
         let loras = normalize_loras(&req);
         assert_eq!(loras[0].path, "/tmp/one.safetensors");
         assert_eq!(loras[1].path, "/tmp/two.safetensors");
-    }
-
-    #[test]
-    fn camera_control_preset_aliases_are_supported() {
-        let preset = camera_control_preset("dolly-in").unwrap();
-        assert_eq!(
-            preset.hf_filename,
-            "ltx-2-19b-lora-camera-control-dolly-in.safetensors"
-        );
-        assert!(camera_control_preset("unknown").is_none());
     }
 
     fn temp_file(name: &str) -> std::path::PathBuf {

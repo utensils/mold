@@ -469,17 +469,6 @@ impl Ltx2Engine {
         })
     }
 
-    fn request_quantization(&self) -> Option<String> {
-        assets::request_quantization(&self.model_name)
-    }
-
-    #[allow(dead_code)]
-    fn camera_control_preset(
-        name: &str,
-    ) -> Option<&'static mold_core::ltx2_camera::Ltx2CameraControlPreset> {
-        lora::camera_control_preset(name)
-    }
-
     /// The still-image conditioning preprocessing contract for this
     /// checkpoint, resolved through the shared
     /// `mold_core::ltx2_preprocess` authority from the model name and the
@@ -512,7 +501,6 @@ impl Ltx2Engine {
         &self,
         req: &GenerateRequest,
         work_dir: &Path,
-        output_path: &Path,
     ) -> Result<Ltx2GeneratePlan> {
         let pipeline = self.select_pipeline(req)?;
         let is_ltx25 = matches!(
@@ -669,9 +657,6 @@ impl Ltx2Engine {
                 .text_projection_path
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
-            distilled_checkpoint_path: pipeline
-                .requires_distilled_checkpoint()
-                .then(|| self.paths.transformer.to_string_lossy().to_string()),
             distilled_lora_path: self
                 .paths
                 .distilled_lora
@@ -682,7 +667,6 @@ impl Ltx2Engine {
             duration_head_path,
             auto_duration,
             gemma_root: gemma_root.to_string_lossy().to_string(),
-            output_path: output_path.to_string_lossy().to_string(),
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
             prompt_tokens,
@@ -693,7 +677,6 @@ impl Ltx2Engine {
             frame_rate,
             num_inference_steps: req.steps,
             guidance: req.guidance,
-            quantization: self.request_quantization(),
             streaming_prefetch_count: Some(preset.streaming_prefetch_count),
             conditioning,
             image_preprocessing,
@@ -1007,7 +990,6 @@ impl Ltx2Engine {
         self.emit("Preparing native LTX-2 continuation");
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
-        let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let (source_frames, probe) = Self::load_extend_source(req, work_dir.path())?;
 
         let overlap = req.effective_extend_overlap_frames_for_family(Some("ltx2"));
@@ -1023,7 +1005,7 @@ impl Ltx2Engine {
         // the plan then supplies the model default — so validating `req`
         // directly would let a 30 fps clip be continued at 24 fps and
         // re-encoded at 24, silently retiming the footage we were handed.
-        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        let mut plan = self.materialize_request(req, work_dir.path())?;
 
         // The stitched output is one video, so the continuation has to render
         // on the source's own lattice. Rejecting is better than silently
@@ -1154,9 +1136,8 @@ impl Ltx2Engine {
         self.emit("Preparing native LTX-2 request");
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
-        let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let materialize_start = Instant::now();
-        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        let mut plan = self.materialize_request(req, work_dir.path())?;
         self.checkpoint()?;
         Self::log_timing("pipeline.materialize_request", materialize_start);
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
@@ -1346,8 +1327,7 @@ impl Ltx2Engine {
         }
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
-        let native_output = work_dir.path().join("ltx2-native-output.wav");
-        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        let mut plan = self.materialize_request(req, work_dir.path())?;
         self.checkpoint()?;
 
         let mut runtime = match self.native_runtime.take() {
@@ -1457,8 +1437,7 @@ impl Ltx2Engine {
         }
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
-        let native_output = work_dir.path().join("ltx2-native-output.mp4");
-        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        let mut plan = self.materialize_request(req, work_dir.path())?;
         apply_stage_sidecar_to_plan(&mut plan, hdr_sidecar);
         if let Some(token) = self.cancellation.as_ref() {
             token.checkpoint()?;
@@ -2341,7 +2320,7 @@ mod tests {
         control.model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV.to_string();
         control.ic_lora_control = Some("union".to_string());
         let error = engine
-            .materialize_request(&control, Path::new("/tmp"), Path::new("/tmp/out.mp4"))
+            .materialize_request(&control, Path::new("/tmp"))
             .unwrap_err();
         assert!(error.to_string().contains("not yet individually validated"));
 
@@ -2349,7 +2328,7 @@ mod tests {
         hdr.model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV.to_string();
         hdr.hdr_exr_dir = Some("/tmp/hdr".to_string());
         let error = engine
-            .materialize_request(&hdr, Path::new("/tmp"), Path::new("/tmp/out.mp4"))
+            .materialize_request(&hdr, Path::new("/tmp"))
             .unwrap_err();
         assert!(error.to_string().contains("HDR/EXR is deferred"));
     }
@@ -2812,9 +2791,7 @@ mod tests {
         req.height = 64;
         req.frames = Some(9);
         req.enable_audio = Some(false);
-        let plan = engine
-            .materialize_request(&req, temp.path(), &temp.path().join("out.mp4"))
-            .unwrap();
+        let plan = engine.materialize_request(&req, temp.path()).unwrap();
         assert_eq!(plan.vae_checkpoint_path, vae.to_string_lossy());
         assert!(!plan.vae_in_checkpoint);
         assert_eq!(
@@ -2843,27 +2820,6 @@ mod tests {
             );
         }
         serialize_to_file(&tensors, &None, path).unwrap();
-    }
-
-    #[test]
-    fn camera_control_preset_aliases_are_supported() {
-        let preset = Ltx2Engine::camera_control_preset("dolly-in").unwrap();
-        assert_eq!(
-            preset.hf_filename,
-            "ltx-2-19b-lora-camera-control-dolly-in.safetensors"
-        );
-        assert!(Ltx2Engine::camera_control_preset("unknown").is_none());
-    }
-
-    #[test]
-    fn fp8_models_use_fp8_cast_quantization() {
-        let engine = Ltx2Engine::new(
-            "ltx-2-19b-distilled:fp8".to_string(),
-            dummy_paths(),
-            LoadStrategy::Sequential,
-            0,
-        );
-        assert_eq!(engine.request_quantization(), Some("fp8-cast".to_string()));
     }
 
     #[test]
@@ -2955,10 +2911,7 @@ mod tests {
             cfg_start_step: None,
         };
         let temp_dir = tempfile::tempdir().unwrap();
-        let bridge = engine
-            .materialize_request(&req, temp_dir.path(), &temp_dir.path().join("out.mp4"))
-            .unwrap();
-        assert_eq!(bridge.quantization.as_deref(), Some("fp8-cast"));
+        let bridge = engine.materialize_request(&req, temp_dir.path()).unwrap();
         assert_eq!(bridge.streaming_prefetch_count, Some(2));
         assert_eq!(bridge.width, 960);
         assert_eq!(bridge.height, 576);
@@ -3256,20 +3209,17 @@ mod tests {
         engine.preset_hint = Some("2.6.0".to_string());
 
         let work_dir = tempfile::tempdir().unwrap();
-        let output = work_dir.path().join("out.mp4");
 
         // T2V on the same checkpoint stays available.
         let t2v = request(OutputFormat::Mp4, Some(false));
-        let plan = engine
-            .materialize_request(&t2v, work_dir.path(), &output)
-            .unwrap();
+        let plan = engine.materialize_request(&t2v, work_dir.path()).unwrap();
         assert!(plan.image_preprocessing.is_none());
 
         // I2V fails closed, naming the model and the header hint.
         let mut i2v = request(OutputFormat::Mp4, Some(false));
         i2v.source_image = Some(vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
         let err = engine
-            .materialize_request(&i2v, work_dir.path(), &output)
+            .materialize_request(&i2v, work_dir.path())
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("cv:12345"), "got: {msg}");
@@ -3290,12 +3240,10 @@ mod tests {
             runtime_session(),
         );
         let work_dir = tempfile::tempdir().unwrap();
-        let output = work_dir.path().join("out.mp4");
+
         let mut i2v = request(OutputFormat::Mp4, Some(false));
         i2v.source_image = Some(vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
-        let plan = engine
-            .materialize_request(&i2v, work_dir.path(), &output)
-            .unwrap();
+        let plan = engine.materialize_request(&i2v, work_dir.path()).unwrap();
         let profile = plan.image_preprocessing.expect("profile for staged image");
         assert_eq!(
             profile.generation,
@@ -3314,12 +3262,10 @@ mod tests {
             runtime_session(),
         );
         let work_dir = tempfile::tempdir().unwrap();
-        let output = work_dir.path().join("out.mp4");
+
         let mut i2v = request(OutputFormat::Mp4, Some(false));
         i2v.source_image = Some(vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
-        let plan = engine
-            .materialize_request(&i2v, work_dir.path(), &output)
-            .unwrap();
+        let plan = engine.materialize_request(&i2v, work_dir.path()).unwrap();
         let profile = plan.image_preprocessing.expect("profile for staged image");
         assert_eq!(
             profile.generation,
@@ -3342,10 +3288,8 @@ mod tests {
             req.hdr_exr_dir = dir.map(str::to_string);
             req.hdr_exr_full_float = dir.is_some();
             let work_dir = tempfile::tempdir().unwrap();
-            let output = work_dir.path().join("out.mp4");
-            engine
-                .materialize_request(&req, work_dir.path(), &output)
-                .unwrap()
+
+            engine.materialize_request(&req, work_dir.path()).unwrap()
         };
 
         // Without a window, the request-derived target is cleared.

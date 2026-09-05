@@ -20,15 +20,6 @@ pub(crate) fn gemma_root(paths: &ModelPaths) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("LTX-2 Gemma text encoder path has no parent directory"))
 }
 
-pub(crate) fn request_quantization(model_name: &str) -> Option<String> {
-    model_name.contains(":fp8").then(|| {
-        // Use the no-extra-deps FP8 path by default. Hopper-specific
-        // `fp8-scaled-mm` requires TensorRT-LLM and does not fit the
-        // normal local 4090 workflow.
-        "fp8-cast".to_string()
-    })
-}
-
 pub(crate) fn resolve_spatial_upscaler_path(
     model_name: &str,
     paths: &ModelPaths,
@@ -130,15 +121,6 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         }
-    }
-
-    #[test]
-    fn fp8_models_use_fp8_cast_quantization() {
-        assert_eq!(
-            request_quantization("ltx-2-19b-distilled:fp8"),
-            Some("fp8-cast".to_string())
-        );
-        assert_eq!(request_quantization("ltx-2-19b-dev:bf16"), None);
     }
 
     #[test]

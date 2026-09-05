@@ -1,7 +1,5 @@
 mod perturbations;
 
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use candle_core::Tensor;
 
@@ -90,70 +88,6 @@ impl MultiModalGuider {
     }
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct MultiModalGuiderFactory {
-    #[allow(dead_code)]
-    negative_context: Option<Tensor>,
-    params_by_sigma: Vec<(f32, MultiModalGuiderParams)>,
-}
-
-#[allow(dead_code)]
-impl MultiModalGuiderFactory {
-    pub fn constant(params: MultiModalGuiderParams, negative_context: Option<Tensor>) -> Self {
-        Self {
-            negative_context,
-            params_by_sigma: vec![(f32::INFINITY, params)],
-        }
-    }
-
-    pub fn from_dict(
-        params_by_sigma: BTreeMap<OrderedSigma, MultiModalGuiderParams>,
-        negative_context: Option<Tensor>,
-    ) -> Self {
-        let mut entries = params_by_sigma
-            .into_iter()
-            .map(|(sigma, params)| (sigma.0, params))
-            .collect::<Vec<_>>();
-        entries.sort_by(|lhs, rhs| rhs.0.total_cmp(&lhs.0));
-        Self {
-            negative_context,
-            params_by_sigma: entries,
-        }
-    }
-
-    pub fn params(&self, sigma: f32) -> &MultiModalGuiderParams {
-        self.params_by_sigma
-            .iter()
-            .rfind(|(upper_bound, _)| *upper_bound >= sigma)
-            .or_else(|| self.params_by_sigma.first())
-            .map(|(_, params)| params)
-            .expect("guider factory requires at least one sigma bin")
-    }
-
-    pub fn build_from_sigma(&self, sigma: f32) -> MultiModalGuider {
-        MultiModalGuider::new(self.params(sigma).clone(), self.negative_context.clone())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub struct OrderedSigma(pub f32);
-
-impl Eq for OrderedSigma {}
-
-impl Ord for OrderedSigma {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0)
-    }
-}
-
-impl PartialOrd for OrderedSigma {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 fn approx_eq(lhs: f64, rhs: f64) -> bool {
     (lhs - rhs).abs() < 1e-6
 }
@@ -171,13 +105,12 @@ fn tensor_std(tensor: &Tensor) -> Result<f32> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use candle_core::{Device, Tensor};
 
     use super::{
-        BatchedPerturbationConfig, MultiModalGuider, MultiModalGuiderFactory,
-        MultiModalGuiderParams, OrderedSigma, Perturbation, PerturbationConfig, PerturbationType,
+        BatchedPerturbationConfig, MultiModalGuider, MultiModalGuiderParams, Perturbation,
+        PerturbationConfig, PerturbationType,
     };
 
     #[test]
@@ -241,28 +174,6 @@ mod tests {
         assert!(guider.should_skip_step(1));
         assert!(guider.should_skip_step(2));
         assert!(!guider.should_skip_step(3));
-    }
-
-    #[test]
-    fn guider_factory_picks_sigma_bin() {
-        let mut bins = BTreeMap::new();
-        bins.insert(
-            OrderedSigma(1.0),
-            MultiModalGuiderParams {
-                cfg_scale: 3.0,
-                ..Default::default()
-            },
-        );
-        bins.insert(
-            OrderedSigma(0.5),
-            MultiModalGuiderParams {
-                cfg_scale: 2.0,
-                ..Default::default()
-            },
-        );
-        let factory = MultiModalGuiderFactory::from_dict(bins, None);
-        assert_eq!(factory.params(0.75).cfg_scale, 3.0);
-        assert_eq!(factory.params(0.49).cfg_scale, 2.0);
     }
 
     #[test]
