@@ -187,10 +187,13 @@ the phone keep Create / Library / Models until their own redesign.
   re-render at all. From a clip print in My images, **Edit clip**
   re-enters the original job with its cached clips and **Duplicate as new**
   starts a fresh sequence from the recorded clips. The picker shows
-  clip-capable styles from every connected
-  machine (choosing Short clip auto-picks one and remembers your single-mode
-  style; with none installed the timeline deep-links to Browse more with the
-  video filters set), and limits, creation, events, previews, and job actions
+  clip styles from every connected
+  machine (choosing Short clip auto-picks one that can join scenes and
+  remembers your single-mode style, and a clip style that only renders one
+  clip at a time is listed with that reason on its row; switching back to
+  Still picture restores a picture style; with none installed the menu says
+  so and Browse more deep-links to the video filter), and limits, creation,
+  events, previews, and job actions
   stay routed to the style's machine. An optional **Opening image** well (with its
   source strength and fit-to-frame controls) sits in the inspector's primary
   form exactly where one-shot source media lives (the header ↺ Reset clears it;
@@ -575,9 +578,13 @@ wire types as the CLI and web UI:
 - **Generation controls** (**Shape** and **Resolution** quick-select common,
   per-family model-native sizes (with manual width/height for anything else);
   **Repeat this look** is an explicit **Keep | Surprise me** pair with the seed
-  in mono beside it and one-click "lock last"; the style picker marks each
-  style's source (Hugging Face / Civitai / local) and ends in **Browse all
-  models →** straight into Browse more, ready-to-use styles first;
+  in mono beside it and one-click "lock last"; the style picker offers only
+  the styles the section you are in can make — picture styles under **Still
+  picture**, clip styles under **Short clip**, 3-D styles under **3-D
+  object** — names that section above the list, marks each
+  style's source (Hugging Face / Civitai / local) and ends in **Browse more
+  →**, which opens Styles already filtered to the same kind, ready-to-use
+  styles first;
   the VRAM badge states plainly what fits ("VRAM · fits) est. 2.3 GB of
   64.0 GB").
 - **Upscaling**: pick a Real-ESRGAN model in Advanced ▸ Upscale to upscale every

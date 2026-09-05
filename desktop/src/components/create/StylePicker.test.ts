@@ -236,6 +236,9 @@ describe("StylePicker — what each row says", () => {
   });
 
   it("shows a remote H3 download-only install with readable labels and its refusal", async () => {
+    // H3 is a clip style, so the Short clip section is where its row lives.
+    // The runtime refusal below is unchanged — it outranks every other reason.
+    useSequenceDraftStore().output = "sequence";
     const h3 = {
       ...model,
       name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
@@ -316,7 +319,10 @@ describe("StylePicker — what each row says", () => {
     const wrapper = mountPicker(useGenerateFormStore().form);
     await wrapper.get('[data-test="style-chip"]').trigger("click");
     await wrapper.get('[data-test="browse-catalog"]').trigger("click");
-    expect(routerPush).toHaveBeenCalledWith("/models");
+    // Filtered to the section the menu was showing — the per-section targets
+    // are pinned below in "sends Browse more to the Styles view filtered to
+    // this section's kind".
+    expect(routerPush).toHaveBeenCalledWith("/models?type=image");
   });
 });
 
@@ -382,5 +388,176 @@ describe("StylePicker — a restored model no machine has", () => {
     expect(wrapper.get('[data-test="style-will-download"]').text()).toBe(
       "Not on HAL 9000 — will download there",
     );
+  });
+});
+
+/*
+ * The view toolbar's Still picture | Short clip | 3-D object control names
+ * three sections, and the menu must only offer what the section can make.
+ * `useCreateOutputKind` is the one authority for that partition; these pin
+ * that the picker reads it, says which section it is showing, and sends
+ * Browse more to the matching kind filter on Styles.
+ */
+describe("StylePicker — the menu holds one section", () => {
+  const meshModel = { ...model, name: "hunyuan3d-mini:fp16", family: "hunyuan3d" } as ModelEntry;
+  const h3Model = {
+    ...model,
+    name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
+    family: "minimax-h3",
+    supports_sequence: false,
+  } as ModelEntry;
+  const wanModel = {
+    ...model,
+    name: "wan22-ti2v-5b:q8",
+    family: "wan",
+    supports_sequence: true,
+  } as ModelEntry;
+
+  function openedIds(wrapper: ReturnType<typeof mountPicker>) {
+    return wrapper.findAll('[data-test="model-option-id"]').map((o) => o.text());
+  }
+
+  /** H3 is license-gated on the primary (`filterRestrictedModels`), so its row
+   *  reaches the picker through a connected machine's inventory, exactly as it
+   *  does in the download-only case above. */
+  function installOnRemote(entries: ModelEntry[]) {
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "HAL 9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useHostModelsStore().byHost["hal9000-7680"] = {
+      entries,
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    // Opening the menu force-refreshes per-host availability, so the mocked
+    // `/api/models` must answer with the same inventory or it clears it.
+    vi.mocked(apiJsonTo).mockResolvedValue(entries);
+  }
+
+  it("offers only picture styles under Still picture", async () => {
+    useModelStore().all = [model, videoModel, wanModel, meshModel];
+    installOnRemote([h3Model]);
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(openedIds(wrapper)).toEqual(["flux-dev:q8"]);
+  });
+
+  it("offers every clip style under Short clip, one-shot-only ones included", async () => {
+    useModelStore().all = [model, videoModel, wanModel, meshModel];
+    installOnRemote([h3Model]);
+    useSequenceDraftStore().output = "sequence";
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    // eslint-disable-next-line no-console
+    expect(openedIds(wrapper).sort()).toEqual([
+      "ltx-video",
+      "minimax-h3-fl2va:comfy-pruned-nvfp4",
+      "wan22-ti2v-5b:q8",
+    ]);
+  });
+
+  it("says on the row why a one-shot-only clip style cannot make a sequence", async () => {
+    useModelStore().all = [videoModel];
+    installOnRemote([h3Model]);
+    useSequenceDraftStore().output = "sequence";
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+
+    const disabledReason = wrapper.getComponent(ModelPicker).props("disabledReason");
+    if (!disabledReason) throw new Error("ModelPicker disabledReason prop is required");
+    expect(disabledReason(videoModel)).toBeNull();
+    expect(disabledReason(h3Model)).toBe("Makes one clip at a time — it cannot join scenes.");
+    expect(wrapper.get('[data-test="model-disabled-reason"]').text()).toBe(
+      "Makes one clip at a time — it cannot join scenes.",
+    );
+  });
+
+  it("offers only 3-D styles under 3-D object", async () => {
+    useModelStore().all = [model, videoModel, meshModel];
+    const form = useGenerateFormStore().form;
+    form.model = meshModel.name;
+    form.family = meshModel.family;
+    const wrapper = mountPicker(form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(openedIds(wrapper)).toEqual(["hunyuan3d-mini:fp16"]);
+  });
+
+  it("keeps the selected style visible even when it is not this section's kind", async () => {
+    // Reusing the settings of a one-shot clip print leaves a clip style on a
+    // Still-picture form. Hiding it would read as "the style was dropped".
+    useModelStore().all = [model, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const wrapper = mountPicker(form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(openedIds(wrapper)).toContain("ltx-video");
+    expect(wrapper.findAll('[data-test="model-option-current"]')).toHaveLength(1);
+  });
+
+  it("names the section above the rows", async () => {
+    useModelStore().all = [model];
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(wrapper.get('[data-test="model-picker-kicker"]').text()).toBe("still picture styles");
+
+    useSequenceDraftStore().output = "sequence";
+    await flushPromises();
+    expect(wrapper.get('[data-test="model-picker-kicker"]').text()).toBe("clip styles");
+  });
+
+  it("names the empty section instead of the generic no-match line", async () => {
+    useModelStore().all = [model];
+    useSequenceDraftStore().output = "sequence";
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+
+    expect(wrapper.get('[data-test="model-picker-empty"]').text()).toBe(
+      "No clip styles on this machine.",
+    );
+    expect(wrapper.get('[data-test="browse-catalog"]').text()).toBe("Browse more →");
+  });
+
+  it("keeps the filter's own no-match line when the section does hold styles", async () => {
+    useModelStore().all = Array.from({ length: 12 }, (_, i) => ({
+      ...model,
+      name: `flux-dev-${i}:q8`,
+    })) as ModelEntry[];
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    await wrapper.get('[data-test="model-filter"]').setValue("nothing matches this");
+    expect(wrapper.get('[data-test="model-picker-empty"]').text()).toBe(
+      "No style matches “nothing matches this”.",
+    );
+  });
+
+  it("sends Browse more to the Styles view filtered to this section's kind", async () => {
+    useModelStore().all = [model, videoModel, meshModel];
+    const form = useGenerateFormStore().form;
+    const wrapper = mountPicker(form);
+
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    await wrapper.get('[data-test="browse-catalog"]').trigger("click");
+    expect(routerPush).toHaveBeenLastCalledWith("/models?type=image");
+
+    useSequenceDraftStore().output = "sequence";
+    await flushPromises();
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    await wrapper.get('[data-test="browse-catalog"]').trigger("click");
+    expect(routerPush).toHaveBeenLastCalledWith("/models?type=video");
+
+    useSequenceDraftStore().output = "single";
+    form.model = meshModel.name;
+    form.family = meshModel.family;
+    await flushPromises();
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    await wrapper.get('[data-test="browse-catalog"]').trigger("click");
+    expect(routerPush).toHaveBeenLastCalledWith("/models");
   });
 });

@@ -3,9 +3,12 @@ import { computed } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelPicker from "./ModelPicker.vue";
 import { useStylePicker } from "../../composables/useStylePicker";
+import {
+  OUTPUT_KIND_BROWSE_TARGET,
+  OUTPUT_KIND_EMPTY,
+  OUTPUT_KIND_SECTION_LABEL,
+} from "../../composables/useCreateOutputKind";
 import { useGenerateFormStore } from "../../stores/generateForm";
-import { generationCapabilitiesForFamily } from "../../lib/capabilities";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { familyLabel } from "@studio/lib/modelFamily";
 import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
 import type { GenerateForm } from "../../lib/generateForm";
@@ -26,18 +29,15 @@ const emit = defineEmits<{ "pull-missing-model": [model: string] }>();
 const formStore = useGenerateFormStore();
 const picker = useStylePicker(() => props.form);
 
-/** Only the Browse footer's deep link reads this; it is the same call the
- *  inspector makes, so the two can never disagree about a video recipe. */
-const caps = computed(() =>
-  generationCapabilitiesForFamily(
-    props.form.family,
-    props.form.model,
-    props.form.pipeline,
-    picker.contractModel.value?.guidance_capabilities,
-    picker.contractModel.value?.source_image ?? props.form.sourceImageCapability,
-    effectiveGenerationRecipe(picker.contractModel.value, props.form.pipeline),
-  ),
-);
+/**
+ * The menu shows ONE section of the view's three, so it says which one and
+ * sends Browse more to the Styles view filtered the same way. All three come
+ * from `useCreateOutputKind`, the one authority for which styles a section
+ * holds — the picker never re-derives it from a family name.
+ */
+const sectionLabel = computed(() => OUTPUT_KIND_SECTION_LABEL[picker.outputKind.value]);
+const sectionEmpty = computed(() => OUTPUT_KIND_EMPTY[picker.outputKind.value]);
+const browseTarget = computed(() => OUTPUT_KIND_BROWSE_TARGET[picker.outputKind.value]);
 
 /** Plain name first. A bare manifest id is not a plain word, so the family's
  *  friendly label stands in for it and the id still rides beside in mono. */
@@ -71,7 +71,9 @@ function pickModel(model: ModelEntry) {
     :missing-model="picker.missingModelId.value"
     :disabled-reason="picker.pickerDisabledReason"
     :show-availability="!picker.stickyTarget.value || picker.stickyTarget.value === 'capable'"
-    :browse-target="caps.supportsVideo ? '/models?type=video' : '/models'"
+    :kicker="sectionLabel"
+    :empty-label="sectionEmpty"
+    :browse-target="browseTarget"
     @pick="pickModel"
     @pick-missing="emit('pull-missing-model', $event)"
   >

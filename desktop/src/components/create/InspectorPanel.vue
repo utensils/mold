@@ -10,7 +10,11 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
+import {
+  defaultClipFrames,
+  modelSupportsSequence,
+  sequenceMotionTailFrames,
+} from "@studio/lib/sequence";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import {
@@ -70,6 +74,7 @@ import { fileUnderAvailable, matchCollection, type FileUnderState } from "@studi
 import FileUnderGroup from "./FileUnderGroup.vue";
 import { dragWidth } from "../../lib/panelResize";
 import { useStylePicker } from "../../composables/useStylePicker";
+import { modelsForOutputKind } from "../../composables/useCreateOutputKind";
 import AdvancedSettings from "./AdvancedSettings.vue";
 import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
 import SequenceOpeningImageWell from "./SequenceOpeningImageWell.vue";
@@ -381,7 +386,7 @@ const managingStarters = ref(false);
 // The Settings tab has no style field: the mock puts the picker on the
 // composer and nowhere else. These rows are still read here for the Output
 // switch, the quality presets, the canvas, and the mesh block.
-const { installedModels, stickyTarget, selectedModel, contractModel, pickerModels } =
+const { installedModels, stickyTarget, selectedModel, contractModel, targetModels } =
   useStylePicker(() => props.form);
 
 // ── Output (One shot | Sequence) — a setting, not a place ────────────────────
@@ -399,13 +404,21 @@ function setPredictDuration(value: boolean) {
     props.form.frames = selectedModel.value?.default_frames ?? 25;
   }
 }
+/**
+ * The clip styles that can author a sequence, read from the target's WHOLE
+ * inventory rather than the picker's rows: the picker is narrowed to the
+ * section the view is currently in, which while the user is still looking at
+ * Still picture contains no clip style at all.
+ */
 const sequenceCapableModels = computed(() =>
   stickyTarget.value &&
   stickyTarget.value !== "capable" &&
   (hostModels.byHost[stickyTarget.value]?.fetchedAt ?? 0) === 0
     ? []
-    : modelsForOutput(pickerModels.value, "sequence"),
+    : modelsForOutputKind(targetModels.value, "clip").filter(modelSupportsSequence),
 );
+/** The styles Still picture can make, for the way back out of a clip draft. */
+const stillModels = computed(() => modelsForOutputKind(targetModels.value, "still"));
 const defaultFrames = computed(() =>
   defaultClipFrames(
     selectedModel.value,
@@ -430,8 +443,20 @@ function setOutputMode(mode: string | number) {
         props.form.family = "";
       }
     }
-  } else if (draft.lastSingleModel) {
-    const restored = findInstalledModel(installedModels.value, draft.lastSingleModel);
+  } else {
+    // Back to Still picture, which must be left holding a style that section
+    // can make: the parked one when it is still a picture style, otherwise the
+    // first installed one. A machine with no picture style at all keeps what
+    // the form has rather than clearing it.
+    const parked = draft.lastSingleModel
+      ? findInstalledModel(stillModels.value, draft.lastSingleModel)
+      : null;
+    const current = selectedModel.value;
+    const restored =
+      parked ??
+      (current && stillModels.value.some((m) => m.name === current.name)
+        ? null
+        : (stillModels.value[0] ?? null));
     if (restored) formStore.applyModel(restored);
     draft.lastSingleModel = null;
   }

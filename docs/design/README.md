@@ -103,6 +103,12 @@ Decisions worth keeping:
   after the two doors, so the machine a print goes to is one glance away in
   every tab and every output kind. It began as the last row of the inspector's
   Settings list, where nobody found it.
+- **A section only offers styles it can make.** Still picture | Short clip |
+  3-D object partitions the installed styles, and the picker shows one part of
+  it: a picture section never lists a clip or 3-D style, and no style belongs to
+  nowhere. The menu names the section it is showing and its Browse more opens
+  Styles filtered to the same kind. A clip style that cannot join scenes stays
+  in the clip section, disabled with the reason on the row.
 - **The view title names what is being made.** On New image the mono title
   follows the output kind — New image · New clip · New 3-D object — and the
   subtitle is the queue count alone. The sidebar's destination stays New image.

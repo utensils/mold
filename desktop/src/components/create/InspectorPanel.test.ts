@@ -957,6 +957,59 @@ describe("InspectorPanel — output", () => {
   // StylePicker.test.ts ("filters to sequence-capable models while in
   // sequence mode"). What the inspector still owns is the swap ABOVE.
 
+  it("finds a clip style even though the picker is showing the Still picture section", async () => {
+    // The picker narrows to the section the view is IN, which while the user
+    // is still on Still picture holds no clip style at all. The swap reads the
+    // target's whole inventory instead, or Short clip would be a dead end on
+    // every machine whose current style is a picture style.
+    useModelStore().all = [stillModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = stillModel.name;
+    form.family = stillModel.family;
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    setOutput(wrapper, "sequence");
+    await flushPromises();
+
+    expect(form.model).toBe("ltx-video");
+  });
+
+  it("restores a STILL style on the way back, never the clip one it swapped in", async () => {
+    // Nothing was parked (the form already carried a clip style when Short
+    // clip was chosen), so returning to Still picture must still leave a style
+    // the section can make.
+    useModelStore().all = [stillModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    setOutput(wrapper, "single");
+    await flushPromises();
+
+    expect(form.model).toBe("flux-dev:q8");
+    expect(form.family).toBe("flux");
+  });
+
+  it("leaves the form alone when no still style is installed", async () => {
+    useModelStore().all = [videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    setOutput(wrapper, "single");
+    await flushPromises();
+
+    expect(form.model).toBe("ltx-video");
+  });
+
   it("surfaces a frame-rate stepper and hides lock-last-seed in sequence mode", async () => {
     useSequenceDraftStore().output = "sequence";
     const form = formFor("ltx-video");

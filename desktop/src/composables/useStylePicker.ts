@@ -1,6 +1,6 @@
 import { computed, type ComputedRef } from "vue";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
-import { modelsForOutput } from "@studio/lib/sequence";
+import { modelSupportsSequence } from "@studio/lib/sequence";
 import {
   isModelRuntimeUnavailable,
   modelRuntimeNotice,
@@ -15,6 +15,7 @@ import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
+import { modelsForOutputKind, outputKindFor, type OutputKind } from "./useCreateOutputKind";
 
 /**
  * Everything the ONE style picker needs to decide what it may offer, and who
@@ -39,7 +40,18 @@ export interface StylePicker {
   contractModel: ComputedRef<ModelEntry | null>;
   /** The form's model id when no machine has it installed. */
   missingModelId: ComputedRef<string | null>;
-  /** Every row the picker may render, narrowed by target and output kind. */
+  /** The New image view's section — which styles the picker may offer. */
+  outputKind: ComputedRef<OutputKind>;
+  /**
+   * Every row the TARGET has, before the section narrows them.
+   *
+   * The section is the picker's question, not the target's, so anything that
+   * asks "what could this machine run" — the inspector's clip swap, which must
+   * find a clip style while the view is still showing Still picture — reads
+   * this instead of `pickerModels`.
+   */
+  targetModels: ComputedRef<ModelEntry[]>;
+  /** Every row the picker may render, narrowed by target and section. */
   pickerModels: ComputedRef<ModelEntry[]>;
   /** Non-null marks a row unpickable and says why. */
   pickerDisabledReason: (model: ModelEntry) => string | null;
@@ -135,11 +147,11 @@ export function useStylePicker(form: () => GenerateForm): StylePicker {
     form().model && !selectedPickerModel.value ? form().model : null,
   );
 
-  const pickerModels = computed<ModelEntry[]>(() => {
+  const targetModels = computed<ModelEntry[]>(() => {
     const target = stickyTarget.value;
     const fetched =
       target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-    const forTarget = fetched
+    return fetched
       ? hostModels.downloadedOn(target).filter((model) => {
           const runnable = hostModels
             .installedOn(target)
@@ -147,8 +159,24 @@ export function useStylePicker(form: () => GenerateForm): StylePicker {
           return runnable || isModelRuntimeUnavailable(model);
         })
       : pickerCandidates.value;
-    // Sequence output narrows the picker to chain-capable video models.
-    return modelsForOutput(forTarget, draft.output);
+  });
+
+  /** The section the view is in — the toolbar's Still picture | Short clip |
+   * 3-D object control, read from the one authority both it and the title bar
+   * read. */
+  const outputKind = computed<OutputKind>(() => outputKindFor(draft.output, form().family));
+
+  /**
+   * The rows the menu offers: this section's styles, so nothing is listed that
+   * the section cannot make. The SELECTED row is kept whatever its kind —
+   * Reuse settings can leave a clip style on a Still-picture form, and hiding
+   * it there would read as the style having been silently dropped.
+   */
+  const pickerModels = computed<ModelEntry[]>(() => {
+    const inSection = modelsForOutputKind(targetModels.value, outputKind.value);
+    const selected = selectedPickerModel.value;
+    if (!selected || inSection.some((model) => model.name === selected.name)) return inSection;
+    return [selected, ...inSection];
   });
 
   function pickerDisabledReason(model: ModelEntry): string | null {
@@ -156,6 +184,13 @@ export function useStylePicker(form: () => GenerateForm): StylePicker {
       const reason =
         modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
       return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;
+    }
+    // A clip style that cannot join scenes is still a clip style, so it stays
+    // in the Short clip section rather than vanishing from every one. What it
+    // cannot do is author the sequence this draft IS, and saying so on the row
+    // beats hiding the style or letting the timeline refuse after the fact.
+    if (draft.output === "sequence" && !modelSupportsSequence(model)) {
+      return "Makes one clip at a time — it cannot join scenes.";
     }
     if (installedModels.value.some((candidate) => candidate.name === model.name)) return null;
     const reason = modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
@@ -179,6 +214,8 @@ export function useStylePicker(form: () => GenerateForm): StylePicker {
     selectedPickerModel,
     contractModel,
     missingModelId,
+    outputKind,
+    targetModels,
     pickerModels,
     pickerDisabledReason,
     stickyHostMissingModel,

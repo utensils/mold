@@ -8,6 +8,7 @@ import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import type { GenerateForm } from "../../lib/generateForm";
 import { findInstalledModel } from "../../lib/generateModels";
 import {
+  modelsForOutputKind,
   OUTPUT_KIND_PLACEHOLDER,
   outputKindFor,
   type OutputKind,
@@ -46,7 +47,10 @@ const hostModels = useHostModelsStore();
 
 const isSequence = computed(() => draft.output === "sequence");
 const isMesh = computed(() => isMeshFamily(props.form.family));
-const meshModels = computed(() => hostModels.unionInstalled.filter((m) => isMeshFamily(m.family)));
+// Which styles each section holds is `useCreateOutputKind`'s one answer — the
+// same one the picker narrows on, so the door and the menu behind it agree.
+const meshModels = computed(() => modelsForOutputKind(hostModels.unionInstalled, "mesh"));
+const stillModels = computed(() => modelsForOutputKind(hostModels.unionInstalled, "still"));
 
 // The same decision the title bar reads (`useCreateOutputKind`), from this
 // form rather than the store so the header answers for the form it renders.
@@ -79,10 +83,13 @@ function setOutputKind(kind: string | number) {
     return;
   }
   if (isMesh.value) {
+    // Whatever we restore has to be a style Still picture can make. The old
+    // "anything that is not 3-D" fallback reached for the first row on the
+    // machine, which on a box with a clip style installed put a video style
+    // under a Still picture label.
     const restored =
-      (lastStillModel.value &&
-        findInstalledModel(hostModels.unionInstalled, lastStillModel.value)) ||
-      hostModels.unionInstalled.find((m) => !isMeshFamily(m.family));
+      (lastStillModel.value && findInstalledModel(stillModels.value, lastStillModel.value)) ||
+      stillModels.value[0];
     if (restored) formStore.applyModel(restored);
     lastStillModel.value = null;
   }

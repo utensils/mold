@@ -63,6 +63,15 @@ const stillModel = {
   default_guidance: 4.5,
 } as ModelEntry;
 
+/** Listed FIRST wherever it appears, so a restore that ignores the section
+ *  rule picks it up instead of the picture style. */
+const clipModel = {
+  ...stillModel,
+  name: "ltx-video",
+  family: "ltx-video",
+  supports_sequence: true,
+} as ModelEntry;
+
 function outputSegments(wrapper: ReturnType<typeof mount>) {
   return wrapper.get("[data-test='output-kind']").findAll("button");
 }
@@ -170,6 +179,29 @@ describe("CreateHeader", () => {
       const wrapper = mount(CreateHeader, { props: { form: form() } });
       await outputSegments(wrapper)[0]!.trigger("click");
       expect(wrapper.emitted("set-output")).toEqual([["single"]]);
+    });
+
+    it("opens the 3-D door for a 3-D style and nothing else", () => {
+      // The door's existence is the section rule's answer, so a clip style on
+      // the machine can never be mistaken for a 3-D one.
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(wrapper).map((b) => b.text())).toEqual(["Still picture", "Short clip"]);
+    });
+
+    it("leaves 3-D holding a still style — never a clip one — when nothing was parked", async () => {
+      readyLocal();
+      installLocal([clipModel, stillModel, meshModel]);
+      const store = useGenerateFormStore();
+      store.form.model = meshModel.name;
+      store.form.family = meshModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[0]!.trigger("click");
+
+      expect(store.form.model).toBe(stillModel.name);
+      expect(store.form.family).toBe("flux");
     });
 
     it("applies the first installed 3-D style, and restores the parked still style", async () => {

@@ -47,6 +47,19 @@ const props = withDefaults(
      * canvas, so its chip must open UPWARD or the menu falls off the window.
      */
     placement?: "down" | "up";
+    /**
+     * The mono kicker naming what this menu holds — the New image view's
+     * section ("still picture styles"). Absent on a consumer that offers
+     * every style.
+     */
+    kicker?: string | null;
+    /**
+     * The sentence for a menu whose whole list is empty, which is a different
+     * fact from a filter that matched nothing: the section holds no styles at
+     * all, and Browse more below is the way out. Absent falls back to the
+     * generic line.
+     */
+    emptyLabel?: string | null;
   }>(),
   {
     showAvailability: true,
@@ -55,6 +68,8 @@ const props = withDefaults(
     browseLabel: "Browse more →",
     missingModel: null,
     placement: "down",
+    kicker: null,
+    emptyLabel: null,
   },
 );
 
@@ -111,6 +126,18 @@ const hasPhantomRow = computed(() => phantom.value !== null && !query.value.trim
 /** Row 0 is the phantom when it renders, so model i sits at i + offset. */
 const rowOffset = computed(() => (hasPhantomRow.value ? 1 : 0));
 const rowCount = computed(() => rows.value.length + rowOffset.value);
+
+/**
+ * An empty list and an empty FILTER RESULT are different facts. The section
+ * holding nothing is answered by the caller's own sentence, which names the
+ * section; a filter that matched nothing keeps the generic line with the
+ * needle in it.
+ */
+const emptyMessage = computed(() =>
+  props.models.length === 0 && props.emptyLabel
+    ? props.emptyLabel
+    : `No style matches “${query.value}”.`,
+);
 
 function rowIndexFor(m: ModelEntry): number {
   return rows.value.indexOf(m) + rowOffset.value;
@@ -266,6 +293,8 @@ onBeforeUnmount(() => {
       :data-placement="placement"
       role="listbox"
     >
+      <!-- What this menu holds, in the section's own words. -->
+      <p v-if="kicker" data-test="model-picker-kicker" class="ms-model__kicker">{{ kicker }}</p>
       <div v-if="showFilter" class="ms-model__filter">
         <input
           ref="filterEl"
@@ -361,7 +390,7 @@ onBeforeUnmount(() => {
         </button>
       </template>
       <p v-if="rowCount === 0" data-test="model-picker-empty" class="ms-model__empty">
-        No style matches “{{ query }}”.
+        {{ emptyMessage }}
       </p>
       <button type="button" data-test="browse-catalog" class="ms-model__browse" @click="browse">
         {{ browseLabel }}
@@ -437,6 +466,15 @@ onBeforeUnmount(() => {
 .ms-model__filter input:focus {
   outline: none;
   border-color: var(--mold-border-focus);
+}
+/* The section caption: quieter than a family heading, same mono vocabulary. */
+.ms-model__kicker {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mold-text-faint);
+  padding: 8px 8px 0;
 }
 .ms-model__group {
   font-family: var(--mold-font-mono);

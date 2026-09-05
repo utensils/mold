@@ -138,3 +138,12 @@
   The title bar now says New image, New clip, or New 3-D object to match the
   output you chose, and the composer's Make count sits inside its chip instead
   of painting a second box over it.
+- **The style menu shows only what this section can make.** Still picture lists
+  picture styles, Short clip lists clip styles, and 3-D object lists 3-D styles,
+  instead of every family mixed together — so choosing a style can no longer
+  move you into another section by surprise. The menu names the section above
+  the list, says "No clip styles on this machine" rather than a blank no-match
+  line when the section is empty, and Browse more opens Styles already filtered
+  to that kind. A clip style that cannot join scenes stays listed under Short
+  clip and explains itself on the row, and switching back to Still picture now
+  restores a picture style rather than whichever style was first on the machine.
