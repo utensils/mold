@@ -145,6 +145,8 @@ pub enum LiveSearchError {
     Network(#[from] reqwest::Error),
     #[error("decode: {0}")]
     Decode(#[from] serde_json::Error),
+    #[error("{host} search is still scanning locally-filtered results")]
+    Incomplete { host: &'static str },
     #[error("upstream {host}: HTTP {status} {body}")]
     Upstream {
         host: &'static str,
@@ -423,7 +425,9 @@ const MAX_SEARCH_RETRY_DELAY: Duration = Duration::from_secs(15);
 fn upstream_retry_after(error: &LiveSearchError) -> Option<Duration> {
     match error {
         LiveSearchError::Upstream { retry_after, .. } => *retry_after,
-        _ => None,
+        LiveSearchError::Network(_)
+        | LiveSearchError::Decode(_)
+        | LiveSearchError::Incomplete { .. } => None,
     }
 }
 
@@ -450,7 +454,9 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 
 fn retryable_search_error(error: &LiveSearchError) -> bool {
     match error {
-        LiveSearchError::Network(_) | LiveSearchError::Decode(_) => true,
+        LiveSearchError::Network(_)
+        | LiveSearchError::Decode(_)
+        | LiveSearchError::Incomplete { .. } => true,
         LiveSearchError::Upstream { status, .. } => {
             matches!(status, 408 | 425 | 429 | 500..=599)
         }
@@ -494,6 +500,10 @@ fn provider_error(source: Source, error: &LiveSearchError) -> CatalogProviderErr
         Source::Civitai => "Civitai",
     };
     let (code, message) = match error {
+        LiveSearchError::Incomplete { .. } => (
+            Some("scan-incomplete"),
+            format!("{provider} is still scanning matching models. Try again shortly."),
+        ),
         LiveSearchError::Upstream { status: 429, .. } => (
             Some("rate-limited"),
             format!("{provider} is handling too many requests right now. Try again shortly."),
@@ -502,7 +512,11 @@ fn provider_error(source: Source, error: &LiveSearchError) -> CatalogProviderErr
             Some("overloaded"),
             "Civitai is busy right now. Try again in a few seconds.".into(),
         ),
-        _ => (None, format!("{provider} is temporarily unavailable.")),
+        LiveSearchError::Network(_)
+        | LiveSearchError::Decode(_)
+        | LiveSearchError::Upstream { .. } => {
+            (None, format!("{provider} is temporarily unavailable."))
+        }
     };
     CatalogProviderError {
         source,
@@ -969,6 +983,16 @@ async fn civitai_search_paged(
                 );
                 chain.next_page += 1;
                 result = Some(page_result);
+            }
+            if result.is_none() && chain.leftover.is_empty() {
+                // An open cursor is not an empty logical page. Preserve the
+                // cursor and ask the bounded retry driver to resume the scan;
+                // if its own budget is exhausted, callers receive an explicit
+                // retryable provider notice rather than false exhaustion.
+                cache.put_chain(key.clone(), chain);
+                return Err(LiveSearchError::Incomplete {
+                    host: "civitai.com",
+                });
             }
             break;
         }
@@ -1885,6 +1909,56 @@ mod tests {
         }
     }
 
+    struct SparseQwenEditResponder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Respond for SparseQwenEditResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let is_edit = call == MAX_WINDOW_FETCHES;
+            let name = if is_edit {
+                "Community Qwen Image Edit"
+            } else {
+                "Community Qwen Image"
+            };
+            let version_name = if is_edit { "QwenImageEdit2511" } else { "v1" };
+            let metadata = if is_edit {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "nextCursor": format!("c{}", call + 1) })
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{
+                    "id": 200_000 + call,
+                    "name": name,
+                    "type": "Checkpoint",
+                    "nsfw": false,
+                    "creator": { "username": "alice" },
+                    "stats": { "downloadCount": 100 },
+                    "tags": [],
+                    "modelVersions": [{
+                        "id": 300_000 + call,
+                        "name": version_name,
+                        "baseModel": "Qwen",
+                        "baseModelType": "Standard",
+                        "files": [{
+                            "id": 400_000 + call,
+                            "name": "model.safetensors",
+                            "sizeKB": 100,
+                            "downloadCount": 1,
+                            "metadata": { "format": "SafeTensor" },
+                            "downloadUrl": "https://civitai.example/model.safetensors",
+                            "hashes": { "SHA256": "deadbeef" }
+                        }],
+                        "images": []
+                    }]
+                }],
+                "metadata": metadata
+            }))
+        }
+    }
+
     fn test_cache() -> LiveCache {
         LiveCache::new(Duration::from_secs(300), 256)
     }
@@ -2471,6 +2545,40 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             MAX_WINDOW_FETCHES,
             "the partial page must be served from the page cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_sparse_qwen_edit_scan_does_not_return_a_false_empty_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(SparseQwenEditResponder {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+
+        let result = search_page(
+            &server.uri(),
+            "https://unused.example",
+            &test_cache(),
+            &LiveSearchOpts {
+                family: Some(Family::QwenImageEdit),
+                page_size: 1,
+                source: Some(Source::Civitai),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded scan should resume until the first matching edit row");
+
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].family, Family::QwenImageEdit);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES + 1,
+            "the retry resumes at the stored cursor rather than restarting"
         );
     }
 
