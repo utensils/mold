@@ -2,6 +2,7 @@ import { computed, type ComputedRef } from "vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
+import { isModelRuntimeUnavailable } from "@studio/lib/modelRuntimeAvailability";
 import type { GenerateForm } from "../lib/generateForm";
 import { findInstalledModel } from "../lib/generateModels";
 import { useGenerateFormStore } from "../stores/generateForm";
@@ -49,9 +50,15 @@ export function useOutputKindDoor(
   // Which styles each section holds is `useCreateOutputKind`'s one answer —
   // the same one the picker narrows on, so the door and the menu behind it
   // agree.
-  const meshModels = computed(() => modelsForOutputKind(targetModels.value, "mesh"));
-  const stillModels = computed(() => modelsForOutputKind(targetModels.value, "still"));
-  const clipModels = computed(() => modelsForOutputKind(targetModels.value, "clip"));
+  // `targetModels` keeps downloaded-but-unrunnable rows so the picker can
+  // disclose them, disabled; a door never opens onto one of those, whether it
+  // is the remembered style or the first in the section.
+  const runnable = computed(() =>
+    targetModels.value.filter((model) => !isModelRuntimeUnavailable(model)),
+  );
+  const meshModels = computed(() => modelsForOutputKind(runnable.value, "mesh"));
+  const stillModels = computed(() => modelsForOutputKind(runnable.value, "still"));
+  const clipModels = computed(() => modelsForOutputKind(runnable.value, "clip"));
 
   // The same decision the title bar reads (`useCreateOutputKind`), from this
   // form rather than the store so the header answers for the form it renders.

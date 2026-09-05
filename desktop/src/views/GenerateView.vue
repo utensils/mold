@@ -4836,18 +4836,18 @@ async function loadPromptHistory() {
 // first inventory to arrive is this device's, and picking FLUX from it would
 // lock the form before the machine that holds the style could answer. Only
 // once the whole fleet has reported without it does the usual pick apply.
-// "Settled" counts the machines still on their way, not only the ready ones:
-// boot reconnect leaves a remembered machine `connecting` while this device's
-// inventory has already landed, and `allReadyHostsFetched` reads only the
-// ready set, so it would call the fleet settled before that machine — the one
-// most likely to hold the remembered style — could answer.
+// "Settled" waits for the boot reconnect as well as the ready machines'
+// inventories: boot leaves a remembered machine `connecting` while this
+// device's inventory has already landed, and `allReadyHostsFetched` reads only
+// the ready set, so it would call the fleet settled before that machine — the
+// one most likely to hold the remembered style — could answer. The reconnect
+// phase is `hosts.initialized`, set only after every probe has returned. It is
+// NOT "no machine is connecting": a failed probe deliberately keeps the row
+// `connecting` until it answers or is forgotten, and an offline machine must
+// not hold the form empty forever when this device has styles to offer.
 const installedInventorySettled = computed(
   () =>
-    hosts.initialized &&
-    !models.loading &&
-    !hostModels.loading &&
-    hostModels.allReadyHostsFetched &&
-    !hosts.all.some((host) => host.status === "connecting"),
+    hosts.initialized && !models.loading && !hostModels.loading && hostModels.allReadyHostsFetched,
 );
 watch(
   [installedModels, installedInventorySettled],
@@ -4875,11 +4875,18 @@ watch(
 // One writer for every path that sets a model — the picker, the doors, Use
 // these settings, an edit session — so the memory can never disagree with
 // the screen.
+//
+// The section is the INSTALLED entry's, never the form's family: an edit
+// session can put a sequence style's name on the form while the family still
+// reads the previous still style's, and a name no machine has (a restored
+// print's missing style) is not remembered at all — it could only ever be
+// restored under the wrong kind.
 watch(
-  () => [form.model, form.family] as const,
-  ([model, family]) => {
+  () => [form.model, installedModels.value] as const,
+  ([model, installed]) => {
     if (!model) return;
-    lastUsed.remember(outputKindForModel({ family: family ?? "" }), model);
+    const entry = findInstalledModel(installed, model);
+    if (entry) lastUsed.remember(outputKindForModel(entry), model);
   },
   { immediate: true },
 );
@@ -5414,9 +5421,23 @@ const outputKindDoor = useOutputKindDoor(
   (mode) => {
     // Raised from another workspace, the intent is consumed during setup,
     // before the inspector exists; the swap waits a tick for it rather than
-    // falling on the floor.
-    if (inspectorRef.value) inspectorRef.value.setOutputMode(mode);
-    else void nextTick(() => inspectorRef.value?.setOutputMode(mode));
+    // falling on the floor. With no style installed at all the starter cards
+    // hold the view and the inspector never mounts, so the draft is switched
+    // directly — there is no style to swap anyway, and Scenes owns that empty
+    // state.
+    const swap = () => {
+      const inspector = inspectorRef.value;
+      if (typeof inspector?.setOutputMode === "function") inspector.setOutputMode(mode);
+      else if (mode !== draft.output) {
+        draft.setOutput(
+          mode,
+          { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+          sequenceDefaultFrames.value,
+        );
+      }
+    };
+    if (inspectorRef.value) swap();
+    else void nextTick(swap);
   },
 );
 onCreateIntent(

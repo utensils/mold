@@ -332,16 +332,18 @@ describe("GenerateView opens on the style last used", () => {
     expect(useGenerateFormStore().form.model).toBe(clip.name);
   });
 
-  it("waits for a machine still reconnecting at launch, which the fetched count ignores", async () => {
+  it("waits for the boot reconnect before giving up on a remembered style", async () => {
     // Boot reconnect leaves a remembered machine `connecting` while this
     // device's inventory has already landed; `allReadyHostsFetched` counts
     // only READY machines, so it read settled and the fallback locked the
-    // form before the machine holding the style could answer.
+    // form before the machine holding the style could answer. The reconnect
+    // phase is `hosts.initialized`, which init sets only after every probe.
     useLastUsedStylesStore().remember("clip", clip.name);
     useModelStore().all = [still];
     const hostModels = useHostModelsStore();
     hostModels.byHost.local = { entries: [still], fetchedAt: Date.now(), error: null };
     const hosts = useHostsStore();
+    hosts.initialized = false;
     hosts.extras.push({
       id: "plato-7680",
       label: "plato",
@@ -360,9 +362,58 @@ describe("GenerateView opens on the style last used", () => {
     expect(useGenerateFormStore().form.model).toBe("");
 
     hosts.extras[0]!.status = "ready";
+    hosts.initialized = true;
     hostModels.byHost["plato-7680"] = { entries: [clip], fetchedAt: Date.now(), error: null };
     await flushPromises();
     expect(useGenerateFormStore().form.model).toBe(clip.name);
+  });
+
+  it("does not let an offline machine hold the form empty forever", async () => {
+    // A failed boot probe deliberately keeps the machine `connecting` (it is
+    // polled until it answers or is forgotten). Once the reconnect phase is
+    // over, a style only that machine held is unavailable for now, and the
+    // usual pick applies rather than Create sitting on no style.
+    useLastUsedStylesStore().remember("clip", clip.name);
+    useModelStore().all = [still];
+    useHostModelsStore().byHost.local = { entries: [still], fetchedAt: Date.now(), error: null };
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "connecting",
+      error: "connection refused",
+      instanceId: null,
+    });
+    mountView();
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe(still.name);
+  });
+
+  it("files a style under the section its INSTALLED entry belongs to, never the form's stale family", async () => {
+    // An edit session can put a sequence style's name on the form while the
+    // family still reads the previous still style's; a name nobody has is
+    // not remembered at all.
+    useModelStore().all = [still, clip];
+    useHostModelsStore().byHost.local = {
+      entries: [still, clip],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    mountView();
+    await flushPromises();
+    const memory = useLastUsedStylesStore();
+    const form = useGenerateFormStore().form;
+    form.model = clip.name; // family left at "flux"
+    await flushPromises();
+    expect(memory.bySection.clip).toBe(clip.name);
+    expect(memory.bySection.still).toBe(still.name);
+
+    form.model = "wan22-ti2v-5b:dmd";
+    form.family = "wan";
+    await flushPromises();
+    expect(memory.bySection.clip).toBe(clip.name);
   });
 
   it("settles for the usual pick once every machine has reported without it", async () => {

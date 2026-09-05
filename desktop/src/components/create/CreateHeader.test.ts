@@ -273,6 +273,26 @@ describe("CreateHeader", () => {
       expect(store.form.model).toBe(wan.name);
     });
 
+    it("never opens a door onto a style no machine can run, remembered or first", async () => {
+      // `targetModels` keeps downloaded-but-unrunnable rows so the picker can
+      // disclose them, disabled; a door must skip them the way the picker
+      // refuses them.
+      readyLocal();
+      const dead = {
+        ...clipModel,
+        name: "minimax-h3:exotic",
+        family: "minimax-h3",
+        runtime_available: false,
+        runtime_unavailable_reason: "No loader for this layout.",
+      } as ModelEntry;
+      installLocal([stillModel, dead, clipModel]);
+      useLastUsedStylesStore().remember("clip", dead.name);
+      const store = useGenerateFormStore();
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(store.form.model).toBe(clipModel.name);
+    });
+
     it("opens 3-D on the 3-D style last used there", async () => {
       readyLocal();
       const other = { ...meshModel, name: "hunyuan3d-full:fp16" } as ModelEntry;

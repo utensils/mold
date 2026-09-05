@@ -635,6 +635,22 @@ describe("GenerateView — sequence output", () => {
     expect(setOutputMode).toHaveBeenCalledWith("sequence");
   });
 
+  it("opens Scenes for the Short clip door even with no style installed at all", async () => {
+    // Nothing installed: the starter cards hold the view and the inspector is
+    // never mounted, so the Scenes swap cannot go through it. The draft is
+    // switched directly — there is no style to swap anyway — and the timeline
+    // owns that empty state.
+    readyLocal();
+    useHostModelsStore().byHost.local = { entries: [], fetchedAt: Date.now(), error: null };
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    useUiStore().shortClip();
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.find("[data-test='generate-layout']").exists()).toBe(false);
+    expect(draft.output).toBe("sequence");
+  });
+
   it("consumes ?output=sequence without leaking the one-shot prompt, then strips the query", async () => {
     readyLocal();
     installedPayload = [videoModel];
