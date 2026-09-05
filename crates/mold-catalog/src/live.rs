@@ -1431,6 +1431,22 @@ fn looks_like_minimax_h3(id_lower: &str) -> bool {
         })
 }
 
+/// Match Qwen as a repository-name token, including the ecosystem's compact
+/// `QwenImage*` spelling, without treating an arbitrary image-edit repository
+/// as Qwen merely because the edit classifier is being evaluated.
+fn looks_like_qwen(id_lower: &str) -> bool {
+    id_lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .any(|word| {
+            word.strip_prefix("qwen").is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix.chars().all(|ch| ch.is_ascii_digit())
+                    || suffix.starts_with("image")
+            })
+        })
+}
+
 /// Wan's sub-family, inferred from a repo id.
 ///
 /// The HF normalizers pass `sub_family: None` on the grounds that single-file
@@ -1479,10 +1495,14 @@ pub fn family_from_hf(
             "diffusers:qwenimageeditpipeline" | "diffusers:qwenimageeditpluspipeline"
         )
     });
-    let qwen_edit_name =
-        crate::civitai_map::refine_family_from_names(Family::QwenImage, repo_id, None)
+    let qwen_context = looks_like_qwen(&id_lower);
+    let qwen_edit_name = qwen_context
+        && crate::civitai_map::refine_family_from_names(Family::QwenImage, repo_id, None)
             == Family::QwenImageEdit;
-    let qwen_image_name = id_lower.contains("qwen-image") || id_lower.contains("qwen_image");
+    let qwen_image_name = qwen_context
+        && (id_lower.contains("qwen-image")
+            || id_lower.contains("qwen_image")
+            || id_lower.contains("qwenimage"));
 
     let family = if looks_like_minimax_h3(&id_lower) {
         Family::MinimaxH3

@@ -959,6 +959,7 @@ fn family_from_hf_id_substring() {
         ("Qwen/Qwen-Image-Edit-2511", Family::QwenImageEdit),
         ("someone/QWEN_IMAGE_EDIT_finetune", Family::QwenImageEdit),
         ("someone/qwen-image-edit-lightning", Family::QwenImageEdit),
+        ("someone/QwenImageEdit2511", Family::QwenImageEdit),
         ("Qwen/Qwen-Image", Family::QwenImage),
     ];
     for (id, want) in cases {
@@ -1001,6 +1002,16 @@ fn family_from_hf_uses_official_qwen_edit_metadata_without_overmatching() {
             .unwrap_or_else(|| panic!("expected generic Qwen family for {id}"));
         assert_eq!(family, Family::QwenImage, "{id}");
     }
+
+    assert!(
+        family_from_hf(
+            "someorg/instruct-image-edit-v2",
+            &[],
+            Some("image-to-image")
+        )
+        .is_none(),
+        "a generic image-edit repository has no Qwen context"
+    );
 }
 
 #[test]
