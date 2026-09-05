@@ -51,6 +51,12 @@ fall back to local inference when the server is unavailable. `--local` skips
 the server. When a task must stay on a particular machine, set the host for
 that invocation and confirm it with a read-only status call first.
 
+MiniMax H3 `--local` accepts one FL2VA request with an owned, single-use
+attempt. Local batches and chains are refused before preparation. Ref2VA
+reference uploads use the server route. The same limits apply to local
+fallback when the server is unavailable; never retry a refused local batch
+by reusing its first request's prepared authority.
+
 ```bash
 mold server status
 mold server status --host gpu-host

@@ -66,6 +66,13 @@ tested; Mold reports that limitation normally rather than treating it as a
 licensing or authorization failure.
 :::
 
+`mold run --local` accepts one FL2VA request and prepares a single-use owned
+attempt with the same request, device, memory, and output checks as the server.
+Local H3 batches and chains are refused before preparation; use the server
+for those requests and for Ref2VA reference uploads. These limits also apply
+when a remote command falls back to local execution. This routing fix does
+not change the hardware qualification limits below.
+
 ::: info Apple Metal is a correctness-only path in progress
 The Apple Silicon execution path exists as of #1164; family-scoped BF16, a
 folded audio-VAE reduction, chunked dense attention sized so the score matrix

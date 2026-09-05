@@ -2462,6 +2462,9 @@ async fn main() {
     // Handle Ctrl+C gracefully — exit immediately without letting background
     // threads (e.g. indicatif's ctrl-c cleanup thread) panic on RecvError.
     ctrlc::set_handler(move || {
+        if commands::generate::cancel_active_local_h3() {
+            return;
+        }
         // Clear the line to remove any progress bar artifacts
         eprint!("\r\x1b[2K");
         std::process::exit(130); // 128 + SIGINT(2), standard Unix convention

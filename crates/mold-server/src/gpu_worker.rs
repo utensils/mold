@@ -3357,6 +3357,18 @@ fn run_claimed_h3_generation(
     let mut prepared = std::mem::ManuallyDrop::new(prepared);
     let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+        {
+            crate::h3_private_bridge::run_bound_attempt(
+                &mut prepared,
+                scope,
+                &job.request,
+                crate::h3_private_bridge::job_media_presence(&job),
+                &mut progress,
+                allocation_commit,
+            )
+        }
+        #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
         prepared.run_once(scope, &mut progress, allocation_commit)
     }));
     progress.clear_callback();
@@ -3459,7 +3471,7 @@ fn run_claimed_h3_generation(
 }
 
 #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
-fn validate_h3_prepared_attempt_facts(
+pub(crate) fn validate_h3_prepared_attempt_facts(
     scope: crate::h3_attempt::H3AttemptScopeFacts<'_>,
     prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
 ) -> anyhow::Result<()> {
@@ -3524,30 +3536,8 @@ fn finish_claimed_h3_success(
     prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
     mut output: crate::h3_private_bridge::H3ClaimedRunOutput,
 ) -> bool {
-    let echo = &output.identity_echo;
-    if echo.device_id != scope.device_id()
-        || echo.device_ordinal != scope.device_ordinal()
-        || echo.execution_identity_sha256 != scope.execution_identity_sha256()
-        || echo.prepared_attempt_identity_sha256 != scope.prepared_attempt_identity_sha256()
-        || echo.target_budget_identity_sha256 != scope.target_budget_identity_sha256()
-        || echo.component_set_identity_sha256 != scope.component_set_identity_sha256()
-        || echo.device_id != prepared.device_id
-        || echo.execution_identity_sha256 != prepared.execution_identity_sha256
-        || echo.prepared_attempt_identity_sha256 != prepared.prepared_attempt_identity_sha256
-        || echo.target_budget_identity_sha256 != prepared.target_budget_identity_sha256
-        || echo.component_set_identity_sha256 != prepared.component_set_identity_sha256
-        || echo.admission_evidence_identity_sha256 != prepared.admission_evidence_identity_sha256
-        || echo.artifact_qualification_identity_sha256
-            != prepared.artifact_qualification_identity_sha256
-        || echo.runtime_qualification_identity_sha256
-            != prepared.runtime_qualification_identity_sha256
-        || echo.consumption_identity_sha256 != prepared.consumption_identity_sha256
-        || echo.media != prepared.media
-    {
-        return reject_claimed_h3_generation_message(
-            job,
-            crate::h3_attempt::H3AttemptError::IdentityMismatch.to_string(),
-        );
+    if let Err(error) = validate_h3_terminal_identity(scope, prepared, &output) {
+        return reject_claimed_h3_generation_message(job, error.to_string());
     }
     if let Err(error) = validate_h3_publication_contract(worker, &job, prepared, &output) {
         return reject_claimed_h3_generation_message(
@@ -3577,26 +3567,70 @@ fn finish_claimed_h3_success(
 }
 
 #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+pub(crate) fn validate_h3_terminal_identity(
+    scope: crate::h3_attempt::H3AttemptScopeFacts<'_>,
+    prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+    output: &crate::h3_private_bridge::H3ClaimedRunOutput,
+) -> anyhow::Result<()> {
+    let echo = &output.identity_echo;
+    if echo.device_id != scope.device_id()
+        || echo.device_ordinal != scope.device_ordinal()
+        || echo.execution_identity_sha256 != scope.execution_identity_sha256()
+        || echo.prepared_attempt_identity_sha256 != scope.prepared_attempt_identity_sha256()
+        || echo.target_budget_identity_sha256 != scope.target_budget_identity_sha256()
+        || echo.component_set_identity_sha256 != scope.component_set_identity_sha256()
+        || echo.device_id != prepared.device_id
+        || echo.execution_identity_sha256 != prepared.execution_identity_sha256
+        || echo.prepared_attempt_identity_sha256 != prepared.prepared_attempt_identity_sha256
+        || echo.target_budget_identity_sha256 != prepared.target_budget_identity_sha256
+        || echo.component_set_identity_sha256 != prepared.component_set_identity_sha256
+        || echo.admission_evidence_identity_sha256 != prepared.admission_evidence_identity_sha256
+        || echo.artifact_qualification_identity_sha256
+            != prepared.artifact_qualification_identity_sha256
+        || echo.runtime_qualification_identity_sha256
+            != prepared.runtime_qualification_identity_sha256
+        || echo.consumption_identity_sha256 != prepared.consumption_identity_sha256
+        || echo.media != prepared.media
+    {
+        anyhow::bail!(crate::h3_attempt::H3AttemptError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
 fn validate_h3_publication_contract(
     worker: &GpuWorker,
     job: &GpuJob,
     prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
     output: &crate::h3_private_bridge::H3ClaimedRunOutput,
 ) -> anyhow::Result<()> {
+    validate_h3_publication_for_request(
+        &job.request,
+        crate::h3_private_bridge::job_media_presence(job),
+        worker.gpu.ordinal,
+        prepared,
+        output,
+    )
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+pub(crate) fn validate_h3_publication_for_request(
+    request: &mold_core::GenerateRequest,
+    media: mold_core::minimax_h3::ResolvedMediaPresence,
+    device_ordinal: usize,
+    prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+    output: &crate::h3_private_bridge::H3ClaimedRunOutput,
+) -> anyhow::Result<()> {
     let contract = &prepared.media;
     let expected_contract =
-        crate::h3_private_bridge::H3PreparedMediaContract::from_request_with_media(
-            &job.request,
-            crate::h3_private_bridge::job_media_presence(job),
-        )
-        .map_err(|_| {
-            anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
-        })?;
-    let expected_seed = job.request.seed.ok_or_else(|| {
+        crate::h3_private_bridge::H3PreparedMediaContract::from_request_with_media(request, media)
+            .map_err(|_| {
+                anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
+            })?;
+    let expected_seed = request.seed.ok_or_else(|| {
         anyhow::anyhow!("private H3 terminal media provenance mismatch: request-seed")
     })?;
-    let expected_frames = job
-        .request
+    let expected_frames = request
         .frames
         .unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES);
     let expected_duration_ms = mold_inference::av_media::timeline_duration_ms(
@@ -3611,7 +3645,7 @@ fn validate_h3_publication_contract(
         anyhow::anyhow!("private H3 terminal media provenance mismatch: response-video")
     })?;
     let durable_metadata = mold_core::OutputMetadata::from_generate_request(
-        &job.request,
+        request,
         expected_seed,
         None,
         "private-owner-publication-validation",
@@ -3660,19 +3694,16 @@ fn validate_h3_publication_contract(
         contract.reference_count == expected_contract.reference_count,
         "contract-reference-count"
     );
-    require_axis!(
-        contract.canonical_model == job.request.model,
-        "request-model"
-    );
+    require_axis!(contract.canonical_model == request.model, "request-model");
     require_axis!(contract.seed == expected_seed, "request-seed");
-    require_axis!(contract.width == job.request.width, "request-width");
-    require_axis!(contract.height == job.request.height, "request-height");
+    require_axis!(contract.width == request.width, "request-width");
+    require_axis!(contract.height == request.height, "request-height");
     require_axis!(contract.frames == expected_frames, "request-frames");
     require_axis!(
         contract.fps == mold_core::minimax_h3::FIXED_FPS,
         "request-fps"
     );
-    require_axis!(echo.device_ordinal == worker.gpu.ordinal, "echo-device");
+    require_axis!(echo.device_ordinal == device_ordinal, "echo-device");
     require_axis!(echo.media == *contract, "echo-media");
     require_axis!(echo.duration_ms == expected_duration_ms, "echo-duration");
     require_axis!(
@@ -5346,7 +5377,7 @@ fn private_h3_memory_sample_error(
 }
 
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
-fn validate_private_h3_physical_capacity(
+pub(crate) fn validate_private_h3_physical_capacity(
     model_name: &str,
     predicted_device_peak_bytes: u64,
     available_device_bytes: u64,
@@ -6076,10 +6107,10 @@ impl Drop for ScopedThreadGpuBinding {
 /// `planned_recheck_peak_bytes`: the learned envelope can carry a *failed*
 /// run's high-water mark, and granting that back is precisely the number that
 /// OOM'd.
-struct ScopedThreadVramGrant;
+pub(crate) struct ScopedThreadVramGrant;
 
 impl ScopedThreadVramGrant {
-    fn enter(predicted_vram_peak_bytes: Option<u64>) -> Option<Self> {
+    pub(crate) fn enter(predicted_vram_peak_bytes: Option<u64>) -> Option<Self> {
         // A zero peak is "no estimate", not "no memory": granting it would
         // starve the engine into full streaming on every job.
         let bytes = predicted_vram_peak_bytes.filter(|bytes| *bytes > 0)?;
@@ -13141,7 +13172,7 @@ mod tests {
             .find("fn run_claimed_h3_generation(")
             .expect("claimed H3 generation");
         let end = source[start..]
-            .find("\nfn validate_h3_prepared_attempt_facts(")
+            .find("\npub(crate) fn validate_h3_prepared_attempt_facts(")
             .map(|offset| start + offset)
             .expect("claimed H3 generation boundary");
         let claimed_h3 = &source[start..end];
