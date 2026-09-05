@@ -6,6 +6,7 @@ import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import sequenceComposerSource from "../components/create/SequenceComposer.vue?raw";
 import composerCardSource from "../components/create/ComposerCard.vue?raw";
 import sceneLaneSource from "../components/create/SceneLane.vue?raw";
+import benchLayoutSource from "../lib/benchLayout?raw";
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -34,8 +35,33 @@ describe("GenerateView layout", () => {
     expect(tagFor(viewSource, "create-bottom-panel")).toContain("height: `${benchHeight}px`");
     expect(tagFor(viewSource, "create-bottom-panel")).toContain("containerType: 'size'");
     expect(tagFor(viewSource, "create-bottom-panel")).toContain("containerName: 'create-bench'");
-    expect(viewSource).toContain("min-h-[320px]");
     expect(viewSource).not.toContain('class="absolute inset-0 h-full w-full object-cover"');
+  });
+
+  /*
+   * The workbench is overflow-hidden and the composer is its LAST child, so
+   * anything the bench clamp fails to reserve is cut off the composer — the
+   * prompt and, in clip mode, the only Generate button. Replaces the old
+   * `min-h-[320px]` string check, which pinned a canvas floor that
+   * contradicted the 144px the clamp reserved.
+   */
+  it("reserves the canvas floor, the resizer and the composer before the bench", () => {
+    // One authority for the floor: the canvas binds the same number the clamp
+    // reserves instead of hard-coding a utility beside it.
+    expect(tagFor(viewSource, "generate-canvas")).toContain("minHeight: `${canvasFloor}px`");
+    expect(tagFor(viewSource, "generate-canvas")).not.toContain("min-h-[");
+    expect(viewSource).toContain('from "../lib/benchLayout"');
+    expect(viewSource).toContain("clampBenchHeight as clampBenchHeightWithin");
+    expect(viewSource).toMatch(/resizerHeight:\s*BENCH_RESIZER_HEIGHT/);
+    expect(viewSource).toMatch(/composerHeight:\s*composerHeight\.value/);
+    // The composer measures itself: a multi-line prompt takes pixels from the
+    // same column, so the ceiling has to move with it.
+    expect(viewSource).toContain("observeComposerHeight");
+    expect(viewSource).toContain("new ResizeObserver");
+    // The resizer advertises the ceiling the clamp actually enforces.
+    expect(tagFor(viewSource, "create-bench-resizer")).toContain(
+      ':aria-valuemax="maxBenchHeight()"',
+    );
   });
 
   it("fills the bottom panel and pins the timeline's readout to its bottom edge", () => {
@@ -53,6 +79,62 @@ describe("GenerateView layout", () => {
     // bottom edge of their own to pin to.
     expect(composerCardSource).toMatch(/\.ms-composer__controls\s*\{[^}]*display:\s*flex/s);
     expect(tagFor(composerCardSource, "generate-button")).toContain("ms-composer__generate");
+  });
+
+  /*
+   * The caption is a child of the ASPECT-FITTED frame, so its width is the
+   * print's, not the canvas's: an 832×1216 portrait at the minimum window
+   * gives it ~287px where the actions need ~420, and `overflow-hidden` cut
+   * Make bigger and the ⋯ button off with no scroll and no cue. The frame
+   * measures itself and the word actions collapse into the ⋯ menu — which is
+   * only safe because that menu offers every one of them.
+   */
+  describe("canvas caption reachability", () => {
+    const captionActions = ["canvas-save", "canvas-variations", "canvas-upscale"] as const;
+
+    it("measures the frame the caption actually lives in", () => {
+      expect(tagFor(viewSource, "preview-frame")).toContain("[container-type:inline-size]");
+      expect(tagFor(viewSource, "preview-frame")).toContain("[container-name:preview-frame]");
+      expect(viewSource).toMatch(
+        /@container preview-frame \(max-width: \d+px\) \{\s*\.caption-action--word \{\s*display: none;/,
+      );
+    });
+
+    it("collapses only the word actions, never the ⋯ menu", () => {
+      for (const action of captionActions) {
+        expect(classesFor(viewSource, action)).toContain("caption-action--word");
+      }
+      expect(classesFor(viewSource, "canvas-more")).toContain("caption-action--icon");
+      expect(classesFor(viewSource, "canvas-more")).not.toContain("caption-action--word");
+    });
+
+    it("offers every collapsible action from the canvas menu", () => {
+      const menu = viewSource.slice(viewSource.indexOf("function canvasMenu()"));
+      // Save is the mesh/image pair the menu already carried.
+      expect(menu).toContain('isMeshResult(j) ? "Save mesh" : "Save image"');
+      expect(menu).toContain('label: "Make 4 variations"');
+      expect(menu).toContain('label: "Make bigger"');
+      // Each menu entry is gated on the same predicate as its caption button.
+      expect(menu).toContain("disabled: !canMakeVariations(j)");
+      expect(menu).toContain("disabled: !canUpscaleCanvasResult(j)");
+      expect(menu).toContain("disabled: !canSaveCanvasResult(j)");
+    });
+  });
+
+  /*
+   * Two colour utilities on one element do not stack: they have equal
+   * specificity, so the one Tailwind emits LAST wins whatever the attribute
+   * order says. `.text-fg-dim` is emitted after `.text-accent`, which is how
+   * the watched sequence's "clip 2/3 · developing…" rendered dim grey while
+   * its class list ended in `text-accent`.
+   */
+  it("never stacks two colour utilities on one element", () => {
+    const COLOUR =
+      /(?<![\w:-])text-(fg|fg-2|fg-dim|fg-faint|accent|error|success|warning|sapphire|star|on-accent)(?![\w-])/g;
+    const offenders = [...viewSource.matchAll(/(?<![:\w-])class="([^"]*)"/g)]
+      .map((match) => match[1]!)
+      .filter((attr) => [...attr.matchAll(COLOUR)].length > 1);
+    expect(offenders).toEqual([]);
   });
 
   it("keeps full model names visible in the shared model picker", () => {
@@ -123,8 +205,12 @@ describe("GenerateView layout", () => {
     // rather than overflowing into a scrollbar.
     expect(viewSource).toContain("MIN_SEQUENCE_BENCH_HEIGHT");
     expect(viewSource).toMatch(/function minBenchHeight\(\)/);
-    expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), available - MIN_CANVAS_HEIGHT\)/);
-    expect(viewSource).toMatch(/Math\.max\(minBenchHeight\(\), height\)/);
+    // Replaces the old inline `available - MIN_CANVAS_HEIGHT` expression: the
+    // ceiling now lives in lib/benchLayout.ts, which reserves the resizer and
+    // the composer too, and keeps the bench floor when nothing else fits.
+    expect(viewSource).toMatch(/minBench:\s*minBenchHeight\(\)/);
+    expect(benchLayoutSource).toMatch(/Math\.max\(input\.minBench, input\.available - reserved\)/);
+    expect(benchLayoutSource).toMatch(/Math\.max\(input\.minBench, input\.requested\)/);
     // Switching Output re-clamps the persisted height against the new floor.
     expect(viewSource).toMatch(/watch\(isSequence, [\s\S]{0,400}?clampBenchToViewport\(\)/);
     // The timeline root must opt out of min-content flooring: floored at auto,

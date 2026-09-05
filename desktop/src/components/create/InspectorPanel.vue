@@ -739,7 +739,7 @@ defineExpose({ setOutputMode });
            beside the source wells behind this group's second door and is
            mounted only for a checkpoint that advertises identity support. -->
       <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
-        <div class="ms-group-label">Start from a photo</div>
+        <div class="ms-group-label uppercase">Start from a photo</div>
         <SourceImageWell ref="sourceWell" :form="form" :selected-model="contractModel" />
         <div v-if="maskDoorAvailable || showIdentity" class="ms-doors">
           <button
@@ -782,7 +782,7 @@ defineExpose({ setOutputMode });
       <!-- Quality — three rungs of the recipe's own steps range, driving the
            Detail slider below rather than a second setting. -->
       <div v-if="qualityRows.length > 0" class="ms-field" data-test="quality-presets">
-        <div class="ms-group-label">Quality</div>
+        <div class="ms-group-label uppercase">Quality</div>
         <div class="ms-quality">
           <button
             v-for="preset in qualityRows"
@@ -905,7 +905,7 @@ defineExpose({ setOutputMode });
            block, so a host that widens the octree ladder or the face bounds
            widens this group with no client release. -->
       <div v-if="meshProfile" class="ms-field ms-card" data-test="mesh-controls">
-        <div class="ms-group-label">3-D object</div>
+        <div class="ms-group-label uppercase">3-D object</div>
         <div class="ms-card__row">
           <SegmentedControl
             v-if="octreeOptions.length > 0"
@@ -976,7 +976,7 @@ defineExpose({ setOutputMode });
       <!-- Clip — one card for length, smoothness and sound. Duration is the
            human-facing control; exact frames stay in Advanced. -->
       <div v-if="showClipCard" class="ms-field ms-card" data-test="clip-card">
-        <div class="ms-group-label">Clip</div>
+        <div class="ms-group-label uppercase">Clip</div>
         <template v-if="!isSequence">
           <div v-if="canPredictDuration" class="ms-field--row" data-test="predict-duration-control">
             <span class="ms-field__label ms-field__label--inline">Predict duration</span>
@@ -1045,12 +1045,12 @@ defineExpose({ setOutputMode });
           <span class="ms-field__label ms-field__label--inline">Repeat this look</span>
           <span v-if="seedReadout" class="ms-field__truth">seed {{ seedReadout }}</span>
         </div>
-        <div class="ms-seg" role="group" aria-label="Repeat this look">
+        <div class="ms-seedmode" role="group" aria-label="Repeat this look">
           <button
             type="button"
             data-test="seed-mode-fixed"
             :aria-pressed="uiSeedMode === 'fixed'"
-            class="ms-seg__btn"
+            class="ms-seedmode__btn"
             :data-on="uiSeedMode === 'fixed' ? 'true' : undefined"
             @click="setSeedMode('fixed')"
           >
@@ -1060,7 +1060,7 @@ defineExpose({ setOutputMode });
             type="button"
             data-test="seed-mode-random"
             :aria-pressed="uiSeedMode === 'random'"
-            class="ms-seg__btn"
+            class="ms-seedmode__btn"
             :data-on="uiSeedMode === 'random' ? 'true' : undefined"
             @click="setSeedMode('random')"
           >
@@ -1314,7 +1314,11 @@ defineExpose({ setOutputMode });
   color: var(--mold-text-dim);
   margin: 0;
 }
-.ms-card__faces {
+/* Written against BOTH classes on purpose: this field also carries
+   `.ms-seed__input`, whose rule is declared later, so at equal specificity a
+   bare `.ms-card__faces` lost its width and height and the face budget
+   rendered as a full-width 32px seed field. */
+.ms-seed__input.ms-card__faces {
   width: auto;
   max-width: 140px;
   height: var(--mold-ctl-md);
@@ -1392,8 +1396,10 @@ defineExpose({ setOutputMode });
 .ms-field__hint--after-slider {
   margin-top: 12px;
 }
+/* The accent is ONE thing; a status is a state token. In the accent this
+   sentence was indistinguishable from the Match-source link above it. */
 .ms-field__hint--warning {
-  color: var(--mold-blue);
+  color: var(--mold-warning);
 }
 .ms-field__error {
   font-size: var(--mold-fs-micro);
@@ -1411,25 +1417,33 @@ defineExpose({ setOutputMode });
 .ms-field__match-source:hover {
   text-decoration: underline;
 }
-.ms-seg {
+/* Keep | Surprise me. Named for what it is, NOT `.ms-seg`: Vue puts the
+   parent's scope id on a child component's ROOT node, so a local `.ms-seg`
+   here matched the shared SegmentedControl's root too (the mesh Surface
+   detail control) at equal specificity, and which radius and ground won
+   depended on the bundler's chunk order rather than on either author.
+   `--mold-radius-3` is the WINDOW radius — 16px in Safelight, which turned a
+   34px-tall control into a pill; the mock uses radius-2 on the container and
+   radius-1 on the buttons. */
+.ms-seedmode {
   display: flex;
   gap: 3px;
   padding: 3px;
   background: var(--mold-bg-deep);
   border: var(--mold-bw) solid var(--mold-border-control);
-  border-radius: var(--mold-radius-3);
+  border-radius: var(--mold-radius-2);
 }
-.ms-seg__btn {
+.ms-seedmode__btn {
   flex: 1;
   border: 0;
   background: transparent;
   color: var(--mold-text-2);
   padding: 7px;
-  border-radius: var(--mold-radius-2);
+  border-radius: var(--mold-radius-1);
   font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
-.ms-seg__btn[data-on="true"] {
+.ms-seedmode__btn[data-on="true"] {
   background: var(--mold-bg);
   color: var(--mold-text);
 }
@@ -1452,6 +1466,7 @@ defineExpose({ setOutputMode });
 }
 .ms-seed__reroll {
   flex-shrink: 0;
+  cursor: pointer;
   color: var(--mold-text-dim);
   background: transparent;
   border: 0;
@@ -1462,6 +1477,7 @@ defineExpose({ setOutputMode });
 }
 .ms-seed__lock {
   color: var(--mold-sapphire);
+  cursor: pointer;
 }
 .ms-seed__lock:hover {
   text-decoration: underline;
@@ -1472,7 +1488,9 @@ defineExpose({ setOutputMode });
   background: transparent;
   color: var(--mold-text-2);
   padding: 11px;
-  border-radius: var(--mold-radius-3);
+  /* A 40px row on the window radius is a pill in Safelight; the card radius
+     is what every other in-view control edge uses. */
+  border-radius: var(--mold-radius-2);
   font-size: var(--mold-fs-xs);
   display: flex;
   align-items: center;

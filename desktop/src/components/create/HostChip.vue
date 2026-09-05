@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
+import Popover from "@ui/components/Popover.vue";
 import { normalizeTargetHost } from "../../lib/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useHostsStore, type HostView } from "../../stores/hosts";
@@ -63,54 +64,48 @@ function hostLine(host: HostView): string {
   return host.queueDepth !== null ? `queue ${host.queueDepth}` : "ready";
 }
 
-const popoverEl = ref<HTMLDivElement | null>(null);
+/*
+ * The menu is the SHARED Popover, which teleports its panel to <body> and
+ * positions it from the trigger's viewport rect. Rendered in place it was an
+ * absolutely positioned box inside `.ms-inspector__scroll` (`overflow-y:
+ * auto`), so it contributed to that ancestor's scrollable area instead of
+ * overlaying it: opening "Where it runs" — which sits near the bottom of the
+ * Settings list — grew the inspector's scroll height and pushed the options
+ * below the fold. Escape and outside-pointerdown dismissal come with it.
+ */
 const popoverOpen = ref(false);
 function toggle() {
   if (hosts.multiHost) popoverOpen.value = !popoverOpen.value;
 }
-function onPointerDown(event: PointerEvent) {
-  if (!popoverOpen.value || !popoverEl.value) return;
-  if (!event.composedPath().includes(popoverEl.value)) popoverOpen.value = false;
-}
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") popoverOpen.value = false;
-}
-onMounted(() => {
-  document.addEventListener("pointerdown", onPointerDown);
-  document.addEventListener("keydown", onKeydown);
-});
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onPointerDown);
-  document.removeEventListener("keydown", onKeydown);
-});
 </script>
 
 <template>
-  <div ref="popoverEl" class="ms-hostchip">
-    <button
-      type="button"
-      data-test="host-chip"
-      class="ms-hostchip__chip"
-      :class="{ 'ms-hostchip__chip--button': hosts.multiHost }"
-      :aria-expanded="hosts.multiHost ? popoverOpen : undefined"
-      :aria-haspopup="hosts.multiHost ? 'menu' : undefined"
-      :tabindex="hosts.multiHost ? 0 : -1"
-      @click="toggle"
-    >
-      <span
-        class="ms-hostchip__dot"
-        :class="chipReady ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'"
-      />
-      {{ chipLabel }} · {{ chipStatus }}
-      <Icon v-if="hosts.multiHost" name="chevron-down" :size="12" class="ms-hostchip__chev" />
-    </button>
-    <div
-      v-if="popoverOpen"
-      data-test="host-menu"
-      role="menu"
-      aria-label="Where it runs"
-      class="ms-hostchip__popover ms-fade-up"
-    >
+  <Popover
+    v-model:open="popoverOpen"
+    class="ms-hostchip"
+    placement="bottom-end"
+    label="Where it runs"
+  >
+    <template #trigger>
+      <button
+        type="button"
+        data-test="host-chip"
+        class="ms-hostchip__chip"
+        :class="{ 'ms-hostchip__chip--button': hosts.multiHost }"
+        :aria-expanded="hosts.multiHost ? popoverOpen : undefined"
+        :aria-haspopup="hosts.multiHost ? 'menu' : undefined"
+        :tabindex="hosts.multiHost ? 0 : -1"
+        @click="toggle"
+      >
+        <span
+          class="ms-hostchip__dot"
+          :class="chipReady ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'"
+        />
+        {{ chipLabel }} · {{ chipStatus }}
+        <Icon v-if="hosts.multiHost" name="chevron-down" :size="12" class="ms-hostchip__chev" />
+      </button>
+    </template>
+    <div data-test="host-menu" role="menu" aria-label="Where it runs" class="ms-hostchip__menu">
       <div class="ms-hostchip__kicker font-mono text-xs">run on</div>
       <button
         type="button"
@@ -159,12 +154,15 @@ onBeforeUnmount(() => {
         <span v-if="target === h.id" class="ms-hostchip__check">✓</span>
       </button>
     </div>
-  </div>
+  </Popover>
 </template>
 
 <style scoped>
+/* The class lands on the shared Popover's root. Only the row behaviour is
+   ours — never `display` or `position`, which the Popover sets at the same
+   specificity and would win or lose by chunk order. */
 .ms-hostchip {
-  position: relative;
+  flex-shrink: 0;
 }
 .ms-hostchip__chip {
   font-family: var(--mold-font-mono);
@@ -205,18 +203,10 @@ onBeforeUnmount(() => {
 .ms-hostchip__dot--wait {
   background: var(--mold-text-dim);
 }
-/* Above every composer affordance (Templates sits at z-30 in the workbench). */
-.ms-hostchip__popover {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 50;
+/* The panel's ground, border, radius and shadow are the shared Popover's;
+   this only sets how wide the routing list wants to be. */
+.ms-hostchip__menu {
   width: 264px;
-  padding: 8px;
-  background: var(--mold-bg);
-  border: 1px solid var(--mold-border-control);
-  border-radius: var(--mold-radius-2);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 .ms-hostchip__kicker {
   font-size: var(--mold-fs-micro);

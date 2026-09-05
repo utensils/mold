@@ -376,6 +376,7 @@ onBeforeUnmount(() => {
 }
 .ms-model__button {
   display: flex;
+  cursor: pointer;
   min-height: 40px;
   width: 100%;
   align-items: center;
@@ -447,6 +448,7 @@ onBeforeUnmount(() => {
 }
 .ms-model__option {
   display: flex;
+  cursor: pointer;
   width: 100%;
   align-items: flex-start;
   gap: 8px;
@@ -496,6 +498,7 @@ onBeforeUnmount(() => {
 }
 .ms-model__browse {
   display: flex;
+  cursor: pointer;
   width: 100%;
   align-items: center;
   border-top: 1px solid var(--mold-border);

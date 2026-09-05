@@ -81,6 +81,19 @@ describe("CreateHeader — the toolbar holds one row", () => {
     expect(segmentedControlSource).toMatch(/\.ms-seg__btn\s*\{[^}]*white-space:\s*nowrap/s);
   });
 
+  /*
+   * The output kind picks a SETTING, so it takes the neutral treatment. In
+   * the accent it was louder than the mock and, sitting on the same view as
+   * the accent-tinted Quality rows and mesh ladder, it stopped saying which
+   * of the two kinds of choice it was.
+   */
+  it("paints the output-kind control neutral, not accent-tinted", () => {
+    expect(createHeaderSource).toMatch(/<SegmentedControl[^>]*variant="neutral"/s);
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    expect(wrapper.get("[data-test='output-kind']").classes()).toContain("ms-seg--neutral");
+  });
+
   it("never lets the segmented control shrink below its own segments", () => {
     expect(createHeaderSource).toMatch(/\.ms-header__seg\s*\{[^}]*flex:\s*0\s+0\s+auto/s);
     expect(createHeaderSource).toMatch(/<SegmentedControl[^>]*class="ms-header__seg"/s);

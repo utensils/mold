@@ -98,7 +98,7 @@ watch(
 <template>
   <div>
     <div class="ms-loras__head">
-      <span class="ms-group-label">Add-on looks</span>
+      <span class="ms-group-label uppercase">Add-on looks</span>
       <span v-if="route" class="ms-loras__route">{{ route.label }}</span>
       <span class="ms-loras__spacer" />
       <button

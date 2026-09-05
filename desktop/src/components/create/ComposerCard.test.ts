@@ -274,12 +274,18 @@ describe("ComposerCard — prompt transforms a recipe ignores", () => {
     return form;
   }
 
-  it("disables Expand and Remix with the reason, even with a prompt typed", () => {
+  it("disables Expand and Remix with the reason, even with a prompt typed", async () => {
     const wrapper = mountComposer(ignoredForm());
     const control = wrapper.findComponent(ExpandControl);
     expect(control.props("transformBlockedReason")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
     expect(wrapper.get('[data-test="expand-action"]').attributes("disabled")).toBeDefined();
+    // Remix folded under the rewrite chip's caret; it is still refused, and
+    // still says why.
+    await wrapper.get('[data-test="rewrite-more"]').trigger("click");
     expect(wrapper.get('[data-test="remix-action"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-test="remix-action"]').attributes("title")).toBe(
+      PROMPT_IGNORED_TRANSFORM_REASON,
+    );
     expect(wrapper.get('[data-test="expand-action"]').attributes("title")).toBe(
       PROMPT_IGNORED_TRANSFORM_REASON,
     );

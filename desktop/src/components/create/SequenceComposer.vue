@@ -42,6 +42,7 @@ import {
   type SequenceConfirmation,
 } from "../../lib/sequenceTimeline";
 import { formatGB } from "../../lib/format";
+import { rulerTicks } from "../../lib/rulerTicks";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
@@ -292,18 +293,10 @@ function togglePlayback() {
 }
 
 /** Ruler ticks: the coarsest round interval that still marks the clip out in
- *  a handful of steps, so the row never crowds at any clip length. */
-const TICK_INTERVALS = [1, 2, 5, 10, 15, 30, 60] as const;
-const ticks = computed(() => {
-  const total = duration.value.seconds;
-  if (total <= 0) return [];
-  const step = TICK_INTERVALS.find((candidate) => total / candidate <= 7) ?? 120;
-  const marks: { at: number; label: string }[] = [];
-  for (let at = 0; at <= total + 0.001; at += step) {
-    marks.push({ at, label: clockLabel(at) });
-  }
-  return marks;
-});
+ *  a handful of steps, so the row never crowds at any clip length. The
+ *  closing mark is pinned to the right edge rather than left:100%, where its
+ *  label would paint past the strip and be cut by the bench's overflow. */
+const ticks = computed(() => rulerTicks(duration.value.seconds, clockLabel));
 
 const validating = ref(false);
 const validationPlan = ref<ChainValidationResponse | null>(null);
@@ -679,7 +672,7 @@ function onBenchContextMenu(event: MouseEvent) {
       <button
         type="button"
         data-test="timeline-help"
-        class="text-micro font-medium text-accent"
+        class="cursor-pointer text-micro font-medium text-accent"
         :aria-expanded="helpOpen"
         @click="helpOpen = !helpOpen"
       >
@@ -713,7 +706,8 @@ function onBenchContextMenu(event: MouseEvent) {
           v-for="tick in ticks"
           :key="tick.at"
           class="ms-timeline__tick"
-          :style="{ left: `${(tick.at / Math.max(duration.seconds, 0.001)) * 100}%` }"
+          :class="{ 'ms-timeline__tick--end': tick.atEnd }"
+          :style="tick.style"
         >
           <span class="ms-timeline__tick-label">{{ tick.label }}</span>
           <span class="ms-timeline__tick-mark" />
@@ -1015,6 +1009,11 @@ function onBenchContextMenu(event: MouseEvent) {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+}
+/* The closing mark grows INWARD from the right edge: pinned at left:100% its
+   label starts at the edge and is cut off by the bench's overflow. */
+.ms-timeline__tick--end {
+  align-items: flex-end;
 }
 .ms-timeline__tick-label {
   font-family: var(--mold-font-mono);

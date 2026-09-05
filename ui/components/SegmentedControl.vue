@@ -29,8 +29,23 @@ const props = withDefaults(
     wrap?: boolean;
     /** Label and sub side by side — tabs carrying a mono count. */
     inline?: boolean;
+    /**
+     * How the active segment is painted. `accent` (the default) tints and
+     * rings it — the treatment for a control that picks a MODE, and what
+     * nav rows, the Quality rows and the mesh detail ladder use. `neutral`
+     * fills it with `--mold-surface-2` in ordinary ink, for a control that
+     * picks a SETTING; the mock uses it for the toolbar's output kind and
+     * for Keep | Surprise me, and the accent stays one thing.
+     */
+    variant?: "accent" | "neutral";
   }>(),
-  { disabled: false, compact: false, wrap: false, inline: false },
+  {
+    disabled: false,
+    compact: false,
+    wrap: false,
+    inline: false,
+    variant: "accent",
+  },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: T] }>();
@@ -70,6 +85,7 @@ function onKeydown(event: KeyboardEvent) {
       'ms-seg--compact': compact,
       'ms-seg--wrap': wrap,
       'ms-seg--inline': inline,
+      'ms-seg--neutral': variant === 'neutral',
     }"
     role="radiogroup"
     :aria-label="label"
@@ -100,7 +116,7 @@ function onKeydown(event: KeyboardEvent) {
   gap: 3px;
   padding: 3px;
   background: var(--mold-bg-deep);
-  border: 1px solid var(--mold-border-control);
+  border: var(--mold-bw) solid var(--mold-border-control);
   border-radius: var(--mold-radius-2);
 }
 
@@ -122,7 +138,7 @@ function onKeydown(event: KeyboardEvent) {
   padding: 7px 8px;
   border-radius: var(--mold-radius-1);
   font-family: var(--mold-font-sans);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
   transition:
     background var(--mold-dur-quick) var(--mold-ease-out),
@@ -166,7 +182,15 @@ function onKeydown(event: KeyboardEvent) {
   background: var(--mold-accent-tint);
   color: var(--mold-blue);
   font-weight: 700;
-  box-shadow: inset 0 0 0 1px var(--mold-blue);
+  box-shadow: inset 0 0 0 var(--mold-bw) var(--mold-blue);
+}
+
+/* Picks a setting, not a mode: a raised fill in ordinary ink, no ring. */
+.ms-seg--neutral .ms-seg__btn[data-on="true"] {
+  background: var(--mold-surface-2);
+  color: var(--mold-text);
+  font-weight: 600;
+  box-shadow: none;
 }
 
 .ms-seg__btn:disabled {

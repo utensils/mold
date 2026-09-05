@@ -38,6 +38,31 @@ describe("SceneLane — the lane is the clip", () => {
     ]);
   });
 
+  /*
+   * The block's width and its caption are the same number. Sized by the
+   * frames it PLAYS but labelled with `clip.frames`, a smooth-seamed block
+   * was narrower than its own caption claimed — the lane is the ruler, so the
+   * two cannot disagree. The authored length stays one hover away.
+   */
+  it("captions every block with the time it plays, not its authored length", () => {
+    const feet = make({ motionTail: 25 }).findAll("[data-test='scene-block'] .ms-lane__length");
+    // 50f and 100f at 25fps, the second handing 25f back across a smooth seam.
+    expect(feet.map((foot) => foot.text())).toEqual(["50f · 2.0s", "75f · 3.0s"]);
+  });
+
+  it("names the authored length on the block whose seam takes frames from it", () => {
+    const feet = make({ motionTail: 25 }).findAll("[data-test='scene-block'] .ms-lane__length");
+    expect(feet[0]!.attributes("title")).toBeUndefined();
+    expect(feet[1]!.attributes("title")).toContain("Plays 75f · 3.0s of 100f · 4.0s");
+    expect(feet[1]!.attributes("title")).toContain("25 frames");
+  });
+
+  it("says one number when no seam takes anything", () => {
+    const feet = make({ motionTail: 0 }).findAll("[data-test='scene-block'] .ms-lane__length");
+    expect(feet.map((foot) => foot.text())).toEqual(["50f · 2.0s", "100f · 4.0s"]);
+    expect(feet.map((foot) => foot.attributes("title"))).toEqual([undefined, undefined]);
+  });
+
   it("counts a smooth seam's carried frames once, so the lane sums to the clip", () => {
     const blocks = make({ motionTail: 25 }).findAll("[data-test='scene-block']");
     expect(blocks.map((block) => (block.element as HTMLElement).style.flexGrow)).toEqual([

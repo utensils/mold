@@ -177,6 +177,7 @@ function onBlur() {
       class="ms-header__seg"
       :model-value="outputKind"
       :options="outputOptions"
+      variant="neutral"
       label="What to make"
       @update:model-value="setOutputKind"
     />
@@ -311,6 +312,7 @@ function onBlur() {
 }
 .ms-header__door {
   display: inline-flex;
+  cursor: pointer;
   align-items: center;
   gap: 6px;
   height: var(--mold-ctl-md);

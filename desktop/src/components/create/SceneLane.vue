@@ -75,6 +75,24 @@ function blockStyle(clip: RailClip, index: number) {
 
 const sceneTitle = (clip: RailClip, index: number) => sceneLabel(clip.prompt, index);
 
+/** The block's caption is the time the block IS — the same number its width
+ *  comes from. Labelled with `clip.frames` it claimed a length the block did
+ *  not draw, because a smooth or fading seam hands its tail to the scene
+ *  before. The authored length is still one hover away, and the Length picker
+ *  above still edits it. */
+function playedLabel(clip: RailClip, index: number): string {
+  return formatFrameDuration(playedFrames(clip, index), props.fps);
+}
+
+function lengthTitle(clip: RailClip, index: number): string | undefined {
+  const played = playedFrames(clip, index);
+  if (played === clip.frames) return undefined;
+  return `Plays ${formatFrameDuration(played, props.fps)} of ${formatFrameDuration(
+    clip.frames,
+    props.fps,
+  )} — the seam hands ${clip.frames - played} frames to the scene before`;
+}
+
 const planWord: Record<"cached" | "rerender" | "new", string> = {
   cached: "kept",
   rerender: "re-made",
@@ -237,7 +255,9 @@ const dragModel = computed({
         <span class="ms-lane__veil" aria-hidden="true" />
         <span class="ms-lane__title" data-test="scene-title">{{ sceneTitle(clip, index) }}</span>
         <span class="ms-lane__foot">
-          <span class="ms-lane__length">{{ formatFrameDuration(clip.frames, fps) }}</span>
+          <span class="ms-lane__length" :title="lengthTitle(clip, index)">{{
+            playedLabel(clip, index)
+          }}</span>
           <span v-if="plans?.[index]" class="ms-lane__plan">{{ planWord[plans[index]!] }}</span>
         </span>
         <span

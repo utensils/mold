@@ -240,7 +240,10 @@ describe("lexicon — the inspector", () => {
 describe("lexicon — the composer", () => {
   it("offers to write more for me, on ⌘E", () => {
     expect(expandSource).toContain('"Write more for me"');
-    expect(expandSource).toContain("'Write more for me'");
+    // The chip's label and its tooltip both say it. Replaces the old
+    // single-quoted assertion, which pinned a quote style that existed only
+    // because the tooltip used to live in a template ternary.
+    expect((expandSource.match(/Write more for me/g) ?? []).length).toBeGreaterThanOrEqual(2);
     expect(expandSource).not.toContain('"Expand"');
     expect(expandSource).not.toContain("'Expand prompt'");
   });

@@ -44,6 +44,17 @@ import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
 import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { SEQUENCE_NEEDS_STYLE, type SequenceConfirmation } from "../lib/sequenceTimeline";
+import {
+  BENCH_RESIZER_HEIGHT,
+  COMPOSER_FALLBACK_HEIGHT,
+  DEFAULT_SEQUENCE_BENCH_HEIGHT,
+  MIN_BENCH_HEIGHT,
+  MIN_SEQUENCE_BENCH_HEIGHT,
+  MIN_SEQUENCE_CANVAS_HEIGHT,
+  MIN_STILL_CANVAS_HEIGHT,
+  benchHeightCeiling,
+  clampBenchHeight as clampBenchHeightWithin,
+} from "../lib/benchLayout";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -723,17 +734,6 @@ const inspectorRef = ref<InstanceType<typeof InspectorPanel> | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
-const DEFAULT_BENCH_HEIGHT = 520;
-const MIN_BENCH_HEIGHT = 280;
-/**
- * Clip mode's floor covers the timeline's fixed chrome (activity header, edit
- * banner, transport, ruler, the scene row and the readout) plus the lane's own
- * minimum, so resizing compresses the lane instead of growing a scrollbar. The
- * words and Generate moved to the composer, which sits below this panel and
- * measures itself.
- */
-const MIN_SEQUENCE_BENCH_HEIGHT = 320;
-const MIN_CANVAS_HEIGHT = 144;
 const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
 function readStoredBenchHeight(): number | null {
   try {
@@ -747,23 +747,49 @@ const storedBenchHeight = readStoredBenchHeight();
 const benchHeight = ref(
   Number.isFinite(storedBenchHeight)
     ? Math.max(MIN_BENCH_HEIGHT, storedBenchHeight!)
-    : DEFAULT_BENCH_HEIGHT,
+    : DEFAULT_SEQUENCE_BENCH_HEIGHT,
 );
 let benchResizeStartY = 0;
 let benchResizeStartHeight = 0;
+
+/**
+ * The composer's real height, measured. It is the piece `overflow-hidden`
+ * eats when the reservation is short, and it is the one piece whose height
+ * the user changes (a long prompt grows the textarea), so the bench ceiling
+ * has to follow it rather than assume it.
+ */
+const composerHeight = ref(COMPOSER_FALLBACK_HEIGHT);
+let composerObserver: ResizeObserver | null = null;
+
+/** The canvas's own floor — bound to its `min-height`, so the CSS and the
+ *  clamp can never disagree the way they did when one said 320 and the
+ *  other reserved 144. */
+const canvasFloor = computed(() =>
+  isSequence.value ? MIN_SEQUENCE_CANVAS_HEIGHT : MIN_STILL_CANVAS_HEIGHT,
+);
 
 function minBenchHeight(): number {
   return isSequence.value ? MIN_SEQUENCE_BENCH_HEIGHT : MIN_BENCH_HEIGHT;
 }
 
+function benchClampInput(requested: number) {
+  return {
+    requested,
+    available: workbenchRef.value?.clientHeight ?? window.innerHeight,
+    minBench: minBenchHeight(),
+    canvasFloor: canvasFloor.value,
+    resizerHeight: BENCH_RESIZER_HEIGHT,
+    composerHeight: composerHeight.value,
+  };
+}
+
 function clampBenchHeight(height: number): number {
-  const available = workbenchRef.value?.clientHeight ?? window.innerHeight;
-  return Math.round(
-    Math.min(
-      Math.max(minBenchHeight(), available - MIN_CANVAS_HEIGHT),
-      Math.max(minBenchHeight(), height),
-    ),
-  );
+  return clampBenchHeightWithin(benchClampInput(height));
+}
+
+/** The resizer's `aria-valuemax`: the same ceiling the clamp enforces. */
+function maxBenchHeight(): number {
+  return benchHeightCeiling(benchClampInput(benchHeight.value));
 }
 
 function setBenchHeight(height: number) {
@@ -800,6 +826,26 @@ function onBenchResizeKeydown(event: KeyboardEvent) {
 
 function clampBenchToViewport() {
   benchHeight.value = clampBenchHeight(benchHeight.value);
+}
+
+/**
+ * Watch the composer's box. A prompt that grows to several lines takes those
+ * pixels from the same column the bench sits in, so the ceiling has to move
+ * with it — otherwise a long prompt pushes Generate out under
+ * `overflow-hidden` again.
+ */
+function observeComposerHeight() {
+  const el = composerRef.value?.$el;
+  if (!(el instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
+  composerHeight.value = el.offsetHeight || COMPOSER_FALLBACK_HEIGHT;
+  clampBenchToViewport();
+  composerObserver = new ResizeObserver(() => {
+    const measured = el.offsetHeight;
+    if (!measured || measured === composerHeight.value) return;
+    composerHeight.value = measured;
+    clampBenchToViewport();
+  });
+  composerObserver.observe(el);
 }
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const remixSource = ref<"original" | "current">("original");
@@ -2890,6 +2936,19 @@ function canvasMenu(): MenuEntry[] {
       label: isMeshResult(j) ? "Save mesh" : "Save image",
       disabled: !canSaveCanvasResult(j),
       action: () => saveCanvasResult(j),
+    },
+    {
+      // Also the caption's own button. The caption collapses its word actions
+      // on a narrow frame (a portrait print), so every one of them has to be
+      // reachable from here or hiding it would remove it from the app.
+      label: "Make 4 variations",
+      disabled: !canMakeVariations(j),
+      action: () => makeVariations(),
+    },
+    {
+      label: "Make bigger",
+      disabled: !canUpscaleCanvasResult(j),
+      action: () => openCanvasUpscale(j),
     },
     {
       label: "Start from this photo",
@@ -5050,6 +5109,7 @@ onMounted(() => {
   if (!import.meta.env.TEST) liveActivity.start();
   window.addEventListener("resize", clampBenchToViewport);
   clampBenchToViewport();
+  observeComposerHeight();
   void listenForNativeImageDrops();
   // The persisted sequence draft wins on ordinary visits; a ?output=sequence
   // deep-link is consumed once and stripped.
@@ -5075,6 +5135,8 @@ onBeforeUnmount(() => {
   stopNativeImageDrop?.();
   stopBenchResize();
   window.removeEventListener("resize", clampBenchToViewport);
+  composerObserver?.disconnect();
+  composerObserver = null;
 });
 </script>
 
@@ -5103,9 +5165,13 @@ onBeforeUnmount(() => {
         data-test="generate-workbench"
         class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        <!-- Canvas -->
+        <!-- Canvas. Its floor is BOUND, not a utility: the bench clamp
+             reserves the same number, and a hard-coded class is how the two
+             drifted to 320 and 144 and clipped the composer away. -->
         <div
-          class="flex min-h-[320px] flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
+          data-test="generate-canvas"
+          class="flex flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
+          :style="{ minHeight: `${canvasFloor}px` }"
         >
           <!-- Prepared variations review takes the canvas while it is open. -->
           <PreparedExpansionBatch
@@ -5155,7 +5221,7 @@ onBeforeUnmount(() => {
               class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
             >
               <div
-                class="relative max-h-full w-full max-w-full overflow-hidden border border-border-control bg-media-bed"
+                class="relative max-h-full w-full max-w-full overflow-hidden border border-border-control bg-media-bed [container-name:preview-frame] [container-type:inline-size]"
                 data-test="preview-frame"
                 :style="previewFrameStyle"
                 @contextmenu="job ? contextMenu.open($event, canvasMenu()) : undefined"
@@ -5308,7 +5374,7 @@ onBeforeUnmount(() => {
                       v-if="canSaveCanvasResult(job)"
                       type="button"
                       data-test="canvas-save"
-                      class="caption-action"
+                      class="caption-action caption-action--word"
                       @click="saveCanvasResult(job)"
                     >
                       <Icon name="save" :size="14" />
@@ -5318,7 +5384,7 @@ onBeforeUnmount(() => {
                       v-if="canMakeVariations(job)"
                       type="button"
                       data-test="canvas-variations"
-                      class="caption-action"
+                      class="caption-action caption-action--word"
                       @click="makeVariations()"
                     >
                       Make 4 variations
@@ -5327,7 +5393,7 @@ onBeforeUnmount(() => {
                       v-if="canUpscaleCanvasResult(job)"
                       type="button"
                       data-test="canvas-upscale"
-                      class="caption-action"
+                      class="caption-action caption-action--word"
                       @click="openCanvasUpscale(job)"
                     >
                       Make bigger
@@ -5412,7 +5478,7 @@ onBeforeUnmount(() => {
             class="pointer-events-none flex flex-col items-center justify-center gap-3"
           >
             <ProgressRing :value="watchedSequencePct" :size="96" show-label />
-            <span class="font-mono text-micro text-fg-dim whitespace-nowrap text-accent">
+            <span class="font-mono text-micro whitespace-nowrap text-accent">
               clip {{ (chains.live.activeStage ?? watchedSequence.current_stage) + 1 }}/{{
                 watchedSequence.stage_count
               }}
@@ -5461,7 +5527,7 @@ onBeforeUnmount(() => {
               :copy-message="settledSequenceErrorCopy"
             />
             <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
-              <span class="font-mono text-micro text-fg-dim whitespace-nowrap text-fg-dim"
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
                 >saved to My images</span
               >
             </div>
@@ -5577,14 +5643,12 @@ onBeforeUnmount(() => {
           aria-orientation="horizontal"
           :aria-valuenow="benchHeight"
           :aria-valuemin="minBenchHeight()"
-          :aria-valuemax="
-            Math.max(minBenchHeight(), (workbenchRef?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT)
-          "
+          :aria-valuemax="maxBenchHeight()"
           tabindex="0"
           title="Drag to resize · double-click to reset"
           @pointerdown="startBenchResize"
           @keydown="onBenchResizeKeydown"
-          @dblclick="setBenchHeight(DEFAULT_BENCH_HEIGHT)"
+          @dblclick="setBenchHeight(DEFAULT_SEQUENCE_BENCH_HEIGHT)"
         >
           <span
             class="h-1 w-12 rounded-inner bg-fg-dim/50 transition-colors group-hover:bg-accent group-focus-visible:bg-accent"
@@ -5605,7 +5669,7 @@ onBeforeUnmount(() => {
           <p
             v-if="isSequence && sequenceReuseNotice"
             data-test="sequence-reuse-note"
-            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0 px-1 pt-1.5 text-fg-dim"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0 px-1 pt-1.5"
           >
             {{ sequenceReuseNotice }}
           </p>
@@ -5779,6 +5843,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .caption-action {
   display: inline-flex;
+  cursor: pointer;
   align-items: center;
   gap: 6px;
   height: 26px;
@@ -5798,5 +5863,17 @@ onBeforeUnmount(() => {
   padding: 0;
   justify-content: center;
   color: var(--mold-text-2);
+}
+
+/* The caption lives INSIDE the aspect-fitted frame, and the frame is only as
+   wide as the print: an 832x1216 portrait at the minimum window gives it
+   ~287px, where Save + Make 4 variations + Make bigger + the meta need ~420
+   and the last of them paint outside the frame's `overflow-hidden` — clipped,
+   with no scroll and no cue. Below that width the word actions stand down and
+   the ... menu, which carries every one of them, answers instead. */
+@container preview-frame (max-width: 440px) {
+  .caption-action--word {
+    display: none;
+  }
 }
 </style>

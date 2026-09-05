@@ -64,9 +64,14 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <!-- The colour is ENTIRELY in the bound map. A static `text-fg-dim` beside
+       it is not a default: Tailwind utilities all have the same specificity,
+       so the winner is emitted-rule order, and `.text-fg-dim` is emitted
+       after `.text-accent` and `.text-error` — which painted a tight fit and
+       a refusal in the same dim grey as an ordinary reading. -->
   <p
     v-if="visible"
-    class="font-mono text-micro text-fg-dim whitespace-nowrap"
+    class="font-mono text-micro whitespace-nowrap"
     role="status"
     aria-live="polite"
     :title="ESTIMATE_TOOLTIP"

@@ -37,6 +37,20 @@ const props = withDefaults(
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const readout = computed(() => props.valueLabel ?? String(props.modelValue));
+
+/**
+ * How much of the track is behind the thumb, 0–100. The filled half is drawn
+ * in the accent (the mock draws every slider that way, and `LoraStack`'s
+ * weight meter already did), so a glance reads the setting without reading
+ * the number. Clamped, because a form may briefly hold a value from a recipe
+ * whose range has since narrowed.
+ */
+const fillPercent = computed(() => {
+  const span = props.max - props.min;
+  if (!(span > 0)) return 0;
+  const fraction = (props.modelValue - props.min) / span;
+  return Math.min(100, Math.max(0, fraction * 100));
+});
 const datalistId = `ms-slider-marks-${useId()}`;
 const positionedMarks = computed(() => {
   const span = props.max - props.min;
@@ -137,6 +151,7 @@ function onPointerCancel() {
       <input
         class="ms-slider__input"
         type="range"
+        :style="{ '--ms-slider-fill': `${fillPercent}%` }"
         :min="min"
         :max="max"
         :step="step"
@@ -196,7 +211,9 @@ function onPointerCancel() {
 
 /* A square 4px track: the theme's radii start at the thumb. The control
    border is the one ground that reads on every surface — a card group paints
-   itself on `--mold-surface`, which would swallow a track of the same value. */
+   itself on `--mold-surface`, which would swallow a track of the same value.
+   The travelled part is painted over that ground in the accent, so the track
+   reads as a setting rather than an empty grey rail with a knob on it. */
 .ms-slider__input {
   -webkit-appearance: none;
   appearance: none;
@@ -204,6 +221,17 @@ function onPointerCancel() {
   width: 100%;
   height: 4px;
   background: var(--mold-border-control);
+  background-image: linear-gradient(
+    to right,
+    var(--mold-blue) var(--ms-slider-fill, 0%),
+    transparent var(--ms-slider-fill, 0%)
+  );
+}
+
+/* A disabled track (a pinned recipe control) keeps the ground, not the
+   accent: nothing there is adjustable. */
+.ms-slider__input:disabled {
+  background-image: none;
 }
 
 .ms-slider__track--marked .ms-slider__input {

@@ -9,9 +9,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import HostChip from "./HostChip.vue";
+import chipSource from "./HostChip.vue?raw";
+
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+
+/*
+ * The routing menu is the shared Popover, whose panel teleports to <body>:
+ * rendered in place it extended `.ms-inspector__scroll`'s scrollable area
+ * instead of overlaying it, so merely opening it pushed the options below
+ * the fold. These read the DOCUMENT rather than the wrapper's subtree for
+ * exactly that reason.
+ */
+function menu(): HTMLElement | null {
+  return document.querySelector("[data-test='host-menu']");
+}
+function option(id: string): HTMLElement {
+  const el = document.querySelector<HTMLElement>(`[data-test='host-option-${id}']`);
+  if (!el) throw new Error(`no host option ${id}`);
+  return el;
+}
 
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
@@ -22,7 +40,25 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 beforeEach(() => setActivePinia(createPinia()));
-afterEach(() => (document.body.innerHTML = ""));
+
+/*
+ * Every wrapper is UNMOUNTED, never wiped with `innerHTML = ""`. The menu
+ * teleports to <body> and the Popover keeps document-level Escape and
+ * pointerdown listeners while it is open, so a wrapper whose DOM was deleted
+ * out from under it still answers the next Escape and patches a detached
+ * tree.
+ */
+const mounted: { unmount: () => void }[] = [];
+afterEach(() => {
+  while (mounted.length) mounted.pop()!.unmount();
+  document.body.innerHTML = "";
+});
+
+function mountChip() {
+  const wrapper = mount(HostChip, { attachTo: document.body });
+  mounted.push(wrapper);
+  return wrapper;
+}
 
 function readyLocal() {
   const conn = useConnectionStore();
@@ -46,20 +82,20 @@ function addRemote(id = "hal9000-7680", label = "hal9000") {
 describe("HostChip", () => {
   it("does not open a routing menu with a single host", async () => {
     readyLocal();
-    const wrapper = mount(HostChip, { attachTo: document.body });
+    const wrapper = mountChip();
     await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
+    expect(menu()).toBeNull();
   });
 
   it("toggles the routing menu open and closed from the chip", async () => {
     readyLocal();
     useAppPrefsStore().settings = { generateTargetHost: null } as never;
     addRemote();
-    const wrapper = mount(HostChip, { attachTo: document.body });
+    const wrapper = mountChip();
     await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(true);
+    expect(menu()).not.toBeNull();
     await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
+    expect(menu()).toBeNull();
   });
 
   it("lists Auto, Most capable, and every host; picking one persists and closes", async () => {
@@ -68,14 +104,14 @@ describe("HostChip", () => {
     prefs.settings = { generateTargetHost: null } as never;
     const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined as never);
     addRemote();
-    const wrapper = mount(HostChip, { attachTo: document.body });
+    const wrapper = mountChip();
     await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-option-auto']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='host-option-capable']").exists()).toBe(true);
-    await wrapper.get("[data-test='host-option-hal9000-7680']").trigger("click");
+    expect(document.querySelector("[data-test='host-option-auto']")).not.toBeNull();
+    expect(document.querySelector("[data-test='host-option-capable']")).not.toBeNull();
+    option("hal9000-7680").click();
     await flushPromises();
     expect(update).toHaveBeenCalledWith({ generateTargetHost: "hal9000-7680" });
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
+    expect(menu()).toBeNull();
   });
 
   it("maps Auto back to null in the persisted setting", async () => {
@@ -84,9 +120,10 @@ describe("HostChip", () => {
     prefs.settings = { generateTargetHost: "hal9000-7680" } as never;
     const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined as never);
     addRemote();
-    const wrapper = mount(HostChip, { attachTo: document.body });
+    const wrapper = mountChip();
     await wrapper.get("[data-test='host-chip']").trigger("click");
-    await wrapper.get("[data-test='host-option-auto']").trigger("click");
+    option("auto").click();
+    await flushPromises();
     expect(update).toHaveBeenCalledWith({ generateTargetHost: null });
   });
 
@@ -94,27 +131,56 @@ describe("HostChip", () => {
     readyLocal();
     useAppPrefsStore().settings = { generateTargetHost: "ghost-7680" } as never;
     addRemote();
-    const wrapper = mount(HostChip, { attachTo: document.body });
+    const wrapper = mountChip();
     await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.get("[data-test='host-option-auto']").attributes("aria-checked")).toBe("true");
+    expect(option("auto").getAttribute("aria-checked")).toBe("true");
   });
 
   it("names the sticky pick on the chip", () => {
     readyLocal();
     useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
     addRemote();
-    const wrapper = mount(HostChip);
+    const wrapper = mountChip();
     expect(wrapper.get("[data-test='host-chip']").text()).toContain("hal9000");
+  });
+
+  /*
+   * "Where it runs" sits near the bottom of the inspector's Settings list,
+   * inside `.ms-inspector__scroll` (`overflow-y: auto`). A hand-rolled
+   * `position: absolute` panel there contributes to that ancestor's
+   * scrollable area instead of overlaying it, so opening the menu grew the
+   * inspector's scroll height and pushed the options below the fold — which
+   * is the exact failure the shared Popover was written to fix.
+   */
+  it("uses the shared Popover instead of an in-flow absolute panel", () => {
+    expect(chipSource).toContain('import Popover from "@ui/components/Popover.vue"');
+    expect(chipSource).toMatch(/<Popover[\s\S]*v-model:open="popoverOpen"/);
+    expect(chipSource).not.toContain("position: absolute");
+    // Dismissal comes with the Popover; the chip no longer owns document
+    // listeners of its own.
+    expect(chipSource).not.toContain("document.addEventListener");
+  });
+
+  it("teleports the panel out of the scrolling inspector", async () => {
+    readyLocal();
+    useAppPrefsStore().settings = { generateTargetHost: null } as never;
+    addRemote();
+    const wrapper = mountChip();
+    await wrapper.get("[data-test='host-chip']").trigger("click");
+    const panel = menu();
+    expect(panel).not.toBeNull();
+    expect(wrapper.element.contains(panel)).toBe(false);
+    expect(panel!.closest(".ms-popover__panel")).not.toBeNull();
   });
 
   it("closes the menu on Escape", async () => {
     readyLocal();
     useAppPrefsStore().settings = { generateTargetHost: null } as never;
     addRemote();
-    const wrapper = mount(HostChip, { attachTo: document.body });
+    const wrapper = mountChip();
     await wrapper.get("[data-test='host-chip']").trigger("click");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await flushPromises();
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
+    expect(menu()).toBeNull();
   });
 });

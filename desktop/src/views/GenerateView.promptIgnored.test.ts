@@ -159,10 +159,13 @@ describe("GenerateView — a recipe that ignores the prompt", () => {
     await flushPromises();
 
     const expand = wrapper.get('[data-test="expand-action"]');
-    const remix = wrapper.get('[data-test="remix-action"]');
     expect(expand.attributes("disabled")).toBeDefined();
-    expect(remix.attributes("disabled")).toBeDefined();
     expect(expand.attributes("title")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
+    // Remix is folded under the rewrite chip's caret now; the refusal and its
+    // sentence are unchanged.
+    await wrapper.get('[data-test="rewrite-more"]').trigger("click");
+    const remix = wrapper.get('[data-test="remix-action"]');
+    expect(remix.attributes("disabled")).toBeDefined();
     expect(remix.attributes("title")).toBe(PROMPT_IGNORED_TRANSFORM_REASON);
     expect(wrapper.get('[data-test="transform-blocked-hint"]').text()).toBe(
       PROMPT_IGNORED_TRANSFORM_REASON,

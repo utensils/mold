@@ -37,6 +37,52 @@ describe("SliderRow", () => {
     expect(source).not.toContain("background: var(--mold-surface)");
   });
 
+  /*
+   * The mock draws the travelled part of every slider in the accent, and
+   * LoraStack's weight meter already did; without it Detail, Stick to my
+   * words, How much to change it and How tight to the photo all read as an
+   * empty grey rail with a knob somewhere on it.
+   */
+  describe("track fill", () => {
+    const fill = (wrapper: ReturnType<typeof make>) =>
+      wrapper.find(".ms-slider__input").attributes("style") ?? "";
+
+    it("paints the accent up to the value and the ground after it", () => {
+      expect(SliderRowSource).toMatch(
+        /background-image: linear-gradient\(\s*to right,\s*var\(--mold-blue\) var\(--ms-slider-fill, 0%\),\s*transparent var\(--ms-slider-fill, 0%\)/,
+      );
+    });
+
+    it("sets the fill to the fraction of the range behind the thumb", () => {
+      // 28 of 6..50 is exactly half.
+      expect(fill(make())).toContain("--ms-slider-fill: 50%");
+      expect(fill(make({ modelValue: 6 }))).toContain("--ms-slider-fill: 0%");
+      expect(fill(make({ modelValue: 50 }))).toContain(
+        "--ms-slider-fill: 100%",
+      );
+      expect(fill(make({ modelValue: 17 }))).toContain("--ms-slider-fill: 25%");
+    });
+
+    it("clamps a value the recipe's range no longer covers", () => {
+      expect(fill(make({ modelValue: 400 }))).toContain(
+        "--ms-slider-fill: 100%",
+      );
+      expect(fill(make({ modelValue: -80 }))).toContain("--ms-slider-fill: 0%");
+    });
+
+    it("shows no fill for a range with no span", () => {
+      expect(fill(make({ min: 12, max: 12, modelValue: 12 }))).toContain(
+        "--ms-slider-fill: 0%",
+      );
+    });
+
+    it("keeps the accent off a disabled track", () => {
+      expect(SliderRowSource).toMatch(
+        /\.ms-slider__input:disabled \{\s*background-image: none;/,
+      );
+    });
+  });
+
   it("prefers valueLabel for the readout when provided", () => {
     const wrapper = make({ valueLabel: "28 steps" });
     expect(wrapper.find(".ms-slider__value").text()).toBe("28 steps");
