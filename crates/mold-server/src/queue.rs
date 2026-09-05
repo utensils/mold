@@ -4987,6 +4987,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -5055,6 +5056,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -5125,6 +5127,7 @@ mod tests {
             gpus: [0, 1]
                 .into_iter()
                 .map(|ordinal| mold_core::GpuSnapshot {
+                    metal_memory: None,
                     ordinal,
                     name: format!("gpu{ordinal}"),
                     backend: mold_core::GpuBackend::Cuda,
@@ -5202,6 +5205,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -5297,6 +5301,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 0,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,

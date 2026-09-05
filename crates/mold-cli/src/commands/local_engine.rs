@@ -260,13 +260,13 @@ pub(crate) fn build_local_engine_from_plan(
             )
         })?;
     let current_free = local_execution_capacity(plan.device_backend, sampled_current_free);
-    if current_free < plan.predicted_vram_peak_bytes {
+    if current_free < plan.admission_vram_demand_bytes() {
         anyhow::bail!(
             "local execution plan invalidated before {:?}: GPU {} now has {} bytes free but the exact plan requires {}",
             plan.device_backend,
             plan.device_ordinal,
             current_free,
-            plan.predicted_vram_peak_bytes
+            plan.admission_vram_demand_bytes()
         );
     }
     // The forced-local twin of the worker's extraction point, and it is BEFORE

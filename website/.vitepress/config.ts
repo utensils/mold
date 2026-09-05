@@ -119,6 +119,7 @@ export default defineConfig({
             { text: 'Feature Support', link: '/guide/feature-matrix' },
             { text: 'Remote Workflows', link: '/guide/remote-workflows' },
             { text: 'Performance', link: '/guide/performance' },
+            { text: 'Metal memory', link: '/guide/metal-memory' },
             { text: 'Custom Models & LoRA', link: '/guide/custom-models' },
             { text: 'Model Discovery Catalog', link: '/docs/catalog' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },

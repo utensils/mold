@@ -1000,9 +1000,9 @@ fn ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
 /// when the request is obviously infeasible; the second catches an optimistic
 /// recorded footprint or unrecovered "ghost" VRAM.
 ///
-/// On macOS (unified memory) the same additive `available + active_vram`
-/// budget applies because tensors freed during `unload()` return to the
-/// system page cache.
+/// On Metal, the shared policy bounds reclaim credit by native allocations,
+/// the working-set capacity and live host headroom. A fresh post-drop sample
+/// verifies the released buffers before a replacement is loaded.
 /// On other platforms with no memory query available, the guard is a no-op.
 pub(crate) fn preflight_memory_guard_for_request(
     model_name: &str,
@@ -1030,6 +1030,17 @@ pub(crate) fn preflight_memory_guard_for_request(
 
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, active_vram_bytes)? {
+            return preflight_memory_guard_with_available_on_gpu_for_request(
+                model_name,
+                paths,
+                0,
+                available,
+                gpu_ordinal,
+                hint,
+                request_has_lora,
+            );
+        }
         // macOS unified memory: query system memory and add reclaimable footprint.
         if let Some(available) = mold_inference::device::available_system_memory_bytes() {
             if available > 0 {
@@ -1077,6 +1088,15 @@ pub(crate) fn preflight_planned_memory_guard(
 
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, active_vram_bytes)? {
+            return check_planned_memory_budget_with_resident(
+                model_name,
+                predicted_peak_bytes,
+                available,
+                0,
+                rejection_suggestion(hint),
+            );
+        }
         if let Some(available) = mold_inference::device::available_system_memory_bytes()
             .filter(|available| *available > 0)
         {
@@ -1099,7 +1119,7 @@ pub(crate) fn preflight_planned_memory_guard(
 /// reclaimable active footprint: anything the driver still reports as used is
 /// unavailable pressure, regardless of whether Mold expected the drop to
 /// release it.
-#[cfg(all(test, not(feature = "cuda")))]
+#[cfg(all(test, not(any(feature = "cuda", feature = "metal"))))]
 pub(crate) fn preflight_memory_guard_after_drop(
     model_name: &str,
     paths: &ModelPaths,
@@ -1133,10 +1153,19 @@ pub(crate) fn preflight_memory_guard_after_drop_for_request(
     }
     #[cfg(not(feature = "cuda"))]
     {
-        // Metal's unified-memory admission already used available system
-        // memory plus the active engine's reclaimable footprint in the first
-        // guard. A second instantaneous sample after `unload()` can lag page
-        // reclamation and falsely reject a swap.
+        mold_inference::device::release_pooled_metal_memory(gpu_ordinal);
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, 0)? {
+            return preflight_memory_guard_with_available_on_gpu_for_request(
+                model_name,
+                paths,
+                0,
+                available,
+                gpu_ordinal,
+                hint,
+                request_has_lora,
+            );
+        }
+        // Preserve the no-backend behavior when no native Metal policy exists.
         let _ = (model_name, paths, gpu_ordinal, hint, request_has_lora);
         Ok(())
     }
@@ -1144,10 +1173,8 @@ pub(crate) fn preflight_memory_guard_after_drop_for_request(
 
 /// Authoritative post-drop recheck for a frozen scheduler plan.
 ///
-/// CUDA must prove the exact planned peak still physically fits the driver's
-/// fresh free-memory sample. Metal retains the existing single-gate behavior:
-/// its unified-memory reclamation can lag the engine drop, so a second sample
-/// is not authoritative there.
+/// Both CUDA and Metal prove the exact peak against a fresh sample; Metal
+/// releases the buffer pool first and never credits the old engine twice.
 pub(crate) fn preflight_planned_memory_guard_after_drop(
     model_name: &str,
     predicted_peak_bytes: u64,
@@ -1169,6 +1196,15 @@ pub(crate) fn preflight_planned_memory_guard_after_drop(
 
     #[cfg(not(feature = "cuda"))]
     {
+        mold_inference::device::release_pooled_metal_memory(gpu_ordinal);
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, 0)? {
+            return check_planned_memory_budget(
+                model_name,
+                predicted_peak_bytes,
+                available,
+                rejection_suggestion(hint),
+            );
+        }
         let _ = (model_name, predicted_peak_bytes, gpu_ordinal, hint);
         Ok(())
     }
@@ -1192,9 +1228,47 @@ pub(crate) fn effective_load_available_bytes(
     }
 
     #[cfg(not(feature = "cuda"))]
-    Ok(mold_inference::device::available_system_memory_bytes()
-        .filter(|available| *available > 0)
-        .map(|available| available.saturating_add(active_vram_bytes)))
+    {
+        if let Some(available) = metal_available_after_reclaim(gpu_ordinal, active_vram_bytes)? {
+            return Ok(Some(available));
+        }
+        Ok(mold_inference::device::available_system_memory_bytes()
+            .filter(|available| *available > 0)
+            .map(|available| available.saturating_add(active_vram_bytes)))
+    }
+}
+
+/// Credit only measured, reclaimable Metal allocations, and never exceed the
+/// current total policy. A failed supported probe must not use the RAM fallback.
+#[cfg(not(feature = "cuda"))]
+fn metal_available_after_reclaim(
+    ordinal: usize,
+    reclaimable: u64,
+) -> Result<Option<u64>, ApiError> {
+    metal_available_from_sample(
+        mold_inference::metal_memory::snapshot(ordinal).as_ref(),
+        reclaimable,
+    )
+}
+
+#[cfg(not(feature = "cuda"))]
+fn metal_available_from_sample(
+    sample: Option<&mold_core::metal_memory::MetalMemorySnapshot>,
+    reclaimable: u64,
+) -> Result<Option<u64>, ApiError> {
+    let Some(sample) = sample else {
+        return Ok(None);
+    };
+    if sample.allocation_headroom_bytes.is_none() {
+        return Err(ApiError::insufficient_memory(format!(
+            "Metal memory admission unavailable: {}",
+            sample
+                .error
+                .as_deref()
+                .unwrap_or("could not measure the working-set budget"),
+        )));
+    }
+    Ok(Some(sample.with_reclaimable(reclaimable)))
 }
 
 #[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
@@ -3217,5 +3291,52 @@ mod fail_closed_tests {
             !ComponentRole::IdentityAdapter.is_host_only_for_test(),
             "the cross-attention adapter is resident on the generation device"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "cuda")))]
+mod metal_policy_tests {
+    use super::*;
+    use mold_core::metal_memory::{MetalMemorySnapshot, MetalWiredLimit};
+
+    #[test]
+    fn metal_memory_warm_admission_credits_weights_once_and_rechecks_changed_policy() {
+        let gib = 1 << 30;
+        let mut sample = MetalMemorySnapshot {
+            wired_limit: MetalWiredLimit::Automatic,
+            physical_bytes: Some(48 * gib),
+            available_host_bytes: Some(32 * gib),
+            recommended_bytes: Some(37 * gib),
+            allocated_bytes: Some(25 * gib),
+            effective_capacity_bytes: None,
+            allocation_headroom_bytes: None,
+            error: None,
+        }
+        .resolve();
+        // Same native delta recorded by the loader: 25 GiB after - 1 GiB before.
+        let resident = 24 * gib;
+        let admits = |sample: &MetalMemorySnapshot, credit| {
+            let available = metal_available_from_sample(Some(sample), credit)?.unwrap();
+            check_planned_memory_budget_with_resident("warm", 30 * gib, available, 0, "")
+        };
+        assert!(admits(&sample, resident).is_ok());
+        assert!(
+            admits(&sample, 0).is_err(),
+            "missing loader attribution double-charges weights"
+        );
+        sample.wired_limit = MetalWiredLimit::Explicit { mib: 16 * 1024 };
+        sample = sample.resolve();
+        assert!(
+            admits(&sample, resident).is_err(),
+            "resident credit must not defeat a lowered policy"
+        );
+        sample.wired_limit = MetalWiredLimit::Unavailable;
+        sample.error = Some("permission denied".into());
+        sample = sample.resolve();
+        assert!(admits(&sample, resident)
+            .unwrap_err()
+            .error
+            .contains("permission denied"));
+        assert_eq!(metal_available_from_sample(None, resident).unwrap(), None);
     }
 }

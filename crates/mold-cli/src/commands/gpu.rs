@@ -66,13 +66,17 @@ pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
     } else {
         device.backend.as_str().to_ascii_uppercase()
     };
-    let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
-        (Some(used), Some(total)) => format!(
-            "{:.1}/{:.1} GiB",
-            used as f64 / 1024_f64.powi(3),
-            total as f64 / 1024_f64.powi(3)
-        ),
-        _ => "—".into(),
+    let vram = if let Some(memory) = &device.memory.metal_memory {
+        memory.budget_label()
+    } else {
+        match (device.memory.used_bytes, device.memory.total_bytes) {
+            (Some(used), Some(total)) => format!(
+                "VRAM {:.1}/{:.1} GiB",
+                used as f64 / 1024_f64.powi(3),
+                total as f64 / 1024_f64.powi(3)
+            ),
+            _ => "VRAM —".into(),
+        }
     };
     let utilization = device
         .telemetry
@@ -80,7 +84,7 @@ pub(crate) fn format_device_line(device: &DeviceInfo) -> String {
         .map(|value| format!("{value}%"))
         .unwrap_or_else(|| "—".into());
     format!(
-        "{}  {}  {}  {}  {}  VRAM {}  util {}",
+        "{}  {}  {}  {}  {}  {}  util {}",
         device.id,
         ordinal,
         device.name,
@@ -218,6 +222,9 @@ fn project_local_devices(
                     .compute_capability
                     .map(|(major, minor)| format!("{major}.{minor}")),
                 memory: DeviceMemoryInfo {
+                    metal_memory: (device.backend == mold_core::GpuBackend::Metal)
+                        .then(|| mold_inference::metal_memory::snapshot(device.ordinal))
+                        .flatten(),
                     total_bytes: total,
                     used_bytes: used,
                     mold_used_bytes: None,
@@ -334,6 +341,7 @@ mod tests {
             pci_bus_id: None,
             compute_capability: None,
             memory: DeviceMemoryInfo {
+                metal_memory: None,
                 total_bytes: Some(24),
                 used_bytes: Some(0),
                 mold_used_bytes: Some(0),

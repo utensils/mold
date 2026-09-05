@@ -46,10 +46,27 @@ fn unified_memory_fixture(
 }
 
 fn publish_unified_headroom(state: &AppState, backend: mold_core::GpuBackend, available: u64) {
+    assert!(
+        available <= 24 << 30,
+        "fixture headroom must fit its 24 GiB capacity so exact-fit assertions remain meaningful"
+    );
     state.resources.publish(mold_core::ResourceSnapshot {
         hostname: "test".into(),
         timestamp: 0,
         gpus: vec![mold_core::GpuSnapshot {
+            metal_memory: (backend == mold_core::GpuBackend::Metal).then(|| {
+                mold_core::metal_memory::MetalMemorySnapshot {
+                    wired_limit: mold_core::metal_memory::MetalWiredLimit::Automatic,
+                    physical_bytes: Some(32 << 30),
+                    available_host_bytes: Some(available.saturating_add(8 << 30)),
+                    recommended_bytes: Some(24 << 30),
+                    allocated_bytes: Some(0),
+                    effective_capacity_bytes: None,
+                    allocation_headroom_bytes: None,
+                    error: None,
+                }
+                .resolve()
+            }),
             ordinal: 0,
             name: "test".into(),
             backend,
@@ -123,6 +140,7 @@ async fn unified_memory_generation_preview_and_lease_use_the_same_phase_budget()
                 },
                 &mut immediate,
             );
+            publish_unified_headroom(&state, backend, 24 << 30);
             let execution = coordinator
                 .generation_plans(&coordinator.pending["unified-job"])
                 .unwrap()
@@ -249,6 +267,7 @@ async fn unified_memory_chain_stage_transports_the_admitted_plan() {
             },
             &mut immediate,
         );
+        publish_unified_headroom(&state, backend, 24 << 30);
         let execution = coordinator
             .owner_plans(&coordinator.pending_owner_work["unified-stage"])
             .unwrap()

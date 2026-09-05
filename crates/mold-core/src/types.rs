@@ -5317,6 +5317,9 @@ pub struct ResourceSnapshot {
 /// Per-GPU memory snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GpuSnapshot {
+    /// Separate Metal policy telemetry; absent on older hosts and other backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_memory: Option<crate::metal_memory::MetalMemorySnapshot>,
     pub ordinal: usize,
     pub name: String,
     pub backend: GpuBackend,
@@ -9707,6 +9710,7 @@ mod tests {
             hostname: "hal9000".to_string(),
             timestamp: 1_700_000_000_000,
             gpus: vec![GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "NVIDIA RTX 3090".to_string(),
                 backend: GpuBackend::Cuda,
@@ -9910,6 +9914,7 @@ mod tests {
     #[test]
     fn metal_snapshot_has_none_per_process_fields() {
         let snap = GpuSnapshot {
+            metal_memory: None,
             ordinal: 0,
             name: "Apple M3 Max".to_string(),
             backend: GpuBackend::Metal,
@@ -10861,6 +10866,9 @@ pub enum DeviceActivity {
 /// explicit JSON `null`, never fabricated zeroes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DeviceMemoryInfo {
+    /// Host-observed Metal working-set policy, never client machine telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_memory: Option<crate::metal_memory::MetalMemorySnapshot>,
     pub total_bytes: Option<u64>,
     pub used_bytes: Option<u64>,
     pub mold_used_bytes: Option<u64>,
@@ -11787,6 +11795,7 @@ mod device_types_tests {
                 pci_bus_id: Some("00000000:01:00.0".into()),
                 compute_capability: Some("8.6".into()),
                 memory: DeviceMemoryInfo {
+                    metal_memory: None,
                     total_bytes: Some(24_000_000_000),
                     used_bytes: None,
                     mold_used_bytes: None,

@@ -2257,6 +2257,12 @@ Examples:
     /// Show version information
     Version,
 
+    /// Inspect or administer this local machine (never redirects to MOLD_HOST)
+    System {
+        #[command(subcommand)]
+        action: commands::system::SystemAction,
+    },
+
     /// Update mold to the latest release from GitHub
     ///
     /// Checks for new releases, downloads the appropriate platform binary,
@@ -2546,6 +2552,10 @@ async fn run() -> anyhow::Result<()> {
     // initialize. It only reads/writes the explicitly selected skill paths.
     if let Commands::Skill(args) = &cli.command {
         return skill::run(args);
+    }
+    // Privileged machine administration must never open user Config/DB paths.
+    if let Commands::System { action } = &cli.command {
+        return commands::system::run(action);
     }
 
     // A missing saved root means its external drive is offline. Fail before
@@ -3382,6 +3392,9 @@ async fn run() -> anyhow::Result<()> {
             generate_completions(&shell)?;
         }
         Commands::Skill(_) => unreachable!("skill commands return before runtime initialization"),
+        Commands::System { .. } => {
+            unreachable!("system commands return before runtime initialization")
+        }
     }
 
     Ok(())

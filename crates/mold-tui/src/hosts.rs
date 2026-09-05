@@ -1606,6 +1606,7 @@ mod tests {
             pci_bus_id: None,
             compute_capability: Some("8.6".into()),
             memory: mold_core::DeviceMemoryInfo {
+                metal_memory: None,
                 total_bytes: Some(24 * 1024_u64.pow(3)),
                 used_bytes: Some(0),
                 mold_used_bytes: None,
@@ -1700,6 +1701,7 @@ mod tests {
             pci_bus_id: None,
             compute_capability: Some("8.6".into()),
             memory: mold_core::DeviceMemoryInfo {
+                metal_memory: None,
                 total_bytes: Some(24 * 1024_u64.pow(3)),
                 used_bytes: Some(0),
                 mold_used_bytes: None,

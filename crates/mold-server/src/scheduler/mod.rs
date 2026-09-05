@@ -745,7 +745,7 @@ fn device_headroom_from_driver(ordinal: usize, backend: mold_core::GpuBackend) -
                 }
             }
         }
-        mold_core::GpuBackend::Metal => mold_inference::device::available_system_memory_bytes(),
+        mold_core::GpuBackend::Metal => mold_inference::device::usable_free_vram_bytes(ordinal),
     }
 }
 
@@ -3212,12 +3212,20 @@ impl Coordinator {
                     },
                     available_at_ms: active_lease.map(|lease| lease.estimated_finish_ms),
                     worker_generation: ready.map_or(0, |ready| ready.generation),
-                    available_vram_bytes: schedulable_available_vram_bytes(
-                        device.sampled_free_vram_bytes,
-                        reclaimable_cache_bytes,
-                        device.sampled_mold_vram_bytes,
-                        has_active_work,
-                        worker.map_or(0, |worker| worker.gpu.total_vram_bytes),
+                    available_vram_bytes: device.metal_memory.as_ref().map_or_else(
+                        || {
+                            if device.backend == mold_core::GpuBackend::Metal {
+                                return device.capacity_bytes;
+                            }
+                            schedulable_available_vram_bytes(
+                                device.sampled_free_vram_bytes,
+                                reclaimable_cache_bytes,
+                                device.sampled_mold_vram_bytes,
+                                has_active_work,
+                                worker.map_or(0, |worker| worker.gpu.total_vram_bytes),
+                            )
+                        },
+                        |sample| sample.with_reclaimable(reclaimable_cache_bytes),
                     ),
                     warm_execution_fingerprints: warm,
                 }
@@ -3254,11 +3262,30 @@ impl Coordinator {
     /// pool facts separate prevents an excluded sibling from lending capacity
     /// to a pinned request's terminal/transient verdict.
     fn total_vram_bytes_by_device_id(&self) -> BTreeMap<String, u64> {
+        let resources = self.state.resources.latest();
         self.state
             .gpu_pool
             .workers
             .iter()
-            .map(|worker| (worker_device_id(&worker), worker.gpu.total_vram_bytes))
+            .map(|worker| {
+                let id = worker_device_id(&worker);
+                let capacity = if worker.gpu.backend == mold_core::GpuBackend::Metal {
+                    resources
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            snapshot.gpus.iter().find(|gpu| {
+                                gpu.backend == mold_core::GpuBackend::Metal
+                                    && gpu.ordinal == worker.gpu.ordinal
+                            })
+                        })
+                        .and_then(|gpu| gpu.metal_memory.as_ref())
+                        .and_then(|sample| sample.effective_capacity_bytes)
+                        .unwrap_or(0)
+                } else {
+                    worker.gpu.total_vram_bytes
+                };
+                (id, capacity)
+            })
             .collect()
     }
 
@@ -9024,6 +9051,16 @@ mod tests {
                 },
                 &mut immediate,
             );
+            if backend == mold_core::GpuBackend::Metal {
+                assert!(
+                    coordinator
+                        .generation_plans(&coordinator.pending["job"])
+                        .is_err(),
+                    "Metal must wait for its first policy observation"
+                );
+                publish_free_vram_for_lanes(&coordinator.state, &[(backend, 24 << 30)]);
+                coordinator.reconcile_resource_capacity(&mut immediate);
+            }
             let _ = coordinator.dispatch_ready().await;
             assert_eq!(recv_grant(&worker_rx).id, "job", "{backend:?}");
 
@@ -10224,13 +10261,27 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(ordinal, (backend, free_bytes))| mold_core::GpuSnapshot {
+                    metal_memory: (*backend == mold_core::GpuBackend::Metal).then(|| {
+                        mold_core::metal_memory::MetalMemorySnapshot {
+                            wired_limit: mold_core::metal_memory::MetalWiredLimit::Automatic,
+                            physical_bytes: Some(32 << 30),
+                            available_host_bytes: Some(free_bytes.saturating_add(8 << 30)),
+                            recommended_bytes: Some(TOTAL),
+                            allocated_bytes: Some(0),
+                            effective_capacity_bytes: None,
+                            allocation_headroom_bytes: None,
+                            error: None,
+                        }
+                        .resolve()
+                    }),
                     ordinal,
                     name: format!("gpu-{ordinal}"),
                     backend: *backend,
                     vram_total: TOTAL,
                     vram_used: TOTAL.saturating_sub(*free_bytes),
-                    vram_used_by_mold: Some(0),
-                    vram_used_by_other: Some(TOTAL.saturating_sub(*free_bytes)),
+                    vram_used_by_mold: (*backend == mold_core::GpuBackend::Cuda).then_some(0),
+                    vram_used_by_other: (*backend == mold_core::GpuBackend::Cuda)
+                        .then_some(TOTAL.saturating_sub(*free_bytes)),
                     gpu_utilization: Some(0),
                 })
                 .collect(),
@@ -11071,6 +11122,7 @@ mod tests {
                 hostname: "test".into(),
                 timestamp: 2,
                 gpus: vec![mold_core::GpuSnapshot {
+                    metal_memory: None,
                     ordinal: 0,
                     name: "gpu-0".into(),
                     backend: mold_core::GpuBackend::Cuda,
@@ -11192,6 +11244,7 @@ mod tests {
                 pci_bus_id: None,
                 compute_capability: Some("8.6".into()),
                 memory: mold_core::DeviceMemoryInfo {
+                    metal_memory: None,
                     total_bytes: Some(24 << 30),
                     used_bytes: Some(1 << 30),
                     mold_used_bytes: Some(1 << 30),
@@ -11867,6 +11920,7 @@ mod tests {
             // Deliberately reversed: vector position is not device identity.
             gpus: vec![
                 mold_core::GpuSnapshot {
+                    metal_memory: None,
                     ordinal: 1,
                     name: "gpu-1".into(),
                     backend: mold_core::GpuBackend::Cuda,
@@ -11877,6 +11931,7 @@ mod tests {
                     gpu_utilization: Some(90),
                 },
                 mold_core::GpuSnapshot {
+                    metal_memory: None,
                     ordinal: 0,
                     name: "gpu-0".into(),
                     backend: mold_core::GpuBackend::Cuda,
@@ -12009,6 +12064,7 @@ mod tests {
             hostname: "test".into(),
             timestamp: 1,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu-0".into(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -12221,6 +12277,7 @@ mod tests {
             hostname: "test".into(),
             timestamp: 1,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu-0".into(),
                 backend: mold_core::GpuBackend::Cuda,
@@ -15665,6 +15722,7 @@ mod tests {
             hostname: "test".to_string(),
             timestamp: 2,
             gpus: vec![mold_core::GpuSnapshot {
+                metal_memory: None,
                 ordinal: 0,
                 name: "gpu-0".to_string(),
                 backend: mold_core::GpuBackend::Cuda,

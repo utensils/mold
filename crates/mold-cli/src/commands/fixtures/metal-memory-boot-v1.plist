@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed by mold: metal-memory-v1 -->
+<plist version="1.0"><dict>
+<key>Label</key><string>io.utensils.mold.metal-memory</string>
+<key>ProgramArguments</key><array>
+<string>/usr/sbin/sysctl</string><string>-w</string>
+<string>iogpu.wired_limit_mb=16384</string>
+</array>
+<key>RunAtLoad</key><true/>
+</dict></plist>

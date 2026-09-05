@@ -195,3 +195,21 @@ Every `main()` calls `mold_db::config_sync::install_config_post_load_hook()`, wh
 5. **Nix flake (flake-parts + crane)** — CUDA 12.8 on Linux (default sm_89 Ada; `mold-sm86` for RTX 3090/A40, `mold-sm100` for B200/B300, `mold-sm120` for RTX 50-series; `mkMold` for any), Metal on macOS. B200 is server-only and remains simulated, not hardware-qualified. Devshell sets `CPATH`/`LIBRARY_PATH`/`LD_LIBRARY_PATH` for CUDA compilation **and execution** — a devshell binary gets no RUNPATH, so every library the release feature set links (cuDNN included) must also be on `LD_LIBRARY_PATH`; the `devshell-cuda-load-path` check enforces it (#1510).
 6. **Shell completions** — static via `clap_complete` + dynamic via `CompleteEnv` with `ArgValueCandidates` for model names.
 7. **Lifecycle authority follows scheduler ownership** — `PATCH /api/devices/:id` and every client enable/disable control are available only when `/api/capabilities.devices.lifecycle` is true. Legacy, observe, CPU-fallback, and all-disabled maintenance runtimes remain read-only; never persist a live change they cannot enforce.
+
+
+## macOS Metal memory policy
+
+`mold_core::metal_memory::MetalMemorySnapshot` is the single budget authority:
+capacity is min(Metal recommendation, positive uint32 sysctl MiB, RAM minus
+max(15%, 8 GiB)); incremental headroom also charges existing Metal allocations
+and live Mach free+inactive. Hardware RAM totals and CUDA attribution remain
+separate. Native read-only sampling uses the memoized Candle Metal device;
+failed supported probes block admission, absent optional sysctl can use the
+recommendation. Reclaim credits are bounded and post-drop guards resample after
+pool release. Do not restore a RAM-only fallback or elevate a server.
+`mold system metal-memory` routes before config/DB startup and always targets
+this machine; status is read-only, set/reset require explicit root invocation.
+`--persist` owns only the fixed root LaunchDaemon, never an executable from a
+user path. Shared DevicePanel reads optional host telemetry; remote clients have
+no kernel mutation control. See `website/guide/metal-memory.md` and the reviewed
+`docs/metal-memory-policy-plan.md` for contracts and validation limits.

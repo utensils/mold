@@ -728,3 +728,16 @@ source <(mold completions zsh)
 source <(mold completions bash)
 mold completions fish > ~/.config/fish/completions/mold.fish
 ```
+
+## `mold system metal-memory`
+
+Local machine administration, independent of `MOLD_HOST` and Mold config/DB:
+
+| Command                 | Behavior                                                                     |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `status [--json]`       | Read local kernel mode, boot policy, and inspection-process Metal budget     |
+| `set <MiB> [--persist]` | Root-only positive uint32 limit, host-floor validation and verified readback |
+| `reset [--persist]`     | Root-only automatic mode (zero); optionally remove the owned boot policy     |
+
+No remote administration endpoint is exposed. See [Metal memory](./metal-memory)
+for persistence, rollback and working-set semantics.
