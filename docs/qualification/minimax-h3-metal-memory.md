@@ -238,6 +238,10 @@ occurred. The separate qualification process and reservation were released.
 
 ## Remaining acceptance
 
+PR #1604 merged as `27ed658e`. The [next campaign plan](minimax-h3-metal-next-campaign.md)
+tracks default-resolution and broader FL2VA evidence, exact phase accounting,
+and launch/cleanup gates. GPU execution is on hold during that preparation.
+
 - Complete per-phase runtime measurements for the intended Turbo/default shape; the small base admission budget above is established.
 - Extend the completed reduced-size conditioner, DiT and VAE evidence to
   default-resolution requests under the same safety controls.
