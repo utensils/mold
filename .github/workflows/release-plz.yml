@@ -43,13 +43,40 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # git_only currently runs cargo package on the tagged workspace, which
+      # cannot represent our Git-pinned backend. Supply the supported local
+      # baseline explicitly instead; release-plz still decides every version.
+      - name: Prepare tagged release baseline
+        id: baseline
+        run: |
+          manifest=$(scripts/release/prepare-release-baseline.sh "$RUNNER_TEMP/release-plz-baseline")
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Install release-plz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz@0.3.162
+
+      - name: Configure release bot identity
+        run: |
+          git config user.name "release-plz-mold[bot]"
+          git config user.email "302347651+release-plz-mold[bot]@users.noreply.github.com"
+
       - name: Run release-plz release-pr
         id: release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASELINE_MANIFEST: ${{ steps.baseline.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          output=$(release-plz release-pr --registry-manifest-path "$BASELINE_MANIFEST" \
+            --repo-url "https://github.com/$GITHUB_REPOSITORY" -o json)
+          pr=$(scripts/release/release-pr-output.sh <<< "$output")
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Remove release baseline
+        if: always() && steps.baseline.outcome == 'success'
+        run: git worktree remove --force "$RUNNER_TEMP/release-plz-baseline"
 
       - name: Sync release PR (changelog promotion + desktop version)
         env:

@@ -13,6 +13,14 @@ if grep -En 'cargo[[:space:]]+publish|CARGO_REGISTRY_TOKEN|publish-crates\.sh' .
 fi
 grep -qx 'publish = false' release-plz.toml \
   || fail "release-plz must keep registry publishing disabled"
+# Retired registry versions must never suppress the next release PR. Every
+# lockstep crate reads the same existing vX.Y.Z baseline, including libraries
+# which do not emit their own tags.
+workspace_config=$(sed -n '/^\[workspace\]/,/^\[\[package\]\]/p' release-plz.toml)
+grep -q -- '--registry-manifest-path' .github/workflows/release-plz.yml \
+  || fail "release-plz must compare against the tagged workspace"
+grep -qx 'git_tag_name = "v{{ version }}"' <<< "$workspace_config" \
+  || fail "all lockstep crates must read the shared version tag"
 # Track the canonical docs, including nested website and agent references.
 # Git's file list avoids scanning generated site output or node_modules.
 while IFS= read -r doc; do
@@ -30,5 +38,7 @@ for job in release-version release-native release-containers publish-aur; do
   grep -q "^  $job:" .github/workflows/release.yml \
     || fail "supported distribution job $job is missing"
 done
+
+bash scripts/tests/release-baseline.sh
 
 echo "PASS: crates.io retirement contract"
