@@ -211,7 +211,24 @@ pub(crate) fn trash_published_outputs_blocking(
         .flatten()
     {
         match trash_print_blocking(dir, name, db, gate, now_ms) {
-            Ok(_) => {
+            // The SAME event a user's own Delete publishes, mapped from the
+            // same outcome: `gallery_trashed` means "moved, recoverable" and
+            // is what puts the row in a client's Trash scope, while
+            // `gallery_removed` means "gone" and drops it from both scopes.
+            // Announcing a removal here made an opt-out print vanish from
+            // desktop state as if it had been purged.
+            Ok(TrashOutcome::Trashed) => {
+                if let Some(events) = events {
+                    events.publish(mold_core::ServerEvent::GalleryTrashed {
+                        filename: name.to_string(),
+                    });
+                }
+            }
+            // Already trashed: nothing moved, so nothing to announce.
+            Ok(TrashOutcome::AlreadyTrashed) => {}
+            // The bytes were gone from both places and the stale row was
+            // dropped — that IS a removal.
+            Ok(TrashOutcome::Vanished) => {
                 if let Some(events) = events {
                     events.publish(mold_core::ServerEvent::GalleryRemoved {
                         filename: name.to_string(),

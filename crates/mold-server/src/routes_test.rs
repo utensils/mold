@@ -21853,6 +21853,108 @@ mod tests {
         );
     }
 
+    /// An opt-out print is announced as TRASHED, not removed: a client's
+    /// Trash scope must receive it, and `gallery_removed` would drop it from
+    /// both scopes as if it had been purged.
+    #[tokio::test]
+    async fn save_to_gallery_off_announces_a_trashed_print() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "throwaway.png", None);
+        let mut events = state.events.subscribe();
+        let names = crate::queue::SavedOutputNames {
+            output: Some("throwaway.png".into()),
+            original: None,
+        };
+        {
+            let _writer = state.gallery_publication_gate.write().await;
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir.path(),
+                &names,
+                db.as_ref().as_ref(),
+                &state.gallery_publication_gate,
+                Some(state.events.as_ref()),
+            );
+        }
+        let announced = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("an event is published")
+            .expect("the channel stays open");
+        match announced {
+            mold_core::ServerEvent::GalleryTrashed { filename } => {
+                assert_eq!(filename, "throwaway.png");
+            }
+            other => panic!("expected gallery_trashed, got {other:?}"),
+        }
+
+        // Nothing moves the second time, so nothing is announced.
+        {
+            let _writer = state.gallery_publication_gate.write().await;
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir.path(),
+                &names,
+                db.as_ref().as_ref(),
+                &state.gallery_publication_gate,
+                Some(state.events.as_ref()),
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err(),
+            "an already-trashed print announces nothing"
+        );
+    }
+
+    /// A trash-view preview is served only while the filename is
+    /// unambiguous. The sidecar is keyed by name alone, so once a NEW live
+    /// print takes the name the cache cannot say which bytes it depicts.
+    #[tokio::test]
+    async fn trash_view_preview_refuses_a_shared_sidecar() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "clip.mp4", None);
+        let trash = crate::batch_transaction::gallery_trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::rename(dir.path().join("clip.mp4"), trash.join("clip.mp4")).unwrap();
+        let preview_dir = crate::routes::server_preview_gif_dir();
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        std::fs::write(
+            preview_dir.join(mold_core::media_paths::preview_gif_filename("clip.mp4")),
+            b"GIF89a",
+        )
+        .unwrap();
+        let app = app_with_state(state);
+
+        // Only the trashed copy exists: the sidecar is unambiguously its own.
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/preview/clip.mp4?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A new live print takes the name: the sidecar can no longer be
+        // attributed, so the trash view misses rather than serving the
+        // live print's pixels under a trashed row.
+        std::fs::write(dir.path().join("clip.mp4"), b"a different, newer clip").unwrap();
+        let resp = app
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/preview/clip.mp4?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Every new organization/trash mutator and listing must wait behind
     /// the atomic publication writer exactly like the historical routes.
     #[tokio::test]

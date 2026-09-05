@@ -1099,8 +1099,11 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // header refuses to commit one, so this only guards stale snapshots).
   const title = validatePrintTitle(form.title ?? "");
   if (title.ok && title.value) req.title = title.value;
-  // Only the opt-out rides the wire; absent is the host's default of saving.
-  if (!form.saveResult) req.save_to_gallery = false;
+  // Only an EXPLICIT opt-out rides the wire. Never `!form.saveResult`: a
+  // template saved before this field existed hydrates it `undefined`, and
+  // treating that as an opt-out would send every print from a legacy starting
+  // point straight to the trash.
+  if (form.saveResult === false) req.save_to_gallery = false;
   // "File under" rides every request built from this form, so a Batch N
   // sibling and a prepared variation file exactly like the one-shot does.
   // Both fields stay ABSENT when nothing is filed.

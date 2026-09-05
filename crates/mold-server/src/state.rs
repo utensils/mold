@@ -1080,6 +1080,34 @@ mod tests {
         assert!(!refresh);
     }
 
+    /// A refresh that FAILED must release rather than publish `None`:
+    /// storing the emptiness would overwrite the last-good totals and mark
+    /// them fresh, so `/api/status.gallery_storage` would vanish for a whole
+    /// TTL over one transient DB error.
+    #[test]
+    fn a_failed_refresh_keeps_the_last_good_snapshot() {
+        let cache = GalleryStorageCache::default();
+        let (_, refresh) = cache.read();
+        assert!(refresh);
+        let totals = mold_core::GalleryStorage {
+            prints: 12,
+            bytes: 3_400,
+            trash_prints: 1,
+            trash_bytes: 100,
+        };
+        cache.store(Some(totals.clone()));
+
+        let later = Instant::now() + MODELS_DISK_TTL;
+        let (served, refresh) = cache.read_at(later);
+        assert_eq!(served, Some(totals.clone()));
+        assert!(refresh, "the stale snapshot hands out one claim");
+        // The refresher failed: release, do not publish.
+        cache.release();
+        let (served, refresh) = cache.read_at(later);
+        assert_eq!(served, Some(totals), "the last good totals still serve");
+        assert!(refresh, "and the next reader may retry");
+    }
+
     #[test]
     fn models_disk_cache_release_reopens_the_claim_without_publishing() {
         let cache = ModelsDiskCache::default();

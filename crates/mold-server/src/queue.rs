@@ -2672,15 +2672,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 };
                 saved_names = save_task.await.unwrap_or_default();
                 // "Save every result" off — the same publish-then-trash the
-                // GPU worker performs, on the single-worker path.
-                if !request.saves_to_gallery() {
+                // GPU worker performs, on the single-worker path, under the
+                // publication writer this block already holds (a second
+                // acquisition would deadlock against it). A print whose
+                // Framewise follow-up still needs the source stays live: the
+                // upscale was asked for, and it reads the file from the
+                // output dir.
+                if !request.saves_to_gallery() && video_upscale_model.is_none() {
                     let dir = trash_dir;
                     let names = saved_names.clone();
                     let db = state.metadata_db.clone();
                     let gate = state.gallery_publication_gate.clone();
                     let events = state.events.clone();
                     tokio::task::spawn_blocking(move || {
-                        let _gallery_writer = gate.blocking_write();
                         crate::gallery_trash::trash_published_outputs_blocking(
                             &dir,
                             &names,
@@ -2691,6 +2695,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     })
                     .await
                     .ok();
+                } else if !request.saves_to_gallery() {
+                    tracing::info!(
+                        job_id = %job.id,
+                        "save_to_gallery=false: kept live because a Framewise upscale still needs the source"
+                    );
                 }
             }
 

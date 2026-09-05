@@ -5798,7 +5798,21 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
         let cache = state.gallery_storage_cache.clone();
         let db = state.metadata_db.clone();
         tokio::task::spawn_blocking(move || {
-            cache.store(db.as_ref().as_ref().and_then(|db| db.storage_totals().ok()))
+            // A transient DB error RELEASES the claim rather than publishing
+            // `None`: storing it would overwrite the last-good totals and
+            // mark the emptiness fresh, so `gallery_storage` would vanish
+            // from status for a whole TTL over one failed query. A host with
+            // no DB at all publishes `None` once, which is the true answer.
+            match db.as_ref().as_ref() {
+                None => cache.store(None),
+                Some(db) => match db.storage_totals() {
+                    Ok(totals) => cache.store(Some(totals)),
+                    Err(error) => {
+                        tracing::warn!(%error, "gallery storage totals refresh failed; keeping the last good snapshot");
+                        cache.release();
+                    }
+                },
+            }
         });
     }
 
@@ -10611,6 +10625,17 @@ async fn get_gallery_preview(
         )));
     }
 
+    // The sidecar is keyed by FILENAME alone, so one name has one preview.
+    // Trashing keeps that sidecar, and a new live print under the same name
+    // overwrites it — at which point the cache cannot say which bytes it
+    // depicts. A trash-view request therefore serves it only while the name
+    // is unambiguous (no live twin); otherwise it is a plain miss and the
+    // caller falls back to the media route, which resolves the view exactly.
+    if from_trash && output_dir.join(&clean_name).is_file() {
+        return Err(ApiError::not_found(format!(
+            "preview not found: {clean_name}"
+        )));
+    }
     let preview_path =
         server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&clean_name));
     let meta = match tokio::fs::metadata(&preview_path).await {

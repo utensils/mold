@@ -3375,6 +3375,20 @@ describe("file under", () => {
     expect(buildRequest(form).save_to_gallery).toBe(false);
   });
 
+  it("never reads a MISSING save preference as an opt-out", () => {
+    // A template saved before the field existed hydrates it undefined. A
+    // falsy check there sent every print from a legacy starting point
+    // straight to the trash; only an explicit `false` opts out.
+    const legacy = {
+      ...newGenerateForm(),
+      model: "flux-dev:q8",
+      family: "flux",
+      prompt: "x",
+    } as GenerateForm & { saveResult?: boolean };
+    delete legacy.saveResult;
+    expect("save_to_gallery" in buildRequest(legacy as GenerateForm)).toBe(false);
+  });
+
   it("ships the title ghost tag plus manual tags on the wire", () => {
     const form = newGenerateForm();
     form.fileUnderAutoTag = true;
