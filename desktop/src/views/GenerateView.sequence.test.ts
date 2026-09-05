@@ -601,6 +601,40 @@ describe("GenerateView — sequence output", () => {
     expect(form.model).toBe(imageModel.name);
   });
 
+  it("opens the Short clip door onto Scenes when raised from another workspace, before the inspector exists", async () => {
+    // The palette raises the intent and THEN navigates here, so the view
+    // consumes it during setup, when the inspector ref is still null. The
+    // swap has to wait for the inspector rather than fall on the floor.
+    readyLocal();
+    installedPayload = [imageModel, videoModel];
+    useModelStore().all = [imageModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = imageModel.name;
+    form.family = imageModel.family;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.clipMode = "scenes";
+    const setOutputMode = vi.fn();
+    useUiStore().shortClip();
+    mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+      global: {
+        stubs: {
+          SequenceComposer: true,
+          ComposerCard: true,
+          InspectorPanel: {
+            name: "InspectorPanel",
+            template: "<div />",
+            setup: () => ({ setOutputMode }),
+          },
+        },
+      },
+    });
+    await flushPromises();
+    expect(setOutputMode).toHaveBeenCalledWith("sequence");
+  });
+
   it("consumes ?output=sequence without leaking the one-shot prompt, then strips the query", async () => {
     readyLocal();
     installedPayload = [videoModel];

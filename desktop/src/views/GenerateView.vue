@@ -4836,8 +4836,18 @@ async function loadPromptHistory() {
 // first inventory to arrive is this device's, and picking FLUX from it would
 // lock the form before the machine that holds the style could answer. Only
 // once the whole fleet has reported without it does the usual pick apply.
+// "Settled" counts the machines still on their way, not only the ready ones:
+// boot reconnect leaves a remembered machine `connecting` while this device's
+// inventory has already landed, and `allReadyHostsFetched` reads only the
+// ready set, so it would call the fleet settled before that machine — the one
+// most likely to hold the remembered style — could answer.
 const installedInventorySettled = computed(
-  () => !models.loading && !hostModels.loading && hostModels.allReadyHostsFetched,
+  () =>
+    hosts.initialized &&
+    !models.loading &&
+    !hostModels.loading &&
+    hostModels.allReadyHostsFetched &&
+    !hosts.all.some((host) => host.status === "connecting"),
 );
 watch(
   [installedModels, installedInventorySettled],
@@ -5401,7 +5411,13 @@ onCreateIntent(
 // style), whether or not New image was already open.
 const outputKindDoor = useOutputKindDoor(
   () => form,
-  (mode) => inspectorRef.value?.setOutputMode(mode),
+  (mode) => {
+    // Raised from another workspace, the intent is consumed during setup,
+    // before the inspector exists; the swap waits a tick for it rather than
+    // falling on the floor.
+    if (inspectorRef.value) inspectorRef.value.setOutputMode(mode);
+    else void nextTick(() => inspectorRef.value?.setOutputMode(mode));
+  },
 );
 onCreateIntent(
   "shortClip",

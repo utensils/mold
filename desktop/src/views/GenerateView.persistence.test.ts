@@ -332,6 +332,39 @@ describe("GenerateView opens on the style last used", () => {
     expect(useGenerateFormStore().form.model).toBe(clip.name);
   });
 
+  it("waits for a machine still reconnecting at launch, which the fetched count ignores", async () => {
+    // Boot reconnect leaves a remembered machine `connecting` while this
+    // device's inventory has already landed; `allReadyHostsFetched` counts
+    // only READY machines, so it read settled and the fallback locked the
+    // form before the machine holding the style could answer.
+    useLastUsedStylesStore().remember("clip", clip.name);
+    useModelStore().all = [still];
+    const hostModels = useHostModelsStore();
+    hostModels.byHost.local = { entries: [still], fetchedAt: Date.now(), error: null };
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "connecting",
+      error: null,
+      instanceId: null,
+    });
+    apiJsonTo.mockImplementation((_target: unknown, path: unknown) =>
+      path === "/api/models" ? new Promise<never>(() => {}) : Promise.resolve([]),
+    );
+
+    mountView();
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe("");
+
+    hosts.extras[0]!.status = "ready";
+    hostModels.byHost["plato-7680"] = { entries: [clip], fetchedAt: Date.now(), error: null };
+    await flushPromises();
+    expect(useGenerateFormStore().form.model).toBe(clip.name);
+  });
+
   it("settles for the usual pick once every machine has reported without it", async () => {
     useLastUsedStylesStore().remember("clip", "wan22-ti2v-5b:dmd");
     useModelStore().all = [still];
