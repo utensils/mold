@@ -5,6 +5,8 @@ import sidebarSource from "../components/shell/Sidebar.vue?raw";
 import paletteSource from "../components/shell/CommandPalette.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import createHeaderSource from "../components/create/CreateHeader.vue?raw";
+import clipModeStripSource from "../components/create/ClipModeStrip.vue?raw";
+import modelsViewSource from "../views/ModelsView.vue?raw";
 import appSource from "../App.vue?raw";
 import chainJobsSource from "../stores/chainJobs.ts?raw";
 import expandSource from "../components/generate/ExpandControl.vue?raw";
@@ -265,14 +267,25 @@ describe("lexicon — the composer", () => {
  */
 describe("lexicon — how the clip gets made", () => {
   it("names the two ways Simple and Scenes, on a control that says what it picks", () => {
-    expect(createHeaderSource).toContain('label: "Simple"');
-    expect(createHeaderSource).toContain('label: "Scenes"');
-    expect(createHeaderSource).toContain('label="How to make the clip"');
+    expect(clipModeStripSource).toContain('label: "Simple"');
+    expect(clipModeStripSource).toContain('label: "Scenes"');
+    expect(clipModeStripSource).toContain('label="How to make the clip"');
   });
 
-  it("keeps the tool's own words off both surfaces", () => {
+  it("filters Styles by the kinds Create offers, in the same words", () => {
+    // Styles said Pictures · Clips against Create's Still picture | Short
+    // clip, and had no 3-D kind. Both read `OUTPUT_KIND_LABEL` now.
+    expect(createHeaderSource).toContain("label: OUTPUT_KIND_LABEL.still");
+    expect(modelsViewSource).toContain("OUTPUT_KIND_LABEL[MEDIA_TYPE_KIND[value]]");
+    for (const old of ['label: "Pictures"', 'label: "Clips"']) {
+      expect(modelsViewSource).not.toContain(old);
+    }
+  });
+
+  it("keeps the tool's own words off every surface", () => {
     const surfaces: [string, string][] = [
       ["CreateHeader", templateText(createHeaderSource)],
+      ["ClipModeStrip", templateText(clipModeStripSource)],
       ["CommandPalette", quoted(paletteSource).join(" ")],
     ];
     for (const [name, text] of surfaces) {

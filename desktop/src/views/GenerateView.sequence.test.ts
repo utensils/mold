@@ -1827,7 +1827,7 @@ describe("GenerateView — Simple | Scenes", () => {
   it("seeds scene 1 from the words and the length already on the composer", async () => {
     const { wrapper, draft, form } = await simpleClip();
 
-    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "scenes");
+    wrapper.findComponent({ name: "ClipModeStrip" }).vm.$emit("set-clip-mode", "scenes");
     await flushPromises();
 
     expect(draft.output).toBe("sequence");
@@ -1845,7 +1845,7 @@ describe("GenerateView — Simple | Scenes", () => {
     draft.ensureClips(97);
     draft.clips[0]!.prompt = "the gate opens";
 
-    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "scenes");
+    wrapper.findComponent({ name: "ClipModeStrip" }).vm.$emit("set-clip-mode", "scenes");
     await flushPromises();
 
     expect(draft.clips[0]?.prompt).toBe("the gate opens");
@@ -1859,7 +1859,7 @@ describe("GenerateView — Simple | Scenes", () => {
     draft.clips[1]!.prompt = "the road bends away";
     await flushPromises();
 
-    wrapper.findComponent({ name: "CreateHeader" }).vm.$emit("set-clip-mode", "simple");
+    wrapper.findComponent({ name: "ClipModeStrip" }).vm.$emit("set-clip-mode", "simple");
     await flushPromises();
 
     expect(draft.output).toBe("single");
