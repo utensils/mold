@@ -17,25 +17,78 @@ describe("TrashBanner", () => {
     const summary = wrapper.find("[data-test='trash-banner-summary']");
     expect(summary.text()).toBe("Prints stay in the trash 30 d before purge · plato keeps 7 d");
     expect(summary.findAll("b").map((b) => b.text())).toEqual(["30 d", "7 d"]);
-    expect(summary.find("b").classes()).toContain("font-utility");
+    expect(summary.find("b").classes()).toContain("font-mono");
     expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe(
-      "3 prints in trash · 41.6 MB",
+      "3 pictures in trash · 41.6 MB",
     );
     expect(wrapper.find("[data-test='trash-banner']").attributes("role")).toBe("status");
   });
 
-  it("emits changeRetention from the Machines link", async () => {
+  it("emits changeRetention from the mono retention control", async () => {
     const wrapper = mount(TrashBanner, {
       props: { hosts: [{ label: "This device", retentionDays: 0 }], count: 1 },
     });
     expect(wrapper.find("[data-test='trash-banner-summary']").text()).toBe(
       "Prints stay in the trash until you empty it",
     );
-    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("1 print in trash");
+    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("1 picture in trash");
     const link = wrapper.find("[data-test='trash-banner-link']");
-    expect(link.text()).toBe("Change retention · Machines");
+    expect(link.text()).toBe("Keep forever ▼");
+    expect(link.attributes("title")).toBe("Change retention · Machines");
     await link.trigger("click");
     expect(wrapper.emitted("changeRetention")).toHaveLength(1);
+  });
+
+  it("names this device's retention and carries Empty now at the right edge", async () => {
+    const wrapper = mount(TrashBanner, {
+      props: {
+        hosts: [{ label: "This device", retentionDays: 30 }],
+        count: 3,
+      },
+    });
+    expect(wrapper.get("[data-test='trash-banner-link']").text()).toBe("Keep for 30 days ▼");
+    const empty = wrapper.get("[data-test='empty-trash']");
+    expect(empty.text()).toBe("Empty now");
+    expect(empty.classes()).toContain("ms-toolbar-button--danger");
+    await empty.trigger("click");
+    expect(wrapper.emitted("emptyNow")).toHaveLength(1);
+  });
+
+  it("names the retention of the machine the control actually edits", async () => {
+    // The list is not always This-device-first: a host with no trash is
+    // skipped entirely, so the first row can be a remote. The control routes
+    // to Settings whenever This device keeps a trash, and it used to print the
+    // first row's number there — contradicting its own sentence two spans left.
+    const wrapper = mount(TrashBanner, {
+      props: {
+        hosts: [
+          { key: "plato", label: "plato", retentionDays: 7 },
+          { key: "local", label: "This device", retentionDays: 30 },
+        ],
+        count: 2,
+      },
+    });
+    expect(wrapper.get("[data-test='trash-banner-link']").text()).toBe("Keep for 30 days ▼");
+  });
+
+  it("falls back to the first machine when this device keeps no trash", () => {
+    const wrapper = mount(TrashBanner, {
+      props: {
+        hosts: [
+          { key: "plato", label: "plato", retentionDays: 7 },
+          { key: "render", label: "Render box", retentionDays: 14 },
+        ],
+        count: 2,
+      },
+    });
+    expect(wrapper.get("[data-test='trash-banner-link']").text()).toBe("Keep for 7 days ▼");
+  });
+
+  it("disables Empty now at zero", () => {
+    const wrapper = mount(TrashBanner, {
+      props: { hosts: [{ label: "This device", retentionDays: 30 }], count: 0 },
+    });
+    expect(wrapper.get("[data-test='empty-trash']").attributes("disabled")).toBeDefined();
   });
 
   it("explains when no connected machine keeps a trash, and hides the link", () => {
@@ -44,6 +97,6 @@ describe("TrashBanner", () => {
       "No connected machine keeps a trash.",
     );
     expect(wrapper.find("[data-test='trash-banner-link']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("0 prints in trash");
+    expect(wrapper.find("[data-test='trash-banner-count']").text()).toBe("0 pictures in trash");
   });
 });

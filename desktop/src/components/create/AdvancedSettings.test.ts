@@ -82,12 +82,9 @@ describe("AdvancedSettings — capability matrix", () => {
 
   it("shows scheduler, negative, and no video for SDXL", () => {
     const titles = accordionTitles(mountSettings(formFor("sdxl")));
-    expect(titles).toEqual([
-      "Scheduler & sampling",
-      "Negative prompt",
-      "LoRA stack",
-      "Output & seed",
-    ]);
+    // Add-on looks is a MAIN-column group now, never an Advanced section.
+    expect(titles).toEqual(["Scheduler & sampling", "Negative prompt", "Output & seed"]);
+    expect(titles).not.toContain("Add-on looks");
   });
 
   it("hides scheduler and negative for FLUX", () => {
@@ -106,7 +103,7 @@ describe("AdvancedSettings — capability matrix", () => {
 
   it("keeps qwen-edit free of scheduler, negative, and video", () => {
     const titles = accordionTitles(mountSettings(formFor("qwen-image-edit")));
-    expect(titles).toEqual(["LoRA stack", "Output & seed"]);
+    expect(titles).toEqual(["Output & seed"]);
   });
 
   it("gives wan a sampler recipe instead of a second scheduler picker", async () => {
@@ -202,12 +199,12 @@ describe("AdvancedSettings — section ordering contract", () => {
 
   it("renders still-image sections in the canonical order", () => {
     const wrapper = mountSettings(formFor("sdxl"), { upscalers: [upscaler] });
-    expect(sectionIds(wrapper)).toEqual(["scheduler", "negative", "lora", "upscale", "output"]);
+    expect(sectionIds(wrapper)).toEqual(["scheduler", "negative", "upscale", "output"]);
   });
 
   it("renders video sections in the canonical order", () => {
     const wrapper = mountSettings(formFor("ltx2"), { upscalers: [upscaler] });
-    expect(sectionIds(wrapper)).toEqual(["negative", "lora", "upscale", "output", "video"]);
+    expect(sectionIds(wrapper)).toEqual(["negative", "upscale", "output", "video"]);
   });
 
   it("keeps every family's rendered sections a subsequence of the canon", () => {

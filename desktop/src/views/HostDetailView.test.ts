@@ -462,26 +462,59 @@ describe("HostDetailView GPU lifecycle controls", () => {
 });
 
 describe("HostDetailView header", () => {
-  it("renders name, status, kind, url, version and instance id from the stores", async () => {
+  it("says what the machine is in one plain sentence, not a row of wire facts", async () => {
     const wrapper = await mountView();
     expect(wrapper.get("[data-test='host-title']").text()).toBe("hal9000");
-    expect(wrapper.text()).toContain("REMOTE");
-    expect(wrapper.get("[data-test='host-url']").text()).toBe("http://hal9000:7680");
-    expect(wrapper.get("[data-test='host-version']").text()).toContain("0.17.0");
-    const instance = wrapper.get("[data-test='host-instance-id']");
-    expect(instance.text()).toContain("0f7a2c31-instance-uuid");
-    // Remote hosts get the remote-only management actions.
+    // Every card in the box, built by the ONE machine-sentence builder the
+    // Machines list also calls — a two-card machine may not read as one here
+    // and as two there.
+    expect(wrapper.get("[data-test='host-sentence']").text()).toBe(
+      "NVIDIA GeForce RTX 4090 + NVIDIA B200 · CUDA · on your network · up 5s",
+    );
+    // The kind is in the sentence; the badge and the raw address are gone.
+    const toolbar = wrapper.get("[data-test='host-toolbar']");
+    expect(toolbar.text()).not.toContain("REMOTE");
+    expect(toolbar.text()).not.toContain("http://hal9000:7680");
+    expect(toolbar.text()).not.toContain("0f7a2c31-instance-uuid");
+    expect(toolbar.text()).not.toContain("0.17.0");
+    // Remote hosts get the remote-only management actions; Disconnect stays
+    // on the machine card's context menu, off this three-button toolbar.
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(false);
   });
 
-  it("copies the full instance id on click even though the display truncates", async () => {
+  it("carries three actions, so Forget… survives the pane's narrowest width", async () => {
+    const wrapper = await mountView();
+    const toolbar = wrapper.get("[data-test='host-toolbar']");
+    // A fourth nowrap button does not fit the 484px pane at `minWidth: 1080`,
+    // and `overflow-hidden` clips from the right — Forget… first. Making
+    // images here stays reachable from the machine card's context menu.
+    expect(toolbar.findAll("button").map((b) => b.text())).toEqual([
+      "hal9000",
+      "Rename",
+      "Open web UI",
+      "Forget…",
+    ]);
+    expect(wrapper.find("[data-test='target-toggle']").exists()).toBe(false);
+  });
+
+  it("keeps the address, version and instance id in the name's tooltip", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='host-identity']").trigger("focusin");
+    await flushPromises();
+    const tip = document.body.querySelector('[role="tooltip"]');
+    expect(tip?.textContent).toContain("http://hal9000:7680");
+    expect(tip?.textContent).toContain("v0.17.0");
+    expect(tip?.textContent).toContain("0f7a2c31-instance-uuid");
+  });
+
+  it("copies the full instance id when the name is clicked", async () => {
     const wrapper = await mountView();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
-    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    await wrapper.get("[data-test='host-title']").trigger("click");
     expect(writeText).toHaveBeenCalledWith("0f7a2c31-instance-uuid");
   });
 
@@ -492,7 +525,7 @@ describe("HostDetailView header", () => {
       value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
     });
 
-    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    await wrapper.get("[data-test='host-title']").trigger("click");
     await flushPromises();
     const { useToastStore } = await import("../stores/toasts");
     const toasts = useToastStore();
@@ -501,9 +534,8 @@ describe("HostDetailView header", () => {
 
   it("renders the local primary without remote-only actions", async () => {
     const wrapper = await mountView("/hosts/local");
-    expect(wrapper.text()).toContain("THIS DEVICE");
+    expect(wrapper.get("[data-test='host-sentence']").text()).toContain("this device");
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(false);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(false);
   });
 
@@ -511,7 +543,7 @@ describe("HostDetailView header", () => {
     const wrapper = await mountView("/hosts/no-such-host");
     expect(wrapper.find("[data-test='host-title']").exists()).toBe(false);
     const missing = wrapper.get("[data-test='host-missing']");
-    expect(missing.text()).toContain("Host not found");
+    expect(missing.text()).toContain("Machine not found");
     expect(missing.find("[data-test='back-to-hosts']").attributes("href")).toBe("/machines");
     // No stream is opened for a host that doesn't exist.
     expect(sseCalls).toHaveLength(0);
@@ -528,10 +560,15 @@ describe("HostDetailView telemetry", () => {
     // Before any frame: every status-poll worker is visible.
     const fallbackCards = wrapper.findAll("[data-test='gpu-card']");
     expect(fallbackCards).toHaveLength(2);
-    expect(fallbackCards[0]!.text()).toContain("NVIDIA GeForce RTX 4090");
-    expect(fallbackCards[0]!.text()).toContain("6.0 GB/24.0 GB");
-    expect(fallbackCards[1]!.text()).toContain("NVIDIA B200");
-    expect(fallbackCards[1]!.text()).toContain("20.0 GB/80.0 GB");
+    // The card names itself in the tooltip; the note stays one reading.
+    expect(fallbackCards[0]!.get("[data-test='gpu-note']").attributes("title")).toContain(
+      "NVIDIA GeForce RTX 4090",
+    );
+    expect(fallbackCards[0]!.text()).toContain("6.0 / 24.0 GB");
+    expect(fallbackCards[1]!.get("[data-test='gpu-note']").attributes("title")).toContain(
+      "NVIDIA B200",
+    );
+    expect(fallbackCards[1]!.text()).toContain("20.0 / 80.0 GB");
     expect(wrapper.find("[data-test='cpu-card']").exists()).toBe(false);
 
     stream.options.onEvent(
@@ -556,13 +593,15 @@ describe("HostDetailView telemetry", () => {
     await flushPromises();
 
     const gpuCard = wrapper.get("[data-test='gpu-card']");
-    expect(gpuCard.text()).toContain("CUDA");
-    expect(gpuCard.text()).toContain("18.0 GB/24.0 GB");
-    expect(gpuCard.get("[data-test='gpu-utilization']").text()).toBe("97%");
+    // The note stays a single short reading; the card names the rest.
+    expect(gpuCard.get("[data-test='gpu-note']").text()).toBe("18.0 / 24.0 GB");
+    expect(gpuCard.get("[data-test='gpu-note']").attributes("title")).toBe(
+      "NVIDIA GeForce RTX 4090 · CUDA · 97% util",
+    );
     const cpuCard = wrapper.get("[data-test='cpu-card']");
-    expect(cpuCard.text()).toContain("16 CORES");
+    expect(cpuCard.text()).toContain("16 cores");
     expect(cpuCard.text()).toContain("43%");
-    expect(wrapper.get("[data-test='ram-card']").text()).toContain("21.0 GB/64.0 GB");
+    expect(wrapper.get("[data-test='ram-card']").text()).toContain("21.0 / 64.0 GB");
   });
 
   it("collapses VRAM and RAM into one Memory row on a unified-memory Metal host", async () => {
@@ -590,9 +629,9 @@ describe("HostDetailView telemetry", () => {
     await flushPromises();
 
     const gpuCard = wrapper.get("[data-test='gpu-card']");
-    expect(gpuCard.text()).toContain("MEMORY");
-    expect(gpuCard.text()).not.toContain("VRAM");
-    expect(gpuCard.text()).toContain("46.9 GB/51.5 GB");
+    expect(gpuCard.text()).toContain("Memory");
+    expect(gpuCard.text()).not.toContain("Graphics memory");
+    expect(gpuCard.text()).toContain("46.9 / 51.5 GB");
     // The standalone RAM row would repeat the same numbers — it stays hidden,
     // while CPU keeps its own row.
     expect(wrapper.find("[data-test='ram-card']").exists()).toBe(false);
@@ -618,8 +657,10 @@ describe("HostDetailView H3 placement", () => {
     const html = wrapper.html();
     const h3At = html.indexOf('data-test="h3-inventory"');
     expect(h3At).toBeGreaterThan(-1);
-    expect(html.indexOf("TELEMETRY")).toBeLessThan(h3At);
-    expect(html.indexOf("INSTALLED MODELS")).toBeLessThan(h3At);
+    for (const label of ["Right now", "Styles on this machine"]) {
+      expect(html.indexOf(label)).toBeGreaterThan(-1);
+      expect(html.indexOf(label)).toBeLessThan(h3At);
+    }
   });
 });
 
@@ -639,9 +680,33 @@ describe("HostDetailView storage and queue", () => {
   it("shows queue depth/capacity and loaded-model chips", async () => {
     installApi({ queue_depth: 3, queue_capacity: 8 });
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='queue-depth']").text()).toBe("3/8");
+    // The noun rides the number even with no scheduled work; a bare "3/8"
+    // under a heading is a figure with nothing saying what it counts.
+    expect(wrapper.get("[data-test='queue-depth']").text()).toBe("3/8 queued");
     const chips = wrapper.findAll("[data-test='loaded-model-name']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
+  });
+
+  it("gives the queue panel the section to itself — no second border, no controls row", async () => {
+    installApi({ queue_depth: 1, queue_capacity: 8 }, [
+      {
+        id: "srv-1",
+        model: "flux-dev:q8",
+        state: "running",
+        started_at_unix_ms: Date.now(),
+        position: 0,
+        gpu: 0,
+      },
+    ]);
+    const wrapper = await mountView();
+    const row = wrapper.get("[data-test='host-queue-row']");
+    // Rows carry their own border and radius; a wrapper that draws another
+    // one leaves the first row touching a rule it did not ask for.
+    const wrapped = row.element.closest(".border-border.bg-panel");
+    expect(wrapped).toBeNull();
+    // The mock's machine page has no Pause / Cancel all row.
+    expect(wrapper.find("[data-test='pause-toggle']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(false);
   });
 
   it("lists the host's server queue with state codes and ownership tags", async () => {
@@ -709,7 +774,7 @@ describe("HostDetailView storage and queue", () => {
       }),
     );
     await flushPromises();
-    expect(wrapper.get("[data-test='gpu-card']").html()).toContain("bg-safelight");
+    expect(wrapper.get("[data-test='gpu-card']").html()).toContain("bg-accent");
   });
 
   it("shows an empty queue line and a PAUSED marker from the queue snapshot", async () => {
@@ -859,10 +924,42 @@ describe("HostDetailView models", () => {
     );
     await flushPromises();
 
+    // The card draws its own border, so this slot is the compact readout:
+    // one style, its percent and eta, a meter, one line of prose.
     const tray = wrapper.get("[data-test='host-downloads']");
     expect(tray.text()).toContain("qwen-image:q4");
-    expect(tray.text()).toContain("2.5 GB / 10.0 GB");
+    expect(tray.get("[data-test='downloads-summary-progress']").text()).toContain("25% · eta");
+    expect(tray.text()).toContain("Nothing else queued to download.");
+    expect(tray.text()).not.toContain("[2.5 GB/10.0 GB,");
     expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
+  });
+
+  it("shows this device's downloads whatever scope the store subscribed as", async () => {
+    // The primary's rows are tagged with the downloads store's own scope,
+    // which any surface that subscribes without a host resets to "primary" —
+    // never this route's "local". Comparing the route id left Downloads here
+    // permanently empty for This device.
+    const wrapper = await mountView("/hosts/local");
+    const { useDownloadsStore } = await import("../stores/downloads");
+    const downloads = useDownloadsStore();
+    await downloads.subscribe(); // e.g. Styles, or the Starters strip
+    expect(downloads.primaryHostId).toBe("primary");
+    downloads.activeJobs = [
+      {
+        id: "pull-9",
+        model: "qwen-image:q4",
+        status: "active",
+        files_done: 1,
+        files_total: 4,
+        bytes_done: 2_500_000_000,
+        bytes_total: 10_000_000_000,
+      } as (typeof downloads.activeJobs)[number],
+    ];
+    await flushPromises();
+
+    const tray = wrapper.get("[data-test='host-downloads']");
+    expect(tray.text()).toContain("qwen-image:q4");
+    expect(wrapper.text()).not.toContain("Nothing on its way to this machine.");
   });
 
   it("keeps live components mounted across health polls and only reopens streams for credentials", async () => {
@@ -1089,10 +1186,10 @@ describe("HostDetailView layout", () => {
     ).toBe(false);
   });
 
-  it("shows uptime from /api/status in the telemetry header", async () => {
+  it("shows uptime from /api/status in the toolbar sentence", async () => {
     installApi({ uptime_secs: 200_000 });
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='host-uptime']").text()).toBe("UP 2d 7h");
+    expect(wrapper.get("[data-test='host-sentence']").text()).toContain("up 2d 7h");
   });
 
   it("renders the models-disk meter inside the telemetry panel, not a separate section", async () => {
@@ -1103,9 +1200,9 @@ describe("HostDetailView layout", () => {
     expect(panel.find("[data-test='gpu-card']").exists()).toBe(true);
   });
 
-  it("labels resident models LOADED so they can't read as queued jobs", async () => {
+  it("labels resident models Loaded and ready so they can't read as queued jobs", async () => {
     const wrapper = await mountView();
-    expect(wrapper.get("[data-test='loaded-label']").text()).toBe("LOADED");
+    expect(wrapper.get("[data-test='loaded-label']").text()).toBe("Loaded and ready");
     const chips = wrapper.findAll("[data-test='loaded-model-name']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
@@ -1167,17 +1264,15 @@ describe("HostDetailView forget", () => {
     await wrapper.get("[data-test='forget-host']").trigger("click");
     expect(forgetRemoteHost).not.toHaveBeenCalled();
 
-    // The confirm dialog teleports to <body>; it carries the §11 copy.
-    const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Forget studio?");
-    expect(dialog?.textContent).toContain("Its API key is discarded.");
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Forget hal9000?");
+    expect(dialog.text()).toContain("Its saved API key is discarded.");
 
-    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(forgetRemoteHost).toHaveBeenCalledWith(REMOTE_ID);
     expect(useHostsStore().extras).toHaveLength(0);
     expect(router.currentRoute.value.path).toBe("/machines");
-    document.body.innerHTML = "";
   });
 });
 
@@ -1287,19 +1382,18 @@ describe("HostDetailView storage (Library trash)", () => {
     await wrapper.get("[data-test='host-empty-trash']").trigger("click");
     expect(emptyTrash).not.toHaveBeenCalled();
 
-    const dialog = document.querySelector("[data-test='confirm-dialog']");
-    expect(dialog?.textContent).toContain("Empty trash?");
-    expect(dialog?.textContent).toContain(
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Empty trash?");
+    expect(dialog.text()).toContain(
       "Delete 2 prints in the trash on hal9000 forever? This can't be undone.",
     );
     // No typed-phrase gate anywhere (design amendment).
-    expect(dialog?.querySelector("input")).toBeNull();
+    expect(dialog.find("input").exists()).toBe(false);
 
-    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(emptyTrash).toHaveBeenCalledWith(TARGET);
     expect(wrapper.get("[data-test='host-trash-count']").text()).toContain("0");
-    document.body.innerHTML = "";
   });
 
   it("disables Empty trash when the trash is empty", async () => {

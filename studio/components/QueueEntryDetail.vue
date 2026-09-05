@@ -242,7 +242,7 @@ async function copyDetail(): Promise<void> {
   min-height: 0;
   box-sizing: border-box;
   flex-direction: column;
-  color: var(--ink-2, currentColor);
+  color: var(--mold-text-2, currentColor);
   font-size: 12px;
 }
 .qed--compact {
@@ -254,30 +254,30 @@ async function copyDetail(): Promise<void> {
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--edge, var(--ce));
+  border-bottom: 1px solid var(--mold-border, var(--mold-border-control));
 }
 .qed__state {
   padding: 2px 6px;
-  border: 1px solid var(--line, var(--ce));
-  border-radius: var(--radius-pill, 999px);
+  border: 1px solid var(--line, var(--mold-border-control));
+  border-radius: var(--mold-radius-2, 999px);
   font-size: 10px;
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
 .qed__state[data-state="running"] {
-  border-color: var(--safelight);
-  color: var(--safelight);
+  border-color: var(--mold-blue);
+  color: var(--mold-blue);
 }
 .qed__state[data-state="held"] {
-  border-color: var(--warning);
-  color: var(--warning);
+  border-color: var(--mold-warning);
+  color: var(--mold-warning);
 }
 .qed__title {
   overflow: hidden;
   min-width: 0;
   flex: 1;
   margin: 0;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -314,11 +314,11 @@ async function copyDetail(): Promise<void> {
 }
 .qed__preview img {
   width: 100%;
-  border-radius: var(--radius-card, 12px);
+  border-radius: var(--mold-radius-2, 12px);
 }
 .qed__preview figcaption {
   margin-top: 4px;
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   font-size: 11px;
 }
 .qed__problem {
@@ -327,19 +327,19 @@ async function copyDetail(): Promise<void> {
   gap: 4px;
   margin: 0;
   padding: 10px;
-  border: 1px solid var(--stop);
-  border-radius: var(--radius-control, 9px);
-  color: var(--stop);
+  border: 1px solid var(--mold-error);
+  border-radius: var(--mold-radius-2, 9px);
+  color: var(--mold-error);
   white-space: pre-wrap;
   word-break: break-word;
 }
 .qed__printtitle {
   margin: 0;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
   font-weight: 600;
 }
 .qed__legend {
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   font-size: 10px;
   letter-spacing: 0.08em;
 }
@@ -352,11 +352,11 @@ async function copyDetail(): Promise<void> {
   word-break: break-word;
 }
 .qed__negative {
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
 }
 .qed__notice {
   margin: 0;
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   line-height: 1.5;
 }
 .qed__group dl {
@@ -369,7 +369,7 @@ async function copyDetail(): Promise<void> {
   grid-template-columns: minmax(0, 1fr);
 }
 .qed__group dt {
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   font-size: 10px;
 }
 .qed--compact .qed__group dt {
@@ -380,7 +380,7 @@ async function copyDetail(): Promise<void> {
   overflow-wrap: anywhere;
 }
 .qed__mono {
-  font-family: var(--f-mono, ui-monospace, monospace);
+  font-family: var(--mold-font-mono, ui-monospace, monospace);
 }
 .qed__foot {
   display: flex;
@@ -388,16 +388,16 @@ async function copyDetail(): Promise<void> {
   flex-direction: column;
   gap: 8px;
   padding: 12px 16px;
-  border-top: 1px solid var(--edge, var(--ce));
+  border-top: 1px solid var(--mold-border, var(--mold-border-control));
 }
 .qed__error {
   margin: 0;
-  color: var(--stop);
+  color: var(--mold-error);
   word-break: break-word;
 }
 .qed__hint {
   margin: 0;
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   line-height: 1.4;
 }
 .qed__actions {
@@ -410,8 +410,8 @@ async function copyDetail(): Promise<void> {
   min-height: 32px;
   flex: 1 1 auto;
   padding: 0 10px;
-  border: 1px solid var(--line, var(--ce));
-  border-radius: var(--radius-control, 9px);
+  border: 1px solid var(--line, var(--mold-border-control));
+  border-radius: var(--mold-radius-2, 9px);
   background: none;
   color: inherit;
   cursor: pointer;
@@ -430,7 +430,7 @@ async function copyDetail(): Promise<void> {
   opacity: 0.5;
 }
 .qed__danger {
-  border-color: var(--stop) !important;
-  color: var(--stop);
+  border-color: var(--mold-error) !important;
+  color: var(--mold-error);
 }
 </style>

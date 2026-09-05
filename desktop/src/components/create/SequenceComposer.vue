@@ -1,16 +1,19 @@
 <script setup lang="ts">
 /*
- * Sequence bench (mockup 1c): replaces the single-print ComposerCard when
- * Output = Sequence. Clip rail with seam pills, an active-clip prompt
- * editor, and a footer with file tools, validation, the fit note, and the
- * primary Generate/Update button. Clips live in the shared sequence draft
- * store; shared params stay in the generate form and are read at submit.
+ * The clip timeline (README §04), between the canvas and the composer: a
+ * transport, a ruler, the scenes lane with its seams and playhead, and the
+ * secondary controls a scene needs that the composer has no room for. The
+ * composer below stays mounted and carries the selected scene's words and the
+ * Generate button, so this file owns no prompt and no primary action — it
+ * reports its own refusal upward instead and lets one button answer for both
+ * modes. Scenes live in the shared sequence draft store; shared params stay in
+ * the generate form and are read at submit.
  */
 import { computed, ref, watch } from "vue";
-import ClipRail from "@ui/components/ClipRail.vue";
+import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import SeamEditor from "@ui/components/SeamEditor.vue";
-import ConfirmDialog from "../shell/ConfirmDialog.vue";
+import SceneLane from "./SceneLane.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   defaultClipFrames,
@@ -33,7 +36,13 @@ import {
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import { promptRecipeFromForm } from "../../lib/promptRecipe";
-import ActionBlocker from "@ui/components/ActionBlocker.vue";
+import {
+  SEQUENCE_NEEDS_STYLE,
+  sceneLabel,
+  type SequenceConfirmation,
+} from "../../lib/sequenceTimeline";
+import { formatGB } from "../../lib/format";
+import { rulerTicks } from "../../lib/rulerTicks";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
@@ -60,6 +69,8 @@ const props = withDefaults(
     chainLevelDirty?: boolean;
     stageMediaByClipId?: Readonly<Record<string, ClipRailMedia | undefined>> | null;
     playingClipId?: string | null;
+    /** How far into the playing scene its own player has run. */
+    elapsedSeconds?: number;
     /** Exact authenticated host that will render this sequence. */
     target?: ApiTarget | null;
   }>(),
@@ -71,24 +82,20 @@ const props = withDefaults(
     chainLevelDirty: false,
     stageMediaByClipId: null,
     playingClipId: null,
+    elapsedSeconds: 0,
     target: null,
   },
 );
 
 const emit = defineEmits<{
-  /** Generate sequence / Update sequence (create vs amend is the parent's call). */
-  submit: [];
-  /** Stop source preparation / placement before the sequence is queued. */
-  cancel: [];
   /** Edit session: submit the current clips as a NEW job instead of amending. */
   duplicate: [];
   "play-clip": [clipId: string];
+  /** What the composer's Generate must refuse for, or null when it may go. */
+  "update:blockedReason": [reason: string | null];
+  /** What the timeline is waiting to have confirmed, or null when nothing is. */
+  "update:confirmation": [confirmation: SequenceConfirmation | null];
 }>();
-
-function submitOrCancel() {
-  if (props.submitting) emit("cancel");
-  else emit("submit");
-}
 
 const draft = useSequenceDraftStore();
 const hosts = useHostsStore();
@@ -111,6 +118,9 @@ const requestClips = computed(() =>
     : draft.clips.map((clip) => ({ ...clip, sourceImage: null })),
 );
 const maxStages = computed(() => props.chainLimits?.max_stages ?? 16);
+const canAdd = computed(() => draft.clips.length < maxStages.value);
+/** "How does this work?" — the timeline explained in one paragraph. */
+const helpOpen = ref(false);
 const newClipFrames = computed(() =>
   defaultClipFrames(props.selectedModel, props.chainLimits, motionTail.value),
 );
@@ -140,7 +150,7 @@ const frameOptions = computed(() => {
   return options.sort((a, b) => a - b);
 });
 
-// ── Active clip ──────────────────────────────────────────────────────────────
+// ── Active scene ─────────────────────────────────────────────────────────────
 const activeIndex = computed(() => {
   const idx = draft.clips.findIndex((clip) => clip.id === draft.activeClipId);
   return idx >= 0 ? idx : 0;
@@ -152,16 +162,15 @@ const activeMeta = computed(() => {
   const idx = activeIndex.value;
   const parts = [formatFrameDuration(clip.frames, props.form.fps)];
   if (idx > 0) {
-    parts.push(`${transitionLabel(clip.transition, motionTail.value)} from clip ${idx}`);
+    parts.push(`${transitionLabel(clip.transition, motionTail.value)} from scene ${idx}`);
   }
   return parts.join(" · ");
 });
 
-function onPromptKeydown(event: KeyboardEvent) {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-    event.preventDefault();
-    submit();
-  }
+/** The scene's own name, trimmed to fit one line of a dialog message. */
+const SCENE_NAME_LIMIT = 42;
+function sceneName(index: number): string {
+  return sceneLabel(draft.clips[index]?.prompt ?? "", index, SCENE_NAME_LIMIT);
 }
 
 function reorderClips(ids: string[]) {
@@ -175,11 +184,10 @@ function resizeClip(id: string, frames: number) {
   if (clip) clip.frames = frames;
 }
 
-// ── Seam editing (rail-anchored popover) ─────────────────────────────────────
+// ── Seam editing (lane-anchored popover) ─────────────────────────────────────
 const openSeamId = ref<string | null>(null);
 const seamClip = computed(() => draft.clips.find((clip) => clip.id === openSeamId.value) ?? null);
 const seamIndex = computed(() => draft.clips.findIndex((clip) => clip.id === openSeamId.value));
-const clipLabel = (idx: number) => (idx === 0 ? "opening" : `clip ${idx + 1}`);
 
 function onSeamClick(id: string) {
   openSeamId.value = openSeamId.value === id ? null : id;
@@ -214,8 +222,8 @@ const stages = computed<SequenceStage[]>(() =>
 const clipPromptOptional = computed(() =>
   promptOptional({
     // The recipe is the authority; the family fields are the older host's
-    // fallback. Keeping the rail on the same input the composer uses is what
-    // stops the two disagreeing about a blank clip prompt.
+    // fallback. Keeping the lane on the same input the composer uses is what
+    // stops the two disagreeing about a blank scene's words.
     recipe: promptRecipeFromForm(props.form),
     family: props.form.family,
     sourceImage: requestOpeningImage.value,
@@ -233,21 +241,62 @@ const validation = computed(() =>
   }),
 );
 const duration = computed(() => sequenceDuration(stages.value, props.form.fps, motionTail.value));
-const fitNote = computed(
-  () =>
-    `✓ fits · ${formatFrameDuration(duration.value.frames, props.form.fps)} @ ${props.form.fps}fps`,
+const sceneCountLabel = computed(() =>
+  draft.clips.length === 1 ? "1 scene" : `${draft.clips.length} scenes`,
 );
+
+/** `0:06` — the transport speaks in clock time, never in frames. */
+function clockLabel(seconds: number): string {
+  const whole = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
 const disabledReason = computed(() => {
   if (props.chainLimits && props.chainLimits.supports_sequence === false) {
-    return (
-      props.chainLimits.sequence_unsupported_reason ?? "This model can't render a clip sequence."
-    );
+    return props.chainLimits.sequence_unsupported_reason ?? "This style can't make a clip.";
   }
-  if (!props.form.model) return "Pick a video model first.";
+  if (!props.form.model) return SEQUENCE_NEEDS_STYLE;
   const openingError = sequenceOpeningImageError(requestOpeningImage.value, draft.mediaRestoring);
   if (openingError) return openingError;
   return validation.value[0] ?? null;
 });
+// The composer holds the one Generate button for both modes, so the timeline's
+// own refusal has to reach it.
+watch(disabledReason, (reason) => emit("update:blockedReason", reason), { immediate: true });
+
+// ── Transport, ruler, playhead ───────────────────────────────────────────────
+const playing = computed(() => props.playingClipId !== null);
+const renderedClipIds = computed(() =>
+  draft.clips
+    .filter((clip) => props.stageMediaByClipId?.[clip.id]?.hasMedia)
+    .map((clip) => clip.id),
+);
+/** Where the needle sits: everything before the playing scene, plus its own
+ *  elapsed time. Nothing playing parks it at the start. */
+const playheadSeconds = computed(() => {
+  const index = draft.clips.findIndex((clip) => clip.id === props.playingClipId);
+  if (index < 0) return 0;
+  return (
+    sequenceDuration(stages.value.slice(0, index), props.form.fps, motionTail.value).seconds +
+    props.elapsedSeconds
+  );
+});
+const playheadPercent = computed(() => {
+  const total = duration.value.seconds;
+  if (total <= 0) return 0;
+  return Math.min(100, Math.max(0, (playheadSeconds.value / total) * 100));
+});
+
+function togglePlayback() {
+  const current = props.playingClipId ?? renderedClipIds.value[0];
+  if (current) emit("play-clip", current);
+}
+
+/** Ruler ticks: the coarsest round interval that still marks the clip out in
+ *  a handful of steps, so the row never crowds at any clip length. The
+ *  closing mark is pinned to the right edge rather than left:100%, where its
+ *  label would paint past the strip and be cut by the bench's overflow. */
+const ticks = computed(() => rulerTicks(duration.value.seconds, clockLabel));
 
 const validating = ref(false);
 const validationPlan = ref<ChainValidationResponse | null>(null);
@@ -315,9 +364,40 @@ async function validatePlan() {
   }
 }
 
-const validationDuration = (plan: ChainValidationResponse) =>
-  `${(plan.estimated_duration_ms / 1_000).toFixed(1)}s`;
-const formatBytes = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+/** The one-line truth under the lane: what the host says when it has been
+ *  asked, and the draft's own arithmetic until then. */
+const readout = computed(() => {
+  const plan = validationPlan.value;
+  if (!plan) {
+    return `${sceneCountLabel.value} · ${duration.value.frames} frames · ${clockLabel(
+      duration.value.seconds,
+    )} at ${props.form.fps}fps`;
+  }
+  const parts = [
+    plan.stage_count === 1 ? "1 scene" : `${plan.stage_count} scenes`,
+    `${plan.estimated_total_frames} frames`,
+    `${(plan.estimated_duration_ms / 1_000).toFixed(1)}s to render`,
+  ];
+  if (plan.vram_estimate) {
+    parts.push(
+      plan.vram_estimate.fits
+        ? `${formatGB(plan.vram_estimate.worst_case_bytes)} of graphics memory`
+        : `${formatGB(plan.vram_estimate.worst_case_bytes)} — more than this machine has`,
+    );
+  }
+  return parts.join(" · ");
+});
+
+function stageLine(stage: ChainValidationResponse["stages"][number], index: number): string {
+  const parts = [
+    `Scene ${index + 1}`,
+    `${stage.frames} → ${stage.output_frames} frames`,
+    transitionLabel(stage.transition, validationPlan.value?.motion_tail_frames ?? 0),
+  ];
+  if (stage.has_source_image) parts.push(index === 0 ? "from your opening photo" : "from a photo");
+  if (stage.has_negative_prompt) parts.push("with words to steer away from");
+  return parts.join(" · ");
+}
 
 // ── Edit sessions ────────────────────────────────────────────────────────────
 const plan = computed(() => {
@@ -338,7 +418,7 @@ const editBanner = computed(() => {
   const cached = current.perClip.filter((p) => p === "cached").length;
   const rerender = current.perClip.length - cached;
   const host = hosts.all.find((h) => h.id === editing.hostId);
-  return `Editing sequence ${editing.jobId.slice(0, 8)} on ${host?.label ?? editing.hostId} · ${cached} cached · ${rerender} will re-render`;
+  return `Editing clip ${editing.jobId.slice(0, 8)} on ${host?.label ?? editing.hostId} · ${cached} cached · ${rerender} will re-render`;
 });
 
 function discardEdit() {
@@ -350,24 +430,56 @@ function discardEdit() {
   draft.stopEditing();
 }
 
-function submit() {
-  if (disabledReason.value || props.submitting) return;
-  emit("submit");
+// ── Removing and clearing ────────────────────────────────────────────────────
+const removeCandidateId = ref<string | null>(null);
+const clearConfirmOpen = ref(false);
+
+function askRemoveScene(id: string) {
+  if (draft.clips.length <= 2) return;
+  removeCandidateId.value = id;
 }
 
-// ── Clear sequence ───────────────────────────────────────────────────────────
-const clearConfirmOpen = ref(false);
-const clearMessage = computed(() => {
-  const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
-  return `Removes all ${draft.clips.length} clips and their prompts.${edit} Model and shared settings stay.`;
-});
+/** Delete on a scene the floor keeps. The lane has already swallowed the key,
+ *  so the refusal has to say itself — silence read as a dead keyboard. */
+function sceneRemoveBlocked() {
+  toasts.push("A clip keeps at least two scenes — clear the clip to start over.");
+}
+
+function removeScene() {
+  if (removeCandidateId.value) draft.removeClip(removeCandidateId.value);
+  removeCandidateId.value = null;
+}
 
 function clearSequence() {
   clearConfirmOpen.value = false;
   openSeamId.value = null;
-  draft.clearSequence(newClipFrames.value);
-  toasts.push("Sequence cleared");
+  draft.clearSequence(newClipFrames.value, props.chainLimits?.supports_audio);
+  toasts.push("Clip cleared");
 }
+
+/** The timeline decides what it needs confirmed; the workbench renders it. */
+const confirmation = computed<SequenceConfirmation | null>(() => {
+  const index = draft.clips.findIndex((clip) => clip.id === removeCandidateId.value);
+  if (index >= 0) {
+    return {
+      title: "Remove this scene?",
+      message: `Removes “${sceneName(index)}” and its words. The scenes around it join up.`,
+      confirmLabel: "Remove the scene",
+      confirm: removeScene,
+      cancel: () => (removeCandidateId.value = null),
+    };
+  }
+  if (!clearConfirmOpen.value) return null;
+  const edit = draft.editing ? " Ends the edit session without changing the finished job." : "";
+  return {
+    title: "Clear the clip?",
+    message: `Removes all ${draft.clips.length} scenes and their words.${edit} The style and shared settings stay.`,
+    confirmLabel: "Clear the clip",
+    confirm: clearSequence,
+    cancel: () => (clearConfirmOpen.value = false),
+  };
+});
+watch(confirmation, (pending) => emit("update:confirmation", pending), { immediate: true });
 
 // ── File tools ───────────────────────────────────────────────────────────────
 const fileToolsOpen = ref(false);
@@ -452,10 +564,10 @@ async function copyToml() {
 }
 
 // ── Context menus ────────────────────────────────────────────────────────────
-// One right-click handler for the whole bench, discriminated by target:
+// One right-click handler for the whole timeline, discriminated by target:
 // text fields keep their own menu, a seam pill keeps its transition editor
-// (SeamPill turns `contextmenu` into a `click`), a clip pill gets the clip
-// menu, and everything else gets the bench menu. Entries come from the
+// (SeamPill turns `contextmenu` into a `click`), a scene block gets the scene
+// menu, and everything else gets the timeline menu. Entries come from the
 // shared builder so web renders exactly the same actions.
 const CONTEXT_MENU_TEXT_TARGETS = "textarea, input, select, [contenteditable], [data-selectable]";
 
@@ -474,7 +586,7 @@ function clipMenuEntries(clipId: string, index: number): MenuEntry[] {
       insertBefore: () => void draft.insertClip(index, newClipFrames.value),
       insertAfter: () => void draft.insertClip(index + 1, newClipFrames.value),
       moveTo: (to) => draft.moveClip(clipId, to),
-      remove: () => draft.removeClip(clipId),
+      remove: () => askRemoveScene(clipId),
     },
   );
 }
@@ -520,58 +632,137 @@ function onBenchContextMenu(event: MouseEvent) {
 </script>
 
 <template>
-  <div data-test="sequence-composer" class="ms-seqbench" @contextmenu="onBenchContextMenu">
+  <div data-test="sequence-composer" class="ms-timeline" @contextmenu="onBenchContextMenu">
     <!-- Edit-session banner -->
-    <div v-if="editBanner" data-test="edit-banner" class="ms-seqbench__banner">
-      <span class="ms-seqbench__banner-text">{{ editBanner }}</span>
+    <div v-if="editBanner" data-test="edit-banner" class="ms-timeline__banner">
+      <span class="ms-timeline__banner-text">{{ editBanner }}</span>
       <button
         type="button"
         data-test="edit-duplicate"
-        class="ms-seqbench__banner-btn"
+        class="ms-toolbar-button"
         @click="emit('duplicate')"
       >
         Duplicate as new
       </button>
-      <button
-        type="button"
-        data-test="edit-discard"
-        class="ms-seqbench__banner-btn"
-        @click="discardEdit"
-      >
+      <button type="button" data-test="edit-discard" class="ms-toolbar-button" @click="discardEdit">
         Discard edit
       </button>
     </div>
 
-    <!-- Clip rail; the seam popover anchors to the rail itself -->
+    <!-- Transport: play the whole clip, where it has got to, how it is built -->
+    <div class="ms-timeline__transport">
+      <button
+        type="button"
+        data-test="timeline-play"
+        class="ms-timeline__play"
+        :disabled="renderedClipIds.length === 0"
+        :title="
+          renderedClipIds.length === 0
+            ? 'Nothing to play yet — generate the clip first'
+            : playing
+              ? 'Stop and go back to the live render'
+              : 'Play the whole clip'
+        "
+        :aria-label="playing ? 'Stop playing' : 'Play the whole clip'"
+        @click="togglePlayback"
+      >
+        <Icon :name="playing ? 'pause' : 'play'" :size="12" :stroke-width="2.5" />
+      </button>
+      <span class="font-mono text-xs text-fg" data-test="sequence-length">
+        {{ clockLabel(playheadSeconds) }}
+        <span class="text-fg-dim">/ {{ clockLabel(duration.seconds) }}</span>
+      </span>
+      <span class="ms-timeline__rule" aria-hidden="true" />
+      <span class="text-xs text-fg-2">{{ sceneCountLabel }}, played end to end</span>
+      <span class="ms-timeline__spacer" />
+      <button
+        type="button"
+        data-test="timeline-help"
+        class="cursor-pointer text-micro font-medium text-accent"
+        :aria-expanded="helpOpen"
+        @click="helpOpen = !helpOpen"
+      >
+        How does this work?
+      </button>
+      <button
+        type="button"
+        data-test="add-scene"
+        class="ms-toolbar-button h-6 text-micro"
+        :disabled="!canAdd"
+        @click="draft.addClip(newClipFrames)"
+      >
+        <Icon name="plus" :size="12" :stroke-width="2" />
+        Add a scene
+      </button>
+    </div>
+    <div v-if="helpOpen" class="ms-timeline__help" data-test="timeline-help-text">
+      <span class="font-mono text-xs text-accent">•</span>
+      <span class="text-micro leading-body text-fg-2" style="text-wrap: pretty">
+        Each block is one scene, written in your own words, and it is as wide as the time it plays.
+        Drag the selected block's right edge to make that scene longer, drag the block itself to
+        reorder, and click the marker between two blocks to say how they should meet. The whole
+        thing is made as one continuous clip.
+      </span>
+    </div>
+
+    <!-- Ruler, left-padded to clear the lane's own label -->
+    <div class="ms-timeline__ruler" aria-hidden="true">
+      <div class="ms-timeline__ticks">
+        <span
+          v-for="tick in ticks"
+          :key="tick.at"
+          class="ms-timeline__tick"
+          :class="{ 'ms-timeline__tick--end': tick.atEnd }"
+          :style="tick.style"
+        >
+          <span class="ms-timeline__tick-label">{{ tick.label }}</span>
+          <span class="ms-timeline__tick-mark" />
+        </span>
+      </div>
+    </div>
+
+    <!-- Scenes lane; the seam popover anchors to the lane row itself -->
     <Popover
       :open="openSeamId !== null"
       placement="bottom-start"
       label="Transition editor"
-      class="ms-seqbench__railwrap"
+      class="ms-timeline__lanewrap"
       @update:open="(open) => !open && (openSeamId = null)"
-      @contextmenu="onBenchContextMenu"
     >
       <template #trigger>
-        <ClipRail
-          class="ms-seqbench__rail"
-          :clips="draft.clips"
-          :active-id="draft.activeClipId"
-          :motion-tail="motionTail"
-          :max-stages="maxStages"
-          :open-seam-id="openSeamId"
-          :plans="plan?.perClip ?? null"
-          :fps="form.fps"
-          :media-by-clip-id="stageMediaByClipId"
-          :playing-id="playingClipId"
-          :frame-options="frameOptions"
-          @select="draft.activeClipId = $event"
-          @add="draft.addClip(newClipFrames)"
-          @remove="draft.removeClip($event)"
-          @reorder="reorderClips"
-          @resize="resizeClip"
-          @seam-click="onSeamClick"
-          @play="onPlayClip"
-        />
+        <div class="ms-timeline__lane-label">
+          <span class="text-xs font-semibold text-fg">Scenes</span>
+          <span class="text-micro text-fg-dim">drag to trim</span>
+        </div>
+        <div class="ms-timeline__lane-area">
+          <SceneLane
+            :clips="draft.clips"
+            :active-id="draft.activeClipId"
+            :motion-tail="motionTail"
+            :fps="form.fps"
+            :open-seam-id="openSeamId"
+            :plans="plan?.perClip ?? null"
+            :media-by-clip-id="stageMediaByClipId"
+            :playing-id="playingClipId"
+            :frame-options="frameOptions"
+            :disabled="submitting"
+            @select="draft.activeClipId = $event"
+            @remove="askRemoveScene"
+            @remove-blocked="sceneRemoveBlocked"
+            @reorder="reorderClips"
+            @resize="resizeClip"
+            @seam-click="onSeamClick"
+          />
+          <span
+            v-if="renderedClipIds.length > 0"
+            class="ms-timeline__playhead"
+            data-test="timeline-playhead"
+            aria-hidden="true"
+            :style="{ left: `${playheadPercent}%` }"
+          >
+            <span class="ms-timeline__playhead-handle" />
+          </span>
+        </div>
       </template>
       <SeamEditor
         v-if="seamClip"
@@ -580,8 +771,8 @@ function onBenchContextMenu(event: MouseEvent) {
         :motion-tail="motionTail"
         :fps="form.fps"
         :fade-frames-max="chainLimits?.fade_frames_max ?? 32"
-        :from-label="clipLabel(seamIndex - 1)"
-        :to-label="clipLabel(seamIndex)"
+        :from-label="sceneName(seamIndex - 1)"
+        :to-label="sceneName(seamIndex)"
         show-apply-all-hint
         @update:transition="setSeamTransition"
         @update:fade-frames="setSeamFade"
@@ -589,84 +780,38 @@ function onBenchContextMenu(event: MouseEvent) {
       />
     </Popover>
 
-    <!-- Active clip editor -->
-    <div v-if="activeClip" class="ms-seqbench__clip">
-      <div class="ms-seqbench__cliphead">
-        <span data-test="active-clip-caption" class="ms-seqbench__caption">
-          CLIP {{ activeIndex + 1 }} OF {{ draft.clips.length }}
-        </span>
-        <span data-test="active-clip-meta" class="ms-seqbench__meta">{{ activeMeta }}</span>
-        <div class="ms-seqbench__spacer" />
-        <label class="ms-seqbench__frames">
-          <span class="ms-seqbench__frames-label">Frames</span>
-          <select
-            v-model.number="activeClip.frames"
-            data-test="clip-frames"
-            class="ms-seqbench__select"
-            aria-label="Clip frames"
-          >
-            <option v-for="frames in frameOptions" :key="frames" :value="frames">
-              {{ formatFrameDuration(frames, form.fps) }}
-            </option>
-          </select>
-        </label>
-      </div>
-      <textarea
-        v-model="activeClip.prompt"
-        data-test="clip-prompt"
-        data-selectable
-        rows="3"
-        class="ms-seqbench__prompt ms-seqbench__prompt--main"
-        :placeholder="
-          activeIndex === 0 ? 'Describe the opening clip…' : 'Describe what happens next…'
-        "
-        aria-label="Clip prompt"
-        @keydown="onPromptKeydown"
-      />
+    <!-- The selected scene's own controls, and what the clip adds up to -->
+    <div v-if="activeClip" class="ms-timeline__scene">
+      <span data-test="active-clip-caption" class="ms-group-label uppercase">
+        Scene {{ activeIndex + 1 }} of {{ draft.clips.length }}
+      </span>
+      <span data-test="active-clip-meta" class="font-mono text-micro text-fg-dim">{{
+        activeMeta
+      }}</span>
+      <span class="ms-timeline__spacer" />
+      <label class="ms-timeline__frames">
+        <span class="text-xs text-fg-dim">Length</span>
+        <select
+          v-model.number="activeClip.frames"
+          data-test="clip-frames"
+          class="ms-timeline__select"
+          aria-label="How long this scene runs"
+        >
+          <option v-for="frames in frameOptions" :key="frames" :value="frames">
+            {{ formatFrameDuration(frames, form.fps) }}
+          </option>
+        </select>
+      </label>
     </div>
 
-    <!-- Footer: file tools · audio · validation/fit · primary action -->
-    <section
-      v-if="validationPlan"
-      class="ms-seqbench__plan"
-      data-test="sequence-validation-plan"
-      aria-live="polite"
-    >
-      <strong>
-        Validated · {{ validationPlan.stage_count }} clips ·
-        {{ validationPlan.estimated_total_frames }}f · {{ validationDuration(validationPlan) }}
-      </strong>
-      <span v-for="(stage, index) in validationPlan.stages" :key="index">
-        Clip {{ index + 1 }} · {{ stage.frames }}f in / {{ stage.output_frames }}f out ·
-        {{ transitionLabel(stage.transition, validationPlan.motion_tail_frames) }}
-        <template v-if="stage.has_source_image">
-          · {{ index === 0 ? "Opening image" : "Source image" }}
-        </template>
-        <template v-if="stage.has_negative_prompt"> · Negative prompt</template>
-      </span>
-      <span v-if="validationPlan.vram_estimate">
-        VRAM {{ formatBytes(validationPlan.vram_estimate.worst_case_bytes) }} ·
-        {{ validationPlan.vram_estimate.fits ? "fits" : "does not fit" }}
-      </span>
-      <span v-for="warning in validationPlan.warnings" :key="warning" class="ms-seqbench__warning">
-        {{ warning }}
-      </span>
-    </section>
-    <p
-      v-if="validationError"
-      class="ms-seqbench__validation-error"
-      data-test="sequence-validation-error"
-      role="alert"
-    >
-      {{ validationError }}
-    </p>
-
-    <div class="ms-seqbench__footer" data-test="sequence-composer-footer">
+    <div class="ms-timeline__foot">
+      <p class="ms-timeline__readout" data-test="sequence-fit" aria-live="polite">{{ readout }}</p>
+      <span class="ms-timeline__spacer" />
       <input
         ref="tomlInput"
         type="file"
         accept=".toml,text/plain"
-        class="hidden"
+        class="ms-timeline__file"
         @change="onTomlFile"
       />
       <Popover
@@ -679,7 +824,7 @@ function onBenchContextMenu(event: MouseEvent) {
           <button
             type="button"
             data-test="file-tools-toggle"
-            class="ms-seqbench__tool"
+            class="ms-toolbar-button"
             :aria-expanded="fileToolsOpen"
             aria-haspopup="menu"
             @click="fileToolsOpen = !fileToolsOpen"
@@ -687,11 +832,11 @@ function onBenchContextMenu(event: MouseEvent) {
             File tools
           </button>
         </template>
-        <div role="menu" class="ms-seqbench__menu" data-test="file-tools-menu">
+        <div role="menu" class="ms-timeline__menu" data-test="file-tools-menu">
           <button
             type="button"
             role="menuitem"
-            class="ms-seqbench__menuitem"
+            class="ms-timeline__menuitem"
             @click="fileTool(() => tomlInput?.click())"
           >
             Import .toml…
@@ -699,7 +844,7 @@ function onBenchContextMenu(event: MouseEvent) {
           <button
             type="button"
             role="menuitem"
-            class="ms-seqbench__menuitem"
+            class="ms-timeline__menuitem"
             @click="fileTool(exportToml)"
           >
             Export .toml
@@ -707,7 +852,7 @@ function onBenchContextMenu(event: MouseEvent) {
           <button
             type="button"
             role="menuitem"
-            class="ms-seqbench__menuitem"
+            class="ms-timeline__menuitem"
             @click="fileTool(() => void copyToml())"
           >
             Copy TOML
@@ -718,315 +863,323 @@ function onBenchContextMenu(event: MouseEvent) {
       <button
         type="button"
         data-test="sequence-validate"
-        class="ms-seqbench__tool"
+        class="ms-toolbar-button"
         :disabled="disabledReason !== null || submitting || validating || !target"
         @click="validatePlan"
       >
-        {{ validating ? "Validating…" : "Validate plan" }}
+        {{ validating ? "Checking…" : "Check the plan" }}
       </button>
 
       <button
         type="button"
         data-test="sequence-clear"
-        class="ms-seqbench__tool ms-seqbench__tool--danger"
+        class="ms-toolbar-button ms-toolbar-button--danger-hover"
         @click="clearConfirmOpen = true"
       >
-        Clear sequence
-      </button>
-
-      <ActionBlocker
-        v-if="disabledReason"
-        data-test="sequence-validation"
-        class="ms-seqbench__blocker"
-        compact
-        :reason="disabledReason"
-        title="Before you generate"
-      />
-      <span v-else data-test="sequence-fit" class="ms-seqbench__note">{{ fitNote }}</span>
-
-      <div class="ms-seqbench__spacer" />
-      <button
-        type="button"
-        data-test="generate-sequence"
-        class="ms-seqbench__generate"
-        :disabled="disabledReason !== null && !submitting"
-        @click="submitOrCancel"
-      >
-        {{
-          submitting
-            ? "Cancel · Preparing sequence…"
-            : draft.editing
-              ? "Update sequence"
-              : "Generate sequence"
-        }}
+        Clear the clip
       </button>
     </div>
 
-    <ConfirmDialog
-      :open="clearConfirmOpen"
-      title="Clear sequence?"
-      :message="clearMessage"
-      confirm-label="Clear sequence"
-      danger
-      @confirm="clearSequence"
-      @cancel="clearConfirmOpen = false"
-    />
+    <!-- The host's own plan, scene by scene, or its refusal -->
+    <section
+      v-if="validationPlan"
+      class="ms-timeline__plan"
+      data-test="sequence-validation-plan"
+      aria-live="polite"
+    >
+      <span v-for="(stage, index) in validationPlan.stages" :key="index">
+        {{ stageLine(stage, index) }}
+      </span>
+      <span v-for="warning in validationPlan.warnings" :key="warning" class="ms-timeline__warning">
+        {{ warning }}
+      </span>
+    </section>
+    <p
+      v-if="validationError"
+      class="ms-timeline__plan ms-timeline__plan--error"
+      data-test="sequence-validation-error"
+      role="alert"
+    >
+      {{ validationError }}
+    </p>
   </div>
 </template>
 
 <style scoped>
-.ms-seqbench {
+/* The clip timeline (README §04) between the canvas and the composer, on the
+   deep surface: transport, ruler, the scenes lane, and what the clip adds up
+   to. The composer below owns the words and the Generate button. */
+.ms-timeline {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   /*
    * The parent panel mounts this `flex: 1 1 0%`. Without an explicit
-   * min-height the bench is floored at its own min-content — which counts
-   * the rail's 204px preferred basis, not its 104px floor — so the panel
-   * grew a scrollbar before the filmstrip's shrink weight ever engaged.
-   * Zero lets the bench take exactly its protected parent shell's space and
-   * flex the rail down for real. GenerateView gives that shell a 300px floor,
-   * so Activity yields before the internal floors below or the Generate
-   * button can clip.
+   * min-height the timeline is floored at its own min-content, so the panel
+   * grew a scrollbar before the lane's shrink weight ever engaged. Zero lets
+   * it take exactly its protected parent shell's space and flex the lane down
+   * for real.
+   *
+   * Width floors at auto too: a scene title is nowrap with an ellipsis, and a
+   * flex item's min-content contribution ignores its overflow, so the root
+   * would be as wide as every prompt laid end to end and the bench would cut
+   * the transport's and the footer's right edge off.
    */
   min-height: 0;
-  border-top: 1px solid var(--edge);
-  background: var(--bench);
-  padding: 12px 22px 14px;
+  min-width: 0;
+  border-top: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg-deep);
+  padding: 0 12px 11px;
+  /* Room above the lane for the seam chips and the playhead's handle. */
+  --scene-seam-space: 24px;
 }
 
-.ms-seqbench__banner {
+.ms-timeline__banner {
   display: flex;
   align-items: center;
   flex-shrink: 0;
   gap: 10px;
-  border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--ce));
-  background: color-mix(in srgb, var(--safelight) 7%, transparent);
-  border-radius: 9px;
-  padding: 8px 12px;
+  margin-top: 8px;
+  border: var(--mold-bw) solid var(--mold-blue);
+  background: var(--mold-accent-tint);
+  border-radius: var(--mold-radius-2);
+  padding: 6px 10px;
 }
-.ms-seqbench__plan,
-.ms-seqbench__validation-error {
-  display: grid;
-  flex-shrink: 0;
-  gap: 3px;
-  max-height: 112px;
-  overflow: auto;
-  border: 1px solid color-mix(in srgb, var(--halide) 35%, var(--ce));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--halide) 8%, transparent);
-  padding: 7px 10px;
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-2);
-}
-.ms-seqbench__validation-error,
-.ms-seqbench__warning {
-  color: var(--warning);
-}
-.ms-seqbench__banner-text {
+.ms-timeline__banner-text {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  color: var(--ink-2);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
 }
-.ms-seqbench__banner-btn {
-  border: 1px solid var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  border-radius: 7px;
-  padding: 4px 10px;
-  font-size: 11px;
+
+.ms-timeline__transport {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  height: 36px;
+  margin: 0 -12px;
+  padding: 0 12px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+}
+.ms-timeline__play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   cursor: pointer;
 }
-.ms-seqbench__banner-btn:hover {
-  color: var(--rebate);
+.ms-timeline__play:disabled {
+  background: var(--mold-surface-2);
+  color: var(--mold-text-faint);
+  cursor: default;
+}
+.ms-timeline__rule {
+  width: var(--mold-bw);
+  height: 16px;
+  background: var(--mold-border);
+}
+.ms-timeline__spacer {
+  flex: 1;
+  min-width: 12px;
+}
+.ms-timeline__help {
+  display: flex;
+  flex-shrink: 0;
+  gap: 10px;
+  margin: -8px -12px 0;
+  padding: 10px 12px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-surface);
+}
+
+/* The ruler's own left padding lines its zero up with the lane's first block,
+   past the lane label — 74px of label plus the row's 8px gap. */
+.ms-timeline__ruler {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-end;
+  height: 18px;
+  margin: -8px -12px 0;
+  padding: 0 12px 0 94px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+}
+.ms-timeline__ticks {
+  position: relative;
+  flex: 1;
+  height: 100%;
+}
+.ms-timeline__tick {
+  position: absolute;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+/* The closing mark grows INWARD from the right edge: pinned at left:100% its
+   label starts at the edge and is cut off by the bench's overflow. */
+.ms-timeline__tick--end {
+  align-items: flex-end;
+}
+.ms-timeline__tick-label {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  line-height: 1;
+  color: var(--mold-text-dim);
+}
+.ms-timeline__tick-mark {
+  display: block;
+  width: var(--mold-bw);
+  height: 4px;
+  background: var(--mold-surface-3);
 }
 
 /*
- * The filmstrip absorbs bench resizes first: an outsized shrink weight pulls
- * the rail from its preferred 204px basis down to a hard floor before any
- * other row gives, so a shorter bench compresses thumbnails (fluid cqh
- * geometry inside ClipRail) instead of growing a scrollbar. The preferred
- * height MUST be the flex basis, not a `height` — a specified height becomes
- * the wrapper's min-content contribution, which propagates up as the
+ * The lane absorbs a resize first: an outsized shrink weight pulls it from its
+ * preferred basis down to a hard floor before any other row gives. The
+ * preferred height MUST be the flex basis, not a `height` — a specified height
+ * becomes the wrapper's min-content contribution, which propagates up as the
  * column's minimum and re-creates the scrollbar this exists to prevent.
  */
-.ms-seqbench__railwrap {
+.ms-timeline__lanewrap {
   display: flex;
   width: 100%;
-  flex: 0 999 204px;
-  min-height: 104px;
+  flex: 0 999 96px;
+  min-height: 62px;
+  /* The seam chips ride above the lane, so the row reserves their height. */
+  margin-top: var(--scene-seam-space);
 }
-.ms-seqbench__railwrap :deep(.ms-popover__trigger) {
+.ms-timeline__lanewrap :deep(.ms-popover__trigger) {
   display: flex;
+  align-items: stretch;
+  gap: 8px;
   width: 100%;
   min-width: 0;
   height: 100%;
 }
-/* Descendant selector outranks ClipRail's own `height: 188px` regardless of
-   stylesheet injection order. */
-.ms-seqbench .ms-seqbench__rail {
+.ms-timeline__lane-label {
+  display: flex;
+  width: 74px;
+  flex-shrink: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+.ms-timeline__lane-area {
+  position: relative;
+  display: flex;
   flex: 1;
   min-width: 0;
-  height: 100%;
-  padding: 2px 0;
 }
 
-.ms-seqbench__clip {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  /* Head (28) + gaps (12) + tools (28) + the prompt's 48px floor: below
-     this the editor's own rows would start clipping. */
-  min-height: 116px;
-  gap: 6px;
+.ms-timeline__playhead {
+  position: absolute;
+  top: calc(-1 * var(--scene-seam-space));
+  bottom: 0;
+  width: 2px;
+  background: var(--mold-blue);
+  pointer-events: none;
 }
-.ms-seqbench__cliphead {
+.ms-timeline__playhead-handle {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  display: block;
+  width: 10px;
+  height: 7px;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-blue);
+}
+
+.ms-timeline__scene {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 10px;
 }
-.ms-seqbench__caption {
-  font-family: var(--f-mono);
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-.ms-seqbench__meta {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-3);
-}
-.ms-seqbench__spacer {
-  flex: 1;
-}
-.ms-seqbench__frames {
+.ms-timeline__frames {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
-.ms-seqbench__frames-label {
-  font-size: 11px;
-  color: var(--ink-3);
-}
-.ms-seqbench__select {
-  height: 28px;
-  border: 1px solid var(--ce);
-  border-radius: 6px;
-  background: var(--bath);
-  color: var(--rebate);
-  font-family: var(--f-mono);
-  font-size: 12px;
+.ms-timeline__select {
+  height: var(--mold-ctl-md);
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
   padding: 0 6px;
 }
-.ms-seqbench__prompt {
-  width: 100%;
-  resize: none;
-  border: 1px solid var(--ce);
-  border-radius: 9px;
-  background: var(--bath);
-  color: var(--rebate);
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 10px 12px;
-}
-.ms-seqbench__prompt:focus {
-  outline: none;
-  border-color: var(--safelight);
-}
-.ms-seqbench__prompt--main {
-  flex: 1;
-  min-height: 48px;
-}
-.ms-seqbench__prompt--negative {
-  font-size: 12px;
-}
-.ms-seqbench__cliptools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ms-seqbench__tool {
-  border: 1px solid var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  border-radius: 7px;
-  padding: 5px 10px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.ms-seqbench__tool:hover {
-  color: var(--rebate);
-}
-.ms-seqbench__tool--danger:hover {
-  color: var(--stop);
-  border-color: var(--stop);
-}
 
-.ms-seqbench__footer {
+.ms-timeline__foot {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 12px;
+  gap: 8px;
   margin-top: auto;
-  padding-top: 2px;
 }
-.ms-seqbench__menu {
+.ms-timeline__readout {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
+}
+.ms-timeline__file {
+  display: none;
+}
+.ms-timeline__menu {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 150px;
 }
-.ms-seqbench__menuitem {
+.ms-timeline__menuitem {
   border: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   text-align: left;
-  padding: 7px 8px;
-  border-radius: 6px;
-  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: var(--mold-radius-1);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
-.ms-seqbench__menuitem:hover {
-  background: var(--surface);
-  color: var(--rebate);
+.ms-timeline__menuitem:hover {
+  background: var(--mold-surface-2);
+  color: var(--mold-text);
 }
-.ms-seqbench__audio {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--ink-2);
+
+.ms-timeline__plan {
+  display: grid;
+  flex-shrink: 0;
+  gap: 3px;
+  max-height: 92px;
+  overflow: auto;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+  padding: 7px 10px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
 }
-.ms-seqbench__note {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--halide);
+.ms-timeline__plan--error,
+.ms-timeline__warning {
+  color: var(--mold-warning);
 }
-.ms-seqbench__blocker {
-  max-width: min(380px, 38vw);
-}
-.ms-seqbench__generate {
-  height: 32px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--safelight);
-  color: var(--on-accent, #fff);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 0 16px;
-  cursor: pointer;
-}
-.ms-seqbench__generate:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-.ms-seqbench__generate:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.hidden {
-  display: none;
+.ms-timeline__plan--error {
+  border-color: var(--mold-warning);
 }
 </style>

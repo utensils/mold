@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Badge pill — small mono status/count pill (spec §03). Tones follow the fixed
+ * Badge pill — small mono status/count pill. Tones follow the fixed
  * token jobs: accent (selection), info (halide), success, warning, danger
  * (stop), neutral. Solid tints the tone at 18% behind tone ink; outline keeps
  * a transparent bg with a 1px tone border. Non-interactive — content only.
@@ -29,16 +29,16 @@ withDefaults(
 
 <style scoped>
 .ms-badge {
-  --ms-badge-tone: var(--safelight);
+  --ms-badge-tone: var(--mold-blue);
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.5;
   border: 1px solid transparent;
-  border-radius: var(--radius-pill);
+  border-radius: var(--mold-radius-2);
   padding: 1px 8px;
   background: color-mix(in srgb, var(--ms-badge-tone) 18%, transparent);
   color: var(--ms-badge-tone);
@@ -47,28 +47,28 @@ withDefaults(
 
 /* Accent solid derives from the selection set — never a new mix. */
 .ms-badge[data-tone="accent"] {
-  background: var(--sel-bg);
-  color: var(--sel-ink);
+  background: var(--mold-accent-tint);
+  color: var(--mold-blue);
 }
 
 .ms-badge[data-tone="info"] {
-  --ms-badge-tone: var(--halide);
+  --ms-badge-tone: var(--mold-sapphire);
 }
 
 .ms-badge[data-tone="success"] {
-  --ms-badge-tone: var(--success);
+  --ms-badge-tone: var(--mold-success);
 }
 
 .ms-badge[data-tone="warning"] {
-  --ms-badge-tone: var(--warning);
+  --ms-badge-tone: var(--mold-warning);
 }
 
 .ms-badge[data-tone="danger"] {
-  --ms-badge-tone: var(--stop);
+  --ms-badge-tone: var(--mold-error);
 }
 
 .ms-badge[data-tone="neutral"] {
-  --ms-badge-tone: var(--ink-2);
+  --ms-badge-tone: var(--mold-text-2);
 }
 
 /* Outline wins over the accent solid overrides above (source order). */

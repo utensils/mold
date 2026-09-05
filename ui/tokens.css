@@ -5,7 +5,20 @@
  * Six themes, selected by ONE root attribute: `data-theme="<id>"`, where the
  * id is a ThemeId from ui/theme.ts (mocha · safelight · blueprint · graphite ·
  * porcelain · nebula). "Match system" is resolved in JS (ui/theme.ts pairs each
- * theme with a light/dark partner), so this sheet never sees more than one id.
+ * theme with a light/dark partner), so the ROOT never carries more than one id.
+ *
+ * Each map is also selectable on a nested element, so a subtree can paint in a
+ * theme the app is not wearing. That exists for exactly one job: the Look
+ * picker's swatch band, which shows a theme's own surfaces without any surface
+ * repeating a hex in TypeScript. Nothing else may stamp `data-theme` inside
+ * the app — a themed island is a bug everywhere else.
+ *
+ * A consumer of a NESTED map must read `--mold-*` DIRECTLY, never a Tailwind
+ * alias such as `bg-bg` or `text-fg`. Those resolve `--color-*`, which is
+ * defined in each shell's `@theme` block at the ROOT: a custom property's
+ * `var()` is substituted where the property is DEFINED, and the substituted
+ * value is what inherits, so an alias reaches the subtree already frozen to
+ * the theme the app is wearing and the nested map never paints.
  *
  * A theme is a COMPLETE token map: surfaces, four text ranks, borders, the
  * single accent (`--mold-blue` — read it as "accent": amber in Safelight,
@@ -105,7 +118,8 @@
   color-scheme: dark;
 }
 
-:root[data-theme="mocha"] {
+:root[data-theme="mocha"],
+[data-theme="mocha"] {
   --mold-bg: #1e1e2e;
   --mold-bg-deep: #181825;
   --mold-bg-crust: #11111b;
@@ -149,7 +163,8 @@
 }
 
 /* ── Safelight · Dark · the darkroom family the app shipped with ───── */
-:root[data-theme="safelight"] {
+:root[data-theme="safelight"],
+[data-theme="safelight"] {
   --mold-bg: #241c15;
   --mold-bg-deep: #171210;
   --mold-bg-crust: #0a0805;
@@ -191,7 +206,8 @@
 }
 
 /* ── Blueprint · Light · drafting table ────────────────────────────── */
-:root[data-theme="blueprint"] {
+:root[data-theme="blueprint"],
+[data-theme="blueprint"] {
   --mold-bg: #f4f7fb;
   --mold-bg-deep: #e9eff7;
   --mold-bg-crust: #dde6f2;
@@ -233,7 +249,8 @@
 }
 
 /* ── Graphite · Dark · neutral, warm signal ────────────────────────── */
-:root[data-theme="graphite"] {
+:root[data-theme="graphite"],
+[data-theme="graphite"] {
   --mold-bg: #1b1c1e;
   --mold-bg-deep: #141517;
   --mold-bg-crust: #0e0f10;
@@ -275,7 +292,8 @@
 }
 
 /* ── Porcelain · Light · high-key, compact ─────────────────────────── */
-:root[data-theme="porcelain"] {
+:root[data-theme="porcelain"],
+[data-theme="porcelain"] {
   --mold-bg: #fbfbfd;
   --mold-bg-deep: #f3f3f6;
   --mold-bg-crust: #e9e9ee;
@@ -317,7 +335,8 @@
 }
 
 /* ── Nebula · Dark · oxblood & crimson ─────────────────────────────── */
-:root[data-theme="nebula"] {
+:root[data-theme="nebula"],
+[data-theme="nebula"] {
   --mold-bg: #1b0c12;
   --mold-bg-deep: #11090d;
   --mold-bg-crust: #090407;

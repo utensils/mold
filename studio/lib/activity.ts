@@ -3,7 +3,7 @@
  * single-generation ("print") jobs and durable sequence (chain) jobs in the
  * same jobs surface — desktop's ActivityStrip, web's Create strip, and the
  * iPhone queue list all consume this merge instead of keeping a separate
- * chain-jobs list (mockup 1c: "the chain Jobs list merges with the
+ * chain-jobs list ("the chain Jobs list merges with the
  * activity strip").
  */
 

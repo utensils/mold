@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
 /*
- * Durable record of toast-level messages (spec §08 G11 adjunct). Toasts stay
+ * Durable record of toast-level messages. Toasts stay
  * transient; this store is the history behind the notifications bell so a
  * long server error the user never caught in time is still readable in full.
  * Session-scoped by design — it answers "what just happened", not an audit

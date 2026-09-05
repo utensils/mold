@@ -9,6 +9,15 @@ export function isCatalogModelId(name: string): boolean {
   return name.startsWith("cv:") || name.startsWith("hf:");
 }
 
+/**
+ * True when the id says nothing a person could recognise — a Civitai
+ * install is a bare number. An `hf:owner/repo` id names the repository and a
+ * manifest id names the checkpoint, so both stay beside the title in mono.
+ */
+export function isOpaqueModelId(name: string): boolean {
+  return name.startsWith("cv:");
+}
+
 /** Built-in H3 manifests predate the additive `display_name` wire field.
  * Keep their stable request ids while giving every Studio surface the same
  * task/layout label, including acquisition-only rows. */

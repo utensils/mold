@@ -442,7 +442,7 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
 
-    expect(view.get("[data-test='host-detail-devices']").text()).toContain("Host utility");
+    expect(view.get("[data-test='host-detail-devices']").text()).toContain("Machine utility");
     expect(view.findAll('[data-test="device-card"]')).toHaveLength(0);
   });
 

@@ -1,0 +1,226 @@
+/* ============================================================
+   Mold Design System — Colors & Type Tokens
+   ------------------------------------------------------------
+   Mold is a Rust-native diffusion image generation tool. Its
+   TUI uses a Catppuccin Mocha-inspired palette and monospace
+   type. The brand logo introduces a cyan→blue→magenta gradient
+   that we sparingly echo as an "ink" accent.
+   ============================================================ */
+
+/* @import MUST come before any other rule. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap");
+
+@font-face {
+  font-family: "JetBrainsMono";
+  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrainsMono";
+  src: url("fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* ── Core surfaces (Catppuccin Mocha) ─────────────────── */
+  --mold-bg:           #1e1e2e;   /* base                    */
+  --mold-bg-deep:      #181825;   /* tab bar / status strip  */
+  --mold-bg-crust:     #11111b;   /* deepest shadow          */
+  --mold-surface:      #313244;   /* elevated panel          */
+  --mold-surface-2:    #45475a;   /* row highlight / border  */
+  --mold-surface-3:    #585b70;   /* divider, muted stroke   */
+
+  /* ── Text ─────────────────────────────────────────────── */
+  --mold-text:         #cdd6f4;   /* primary text            */
+  --mold-text-2:       #bac2de;   /* slightly dimmed         */
+  --mold-text-dim:     #7f849c;   /* labels, secondary       */
+  --mold-text-faint:   #585b70;   /* disabled, ghost         */
+
+  /* ── Borders ──────────────────────────────────────────── */
+  --mold-border:       #45475a;
+  --mold-border-focus: #89b4fa;
+
+  /* ── Accents (from Catppuccin Mocha) ──────────────────── */
+  --mold-blue:         #89b4fa;   /* primary accent / focus  */
+  --mold-lavender:     #b4befe;   /* soft highlight          */
+  --mold-mauve:        #cba6f7;   /* brand gradient end      */
+  --mold-pink:         #f5c2e7;
+  --mold-sapphire:     #74c7ec;
+  --mold-sky:          #89dceb;   /* brand gradient start    */
+  --mold-teal:         #94e2d5;
+
+  /* ── Semantic ─────────────────────────────────────────── */
+  --mold-success:      #a6e3a1;   /* green  — ✓ done         */
+  --mold-warning:      #f9e2af;   /* yellow — downloads      */
+  --mold-error:        #f38ba8;   /* red    — ✗ error        */
+  --mold-info:         #89b4fa;   /* blue   — spinner/active */
+  --mold-star:         #f9e2af;   /* ★ loaded model marker   */
+
+  /* ── Brand gradient (logo-derived, used sparingly) ────── */
+  --mold-ink-start:    #89dceb;   /* sky cyan                */
+  --mold-ink-mid:      #89b4fa;   /* blue                    */
+  --mold-ink-end:      #cba6f7;   /* mauve                   */
+  --mold-ink-gradient: linear-gradient(135deg,
+      var(--mold-ink-start) 0%,
+      var(--mold-ink-mid) 50%,
+      var(--mold-ink-end) 100%);
+
+  /* ── Type families ────────────────────────────────────── */
+  --mold-font-mono:    "JetBrainsMono", "Fira Code", ui-monospace,
+                       SFMono-Regular, Menlo, Monaco, Consolas,
+                       "Liberation Mono", monospace;
+  --mold-font-sans:    "Inter", -apple-system, BlinkMacSystemFont,
+                       "Segoe UI", Roboto, sans-serif;
+
+  /* ── Type scale (primary medium = mono) ───────────────── */
+  --mold-fs-micro:     11px;      /* status bar hints        */
+  --mold-fs-xs:        12px;      /* dim labels, meta        */
+  --mold-fs-sm:        13px;      /* body in panels          */
+  --mold-fs-base:      14px;      /* TUI default cell size   */
+  --mold-fs-md:        16px;      /* section titles          */
+  --mold-fs-lg:        20px;      /* view headings           */
+  --mold-fs-xl:        28px;      /* page titles             */
+  --mold-fs-2xl:       40px;      /* marketing H1            */
+  --mold-fs-3xl:       64px;      /* display / hero          */
+
+  --mold-lh-tight:     1.1;
+  --mold-lh-snug:      1.3;
+  --mold-lh-body:      1.5;
+
+  /* ── Spacing (TUI-cell-derived, 8px grid w/ half steps) ─ */
+  --mold-sp-0:  0;
+  --mold-sp-1:  4px;
+  --mold-sp-2:  8px;
+  --mold-sp-3:  12px;
+  --mold-sp-4:  16px;
+  --mold-sp-5:  24px;
+  --mold-sp-6:  32px;
+  --mold-sp-7:  48px;
+  --mold-sp-8:  64px;
+
+  /* ── Borders & radii ──────────────────────────────────── */
+  --mold-bw:          1px;
+  --mold-bw-thick:    2px;
+  --mold-radius-0:    0;          /* TUI has no radius       */
+  --mold-radius-1:    2px;        /* web-only, subtle        */
+  --mold-radius-2:    4px;
+  --mold-radius-3:    6px;
+
+  /* ── Elevation (web, NOT in TUI) ──────────────────────── */
+  --mold-shadow-sm:   0 1px 0 rgba(0,0,0,0.35);
+  --mold-shadow-md:   0 4px 14px rgba(0,0,0,0.45);
+  --mold-shadow-glow: 0 0 0 1px rgba(137,180,250,0.35),
+                      0 8px 32px rgba(137,180,250,0.18);
+
+  /* ── Transitions ──────────────────────────────────────── */
+  --mold-ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --mold-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --mold-dur-quick:   120ms;
+  --mold-dur-base:    180ms;
+  --mold-dur-slow:    320ms;
+}
+
+/* ============================================================
+   Semantic text roles
+   ============================================================ */
+
+.mold-display {
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-3xl);
+  font-weight: 700;
+  line-height: var(--mold-lh-tight);
+  letter-spacing: -0.02em;
+  color: var(--mold-text);
+}
+.mold-h1 {
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-2xl);
+  font-weight: 600;
+  line-height: var(--mold-lh-tight);
+  letter-spacing: -0.015em;
+  color: var(--mold-text);
+}
+.mold-h2 {
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-xl);
+  font-weight: 600;
+  line-height: var(--mold-lh-snug);
+  letter-spacing: -0.01em;
+  color: var(--mold-text);
+}
+.mold-h3 {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-md);
+  font-weight: 700;
+  line-height: var(--mold-lh-snug);
+  color: var(--mold-text);
+}
+.mold-eyebrow {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mold-text-dim);
+}
+.mold-body {
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-sm);
+  line-height: var(--mold-lh-body);
+  color: var(--mold-text);
+}
+.mold-meta {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
+}
+.mold-code,
+.mold-mono {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-sm);
+  color: var(--mold-text);
+}
+.mold-label {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-sm);
+  color: var(--mold-text-dim);
+}
+.mold-kbd {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  font-weight: 700;
+  color: var(--mold-blue);
+  background: var(--mold-bg-deep);
+  padding: 2px 6px;
+  border-radius: var(--mold-radius-1);
+}
+
+/* Tabular numerals & slashed zero for all mono */
+.mold-mono, .mold-code, .mold-label, .mold-meta, .mold-kbd, .mold-h3 {
+  font-variant-numeric: tabular-nums slashed-zero;
+}

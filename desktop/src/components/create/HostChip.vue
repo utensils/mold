@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
+import Popover from "@ui/components/Popover.vue";
 import { normalizeTargetHost } from "../../lib/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 
 /**
- * The generation-host chip (extracted from the Create header so the chain
- * composer shares it): a live status chip that, with more than one host,
- * opens the routing menu — Auto (least busy), Most capable ("capable"
- * sentinel), or a sticky host — writing the same persisted
- * `generateTargetHost` contract as always.
+ * Where it runs — the last chip on the New image view toolbar: a live status
+ * chip that, with more than one host, opens the routing menu — Auto (least
+ * busy), Most capable ("capable" sentinel), or a sticky host — writing the
+ * same persisted `generateTargetHost` contract as always. With one host it
+ * is a plain status label; there is nothing to choose between.
  */
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
@@ -63,55 +64,54 @@ function hostLine(host: HostView): string {
   return host.queueDepth !== null ? `queue ${host.queueDepth}` : "ready";
 }
 
-const popoverEl = ref<HTMLDivElement | null>(null);
+/*
+ * The menu is the SHARED Popover, which teleports its panel to <body> and
+ * positions it from the trigger's viewport rect. Rendered in place it was an
+ * absolutely positioned box inside `.ms-inspector__scroll` (`overflow-y:
+ * auto`), so it contributed to that ancestor's scrollable area instead of
+ * overlaying it: opening "Where it runs" — which sits near the bottom of the
+ * Settings list — grew the inspector's scroll height and pushed the options
+ * below the fold. Escape and outside-pointerdown dismissal come with it.
+ */
 const popoverOpen = ref(false);
 function toggle() {
   if (hosts.multiHost) popoverOpen.value = !popoverOpen.value;
 }
-function onPointerDown(event: PointerEvent) {
-  if (!popoverOpen.value || !popoverEl.value) return;
-  if (!event.composedPath().includes(popoverEl.value)) popoverOpen.value = false;
-}
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") popoverOpen.value = false;
-}
-onMounted(() => {
-  document.addEventListener("pointerdown", onPointerDown);
-  document.addEventListener("keydown", onKeydown);
-});
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onPointerDown);
-  document.removeEventListener("keydown", onKeydown);
-});
 </script>
 
 <template>
-  <div ref="popoverEl" class="ms-hostchip">
-    <button
-      type="button"
-      data-test="host-chip"
-      class="ms-hostchip__chip"
-      :class="{ 'ms-hostchip__chip--button': hosts.multiHost }"
-      :aria-expanded="hosts.multiHost ? popoverOpen : undefined"
-      :aria-haspopup="hosts.multiHost ? 'menu' : undefined"
-      :tabindex="hosts.multiHost ? 0 : -1"
-      @click="toggle"
-    >
-      <span
-        class="ms-hostchip__dot"
-        :class="chipReady ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'"
-      />
-      {{ chipLabel }} · {{ chipStatus }}
-      <Icon v-if="hosts.multiHost" name="chevron-down" :size="12" class="ms-hostchip__chev" />
-    </button>
-    <div
-      v-if="popoverOpen"
-      data-test="host-menu"
-      role="menu"
-      aria-label="Generation host"
-      class="ms-hostchip__popover ms-fade-up"
-    >
-      <div class="ms-hostchip__kicker data-mono">run on</div>
+  <Popover
+    v-model:open="popoverOpen"
+    class="ms-hostchip"
+    placement="bottom-end"
+    label="Where it runs"
+  >
+    <template #trigger>
+      <button
+        type="button"
+        data-test="host-chip"
+        class="ms-hostchip__chip"
+        :class="{ 'ms-hostchip__chip--button': hosts.multiHost }"
+        :aria-expanded="hosts.multiHost ? popoverOpen : undefined"
+        :aria-haspopup="hosts.multiHost ? 'menu' : undefined"
+        :tabindex="hosts.multiHost ? 0 : -1"
+        :title="
+          hosts.multiHost
+            ? 'Where it runs — Auto picks whichever machine has the style'
+            : 'Where it runs'
+        "
+        @click="toggle"
+      >
+        <span
+          class="ms-hostchip__dot"
+          :class="chipReady ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'"
+        />
+        {{ chipLabel }} · {{ chipStatus }}
+        <Icon v-if="hosts.multiHost" name="chevron-down" :size="12" class="ms-hostchip__chev" />
+      </button>
+    </template>
+    <div data-test="host-menu" role="menu" aria-label="Where it runs" class="ms-hostchip__menu">
+      <div class="ms-hostchip__kicker font-mono text-xs">run on</div>
       <button
         type="button"
         role="menuitemradio"
@@ -121,7 +121,7 @@ onBeforeUnmount(() => {
         @click="pick('auto')"
       >
         <span class="ms-hostchip__row-label">Auto</span>
-        <span class="ms-hostchip__row-sub data-mono">least busy</span>
+        <span class="ms-hostchip__row-sub font-mono text-xs">least busy</span>
         <span v-if="target === 'auto'" class="ms-hostchip__check">✓</span>
       </button>
       <button
@@ -133,7 +133,7 @@ onBeforeUnmount(() => {
         @click="pick('capable')"
       >
         <span class="ms-hostchip__row-label">Most capable</span>
-        <span class="ms-hostchip__row-sub data-mono">strongest gpu</span>
+        <span class="ms-hostchip__row-sub font-mono text-xs">strongest gpu</span>
         <span v-if="target === 'capable'" class="ms-hostchip__check">✓</span>
       </button>
       <div class="ms-hostchip__rule" />
@@ -155,43 +155,50 @@ onBeforeUnmount(() => {
           "
         />
         <span class="ms-hostchip__row-label">{{ h.label }}</span>
-        <span class="ms-hostchip__row-sub data-mono">{{ hostLine(h) }}</span>
+        <span class="ms-hostchip__row-sub font-mono text-xs">{{ hostLine(h) }}</span>
         <span v-if="target === h.id" class="ms-hostchip__check">✓</span>
       </button>
     </div>
-  </div>
+  </Popover>
 </template>
 
 <style scoped>
+/* The class lands on the shared Popover's root. Only the row behaviour is
+   ours — never `display` or `position`, which the Popover sets at the same
+   specificity and would win or lose by chunk order. */
 .ms-hostchip {
-  position: relative;
+  flex-shrink: 0;
 }
+/* Sized to the view toolbar's row: the doors beside it are `--mold-ctl-md`
+   tall, and a shorter chip read as a stray label. */
 .ms-hostchip__chip {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
   display: flex;
   align-items: center;
   gap: 6px;
+  height: var(--mold-ctl-md);
   background: transparent;
   border: 0;
-  padding: 4px 0;
+  padding: 0;
+  white-space: nowrap;
 }
 .ms-hostchip__chip--button {
   cursor: pointer;
-  border: 1px solid var(--edge);
-  border-radius: 20px;
-  padding: 4px 10px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  padding: 0 10px;
   transition:
-    color var(--dur-quick) var(--ease),
-    border-color var(--dur-quick) var(--ease);
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-hostchip__chip--button:hover {
-  color: var(--rebate);
-  border-color: var(--ce);
+  color: var(--mold-text);
+  border-color: var(--mold-border-focus);
 }
 .ms-hostchip__chev {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-hostchip__dot {
   width: 6px;
@@ -200,29 +207,21 @@ onBeforeUnmount(() => {
   border-radius: 50%;
 }
 .ms-hostchip__dot--ready {
-  background: var(--success);
+  background: var(--mold-success);
 }
 .ms-hostchip__dot--wait {
-  background: var(--ink-3);
+  background: var(--mold-text-dim);
 }
-/* Above every composer affordance (Templates sits at z-30 in the workbench). */
-.ms-hostchip__popover {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 50;
+/* The panel's ground, border, radius and shadow are the shared Popover's;
+   this only sets how wide the routing list wants to be. */
+.ms-hostchip__menu {
   width: 264px;
-  padding: 8px;
-  background: var(--bench);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-card);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 .ms-hostchip__kicker {
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   padding: 4px 8px 6px;
 }
 .ms-hostchip__row {
@@ -232,16 +231,16 @@ onBeforeUnmount(() => {
   gap: 8px;
   border: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   padding: 8px;
-  border-radius: var(--radius-control);
-  font-size: 12.5px;
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-xs);
   text-align: left;
   cursor: pointer;
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-hostchip__row:hover:not(:disabled) {
-  background: var(--surface);
+  background: var(--mold-surface);
 }
 .ms-hostchip__row:disabled {
   opacity: 0.6;
@@ -255,16 +254,16 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .ms-hostchip__row-sub {
-  font-size: 9.5px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 .ms-hostchip__check {
-  color: var(--safelight);
-  font-size: 12px;
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-xs);
 }
 .ms-hostchip__rule {
   height: 1px;
-  background: var(--edge);
+  background: var(--mold-border);
   margin: 4px 8px;
 }
 </style>

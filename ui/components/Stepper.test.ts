@@ -27,6 +27,15 @@ describe("Stepper", () => {
     expect(spin.attributes("tabindex")).toBe("0");
   });
 
+  it("paints its own box by default and drops it in the compact variant", () => {
+    // The compact variant sits inside another bordered control (the
+    // composer's Make chip), so it must not paint a second border on top.
+    expect(make(2).classes()).not.toContain("ms-stepper--compact");
+    expect(make(2, { compact: true }).classes()).toContain(
+      "ms-stepper--compact",
+    );
+  });
+
   it("renders the current value", () => {
     expect(make(3).find(".ms-stepper__value").text()).toBe("3");
   });

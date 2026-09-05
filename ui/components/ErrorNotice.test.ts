@@ -37,8 +37,8 @@ describe("ErrorNotice", () => {
       },
     });
     const message = wrapper.get("[data-test='error-notice-message']");
-    expect(message.classes()).toContain("[overflow-wrap:anywhere]");
-    expect(message.classes()).toContain("min-w-0");
+    // The scoped stylesheet gives this class `overflow-wrap: anywhere`.
+    expect(message.classes()).toContain("ms-error__message");
   });
 
   it("renders compact spacing and emits from an accessible dismiss button", async () => {
@@ -47,11 +47,8 @@ describe("ErrorNotice", () => {
     });
 
     expect(wrapper.get("[data-test='error-notice']").classes()).toContain(
-      "py-1.5",
+      "ms-error--compact",
     );
-    expect(
-      wrapper.get("[data-test='error-notice-message']").classes(),
-    ).toContain("leading-snug");
 
     const dismiss = wrapper.get("[data-test='dismiss-error-notice']");
     expect(dismiss.attributes("aria-label")).toBe("Dismiss error message");

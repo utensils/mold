@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /*
- * Switch toggle — boolean control (prototype upscale toggle). 44×26 track
- * with a 20px knob that slides 18px right when on; the on state tints the
- * track with the selection set and lights the knob with the accent.
+ * Switch toggle — boolean control. A 44×26 track with a 20px knob that slides
+ * 18px right when on; the on state tints the track with the selection set and
+ * lights the knob with the accent.
  * Space/Enter toggle (handled on keydown with preventDefault so the native
  * button activation never double-fires).
  */
@@ -47,20 +47,19 @@ function onKeydown(event: KeyboardEvent) {
 </template>
 
 <style scoped>
-/* --radius-pill clamps to fully round (13px) on the 26px track. */
 .ms-switch {
   position: relative;
   width: 44px;
   height: 26px;
   flex: 0 0 auto;
   padding: 0;
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-pill);
-  background: var(--bench);
+  border: var(--mold-bw) solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
   cursor: pointer;
   transition:
-    background var(--dur-quick) var(--ease),
-    border-color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-switch__knob {
@@ -69,21 +68,21 @@ function onKeydown(event: KeyboardEvent) {
   left: 2px;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
-  background: var(--ink-3);
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text-dim);
   transition:
-    transform var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    transform var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-switch[data-on="true"] {
-  background: var(--sel-bg);
-  border-color: var(--sel-border);
+  background: var(--mold-accent-tint);
+  border-color: var(--mold-blue);
 }
 
 .ms-switch[data-on="true"] .ms-switch__knob {
   transform: translateX(18px);
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .ms-switch:disabled {
@@ -92,7 +91,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-switch:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 </style>

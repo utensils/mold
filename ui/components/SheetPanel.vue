@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Phone-surface sheet (spec §05) — full-screen takeover ("full") or
+ * Phone-surface sheet — full-screen takeover ("full") or
  * bottom sheet with grab handle ("bottom"). Renders INSIDE its owning
  * frame: absolute overlay, never Teleport or position:fixed. Backdrop
  * click and Esc close; clicks inside the panel do not.
@@ -81,7 +81,7 @@ useRootFocusOnOpen(root, () => props.open);
   backdrop-filter: blur(5px);
   display: flex;
   flex-direction: column;
-  animation: ms-fade-up var(--dur-base) var(--ease);
+  animation: ms-fade-up var(--mold-dur-base) var(--mold-ease-out);
 }
 
 .ms-sheet[data-variant="bottom"] {
@@ -89,7 +89,7 @@ useRootFocusOnOpen(root, () => props.open);
 }
 
 .ms-sheet:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -97,7 +97,7 @@ useRootFocusOnOpen(root, () => props.open);
 .ms-sheet__panel-full {
   position: absolute;
   inset: 0;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
   display: flex;
   flex-direction: column;
 }
@@ -108,43 +108,43 @@ useRootFocusOnOpen(root, () => props.open);
   align-items: center;
   gap: 10px;
   padding: 16px 18px 12px;
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
 }
 
 .ms-sheet__title {
   flex: 1;
   min-width: 0;
-  font-family: var(--f-display);
+  font-family: var(--mold-font-sans);
   font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-sheet__close {
   width: 34px;
   height: 34px;
   flex: 0 0 34px;
-  border-radius: var(--radius-pill);
+  border-radius: 999px;
   border: 0;
-  background: color-mix(in srgb, var(--rebate) 9%, transparent);
-  color: var(--ink-2);
+  background: color-mix(in srgb, var(--mold-text) 9%, transparent);
+  color: var(--mold-text-2);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition:
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-sheet__close:hover {
-  background: color-mix(in srgb, var(--rebate) 14%, transparent);
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-text) 14%, transparent);
+  color: var(--mold-text);
 }
 
 .ms-sheet__close:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -157,8 +157,8 @@ useRootFocusOnOpen(root, () => props.open);
 
 /* ── Bottom sheet ──────────────────────────────────────────────────── */
 .ms-sheet__panel-bottom {
-  background: var(--bench);
-  border-top: 1px solid var(--edge);
+  background: var(--mold-bg);
+  border-top: 1px solid var(--mold-border);
   border-radius: 22px 22px 0 0;
   padding: 14px 16px 26px;
 }
@@ -167,16 +167,16 @@ useRootFocusOnOpen(root, () => props.open);
   width: 38px;
   height: 4px;
   border-radius: 3px;
-  background: var(--ce);
+  background: var(--mold-border-control);
   margin: 0 auto 14px;
 }
 
 .ms-sheet__bottom-title {
-  font-family: var(--f-display);
+  font-family: var(--mold-font-sans);
   font-size: 16px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--rebate);
+  color: var(--mold-text);
   margin-bottom: 10px;
 }
 </style>

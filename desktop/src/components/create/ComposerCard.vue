@@ -2,31 +2,46 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { promptPlaceholder } from "@studio/lib/promptRequirement";
 import { promptTransformBlockedReason } from "@studio/lib/promptTransform";
-import Keycap from "@ui/components/Keycap.vue";
+import {
+  clampVideoFrames,
+  formatVideoDuration,
+  maxVideoFrames,
+  minVideoFrames,
+  videoFrameStep,
+  type VideoFrameContract,
+} from "@studio/lib/videoDuration";
+import { outputFamilyLabel } from "@studio/lib/outputShape";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import Icon from "@ui/components/Icon.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
+import Stepper from "@ui/components/Stepper.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import EstimateBadge from "../generate/EstimateBadge.vue";
-import StyleChips from "./StyleChips.vue";
 import type { GenerateForm } from "../../lib/generateForm";
 import { promptInputForForm } from "../../lib/promptRecipe";
 import type { GenerateRequest } from "../../lib/api/types";
 import type { ApiTarget } from "../../lib/api/client";
+import { MAX_BATCH_SIZE } from "../../lib/generateForm";
 import { autoGrowRows } from "../../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "@studio/lib/promptCycler";
 import type { PromptAuthoringSource } from "@studio/lib/promptProvenance";
 import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 /**
- * The Create composer (Mold Studio). Owns the prompt textarea and its editing
- * affordances — ⌘↵ generate, ⌘E expand, ↑/↓ shell-style prompt history,
- * autogrow — plus the style row, estimate, expand control, and Generate button.
- * The view keeps all orchestration; this component only surfaces intent.
+ * The composer (README §04): the prompt line carries the estimate on its
+ * right; the control row below carries the chips — Style, Shape, Length,
+ * Make N, Write more for me — then Generate. Style is the ONE style picker and is
+ * supplied through the `style` slot, so this component stays presentational.
+ * Advisory text never shares a row with controls. Owns the prompt textarea and its editing affordances — ⌘↵
+ * generate, ⌘E expand, ↑/↓ shell-style prompt history, autogrow. The view
+ * keeps all orchestration; this component only surfaces intent.
  */
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
     effectiveBatchSize: number;
+    /** The recipe renders one at a time: the Make chip reads 1 and locks. */
+    batchLocked?: boolean;
     expansionRunning: boolean;
     expansionHostLabel: string | null;
     canUndo: boolean;
@@ -38,14 +53,47 @@ const props = withDefaults(
     warningReason?: string | null;
     submitting: boolean;
     buttonLabel: string;
+    /** Queue depth, said beside the one-word button rather than inside it. */
+    queuedNote?: string | null;
     estimateRequest: GenerateRequest | null;
     estimateTarget: ApiTarget | null;
     preprocessingStatus: string | null;
     remixSource?: "original" | "current";
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
+    /** Clip mode: the composer writes the SELECTED SCENE's words rather than
+     * the form's prompt. Null keeps the one-shot binding. */
+    promptValue?: string | null;
+    /** Clip mode's own invitation — "Scene 2 — describe what happens next". */
+    placeholder?: string | null;
+    /** A chain has no batch, so the scene-by-scene clip hides Make outright
+     * rather than showing a count nothing reads. */
+    showCount?: boolean;
+    /**
+     * The clip's length, as the chip beside Shape. `lengthContract` absent
+     * hides it — a still has no length, and a sequence's lengths are
+     * per-scene. It is the same `form.frames` the inspector's Clip card
+     * slider writes, so the two are one control shown twice.
+     */
+    lengthFrames?: number | null;
+    lengthFps?: number;
+    lengthContract?: VideoFrameContract | null;
+    /** Rewriting reaches the one-shot prompt only, so a scene has no expander. */
+    showExpand?: boolean;
   }>(),
-  { history: () => [], remixSource: "original", warningReason: null },
+  {
+    history: () => [],
+    remixSource: "original",
+    warningReason: null,
+    batchLocked: false,
+    promptValue: null,
+    placeholder: null,
+    showCount: true,
+    lengthFrames: null,
+    lengthFps: 24,
+    lengthContract: null,
+    showExpand: true,
+  },
 );
 
 const emit = defineEmits<{
@@ -57,7 +105,14 @@ const emit = defineEmits<{
   /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
    * prompt and releases any quick expansion, where typing keeps it. */
   "prompt-authored": [value: string, source: PromptAuthoringSource];
+  /** Clip mode: the selected scene's new words. */
+  "update:promptValue": [value: string];
+  /** The Length chip's new frame count, already on the family's grid. */
+  "update:lengthFrames": [frames: number];
   "update:remixSource": [value: "original" | "current"];
+  /** The Shape chip is a door to the inspector's Settings tab. Style is not:
+   *  its chip opens the picker itself, in the `style` slot. */
+  "open-shape": [];
 }>();
 
 // Disabled state and corrective guidance are intentionally separate: obvious
@@ -66,16 +121,70 @@ const generateDisabled = computed(() => props.disabled && !props.submitting);
 // The recipe is the prompt rule's authority (a mesh family has no text
 // encoder to feed), so the form's snapshot of it rides along — without it the
 // pre-profile family rule would ask for a description nothing reads.
-const placeholder = computed(() =>
-  promptPlaceholder(promptInputForForm(props.form), "Describe the image you want to create…"),
+const invitation = computed(
+  () =>
+    props.placeholder ??
+    promptPlaceholder(
+      promptInputForForm(props.form),
+      "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
+    ),
 );
+/** One writable prompt whichever words the composer is carrying. */
+const promptText = computed({
+  get: () => props.promptValue ?? props.form.prompt,
+  set: (value: string) => {
+    if (props.promptValue === null) props.form.prompt = value;
+    else emit("update:promptValue", value);
+  },
+});
 // Expand and Remix rewrite the prompt, so the same recipe snapshot answers
 // for them: a family with no text encoder reads nothing a rewrite could say.
-// The view derives this from the same form, so the disabled control and its
-// refusal necessarily carry one sentence.
 const transformBlockedReason = computed(() =>
   promptTransformBlockedReason(props.form.recipeCapabilities?.promptMode),
 );
+
+/** "Square · 1024" — the canvas as a chip; a 3-D style has no canvas. */
+const shapeLabel = computed(() => {
+  const canvasless = props.form.recipeCapabilities?.canvasless ?? isMeshFamily(props.form.family);
+  if (canvasless) return null;
+  const { width, height } = props.form;
+  const family = outputFamilyLabel(width, height);
+  const size = width === height ? `${width}` : `${width}×${height}`;
+  return `${family === "1:1" ? "Square" : family} · ${size}`;
+});
+
+/*
+ * Length — the clip as a chip. Every bound comes from the shared video-duration
+ * authority, so the chip snaps to exactly the grid the request validator
+ * enforces and the inspector's slider offers. An intentional above-ceiling
+ * count (the auto-chained long clip) is shown as authored while the slider
+ * itself stays inside the one-render range, which is `VideoDurationSlider`'s
+ * own rule.
+ */
+const lengthRate = computed(() => Math.max(1, Math.round(props.lengthFps) || 24));
+const lengthMin = computed(() => minVideoFrames(props.lengthContract));
+const lengthMax = computed(() => maxVideoFrames(props.lengthContract, lengthRate.value));
+const lengthStep = computed(() => videoFrameStep(props.lengthContract));
+const lengthValue = computed(() =>
+  clampVideoFrames(props.lengthFrames ?? lengthMin.value, lengthRate.value, props.lengthContract),
+);
+const lengthShown = computed(() =>
+  (props.lengthFrames ?? 0) > lengthMax.value ? props.lengthFrames! : lengthValue.value,
+);
+const lengthReadout = computed(
+  () => `${lengthShown.value}f · ${formatVideoDuration(lengthShown.value, lengthRate.value)}`,
+);
+const lengthFill = computed(() => {
+  const span = lengthMax.value - lengthMin.value;
+  if (span <= 0) return "100%";
+  return `${Math.round(((lengthValue.value - lengthMin.value) / span) * 100)}%`;
+});
+function setLength(raw: string) {
+  emit(
+    "update:lengthFrames",
+    clampVideoFrames(Number(raw), lengthRate.value, props.lengthContract),
+  );
+}
 
 const promptEl = ref<HTMLTextAreaElement | null>(null);
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
@@ -90,20 +199,16 @@ watch(
 function growPrompt() {
   if (promptEl.value) autoGrowRows(promptEl.value);
 }
-watch(
-  () => props.form.prompt,
-  () => void nextTick(growPrompt),
-  { flush: "post" },
-);
+watch(promptText, () => void nextTick(growPrompt), { flush: "post" });
 onMounted(() => {
   growPrompt();
   promptEl.value?.focus();
 });
 
 function cycleHistory(direction: "prev" | "next"): boolean {
-  const replacement = direction === "prev" ? cycler.prev(props.form.prompt) : cycler.next();
+  const replacement = direction === "prev" ? cycler.prev(promptText.value) : cycler.next();
   if (replacement === null) return false;
-  props.form.prompt = replacement;
+  promptText.value = replacement;
   emit("prompt-authored", replacement, "recalled");
   void nextTick(() => {
     const el = promptEl.value;
@@ -113,9 +218,11 @@ function cycleHistory(direction: "prev" | "next"): boolean {
 }
 
 function onPromptInput(event: Event) {
+  const value = (event.target as HTMLTextAreaElement).value;
   cycler.reset();
+  promptText.value = value;
   growPrompt();
-  emit("prompt-authored", (event.target as HTMLTextAreaElement).value, "typed");
+  emit("prompt-authored", value, "typed");
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -155,45 +262,101 @@ defineExpose({ focus, expand, record });
 
 <template>
   <div data-test="composer-card" class="ms-composer">
-    <div class="ms-composer__bench">
-      <textarea
-        ref="promptEl"
-        v-model="form.prompt"
-        data-selectable
-        rows="2"
-        aria-label="Prompt"
-        :placeholder="placeholder"
-        class="ms-composer__input"
-        @keydown="onKeydown"
-        @input="onPromptInput"
-      />
-      <StyleChips v-model="form.stylePreset" />
-    </div>
-    <div class="ms-composer__actions">
-      <ExpandControl
-        ref="expandControl"
-        :prompt="form.prompt"
-        :batch-size="effectiveBatchSize"
-        :running="expansionRunning"
-        :host-label="expansionHostLabel"
-        :can-undo="canUndo"
-        :blocked="preparedBlocked"
-        :transform-blocked-reason="transformBlockedReason"
-        :original-available="!!form.originalPrompt"
-        :remix-source="remixSource"
-        @expand="emit('expand')"
-        @remix="emit('remix')"
-        @update:remix-source="emit('update:remixSource', $event)"
-        @restore="emit('restore')"
-      />
-      <div class="ms-composer__right">
+    <div class="ms-composer__card">
+      <div class="ms-composer__prompt-row">
+        <textarea
+          ref="promptEl"
+          :value="promptText"
+          data-selectable
+          rows="1"
+          aria-label="Prompt"
+          :placeholder="invitation"
+          class="ms-composer__input"
+          @keydown="onKeydown"
+          @input="onPromptInput"
+        />
+        <EstimateBadge
+          class="ms-composer__estimate"
+          :request="estimateRequest"
+          :target="estimateTarget"
+        />
+      </div>
+      <div class="ms-composer__controls">
+        <!-- The Style chip IS the picker (StylePicker.vue, filled by the view);
+             it opens its menu in place rather than being a door to a second
+             selector in the inspector. Shape keeps its door. -->
+        <slot name="style" />
+        <button
+          v-if="shapeLabel"
+          type="button"
+          data-test="shape-chip"
+          class="ms-chip"
+          title="Shape and size"
+          @click="emit('open-shape')"
+        >
+          {{ shapeLabel }} <span class="ms-chip__caret">▼</span>
+        </button>
+        <span v-if="lengthContract" class="ms-chip ms-chip--slider" data-test="length-chip">
+          <span>Length</span>
+          <input
+            type="range"
+            class="ms-chip__slider"
+            data-test="length-slider"
+            :min="lengthMin"
+            :max="lengthMax"
+            :step="lengthStep"
+            :value="lengthValue"
+            :style="{ '--ms-chip-slider-fill': lengthFill }"
+            aria-label="How long the clip is"
+            :aria-valuetext="lengthReadout"
+            @input="setLength(($event.target as HTMLInputElement).value)"
+          />
+          <span class="ms-chip__id" data-test="length-readout">{{ lengthReadout }}</span>
+        </span>
+        <span
+          v-if="showCount"
+          class="ms-chip ms-chip--stepper"
+          data-test="batch-chip"
+          :class="{ 'ms-chip--locked': batchLocked }"
+        >
+          <span>Make</span>
+          <Stepper
+            :model-value="batchLocked ? 1 : form.batchSize"
+            :min="1"
+            :max="batchLocked ? 1 : MAX_BATCH_SIZE"
+            :editable="!batchLocked"
+            compact
+            label="How many to make"
+            @update:model-value="form.batchSize = $event"
+          />
+        </span>
+        <ExpandControl
+          v-if="showExpand"
+          ref="expandControl"
+          :prompt="form.prompt"
+          :batch-size="effectiveBatchSize"
+          :running="expansionRunning"
+          :host-label="expansionHostLabel"
+          :can-undo="canUndo"
+          :blocked="preparedBlocked"
+          :transform-blocked-reason="transformBlockedReason"
+          :original-available="!!form.originalPrompt"
+          :remix-source="remixSource"
+          @expand="emit('expand')"
+          @remix="emit('remix')"
+          @update:remix-source="emit('update:remixSource', $event)"
+          @restore="emit('restore')"
+        />
+        <span class="ms-composer__spacer" />
         <span
           v-if="preprocessingStatus"
           class="ms-composer__status"
           data-test="preprocessing-status"
           >{{ preprocessingStatus }}</span
         >
-        <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
+        <span v-if="queuedNote" class="ms-composer__queued" data-test="generate-queued-note">{{
+          queuedNote
+        }}</span>
         <button
           type="button"
           data-test="generate-button"
@@ -201,9 +364,9 @@ defineExpose({ focus, expand, record });
           :disabled="generateDisabled"
           @click="submitOrCancel"
         >
-          <Icon name="sparkle" :size="16" />
+          <Icon v-if="submitting" name="close" :size="14" />
           {{ buttonLabel }}
-          <Keycap on-accent>{{ shortcutLabel("↩") }}</Keycap>
+          <kbd class="ms-composer__key">{{ shortcutLabel("↩") }}</kbd>
         </button>
       </div>
     </div>
@@ -221,79 +384,193 @@ defineExpose({ focus, expand, record });
 .ms-composer {
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--edge);
-  padding: 16px 22px;
-  background: var(--bench);
+  border-top: var(--mold-bw) solid var(--mold-border);
+  padding: 12px 14px 14px;
+  background: var(--mold-bg);
 }
-.ms-composer__bench {
+.ms-composer__card {
   display: flex;
-  flex: 1;
   flex-direction: column;
-  background: var(--bath);
-  border: 1px solid var(--ce);
-  border-radius: 12px;
-  padding: 12px 14px;
-  transition: border-color 0.1s;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
+  transition: border-color var(--mold-dur-quick) var(--mold-ease-out);
 }
-.ms-composer__bench:focus-within {
-  border-color: var(--safelight);
+.ms-composer__card:focus-within {
+  border-color: var(--mold-border-focus);
+}
+.ms-composer__prompt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 12px 14px 6px;
 }
 .ms-composer__input {
   flex: 1;
+  min-width: 0;
   width: 100%;
   box-sizing: border-box;
   border: 0;
   background: transparent;
-  color: var(--rebate);
-  font-family: var(--f-body);
-  font-size: 14.5px;
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-base);
+  line-height: var(--mold-lh-body);
   resize: none;
   outline: none;
-  min-height: 44px;
-  line-height: 1.45;
+  min-height: 24px;
+  max-height: 160px;
   overflow-x: hidden;
 }
-.ms-composer__actions {
+.ms-composer__input::placeholder {
+  color: var(--mold-text-dim);
+}
+.ms-composer__estimate {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ms-composer__controls {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-top: auto;
-  padding-top: 12px;
-  min-width: 0;
   flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px 10px 12px;
 }
-.ms-composer__right {
-  display: flex;
+.ms-composer__spacer {
+  flex: 1;
+  min-width: 16px;
+}
+.ms-chip {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  margin-left: auto;
-  min-width: 0;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
+  cursor: pointer;
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
-.ms-composer__blocker {
-  order: 3;
-  margin-top: 10px;
+.ms-chip:hover {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
+}
+.ms-chip--style {
+  background: var(--mold-surface);
+  color: var(--mold-text);
+  font-weight: 500;
+}
+.ms-chip__label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ms-chip__id {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+.ms-chip--locked {
+  color: var(--mold-text-dim);
+  cursor: default;
+}
+.ms-chip__caret {
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+/* The chip IS the track's frame: no label row, no ticks, the mono readout
+ * beside it. The full control stays in the inspector's Clip card. */
+.ms-chip--slider {
+  cursor: default;
+  gap: 8px;
+}
+/* Same track vocabulary as the kit's SliderRow — accent behind the thumb,
+ * control ink ahead of it — so the chip and the inspector's slider read as
+ * the one control they are. */
+.ms-chip__slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 84px;
+  height: 4px;
+  margin: 0;
+  padding: 0;
+  background: var(--mold-border-control);
+  background-image: linear-gradient(
+    to right,
+    var(--mold-blue) var(--ms-chip-slider-fill, 0%),
+    transparent var(--ms-chip-slider-fill, 0%)
+  );
+  cursor: pointer;
+}
+.ms-chip__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
+  cursor: pointer;
+}
+.ms-chip__slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
+  cursor: pointer;
+}
+.ms-chip__slider:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: 2px;
+}
+.ms-chip--stepper {
+  cursor: default;
+  gap: 2px;
+  /* The compact Stepper's − button carries its own 22px hit box, so the
+   * chip's right padding is only the 2px that keeps it off the border. */
+  padding-right: 2px;
 }
 .ms-composer__status {
-  font-size: 11px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ms-composer__queued {
+  flex-shrink: 0;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+  white-space: nowrap;
+}
+.ms-composer__blocker {
+  margin-top: 8px;
+}
 .ms-composer__generate {
-  border: 0;
-  background: var(--safelight);
-  color: var(--on-accent);
-  padding: 0 20px;
-  height: 42px;
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 700;
-  display: flex;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 9px;
+  flex-shrink: 0;
+  height: var(--mold-ctl-lg);
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
+  font-size: var(--mold-fs-sm);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
   cursor: pointer;
-  transition: filter 0.1s;
+  transition: filter var(--mold-dur-quick) var(--mold-ease-out);
 }
 .ms-composer__generate:hover:not(:disabled) {
   filter: brightness(1.05);
@@ -302,7 +579,12 @@ defineExpose({ focus, expand, record });
   transform: translateY(1px);
 }
 .ms-composer__generate:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: default;
+}
+.ms-composer__key {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  opacity: 0.7;
 }
 </style>

@@ -234,7 +234,7 @@ describe("MobileSettingsView", () => {
     );
 
     expect(wrapper.text()).toContain("Compute devices");
-    expect(wrapper.text()).toContain("Host utility");
+    expect(wrapper.text()).toContain("Machine utility");
     expect(wrapper.text()).toContain("Post upscale");
   });
 

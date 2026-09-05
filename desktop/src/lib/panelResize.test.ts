@@ -9,11 +9,15 @@ describe("PANEL_LIMITS", () => {
     }
   });
 
-  it("fits all five Generate aspect controls on one row at the default width", () => {
+  it("opens the inspector at the shell's own width and still reaches the aspect row", () => {
+    // 300 is `--mold-shell-inspector-w`, the plane the shell anatomy draws.
+    expect(PANEL_LIMITS.generateParams.def).toBe(300);
+    // Five 52px aspect controls on one row need a wider pane than the default,
+    // so the range has to reach it — the drag is what gets you there.
     const inspectorPadding = 18 * 2;
     const aspectControls = 52 * 5;
     const aspectGaps = 7 * 4;
-    expect(PANEL_LIMITS.generateParams.def - inspectorPadding).toBeGreaterThanOrEqual(
+    expect(PANEL_LIMITS.generateParams.max - inspectorPadding).toBeGreaterThanOrEqual(
       aspectControls + aspectGaps,
     );
   });
@@ -21,17 +25,17 @@ describe("PANEL_LIMITS", () => {
 
 describe("clampPanelWidth", () => {
   it.each([
-    ["navRail", 100, 160], // below min
-    ["navRail", 160, 160], // at min
+    ["navRail", 100, 220], // below min
+    ["navRail", 220, 220], // at min
     ["navRail", 250, 250], // in range
-    ["navRail", 320, 320], // at max
-    ["navRail", 9999, 320], // above max
+    ["navRail", 360, 360], // at max
+    ["navRail", 9999, 360], // above max
     ["generateParams", 10, 280],
     ["generateParams", 280, 280],
     ["generateParams", 333, 333],
     ["generateParams", 480, 480],
     ["generateParams", 4000, 480],
-    ["historyDrawer", 10, 420],
+    ["historyDrawer", 10, 260],
     ["historyDrawer", 680, 680],
     ["historyDrawer", 4000, 960],
   ] as const)("clamps %s width %d to %d", (panel, px, expected) => {
@@ -39,8 +43,8 @@ describe("clampPanelWidth", () => {
   });
 
   it("rounds fractional widths to whole pixels", () => {
-    expect(clampPanelWidth("navRail", 200.4)).toBe(200);
-    expect(clampPanelWidth("navRail", 200.6)).toBe(201);
+    expect(clampPanelWidth("navRail", 260.4)).toBe(260);
+    expect(clampPanelWidth("navRail", 260.6)).toBe(261);
     expect(clampPanelWidth("generateParams", 320.5)).toBe(321);
   });
 });
@@ -48,7 +52,7 @@ describe("clampPanelWidth", () => {
 describe("dragWidth", () => {
   it("grows a right-edge handle with +dx (nav rail)", () => {
     expect(dragWidth("navRail", 208, 30, "right")).toBe(238);
-    expect(dragWidth("navRail", 208, -20, "right")).toBe(188);
+    expect(dragWidth("navRail", 268, -20, "right")).toBe(248);
   });
 
   it("grows a left-edge handle with -dx (generate inspector)", () => {
@@ -60,8 +64,8 @@ describe("dragWidth", () => {
   });
 
   it("clamps the dragged width to the panel's limits", () => {
-    expect(dragWidth("navRail", 208, -500, "right")).toBe(160);
-    expect(dragWidth("navRail", 208, 500, "right")).toBe(320);
+    expect(dragWidth("navRail", 268, -500, "right")).toBe(220);
+    expect(dragWidth("navRail", 268, 500, "right")).toBe(360);
     expect(dragWidth("generateParams", 320, -500, "left")).toBe(480);
     expect(dragWidth("generateParams", 320, 500, "left")).toBe(280);
   });

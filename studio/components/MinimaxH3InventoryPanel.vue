@@ -209,7 +209,7 @@ function percentage(done: number, total: number): number {
 <style scoped>
 .h3-inventory {
   margin: 16px 0;
-  color: var(--color-ink, var(--ink, currentColor));
+  color: var(--mold-text);
 }
 
 .h3-inventory__header,
@@ -247,21 +247,21 @@ function percentage(done: number, total: number): number {
 .h3-task p,
 .h3-components > header span,
 .h3-component__copy > span {
-  color: var(--color-ink-2, var(--ink-2, #667085));
+  color: var(--color-ink-2, var(--mold-text-2, #667085));
   font-size: 12px;
   line-height: 1.4;
 }
 
 .h3-inventory__header > span {
-  color: var(--color-ink-2, var(--ink-2, #667085));
+  color: var(--color-ink-2, var(--mold-text-2, #667085));
   font-size: 12px;
 }
 
 .h3-host {
   padding: 14px;
-  border: 1px solid var(--color-edge, var(--edge, #d0d5dd));
+  border: 1px solid var(--color-edge, var(--mold-border, #d0d5dd));
   border-radius: 14px;
-  background: var(--color-bench, var(--bench, rgba(255, 255, 255, 0.03)));
+  background: var(--color-bench, var(--mold-bg, rgba(255, 255, 255, 0.03)));
 }
 
 .h3-host + .h3-host {
@@ -279,11 +279,11 @@ function percentage(done: number, total: number): number {
   min-width: 0;
   padding: 8px 10px;
   border-radius: 9px;
-  background: var(--color-bath, var(--bath, rgba(127, 127, 127, 0.08)));
+  background: var(--color-bath, var(--mold-bg-deep, rgba(127, 127, 127, 0.08)));
 }
 
 .h3-qualification dt {
-  color: var(--color-ink-2, var(--ink-2, #667085));
+  color: var(--color-ink-2, var(--mold-text-2, #667085));
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -307,12 +307,12 @@ function percentage(done: number, total: number): number {
 .h3-task {
   min-width: 0;
   padding: 11px;
-  border: 1px solid var(--color-edge, var(--edge, #d0d5dd));
+  border: 1px solid var(--color-edge, var(--mold-border, #d0d5dd));
   border-radius: 10px;
 }
 
 .h3-task__eyebrow {
-  color: var(--color-ink-2, var(--ink-2, #667085));
+  color: var(--color-ink-2, var(--mold-text-2, #667085));
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -342,13 +342,13 @@ function percentage(done: number, total: number): number {
   margin-top: 6px !important;
   padding: 0;
   list-style: none;
-  border-top: 1px solid var(--color-edge, var(--edge, #d0d5dd));
+  border-top: 1px solid var(--color-edge, var(--mold-border, #d0d5dd));
 }
 
 .h3-components li {
   min-height: 44px;
   padding: 8px 0;
-  border-bottom: 1px solid var(--color-edge, var(--edge, #d0d5dd));
+  border-bottom: 1px solid var(--color-edge, var(--mold-border, #d0d5dd));
 }
 
 .h3-component__copy {
@@ -377,22 +377,22 @@ function percentage(done: number, total: number): number {
   height: 4px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--color-edge, var(--edge, #d0d5dd));
+  background: var(--color-edge, var(--mold-border, #d0d5dd));
 }
 
 .h3-component__progress i {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--color-rebate, var(--rebate, #3b82f6));
+  background: var(--color-rebate, var(--mold-text, #3b82f6));
 }
 
 .h3-state {
   flex: none;
   padding: 3px 7px;
   border-radius: 999px;
-  background: var(--color-bath, var(--bath, rgba(127, 127, 127, 0.12)));
-  color: var(--color-ink-2, var(--ink-2, #667085));
+  background: var(--color-bath, var(--mold-bg-deep, rgba(127, 127, 127, 0.12)));
+  color: var(--color-ink-2, var(--mold-text-2, #667085));
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -407,7 +407,7 @@ function percentage(done: number, total: number): number {
 }
 
 .h3-state--downloading {
-  color: var(--color-rebate, var(--rebate, #2563eb));
+  color: var(--color-rebate, var(--mold-text, #2563eb));
 }
 
 .h3-state--failed {

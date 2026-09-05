@@ -27,10 +27,10 @@ export const SEVERITY_MARKS: Record<NotificationSeverity, SeverityMark> = {
   // Green covers everything that is not a warning or an error: an ordinary
   // notice and a success both mean "nothing is wrong". The glyph, not the hue,
   // separates them.
-  info: { glyph: "•", label: "Info", color: "var(--success)" },
-  success: { glyph: "✓", label: "Success", color: "var(--success)" },
-  warning: { glyph: "!", label: "Warning", color: "var(--warning)" },
-  error: { glyph: "✕", label: "Error", color: "var(--stop)" },
+  info: { glyph: "•", label: "Info", color: "var(--mold-success)" },
+  success: { glyph: "✓", label: "Success", color: "var(--mold-success)" },
+  warning: { glyph: "!", label: "Warning", color: "var(--mold-warning)" },
+  error: { glyph: "✕", label: "Error", color: "var(--mold-error)" },
 };
 
 export function severityMark(kind: NotificationSeverity): SeverityMark {
@@ -50,7 +50,7 @@ export function severityIsUrgent(kind: NotificationSeverity): boolean {
 /**
  * Presentation derived from the one color, so no surface restates a hue.
  * `tint` is the translucent wash a chip or border uses; `solid` is the filled
- * treatment an error chip takes, whose text reads with `--on-status`.
+ * treatment an error chip takes, whose text reads with `--mold-on-accent`.
  */
 export function severityTint(
   kind: NotificationSeverity,

@@ -52,7 +52,7 @@ export function meshTargetFacesError(
     targetFaces < mesh.target_faces_min ||
     targetFaces > mesh.target_faces_max
   ) {
-    return `Target faces must be a whole number from ${mesh.target_faces_min} to ${mesh.target_faces_max}.`;
+    return `Use a whole number of faces from ${mesh.target_faces_min} to ${mesh.target_faces_max}.`;
   }
   return null;
 }
@@ -138,7 +138,7 @@ export function mobileMediaBudgetValidationError(form: GenerateForm): string | n
 export function stepsValidationError(value: number): string | null {
   return Number.isInteger(value) && value >= 1 && value <= 100
     ? null
-    : "Steps must be a whole number from 1 to 100.";
+    : "Detail must be a whole number of passes from 1 to 100.";
 }
 
 export function profileStepsValidationError(

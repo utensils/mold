@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import SettingRow from "./SettingRow.vue";
 import { apiJson } from "../../lib/api/client";
 import { ipc, inTauri } from "../../lib/ipc";
@@ -14,12 +14,24 @@ const engine = ref<ServerStatus | null>(null);
 const appVersion = ref<string | null>(null);
 const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
+/** Ask the engine again whenever the connection comes up — NOT once on
+ *  mount. Launching straight into Settings (`restoreLastRoute`) mounts this
+ *  before the engine is ready, and a mount-only read left Engine reading
+ *  "offline" for the rest of the session. */
+watch(
+  () => conn.ready,
+  async (ready) => {
+    if (!ready) return;
+    try {
+      engine.value = await apiJson<ServerStatus>("/api/status");
+    } catch {
+      /* engine offline */
+    }
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
-  try {
-    engine.value = await apiJson<ServerStatus>("/api/status");
-  } catch {
-    /* engine offline */
-  }
   if (inTauri()) {
     const { getVersion } = await import("@tauri-apps/api/app");
     appVersion.value = await getVersion();
@@ -49,46 +61,36 @@ function openPrivacyPolicy(): void {
 <template>
   <div class="w-full" data-test="about-section-content">
     <SettingRow label="Mold" help="Desktop app version.">
-      <span class="data-mono text-body text-ink-2">{{ appVersion ?? "dev" }}</span>
+      <span class="font-mono text-sm text-fg-2">{{ appVersion ?? "dev" }}</span>
     </SettingRow>
     <SettingRow label="Engine" :help="conn.baseUrl ?? undefined">
-      <span class="data-mono text-body text-ink-2">
+      <span class="font-mono text-sm text-fg-2">
         {{ engine ? `mold ${engine.version}` : "offline" }}
       </span>
     </SettingRow>
     <SettingRow label="Processing" help="Where generations run.">
-      <span class="data-mono text-body text-ink-3">Local + your hosts</span>
+      <span class="font-mono text-sm text-fg-dim">Local + your hosts</span>
     </SettingRow>
     <SettingRow label="Core contributors">
-      <span class="text-right text-body text-ink-2">James Brink · Jeffrey Dilley</span>
+      <span class="text-right text-sm text-fg-2">James Brink · Jeffrey Dilley</span>
     </SettingRow>
     <SettingRow label="Privacy" help="How Mold handles app and server data.">
       <button
         type="button"
         data-test="desktop-privacy-policy"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        class="ms-toolbar-button"
         @click="openPrivacyPolicy"
       >
         Privacy policy
       </button>
     </SettingRow>
     <SettingRow label="Logs" help="Engine and app logs live in the active Mold home.">
-      <button
-        type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-        @click="ipc.openLogsDir()"
-      >
+      <button type="button" class="ms-toolbar-button" @click="ipc.openLogsDir()">
         Open logs folder
       </button>
     </SettingRow>
     <SettingRow label="Diagnostics" help="Versions, connection, and engine state as JSON.">
-      <button
-        type="button"
-        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-        @click="copyDiagnostics"
-      >
-        Copy
-      </button>
+      <button type="button" class="ms-toolbar-button" @click="copyDiagnostics">Copy</button>
     </SettingRow>
   </div>
 </template>

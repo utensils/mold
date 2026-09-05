@@ -1,21 +1,23 @@
 <script setup lang="ts">
+/*
+ * Settings ▸ Machines: this device and its key (the one machine knob that
+ * belongs in Settings, because it exposes THIS device to other apps) and the
+ * Mold home it works out of. The directories underneath it are Styles & disk;
+ * adding, connecting, and forgetting other machines live in the Machines
+ * workspace.
+ */
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
-import ConfigSettingRow from "./ConfigSettingRow.vue";
 import MoldHomeCard from "./MoldHomeCard.vue";
+import SettingRow from "./SettingRow.vue";
 import { ipc } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
-import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
 
 const router = useRouter();
 const conn = useConnectionStore();
-const config = useSettingsConfigStore();
 const toasts = useToastStore();
 
-// This-device card — the one host knob that belongs in Settings (it exposes
-// THIS device to other apps). Adding, connecting, and forgetting other
-// machines all moved to the Machines workspace.
 const restarting = computed(() => conn.status === "starting");
 /** Engine-start failures land in `error` (startLocalEngine) or `localError`
  *  (ensureLocalServer) depending on which step died — surface either. */
@@ -24,6 +26,12 @@ const localFailure = computed(() =>
 );
 const localKeyVisible = ref(false);
 const localApiKey = computed(() => conn.localInfo?.apiKey ?? "");
+/** What to say instead of a key. "Local server unavailable" was said for a
+ *  server that IS running and simply asks for no key — beside a green dot
+ *  saying it is up. Name which of the two it is. */
+const noKeyReason = computed(() =>
+  conn.localInfo ? "This device isn't asking for a key" : "Local server not running",
+);
 
 async function copyLocalApiKey() {
   if (!localApiKey.value) return;
@@ -37,117 +45,89 @@ async function restartEngine() {
   else if (result === "failed" && conn.error) toasts.push(conn.error, "error");
 }
 
-function hostDot(status: "ready" | "connecting" | "error"): string {
-  switch (status) {
-    case "ready":
-      return "bg-safelight";
-    case "connecting":
-      return "bg-halide animate-pulse";
-    default:
-      return "bg-stop";
-  }
-}
+const engineDot = computed(() =>
+  conn.ready ? "bg-success" : conn.status === "starting" ? "bg-sapphire ms-pulse" : "bg-error",
+);
 </script>
 
 <template>
-  <div class="max-w-2xl">
-    <!-- Machines live in their own workspace now -->
-    <div class="border-edge flex items-center gap-3 rounded-chrome border bg-bench p-4">
-      <div class="min-w-0 flex-1">
-        <span class="text-body font-medium text-ink">Machines</span>
-        <p class="mt-1 text-caption text-ink-3">
-          Add, connect, forget, and inspect machines — including RunPod and hosts on your network —
-          in the Machines workspace.
-        </p>
-      </div>
+  <div>
+    <!-- Machines live in their own workspace — this is the doorway -->
+    <SettingRow
+      label="Your machines"
+      help="Connect, rent, forget, and inspect machines — including RunPod and hosts on your network — in Machines."
+    >
       <button
         type="button"
         data-test="open-machines"
-        class="border-ce h-8 shrink-0 rounded-control border px-3 text-body font-semibold text-ink-2 hover:text-ink"
+        class="ms-toolbar-button"
         @click="router.push('/machines')"
       >
         Open Machines
       </button>
-    </div>
+    </SettingRow>
 
     <!-- This device -->
-    <div class="border-edge mt-4 rounded-chrome border bg-bench p-4">
-      <div class="flex items-center gap-3">
-        <span
-          class="h-1.5 w-1.5 shrink-0 rounded-full"
-          :class="
-            hostDot(conn.ready ? 'ready' : conn.status === 'starting' ? 'connecting' : 'error')
-          "
-        />
-        <span class="text-body font-medium text-ink">This device</span>
-        <span class="data-mono ml-auto text-caption text-ink-3">{{ conn.baseUrl ?? "—" }}</span>
+    <SettingRow label="This device" :help="conn.baseUrl ?? undefined">
+      <span class="flex items-center gap-2">
+        <span class="h-1.5 w-1.5 rounded-full" :class="engineDot" aria-hidden="true" />
         <button
           v-if="conn.mode === 'local'"
           type="button"
-          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+          class="ms-toolbar-button"
           :disabled="restarting"
           @click="restartEngine"
         >
-          {{ restarting ? "Restarting…" : "Restart" }}
+          {{ restarting ? "Restarting…" : "Restart engine" }}
         </button>
-      </div>
+      </span>
+    </SettingRow>
 
-      <div class="border-edge mt-4 border-t pt-4">
-        <span class="text-caption text-ink-2">This device API key</span>
-        <p class="mt-1 text-caption text-ink-3">
-          Use this key when another Mold app connects to this device over the network.
-        </p>
-        <div class="mt-2 flex items-center gap-2">
-          <code
-            class="border-edge data-mono rounded-control border bg-bath px-2 py-1 text-caption text-ink-2"
-          >
-            {{
-              localApiKey
-                ? localKeyVisible
-                  ? localApiKey
-                  : "••••••••••••••••"
-                : "Local server unavailable"
-            }}
-          </code>
-          <button
-            v-if="localApiKey"
-            type="button"
-            data-test="reveal-local-api-key"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-            @click="localKeyVisible = !localKeyVisible"
-          >
-            {{ localKeyVisible ? "Hide" : "Reveal" }}
-          </button>
-          <button
-            v-if="localApiKey"
-            type="button"
-            data-test="copy-local-api-key"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-            @click="copyLocalApiKey"
-          >
-            Copy
-          </button>
-        </div>
-        <div v-if="localFailure" class="mt-2">
-          <p class="text-caption text-stop">{{ localFailure }}</p>
-          <button
-            type="button"
-            data-test="open-local-logs"
-            class="border-edge mt-2 h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-            @click="ipc.openLogsDir()"
-          >
-            Open logs folder
-          </button>
-        </div>
-      </div>
+    <SettingRow
+      label="This device's API key"
+      help="Another mold app on your network uses this key to connect here."
+    >
+      <!-- A revealed key is one long unbreakable token in a `shrink-0` group:
+           bound it and let it break, or the whole page gains a horizontal
+           scrollbar at the persisted 130% interface scale. -->
+      <code
+        class="max-w-[18ch] break-all rounded-control border border-border bg-bg px-2 py-1 font-mono text-micro text-fg-2"
+        data-test="local-api-key"
+      >
+        {{ localApiKey ? (localKeyVisible ? localApiKey : "••••••••••••••••") : noKeyReason }}
+      </code>
+      <button
+        v-if="localApiKey"
+        type="button"
+        data-test="reveal-local-api-key"
+        class="ms-toolbar-button"
+        @click="localKeyVisible = !localKeyVisible"
+      >
+        {{ localKeyVisible ? "Hide" : "Reveal" }}
+      </button>
+      <button
+        v-if="localApiKey"
+        type="button"
+        data-test="copy-local-api-key"
+        class="ms-toolbar-button"
+        @click="copyLocalApiKey"
+      >
+        Copy
+      </button>
+    </SettingRow>
+
+    <div v-if="localFailure" class="border-b border-border px-3.5 py-3">
+      <p class="text-xs text-error">{{ localFailure }}</p>
+      <button
+        type="button"
+        data-test="open-local-logs"
+        class="ms-toolbar-button mt-2"
+        @click="ipc.openLogsDir()"
+      >
+        Open logs folder
+      </button>
     </div>
 
     <MoldHomeCard />
-
-    <!-- Storage (engine config) -->
-    <div v-if="config.available" class="mt-5">
-      <ConfigSettingRow schema-key="models_dir" />
-      <ConfigSettingRow schema-key="output_dir" />
-    </div>
   </div>
 </template>

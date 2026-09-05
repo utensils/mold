@@ -22,7 +22,16 @@ pub async fn run(path: &Path) -> Result<()> {
     let authority = super::chain::resolve_chain_model_authority(&built.model, &config);
     let substitution = super::chain::normalize_script_motion_tail(&mut built, &authority);
     let model = built.model.clone();
-    let req = built.normalise_with_family(authority.family_hint())?;
+    let mut req = built.normalise_with_family(authority.family_hint())?;
+    // Audio is a resolved default, not an opt-in: a script that never
+    // mentions `enable_audio` still renders with sound on an LTX-2 chain, so
+    // validation has to report the answer the render will use.
+    //
+    // `mold chain validate` has no `--local`, so it plans the submission
+    // route: the answer belongs to whichever host renders it, and the CLI
+    // only resolves it for a run it performs itself. An explicit
+    // `enable_audio` in the script still survives.
+    req.enable_audio = super::chain::resolve_chain_enable_audio(&req, &config, false);
     if let Some((original, applied)) = substitution {
         println!(
             "note: {model} carries {applied} frame(s) across a seam, not {original}; \
@@ -30,9 +39,10 @@ pub async fn run(path: &Path) -> Result<()> {
         );
     }
     println!(
-        "OK — {} stages, {} frames estimated",
+        "OK — {} stages, {} frames estimated, audio {}",
         req.stages.len(),
-        req.estimated_total_frames()
+        req.estimated_total_frames(),
+        super::chain::describe_enable_audio(req.enable_audio)
     );
     Ok(())
 }

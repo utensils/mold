@@ -585,6 +585,28 @@ export function isImageConditionedVideoFamily(family: string): boolean {
 }
 
 /**
+ * Whether a fresh selection of this model renders with sound.
+ *
+ * Mirrors `mold_core::generation_profile::resolve_enable_audio` with the
+ * recipe's own `supports_audio`: an unset request means the recipe's answer,
+ * and that answer is ON wherever the recipe can deliver audio. A video model
+ * that renders sound is what the user asked for when they picked it; making
+ * them find a toggle first is what shipped silent clips by default.
+ *
+ * The model row's `supports_audio === false` is the narrower veto — a
+ * video-only LTX-2 checkpoint whose audio assets are missing — and it wins
+ * over the family-level capability. This is only the DEFAULT: an explicit
+ * user choice is stored on the form and sent verbatim.
+ */
+export function defaultEnableAudio(
+  capabilities: { supportsAudio: boolean },
+  model: { supports_audio?: boolean | null } | null | undefined,
+): boolean {
+  if (!capabilities.supportsAudio) return false;
+  return model?.supports_audio !== false;
+}
+
+/**
  * Whether a model is an UNDISTILLED FLUX.2 [klein] base checkpoint.
  *
  * These are the one Flux.2 tier trained without guidance distillation, so

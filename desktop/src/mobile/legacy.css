@@ -1,0 +1,113 @@
+/*
+ * LEGACY — the iPhone/Android surface still speaks the pre-redesign token
+ * vocabulary. ui/tokens.css's LEGACY BRIDGE keeps those custom properties
+ * alive and this file keeps the handful of Tailwind utilities they pair with.
+ * Delete both, and import ../styles/base.css instead, when the mobile surface
+ * is redesigned.
+ */
+@import "tailwindcss";
+@import "../../../ui/tokens.css";
+@import "../../../ui/fonts/fonts.css";
+@import "../../../ui/kit.css";
+
+@theme {
+  --font-display: var(--f-display);
+  --font-body: var(--f-body);
+  --font-utility: var(--f-mono);
+
+  --text-display-lg: 2.125rem;
+  --text-display: 1.375rem;
+  --text-display-sm: 1.125rem;
+  --text-body-lg: 0.9375rem;
+  --text-body: 0.8125rem;
+  --text-caption: 0.6875rem;
+  --text-data: 0.75rem;
+  --text-edge-code: 0.65625rem;
+}
+
+/* Native-app feel: no WebKit elastic rubber-banding anywhere. The document
+ * containers are not enough — every inner scroll region (the Create stack, the
+ * gallery, every sheet) must stop dead at its limits too. */
+html,
+body,
+#app,
+* {
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--bath);
+  color: var(--rebate);
+  font-family: var(--f-body);
+  font-size: var(--text-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Text the user composes or reads as CONTENT is selectable; the chrome is
+ * not, so a long press on a button does not raise a selection loupe. */
+input,
+textarea,
+[data-selectable] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* WKWebView may expose Picture in Picture in its native media controls even
+ * when the element opts out. Playback stays inside the app's own viewer, so
+ * that WebKit-only control is hidden as a fallback. */
+video::-webkit-media-controls-picture-in-picture-button {
+  display: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--safelight) 35%, transparent);
+}
+
+/* Utility type roles the mobile views still compose with. */
+.edge-code {
+  font-family: var(--f-mono);
+  font-size: var(--text-edge-code);
+  font-stretch: 87.5%;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.data-mono {
+  font-family: var(--f-mono);
+  font-size: var(--text-data);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Visually hidden, still read by assistive tech. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Someone who asked the system for less motion gets it here too. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

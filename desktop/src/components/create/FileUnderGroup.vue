@@ -320,7 +320,7 @@ onBeforeUnmount(() => {
           @mousedown.prevent="commitTag(tag.name, 'suggestion')"
         >
           <span class="ms-fu__row-name">{{ tag.name }}</span>
-          <span class="data-mono ms-fu__row-count">{{ tag.count }}</span>
+          <span class="font-mono text-xs ms-fu__row-count">{{ tag.count }}</span>
         </button>
         <p class="ms-fu__pop-foot">↵ adds · new names are created on develop</p>
       </div>
@@ -336,7 +336,7 @@ onBeforeUnmount(() => {
           class="ms-fu__collection-main"
           data-test="file-under-collection"
           :aria-expanded="collectionMenuOpen"
-          aria-label="Collection"
+          aria-label="Album"
           @click.stop="toggleCollectionMenu"
         >
           <Icon name="collection" :size="14" />
@@ -344,7 +344,7 @@ onBeforeUnmount(() => {
           <span v-else class="ms-fu__collection-none">None</span>
           <span
             v-if="chosen?.source === 'title'"
-            class="data-mono ms-fu__collection-match"
+            class="font-mono text-xs ms-fu__collection-match"
             data-test="file-under-collection-match"
           >
             · matched to title <span class="ms-fu__collection-tick">✓</span>
@@ -355,8 +355,8 @@ onBeforeUnmount(() => {
           type="button"
           class="ms-fu__chip-x"
           data-test="file-under-collection-clear"
-          aria-label="Clear collection"
-          title="Clear collection"
+          aria-label="Clear the album"
+          title="Clear the album"
           @click.stop="clearChosen"
         >
           ✕
@@ -383,7 +383,7 @@ onBeforeUnmount(() => {
         >
           <span class="ms-fu__row-tick">{{ slugOf(entry) === chosenSlug ? "✓" : "" }}</span>
           <span class="ms-fu__row-name">{{ entry.name }}</span>
-          <span v-if="countFor(entry) !== null" class="data-mono ms-fu__row-count">
+          <span v-if="countFor(entry) !== null" class="font-mono text-xs ms-fu__row-count">
             {{ countFor(entry) }}
           </span>
         </button>
@@ -395,7 +395,7 @@ onBeforeUnmount(() => {
           @click="openNewCollection"
         >
           <Icon name="plus" :size="13" />
-          <span class="ms-fu__row-name">New collection…</span>
+          <span class="ms-fu__row-name">New album…</span>
         </button>
         <div v-else class="ms-fu__row ms-fu__row--new">
           <Icon name="plus" :size="13" />
@@ -404,8 +404,8 @@ onBeforeUnmount(() => {
             type="text"
             class="ms-fu__new-input"
             data-test="file-under-new-collection-input"
-            placeholder="Collection name"
-            aria-label="New collection name"
+            placeholder="Album name"
+            aria-label="New album name"
             @keydown.enter.prevent="commitNewCollection"
             @keydown.esc.prevent="closeCollectionMenu"
           />
@@ -420,7 +420,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <p class="data-mono ms-fu__filename" data-test="file-under-filename">
+    <p class="font-mono text-xs ms-fu__filename" data-test="file-under-filename">
       <span class="ms-fu__filename-key">files as</span>
       {{ previewStem }}<b v-if="previewSlug" class="ms-fu__filename-slug">{{ previewSlug }}</b>
     </p>
@@ -433,18 +433,18 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid var(--edge);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bench) 55%, var(--bath));
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
+  background: color-mix(in srgb, var(--mold-bg) 55%, var(--mold-bg-deep));
   padding: 10px;
 }
 .ms-fu__title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   font-weight: 600;
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 .ms-fu__anchor {
   position: relative;
@@ -455,9 +455,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 5px;
   min-height: 34px;
-  border: 1px solid var(--ce);
-  border-radius: 9px;
-  background: var(--bath);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg-deep);
   padding: 5px 7px;
 }
 .ms-fu__chip {
@@ -465,12 +465,12 @@ onBeforeUnmount(() => {
   min-height: 22px;
   align-items: center;
   gap: 5px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-pill);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
   padding: 1px 5px 1px 8px;
-  font-size: 11.5px;
-  color: var(--ink-2);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
   max-width: 100%;
   overflow-wrap: anywhere;
 }
@@ -478,34 +478,34 @@ onBeforeUnmount(() => {
    for this draft even as the title keeps re-deriving the same slug. */
 .ms-fu__chip--ghost {
   border-style: dashed;
-  border-color: var(--ce);
+  border-color: var(--mold-border-control);
   background: transparent;
 }
 .ms-fu__chip-src {
-  font-family: var(--f-mono);
-  font-size: 9px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.06em;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-fu__chip-x {
   border: 0;
   background: transparent;
-  color: var(--ink-3);
-  font-size: 10px;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-micro);
   line-height: 1;
   cursor: pointer;
   padding: 0 1px;
 }
 .ms-fu__chip-x:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .ms-fu__tag-input {
   flex: 1 1 90px;
   min-width: 80px;
   border: 0;
   background: transparent;
-  font-size: 12px;
-  color: var(--rebate);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
   padding: 2px 0;
 }
 .ms-fu__tag-input:focus {
@@ -517,12 +517,12 @@ onBeforeUnmount(() => {
   min-height: 34px;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--ce);
-  border-radius: 9px;
-  background: var(--bath);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg-deep);
   padding: 0 9px;
-  font-size: 12px;
-  color: var(--rebate);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
   cursor: pointer;
 }
 .ms-fu__collection-main {
@@ -546,16 +546,16 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .ms-fu__collection-none {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .ms-fu__collection-tick {
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-weight: 700;
 }
 .ms-fu__collection-match {
   flex-shrink: 0;
-  font-size: 9px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 /* Anchored to the group, never to the small input: `left/right: 0` keeps the
    popover inside the inspector at every panel width. */
@@ -567,9 +567,9 @@ onBeforeUnmount(() => {
   z-index: 30;
   max-height: 16rem;
   overflow-y: auto;
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
   padding: 5px 0;
 }
@@ -580,27 +580,27 @@ onBeforeUnmount(() => {
   gap: 6px;
   padding: 5px 10px;
   text-align: left;
-  font-size: 12px;
-  color: var(--ink-2);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
   background: transparent;
   border: 0;
   cursor: pointer;
 }
 .ms-fu__row:hover {
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
 }
 .ms-fu__row--new {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   margin-top: 4px;
   padding-top: 7px;
-  color: var(--halide);
+  color: var(--mold-sapphire);
 }
 .ms-fu__row-tick {
   width: 10px;
   flex-shrink: 0;
-  color: var(--safelight);
-  font-size: 10px;
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-micro);
 }
 .ms-fu__row-name {
   min-width: 0;
@@ -611,45 +611,45 @@ onBeforeUnmount(() => {
 }
 .ms-fu__row-count {
   flex-shrink: 0;
-  font-size: 10px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 .ms-fu__new-input {
   flex: 1;
   min-width: 0;
   border: 0;
   background: transparent;
-  font-size: 12px;
-  color: var(--rebate);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
 }
 .ms-fu__new-input:focus {
   outline: none;
 }
 .ms-fu__pop-foot {
   padding: 4px 10px 2px;
-  font-size: 9px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 /* Dashed, like the ghost chip: a preview of a name the host will stamp. */
 .ms-fu__filename {
-  border: 1px dashed var(--ce);
-  border-radius: 6px;
-  background: var(--bath);
+  border: 1px dashed var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg-deep);
   padding: 6px 8px;
-  font-size: 10.5px;
+  font-size: var(--mold-fs-micro);
   line-height: 1.6;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   overflow-wrap: anywhere;
 }
 .ms-fu__filename-key {
   margin-right: 5px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  font-size: 8.5px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 .ms-fu__filename-slug {
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-weight: 600;
 }
 </style>

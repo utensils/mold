@@ -25,6 +25,7 @@ import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/Sourc
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { resolveExclusiveWells, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
+import SliderRow from "@ui/components/SliderRow.vue";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -161,6 +162,15 @@ const sourceLimitLabel = computed(() =>
 const pickerOpen = ref(false);
 const endPickerOpen = ref(false);
 const maskOpen = ref(false);
+/** Whether this recipe and this attachment can take a painted mask at all —
+ * the one answer behind the group's "Paint a mask" door. */
+const maskAvailable = computed(
+  () => sourceRefinements.value && caps.value.supportsMask && Boolean(props.form.sourceImage),
+);
+function openMaskEditor() {
+  if (maskAvailable.value) maskOpen.value = true;
+}
+defineExpose({ maskAvailable, openMaskEditor });
 const h3ReferencePickerOpen = ref(false);
 /** Which ordered reference the crop dialog is editing; null when closed. */
 const h3CropIndex = ref<number | null>(null);
@@ -460,8 +470,8 @@ function setSourceFitMode(e: Event) {
 <template>
   <div v-if="plan.kind === 'h3-references'" data-test="h3-reference-controls">
     <div class="mb-2 flex items-center gap-2">
-      <span class="edge-code">Ordered references</span>
-      <div class="border-edge h-px flex-1 border-t" />
+      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">Ordered references</span>
+      <div class="border-border h-px flex-1 border-t" />
     </div>
     <MinimaxH3AuthoringPanel
       :model-value="h3Authoring"
@@ -513,14 +523,14 @@ function setSourceFitMode(e: Event) {
       @clear="onPrimaryClear"
     />
     <template v-if="targetLayout && form.imageAttachments[0]">
-      <label class="mt-3 block text-caption text-ink-2" for="edit-source-fit-policy">
+      <label class="mt-3 block text-micro text-fg-2" for="edit-source-fit-policy">
         Source fit
       </label>
       <select
         id="edit-source-fit-policy"
         :value="editFitMode"
         data-test="source-fit-policy"
-        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+        class="border-border mt-1 h-7 w-full rounded-control border bg-bg-deep px-1.5 text-sm text-fg"
         @change="setSourceFitMode"
       >
         <option
@@ -531,7 +541,7 @@ function setSourceFitMode(e: Event) {
           {{ option.label }}
         </option>
       </select>
-      <p class="mt-1 text-caption text-ink-3" data-test="source-fit-help">
+      <p class="mt-1 text-micro text-fg-dim" data-test="source-fit-help">
         {{ sourceFitHelp(editFitMode) }} Qwen conditioning limit: {{ sourceLimitLabel }} from this
         model; Output size is separate.
       </p>
@@ -543,8 +553,10 @@ function setSourceFitMode(e: Event) {
       class="mb-2 flex items-center gap-2"
       :class="{ 'mt-3': plan.kind === 'single-or-references' }"
     >
-      <span class="edge-code">{{ referencesOnly ? "References" : "Pictures" }}</span>
-      <div class="border-edge h-px flex-1 border-t" />
+      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+        referencesOnly ? "References" : "Pictures"
+      }}</span>
+      <div class="border-border h-px flex-1 border-t" />
     </div>
 
     <div
@@ -556,7 +568,7 @@ function setSourceFitMode(e: Event) {
       <div
         v-for="(image, index) in form.imageAttachments"
         :key="`${index}-${image.slice(0, 16)}`"
-        class="relative w-20 shrink-0 overflow-hidden rounded-media border border-control-edge bg-bath"
+        class="relative w-20 shrink-0 overflow-hidden rounded-inner border border-border-control bg-bg-deep"
         draggable="true"
         :data-test="`attachment-card-${index}`"
         @dragstart="onTileDragStart(index, $event)"
@@ -570,17 +582,20 @@ function setSourceFitMode(e: Event) {
           :alt="`${attachmentRoleLabel(index)} ${attachmentTitleLabel(index)}`"
         />
         <div class="px-1.5 py-1 leading-tight">
-          <div class="edge-code" :data-test="`attachment-role-${index}`">
+          <div
+            class="font-mono text-micro text-fg-dim whitespace-nowrap"
+            :data-test="`attachment-role-${index}`"
+          >
             {{ referencesOnly ? `Reference ${index + 1}` : attachmentRoleLabel(index) }}
           </div>
-          <div class="truncate text-caption text-ink" :data-test="`attachment-title-${index}`">
+          <div class="truncate text-micro text-fg" :data-test="`attachment-title-${index}`">
             {{ attachmentTitleLabel(index) }}
           </div>
         </div>
         <button
           v-if="index > 0"
           type="button"
-          class="absolute top-1 left-1 h-5 w-5 rounded-control bg-bath/90 text-caption text-ink-2 hover:text-ink"
+          class="absolute top-1 left-1 h-5 w-5 rounded-control bg-bg-deep/90 text-micro text-fg-2 hover:text-fg"
           :aria-label="`Move ${attachmentTitleLabel(index)} left`"
           :data-test="`move-attachment-up-${index}`"
           @click="moveAttachmentBy(index, -1)"
@@ -590,7 +605,7 @@ function setSourceFitMode(e: Event) {
         <button
           v-if="index < form.imageAttachments.length - 1"
           type="button"
-          class="absolute top-1 left-7 h-5 w-5 rounded-control bg-bath/90 text-caption text-ink-2 hover:text-ink"
+          class="absolute top-1 left-7 h-5 w-5 rounded-control bg-bg-deep/90 text-micro text-fg-2 hover:text-fg"
           :aria-label="`Move ${attachmentTitleLabel(index)} right`"
           :data-test="`move-attachment-down-${index}`"
           @click="moveAttachmentBy(index, 1)"
@@ -599,7 +614,7 @@ function setSourceFitMode(e: Event) {
         </button>
         <button
           type="button"
-          class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
+          class="border-border absolute top-1 right-1 h-5 w-5 rounded-control border bg-bg-deep text-fg-2 hover:text-error"
           :aria-label="`Remove ${attachmentTitleLabel(index)}`"
           :data-test="`remove-attachment-${index}`"
           @click="removeAttachmentAt(index)"
@@ -610,7 +625,7 @@ function setSourceFitMode(e: Event) {
 
       <button
         type="button"
-        class="flex h-[4.75rem] w-20 shrink-0 cursor-pointer items-center justify-center rounded-media border border-dashed border-control-edge text-body-lg text-ink-3 transition-colors hover:border-safelight hover:text-safelight focus-visible:outline-2 focus-visible:outline-safelight"
+        class="flex h-[4.75rem] w-20 shrink-0 cursor-pointer items-center justify-center rounded-inner border border-dashed border-border-control text-base text-fg-dim transition-colors hover:border-accent hover:text-accent focus-visible:outline-2 focus-visible:outline-accent"
         data-test="add-edit-image"
         aria-label="Add pictures"
         @click="editPickerOpen = true"
@@ -620,7 +635,7 @@ function setSourceFitMode(e: Event) {
     </div>
     <p
       v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
-      class="mt-1 text-caption text-ink-3"
+      class="mt-1 text-micro text-fg-dim"
     >
       {{
         referencesOnly
@@ -633,7 +648,7 @@ function setSourceFitMode(e: Event) {
     <!-- The exclusive parking note, on whichever well is not shipping. -->
     <p
       v-if="exclusive?.parked === 'references'"
-      class="mt-1 text-caption text-ink-3"
+      class="mt-1 text-micro text-fg-dim"
       data-test="references-parked-note"
     >
       {{ exclusive.note }}
@@ -663,12 +678,12 @@ function setSourceFitMode(e: Event) {
          exclusive recipe these belong to the Source well, so they render
          only while it is the active one. -->
     <template v-if="sourceRefinements && form.sourceImage && !caps.canvasless">
-      <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
+      <label class="mt-3 block text-micro text-fg-2" for="source-fit-policy">Source fit</label>
       <select
         id="source-fit-policy"
         :value="form.sourceFit?.mode ?? defaultSourceFitPolicy().mode"
         data-test="source-fit-policy"
-        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+        class="border-border mt-1 h-7 w-full rounded-control border bg-bg-deep px-1.5 text-sm text-fg"
         @change="setSourceFitMode"
       >
         <option v-if="caps.supportsMask" value="pad-repaint">Pad repaint</option>
@@ -679,7 +694,7 @@ function setSourceFitMode(e: Event) {
       </select>
       <p
         v-if="form.sourceFit?.mode === 'upscale-then-fit'"
-        class="mt-1 text-caption text-ink-3"
+        class="mt-1 text-micro text-fg-dim"
         data-test="source-fit-upscaler-hint"
       >
         {{
@@ -692,35 +707,25 @@ function setSourceFitMode(e: Event) {
 
     <!-- Strength (wan pins the first frame exactly and never reads it) -->
     <template v-if="sourceRefinements && form.sourceImage && caps.supportsStrength">
-      <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
-        {{ strength.label }}
-        <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
-      </label>
-      <input
-        v-model.number="form.strength"
-        type="range"
-        min="0.05"
-        max="1"
-        step="0.05"
-        class="mt-1 w-full accent-[var(--safelight)]"
-        :aria-label="strength.label"
-        :title="strength.hint"
+      <SliderRow
+        class="mt-3"
+        :model-value="form.strength"
+        :min="0.05"
+        :max="1"
+        :step="0.05"
+        :label="strength.label"
+        :value-label="form.strength.toFixed(2)"
+        :low="strength.higherMeansSource ? 'Start fresh' : 'Keep the photo'"
+        :high="strength.higherMeansSource ? 'Keep the photo' : 'Start fresh'"
+        @update:model-value="form.strength = $event"
       />
+      <p class="mt-1 text-micro text-fg-dim">{{ strength.hint }}</p>
     </template>
 
-    <!-- Mask well (inpaint families) -->
-    <template v-if="sourceRefinements && caps.supportsMask && form.sourceImage">
-      <div class="mt-3 flex items-center justify-between">
-        <label class="text-caption text-ink-2">Mask</label>
-        <button
-          type="button"
-          class="text-caption text-safelight underline-offset-2 hover:underline"
-          data-test="source-edit-mask"
-          @click="maskOpen = true"
-        >
-          Edit mask…
-        </button>
-      </div>
+    <!-- Mask well (inpaint families). Painting is opened by the Start-from-a-
+         photo group's own door, which asks this component whether it has one. -->
+    <template v-if="maskAvailable">
+      <label class="mt-3 block text-micro text-fg-2">Mask</label>
       <div class="mt-1">
         <ImageDropWell
           :image="form.maskImage"
@@ -735,7 +740,7 @@ function setSourceFitMode(e: Event) {
 
     <!-- Control well + model + scale (sd15 only) -->
     <template v-if="caps.supportsControlNet">
-      <label class="mt-3 block text-caption text-ink-2">Control image</label>
+      <label class="mt-3 block text-micro text-fg-2">Control image</label>
       <div class="mt-1">
         <ImageDropWell
           :image="form.controlImage"
@@ -747,14 +752,14 @@ function setSourceFitMode(e: Event) {
         />
       </div>
       <template v-if="form.controlImage">
-        <label class="mt-3 block text-caption text-ink-2" for="controlnet-select">
+        <label class="mt-3 block text-micro text-fg-2" for="controlnet-select">
           Control model
         </label>
         <select
           id="controlnet-select"
           data-test="controlnet-select"
           :value="controlSelectValue"
-          class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+          class="border-border mt-1 h-7 w-full rounded-control border bg-bg-deep px-1.5 text-sm text-fg"
           @change="onControlModelChange"
         >
           <option value="">None</option>
@@ -770,7 +775,7 @@ function setSourceFitMode(e: Event) {
         </select>
         <p
           v-if="controlNetOptions.some((o) => o.disabled)"
-          class="mt-1 text-caption text-ink-3"
+          class="mt-1 text-micro text-fg-dim"
           data-test="controlnet-missing-hint"
         >
           Greyed-out models aren't downloaded yet — pull them from the Catalog.
@@ -783,10 +788,11 @@ function setSourceFitMode(e: Event) {
           type="text"
           aria-label="Custom control model id"
           placeholder="controlnet-canny-sd15"
-          class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink placeholder:text-ink-3"
+          class="border-border mt-1 h-7 w-full rounded-control border bg-bg-deep px-1.5 text-sm text-fg placeholder:text-fg-dim"
         />
-        <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
-          Control scale <span class="data-mono text-ink">{{ form.controlScale.toFixed(2) }}</span>
+        <label class="mt-3 flex items-center justify-between text-micro text-fg-2">
+          Control scale
+          <span class="font-mono text-xs text-fg">{{ form.controlScale.toFixed(2) }}</span>
         </label>
         <input
           v-model.number="form.controlScale"
@@ -794,7 +800,7 @@ function setSourceFitMode(e: Event) {
           min="0"
           max="2"
           step="0.05"
-          class="mt-1 w-full accent-[var(--safelight)]"
+          class="mt-1 w-full accent-[var(--mold-blue)]"
         />
       </template>
     </template>
@@ -838,12 +844,12 @@ function setSourceFitMode(e: Event) {
     <!-- The same client-side fit as an ordinary source, coerced maskless and
          applied to both boundaries at submit. -->
     <template v-if="h3Authoring.firstFrame || h3Authoring.lastFrame">
-      <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
+      <label class="mt-3 block text-micro text-fg-2" for="source-fit-policy">Source fit</label>
       <select
         id="source-fit-policy"
         :value="coerceSourceFitForMaskless(form.sourceFit ?? { mode: 'crop-fill' }).mode"
         data-test="source-fit-policy"
-        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+        class="border-border mt-1 h-7 w-full rounded-control border bg-bg-deep px-1.5 text-sm text-fg"
         @change="setSourceFitMode"
       >
         <option value="crop-fill">Crop fill</option>

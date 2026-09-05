@@ -32,6 +32,14 @@ vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
   ipc: { localGalleryList: vi.fn().mockResolvedValue({ images: [], target: null }) },
 }));
+// "Use these settings" asks the producing host what source media it kept.
+const retainedInventory = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ availability: "available", members: [] }),
+);
+vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@studio/api/gallerySourceMedia")>();
+  return { ...actual, retainedSourceMediaInventory: retainedInventory };
+});
 
 import HistoryDrawer from "./HistoryDrawer.vue";
 import DrawerPanel from "@ui/components/DrawerPanel.vue";
@@ -149,20 +157,34 @@ beforeEach(() => {
 });
 
 describe("HistoryDrawer runs", () => {
-  it("starts wider and persists left-edge resizing or a double-click reset", async () => {
+  it("is an inline column, never a modal drawer over the grid", async () => {
+    const wrapper = await mountDrawer();
+    // A scrim with `aria-modal` made every tile behind it unclickable; the
+    // panel is a plain flex sibling of the grid instead.
+    expect(wrapper.findComponent(DrawerPanel).exists()).toBe(false);
+    const panel = wrapper.get("[data-test='history-panel']");
+    expect(panel.attributes("aria-modal")).toBeUndefined();
+    expect(panel.attributes("role")).toBeUndefined();
+    expect(panel.attributes("aria-label")).toBe("History");
+    expect(wrapper.find(".ms-drawer").exists()).toBe(false);
+  });
+
+  it("opens at the mock's column width and persists left-edge resizing or a reset", async () => {
     const wrapper = await mountDrawer();
     const prefs = useAppPrefsStore();
     const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined);
-    expect(wrapper.getComponent(DrawerPanel).props("width")).toBe(620);
+    const width = () =>
+      (wrapper.get("[data-test='history-panel']").element as HTMLElement).style.width;
+    expect(width()).toBe("290px");
 
     const handle = wrapper.getComponent(PanelResizeHandle);
     expect(handle.props("label")).toBe("Resize history");
     handle.vm.$emit("resize", -80);
     await flushPromises();
-    expect(wrapper.getComponent(DrawerPanel).props("width")).toBe(700);
+    expect(width()).toBe("370px");
     handle.vm.$emit("commit");
     await flushPromises();
-    expect(update).toHaveBeenCalledWith({ historyDrawerWidth: 700 });
+    expect(update).toHaveBeenCalledWith({ historyDrawerWidth: 370 });
 
     handle.vm.$emit("reset");
     await flushPromises();
@@ -176,15 +198,21 @@ describe("HistoryDrawer runs", () => {
     expect(rows[0]!.text()).toContain("a lighthouse at dusk");
     expect(rows[0]!.text()).toContain("flux2-klein");
     expect(rows[0]!.text()).toContain("1024×768");
-    expect(rows[0]!.text()).toContain("S 42");
-    expect(rows[0]!.text()).toContain("4 steps");
+    expect(rows[0]!.text()).toContain("seed 42");
+    // The mock's meta line folds the clock in and drops the pass count.
+    expect(rows[0]!.get("[data-test='run-meta']").text()).toMatch(
+      /^flux2-klein · 1024×768 · seed 42 · \d{1,2}:\d{2}/,
+    );
+    expect(rows[0]!.text()).toContain("Use these settings");
   });
 
-  it("reuses a run's full settings including the seed", async () => {
+  it("reuses a run down the retained-source road, print and all", async () => {
     const wrapper = await mountDrawer();
     await wrapper.get("[data-test='run-row']").trigger("click");
     await flushPromises();
     const composer = useComposerStore();
+    // A bare `composer.set` restored the numbers and dropped the photo the
+    // print was made from — this is the same road the Lightbox takes.
     expect(composer.prefill).toEqual({
       metadata: expect.objectContaining({
         prompt: "a lighthouse at dusk",
@@ -192,7 +220,9 @@ describe("HistoryDrawer runs", () => {
         width: 1024,
         height: 768,
       }),
+      print: expect.objectContaining({ filename: "a.png", hostId: null }),
     });
+    expect(retainedInventory).toHaveBeenCalledWith("a.png", expect.anything());
     expect(router.currentRoute.value.path).toBe("/create");
   });
 
@@ -567,7 +597,7 @@ describe("HistoryDrawer sequences", () => {
     await wrapper.get("[data-test='seq-clear-inactive']").trigger("click");
     expect(chains.clearInactive).not.toHaveBeenCalled();
     expect(wrapper.get("[data-test='seq-clear-inactive']").text()).toBe(
-      "Delete 2 inactive sequences on okra?",
+      "Delete 2 inactive clips on okra?",
     );
     await wrapper.get("[data-test='seq-clear-inactive']").trigger("click");
     await flushPromises();
@@ -588,10 +618,8 @@ describe("HistoryDrawer sequences", () => {
     await wrapper.get("[data-test='seq-cleanup-disk']").trigger("click");
     expect(chains.gc).not.toHaveBeenCalled();
     const dialog = document.querySelector("[data-test='confirm-dialog']") as HTMLElement;
-    expect(dialog.textContent).toContain(
-      "cached scene media used for scene playback and sequence editing",
-    );
-    expect(dialog.textContent).toContain("Final videos in the Library remain.");
+    expect(dialog.textContent).toContain("the cached scenes used for playback and editing");
+    expect(dialog.textContent).toContain("Finished clips in My images stay.");
 
     (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
     await flushPromises();
@@ -618,7 +646,7 @@ describe("HistoryDrawer sequences", () => {
     await wrapper.get("[data-test='tab-sequences']").trigger("click");
     await flushPromises();
     const empty = wrapper.get("[data-test='sequences-empty']");
-    expect(empty.text()).toContain("No sequences yet");
+    expect(empty.text()).toContain("No clips yet");
     const buttons = empty.findAll("button");
     expect(buttons).toHaveLength(1);
     await buttons[0]!.trigger("click");

@@ -139,7 +139,7 @@ async function panelContract(wrapper: ReturnType<typeof mount>) {
     .findAllComponents({ name: "SegmentedControl" })
     .find((row) => row.props("label") === "File format");
   return {
-    strength: wrapper.text().includes("Denoise strength"),
+    strength: wrapper.text().includes("How much to change it"),
     mask: wrapper.find("[data-test='source-edit-mask']").exists(),
     negative: wrapper.find("[data-test='section-negative']").exists(),
     formats: (formatControl?.props("options") as { value: string }[] | undefined)?.map(
@@ -197,12 +197,11 @@ describe("InspectorPanel — a target host that does not have the model", () => 
     const octree = wrapper
       .findAllComponents({ name: "SegmentedControl" })
       .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    // Rough | Normal | Fine over the recipe's own floor, default and ceiling.
     expect(octree.props("options")).toEqual([
-      { value: 128, label: "128" },
-      { value: 192, label: "192" },
-      { value: 256, label: "256" },
-      { value: 320, label: "320" },
-      { value: 384, label: "384" },
+      { value: 128, label: "Rough" },
+      { value: 256, label: "Normal" },
+      { value: 384, label: "Fine" },
     ]);
   });
 
@@ -307,14 +306,14 @@ describe("InspectorPanel — Mesh group", () => {
       .findAllComponents({ name: "SegmentedControl" })
       .find((row) => row.attributes("data-test") === "mesh-octree")!;
     expect(octree.props("options")).toEqual([
-      { value: 128, label: "128" },
-      { value: 192, label: "192" },
-      { value: 256, label: "256" },
-      { value: 320, label: "320" },
-      { value: 384, label: "384" },
+      { value: 128, label: "Rough" },
+      { value: 256, label: "Normal" },
+      { value: 384, label: "Fine" },
     ]);
     // Untouched means "use the profile default", and the default is lit.
     expect(octree.props("modelValue")).toBe(256);
+    // The rung itself stays on screen as the mono truth beside the words.
+    expect(wrapper.get("[data-test='mesh-octree-truth']").text()).toContain("octree 256");
   });
 
   it("writes the chosen octree resolution onto the form", async () => {
@@ -333,7 +332,7 @@ describe("InspectorPanel — Mesh group", () => {
     await flushPromises();
     const threshold = wrapper
       .findAllComponents(SliderRow)
-      .find((row) => row.props("label") === "Iso threshold")!;
+      .find((row) => row.props("label") === "How tight to the photo")!;
     expect(threshold.props()).toMatchObject({
       min: 0,
       max: 1,
@@ -361,14 +360,14 @@ describe("InspectorPanel — Mesh group", () => {
     await flushPromises();
     const threshold = wrapper
       .findAllComponents(SliderRow)
-      .find((row) => row.props("label") === "Iso threshold")!;
+      .find((row) => row.props("label") === "How tight to the photo")!;
     expect(threshold.props("disabled")).toBe(true);
     expect(wrapper.get("[data-test='mesh-threshold-note']").text()).toBe(
       "This build pins the iso surface.",
     );
   });
 
-  it("bounds Target faces by the recipe and treats blank as the raw surface", async () => {
+  it("bounds Simplify to by the recipe and treats blank as every detail", async () => {
     const { form, wrapper } = mountFor(meshModel());
     await flushPromises();
     const faces = wrapper.get("[data-test='mesh-target-faces']");
@@ -385,7 +384,7 @@ describe("InspectorPanel — Mesh group", () => {
   // A budget outside the advertised bounds is a 422 at admission; the
   // inspector names the bounds inline (as it does for Steps) instead of
   // letting Generate learn it from the host.
-  it("names the advertised bounds beside a Target faces value outside them", async () => {
+  it("names the advertised bounds beside a Simplify to value outside them", async () => {
     const { form, wrapper } = mountFor(meshModel());
     await flushPromises();
     const faces = wrapper.get("[data-test='mesh-target-faces']");
@@ -395,12 +394,93 @@ describe("InspectorPanel — Mesh group", () => {
     // The typed value stands — it is not snapped behind the user's back.
     expect(form.mesh.targetFaces).toBe(10);
     expect(wrapper.get("[data-test='mesh-target-faces-error']").text()).toBe(
-      "Target faces must be a whole number from 100 to 2000000.",
+      "Use a whole number of faces from 100 to 2000000.",
     );
     expect(faces.attributes("aria-invalid")).toBe("true");
 
     await faces.setValue("50000");
     expect(wrapper.find("[data-test='mesh-target-faces-error']").exists()).toBe(false);
     expect(faces.attributes("aria-invalid")).toBeUndefined();
+  });
+});
+
+/**
+ * The three-rung collapse is the design; the unmatched restored value is not.
+ * `MESH_OCTREE_RESOLUTIONS` is five rungs, so 192 and 320 have no segment —
+ * and a print made at one of them (the CLI, an older client, Use these
+ * settings) left the control with nothing chosen while the truth line beneath
+ * it read `octree 192`.
+ */
+describe("InspectorPanel — an off-ladder octree value", () => {
+  it("adds the restored rung in order so it reads as chosen", async () => {
+    const { form, wrapper } = mountFor(meshModel());
+    await flushPromises();
+    form.mesh.octreeResolution = 192;
+    await flushPromises();
+    const octree = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    expect(octree.props("options")).toEqual([
+      { value: 128, label: "Rough" },
+      { value: 192, label: "192" },
+      { value: 256, label: "Normal" },
+      { value: 384, label: "Fine" },
+    ]);
+    expect(octree.props("modelValue")).toBe(192);
+  });
+
+  it("keeps the three-rung ladder for a value already on it", async () => {
+    const { form, wrapper } = mountFor(meshModel());
+    await flushPromises();
+    form.mesh.octreeResolution = 384;
+    await flushPromises();
+    const octree = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-octree")!;
+    expect(octree.props("options")).toHaveLength(3);
+  });
+});
+
+/**
+ * The Quality rows and the Add-on-looks group are the two main-column groups
+ * the inspector renders beside the sliders. Quality writes `form.steps` — it
+ * is the Detail slider's own three rungs, never a second setting — and a
+ * recipe that pins its steps offers no rows at all.
+ */
+describe("InspectorPanel — Quality and Add-on looks", () => {
+  it("offers the recipe's own recommended rungs, and writes Detail", async () => {
+    const { form, wrapper } = mountFor(rasterModel());
+    await flushPromises();
+    const rows = wrapper.get("[data-test='quality-presets']");
+    expect(rows.text()).toContain("Quality");
+    expect(rows.findAll("button").map((b) => b.text())).toEqual([
+      expect.stringContaining("Draft"),
+      expect.stringContaining("Good"),
+      expect.stringContaining("Best"),
+    ]);
+
+    const ladder = sdxlRecipe().steps!.recommended!;
+    await wrapper.get("[data-test='quality-draft']").trigger("click");
+    // The ladder's lowest rung — never the control's raw floor, which is an
+    // admission bound rather than a draft anyone would want.
+    expect(form.steps).toBe(ladder[0]);
+    expect(wrapper.get("[data-test='quality-draft']").attributes("aria-pressed")).toBe("true");
+
+    await wrapper.get("[data-test='quality-best']").trigger("click");
+    expect(form.steps).toBe(ladder[ladder.length - 1]);
+  });
+
+  it("keeps Add-on looks in the main column for a recipe that takes them", async () => {
+    const raster = mountFor(rasterModel());
+    await flushPromises();
+    expect(raster.wrapper.find("[data-test='inspector-loras']").exists()).toBe(true);
+
+    raster.wrapper.unmount();
+    document.body.innerHTML = "";
+    setActivePinia(createPinia());
+
+    const mesh = mountFor(meshModel());
+    await flushPromises();
+    expect(mesh.wrapper.find("[data-test='inspector-loras']").exists()).toBe(false);
   });
 });

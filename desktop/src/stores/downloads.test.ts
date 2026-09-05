@@ -271,6 +271,19 @@ describe("downloads store ETA + history + retry", () => {
     expect(store.etaByJob["a"]).toBe(90);
   });
 
+  it("exposes the live transfer rate per active job from the same samples", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const store = useDownloadsStore();
+    store.apply({ type: "started", id: "a", files_total: 2, bytes_total: 100_000_000 });
+    store.apply({ type: "progress", id: "a", files_done: 0, bytes_done: 0 });
+    // One sample is no rate yet — the banner shows a dash, never a guess.
+    expect(store.rateByJob["a"]).toBeNull();
+    vi.setSystemTime(10_000);
+    store.apply({ type: "progress", id: "a", files_done: 1, bytes_done: 10_000_000 });
+    expect(store.rateByJob["a"]).toBe(1_000_000);
+  });
+
   it("drops the rate window when a job settles", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -281,6 +294,7 @@ describe("downloads store ETA + history + retry", () => {
     store.apply({ type: "progress", id: "a", files_done: 0, bytes_done: 20 });
     store.apply({ type: "job_failed", id: "a", error: "boom" });
     expect(store.etaByJob["a"]).toBeUndefined();
+    expect(store.rateByJob["a"]).toBeUndefined();
     expect(Object.keys(store.rateSamples)).toHaveLength(0);
   });
 

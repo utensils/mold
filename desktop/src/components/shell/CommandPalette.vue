@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
-import Keycap from "@ui/components/Keycap.vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useUiStore } from "../../stores/ui";
 import { useGalleryStore } from "../../stores/gallery";
 import { useModelStore } from "../../stores/models";
@@ -14,7 +14,11 @@ import { useGenerationStore } from "../../stores/generation";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useQueueActivity } from "../../composables/useQueueActivity";
+import { useQueueCommands } from "../../composables/useQueueCommands";
 import { THEME_META } from "../../lib/theme";
+import { NAV_ROUTES } from "../../lib/shortcuts";
+import { altShortcutLabel, shiftShortcutLabel, shortcutLabel } from "../../lib/platform";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
@@ -29,12 +33,16 @@ import {
   type SearchableCatalogEntry,
 } from "@studio/lib/modelSearch";
 import { newGenerateForm, applyModelDefaults } from "../../lib/generateForm";
+import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { batchLockedForRequest, canRepeatPrint } from "../../lib/variations";
 import type { ModelEntry } from "../../lib/api/types";
 
 interface Command extends Matchable {
   id: string;
   title: string;
   subtitle?: string;
+  /** The chord that runs this without the palette, in the right mono column. */
+  key?: string | undefined;
   run: () => void;
 }
 
@@ -42,6 +50,10 @@ interface Command extends Matchable {
 const AUTO_TARGET_IDS = ["capable"] as const;
 
 const ui = useUiStore();
+// The palette sits above every dialog (z 120 over the modal's 100), so it
+// registers as the topmost overlay: otherwise a ModalPanel underneath took
+// Escape first and stopped it before the palette's own input ever saw it.
+useOverlayStack(toRef(ui, "paletteOpen"), "command-palette");
 const router = useRouter();
 const gallery = useGalleryStore();
 const models = useModelStore();
@@ -53,17 +65,72 @@ const generation = useGenerationStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
 const appPrefs = useAppPrefsStore();
+/**
+ * Whether Make 4 variations means anything for the picture on the canvas.
+ *
+ * The recipe that answers is the PRINT'S, read from its own saved request and
+ * the checkpoint's contract — never the composer's form, which may have moved
+ * on to another style since. Asking the form answered wrong in both
+ * directions: it hid the command for a repeatable print while an edit recipe
+ * was selected, and offered it for a print no recipe could repeat.
+ */
+const activePrintRepeatable = computed(() => {
+  const candidate = generation.active;
+  const request = candidate?.request;
+  if (!request) return false;
+  const entry = hostModels.contractEntryForTarget(request.model, candidate.hostId ?? null);
+  return canRepeatPrint(
+    candidate,
+    batchLockedForRequest(
+      request,
+      generationCapabilitiesForFamily(entry?.family ?? "", request.model),
+    ),
+  );
+});
+// The same queue authority Space and the sidebar act on, so the palette can
+// never pause a different machine than the status bar's hint promises.
+const queueCommands = useQueueCommands();
+// Stop everything is fleet-wide, so its count is the fleet's live work, not
+// this client's pending prints.
+const queue = useQueueActivity();
 const inventoryKnown = useInventoryKnown();
 
-/** Mono section label for a result row, derived from its id prefix. */
+/**
+ * The mono group column (README §04): the mock's five groups — make · queue ·
+ * go · styles · machines. First matching prefix wins, so a specific id sits
+ * above the family it belongs to. Look is a `go` row: it reaches a setting,
+ * and `make` is reserved for the rows that put a picture on the canvas.
+ */
+const GROUPS: readonly (readonly [prefix: string, group: string])[] = [
+  ["nav-runpod", "machines"],
+  ["nav-create", "make"],
+  ["nav-sequence", "make"],
+  ["nav-", "go"],
+  ["act-add-host", "machines"],
+  ["act-engine-restart", "machines"],
+  ["act-cancel", "queue"],
+  ["act-clear-finished", "queue"],
+  ["act-", "make"],
+  ["queue-", "queue"],
+  ["theme-", "go"],
+  ["appear-", "go"],
+  ["history-", "make"],
+  ["print-", "go"],
+  ["model-", "styles"],
+  ["load-", "styles"],
+  ["unload-", "styles"],
+  ["install-", "styles"],
+  ["style-", "styles"],
+];
+
 function sectionLabel(id: string): string {
-  if (id.startsWith("nav-")) return "go";
-  if (id.startsWith("theme-") || id.startsWith("appear-")) return "theme";
-  if (id.startsWith("model-") || id.startsWith("load-") || id.startsWith("unload-")) return "model";
-  if (id.startsWith("install-")) return "install";
-  if (id.startsWith("history-")) return "recent";
-  if (id.startsWith("print-")) return "print";
-  return "run";
+  return GROUPS.find(([prefix]) => id.startsWith(prefix))?.[1] ?? "go";
+}
+
+/** The nav chord for a destination, read from the keyboard map itself. */
+function navKey(route: string): string | undefined {
+  const key = Object.entries(NAV_ROUTES).find(([, target]) => target === route)?.[0];
+  return key ? shortcutLabel(key) : undefined;
 }
 
 const query = ref("");
@@ -188,61 +255,98 @@ const staticCommands = computed<Command[]>(() => {
   const cmds: Command[] = [
     {
       id: "nav-create",
-      title: "Go to Create",
-      // "generate" keeps the pre-rename muscle memory working.
-      keywords: ["generate", "compose"],
+      title: "New image",
+      // The old names keep muscle memory working.
+      keywords: ["create", "generate", "compose"],
+      key: navKey("/create"),
       run: () => go("/create"),
     },
     {
+      id: "nav-queue",
+      title: "Queue",
+      keywords: ["jobs", "waiting", "line", "being made"],
+      key: navKey("/queue"),
+      run: () => go("/queue"),
+    },
+    {
       id: "nav-library",
-      title: "Go to Library",
-      keywords: ["gallery", "prints"],
+      title: "My images",
+      keywords: ["library", "gallery", "prints", "pictures"],
+      key: navKey("/library"),
       run: () => go("/library"),
     },
     {
       id: "nav-models",
-      title: "Go to Models",
-      // "catalog" keeps the pre-rename muscle memory working.
-      keywords: ["models", "catalog"],
+      title: "Styles",
+      keywords: ["models", "catalog", "checkpoints"],
+      key: navKey("/models"),
       run: () => go("/models"),
     },
     {
       id: "nav-machines",
-      title: "Go to Machines",
+      title: "Machines",
       keywords: ["hosts", "jobs", "gpu"],
+      key: navKey("/machines"),
       run: () => go("/machines"),
     },
     {
       id: "nav-sequence",
-      title: "Create sequence",
-      keywords: ["sequence", "clips", "video"],
+      title: "Make a short clip",
+      keywords: ["sequence", "clips", "video", "scenes"],
       run: () => go("/create?output=sequence"),
     },
     {
       id: "nav-history",
-      title: "Open history",
-      keywords: ["runs", "prompts", "recent"],
+      title: "Recent settings",
+      keywords: ["history", "runs", "prompts", "recent"],
       run: () => go("/library?panel=history"),
     },
     {
       id: "nav-runpod",
-      title: "Manage RunPod GPUs",
-      keywords: ["cloud", "gpu", "instance"],
+      title: "Rent a GPU…",
+      keywords: ["runpod", "cloud", "gpu", "instance", "pod"],
       run: () => go("/machines/runpod"),
     },
-    { id: "nav-settings", title: "Go to Settings", run: () => go("/settings") },
+    {
+      id: "nav-settings",
+      title: "Settings",
+      key: navKey("/settings"),
+      run: () => go("/settings"),
+    },
     {
       id: "act-new",
-      title: "New generation",
-      keywords: ["clear", "compose"],
+      title: "Start a blank image",
+      keywords: ["new", "clear", "compose", "generation"],
+      key: shortcutLabel("N"),
       run: () => {
         ui.newGeneration();
         go("/create");
       },
     },
     {
+      id: "act-generate",
+      title: "Generate from these words",
+      keywords: ["make", "render", "submit", "run"],
+      key: shortcutLabel("↩"),
+      run: () => {
+        ui.generate();
+        go("/create");
+      },
+    },
+    {
+      id: "act-clip-scenes",
+      title: "Edit the clip scene by scene",
+      keywords: ["scenes", "clip", "sequence", "story", "shots"],
+      run: () => {
+        ui.clipScenes();
+        go("/create");
+      },
+    },
+    {
       id: "act-seed",
-      title: "Randomize seed",
+      title: "Surprise me — a new seed",
+      keywords: ["seed", "randomize", "repeat this look"],
+      key: shortcutLabel("R"),
       run: () => {
         ui.randomizeSeed();
         go("/create");
@@ -252,9 +356,9 @@ const staticCommands = computed<Command[]>(() => {
     // the primary now — recovery is covered by "Restart engine" below.
     {
       id: "act-add-host",
-      title: "Add host…",
-      keywords: ["engine", "server", "host", "remote"],
-      run: () => go("/settings?section=hosts"),
+      title: "Connect a machine…",
+      keywords: ["add", "engine", "server", "host", "remote"],
+      run: () => go("/machines?connect=1"),
     },
     {
       id: "act-engine-restart",
@@ -272,10 +376,17 @@ const staticCommands = computed<Command[]>(() => {
       id: "act-copy-seed",
       title: "Copy last seed",
       keywords: ["seed", "clipboard"],
+      key: shiftShortcutLabel("C"),
       run: () => {
         ui.copySeed();
         close();
       },
+    },
+    {
+      id: "style-download",
+      title: "Download a style…",
+      keywords: ["get", "install", "pull", "browse", "catalog", "models"],
+      run: () => go("/models?tab=discover"),
     },
     ...THEME_META.map((meta) => ({
       id: `theme-${meta.id}`,
@@ -300,10 +411,36 @@ const staticCommands = computed<Command[]>(() => {
       },
     },
   ];
+  if (activePrintRepeatable.value) {
+    cmds.push({
+      id: "act-variations",
+      title: "Make 4 variations of the last picture",
+      keywords: ["batch", "again", "more", "siblings", "four"],
+      key: altShortcutLabel("↩"),
+      run: () => {
+        ui.makeVariations();
+        go("/create");
+      },
+    });
+  }
+  if (queueCommands.canPause.value) {
+    cmds.push({
+      id: "queue-pause",
+      title: queueCommands.paused.value ? "Resume the queue" : "Pause the queue",
+      keywords: ["pause", "resume", "hold", "queue", "dispatch"],
+      key: "Space",
+      run: () => {
+        void queueCommands.togglePause();
+        close();
+      },
+    });
+  }
   if (generation.pending.length > 0) {
     cmds.push({
       id: "act-cancel",
-      title: "Cancel job",
+      title: "Stop the image being made",
+      keywords: ["cancel", "job"],
+      key: shortcutLabel("."),
       run: () => {
         void generation
           .cancel()
@@ -317,25 +454,18 @@ const staticCommands = computed<Command[]>(() => {
       },
     });
   }
-  if (generation.pending.length > 1) {
+  // The same fleet-wide action the rail and the Queue view offer, through the
+  // same confirm. The palette used to run a private loop over THIS client's
+  // pending prints under the same words: a strict subset of the blast radius,
+  // and no confirmation on either.
+  if (queue.liveCount.value > 0) {
+    const live = queue.liveCount.value;
     cmds.push({
       id: "act-cancel-all",
-      title: `Cancel all ${generation.pending.length} jobs`,
-      keywords: ["queue", "stop"],
+      title: `Stop everything · ${live} ${live === 1 ? "picture" : "pictures"}`,
+      keywords: ["cancel", "all", "jobs", "queue", "stop"],
       run: () => {
-        const ids = generation.pending.map((j) => j.clientId);
-        void Promise.all(ids.map((id) => generation.cancel(id)))
-          .then((outcomes) => {
-            const cancelled = outcomes.filter(Boolean).length;
-            if (cancelled === outcomes.length) toasts.push("Cancelled all jobs");
-            else if (cancelled > 0)
-              toasts.push(
-                `Cancelled ${cancelled} ${cancelled === 1 ? "job" : "jobs"}; remaining jobs already settled`,
-              );
-          })
-          .catch((error) =>
-            toasts.push(error instanceof Error ? error.message : String(error), "error"),
-          );
+        queueCommands.askStopEverything();
         close();
       },
     });
@@ -343,7 +473,7 @@ const staticCommands = computed<Command[]>(() => {
   if (generation.jobs.some((j) => j.status === "complete" || j.status === "error")) {
     cmds.push({
       id: "act-clear-finished",
-      title: "Clear finished jobs",
+      title: "Clear finished",
       keywords: ["jobs", "queue"],
       run: () => {
         generation.prune(0);
@@ -582,24 +712,28 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div
     v-if="ui.paletteOpen"
-    class="cmdk-scrim absolute inset-0 z-[120] flex justify-center pt-[84px]"
+    class="absolute inset-0 z-[120] flex justify-center bg-scrim pt-[110px]"
     @click.self="close"
   >
     <div
-      class="ms-fade-up flex h-fit max-h-[440px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-card-lg border border-ce bg-bench shadow-raised"
+      class="ms-fade-up flex h-fit max-h-[400px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-window border border-border bg-surface shadow-md"
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
     >
-      <div class="flex items-center gap-2.5 border-b border-edge px-4 py-3.5">
-        <Icon name="search" :size="17" class="shrink-0 text-ink-3" />
+      <div class="flex items-center gap-2.5 border-b border-border px-4 py-3.5">
+        <Icon name="search" :size="17" class="shrink-0 text-fg-dim" />
         <input
           ref="inputEl"
           v-model="query"
           data-selectable
           type="text"
-          placeholder="Search actions, models, settings…"
-          class="min-w-0 flex-1 bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
+          placeholder="Type what you want to do…"
+          class="min-w-0 flex-1 bg-transparent text-base text-fg outline-none placeholder:text-fg-dim"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           role="combobox"
           aria-autocomplete="list"
           aria-expanded="true"
@@ -608,11 +742,11 @@ function onKeydown(e: KeyboardEvent) {
           aria-label="Search or run a command"
           @keydown="onKeydown"
         />
-        <Keycap>esc</Keycap>
+        <kbd class="font-mono text-micro font-bold text-accent">esc</kbd>
       </div>
-      <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto p-2" role="listbox">
-        <p v-if="results.length === 0" class="px-3 py-6 text-center text-body text-ink-3">
-          No matches.
+      <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto" role="listbox">
+        <p v-if="results.length === 0" class="px-4 py-6 text-center text-sm text-fg-dim">
+          Nothing matches.
         </p>
         <button
           v-for="(cmd, i) in results"
@@ -621,33 +755,27 @@ function onKeydown(e: KeyboardEvent) {
           type="button"
           role="option"
           :aria-selected="i === selected"
-          class="flex w-full items-center gap-3 rounded-control px-3 py-2.5 text-left transition-colors duration-100"
-          :class="i === selected ? 'bg-surface' : ''"
+          class="flex w-full items-center gap-3 border-b border-border px-4 py-[11px] text-left transition-colors duration-100 last:border-b-0"
+          :class="i === selected ? 'bg-surface-2' : 'hover:bg-surface-2'"
           @mouseenter="selected = i"
           @click="cmd.run()"
         >
           <span
-            class="w-12 shrink-0 font-utility text-[9px] tracking-[0.06em] text-ink-3 uppercase"
+            class="w-[60px] shrink-0 font-mono text-micro tracking-[0.06em] text-fg-dim uppercase"
           >
             {{ sectionLabel(cmd.id) }}
           </span>
-          <span
-            class="min-w-0 flex-1 truncate text-[13.5px]"
-            :class="i === selected ? 'text-ink' : 'text-ink-2'"
-          >
-            {{ cmd.title }}
+          <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span class="truncate text-sm text-fg">{{ cmd.title }}</span>
+            <span v-if="cmd.subtitle" class="truncate text-micro text-fg-dim">
+              {{ cmd.subtitle }}
+            </span>
           </span>
-          <span v-if="cmd.subtitle" class="edge-code shrink-0">{{ cmd.subtitle }}</span>
-          <Icon name="arrow-right" :size="14" class="shrink-0 text-ce" />
+          <span v-if="cmd.key" class="shrink-0 font-mono text-micro text-fg-dim">{{
+            cmd.key
+          }}</span>
         </button>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.cmdk-scrim {
-  background: rgba(6, 5, 10, 0.55);
-  backdrop-filter: blur(4px);
-}
-</style>

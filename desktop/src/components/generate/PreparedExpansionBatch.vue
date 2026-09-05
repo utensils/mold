@@ -159,15 +159,15 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
   <section
     ref="sectionEl"
     data-test="prepared-expansion-batch"
-    class="border-edge mt-3 flex max-h-[min(34rem,60vh)] flex-col overflow-hidden rounded-chrome border bg-bath/45 p-3"
+    class="border-border mt-3 flex max-h-[min(34rem,60vh)] flex-col overflow-hidden rounded-window border bg-bg-deep/45 p-3"
     aria-labelledby="prepared-expansion-title"
   >
     <header class="flex flex-wrap items-start justify-between gap-2">
       <div>
-        <h2 id="prepared-expansion-title" class="text-body font-semibold text-ink">
+        <h2 id="prepared-expansion-title" class="text-sm font-semibold text-fg">
           Review {{ batch.prompts.length }} {{ batch.kind === "remix" ? "remixes" : "variations" }}
         </h2>
-        <p class="mt-0.5 text-caption text-ink-2">
+        <p class="mt-0.5 text-micro text-fg-2">
           {{ batch.route.label }}
           <span aria-hidden="true"> · </span>
           <span>{{ policyLabel }} resolved</span>
@@ -175,7 +175,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
         <p
           v-if="batch.kind === 'remix'"
           data-test="remix-source-label"
-          class="mt-1 text-caption text-ink-2"
+          class="mt-1 text-micro text-fg-2"
         >
           Remixing {{ batch.sourceKind === "original" ? "original idea" : "current prompt" }}
         </p>
@@ -184,7 +184,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
         v-if="!hasStaleReasons"
         type="button"
         data-test="regenerate-prepared"
-        class="border-edge min-h-7 rounded-control border px-2 text-caption text-ink-2 transition-colors duration-100 hover:text-ink disabled:opacity-50"
+        class="border-border min-h-7 rounded-control border px-2 text-micro text-fg-2 transition-colors duration-100 hover:text-fg disabled:opacity-50"
         :disabled="preparing || submitting"
         @click="requestReplacement('regenerate')"
       >
@@ -196,7 +196,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
       v-if="preparing"
       role="status"
       aria-live="polite"
-      class="mt-3 rounded-control bg-[color-mix(in_srgb,var(--halide)_10%,transparent)] px-2.5 py-2 text-caption text-halide"
+      class="mt-3 rounded-control bg-sapphire/10 px-2.5 py-2 text-micro text-sapphire"
     >
       Expanding {{ batch.requestedCount }} prompts on {{ activeHostLabel ?? batch.route.label }}…
       The current set stays available until its replacement is ready.
@@ -205,16 +205,16 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
     <div
       v-if="hasStaleReasons"
       role="alert"
-      class="border-halide/40 mt-3 rounded-control border bg-[color-mix(in_srgb,var(--halide)_8%,transparent)] p-2.5"
+      class="border-sapphire/40 mt-3 rounded-control border bg-sapphire/10 p-2.5"
     >
-      <p class="text-body font-semibold text-ink">Prepared work is out of date</p>
-      <ul class="mt-1 list-disc space-y-0.5 pl-4 text-caption text-ink-2">
+      <p class="text-sm font-semibold text-fg">Prepared work is out of date</p>
+      <ul class="mt-1 list-disc space-y-0.5 pl-4 text-micro text-fg-2">
         <li v-for="reason in staleReasons" :key="reason">{{ reason }}</li>
       </ul>
       <button
         type="button"
         data-test="refresh-prepared"
-        class="border-halide/50 mt-2 min-h-7 rounded-control border px-2 text-caption text-halide transition-colors duration-100 hover:border-halide hover:text-ink disabled:opacity-50"
+        class="border-sapphire/50 mt-2 min-h-7 rounded-control border px-2 text-micro text-sapphire transition-colors duration-100 hover:border-sapphire hover:text-fg disabled:opacity-50"
         :disabled="preparing || submitting"
         @click="requestReplacement('refresh')"
       >
@@ -225,7 +225,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
     <div
       v-if="error && !pullStatus"
       role="alert"
-      class="border-stop/45 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
+      class="border-error/45 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-error/10 px-2.5 py-2 text-micro text-error"
     >
       <span>{{ error }}</span>
     </div>
@@ -245,16 +245,16 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
     <div
       v-if="hasCompactReview && !reviewAll"
       data-test="compact-review-summary"
-      class="border-edge mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-bench px-2.5 py-2"
+      class="border-border mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-bg px-2.5 py-2"
     >
-      <p class="text-caption text-ink-2">
+      <p class="text-micro text-fg-2">
         Showing the first {{ REVIEW_PAGE_SIZE }} prompts.
         {{ batch.prompts.length - REVIEW_PAGE_SIZE }} more are ready to queue.
       </p>
       <button
         type="button"
         data-test="review-all-prompts"
-        class="border-edge min-h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+        class="border-border min-h-7 rounded-control border px-2 text-micro text-fg-2 hover:text-fg"
         @click="reviewAll = true"
       >
         Review all
@@ -269,7 +269,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
       <button
         type="button"
         data-test="compact-prompt-review"
-        class="min-h-7 rounded-control px-2 text-caption text-ink-2 hover:text-ink"
+        class="min-h-7 rounded-control px-2 text-micro text-fg-2 hover:text-fg"
         @click="
           reviewAll = false;
           reviewPage = 0;
@@ -277,11 +277,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
       >
         Compact review
       </button>
-      <div class="flex items-center gap-2 text-caption text-ink-2">
+      <div class="flex items-center gap-2 text-micro text-fg-2">
         <button
           type="button"
           data-test="previous-prompt-page"
-          class="border-edge min-h-7 rounded-control border px-2 disabled:opacity-50"
+          class="border-border min-h-7 rounded-control border px-2 disabled:opacity-50"
           :disabled="reviewPage === 0"
           @click="reviewPage -= 1"
         >
@@ -291,7 +291,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
         <button
           type="button"
           data-test="next-prompt-page"
-          class="border-edge min-h-7 rounded-control border px-2 disabled:opacity-50"
+          class="border-border min-h-7 rounded-control border px-2 disabled:opacity-50"
           :disabled="reviewPage >= reviewPageCount - 1"
           @click="reviewPage += 1"
         >
@@ -304,9 +304,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
       <li
         v-for="{ prompt, index } in visiblePrompts"
         :key="prompt.id"
-        class="border-edge grid grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-2 rounded-control border bg-bench p-2 max-[560px]:grid-cols-[2rem_minmax(0,1fr)]"
+        class="border-border grid grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-2 rounded-control border bg-bg p-2 max-[560px]:grid-cols-[2rem_minmax(0,1fr)]"
       >
-        <span class="data-mono pt-1.5 text-halide" aria-hidden="true">
+        <span class="font-mono text-xs pt-1.5 text-sapphire" aria-hidden="true">
           {{ String(index + 1).padStart(2, "0") }}
         </span>
         <div class="min-w-0">
@@ -318,17 +318,17 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
             :aria-label="`Variation ${index + 1} of ${batch.prompts.length}`"
             :aria-invalid="!prompt.text.trim() || undefined"
             :disabled="submitting"
-            class="border-edge min-h-16 w-full resize-y rounded-control border bg-bath px-2.5 py-2 text-body text-ink outline-none transition-colors duration-100 placeholder:text-ink-3 focus:border-safelight"
+            class="border-border min-h-16 w-full resize-y rounded-control border bg-bg-deep px-2.5 py-2 text-sm text-fg outline-none transition-colors duration-100 placeholder:text-fg-dim focus:border-accent"
             @input="editorInput(prompt.id, $event)"
           />
-          <p v-if="!prompt.text.trim()" class="mt-1 text-caption text-stop">
+          <p v-if="!prompt.text.trim()" class="mt-1 text-micro text-error">
             Variation {{ index + 1 }} needs a prompt before generation.
           </p>
         </div>
         <button
           v-if="batch.kind === 'remix'"
           type="button"
-          class="border-edge min-h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+          class="border-border min-h-7 rounded-control border px-2 text-micro text-fg-2 hover:text-fg"
           :data-test="`apply-remix-${index}`"
           :disabled="submitting || !prompt.text.trim()"
           @click="emit('apply', prompt.id)"
@@ -338,7 +338,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
         <button
           v-if="batch.prompts.length > 1"
           type="button"
-          class="min-h-7 rounded-control px-2 text-caption text-ink-3 transition-colors duration-100 hover:bg-stop/10 hover:text-stop max-[560px]:col-start-2 max-[560px]:justify-self-start"
+          class="min-h-7 rounded-control px-2 text-micro text-fg-dim transition-colors duration-100 hover:bg-error/10 hover:text-error max-[560px]:col-start-2 max-[560px]:justify-self-start"
           :aria-label="`Remove variation ${index + 1}`"
           :data-remove-id="prompt.id"
           :disabled="submitting"
@@ -354,11 +354,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
       role="alertdialog"
       aria-modal="false"
       aria-labelledby="collapse-title"
-      class="border-safelight/45 mt-3 rounded-control border bg-[color-mix(in_srgb,var(--safelight)_8%,transparent)] p-3"
+      class="border-accent/45 mt-3 rounded-control border bg-accent-tint p-3"
       @keydown.esc.stop.prevent="keepPreparedBatch"
     >
-      <p id="collapse-title" class="text-body font-semibold text-ink">Continue with one prompt?</p>
-      <p class="mt-1 max-w-[65ch] text-caption text-ink-2">
+      <p id="collapse-title" class="text-sm font-semibold text-fg">Continue with one prompt?</p>
+      <p class="mt-1 max-w-[65ch] text-micro text-fg-2">
         This ends the prepared batch and moves the remaining variation into the main composer.
       </p>
       <div class="mt-2 flex flex-wrap gap-2">
@@ -366,7 +366,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
           ref="confirmButton"
           type="button"
           data-test="confirm-collapse"
-          class="min-h-8 rounded-control bg-safelight px-3 text-caption font-semibold text-on-accent"
+          class="min-h-8 rounded-control bg-accent px-3 text-micro font-semibold text-on-accent"
           @click="confirmCollapse"
         >
           Continue with one prompt
@@ -374,7 +374,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
         <button
           type="button"
           data-test="keep-prepared-batch"
-          class="border-edge min-h-8 rounded-control border px-3 text-caption text-ink-2 hover:text-ink"
+          class="border-border min-h-8 rounded-control border px-3 text-micro text-fg-2 hover:text-fg"
           @click="keepPreparedBatch"
         >
           Keep prepared batch
@@ -383,25 +383,25 @@ onBeforeUnmount(() => window.removeEventListener("keydown", dismissOnEscape));
     </div>
 
     <footer
-      class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-edge pt-3"
+      class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3"
     >
       <button
         type="button"
         data-test="discard-prepared"
-        class="min-h-8 rounded-control px-2 text-caption text-ink-3 transition-colors duration-100 hover:bg-stop/10 hover:text-stop"
+        class="min-h-8 rounded-control px-2 text-micro text-fg-dim transition-colors duration-100 hover:bg-error/10 hover:text-error"
         @click="emit('discard')"
       >
         Cancel
       </button>
       <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-        <span class="text-caption text-ink-3">
+        <span class="text-micro text-fg-dim">
           {{ batch.prompts.length }} {{ batch.prompts.length === 1 ? "prompt" : "prompts" }} linked
           to Batch
         </span>
         <button
           type="button"
           data-test="generate-prepared"
-          class="min-h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="min-h-9 rounded-window bg-accent px-4 text-sm font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
           :disabled="!canGenerate"
           @click="emit('generate')"
         >

@@ -32,14 +32,42 @@ afterEach(() => {
 });
 
 describe("BulkBar (Prints)", () => {
-  it("offers Add to collection · Tag · ♥ Favorite · Move to trash with the count", async () => {
+  it("reads N selected, then a spacer, then ★ Favourite · Add tag · Add to album · Export… · Delete", async () => {
     const wrapper = mountBar();
-    expect(wrapper.text()).toContain("5 / 24 selected");
-    expect(wrapper.get("[data-test='bulk-collections']").text()).toContain("Add to collection");
-    expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Tag");
-    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favorite");
+    expect(wrapper.get("[data-test='bulk-count']").text()).toBe("5 selected");
+    const cluster = wrapper
+      .findAll("button[data-test^='bulk-']")
+      .map((el) => el.attributes("data-test"));
+    expect(cluster).toEqual([
+      "bulk-select-all",
+      "bulk-clear",
+      "bulk-favorite",
+      "bulk-tags",
+      "bulk-collections",
+      "bulk-export",
+      "bulk-delete",
+    ]);
+    expect(wrapper.find("[data-test='bulk-spacer']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("emits export for the selection", async () => {
+    const wrapper = mountBar();
+    const button = wrapper.get("[data-test='bulk-export']");
+    expect(button.text()).toContain("Export…");
+    await button.trigger("click");
+    expect(wrapper.emitted("export")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("offers Add to album · Add tag · ★ Favourite · Move to trash", async () => {
+    const wrapper = mountBar();
+    expect(wrapper.text()).toContain("5 selected");
+    expect(wrapper.get("[data-test='bulk-collections']").text()).toContain("Add to album");
+    expect(wrapper.get("[data-test='bulk-tags']").text()).toContain("Add tag");
+    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Favourite");
     const trash = wrapper.get("[data-test='bulk-delete']");
-    expect(trash.text()).toContain("Move 5 prints to trash");
+    expect(trash.text()).toContain("Move 5 pictures to trash");
     await trash.trigger("click");
     expect(wrapper.emitted("trash")).toHaveLength(1);
     expect(wrapper.emitted("delete")).toBeUndefined();
@@ -50,7 +78,7 @@ describe("BulkBar (Prints)", () => {
     await wrapper.get("[data-test='bulk-favorite']").trigger("click");
     expect(wrapper.emitted("favorite")).toEqual([[true]]);
     await wrapper.setProps({ allFavorite: true });
-    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Unfavorite");
+    expect(wrapper.get("[data-test='bulk-favorite']").text()).toContain("Unfavourite");
     await wrapper.get("[data-test='bulk-favorite']").trigger("click");
     expect(wrapper.emitted("favorite")?.at(-1)).toEqual([false]);
   });
@@ -60,7 +88,7 @@ describe("BulkBar (Prints)", () => {
     await wrapper.get("[data-test='bulk-collections']").trigger("click");
     const panel = document.body.querySelector("[data-test='bulk-collections-panel']")!;
     expect(panel).not.toBeNull();
-    expect(panel.textContent).toContain("Add 5 prints to");
+    expect(panel.textContent).toContain("Add 5 pictures to");
     expect(panel.textContent).toContain("fans out to This Mac · plato");
     const rows = panel.querySelectorAll("[data-test='collection-row']");
     expect(rows[0]!.getAttribute("aria-checked")).toBe("true");
@@ -99,7 +127,7 @@ describe("BulkBar (Prints)", () => {
     expect(wrapper.emitted("delete")).toBeUndefined();
     await wrapper.setProps({ confirming: true });
     expect(wrapper.get("[data-test='bulk-delete']").text()).toBe(
-      "Delete 2 prints? This can't be undone.",
+      "Delete 2 pictures? This can't be undone.",
     );
     await wrapper.get("[data-test='bulk-delete']").trigger("click");
     expect(wrapper.emitted("delete")).toHaveLength(1);
@@ -113,7 +141,7 @@ describe("BulkBar (Prints)", () => {
     expect(wrapper.find("[data-test='bulk-delete']").exists()).toBe(true);
   });
 
-  it("offers Remove from collection inside a drill-in", async () => {
+  it("offers Remove from album inside a drill-in", async () => {
     const wrapper = mountBar({ collectionName: "Smurfs" });
     await wrapper.get("[data-test='bulk-remove-from-collection']").trigger("click");
     expect(wrapper.emitted("removeFromCollection")).toHaveLength(1);
@@ -129,5 +157,21 @@ describe("BulkBar (Trash)", () => {
     expect(wrapper.emitted("restore")).toHaveLength(1);
     await wrapper.get("[data-test='bulk-delete-forever']").trigger("click");
     expect(wrapper.emitted("deleteForever")).toHaveLength(1);
+  });
+});
+
+describe("BulkBar export progress", () => {
+  it("says Exporting… while the batch runs, and never borrows the delete label", () => {
+    const wrapper = mountBar({ exporting: true });
+    const button = wrapper.get("[data-test='bulk-export']");
+    expect(button.text()).toBe("Exporting…");
+    expect(button.attributes("disabled")).toBeDefined();
+    // The delete button keeps its own wording — exporting is not deleting.
+    expect(wrapper.get("[data-test='bulk-delete']").text()).not.toContain("Deleting");
+  });
+
+  it("reads Export… when no batch is running", () => {
+    const wrapper = mountBar();
+    expect(wrapper.get("[data-test='bulk-export']").text()).toBe("Export…");
   });
 });

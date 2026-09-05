@@ -57,9 +57,9 @@ const emit = defineEmits<{
   align-items: center;
   gap: 2px;
   padding: 3px;
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
-  background: var(--bath);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
 }
 
 .ms-layout__option {
@@ -70,30 +70,30 @@ const emit = defineEmits<{
   gap: 6px;
   padding: 0 9px;
   border: 0;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
   background: transparent;
-  color: var(--ink-3);
-  font-family: var(--f-body);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-sans);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition:
-    color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-layout__option:hover:not([data-on="true"]) {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-layout__option[data-on="true"] {
-  color: var(--sel-ink);
-  background: var(--sel-bg);
-  box-shadow: var(--sel-ring);
+  color: var(--mold-blue);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 .ms-layout__option:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 </style>

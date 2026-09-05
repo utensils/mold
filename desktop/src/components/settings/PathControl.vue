@@ -13,7 +13,7 @@ async function pick() {
 <template>
   <div class="flex items-center gap-2">
     <span
-      class="data-mono max-w-64 truncate text-caption text-ink-2"
+      class="font-mono max-w-64 truncate text-micro text-fg-2"
       :title="props.modelValue"
       dir="rtl"
     >
@@ -22,7 +22,7 @@ async function pick() {
     <button
       type="button"
       :disabled="disabled"
-      class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-40"
+      class="ms-toolbar-button disabled:opacity-40"
       @click="pick"
     >
       Choose…

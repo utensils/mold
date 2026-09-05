@@ -14,12 +14,12 @@ import {
   shouldShowStarterCards,
 } from "../lib/generateModels";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
+import Icon from "@ui/components/Icon.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import type { ClipRailMedia } from "@ui/components/types";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
-import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import GenerateErrorNotice from "../components/generate/GenerateErrorNotice.vue";
@@ -37,11 +37,26 @@ import {
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
-import ActivityStrip from "../components/create/ActivityStrip.vue";
+import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
+import StylePicker from "../components/create/StylePicker.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import { SEQUENCE_NEEDS_STYLE, type SequenceConfirmation } from "../lib/sequenceTimeline";
+import {
+  BENCH_RESIZER_HEIGHT,
+  COMPOSER_FALLBACK_HEIGHT,
+  DEFAULT_SEQUENCE_BENCH_HEIGHT,
+  MIN_BENCH_HEIGHT,
+  MIN_SEQUENCE_BENCH_HEIGHT,
+  MIN_SEQUENCE_CANVAS_HEIGHT,
+  MIN_STILL_CANVAS_HEIGHT,
+  benchHeightCeiling,
+  clampBenchHeight as clampBenchHeightWithin,
+} from "../lib/benchLayout";
+import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
+import { outputKindFor } from "../composables/useCreateOutputKind";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
@@ -71,6 +86,8 @@ import {
   friendlySequenceError,
   modelSupportsSequence,
   modelsForOutput,
+  sequenceClipFrameCap,
+  sequenceFrameOptions,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
@@ -132,20 +149,23 @@ import {
   needsHostRoute,
   suggestOutputFilename,
   type BatchRequestOptions,
+  type GalleryPrintOnCanvas,
   type Job,
 } from "../stores/generation";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
-import { copyBase64ImageToClipboard } from "../lib/clipboard";
+import { copyBase64ImageToClipboard, copyImageBytesToClipboard } from "../lib/clipboard";
+import { suggestedSaveName } from "../lib/gallery/saveName";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
-import { useUiStore } from "../stores/ui";
+import { useUiStore, type CreateIntent } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import {
   generationCapabilitiesForFamily,
   generationCapabilitiesForForm,
 } from "../lib/capabilities";
+import { batchLockedForForm, batchLockedForRequest, canRepeatPrint } from "../lib/variations";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -161,12 +181,12 @@ import {
   keepingPrintIdentity,
   loraBindingMatchesRoute,
   loraHostBinding,
+  MAX_BATCH_SIZE,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
 } from "../lib/generateForm";
 import { emptyMeshForm } from "@studio/lib/meshControls";
-import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
-import { videoFramesError } from "@studio/lib/videoDuration";
+import { videoFramesError, type VideoFrameContract } from "@studio/lib/videoDuration";
 import {
   advancedVideoValidationError,
   audioOutputValidationError,
@@ -266,6 +286,11 @@ import {
   thumbnailPath,
 } from "../lib/gallery/media";
 import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
+import { readGalleryMediaBase64 } from "../lib/gallery/sourceMedia";
+import { useReuseStillPrint } from "../composables/useReuseStillPrint";
+import { upscaleLibraryImage } from "@studio/api/videoUpscale";
+import { defaultUpscaler } from "@studio/lib/upscale";
+import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
 import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
@@ -312,6 +337,7 @@ const videoExportError = ref("");
 const videoExportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 // Multi-host gallery — source-image restore looks up prints across hosts.
 const hostGallery = useGalleryStore();
+const reuseStillPrint = useReuseStillPrint();
 const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
 const licenseAcceptance = useLicenseAcceptance();
@@ -707,21 +733,11 @@ const form = formStore.form;
 
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 const workbenchRef = ref<HTMLDivElement | null>(null);
-const templatesOpen = ref(false);
-const templatesEl = ref<HTMLDivElement | null>(null);
-const templatesToggleEl = ref<HTMLButtonElement | null>(null);
+const inspectorTab = ref<InspectorTab>("settings");
+const inspectorRef = ref<InstanceType<typeof InspectorPanel> | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
-const DEFAULT_BENCH_HEIGHT = 520;
-const MIN_BENCH_HEIGHT = 280;
-/**
- * Sequence mode's floor covers the composer's fixed chrome (activity header,
- * edit banner, clip head, prompt, tools, footer) plus the filmstrip's minimum
- * height, so resizing compresses the rail instead of growing a scrollbar.
- */
-const MIN_SEQUENCE_BENCH_HEIGHT = 390;
-const MIN_CANVAS_HEIGHT = 144;
 const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
 function readStoredBenchHeight(): number | null {
   try {
@@ -735,23 +751,49 @@ const storedBenchHeight = readStoredBenchHeight();
 const benchHeight = ref(
   Number.isFinite(storedBenchHeight)
     ? Math.max(MIN_BENCH_HEIGHT, storedBenchHeight!)
-    : DEFAULT_BENCH_HEIGHT,
+    : DEFAULT_SEQUENCE_BENCH_HEIGHT,
 );
 let benchResizeStartY = 0;
 let benchResizeStartHeight = 0;
+
+/**
+ * The composer's real height, measured. It is the piece `overflow-hidden`
+ * eats when the reservation is short, and it is the one piece whose height
+ * the user changes (a long prompt grows the textarea), so the bench ceiling
+ * has to follow it rather than assume it.
+ */
+const composerHeight = ref(COMPOSER_FALLBACK_HEIGHT);
+let composerObserver: ResizeObserver | null = null;
+
+/** The canvas's own floor — bound to its `min-height`, so the CSS and the
+ *  clamp can never disagree the way they did when one said 320 and the
+ *  other reserved 144. */
+const canvasFloor = computed(() =>
+  isSequence.value ? MIN_SEQUENCE_CANVAS_HEIGHT : MIN_STILL_CANVAS_HEIGHT,
+);
 
 function minBenchHeight(): number {
   return isSequence.value ? MIN_SEQUENCE_BENCH_HEIGHT : MIN_BENCH_HEIGHT;
 }
 
+function benchClampInput(requested: number) {
+  return {
+    requested,
+    available: workbenchRef.value?.clientHeight ?? window.innerHeight,
+    minBench: minBenchHeight(),
+    canvasFloor: canvasFloor.value,
+    resizerHeight: BENCH_RESIZER_HEIGHT,
+    composerHeight: composerHeight.value,
+  };
+}
+
 function clampBenchHeight(height: number): number {
-  const available = workbenchRef.value?.clientHeight ?? window.innerHeight;
-  return Math.round(
-    Math.min(
-      Math.max(minBenchHeight(), available - MIN_CANVAS_HEIGHT),
-      Math.max(minBenchHeight(), height),
-    ),
-  );
+  return clampBenchHeightWithin(benchClampInput(height));
+}
+
+/** The resizer's `aria-valuemax`: the same ceiling the clamp enforces. */
+function maxBenchHeight(): number {
+  return benchHeightCeiling(benchClampInput(benchHeight.value));
 }
 
 function setBenchHeight(height: number) {
@@ -789,6 +831,26 @@ function onBenchResizeKeydown(event: KeyboardEvent) {
 function clampBenchToViewport() {
   benchHeight.value = clampBenchHeight(benchHeight.value);
 }
+
+/**
+ * Watch the composer's box. A prompt that grows to several lines takes those
+ * pixels from the same column the bench sits in, so the ceiling has to move
+ * with it — otherwise a long prompt pushes Generate out under
+ * `overflow-hidden` again.
+ */
+function observeComposerHeight() {
+  const el = composerRef.value?.$el;
+  if (!(el instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
+  composerHeight.value = el.offsetHeight || COMPOSER_FALLBACK_HEIGHT;
+  clampBenchToViewport();
+  composerObserver = new ResizeObserver(() => {
+    const measured = el.offsetHeight;
+    if (!measured || measured === composerHeight.value) return;
+    composerHeight.value = measured;
+    clampBenchToViewport();
+  });
+  composerObserver.observe(el);
+}
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const remixSource = ref<"original" | "current">("original");
 const expansionRunning = ref(false);
@@ -812,12 +874,6 @@ let expansionPullRequestId = 0;
 const expansionAttemptHostLabel = ref<string | null>(null);
 const quickExpansionOriginal = ref<string | null>(null);
 const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
-/**
- * The negative prompt before and after a bake-and-clear merged the preset's
- * curated fragments into it. Undo re-arms `before` alongside the prompt and
- * chip; `baked` lets it bow out when the user has since edited the field.
- */
-const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const submissionPlanning = ref(false);
 const preparationGuard = new PreparationRequestGuard();
@@ -920,16 +976,27 @@ async function listenForNativeImageDrops() {
   else stopNativeImageDrop = unlisten;
 }
 
-function onDocumentPointerDown(event: PointerEvent) {
-  if (!templatesOpen.value || !templatesEl.value) return;
-  if (!event.composedPath().includes(templatesEl.value)) templatesOpen.value = false;
-}
+/** The Recent tab's rows: the pictures already made, newest first. */
+const RECENT_PRINTS_CAP = 24;
+const recentPrints = computed(() => hostGallery.merged.slice(0, RECENT_PRINTS_CAP));
 
-function onDocumentKeydown(event: KeyboardEvent) {
-  if (!templatesOpen.value || event.defaultPrevented || event.key !== "Escape") return;
-  event.preventDefault();
-  templatesOpen.value = false;
-  void nextTick(() => templatesToggleEl.value?.focus());
+/**
+ * Recent tab: a row restores the whole recipe, exactly as the Lightbox's
+ * "Use these settings" does — full metadata through `applyPrefillToForm`, plus
+ * the print's own retained-source authority when its machine kept one. The
+ * door that opens this tab promises those settings, so it must be the same
+ * path, not a prompt-only shortcut.
+ */
+function reuseRecentPrint(entry: MergedPrint) {
+  // A stitched clip restores as a clip, exactly as the Lightbox restores it:
+  // a metadata prefill would force `single` and keep one scene's words.
+  if (planSequenceReuse(entry.item.metadata)) {
+    composer.setSequence({ kind: "reuse", metadata: entry.item.metadata });
+    return;
+  }
+  reuseStillPrint(entry);
+  inspectorTab.value = "settings";
+  void nextTick(() => composerRef.value?.focus?.());
 }
 
 const selectedQueueRender = ref<{
@@ -1115,10 +1182,11 @@ const requestConditioning = computed(() =>
   }),
 );
 
+/** The recipe renders one at a time (an edit model, or a request that
+ * carries references): the Make chip reads 1 and locks. */
+const batchLocked = computed(() => batchLockedForForm(form, caps.value));
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne || requestConditioning.value === "references"
-    ? 1
-    : Math.max(1, Math.floor(form.batchSize)),
+  batchLocked.value ? 1 : Math.max(1, Math.floor(form.batchSize)),
 );
 
 /** Where the print itself would go. Expansion starts here and only leaves it
@@ -1193,15 +1261,13 @@ const preparedStaleReasons = computed(() => {
           kind: "remix" as const,
           ...(form.originalPrompt ? { rootPrompt: form.originalPrompt } : {}),
           sourceKind: remixSource.value,
-          dimensions: defaultRemixDimensions(
-            expansionTaskForRequest(form.family, request),
-            Boolean(form.stylePreset),
-          ),
+          dimensions: defaultRemixDimensions(expansionTaskForRequest(form.family, request), false),
           conditioningFingerprint: conditioningFingerprint(request),
         }
       : {}),
     requestedCount: effectiveBatchSize.value,
-    stylePreset: form.stylePreset || null,
+    // This surface has no style preset to freeze or to go stale on.
+    stylePreset: null,
     selectedHostPolicy: stickyTarget.value,
     readyHostIds: new Set(
       hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
@@ -1505,7 +1571,7 @@ let sequenceAmendInFlight = false;
 let sequenceCancellationRequest: (() => Promise<void>) | null = null;
 /** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
 const editSharedBaseline = ref<string | null>(null);
-/** What a Library reuse could NOT restore, said once and quietly beneath the
+/** What a My images reuse could NOT restore, said once and quietly beneath the
  *  rail. Cleared the moment the user submits or leaves Sequence — it describes
  *  one handoff, not a standing property of the draft. */
 const sequenceReuseNotice = ref<string | null>(null);
@@ -1605,7 +1671,11 @@ async function loadChainLimits() {
     if (!limits.supports_audio) draft.enableAudio = false;
     if (!draft.editing) {
       const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
-      draft.adoptSequenceModel(entry.name, frames);
+      // A model switch adopts that model's audio answer — on wherever the
+      // chain renders sound, matching a one-shot of the same model. A
+      // re-fetch for the SAME model returns false from `adoptSequenceModel`
+      // and leaves the user's own choice alone.
+      draft.adoptSequenceModel(entry.name, frames, limits.supports_audio);
     }
   } catch {
     if (version === chainLimitsFetch) chainLimits.value = null;
@@ -1632,7 +1702,7 @@ watch(
   { immediate: true },
 );
 
-// The activity strip lists every connected host's durable jobs.
+// The queue rail lists every connected host's durable jobs.
 watch(
   () => readyHostSignature(hosts.all),
   () => void chains.fetchAll(),
@@ -1869,6 +1939,14 @@ const playingSequenceClipId = computed(() => {
   return stageIdx === null ? null : (sequenceStageClipIds.value[stageIdx] ?? null);
 });
 
+/** How far the playing scene's own player has run. The timeline adds the
+ *  scenes before it to put the transport's needle on the whole clip. */
+const sequenceClipElapsed = ref(0);
+watch(sequencePlaybackSrc, () => (sequenceClipElapsed.value = 0));
+function onSequenceTimeUpdate(event: Event) {
+  sequenceClipElapsed.value = (event.target as HTMLVideoElement).currentTime;
+}
+
 function returnToLiveSequence() {
   playingSequenceStage.value = null;
 }
@@ -1876,7 +1954,7 @@ function returnToLiveSequence() {
 /**
  * The watched job once it has settled. The Create strip no longer keeps a
  * settled row, so the canvas is what holds the result: the finished video with
- * Edit sequence / Show in library, or the failure with Resume. Settling must
+ * Edit clip / Show in My images, or the failure with Resume. Settling must
  * never drop the canvas back to the empty state.
  */
 const settledSequence = computed(() => {
@@ -2175,7 +2253,7 @@ async function duplicateSequenceAsNew() {
   await generateSequence();
 }
 
-/** ActivityStrip Edit: load a durable job's effective script into an edit
+/** Edit sequence: load a durable job's effective script into an edit
  * session — applying its shared params to the form is the explicit action. */
 async function editSequence(payload: { hostId: string; jobId: string }) {
   await loadSequence(payload, true);
@@ -2261,12 +2339,21 @@ watch(
   { immediate: true },
 );
 
-const buttonLabel = computed(() => {
-  if (submissionPlanning.value) return "Cancel";
-  return generation.pending.length > 0
-    ? `Generate (+${generation.pending.length} queued)`
-    : "Generate";
-});
+/** Amending an existing clip is not a new print: the one Generate button says
+ *  what it will actually do to the clip already on the timeline. */
+// "Update clip" only while the button really amends: an edit session parked
+// behind the Simple toggle is kept, but Simple's Generate makes a new print.
+const buttonLabel = computed(() =>
+  composerSubmitting.value
+    ? "Cancel"
+    : isSequence.value && draft.editing
+      ? "Update clip"
+      : "Generate",
+);
+/** The queue depth rides beside the button, never inside its one word. */
+const queuedNote = computed(() =>
+  generation.pending.length > 0 ? `+${generation.pending.length} queued` : null,
+);
 const submissionStatus = computed(() =>
   submissionPlanning.value
     ? (preprocessingStatus.value ?? "Checking machine fit and generation route…")
@@ -2370,26 +2457,28 @@ const liveGenerationStatus = computed(() => {
   return j.status === "finishing" ? `${copy}…` : copy;
 });
 
+/** The caption's left slot: the file this print landed as, or — while it is
+ * still developing, and for an inline completion the host never named — the
+ * style that is making it. */
 const edgeCode = computed(() => {
   const selected = selectedQueueRender.value;
+  if (selected) return modelDisplayNameForId(selected.model, installedModels.value);
+  const j = job.value;
+  if (!j) return "";
+  return j.result?.filename ?? modelDisplayNameForId(j.model, installedModels.value);
+});
+
+/** The caption's right slot: the print's size and how long it took. */
+const captionMeta = computed(() => {
+  const selected = selectedQueueRender.value;
   if (selected) {
-    const name = modelDisplayNameForId(selected.model, installedModels.value);
     const preview = selected.preview;
-    const progress =
-      preview && preview.step !== null && preview.total !== null
-        ? `${preview.step}/${preview.total}`
-        : (preview?.stage ?? "waiting for progress");
-    return `${name} · ${progress}`;
+    return preview && preview.step !== null && preview.total !== null
+      ? `${preview.step}/${preview.total}`
+      : (preview?.stage ?? "waiting for progress");
   }
   const j = job.value;
   if (!j) return "";
-  const name = modelDisplayNameForId(j.model, installedModels.value);
-  const s = j.result
-    ? `S ${j.result.seed_used}`
-    : j.visualSeed.startsWith(`${j.model}·`)
-      ? "S random"
-      : `S ${j.visualSeed.slice(0, 12)}`;
-  const stepPart = `${j.status === "complete" ? j.total : j.step}/${j.total}`;
   // A mesh has no pixels to describe — `width`/`height` are its poster's, not
   // the print's — so its geometry is the provenance: the one shared caption
   // every surface writes under a 3-D print.
@@ -2405,16 +2494,20 @@ const edgeCode = computed(() => {
         j.result?.mesh_bounds_max,
       )
     : j.result
-      ? `${j.result.width}×${j.result.height}`
-      : `${j.width}×${j.height}`;
+      ? squareSizeLabel(j.result.width, j.result.height)
+      : squareSizeLabel(j.width, j.height);
   const time = j.result ? `${(j.result.generation_time_ms / 1000).toFixed(1)}s` : "";
-  return [name, s, stepPart, size, time].filter(Boolean).join("  ");
+  return [size, time].filter(Boolean).join(" · ");
 });
+
+/** `1024²` for a square canvas, `1216×704` otherwise. */
+function squareSizeLabel(width: number, height: number): string {
+  return width === height ? `${width}²` : `${width}×${height}`;
+}
 
 let templateLoadEpoch = 0;
 async function loadTemplate(template: GenerationTemplate) {
   const epoch = ++templateLoadEpoch;
-  templatesOpen.value = false;
   const hydrated = await hydrateGenerationTemplate(template);
   if (epoch !== templateLoadEpoch) return;
   // buildRequest's pruneRequestForFamily still guards anything the (possibly
@@ -2429,6 +2522,10 @@ async function loadTemplate(template: GenerationTemplate) {
   keepingPrintIdentity(form, () =>
     Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
   );
+  // A template saved before the redesign carries a style preset, and this
+  // surface has no control that would show one. Restoring it would put back an
+  // invisible prompt rewriter: the words on screen would not be the words sent.
+  form.stylePreset = "";
   // A template is PARAMETERS, not a capability snapshot. One saved before the
   // snapshot existed (or on another host) carries none, and applying it over
   // a Hunyuan3D form left the mesh recipe's `glb` pin and zero canvas in
@@ -2450,9 +2547,9 @@ async function loadTemplate(template: GenerationTemplate) {
 }
 
 function siblingDot(s: Job): string {
-  if (s.status === "complete") return "text-ink"; // ◉ developed
-  if (s.status === "error") return s.outcomeUnknown ? "text-ink-2" : "text-stop";
-  return "text-ink-3"; // ◎ pending
+  if (s.status === "complete") return "text-fg"; // ◉ developed
+  if (s.status === "error") return s.outcomeUnknown ? "text-fg-2" : "text-error";
+  return "text-fg-dim"; // ◎ pending
 }
 
 /** Whether this job produced a WAV rather than a picture or a clip. */
@@ -2707,6 +2804,305 @@ async function useCanvasResultAsSource(j: Job, entry: MergedPrint | null): Promi
   toasts.push(outcome.message);
 }
 
+/**
+ * Make 4 variations: the print that is on the canvas, made again as a batch.
+ * Nothing else changes — the words, the style, the size and the seed policy
+ * are whatever produced this picture, which is the whole point of the action.
+ * The count rides this ONE submission: writing it to the form would leave
+ * every later Generate making four.
+ *
+ * It is offered only for a finished still on a recipe that can repeat: a clip,
+ * a mesh and a sound have no batch, and a batch-locked recipe coerces the
+ * count to one, so the button would promise four and make exactly one.
+ */
+const VARIATION_BATCH = 4;
+
+/**
+ * The recipe that answers for a PRINT — the checkpoint's own contract, read
+ * from whichever machine holds it, exactly as the composer reads the form's.
+ * The form is irrelevant here: it may have moved on to another style entirely
+ * since this picture was made.
+ */
+function capabilitiesForPrint(request: GenerateRequest, hostId: string | null) {
+  const entry = hostModels.contractEntryForTarget(request.model, hostId);
+  const pipeline = request.pipeline ?? null;
+  return generationCapabilitiesForFamily(
+    entry?.family ?? "",
+    request.model,
+    pipeline,
+    undefined,
+    undefined,
+    effectiveGenerationRecipe(entry, pipeline),
+  );
+}
+
+function canMakeVariations(candidate: Job | null): boolean {
+  const request = candidate?.request;
+  if (isSequence.value || !request) return false;
+  return canRepeatPrint(
+    candidate,
+    batchLockedForRequest(request, capabilitiesForPrint(request, candidate.hostId ?? null)),
+  );
+}
+function makeVariations(count = VARIATION_BATCH) {
+  const candidate = job.value;
+  if (!candidate || !canMakeVariations(candidate)) return;
+  void repeatPrint(candidate, Math.min(Math.max(count, 1), MAX_BATCH_SIZE));
+}
+
+/**
+ * The print, made again as a batch of `count`.
+ *
+ * It submits the print's OWN saved request rather than rebuilding one from the
+ * live form: the request already carries the fitted source bytes, the baked
+ * style, the seed policy and the filing this picture was made with, and every
+ * one of those was persisted and stashed at the first submit. So the whole
+ * composer half of `generate()` — the prepared-batch guards, the style
+ * composition, source preprocessing, the retained-source relay, the media
+ * stash — has nothing to do here, and running it would make four of whatever
+ * the composer is holding now.
+ *
+ * What it keeps is everything about WHERE the four will run: the chain-routing
+ * refusal, placement (four prints is a new question, and the style may have
+ * been evicted since), the licence gate and the missing-model pull offer. An
+ * empty composer, or one holding an unrenderable form, does not block it: that
+ * refusal is the form's, not this picture's.
+ * The host is the print's own — a picture made on
+ * another machine re-rendered here is a different picture — and a pinned
+ * machine that has gone away errors through the same placement message rather
+ * than silently rerouting.
+ */
+async function repeatPrint(candidate: Job, count: number) {
+  const source = candidate.request;
+  if (!source || preparedSubmitting.value || submissionPlanning.value) return;
+  const submitToken = submissionGuard.begin();
+  const submitSignal = submissionGuard.signalFor(submitToken);
+  submissionPlanning.value = true;
+  try {
+    const request: GenerateRequest = { ...source, batch_size: count };
+    // The print's own machine, always named: to placement a null selection is
+    // AUTOMATIC (any ready machine), and a print this device made carries
+    // hostId null, so the fallback is the primary rather than the fleet.
+    const printHostId = candidate.hostId ?? hosts.primaryHost?.id ?? null;
+    const entry = hostModels.contractEntryForTarget(request.model, printHostId);
+    const family = entry?.family ?? "";
+    const routingModel = entry
+      ? { default_frames: entry.default_frames, source_image: entry.source_image }
+      : null;
+    const chainRouting = decideGenerateRequestRouting(request, family, routingModel);
+    if (chainRouting.kind === "reject") {
+      toasts.push(chainRouting.reason, "error");
+      return;
+    }
+    if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
+      toasts.push(
+        "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer.",
+        "error",
+      );
+      return;
+    }
+    const planningRequest =
+      chainRouting.kind === "chain" ? buildAutoChainRequest(request, chainRouting) : request;
+    // No LoRA provenance check: a saved request carries the look's PATH, not
+    // the machine that supplied it, and the resubmission goes to the print's
+    // own host, where those paths are exactly as valid as they were when it
+    // was made. A host that has gone away fails placement below with the
+    // sentence that names the machine, which is the same refusal.
+    const feasibility = await hosts.resolveFeasible(printHostId, planningRequest, count, {
+      signal: submitSignal,
+    });
+    if (!submissionGuard.isCurrent(submitToken)) return;
+    if (feasibility.kind !== "route") {
+      const offered = offerMissingModelPull(feasibility, {
+        model: request.model,
+        modelFamily: family,
+        // The print's own request, verbatim — never the composer's quick
+        // rewrite, which belongs to a different, unsubmitted print.
+        request,
+        batch: count,
+        chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
+        requestOptions: {},
+        // The request is already final — nothing is fitted or composed after
+        // the pull, so the resumed submission is byte-for-byte this one.
+        resumeAfterPull: true,
+      });
+      if (!offered) toasts.push(placementFailureMessage(feasibility), "error");
+      return;
+    }
+    const route = freezeModelFamily(feasibility.route, family)!;
+    const { accepted } = await licenseAcceptance.request({
+      hostLabel: route.label,
+      target: route.target,
+      requirements: licenseRequirements(feasibility.preview?.pending_downloads),
+    });
+    if (!accepted || !submissionGuard.isCurrent(submitToken)) return;
+    let settled: ReturnType<typeof generation.submitBatch>["settled"];
+    try {
+      ({ settled } = generation.submitBatch(request, count, route, chainRouting, {}));
+    } catch (error) {
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
+      return;
+    }
+    missingModel.value = null;
+    void settled.then((done) => {
+      for (const warning of new Set(done.flatMap((finished) => finished.requestWarnings))) {
+        toasts.push(warning, "warning");
+      }
+      const ok = done.filter((finished) => finished.status === "complete").length;
+      const failedCount = done.filter(
+        (finished) => finished.status === "error" && !finished.outcomeUnknown,
+      ).length;
+      if (ok > 0) {
+        toasts.push(
+          failedCount > 0
+            ? `Generated ${ok} of ${done.length} variations. ${failedCount} failed; the rest were saved to My images.`
+            : ok === 1
+              ? "Generated — saved to My images"
+              : `Generated ${ok} pictures — saved to My images`,
+        );
+      }
+    });
+  } finally {
+    if (submissionGuard.isCurrent(submitToken)) submissionPlanning.value = false;
+  }
+}
+
+// ── Make bigger (the caption's upscale door) ────────────────────────────────
+// One print, one machine: the canvas result has exactly one origin, so this
+// carries neither the Library's authority picker nor its framewise video
+// recovery. A host that can upscale a gallery file in place does; anything
+// older streams the bytes back and saves the result beside them.
+const upscaleEntry = ref<MergedPrint | null>(null);
+const upscaleModel = ref("");
+const upscaleBusy = ref(false);
+const upscaleError = ref("");
+
+function canUpscaleCanvasResult(j: Job): boolean {
+  return (
+    j.status === "complete" &&
+    !j.result?.video_frames &&
+    !isAudioResult(j) &&
+    !isMeshResult(j) &&
+    !!canvasPrintEntry(j)
+  );
+}
+
+function openCanvasUpscale(j: Job) {
+  const entry = canvasPrintEntry(j);
+  if (!entry) return;
+  upscaleEntry.value = entry;
+  upscaleError.value = "";
+  upscaleModel.value = defaultUpscaler(models.upscalers);
+}
+
+function closeCanvasUpscale() {
+  upscaleEntry.value = null;
+  upscaleBusy.value = false;
+  upscaleError.value = "";
+}
+
+async function startCanvasUpscale() {
+  const entry = upscaleEntry.value;
+  const target = entry ? hostGallery.targetOf(entry.sourceKey) : null;
+  if (!entry || !target || upscaleBusy.value) return;
+  upscaleBusy.value = true;
+  upscaleError.value = "";
+  try {
+    if (hosts.capabilities[entry.sourceKey]?.video_upscale?.gallery_image === true) {
+      const result = await upscaleLibraryImage(target, entry.item.filename, upscaleModel.value);
+      toasts.push(`Made bigger — ${result.filename}`);
+    } else {
+      const upscaled = await upscaleImage({
+        model: upscaleModel.value,
+        image: await readGalleryMediaBase64(entry, hostGallery),
+        target,
+      });
+      const stem = entry.item.filename.replace(/\.[^.]+$/, "");
+      const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
+      toasts.push(`Made bigger — saved as ${saved}`);
+    }
+    void hostGallery.refreshHost(entry.sourceKey);
+    closeCanvasUpscale();
+  } catch (error) {
+    upscaleError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    upscaleBusy.value = false;
+  }
+}
+
+/**
+ * Whether the canvas result can be written out as a file right now.
+ *
+ * Not "does it carry bytes": every ordinary desktop generation settles through
+ * `applyDurableCompletion`, which names the host's file and leaves `image`
+ * empty, so gating on inline bytes hid Save from every print the app makes.
+ * A named file on a reachable machine is saveable; inline bytes (a legacy or
+ * non-durable stream) still are too.
+ */
+function canSaveCanvasResult(j: Job): boolean {
+  const result = j.result;
+  if (!result || result.video_frames || isAudioResult(j)) return false;
+  if (result.image) return true;
+  return !!result.filename && !!resultHostTarget(j.clientId);
+}
+
+function saveCanvasResult(j: Job) {
+  const result = j.result;
+  if (!result) return;
+  if (result.image) {
+    const filename =
+      result.filename ??
+      suggestOutputFilename(result.model, result.seed_used, result.format, j.submittedAtUnixMs);
+    void ipc
+      .saveMediaBytes(filename, result.image)
+      .then((saved) => showSavedMediaToast(toasts, saved))
+      .catch((error) =>
+        toasts.push(error instanceof Error ? error.message : String(error), "error"),
+      );
+    return;
+  }
+  const entry = canvasPrintEntry(j);
+  const target = resultHostTarget(j.clientId);
+  if (!entry || !result.filename) return;
+  if (!target) {
+    toasts.push("This print’s machine is no longer connected.", "error");
+    return;
+  }
+  // The same road the Library and the Lightbox take, so one print saved from
+  // two places lands under one name.
+  void saveGalleryMedia(target, result.filename, suggestedSaveName(entry.item))
+    .then((saved) => showSavedMediaToast(toasts, saved))
+    .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
+}
+
+/**
+ * Copy image. A durable completion has no inline bytes, so the copy takes the
+ * picture the canvas is ALREADY showing — `resultUrl`, the media the native
+ * bridge (or the host) resolved for the viewer — rather than the empty field.
+ */
+async function copyCanvasImage(j: Job): Promise<void> {
+  const result = j.result;
+  if (!result) return;
+  const mime = result.format === "jpeg" ? "image/jpeg" : `image/${result.format}`;
+  if (result.image) {
+    await copyBase64ImageToClipboard(result.image, mime);
+    return;
+  }
+  const url = j.resultUrl;
+  if (!url) throw new Error("This print’s picture hasn’t loaded yet.");
+  await copyImageBytesToClipboard(url, {
+    fetchImage: async (path) => new Uint8Array(await (await fetch(path)).arrayBuffer()),
+    mimeType: mime,
+  });
+}
+
+/** Whether there is a picture to copy: raster only, and bytes from somewhere. */
+function canCopyCanvasImage(j: Job): boolean {
+  const result = j.result;
+  if (!result || result.video_frames || isAudioResult(j) || isMeshResult(j)) return false;
+  return !!result.image || !!j.resultUrl;
+}
+
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
   if (!j) return [];
@@ -2739,11 +3135,9 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Copy image",
-      disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || isMeshResult(j),
+      disabled: !canCopyCanvasImage(j),
       action: () => {
-        if (!j.result) return;
-        const mime = j.result.format === "jpeg" ? "image/jpeg" : `image/${j.result.format}`;
-        void copyBase64ImageToClipboard(j.result.image, mime)
+        void copyCanvasImage(j)
           .then(() => toasts.push("Image copied"))
           .catch((error) =>
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
@@ -2752,27 +3146,24 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: isMeshResult(j) ? "Save mesh" : "Save image",
-      disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || !j.result.image,
-      action: () => {
-        if (!j.result?.image) return;
-        const filename =
-          j.result.filename ??
-          suggestOutputFilename(
-            j.result.model,
-            j.result.seed_used,
-            j.result.format,
-            j.submittedAtUnixMs,
-          );
-        void ipc
-          .saveMediaBytes(filename, j.result.image)
-          .then((saved) => showSavedMediaToast(toasts, saved))
-          .catch((error) =>
-            toasts.push(error instanceof Error ? error.message : String(error), "error"),
-          );
-      },
+      disabled: !canSaveCanvasResult(j),
+      action: () => saveCanvasResult(j),
     },
     {
-      label: "Use as source",
+      // Also the caption's own button. The caption collapses its word actions
+      // on a narrow frame (a portrait print), so every one of them has to be
+      // reachable from here or hiding it would remove it from the app.
+      label: "Make 4 variations",
+      disabled: !canMakeVariations(j),
+      action: () => makeVariations(),
+    },
+    {
+      label: "Make bigger",
+      disabled: !canUpscaleCanvasResult(j),
+      action: () => openCanvasUpscale(j),
+    },
+    {
+      label: "Start from this photo",
       // Whether this print CAN be a source is a question about the print, not
       // about which delivery the completion used: a mesh is geometry and an
       // audio print has no pixels, both answered from the filename the host
@@ -2801,9 +3192,9 @@ function canvasMenu(): MenuEntry[] {
     },
     { separator: true },
     {
-      label: "Show in Gallery",
+      label: "Show in My images",
       disabled: j.status !== "complete",
-      action: () => void router.push("/gallery"),
+      action: () => void router.push("/library"),
     },
   ];
 }
@@ -2886,7 +3277,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     task: expansionTaskForRequest(form.family, request),
     context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
-    stylePreset: form.stylePreset || null,
+    stylePreset: null,
     selectedHostPolicy: stickyTarget.value,
   };
 }
@@ -2907,8 +3298,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   const request = buildRequest(form);
   const task = expansionTaskForRequest(form.family, request);
   const source = promptSource(form.prompt, form.originalPrompt, remixSource.value);
-  const stylePreset = form.stylePreset || null;
-  const dimensions = defaultRemixDimensions(task, Boolean(stylePreset));
+  const dimensions = defaultRemixDimensions(task, false);
   // Match the Batch value the composer actually presents. Capability/source
   // constraints can force the effective value to one while preserving the
   // user's saved raw preference for a later compatible model.
@@ -2918,7 +3308,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   expansionError.value = null;
   expansionAttemptHostLabel.value = route.label;
   try {
-    const style = styleHint(stylePreset ?? "");
     const response = await remixPrompt(
       {
         source_prompt: source.prompt,
@@ -2928,7 +3317,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         variations: requestedCount,
         task,
         context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
-        ...(style ? { style } : {}),
         dimensions,
       },
       route.target,
@@ -2952,8 +3340,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
       form.prompt = selected.prompt;
       form.originalPrompt = response.root_prompt ?? response.source_prompt;
       quickExpansionOriginal.value = response.source_prompt;
-      bakeStyleNegative(stylePreset ?? "", form.family);
-      form.stylePreset = "";
       quickExpansionSnapshot.value = {
         requestToken: token,
         originalPrompt: response.root_prompt ?? response.source_prompt,
@@ -2961,7 +3347,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         model: form.model,
         family: form.family,
         task,
-        stylePreset,
+        stylePreset: null,
         selectedHostPolicy: stickyTarget.value,
         route: frozenGenerationRoute(printRoute, route),
         ...expansionRouteProvenance(printRoute, route),
@@ -2991,7 +3377,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         family: form.family,
         task,
         requestedCount,
-        stylePreset,
+        stylePreset: null,
         selectedHostPolicy: stickyTarget.value,
       },
       frozenGenerationRoute(printRoute, route),
@@ -3147,9 +3533,6 @@ async function expandForCurrentBatch(
   expansionError.value = null;
   expansionMissingModel.value = null;
   try {
-    // The active chip travels as a natural-language directive the server
-    // weaves into the expander's system message — never the literal suffix.
-    const styleDirective = styleHint(inputs.stylePreset ?? "");
     const response = await expandPrompt(
       inputs.sourcePrompt,
       {
@@ -3157,7 +3540,6 @@ async function expandForCurrentBatch(
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
         task: inputs.task,
         ...(inputs.context ? { context: inputs.context } : {}),
-        ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
     );
@@ -3177,12 +3559,11 @@ async function expandForCurrentBatch(
         current.model !== inputs.model ||
         current.family !== inputs.family ||
         current.task !== inputs.task ||
-        current.stylePreset !== inputs.stylePreset ||
         current.selectedHostPolicy !== inputs.selectedHostPolicy ||
         !hostStillReady
       ) {
         expansionError.value =
-          "The prompt, style, or generation host changed while expansion was running. Expand again to use the current inputs.";
+          "The prompt, model, or generation host changed while expansion was running. Expand again to use the current inputs.";
         return;
       }
       quickExpansionOriginal.value = inputs.sourcePrompt;
@@ -3200,14 +3581,6 @@ async function expandForCurrentBatch(
         route: frozenGenerationRoute(printRoute, route),
         ...expansionRouteProvenance(printRoute, route),
       };
-      // Bake-and-clear: the rewrite absorbed the style (the server received
-      // it as a directive), so the chip clears here — leaving it lit would
-      // apply the look twice at submit. Prepared batches below KEEP the chip:
-      // it is the frozen-style indicator for the reviewed set (a style change
-      // is a named staleness axis) and their submit path never re-composes it
-      // into the reviewed prompt text.
-      bakeStyleNegative(inputs.stylePreset ?? "", inputs.family);
-      form.stylePreset = "";
       if (replacePrepared) {
         const active = document.activeElement;
         const shouldRestoreFocus =
@@ -3236,46 +3609,21 @@ async function expandForCurrentBatch(
   }
 }
 
-/**
- * Bake-and-clear owes the user the preset's curated negative: the chip is
- * about to be dropped, so submit-time composition will never see it again.
- * The look itself already reached the rewritten prompt through the expansion
- * directive — only the negative half has nowhere else to live.
- */
-function bakeStyleNegative(presetId: string, family: string) {
-  quickExpansionNegative.value = null;
-  const merged = mergeStyleNegative(form.negativePrompt, presetId, {
-    supportsNegativePrompt: generationCapabilitiesForFamily(family).supportsNegativePrompt,
-  });
-  if (merged === form.negativePrompt) return;
-  quickExpansionNegative.value = { before: form.negativePrompt, baked: merged };
-  form.negativePrompt = merged;
-}
-
-/** True while a quick expansion still owns the composer: its frozen route,
- * its undo, or the style it baked into the prompt. */
+/** True while a quick expansion still owns the composer: its frozen route or
+ * its undo. */
 function quickExpansionActive(): boolean {
   return quickExpansionSnapshot.value !== null || quickExpansionOriginal.value !== null;
 }
 
 /**
- * Drop every trace of a quick expansion without touching the prompt text:
- * the frozen route snapshot, the undo, the provenance, and the chip and
- * negative fragments the bake-and-clear apply consumed — unless the user has
- * edited the negative since, which is theirs to keep. Undo re-arms the
+ * Drop every trace of a quick expansion without touching the prompt text: the
+ * frozen route snapshot, the undo and the provenance. Undo re-arms the
  * pre-expansion state through here and then puts the original prompt back;
  * a history recall goes through here and then installs the recalled prompt.
  */
 function releaseQuickExpansion() {
   if (!quickExpansionActive()) return;
   submissionGuard.invalidate();
-  const snapshot = quickExpansionSnapshot.value;
-  if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
-  const negative = quickExpansionNegative.value;
-  if (negative && form.negativePrompt === negative.baked) {
-    form.negativePrompt = negative.before;
-  }
-  quickExpansionNegative.value = null;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
   quickExpansionSnapshot.value = null;
@@ -3337,11 +3685,6 @@ function collapsePreparedBatch(removedId: string) {
   form.batchSize = 1;
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
-  // Same bake-and-clear rule as a quick apply: the surviving reviewed text
-  // absorbed the frozen style, so keeping the chip would re-apply the look —
-  // and the frozen style's negative moves into the form with it.
-  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
-  form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
   void nextTick(() => composerRef.value?.focus?.());
@@ -3355,8 +3698,6 @@ function applyPreparedRemix(id: string) {
   form.prompt = selected.text.trim();
   form.originalPrompt = batch.rootPrompt ?? batch.sourcePrompt;
   quickExpansionOriginal.value = batch.sourcePrompt;
-  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
-  form.stylePreset = "";
   quickExpansionSnapshot.value = {
     requestToken: preparationGuard.begin(),
     originalPrompt: batch.rootPrompt ?? batch.sourcePrompt,
@@ -3572,6 +3913,9 @@ function appendPromptWord(word: string) {
 }
 
 function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed") {
+  // Clip mode's words belong to the selected scene, so neither the one-shot
+  // prompt's provenance nor its quick rewrite has anything to say about them.
+  if (isSequence.value) return;
   // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
   // nothing left to describe: release it instead of raising the stale banner
   // whose recovery actions would re-expand a prompt no longer on screen.
@@ -3804,7 +4148,7 @@ const generationInputBlockerReason = computed<string | null>(() => {
   // H3 opening-frame correction until the user starts typing.
   if (h3AuthoringError.value) return h3AuthoringError.value;
   if (promptMissing.value) return "Add a prompt before generating.";
-  if (!form.model) return "Choose an installed model before generating.";
+  if (!form.model) return "Choose a style first.";
   if (chainValidationError.value) return chainValidationError.value;
   if (quickStaleReasons.value.length > 0) {
     return "The prepared rewrite no longer matches the prompt, model, or machine. Choose a recovery action above.";
@@ -3840,6 +4184,95 @@ const composerWarningReason = computed<string | null>(() =>
       ),
 );
 
+/*
+ * One composer, two modes. In clip mode it carries the SELECTED SCENE's words,
+ * the timeline above owns the refusal, and Generate submits the whole chain —
+ * so every binding below asks `isSequence` once and nothing downstream has to.
+ */
+const activeScene = computed(
+  () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
+);
+const activeSceneIndex = computed(() => {
+  const index = draft.clips.findIndex((clip) => clip.id === activeScene.value?.id);
+  return index >= 0 ? index : 0;
+});
+const composerPrompt = computed(() =>
+  isSequence.value ? (activeScene.value?.prompt ?? "") : null,
+);
+/** A one-shot on a clip style: the plain render the Simple sub-mode makes.
+ *  Read from the one section authority, never a second family list. */
+const isSimpleClip = computed(
+  () => !isSequence.value && outputKindFor(draft.output, form.family) === "clip",
+);
+const composerPlaceholder = computed(() => {
+  if (isSimpleClip.value) return "Describe the clip";
+  if (!isSequence.value) return null;
+  return activeSceneIndex.value === 0
+    ? "Scene 1 — describe how the clip opens"
+    : `Scene ${activeSceneIndex.value + 1} — describe what happens next`;
+});
+
+/**
+ * The Length chip's contract, which is the SAME row the inspector's Clip card
+ * reads — both write `form.frames`, so the chip and the slider are one control
+ * shown twice. Absent outside the simple clip: a sequence's lengths are
+ * per-scene and a still has none.
+ */
+const composerLengthContract = computed<VideoFrameContract | null>(() => {
+  if (!isSimpleClip.value || form.predictDuration) return null;
+  const entry = contractEntry.value;
+  return {
+    ...(entry ?? {}),
+    family: entry?.family ?? form.family,
+    name: entry?.name ?? form.model,
+    source_image: entry?.source_image ?? form.sourceImageCapability,
+  };
+});
+function writeScenePrompt(value: string) {
+  const scene = activeScene.value;
+  if (scene) scene.prompt = value;
+}
+/**
+ * What Generate must refuse for in clip mode. The timeline raises its own
+ * refusal while it is mounted, but it is `v-else`'d away entirely when no
+ * installed style can make a clip — so the view answers for it there, and the
+ * one composer is locked whether or not the timeline exists.
+ */
+const timelineBlockedReason = ref<string | null>(SEQUENCE_NEEDS_STYLE);
+const sequenceBlockedReason = computed(() =>
+  showSequenceEmpty.value ? SEQUENCE_NEEDS_STYLE : timelineBlockedReason.value,
+);
+const composerRefusal = computed(() =>
+  isSequence.value ? sequenceBlockedReason.value : composerBlockerReason.value,
+);
+const composerLocked = computed(() =>
+  isSequence.value ? sequenceBlockedReason.value !== null : composerDisabled.value,
+);
+const composerSubmitting = computed(() =>
+  isSequence.value ? sequenceSubmitting.value : submissionPlanning.value,
+);
+
+/**
+ * The timeline's destructive questions, asked over the whole workbench. The
+ * bench strip is a `container-type: size` box, which makes it the containing
+ * block for an absolutely positioned dialog — one rendered inside it would be
+ * centred and clipped in a 320px strip.
+ */
+const sequenceConfirmation = ref<SequenceConfirmation | null>(null);
+function resolveSequenceConfirmation(answer: "confirm" | "cancel") {
+  const pending = sequenceConfirmation.value;
+  if (pending) pending[answer]();
+}
+
+function composerGenerate() {
+  if (isSequence.value) void generateSequence();
+  else void generate();
+}
+function composerCancel() {
+  if (isSequence.value) cancelSequenceSubmission();
+  else cancelSubmissionPlanning();
+}
+
 // The shared rule picks the sentence: the surface's own wording while the
 // prompt is required, the optional wording once conditioning makes it
 // optional, and the image-preparation wording for a recipe that never reads
@@ -3851,7 +4284,9 @@ const emptyCanvasGuidance = computed(() =>
   ),
 );
 
-async function generate() {
+/** `batchOverride` submits a one-off count — Make 4 variations — without
+ *  touching the batch size the form keeps for every later Generate. */
+async function generate(batchOverride: number | null = null) {
   if (generationInputBlockerReason.value || preparedSubmitting.value || submissionPlanning.value)
     return;
   clearSelectedQueueRender();
@@ -3918,6 +4353,7 @@ async function generate() {
   submissionPlanning.value = true;
   try {
     const draft = cloneGenerateForm(form);
+    if (batchOverride !== null) draft.batchSize = batchOverride;
     const routingModel = selectedEntry.value
       ? {
           default_frames: selectedEntry.value.default_frames,
@@ -3943,19 +4379,9 @@ async function generate() {
           }
         : null;
     const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
-    // The composer style preset is baked into the OUTGOING request at submit —
-    // the textarea and negative field are never mutated. Reviewed prepared
-    // prompts ship verbatim (the style already reached them through the
-    // expansion directive; staleness pins the chip to the frozen style), so
-    // the prompt half only applies to the ordinary path. The preset negative
-    // is separate from the reviewed prompt text and merges for BOTH paths,
-    // gated on the family's negative-prompt support.
-    const styled = composeStyle(draft.prompt, draft.stylePreset, {
-      supportsNegativePrompt: draftCaps.supportsNegativePrompt,
-      negative: draft.negativePrompt,
-    });
-    if (!preparedSubmission) draft.prompt = styled.prompt;
-    draft.negativePrompt = styled.negative ?? "";
+    // No style bake here: the desktop composer has no preset strip, and a
+    // preset surviving in the form (an old template, a persisted draft) would
+    // rewrite the prompt invisibly — the words on screen are the words sent.
     const batch = preparedSubmission
       ? preparedSubmission.batch
       : draftCaps.forcesBatchSizeOne
@@ -4330,12 +4756,14 @@ async function generate() {
       if (ok > 0) {
         if (failedCount > 0) {
           toasts.push(
-            `Generated ${ok} of ${done.length} variations. ${failedCount} failed; successful prints were saved to Gallery.`,
+            `Generated ${ok} of ${done.length} variations. ${failedCount} failed; the rest were saved to My images.`,
             "error",
           );
         } else {
           toasts.push(
-            ok === 1 ? "Generated, saved to Gallery" : `Generated ${ok} prints, saved to Gallery`,
+            ok === 1
+              ? "Generated — saved to My images"
+              : `Generated ${ok} pictures — saved to My images`,
           );
         }
         // Gallery refresh is handled by the generation store's complete hook
@@ -4438,6 +4866,31 @@ function invalidateRetainedRestore(): void {
   composer.invalidateRetainedSource();
 }
 
+/**
+ * "Use these settings again" shows the picture too. The restored recipe is
+ * already in the form, so the canvas job carries the request that recipe
+ * builds — which is what Make 4 variations and Make bigger read — and the
+ * print's own media, fetched from its bucket. A recipe the form cannot yet
+ * build (a model no machine has, an unrestorable source) still shows the
+ * picture; the request falls back to the print's own words and model.
+ */
+function showRestoredPrint(print: GalleryPrintOnCanvas): void {
+  let request: GenerateRequest;
+  try {
+    request = buildRequest(form);
+  } catch {
+    request = {
+      prompt: print.metadata.prompt,
+      model: print.metadata.model,
+      width: print.metadata.width,
+      height: print.metadata.height,
+      steps: print.metadata.steps,
+      seed: print.metadata.seed,
+    };
+  }
+  generation.showGalleryPrint(print, request);
+}
+
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
@@ -4479,6 +4932,7 @@ function applyPrefill() {
   }
   applyPrefillToForm(form, prefill, installedModels.value);
   inspectSelectedQueueRender("metadata" in prefill ? prefill.queueSelection : undefined);
+  if ("metadata" in prefill && prefill.print) showRestoredPrint(prefill.print);
   discloseMissingRestoredModel();
   if ("metadata" in prefill && prefill.metadata) {
     // A first/last-frame print restores every knob except its closing still:
@@ -4736,6 +5190,71 @@ function applySequenceReuse(metadata: OutputMetadata) {
   void loadChainLimits();
 }
 
+/**
+ * Simple | Scenes — the two ways of making a clip, from the toolbar toggle and
+ * from the palette. The sub-mode is a remembered preference on the draft; the
+ * switch itself moves the draft's OUTPUT, keeping the clip style either way.
+ *
+ * Nothing is destroyed in either direction. Going to Scenes seeds scene 1 from
+ * the words and the length already on the composer when no scene has been
+ * written yet; coming back parks the scenes exactly as they are — the
+ * timeline's own Clear the clip is the only eraser.
+ */
+function setClipMode(mode: ClipMode) {
+  draft.clipMode = mode;
+  if (mode === "simple") {
+    if (!isSequence.value) return;
+    draft.setOutput(
+      "single",
+      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+      sequenceDefaultFrames.value,
+    );
+    return;
+  }
+  if (isSequence.value) return;
+  const seedPrompt = form.prompt.trim();
+  const seedFrames = form.frames;
+  // Mirror the inspector's model rule, and swap BEFORE seeding clips: a style
+  // that cannot join scenes is parked and replaced by the first one that can,
+  // so the new clips default their length from the model that will render them.
+  const current = selectedEntry.value;
+  if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
+    draft.lastSingleModel = form.model || null;
+    const pick = sequenceCapableModels.value[0];
+    if (pick) formStore.applyModel(pick);
+  }
+  const unwritten = draft.clips.every((clip) => !clip.prompt.trim());
+  draft.setOutput(
+    "sequence",
+    { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+    sequenceDefaultFrames.value,
+  );
+  if (!unwritten) return;
+  const first = draft.clips[0];
+  if (!first) return;
+  if (seedPrompt) first.prompt = seedPrompt;
+  const seededLength = sceneLengthFor(seedFrames);
+  if (seededLength !== null) first.frames = seededLength;
+}
+
+/**
+ * The composer's length as ONE scene's length: the longest offered scene that
+ * does not exceed it. A simple clip may be longer than any single scene — that
+ * is the auto-chained one-shot — so it becomes the longest scene there is
+ * rather than a length the chain validator refuses. `null` = shorter than the
+ * shortest scene, so scene 1 keeps the model's own default.
+ */
+function sceneLengthFor(frames: number): number | null {
+  if (!Number.isFinite(frames) || frames <= 0) return null;
+  const options = sequenceFrameOptions(
+    sequenceClipFrameCap(selectedSequenceEntry.value, chainLimits.value),
+    sequenceMotionTail.value,
+    selectedSequenceEntry.value?.family,
+  );
+  const fits = options.filter((option) => option <= frames);
+  return fits.length > 0 ? fits[fits.length - 1]! : null;
+}
+
 /** A sequence handed over from elsewhere: Library ▸ History ▸ Sequences and
  *  the canvas hand over `edit`; a Library sequence print hands over `reuse`.
  *  One-shot — the slot is emptied on arrival so a back-nav cannot replay it. */
@@ -4755,14 +5274,37 @@ function applySequenceHandoff() {
 watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true });
 // Leaving Sequence retires the caveat with the rail it described.
 watch(isSequence, (on) => {
-  if (!on) sequenceReuseNotice.value = null;
+  if (!on) {
+    sequenceReuseNotice.value = null;
+    // No bench is mounted in one-shot mode, and a still reserves more than
+    // twice a clip's canvas floor — clamping here measured the timeline
+    // against a floor it was never under and shrank a height the user dragged.
+    return;
+  }
   // The bench floor is mode-aware; a persisted one-shot height may sit below
   // the sequence floor and would otherwise scroll the composer.
   clampBenchToViewport();
 });
 
+/**
+ * Act on a shell intent exactly once, whether it was raised while this view
+ * was mounted or on the way here. The palette and the native menu raise the
+ * intent and then navigate, so a plain watcher registered on the already
+ * incremented tick would drop every cross-workspace command silently.
+ */
+function onCreateIntent(intent: CreateIntent, tick: () => number, run: () => void) {
+  watch(
+    tick,
+    () => {
+      if (ui.consumeIntent(intent)) run();
+    },
+    { immediate: true },
+  );
+}
+
 // ⌘N — clear the composer for a fresh generation, keeping the model.
-watch(
+onCreateIntent(
+  "newGeneration",
   () => ui.newGenerationTick,
   () => {
     invalidateRetainedRestore();
@@ -4774,7 +5316,6 @@ watch(
     expansionAttemptHostLabel.value = null;
     quickExpansionOriginal.value = null;
     quickExpansionSnapshot.value = null;
-    quickExpansionNegative.value = null;
     submissionGuard.invalidate();
     formStore.clearComposer();
     void nextTick(() => composerRef.value?.focus?.());
@@ -4801,20 +5342,37 @@ watch(
 );
 
 // ⌘R — randomize the seed.
-watch(
+onCreateIntent(
+  "randomizeSeed",
   () => ui.randomizeSeedTick,
   () => {
     form.seed = String(randomSeed());
   },
 );
 
+// Palette — take the clip apart into scenes.
+onCreateIntent(
+  "clipScenes",
+  () => ui.clipScenesTick,
+  () => setClipMode("scenes"),
+);
+
+// ⌥↩ / palette — the picture on the canvas, made four more times.
+onCreateIntent(
+  "makeVariations",
+  () => ui.makeVariationsTick,
+  () => makeVariations(),
+);
+
 // Menu ▸ Generate / Expand Prompt reuse the composer actions. In sequence
 // output the same intent submits the sequence.
-watch(
+onCreateIntent(
+  "generate",
   () => ui.generateTick,
   () => (isSequence.value ? void generateSequence() : void generate()),
 );
-watch(
+onCreateIntent(
+  "expand",
   () => ui.expandTick,
   () => {
     if (refusePromptTransform()) return;
@@ -4827,10 +5385,9 @@ onMounted(() => {
   // ready-host transition refreshes and replaces each live host's slice.
   if (!import.meta.env.TEST) void loadPromptHistory();
   if (!import.meta.env.TEST) liveActivity.start();
-  document.addEventListener("pointerdown", onDocumentPointerDown);
-  document.addEventListener("keydown", onDocumentKeydown);
   window.addEventListener("resize", clampBenchToViewport);
   clampBenchToViewport();
+  observeComposerHeight();
   void listenForNativeImageDrops();
   // The persisted sequence draft wins on ordinary visits; a ?output=sequence
   // deep-link is consumed once and stripped.
@@ -4856,8 +5413,8 @@ onBeforeUnmount(() => {
   stopNativeImageDrop?.();
   stopBenchResize();
   window.removeEventListener("resize", clampBenchToViewport);
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
+  composerObserver?.disconnect();
+  composerObserver = null;
 });
 </script>
 
@@ -4868,45 +5425,34 @@ onBeforeUnmount(() => {
     <div
       v-if="nativeImageDragOver"
       data-test="native-image-drop-overlay"
-      class="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-chrome border-2 border-dashed border-safelight bg-bath/90 text-body-lg text-safelight shadow-raised"
+      class="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-window border-2 border-dashed border-accent bg-bg-deep/90 text-base text-accent shadow-md"
     >
       Drop image to load settings and use as source
     </div>
 
     <!-- Main column: header / canvas / activity / composer -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <CreateHeader :form="form" />
+      <CreateHeader
+        :form="form"
+        @open-tab="inspectorTab = $event"
+        @set-output="inspectorRef?.setOutputMode($event)"
+        @set-clip-mode="setClipMode"
+      />
 
       <div
         ref="workbenchRef"
         data-test="generate-workbench"
         class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        <!-- Templates popover (relocated from the inspector) -->
-        <div ref="templatesEl" class="absolute right-3 top-3 z-20">
-          <button
-            ref="templatesToggleEl"
-            type="button"
-            data-test="templates-toggle"
-            class="border-edge rounded-control border bg-bench/80 px-2.5 py-1 text-caption text-ink-2 backdrop-blur transition-colors hover:text-ink"
-            :aria-expanded="templatesOpen"
-            @click="templatesOpen = !templatesOpen"
-          >
-            Templates
-          </button>
-          <div
-            v-if="templatesOpen"
-            class="border-edge absolute right-0 mt-1 w-72 rounded-chrome border bg-bench p-3 shadow-raised"
-          >
-            <TemplatesPanel :form="form" :models="hostModels.unionInstalled" @load="loadTemplate" />
-          </div>
-        </div>
-
-        <!-- Canvas -->
+        <!-- Canvas. Its floor is BOUND, not a utility: the bench clamp
+             reserves the same number, and a hard-coded class is how the two
+             drifted to 320 and 144 and clipped the composer away. -->
         <div
-          class="flex min-h-[144px] flex-1 items-center justify-center overflow-hidden bg-desk p-7"
+          data-test="generate-canvas"
+          class="flex flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
+          :style="{ minHeight: `${canvasFloor}px` }"
         >
-          <!-- Prepared variations review (prototype: this replaces the canvas) -->
+          <!-- Prepared variations review takes the canvas while it is open. -->
           <PreparedExpansionBatch
             v-if="preparedBatch"
             :batch="preparedBatch"
@@ -4954,7 +5500,7 @@ onBeforeUnmount(() => {
               class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
             >
               <div
-                class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                class="relative max-h-full w-full max-w-full overflow-hidden border border-border-control bg-media-bed [container-name:preview-frame] [container-type:inline-size]"
                 data-test="preview-frame"
                 :style="previewFrameStyle"
                 @contextmenu="job ? contextMenu.open($event, canvasMenu()) : undefined"
@@ -5070,23 +5616,80 @@ onBeforeUnmount(() => {
                     show-label
                   />
                 </div>
+
+                <!-- Caption strip (README §04): the result's actions live in
+                     the image's own caption, never as a pill overlapping it.
+                     Plain words first, the mono truth beside them. -->
+                <div
+                  data-test="canvas-caption"
+                  class="absolute inset-x-0 bottom-0 flex items-center gap-3 border-t border-border bg-bg-crust py-1.5 pr-1.5 pl-2.5"
+                  @contextmenu.stop
+                >
+                  <span
+                    v-if="liveGenerationStatus"
+                    data-test="generation-live-status"
+                    class="min-w-0 flex-1 truncate font-mono text-micro text-accent"
+                  >
+                    {{ liveGenerationStatus }}
+                  </span>
+                  <span
+                    v-else
+                    data-test="generation-edge-code"
+                    class="min-w-0 flex-1 truncate font-mono text-micro text-fg-2"
+                    :title="edgeCode"
+                  >
+                    {{ edgeCode }}
+                  </span>
+                  <span
+                    v-if="captionMeta"
+                    data-test="generation-caption-meta"
+                    class="shrink-0 font-mono text-micro text-fg-dim whitespace-nowrap"
+                  >
+                    {{ captionMeta }}
+                  </span>
+                  <template v-if="job && job.status === 'complete'">
+                    <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
+                    <button
+                      v-if="canSaveCanvasResult(job)"
+                      type="button"
+                      data-test="canvas-save"
+                      class="caption-action caption-action--word"
+                      @click="saveCanvasResult(job)"
+                    >
+                      <Icon name="save" :size="14" />
+                      Save
+                    </button>
+                    <button
+                      v-if="canMakeVariations(job)"
+                      type="button"
+                      data-test="canvas-variations"
+                      class="caption-action caption-action--word"
+                      @click="makeVariations()"
+                    >
+                      Make 4 variations
+                    </button>
+                    <button
+                      v-if="canUpscaleCanvasResult(job)"
+                      type="button"
+                      data-test="canvas-upscale"
+                      class="caption-action caption-action--word"
+                      @click="openCanvasUpscale(job)"
+                    >
+                      Make bigger
+                    </button>
+                    <button
+                      type="button"
+                      data-test="canvas-more"
+                      class="caption-action caption-action--icon"
+                      title="More"
+                      aria-label="More actions"
+                      @click="contextMenu.open($event, canvasMenu())"
+                    >
+                      <Icon name="more" :size="14" />
+                    </button>
+                  </template>
+                </div>
               </div>
-            </div>
-
-            <div
-              v-if="liveGenerationStatus"
-              data-test="generation-live-status"
-              class="edge-code mt-2 max-w-full text-center text-safelight"
-            >
-              {{ liveGenerationStatus }}
-            </div>
-
-            <div
-              data-test="generation-edge-code"
-              class="edge-code mt-2 max-w-full truncate"
-              :title="edgeCode"
-            >
-              {{ edgeCode }}
             </div>
 
             <!-- Batch dots -->
@@ -5094,14 +5697,14 @@ onBeforeUnmount(() => {
               <span
                 v-for="(s, i) in siblings"
                 :key="i"
-                class="data-mono text-body"
+                class="font-mono text-sm"
                 :class="siblingDot(s)"
                 :title="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
                 :aria-label="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
               >
                 {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
               </span>
-              <span class="edge-code ml-1">
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap ml-1">
                 {{ siblings.filter((s) => s.status === "complete").length }} of
                 {{ siblings.length }}
               </span>
@@ -5123,20 +5726,23 @@ onBeforeUnmount(() => {
             <video
               :key="sequencePlaybackSrc"
               :src="sequencePlaybackSrc"
-              class="min-h-0 w-full flex-1 rounded-media border border-control-edge bg-print-surface object-contain"
+              class="min-h-0 w-full flex-1 rounded-inner border border-border-control bg-media-bed object-contain"
               autoplay
               controls
               loop
               playsinline
+              @timeupdate="onSequenceTimeUpdate"
             />
             <div
-              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-edge bg-bench/90 px-2 py-1.5 shadow-raised backdrop-blur"
+              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-border bg-bg/90 px-2 py-1.5 shadow-md backdrop-blur"
             >
-              <span class="edge-code">Clip {{ (playingSequenceStage ?? 0) + 1 }}</span>
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                >Scene {{ (playingSequenceStage ?? 0) + 1 }}</span
+              >
               <button
                 type="button"
                 data-test="sequence-return-live"
-                class="rounded-control border border-edge px-2 py-1 text-caption text-ink-2 hover:text-ink"
+                class="rounded-control border border-border px-2 py-1 text-micro text-fg-2 hover:text-fg"
                 @click="returnToLiveSequence"
               >
                 Return to live render
@@ -5151,7 +5757,7 @@ onBeforeUnmount(() => {
             class="pointer-events-none flex flex-col items-center justify-center gap-3"
           >
             <ProgressRing :value="watchedSequencePct" :size="96" show-label />
-            <span class="edge-code text-safelight">
+            <span class="font-mono text-micro whitespace-nowrap text-accent">
               clip {{ (chains.live.activeStage ?? watchedSequence.current_stage) + 1 }}/{{
                 watchedSequence.stage_count
               }}
@@ -5160,7 +5766,7 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- Settled sequence: the canvas holds the result, because the
-               activity strip no longer does. -->
+               queue rail never did. -->
           <div
             v-else-if="isSequence && settledSequence"
             data-test="sequence-result"
@@ -5173,7 +5779,7 @@ onBeforeUnmount(() => {
             >
               <div
                 data-test="sequence-result-frame"
-                class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                class="relative max-h-full w-full max-w-full overflow-hidden rounded-inner border border-border-control bg-media-bed"
                 :style="settledFrameStyle"
               >
                 <AuthedMedia
@@ -5200,10 +5806,15 @@ onBeforeUnmount(() => {
               :copy-message="settledSequenceErrorCopy"
             />
             <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
-              <span class="edge-code text-ink-3">saved to Library</span>
+              <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                >saved to My images</span
+              >
             </div>
 
-            <div class="edge-code mt-2 max-w-full truncate" :title="settledSequenceCaption">
+            <div
+              class="font-mono text-micro text-fg-dim whitespace-nowrap mt-2 max-w-full truncate"
+              :title="settledSequenceCaption"
+            >
               {{ settledSequenceCaption }}
             </div>
             <div class="mt-2 flex items-center gap-2">
@@ -5211,7 +5822,7 @@ onBeforeUnmount(() => {
                 v-if="settledSequenceError"
                 type="button"
                 data-test="sequence-resume"
-                class="rounded-control bg-stop px-3 py-1 text-body font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px"
+                class="rounded-control bg-error px-3 py-1 text-sm font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px"
                 @click="resumeSettledSequence"
               >
                 Resume
@@ -5219,18 +5830,18 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-test="sequence-edit"
-                class="border-ce rounded-control border px-3 py-1 text-body text-ink-2 transition-colors hover:text-rebate"
+                class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
                 @click="editSettledSequence"
               >
-                Edit sequence
+                Edit clip
               </button>
               <button
                 type="button"
                 data-test="sequence-show-in-library"
-                class="border-ce rounded-control border px-3 py-1 text-body text-ink-2 transition-colors hover:text-rebate"
+                class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
                 @click="showSettledSequenceInLibrary"
               >
-                Show in library
+                Show in My images
               </button>
             </div>
           </div>
@@ -5241,7 +5852,7 @@ onBeforeUnmount(() => {
             data-test="empty-canvas"
             brand
             icon="image"
-            headline="Your print develops here"
+            headline="Your picture appears here"
             :guidance="emptyCanvasGuidance"
           />
         </div>
@@ -5259,7 +5870,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-test="reexpand-and-generate"
-              class="rounded-control bg-stop px-3 py-1.5 text-body font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px disabled:opacity-50"
+              class="rounded-control bg-error px-3 py-1.5 text-sm font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px disabled:opacity-50"
               :disabled="expansionRunning || preparedSubmitting"
               @click="reexpandAndGenerate"
             >
@@ -5268,7 +5879,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-test="generate-expanded-anyway"
-              class="border-stop/50 rounded-control border px-3 py-1.5 text-body font-medium text-stop transition-colors hover:bg-stop/10 active:translate-y-px disabled:opacity-50"
+              class="border-error/50 rounded-control border px-3 py-1.5 text-sm font-medium text-error transition-colors hover:bg-error/10 active:translate-y-px disabled:opacity-50"
               :disabled="expansionRunning || preparedSubmitting"
               @click="generateExpandedAnyway"
             >
@@ -5277,7 +5888,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-test="restore-expanded-original"
-              class="rounded-control px-3 py-1.5 text-body text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+              class="rounded-control px-3 py-1.5 text-sm text-fg-2 transition-colors hover:text-fg active:translate-y-px"
               @click="restoreQuickExpansion"
             >
               Restore original
@@ -5303,76 +5914,75 @@ onBeforeUnmount(() => {
         />
 
         <div
+          v-if="isSequence"
           data-test="create-bench-resizer"
-          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-edge bg-bath/80"
+          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-border bg-bg-deep/80"
           role="separator"
           aria-label="Resize Activity and sequence editor"
           aria-orientation="horizontal"
           :aria-valuenow="benchHeight"
           :aria-valuemin="minBenchHeight()"
-          :aria-valuemax="
-            Math.max(minBenchHeight(), (workbenchRef?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT)
-          "
+          :aria-valuemax="maxBenchHeight()"
           tabindex="0"
           title="Drag to resize · double-click to reset"
           @pointerdown="startBenchResize"
           @keydown="onBenchResizeKeydown"
-          @dblclick="setBenchHeight(DEFAULT_BENCH_HEIGHT)"
+          @dblclick="setBenchHeight(DEFAULT_SEQUENCE_BENCH_HEIGHT)"
         >
           <span
-            class="h-1 w-12 rounded-full bg-ink-3/50 transition-colors group-hover:bg-safelight group-focus-visible:bg-safelight"
+            class="h-1 w-12 rounded-inner bg-fg-dim/50 transition-colors group-hover:bg-accent group-focus-visible:bg-accent"
             aria-hidden="true"
           />
         </div>
 
         <div
+          v-if="isSequence"
           data-test="create-bottom-panel"
-          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-desk"
+          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-bg-deep"
           :style="{
             height: `${benchHeight}px`,
             containerType: 'size',
             containerName: 'create-bench',
           }"
         >
-          <ActivityStrip @edit-sequence="editSequence" />
           <p
             v-if="isSequence && sequenceReuseNotice"
             data-test="sequence-reuse-note"
-            class="edge-code shrink-0 px-1 pt-1.5 text-ink-3"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0 px-1 pt-1.5"
           >
             {{ sequenceReuseNotice }}
           </p>
 
-          <!-- Sequence bench replaces the single-print composer in-place -->
+          <!-- The clip timeline sits above the composer, never instead of it -->
           <EmptyStateBlock
             v-if="showSequenceEmpty"
             data-test="sequence-empty"
             class="flex-1 py-6"
             icon="image"
-            headline="Sequences need a video model"
-            guidance="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+            headline="A short clip needs a video style"
+            guidance="Get an LTX Video or distilled LTX-2 style that can chain, then tell the story one scene at a time."
           >
             <template #action>
               <button
                 type="button"
                 data-test="sequence-browse-models"
-                class="rounded-control bg-safelight px-3 py-1.5 text-body font-semibold text-on-accent"
+                class="rounded-control bg-accent px-3 py-1.5 text-sm font-semibold text-on-accent"
                 @click="
                   router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
                 "
               >
-                Browse video models
+                Browse video styles
               </button>
             </template>
           </EmptyStateBlock>
-          <!-- Protect the sequence's hard chrome floor from Activity. The
-               composer itself stays min-h-0 so its filmstrip can squash, but
-               this parent flex item makes Activity yield before the footer or
-               Generate button can clip at the supported 390px bench floor. -->
+          <!-- Protect the timeline's hard chrome floor from Activity. The
+               timeline itself stays min-h-0 so its lane can squash, but this
+               parent flex item makes Activity yield before the transport or
+               the readout can clip at the supported bench floor. -->
           <div
             v-else-if="isSequence"
             data-test="generate-sequence-shell"
-            class="flex min-h-[300px] flex-[1_0_300px] overflow-hidden"
+            class="flex min-h-[228px] flex-[1_0_228px] overflow-hidden"
           >
             <SequenceComposer
               data-test="generate-sequence-composer"
@@ -5385,56 +5995,102 @@ onBeforeUnmount(() => {
               :chain-level-dirty="chainLevelDirty"
               :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
               :playing-clip-id="playingSequenceClipId"
+              :elapsed-seconds="sequenceClipElapsed"
               :target="sequenceTarget"
-              @submit="generateSequence"
-              @cancel="cancelSequenceSubmission"
               @duplicate="duplicateSequenceAsNew"
               @play-clip="playSequenceClip"
+              @update:blocked-reason="timelineBlockedReason = $event"
+              @update:confirmation="sequenceConfirmation = $event"
             />
           </div>
-          <ComposerCard
-            v-else
-            ref="composerRef"
-            data-test="generate-composer"
-            class="flex-1"
-            :form="form"
-            :effective-batch-size="effectiveBatchSize"
-            :expansion-running="expansionRunning"
-            :expansion-host-label="expansionHostLabel"
-            :can-undo="quickExpansionOriginal !== null"
-            :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-            :disabled="composerDisabled"
-            :disabled-reason="composerBlockerReason"
-            :warning-reason="composerWarningReason"
-            :submitting="submissionPlanning"
-            :button-label="buttonLabel"
-            :estimate-request="estimateRequest"
-            :estimate-target="estimateTarget"
-            :preprocessing-status="submissionStatus"
-            :history="promptHistory"
-            :remix-source="remixSource"
-            @prompt-authored="onPromptAuthored"
-            @generate="generate"
-            @cancel="cancelSubmissionPlanning"
-            @expand="expandForCurrentBatch()"
-            @remix="remixForCurrentPrompt()"
-            @update:remix-source="remixSource = $event"
-            @restore="restoreQuickExpansion"
-          />
         </div>
+        <!-- One composer for both modes: in clip mode it carries the selected
+             scene's words and Generate submits the whole chain. -->
+        <ComposerCard
+          ref="composerRef"
+          data-test="generate-composer"
+          class="shrink-0"
+          :form="form"
+          :effective-batch-size="effectiveBatchSize"
+          :expansion-running="expansionRunning"
+          :expansion-host-label="expansionHostLabel"
+          :can-undo="quickExpansionOriginal !== null"
+          :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+          :disabled="composerLocked"
+          :disabled-reason="composerRefusal"
+          :warning-reason="isSequence ? null : composerWarningReason"
+          :submitting="composerSubmitting"
+          :button-label="buttonLabel"
+          :queued-note="isSequence ? null : queuedNote"
+          :estimate-request="isSequence ? null : estimateRequest"
+          :estimate-target="estimateTarget"
+          :preprocessing-status="isSequence ? null : submissionStatus"
+          :history="isSequence ? [] : promptHistory"
+          :remix-source="remixSource"
+          :batch-locked="batchLocked"
+          :prompt-value="composerPrompt"
+          :placeholder="composerPlaceholder"
+          :show-count="!isSequence"
+          :length-frames="form.frames"
+          :length-fps="form.fps"
+          :length-contract="composerLengthContract"
+          :show-expand="!isSequence"
+          @open-shape="inspectorTab = 'settings'"
+          @prompt-authored="onPromptAuthored"
+          @update:prompt-value="writeScenePrompt"
+          @update:length-frames="form.frames = $event"
+          @generate="composerGenerate"
+          @cancel="composerCancel"
+          @expand="expandForCurrentBatch()"
+          @remix="remixForCurrentPrompt()"
+          @update:remix-source="remixSource = $event"
+          @restore="restoreQuickExpansion"
+        >
+          <!-- The one style selector in the app. -->
+          <template #style>
+            <StylePicker :form="form" @pull-missing-model="offerPullForSelectedModel" />
+          </template>
+        </ComposerCard>
+
+        <ConfirmDialog
+          :open="sequenceConfirmation !== null"
+          :title="sequenceConfirmation?.title ?? ''"
+          :message="sequenceConfirmation?.message ?? ''"
+          :confirm-label="sequenceConfirmation?.confirmLabel ?? 'Confirm'"
+          danger
+          @confirm="resolveSequenceConfirmation('confirm')"
+          @cancel="resolveSequenceConfirmation('cancel')"
+        />
       </div>
     </div>
 
     <!-- Inspector (persisted, left-edge resizable width) -->
     <InspectorPanel
+      ref="inspectorRef"
       :form="form"
+      :tab="inspectorTab"
+      :recent="recentPrints"
       :last-seed="generation.lastSeedUsed"
       :chain-limits="chainLimits"
       :canvas-intent="canvasIntent"
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"
       @reset-settings="invalidateRetainedRestore"
-      @pull-missing-model="offerPullForSelectedModel"
+      @update:tab="inspectorTab = $event"
+      @load-template="loadTemplate"
+      @reuse-print="reuseRecentPrint"
+    />
+
+    <UpscaleDialog
+      v-model="upscaleModel"
+      :open="!!upscaleEntry"
+      kind="image"
+      :source-name="upscaleEntry?.item.filename ?? ''"
+      :models="models.upscalers"
+      :busy="upscaleBusy"
+      :error="upscaleError || null"
+      @confirm="startCanvasUpscale"
+      @close="closeCanvasUpscale"
     />
 
     <DownloadTargetDialog
@@ -5466,3 +6122,41 @@ onBeforeUnmount(() => {
     />
   </div>
 </template>
+
+<style scoped>
+.caption-action {
+  display: inline-flex;
+  cursor: pointer;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  border-radius: var(--mold-radius-1);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--mold-text);
+}
+.caption-action:hover {
+  background: var(--mold-surface);
+}
+.caption-action--icon {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  color: var(--mold-text-2);
+}
+
+/* The caption lives INSIDE the aspect-fitted frame, and the frame is only as
+   wide as the print: an 832x1216 portrait at the minimum window gives it
+   ~287px, where Save + Make 4 variations + Make bigger + the meta need ~420
+   and the last of them paint outside the frame's `overflow-hidden` — clipped,
+   with no scroll and no cue. Below that width the word actions stand down and
+   the ... menu, which carries every one of them, answers instead. */
+@container preview-frame (max-width: 440px) {
+  .caption-action--word {
+    display: none;
+  }
+}
+</style>

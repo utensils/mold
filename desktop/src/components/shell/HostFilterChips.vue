@@ -26,26 +26,26 @@ const options = computed(() => [{ key: "all", label: "All", count: total.value }
 
 <template>
   <div
-    class="flex rounded-control border border-control-edge bg-bath p-0.5"
+    class="flex rounded-control border border-border-control bg-bg-deep p-0.5"
     role="tablist"
-    :aria-label="ariaLabel ?? 'Gallery source'"
+    :aria-label="ariaLabel ?? 'Made on'"
   >
     <button
       v-for="option in options"
       :key="option.key"
       type="button"
       role="tab"
-      class="flex items-center gap-1 rounded-control px-2.5 py-1 text-caption transition-colors"
+      class="flex items-center gap-1 rounded-control px-2.5 py-1 text-micro transition-colors"
       :class="
         modelValue === option.key
-          ? 'bg-bench font-medium text-ink shadow-sm'
-          : 'text-ink-3 hover:text-ink'
+          ? 'bg-bg font-medium text-fg shadow-sm'
+          : 'text-fg-dim hover:text-fg'
       "
       :aria-selected="modelValue === option.key"
       @click="emit('update:modelValue', option.key)"
     >
       <span class="max-w-32 truncate">{{ option.label }}</span>
-      <span class="data-mono text-ink-3">{{ option.count }}</span>
+      <span class="font-mono text-xs text-fg-dim">{{ option.count }}</span>
     </button>
   </div>
 </template>

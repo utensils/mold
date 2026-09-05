@@ -150,7 +150,11 @@ export function buildChainRequest(
     output_format: "mp4",
   };
   if (seed !== undefined && Number.isFinite(seed)) req.seed = seed;
-  if (opts.enableAudio) req.enable_audio = true;
+  // ALWAYS explicit. An omitted `enable_audio` means "the recipe's own
+  // answer" at the server door now, and that answer is ON for an audio
+  // family — so omitting the field when the user turned sound off would
+  // hand back the audio they just refused.
+  req.enable_audio = opts.enableAudio;
   return req;
 }
 
@@ -239,7 +243,10 @@ export function clipsToChainScript(
       steps: shared.steps,
       guidance: shared.guidance,
       strength: shared.strength,
-      enable_audio: opts.enableAudio ? true : null,
+      // Explicit in both directions, for the reason `buildChainRequest`
+      // documents: a null here would read as "resolve the default" and
+      // re-enable the sound the author turned off.
+      enable_audio: opts.enableAudio,
     },
     stages: clips.map((clip, idx) =>
       serializeStage(clip, idx, opts.openingImage ?? null, "source_image_b64"),

@@ -3,8 +3,6 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import InspectorPanel from "./InspectorPanel.vue";
-import AdvancedSettings from "./AdvancedSettings.vue";
-import ModelPicker from "./ModelPicker.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -13,6 +11,9 @@ import Stepper from "@ui/components/Stepper.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
+import TemplatesPanel from "../generate/TemplatesPanel.vue";
+import LoraStack from "../generate/LoraStack.vue";
+import StarterList from "./StarterList.vue";
 import { aspectIdFor } from "../../lib/resolutions";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
@@ -24,7 +25,6 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
-import { apiJsonTo } from "../../lib/api/client";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("../../lib/api/client", () => ({
@@ -95,7 +95,9 @@ describe("InspectorPanel — layout", () => {
     ];
     const wrapper = mount(InspectorPanel, { props: { form } });
     const guidance = () =>
-      wrapper.findAllComponents(SliderRow).find((row) => row.props("label") === "Prompt strength")!;
+      wrapper
+        .findAllComponents(SliderRow)
+        .find((row) => row.props("label") === "Stick to my words")!;
     expect(guidance().props("disabled")).toBe(true);
     expect(guidance().props("modelValue")).toBe(1);
     // The sentence is the profile's own note, not inspector copy.
@@ -167,9 +169,11 @@ describe("InspectorPanel — layout", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
-    // Detail + Prompt strength sliders.
+    // Detail + Stick to my words sliders.
     expect(wrapper.findAllComponents(SliderRow)).toHaveLength(2);
-    expect(wrapper.findComponent(Stepper).exists()).toBe(true);
+    // "Make N" moved to the composer's control row — the inspector must not
+    // carry a second copy of it.
+    expect(wrapper.findComponent(Stepper).exists()).toBe(false);
     expect(wrapper.find('[data-test="seed-mode-random"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="open-advanced"]').exists()).toBe(true);
   });
@@ -253,23 +257,23 @@ describe("InspectorPanel — layout", () => {
     expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(false);
   });
 
-  it("defaults wide enough for one ratio row and persists left-edge resizing", async () => {
+  it("defaults to the shell's inspector width and persists left-edge resizing", async () => {
     const prefs = useAppPrefsStore();
     const update = vi.spyOn(prefs, "update").mockResolvedValue();
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     const inspector = wrapper.get('[data-test="inspector-panel"]');
     const handle = wrapper.getComponent(PanelResizeHandle);
 
-    expect(inspector.attributes("style")).toContain("width: 340px");
+    expect(inspector.attributes("style")).toContain("width: 300px");
     expect(handle.props("label")).toBe("Resize generation settings");
 
     handle.vm.$emit("resize", -40);
     await flushPromises();
-    expect(inspector.attributes("style")).toContain("width: 380px");
+    expect(inspector.attributes("style")).toContain("width: 340px");
 
     handle.vm.$emit("commit");
     await flushPromises();
-    expect(update).toHaveBeenCalledWith({ generateParamsWidth: 380 });
+    expect(update).toHaveBeenCalledWith({ generateParamsWidth: 340 });
 
     handle.vm.$emit("reset");
     await flushPromises();
@@ -525,41 +529,73 @@ describe("InspectorPanel — shape + resolution projection", () => {
   });
 });
 
-describe("InspectorPanel — batch", () => {
-  it("steps the batch size through the Stepper", async () => {
-    const form = formFor("flux");
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    wrapper.findComponent(Stepper).vm.$emit("update:modelValue", 3);
-    await flushPromises();
-    expect(form.batchSize).toBe(3);
-    expect(wrapper.findComponent(Stepper).props("max")).toBe(10_000);
-    expect(wrapper.findComponent(Stepper).props("editable")).toBe(true);
+// "Make N" now lives on the composer's control row; its Stepper contract and
+// the one-at-a-time lock are covered by `ComposerCard.test.ts`.
+
+describe("InspectorPanel — tabs", () => {
+  it("opens Starters and Recent as tabs beside Settings, never as popovers", async () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.find('[data-test="inspector-starters"]').exists()).toBe(false);
+    await wrapper.get('[data-test="inspector-tab-starters"]').trigger("click");
+    expect(wrapper.emitted("update:tab")).toEqual([["starters"]]);
+    await wrapper.get('[data-test="inspector-tab-recent"]').trigger("click");
+    expect(wrapper.emitted("update:tab")?.at(-1)).toEqual(["recent"]);
   });
 
-  it("accepts a directly entered large positive batch", async () => {
-    const form = formFor("flux");
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    const input = wrapper.get('input[aria-label="Batch size"]');
-    await input.setValue("1000");
-    await input.trigger("change");
-    await flushPromises();
-    expect(form.batchSize).toBe(1000);
+  it("loads a starting point from the Starters tab's picture cards", async () => {
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("flux"), tab: "starters" },
+    });
+    expect(wrapper.find('[data-test="inspector-starters"]').exists()).toBe(true);
+    // Pictures are the tab; the save/search/sort manager is behind Edit….
+    expect(wrapper.findComponent(StarterList).exists()).toBe(true);
+    expect(wrapper.findComponent(TemplatesPanel).exists()).toBe(false);
+
+    const template = { id: "t1", name: "River preset" } as never;
+    wrapper.findComponent(StarterList).vm.$emit("load", template);
+    expect(wrapper.emitted("load-template")).toEqual([[template]]);
+
+    await wrapper.get('[data-test="edit-starters"]').trigger("click");
+    expect(wrapper.findComponent(TemplatesPanel).exists()).toBe(true);
+    expect(wrapper.findComponent(StarterList).exists()).toBe(false);
+    wrapper.findComponent(TemplatesPanel).vm.$emit("load", template);
+    expect(wrapper.emitted("load-template")).toHaveLength(2);
   });
 
-  it("does not overwrite an uncommitted direct entry on an arrow key", async () => {
-    const form = formFor("flux");
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    const input = wrapper.get('input[aria-label="Batch size"]');
-    (input.element as HTMLInputElement).value = "120";
-    await input.trigger("keydown", { key: "ArrowUp" });
-    expect(form.batchSize).toBe(1);
-    expect((input.element as HTMLInputElement).value).toBe("120");
+  it("restores a whole recipe from a Recent row, not just its words", async () => {
+    const print = {
+      item: { filename: "a.png", metadata: { prompt: "a river", model: "flux-dev:q8" } },
+      sourceKey: "local",
+      hostLabel: "This Mac",
+      availableOn: [],
+    } as never;
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("flux"), tab: "recent", recent: [print] },
+    });
+    const rows = wrapper
+      .get('[data-test="inspector-recent"]')
+      .findAll("[data-test='recent-print']");
+    expect(rows).toHaveLength(1);
+    await rows[0]!.trigger("click");
+    expect(wrapper.emitted("reuse-print")).toEqual([[print]]);
   });
 
-  it("locks the batch to one for edit models", () => {
-    const wrapper = mount(InspectorPanel, { props: { form: formFor("qwen-image-edit") } });
-    expect(wrapper.findComponent(Stepper).props("max")).toBe(1);
-    expect(wrapper.text()).toContain("Locked to 1");
+  it("says so when nothing has been made yet", () => {
+    const wrapper = mount(InspectorPanel, {
+      props: { form: formFor("flux"), tab: "recent" },
+    });
+    expect(wrapper.get('[data-test="inspector-recent"]').text()).toContain(
+      "Pictures you make show up here",
+    );
+  });
+
+  it("leaves Where it runs to the view toolbar", () => {
+    // Buried at the foot of the Settings list the routing pick was hard to
+    // find; it is a toolbar chip now (CreateHeader), never an inspector row.
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.find('[data-test="inspector-host"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="host-chip"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Where it runs");
   });
 });
 
@@ -627,9 +663,9 @@ describe("InspectorPanel — advanced", () => {
     form.model = "z-image-turbo:q8";
     const wrapper = mount(InspectorPanel, { props: { form } });
 
-    await wrapper.get('[data-test="open-advanced"]').trigger("click");
-
-    expect(wrapper.getComponent(AdvancedSettings).props("loraRoute")).toMatchObject({
+    // Add-on looks is a main-column group now, so the route reaches the picker
+    // without opening Advanced at all.
+    expect(wrapper.getComponent(LoraStack).props("route")).toMatchObject({
       hostId: "plato-7680",
       target: { baseUrl: "http://plato:7680" },
     });
@@ -782,7 +818,7 @@ describe("InspectorPanel — reset to model defaults", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("sdxl") } });
     const reset = wrapper.get('[data-test="settings-reset"]');
     expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
-    expect(reset.attributes("aria-label")).toBe("Reset settings to model defaults");
+    expect(reset.attributes("aria-label")).toBe("Reset to the style's defaults");
   });
 
   it("restores the model's defaults while preserving prompt/model and resetting Batch", async () => {
@@ -857,21 +893,18 @@ describe("InspectorPanel — output", () => {
     default_guidance: 4.5,
   } as ModelEntry;
 
-  function outputSegments(wrapper: ReturnType<typeof mount>) {
-    return wrapper.get("[data-test='output-mode']").findAll("button[role='radio']");
+  /** The view toolbar's Still picture | Short clip control emits `set-output`
+   * into exactly this. The inspector carries no second output switch. */
+  function setOutput(wrapper: ReturnType<typeof mount>, mode: "single" | "sequence") {
+    (wrapper.vm as unknown as { setOutputMode: (m: string) => void }).setOutputMode(mode);
   }
 
-  it("renders the Output card between Model and Shape with One shot active", () => {
+  it("carries no output switch of its own", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
-    const card = wrapper.get("[data-test='output-card']");
-    expect(card.text()).toContain("Output");
-    const segments = outputSegments(wrapper);
-    expect(segments.map((b) => b.text())).toEqual(["One shot", "Sequence"]);
-    expect(segments[0]!.attributes("aria-checked")).toBe("true");
-    // Card order: Model precedes the Output card, which precedes Shape.
-    const html = wrapper.html();
-    expect(html.indexOf("output-card")).toBeGreaterThan(html.indexOf("selected-model-name"));
-    expect(html.indexOf("output-card")).toBeLessThan(html.indexOf(">Shape<"));
+    expect(wrapper.find("[data-test='output-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='output-mode']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("One shot");
+    expect(wrapper.text()).not.toContain("Sequence");
   });
 
   it("switching to Sequence keeps prompts separate, remembers + swaps the model, and locks batch", async () => {
@@ -882,7 +915,7 @@ describe("InspectorPanel — output", () => {
     form.prompt = "a cat at dusk";
     const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
 
-    await outputSegments(wrapper)[1]!.trigger("click");
+    setOutput(wrapper, "sequence");
     await flushPromises();
 
     const draft = useSequenceDraftStore();
@@ -892,9 +925,8 @@ describe("InspectorPanel — output", () => {
     // A non-capable model is remembered and swapped for the first capable one.
     expect(draft.lastSingleModel).toBe("flux-dev:q8");
     expect(form.model).toBe("ltx-video");
-    // Batch locks to one timeline; the switch-back caption appears.
-    expect(wrapper.text()).toContain("a sequence renders one timeline");
-    expect(wrapper.text()).toContain("one-shot and sequence prompts stay separate");
+    // The one-shot prompt is parked, not carried into clip 1.
+    expect(form.prompt).toBe("a cat at dusk");
   });
 
   it("switching back restores the remembered single model without leaking clip 1's prompt", async () => {
@@ -910,7 +942,7 @@ describe("InspectorPanel — output", () => {
     draft.lastSingleModel = "flux-dev:q8";
     const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
 
-    await outputSegments(wrapper)[0]!.trigger("click");
+    setOutput(wrapper, "single");
     await flushPromises();
 
     expect(draft.output).toBe("single");
@@ -921,15 +953,61 @@ describe("InspectorPanel — output", () => {
     expect(draft.clips).toHaveLength(2);
   });
 
-  it("filters the picker to sequence-capable models while in sequence mode", async () => {
+  // The picker's own sequence narrowing moved with the picker, to
+  // StylePicker.test.ts ("filters to sequence-capable models while in
+  // sequence mode"). What the inspector still owns is the swap ABOVE.
+
+  it("finds a clip style even though the picker is showing the Still picture section", async () => {
+    // The picker narrows to the section the view is IN, which while the user
+    // is still on Still picture holds no clip style at all. The swap reads the
+    // target's whole inventory instead, or Short clip would be a dead end on
+    // every machine whose current style is a picture style.
+    useModelStore().all = [stillModel, videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = stillModel.name;
+    form.family = stillModel.family;
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    setOutput(wrapper, "sequence");
+    await flushPromises();
+
+    expect(form.model).toBe("ltx-video");
+  });
+
+  it("restores a STILL style on the way back, never the clip one it swapped in", async () => {
+    // Nothing was parked (the form already carried a clip style when Short
+    // clip was chosen), so returning to Still picture must still leave a style
+    // the section can make.
     useModelStore().all = [stillModel, videoModel];
     const form = useGenerateFormStore().form;
     form.model = videoModel.name;
-    useSequenceDraftStore().output = "sequence";
+    form.family = videoModel.family;
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(25);
     const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
-    const options = wrapper.findAll('[data-test="model-option-name"]');
-    expect(options.map((o) => o.text())).toEqual(["ltx-video"]);
+
+    setOutput(wrapper, "single");
+    await flushPromises();
+
+    expect(form.model).toBe("flux-dev:q8");
+    expect(form.family).toBe("flux");
+  });
+
+  it("leaves the form alone when no still style is installed", async () => {
+    useModelStore().all = [videoModel];
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const draft = useSequenceDraftStore();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    setOutput(wrapper, "single");
+    await flushPromises();
+
+    expect(form.model).toBe("ltx-video");
   });
 
   it("surfaces a frame-rate stepper and hides lock-last-seed in sequence mode", async () => {
@@ -937,133 +1015,41 @@ describe("InspectorPanel — output", () => {
     const form = formFor("ltx-video");
     const wrapper = mount(InspectorPanel, { props: { form, lastSeed: 77 } });
     expect(wrapper.find('[data-test="sequence-fps"]').exists()).toBe(true);
-    expect(wrapper.text()).toContain("Frame rate");
+    expect(wrapper.get('[data-test="clip-card"]').text()).toContain("Smoothness");
     expect(wrapper.find('[data-test="lock-last-seed"]').exists()).toBe(false);
   });
 });
 
-describe("InspectorPanel — model picker", () => {
-  const model: ModelEntry = {
-    name: "flux-dev:q8",
-    family: "flux",
-    downloaded: true,
-    default_width: 1024,
-    default_height: 1024,
-    default_steps: 20,
-    default_guidance: 4.5,
-  } as ModelEntry;
-
-  it("opens the picker and applies a chosen model to the shared form", async () => {
-    useModelStore().all = [model];
+/*
+ * The inspector no longer holds a style field at all. Two selectors — a chip
+ * that was only a door and a full picker behind it — is what made one of them
+ * read as broken. Every row/label/refusal assertion that used to mount the
+ * inspector for its picker now mounts StylePicker.test.ts instead.
+ */
+describe("InspectorPanel — no second style selector", () => {
+  it("renders no style field, and keeps the way back to the style's defaults", async () => {
+    useModelStore().all = [
+      {
+        name: "flux-dev:q8",
+        family: "flux",
+        downloaded: true,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 4.5,
+      } as ModelEntry,
+    ];
     const form = useGenerateFormStore().form;
     const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
-    expect(wrapper.find('[data-test="model-option-name"]').exists()).toBe(true);
-    await wrapper.get('[data-test="model-option-name"]').trigger("click");
-    expect(form.model).toBe("flux-dev:q8");
-  });
+    await flushPromises();
 
-  it("shows a human-readable catalog name while preserving the runnable id", async () => {
-    const catalogModel = {
-      ...model,
-      name: "cv:23423432",
-      family: "sdxl",
-      description: "RealVisXL V5.0 by SG161222",
-    };
-    useModelStore().all = [catalogModel];
-    const form = useGenerateFormStore().form;
-    form.model = catalogModel.name;
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe(
-      "RealVisXL V5.0 by SG161222",
-    );
-    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
-    const option = wrapper.get('[data-test="model-option-name"]');
-    expect(option.text()).toBe("RealVisXL V5.0 by SG161222");
-    await option.trigger("click");
-    expect(form.model).toBe("cv:23423432");
-  });
-
-  it("shows a remote H3 download-only install with readable labels and its refusal", async () => {
-    const h3 = {
-      ...model,
-      name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
-      family: "minimax-h3",
-      runtime_available: false,
-      runtime_unavailable_reason: "This H3 weight layout has no executable loader.",
-    } as ModelEntry;
-    useHostsStore().extras.push({
-      id: "hal9000-7680",
-      label: "HAL 9000",
-      url: "http://hal9000:7680",
-      apiKey: null,
-      status: "ready",
-      error: null,
-      instanceId: null,
-    });
-    useHostModelsStore().byHost["hal9000-7680"] = {
-      entries: [h3],
-      fetchedAt: Date.now(),
-      error: null,
-    };
-    vi.mocked(apiJsonTo).mockResolvedValueOnce([h3]);
-    const form = useGenerateFormStore().form;
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
-
-    expect(wrapper.get(".ms-model__group").text()).toBe("MiniMax H3");
-    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("MiniMax H3 FL2VA · NVFP4");
-    expect(wrapper.get('[data-test="model-disabled-reason"]').text()).toBe(
-      "Download only — This H3 weight layout has no executable loader.",
-    );
-    expect(wrapper.get(".ms-model__option").attributes("disabled")).toBeDefined();
-  });
-
-  it("keeps an unavailable model disabled on the pinned host when another host can run it", () => {
-    const name = "shared-runtime-model";
-    const runnable = {
-      ...model,
-      name,
-      runtime_available: true,
-    } as ModelEntry;
-    const unavailable = {
-      ...runnable,
-      runtime_available: false,
-      runtime_unavailable_reason: "HAL cannot execute this H3 weight layout.",
-    } as ModelEntry;
-    const connection = useConnectionStore();
-    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
-    connection.status = "ready";
-    useHostsStore().extras.push({
-      id: "hal9000-7680",
-      label: "HAL 9000",
-      url: "http://hal9000:7680",
-      apiKey: null,
-      status: "ready",
-      error: null,
-      instanceId: null,
-    });
-    const hostModels = useHostModelsStore();
-    hostModels.byHost.local = { entries: [runnable], fetchedAt: Date.now(), error: null };
-    hostModels.byHost["hal9000-7680"] = {
-      entries: [unavailable],
-      fetchedAt: Date.now(),
-      error: null,
-    };
-    useModelStore().all = [runnable];
-    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
-    const form = useGenerateFormStore().form;
-    form.model = name;
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    const disabledReason = wrapper.getComponent(ModelPicker).props("disabledReason");
-    expect(disabledReason).toBeTypeOf("function");
-    if (!disabledReason) throw new Error("ModelPicker disabledReason prop is required");
-    expect(disabledReason(unavailable)).toBe(
-      "Download only — HAL cannot execute this H3 weight layout.",
-    );
+    expect(wrapper.find('[data-test="inspector-style"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="selected-model-name"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="model-picker-menu"]').exists()).toBe(false);
+    expect(wrapper.findComponent({ name: "ModelPicker" }).exists()).toBe(false);
+    // The mock has no Reset anywhere; this is the only route back to the
+    // checkpoint's own defaults, so it stays.
+    expect(wrapper.find('[data-test="settings-reset"]').exists()).toBe(true);
   });
 });
 
@@ -1170,11 +1156,12 @@ describe("InspectorPanel — source media in the primary form", () => {
     });
   });
 
-  it("renders the identity photo well right after source media when qualified", () => {
+  it("renders the identity photo well right after source media when qualified", async () => {
     const form = formFor("flux");
     form.model = "flux-dev:q8";
     form.identitySupported = true;
     const wrapper = mount(InspectorPanel, { props: { form } });
+    await wrapper.get("[data-test='open-identity']").trigger("click");
     const field = wrapper.get("[data-test='inspector-identity']");
     expect(field.find("[data-test='identity-photo-well']").exists()).toBe(true);
     // Primary form, immediately below the source wells — never behind Advanced.
@@ -1354,39 +1341,8 @@ describe("InspectorPanel — model aspect vs source tie", () => {
   });
 });
 
-describe("InspectorPanel — a restored model no machine has", () => {
-  it("keeps the recorded model visible with a Not installed tag", async () => {
-    useModelStore().all = [];
-    const form = formFor("zimage");
-    form.model = "z-image-turbo:q6";
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    await flushPromises();
-
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("z-image-turbo:q6");
-    expect(wrapper.get('[data-test="selected-model-missing"]').text()).toBe("Not installed");
-  });
-
-  it("offers the pull for that exact id when its picker row is chosen", async () => {
-    useModelStore().all = [];
-    const form = formFor("zimage");
-    form.model = "z-image-turbo:q6";
-    const wrapper = mount(InspectorPanel, { props: { form } });
-    await flushPromises();
-
-    await wrapper.get(".ms-model__button").trigger("click");
-    await wrapper.get('[data-test="model-option-missing"]').trigger("click");
-
-    expect(wrapper.emitted("pull-missing-model")).toEqual([["z-image-turbo:q6"]]);
-    // The raw id is what the form and the request keep carrying.
-    expect(form.model).toBe("z-image-turbo:q6");
-  });
-
-  it("shows Choose a model only when nothing is selected at all", () => {
-    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
-    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("Choose a model");
-    expect(wrapper.find('[data-test="selected-model-missing"]').exists()).toBe(false);
-  });
-});
+// A restored model no machine has is the picker's story now, and lives in
+// StylePicker.test.ts ("a restored model no machine has").
 
 describe("InspectorPanel — File under", () => {
   function connectHost(id: string, organize: boolean) {

@@ -58,17 +58,31 @@ function addRunPodHost(hosts: ReturnType<typeof useHostsStore>) {
   });
 }
 
-async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => void) {
+/** The text of the FIRST render — captured synchronously, before any await
+ *  lets Vue's scheduler flush what `onMounted` changed. That frame is what a
+ *  user sees on arrival, and it is the only place a start-up flash lives. */
+let firstFrame = "";
+
+async function mountView(
+  setup?: (hosts: ReturnType<typeof useHostsStore>) => void,
+  path = "/machines",
+) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: "/", component: stub },
-      { path: "/machines", component: stub },
-      { path: "/machines/runpod", component: stub },
-      { path: "/machines/:id", component: stub },
+      {
+        path: "/machines",
+        name: "machines",
+        component: stub,
+        children: [
+          { path: "runpod", name: "runpod", component: stub },
+          { path: ":id", name: "host-detail", component: stub },
+        ],
+      },
     ],
   });
-  router.push("/machines");
+  router.push(path);
   await router.isReady();
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -125,6 +139,7 @@ async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => vo
   };
   setup?.(hosts);
   const wrapper = mount(MachinesView, { global: { plugins: [pinia, router] } });
+  firstFrame = wrapper.text();
   await flushPromises();
   return wrapper;
 }
@@ -206,7 +221,7 @@ describe("MachinesView overview", () => {
 
     expect(wrapper.get("[data-test='host-reconnecting']").text()).toBe("reconnecting…");
     expect(wrapper.get("[data-test='host-card']").text()).toContain("NVIDIA B200");
-    expect(wrapper.get("[data-test='host-card']").text()).toContain("queue 0");
+    expect(wrapper.get("[data-test='host-card']").text()).toContain("nothing waiting");
   });
 
   it("offers common context-menu actions for connected, remembered, and discovered hosts", async () => {
@@ -217,7 +232,7 @@ describe("MachinesView overview", () => {
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
     ).toEqual([
       "Open details",
-      "Set as generation target",
+      "Make images here",
       "Copy address",
       "Open web UI",
       "Disconnect",
@@ -236,6 +251,32 @@ describe("MachinesView overview", () => {
     wrapper.unmount();
   });
 
+  it("lands on the machine the shell talks about and marks it selected", async () => {
+    const wrapper = await mountView();
+    // No pin and nothing running: this device.
+    expect(router.currentRoute.value.path).toBe("/machines/local");
+    expect(wrapper.get("[data-test='this-device-card']").attributes("aria-current")).toBe("true");
+    expect(wrapper.get("[data-test='host-card']").attributes("aria-current")).toBeUndefined();
+  });
+
+  it("badges the machine that makes images and offers the rest the job", async () => {
+    appSettingsGet.mockResolvedValue({
+      savedHosts: [],
+      connectedHostIds: [],
+      generateTargetHost: "hal9000-7680",
+    });
+    const wrapper = await mountView();
+    const { useAppPrefsStore } = await import("../stores/appPrefs");
+    await useAppPrefsStore().init();
+    await flushPromises();
+    expect(wrapper.get("[data-test='host-card']").find("[data-test='target-badge']").text()).toBe(
+      "making images here",
+    );
+    expect(
+      wrapper.get("[data-test='this-device-card']").find("[data-test='target-badge']").exists(),
+    ).toBe(false);
+  });
+
   it("renders This device first, then connected remote cards", async () => {
     const wrapper = await mountView();
     expect(wrapper.find("[data-test='this-device-card']").exists()).toBe(true);
@@ -245,9 +286,10 @@ describe("MachinesView overview", () => {
     // This device shows its memory meter and hardware line.
     const device = wrapper.get("[data-test='this-device-card']");
     expect(device.text()).toContain("Apple M3 Max");
-    expect(device.text()).toContain("Memory");
+    // The meter above says what it measures, so the reading is bare numbers.
+    expect(device.text()).not.toContain("Memory");
     expect(remotes[0]!.text()).toContain("NVIDIA GeForce RTX 4090 + NVIDIA B200");
-    expect(remotes[0]!.text()).toContain("30.0 GB / 104.0 GB");
+    expect(remotes[0]!.text()).toContain("30.0 / 104.0 GB");
   });
 
   it("never offers Forget on the This device card (it has no saved entry)", async () => {
@@ -283,6 +325,43 @@ describe("MachinesView overview", () => {
     expect(router.currentRoute.value.path).toBe("/machines/pod-123-7680-proxy-runpod-net");
   });
 
+  it("lists a connected pod once — as its pod row, never also as a machine card", async () => {
+    const wrapper = await mountView(addRunPodHost);
+
+    // The pod row already IS the machine row for a rented GPU: its menu is
+    // that host's own, and only it can carry the running cost and Stop.
+    const machines = wrapper.findAll("[data-test='host-card']");
+    expect(machines.map((card) => card.text())).toHaveLength(1);
+    expect(machines.every((card) => !card.text().includes("mold-runpod"))).toBe(true);
+    expect(wrapper.findAll("[data-test='runpod-running']")).toHaveLength(1);
+  });
+
+  it("marks the pod row when the pod is the machine making images", async () => {
+    appSettingsGet.mockResolvedValue({
+      savedHosts: [],
+      connectedHostIds: [],
+      generateTargetHost: "pod-123-7680-proxy-runpod-net",
+    });
+    const wrapper = await mountView(addRunPodHost);
+    const { useAppPrefsStore } = await import("../stores/appPrefs");
+    await useAppPrefsStore().init();
+    await flushPromises();
+
+    const pod = wrapper.get("[data-test='runpod-running']");
+    expect(pod.get("[data-test='target-badge']").text()).toBe("making images here");
+  });
+
+  it("does not claim the network is empty before the first scan answers", async () => {
+    // `scan()` runs in onMounted — AFTER the first render — so a `scanning`
+    // that starts false published "No other mold servers found" in the very
+    // frame the user arrives on, before anything had looked.
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountView();
+    expect(firstFrame).not.toContain("No other mold servers found");
+    // …and it does say so once the scan has actually come back empty.
+    expect(wrapper.text()).toContain("No other mold servers found");
+  });
+
   it("connects to an unconnected RunPod before opening its machine detail", async () => {
     const wrapper = await mountView();
 
@@ -301,13 +380,13 @@ describe("MachinesView overview", () => {
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
     ).toEqual([
       "Open details",
-      "Set as generation target",
+      "Make images here",
       "Copy address",
       "Open web UI",
       "Disconnect",
       "Forget…",
       "Manage RunPod",
-      "Stop pod",
+      "Stop it",
     ]);
   });
 
@@ -326,7 +405,7 @@ describe("MachinesView overview", () => {
     await wrapper.get("[data-test='runpod-running']").trigger("contextmenu");
     expect(
       useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
-    ).not.toContain("Stop pod");
+    ).not.toContain("Stop it");
   });
 
   it("stops a pod without also opening its machine detail", async () => {
@@ -335,7 +414,7 @@ describe("MachinesView overview", () => {
     await wrapper.get("[data-test='pod-cost-stop']").trigger("click");
     await flushPromises();
     expect(runpodStop).toHaveBeenCalledWith("pod-123");
-    expect(router.currentRoute.value.path).toBe("/machines");
+    expect(router.currentRoute.value.path).not.toContain("pod-123");
   });
 
   it("lists remembered (offline) hosts with a Connect action", async () => {
@@ -426,12 +505,18 @@ describe("MachinesView overview", () => {
     expect(text).toContain("clone-7680");
   });
 
+  it("opens the connect-a-machine dialog from the palette's ?connect=1 and cleans the address", async () => {
+    const wrapper = await mountView(undefined, "/machines?connect=1");
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(true);
+    expect(router.currentRoute.value.query.connect).toBeUndefined();
+  });
+
   it("opens the connect-a-machine modal from Add machine", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='connect-type-remote']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(false);
     await wrapper.get("[data-test='add-machine']").trigger("click");
     await flushPromises();
-    expect(wrapper.find("[data-test='connect-type-remote']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='connect-address']").exists()).toBe(true);
   });
 
   it("connecting a discovered box finds a stored key under its instance-id twin's slug", async () => {

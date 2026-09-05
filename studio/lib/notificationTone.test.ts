@@ -8,14 +8,14 @@ import {
 
 describe("notificationTone", () => {
   it("maps severity to the green / yellow / red token trio", () => {
-    expect(notificationTone("success").color).toBe("var(--success)");
-    expect(notificationTone("warning").color).toBe("var(--warning)");
-    expect(notificationTone("error").color).toBe("var(--stop)");
+    expect(notificationTone("success").color).toBe("var(--mold-success)");
+    expect(notificationTone("warning").color).toBe("var(--mold-warning)");
+    expect(notificationTone("error").color).toBe("var(--mold-error)");
   });
 
   it("reads an ordinary notice as green — only warnings and errors stand out", () => {
-    expect(notificationTone("info").color).toBe("var(--success)");
-    expect(notificationTone("info").badge).toBe("var(--success)");
+    expect(notificationTone("info").color).toBe("var(--mold-success)");
+    expect(notificationTone("info").badge).toBe("var(--mold-success)");
     // The glyph, not the hue, separates a notice from a success.
     expect(notificationTone("info").glyph).not.toBe(
       notificationTone("success").glyph,
@@ -46,14 +46,14 @@ describe("notificationTone", () => {
   });
 
   it("fills a counted badge with an opaque token, never translucent hint ink", () => {
-    // A translucent ink such as --ink-3 is a color-mix: a count printed on it
+    // A translucent ink such as --mold-text-dim is a color-mix: a count printed on it
     // has no predictable contrast against whatever sits behind the badge.
     for (const tone of Object.values(NOTIFICATION_TONES)) {
       expect(tone.badge).not.toContain("ink-3");
     }
     // One per-theme ink is legible on every badge fill (guarded for contrast
     // in desktop/src/styles/tokens.contrast.test.ts).
-    expect(NOTIFICATION_BADGE_INK).toBe("var(--on-status)");
+    expect(NOTIFICATION_BADGE_INK).toBe("var(--mold-on-accent)");
   });
 });
 

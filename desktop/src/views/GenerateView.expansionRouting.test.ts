@@ -90,6 +90,7 @@ function mountView() {
         ErrorNotice: false,
         ComposerCard: false,
         InspectorPanel: false,
+        StylePicker: false,
         ModelPicker: false,
       },
     },

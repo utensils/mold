@@ -101,9 +101,9 @@ current platform support.
 
 ## Mold Studio
 
-The desktop app brings Create, Library, Models, Machines, and Settings into one
-workspace for local and remote generation. It also pairs with the iPhone and
-Android companions.
+The desktop app puts New image, Queue, My images, Styles, Machines, and
+Settings in one window, in plain words, with six themes, for local and remote
+generation. It also pairs with the iPhone and Android companions.
 
 **[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)

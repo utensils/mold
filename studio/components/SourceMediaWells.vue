@@ -233,31 +233,31 @@ const endHint = computed(() =>
   opacity: 0.7;
 }
 .smw__label {
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-edge-code, 11px);
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   white-space: nowrap;
 }
 .smw__label--required {
-  color: var(--safelight, #b45309);
+  color: var(--mold-blue, #b45309);
 }
 .smw__label--muted {
   opacity: 0.8;
 }
 .smw__rule {
   flex: 1;
-  border-top: 1px solid var(--edge, #ddd);
+  border-top: 1px solid var(--mold-border, #ddd);
 }
 .smw__hint,
 .smw__error {
   margin: 0;
   font-size: 12px;
   line-height: 1.45;
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
 }
 .smw__error {
-  color: var(--stop, #b42318);
+  color: var(--mold-error, #b42318);
 }
 </style>

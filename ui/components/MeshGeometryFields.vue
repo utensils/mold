@@ -204,16 +204,16 @@ function commitTypedSize(event: Event): void {
 }
 legend {
   margin-bottom: 8px;
-  font-family: var(--f-mono, monospace);
+  font-family: var(--mold-font-mono, monospace);
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3, #777078);
+  color: var(--mold-text-dim, #777078);
 }
 .mesh-geometry fieldset > p {
   margin: 8px 0 0;
-  color: var(--ink-3, #777078);
-  font-family: var(--f-mono, monospace);
+  color: var(--mold-text-dim, #777078);
+  font-family: var(--mold-font-mono, monospace);
   font-size: 12px;
 }
 .mesh-geometry-options {
@@ -236,19 +236,19 @@ legend {
   min-height: 44px;
   padding: 0 8px;
   place-items: center;
-  border: 1px solid var(--edge, rgb(128 120 140 / 35%));
+  border: 1px solid var(--mold-border, rgb(128 120 140 / 35%));
   border-radius: 10px;
   font-size: 13px;
   font-weight: 650;
   text-align: center;
 }
 .mesh-geometry-options input:checked + span {
-  border-color: var(--safelight, #ad5700);
-  background: color-mix(in srgb, var(--safelight, #ad5700) 12%, transparent);
-  color: var(--safelight, #ad5700);
+  border-color: var(--mold-blue, #ad5700);
+  background: color-mix(in srgb, var(--mold-blue, #ad5700) 12%, transparent);
+  color: var(--mold-blue, #ad5700);
 }
 .mesh-geometry-options input:focus-visible + span {
-  outline: 2px solid var(--safelight, #ad5700);
+  outline: 2px solid var(--mold-blue, #ad5700);
   outline-offset: 2px;
 }
 .mesh-geometry-custom {
@@ -258,7 +258,7 @@ legend {
   margin-top: 8px;
 }
 .mesh-geometry-custom-label {
-  color: var(--ink-3, #777078);
+  color: var(--mold-text-dim, #777078);
   font-size: 12px;
 }
 .mesh-geometry-custom input {
@@ -266,11 +266,11 @@ legend {
   min-width: 0;
   min-height: 44px;
   padding: 0 10px;
-  border: 1px solid var(--edge, rgb(128 120 140 / 35%));
+  border: 1px solid var(--mold-border, rgb(128 120 140 / 35%));
   border-radius: 10px;
   background: transparent;
   color: inherit;
-  font-family: var(--f-mono, monospace);
+  font-family: var(--mold-font-mono, monospace);
   font-size: 13px;
 }
 fieldset:disabled {

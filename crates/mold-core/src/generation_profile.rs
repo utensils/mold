@@ -652,6 +652,42 @@ pub fn prompt_requirement_for_family(
     }
 }
 
+/// Whether this family's renderer emits an audio track at all.
+///
+/// The family half of the audio contract, and the ONE place it is decided:
+/// the recipe's advertised `capabilities.supports_audio`, the chain
+/// capability table, and every default resolved by [`resolve_enable_audio`]
+/// read this rather than carrying their own family list.
+///
+/// LTX-2 answers to `GenerateRequest.enable_audio`; MiniMax H3 emits
+/// synchronized audio unconditionally and the flag is inert there (its
+/// admission arm returns before the flag is ever read). Every other family
+/// has no audio decode path.
+pub fn family_emits_audio(family: &str) -> bool {
+    let family = canonical_family(family);
+    family == "ltx2" || crate::minimax_h3::is_family(family)
+}
+
+/// Resolve `enable_audio` for one render.
+///
+/// An explicit value always wins — a user who turned sound off gets silence,
+/// and a user who turned it on gets an admission error where the recipe
+/// cannot deliver. **Unset means the recipe's own answer, and that answer is
+/// ON wherever the recipe can deliver audio.** A video model that renders
+/// sound is what the user asked for when they picked it; making them find a
+/// toggle first shipped silent clips by default.
+///
+/// `supports_audio` is the recipe's advertised capability
+/// (`capabilities.supports_audio`, or [`family_emits_audio`] where only the
+/// family is known), never a second family list at the call site.
+///
+/// This is the same rule the LTX-2 engine has always applied to a one-shot
+/// (`enable_audio.unwrap_or(output == Mp4)`); it is now the rule at the chain
+/// doors and in every client too, which is where the two had diverged.
+pub fn resolve_enable_audio(requested: Option<bool>, supports_audio: bool) -> bool {
+    requested.unwrap_or(supports_audio)
+}
+
 /// The advertised sentence for a non-required prompt.
 fn prompt_reason(mode: PromptRequirement) -> Option<String> {
     match mode {
@@ -1545,6 +1581,31 @@ fn fixed_dmd_steps_note(ladder: crate::manifest::WanDmdLadder) -> String {
     )
 }
 
+/// The three step counts a client can offer as a quality ladder: a faster
+/// draft, the recipe's own default, and a slower pass.
+///
+/// The rungs are relative to the DEFAULT rather than to the control's bounds,
+/// because the default is the only number the recipe actually vouches for —
+/// the bounds are a validation envelope (`1..=100` for most families), and
+/// thirds of that envelope would offer 33 steps for a 4-step Klein render.
+/// Half rounds up so a 1-step default cannot produce a zero rung, and both
+/// outer rungs are clamped into `[min, max]` before the list is deduped, so a
+/// narrow band collapses rather than escaping the control.
+///
+/// A FIXED control never comes here: a wan DMD tier and an H3 Turbo tier are
+/// distilled onto one schedule length, and a second rung would advertise a
+/// render they cannot perform.
+fn steps_ladder(min: u32, default: u32, max: u32) -> Vec<u32> {
+    let mut rungs = vec![
+        default.div_ceil(2).max(min),
+        default,
+        (default * 3).div_ceil(2).min(max),
+    ];
+    rungs.sort_unstable();
+    rungs.dedup();
+    rungs
+}
+
 fn recipe(
     input: &GenerationProfileInput<'_>,
     id: &str,
@@ -1874,6 +1935,21 @@ fn recipe(
         (None, true) => h3_compact_steps,
         (None, false) => input.default_steps,
     };
+    let steps_min = match (wan_dmd_steps, h3_compact_turbo_steps, family) {
+        (Some(steps), _, _) | (None, Some(steps), _) => steps,
+        (None, None, "minimax-h3") => crate::minimax_h3::COMPACT_MIN_STEPS,
+        _ => 1,
+    };
+    let steps_max = match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
+        (Some(steps), _, _) | (None, Some(steps), _) => steps,
+        (None, None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
+        (None, None, false) => 100,
+    };
+    let steps_mode = if wan_dmd_steps.is_some() || h3_compact_turbo_steps.is_some() {
+        ControlMode::Fixed
+    } else {
+        ControlMode::Adjustable
+    };
     let defaults = GenerationDefaultsProfile {
         width: if audio_only || mesh_only {
             0
@@ -1902,23 +1978,19 @@ fn recipe(
         resolution,
         steps: IntegerControl {
             default: default_steps,
-            min: match (wan_dmd_steps, h3_compact_turbo_steps, family) {
-                (Some(steps), _, _) | (None, Some(steps), _) => steps,
-                (None, None, "minimax-h3") => crate::minimax_h3::COMPACT_MIN_STEPS,
-                _ => 1,
-            },
-            max: match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
-                (Some(steps), _, _) | (None, Some(steps), _) => steps,
-                (None, None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
-                (None, None, false) => 100,
-            },
+            min: steps_min,
+            max: steps_max,
             step: 1,
-            recommended: vec![default_steps],
-            mode: if wan_dmd_steps.is_some() || h3_compact_turbo_steps.is_some() {
-                ControlMode::Fixed
+            // A pinned count has one rung by definition: a wan DMD tier and
+            // an H3 Turbo tier are distilled onto one schedule length, so
+            // offering a second number would advertise a render they cannot
+            // perform. Everything adjustable gets the ladder.
+            recommended: if steps_mode == ControlMode::Fixed {
+                vec![default_steps]
             } else {
-                ControlMode::Adjustable
+                steps_ladder(steps_min, default_steps, steps_max)
             },
+            mode: steps_mode,
             note: wan_dmd_ladder
                 .map(fixed_dmd_steps_note)
                 .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note)),
@@ -3588,6 +3660,54 @@ mod tests {
             .contains("no default recipe"));
     }
 
+    /// The family half of the audio contract. LTX-2 answers to the flag;
+    /// H3 emits sound unconditionally; nothing else has a decode path.
+    #[test]
+    fn family_emits_audio_names_the_two_audio_families() {
+        assert!(family_emits_audio("ltx2"));
+        assert!(family_emits_audio("ltx-2"));
+        assert!(family_emits_audio("minimax-h3"));
+        assert!(!family_emits_audio("ltx-video"));
+        assert!(!family_emits_audio("wan"));
+        assert!(!family_emits_audio("flux"));
+        assert!(!family_emits_audio(""));
+    }
+
+    /// Unset means the recipe's own answer, and that answer is ON wherever
+    /// the recipe can deliver audio. This is the whole default flip: a video
+    /// model that renders sound does so without the user finding a toggle.
+    #[test]
+    fn unset_enable_audio_resolves_on_for_an_audio_recipe() {
+        assert!(resolve_enable_audio(None, true));
+        assert!(!resolve_enable_audio(None, false));
+    }
+
+    /// An explicit value always wins, in both directions — including an
+    /// explicit `true` on a recipe that cannot deliver, which admission
+    /// refuses by name rather than this function silencing.
+    #[test]
+    fn explicit_enable_audio_always_wins_over_the_recipe_default() {
+        assert!(!resolve_enable_audio(Some(false), true));
+        assert!(resolve_enable_audio(Some(true), false));
+        assert!(resolve_enable_audio(Some(true), true));
+        assert!(!resolve_enable_audio(Some(false), false));
+    }
+
+    /// The recipe an LTX-2 checkpoint advertises is the input the default
+    /// reads, so the profile and the resolved value cannot drift.
+    #[test]
+    fn an_ltx2_recipe_advertises_the_capability_the_default_reads() {
+        let mut ltx = input("ltx-2.3-22b-distilled:fp8", "ltx2");
+        ltx.supports_audio = true;
+        let profile = resolve_generation_profile(ltx);
+        let recipe = profile.recipes.first().expect("ltx2 has a recipe");
+        assert!(recipe.capabilities.supports_audio);
+        assert!(resolve_enable_audio(
+            None,
+            recipe.capabilities.supports_audio
+        ));
+    }
+
     #[test]
     fn h3_compact_profiles_pin_the_reviewed_envelope() {
         // The reviewed compact stack admits exactly one canvas, one step
@@ -3700,7 +3820,21 @@ mod tests {
                 );
             }
             assert_eq!(recipe.steps.default, steps, "{model}");
-            assert_eq!(recipe.steps.recommended, vec![steps], "{model}");
+            // A pinned Turbo schedule has exactly one rung; the base tag
+            // offers the ladder around its default, inside the compact band.
+            if turbo {
+                assert_eq!(recipe.steps.recommended, vec![steps], "{model}");
+            } else {
+                assert_eq!(
+                    recipe.steps.recommended,
+                    steps_ladder(
+                        crate::minimax_h3::COMPACT_MIN_STEPS,
+                        steps,
+                        crate::minimax_h3::COMPACT_MAX_STEPS
+                    ),
+                    "{model}"
+                );
+            }
 
             let temporal = recipe.temporal.as_ref().unwrap();
             assert_eq!(temporal.frames.mode, ControlMode::Adjustable, "{model}");
@@ -3816,6 +3950,11 @@ mod tests {
             assert_eq!(recipe.steps.mode, ControlMode::Adjustable, "{model}");
             assert_eq!(recipe.steps.min, 2, "{model}");
             assert_eq!(recipe.steps.max, 100, "{model}");
+            assert_eq!(
+                recipe.steps.recommended,
+                steps_ladder(2, crate::minimax_h3::DEFAULT_STEPS, 100),
+                "{model}: an adjustable H3 tier offers the ladder"
+            );
 
             let temporal = recipe.temporal.as_ref().unwrap();
             assert_eq!(temporal.frames.mode, ControlMode::Adjustable, "{model}");
@@ -4043,5 +4182,75 @@ mod tests {
         })
         .unwrap();
         assert!(!encoded.contains("note"), "{encoded}");
+    }
+
+    /// The steps ladder is half the default, the default, and half again —
+    /// clamped into the control's own band and deduped.
+    #[test]
+    fn the_steps_ladder_is_three_rungs_around_the_default() {
+        // FLUX / SDXL.
+        assert_eq!(steps_ladder(1, 30, 100), vec![15, 30, 45]);
+        // FLUX.2 [klein].
+        assert_eq!(steps_ladder(1, 4, 100), vec![2, 4, 6]);
+        // Z-Image — the halves round up, never to zero.
+        assert_eq!(steps_ladder(1, 9, 100), vec![5, 9, 14]);
+        // LTX-2.
+        assert_eq!(steps_ladder(1, 8, 100), vec![4, 8, 12]);
+
+        // The band clamps both ends rather than escaping the control.
+        assert_eq!(steps_ladder(2, 4, 5), vec![2, 4, 5]);
+        assert_eq!(steps_ladder(20, 30, 35), vec![20, 30, 35]);
+
+        // A degenerate band collapses to one rung instead of repeating it.
+        assert_eq!(steps_ladder(4, 4, 4), vec![4]);
+        assert_eq!(steps_ladder(1, 1, 100), vec![1, 2]);
+    }
+
+    /// Every shipped recipe advertises a ladder a client can render as a
+    /// quality picker: sorted, deduped, inside the control, and containing
+    /// the default. A fixed control (a wan DMD tier, an H3 Turbo tier) keeps
+    /// its single pinned rung.
+    #[test]
+    fn every_shipped_recipe_offers_a_usable_steps_ladder() {
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.is_generation_model())
+        {
+            let profile = generation_profile_for_manifest(manifest);
+            for recipe in &profile.recipes {
+                let context = format!("{} recipe {}", manifest.name, recipe.id);
+                let ladder = &recipe.steps.recommended;
+                assert!(!ladder.is_empty(), "{context}: empty steps ladder");
+                assert!(
+                    ladder.windows(2).all(|pair| pair[0] < pair[1]),
+                    "{context}: steps ladder is not sorted and deduped: {ladder:?}"
+                );
+                assert!(
+                    ladder
+                        .iter()
+                        .all(|rung| (recipe.steps.min..=recipe.steps.max).contains(rung)),
+                    "{context}: steps ladder escapes [{}, {}]: {ladder:?}",
+                    recipe.steps.min,
+                    recipe.steps.max
+                );
+                assert!(
+                    ladder.contains(&recipe.steps.default),
+                    "{context}: steps ladder omits the default {}: {ladder:?}",
+                    recipe.steps.default
+                );
+                if recipe.steps.mode == ControlMode::Fixed {
+                    assert_eq!(
+                        ladder,
+                        &vec![recipe.steps.default],
+                        "{context}: a pinned step count has exactly one rung"
+                    );
+                } else if recipe.steps.min < recipe.steps.max {
+                    assert!(
+                        ladder.len() >= 2,
+                        "{context}: an adjustable control needs a choice: {ladder:?}"
+                    );
+                }
+            }
+        }
     }
 }

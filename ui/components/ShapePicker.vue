@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Shape picker — aspect-ratio chips (spec §03). Each option is a chip with a
+ * Shape picker — aspect-ratio chips. Each option is a chip with a
  * proportional swatch (the swatch IS the ratio, never text) above a mono
  * label. Keyboard: arrow keys move the selection (roving tabindex).
  */
@@ -114,31 +114,31 @@ function onKeydown(event: KeyboardEvent) {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
-  border-radius: var(--radius-control);
+  color: var(--mold-text-2);
+  border-radius: var(--mold-radius-2);
   cursor: pointer;
   transition:
-    border-color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease),
-    box-shadow var(--dur-quick) var(--ease);
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    box-shadow var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-shape__btn:hover:not([data-on="true"]):not(:disabled) {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-shape__btn[data-on="true"] {
-  border-color: var(--sel-border);
-  color: var(--sel-ink);
-  background: var(--sel-bg);
-  box-shadow: var(--sel-ring);
+  border-color: var(--mold-blue);
+  color: var(--mold-blue);
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 .ms-shape__btn[data-on="true"] .ms-shape__swatch {
-  background: var(--sel-fill);
+  background: var(--mold-accent-tint);
 }
 
 .ms-shape__btn:disabled {
@@ -147,7 +147,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-shape__btn:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -162,11 +162,11 @@ function onKeydown(event: KeyboardEvent) {
   display: block;
   border: 1.5px solid currentColor;
   border-radius: 2px;
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-shape__label {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
 }
 </style>

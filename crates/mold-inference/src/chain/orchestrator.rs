@@ -526,10 +526,14 @@ fn build_stage_generate_request(
         fps: Some(chain.fps),
         upscale_model: None,
         gif_preview: false,
-        // Chain wire-format default is None ("no preference") which collapses
-        // to false here so existing callers don't suddenly start producing
-        // audio they didn't ask for. Callers that want chain audio set
-        // `chain.enable_audio = Some(true)` explicitly.
+        // The chain's audio answer is RESOLVED at its door, never here: the
+        // server's `validate_and_normalize_chain_family` and the CLI's
+        // `run_chain` both read `generation_profile::resolve_enable_audio`
+        // with the family they resolved, so a request reaching the
+        // orchestrator already carries an explicit value. An unset one means
+        // no door classified the model, and silence is the only answer this
+        // layer can give — it cannot tell an LTX-2 chain from a wan one, and
+        // `Some(true)` on a wan stage is a request its own admission refuses.
         enable_audio: Some(chain.enable_audio.unwrap_or(false)),
         audio_file: None,
         audio_file_path: None,
@@ -1068,9 +1072,12 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_default_enable_audio_resolves_to_false_for_each_stage() {
-        // None on the wire = "no preference" = off. Existing chain callers
-        // that never set `enable_audio` keep getting video-only output.
+    fn orchestrator_unresolved_enable_audio_stays_silent_for_each_stage() {
+        // The doors resolve the default; an unset value reaching the
+        // orchestrator means nothing classified the model, and this layer
+        // cannot tell an LTX-2 chain from a wan one. Silence is the only
+        // answer it can give — `Some(true)` on a wan stage is a request the
+        // family validator refuses by name.
         let stages = vec![stage("a", 9), stage("a", 9)];
         let req = chain_req(stages, 0);
         assert_eq!(req.enable_audio, None);

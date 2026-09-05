@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
  * TrashTileActions — what a Trash-scope tile wears on top of its thumbnail
- * (V3 "Shelf"): the "Purges in N d" chip (warning tone on the number only;
+ * in the Trash scope: the "Purges in N d" chip (warning tone on the number only;
  * "Kept" when retention is forever) and, on hover, Restore (default) /
  * Delete forever (secondary). The tile itself stays a plain button — these
  * are absolutely positioned overlays that stop click propagation so the
@@ -32,7 +32,7 @@ const countdown = computed(() =>
 
 <template>
   <span
-    class="ms-purge absolute top-2 left-2 rounded-control bg-black/60 px-1.5 py-0.5 font-utility text-[10.5px] text-on-media"
+    class="ms-purge absolute top-2 left-2 rounded-control bg-black/60 px-1.5 py-0.5 font-mono text-micro text-on-media"
     data-test="purge-chip"
     :data-kind="countdown.kind"
     :title="countdown.label"
@@ -54,7 +54,7 @@ const countdown = computed(() =>
   >
     <button
       type="button"
-      class="ms-ta flex h-6 flex-1 items-center justify-center gap-1 rounded-control border border-white/40 bg-black/45 text-[11px] text-on-media hover:bg-black/70 disabled:opacity-50"
+      class="ms-ta flex h-6 flex-1 items-center justify-center gap-1 rounded-control border border-white/40 bg-black/45 text-micro text-on-media hover:bg-black/70 disabled:opacity-50"
       data-test="trash-restore"
       :disabled="busy"
       @click.stop="emit('restore')"
@@ -64,7 +64,7 @@ const countdown = computed(() =>
     </button>
     <button
       type="button"
-      class="ms-ta ms-ta--danger flex h-6 flex-1 items-center justify-center rounded-control border bg-black/45 text-[11px] hover:bg-black/70 disabled:opacity-50"
+      class="ms-ta ms-ta--danger flex h-6 flex-1 items-center justify-center rounded-control border bg-black/45 text-micro hover:bg-black/70 disabled:opacity-50"
       data-test="trash-delete-forever"
       :disabled="busy"
       @click.stop="emit('deleteForever')"
@@ -76,12 +76,12 @@ const countdown = computed(() =>
 
 <style scoped>
 .ms-purge__n {
-  color: var(--warning);
+  color: var(--mold-warning);
   font-weight: 600;
 }
 
 .ms-ta--danger {
-  border-color: color-mix(in srgb, var(--stop) 70%, white);
-  color: color-mix(in srgb, var(--stop) 35%, white);
+  border-color: color-mix(in srgb, var(--mold-error) 70%, white);
+  color: color-mix(in srgb, var(--mold-error) 35%, white);
 }
 </style>

@@ -18,6 +18,7 @@ import { useToastStore } from "../stores/toasts";
 import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
+import Icon from "@ui/components/Icon.vue";
 
 const runpod = useRunPodStore();
 const prefs = useAppPrefsStore();
@@ -26,7 +27,7 @@ const toasts = useToastStore();
 const apiKey = ref("");
 const savingKey = ref(false);
 const confirmingDelete = ref<string | null>(null);
-// Confirm-before-spend (§08 G9): nothing provisions or resumes billing without
+// Confirm before spend: nothing provisions or resumes billing without
 // an explicit acknowledgement.
 const confirmProvision = ref(false);
 const confirmStartPod = ref<RunPodPod | null>(null);
@@ -282,68 +283,39 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <header class="border-edge flex h-11 shrink-0 items-center gap-3 border-b px-4">
-      <RouterLink
-        to="/machines"
-        class="-ml-1 flex items-center gap-0.5 rounded-control px-1.5 py-1 text-body font-semibold text-safelight hover:brightness-110"
+    <div
+      class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
+    >
+      <Icon name="runpod" :size="15" class="shrink-0 text-fg-dim" />
+      <span class="font-mono text-base font-bold text-fg">runpod cloud</span>
+      <span v-if="runpod.overview.account" class="min-w-0 truncate text-xs text-fg-dim">
+        {{ runpod.overview.account.email }} ·
+        <span class="font-mono">{{ money(runpod.overview.account.spendPerHour) }}/hr</span> active ·
+        <span class="font-mono">{{ money(runpod.overview.account.balance) }}</span> balance
+      </span>
+      <span class="flex-1" />
+      <button
+        type="button"
+        aria-label="Refresh RunPod status"
+        class="ms-toolbar-button"
+        @click="runpod.load()"
       >
-        <svg
-          width="18"
-          height="18"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.4"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M15 6l-6 6 6 6" />
-        </svg>
-        Machines
-      </RouterLink>
-      <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
-        RunPod
-      </span>
-      <span v-if="runpod.overview.account" class="text-caption text-ink-3">
-        {{ runpod.overview.account.email }}
-      </span>
-      <div class="ml-auto flex items-center gap-2">
-        <span v-if="runpod.overview.account" class="data-mono text-caption text-ink-2">
-          {{ money(runpod.overview.account.spendPerHour) }}/hr active ·
-          {{ money(runpod.overview.account.balance) }} balance
-        </span>
-        <button
-          type="button"
-          aria-label="Refresh RunPod status"
-          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-          @click="runpod.load()"
-        >
-          Refresh
-        </button>
-        <button
-          type="button"
-          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-          @click="openConsole"
-        >
-          RunPod console ↗
-        </button>
-      </div>
-    </header>
+        Refresh
+      </button>
+      <button type="button" class="ms-toolbar-button" @click="openConsole">RunPod console ↗</button>
+    </div>
 
     <div
       v-if="runpod.loaded && !runpod.overview.configured"
       class="flex flex-1 items-center justify-center p-8"
     >
-      <section class="border-edge w-full max-w-lg rounded-chrome border bg-bench p-6">
-        <h1 class="font-display text-display-md font-bold text-ink" style="font-stretch: 90%">
-          Add cloud GPUs to your bench
-        </h1>
-        <p class="mt-2 max-w-md text-body text-ink-2">
-          Paste a RunPod API key to launch, stop, and connect to Mold instances from this app. The
+      <section class="border-border w-full max-w-lg rounded-window border bg-bg p-6">
+        <h1 class="font-sans text-lg font-bold text-fg">Add cloud GPUs to your bench</h1>
+        <p class="mt-2 max-w-md text-sm text-fg-2">
+          Paste a RunPod API key to launch, stop, and connect to mold instances from this app. The
           key is stored only on this device.
         </p>
-        <label class="mt-5 block text-caption font-medium text-ink" for="runpod-api-key">
+        <label class="mt-5 block text-micro font-medium text-fg" for="runpod-api-key">
           RunPod API key
         </label>
         <div class="mt-1 flex gap-2">
@@ -354,38 +326,55 @@ onBeforeUnmount(() => {
             type="password"
             autocomplete="off"
             placeholder="rpa_…"
-            class="border-edge data-mono h-9 min-w-0 flex-1 rounded-control border bg-bath px-2.5 text-ink placeholder:text-ink-3"
+            class="border-border font-mono text-xs h-9 min-w-0 flex-1 rounded-control border bg-bg-deep px-2.5 text-fg placeholder:text-fg-dim"
             @keydown.enter="connectKey"
           />
           <button
             type="button"
-            class="h-9 rounded-control bg-safelight px-4 text-body font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
+            class="h-9 rounded-control bg-accent px-4 text-sm font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
             :disabled="savingKey || !apiKey.trim()"
             @click="connectKey"
           >
             {{ savingKey ? "Checking…" : "Connect RunPod" }}
           </button>
         </div>
-        <p v-if="runpod.error" class="mt-2 text-caption text-stop">{{ runpod.error }}</p>
+        <p v-if="runpod.error" class="mt-2 text-micro text-error">{{ runpod.error }}</p>
       </section>
     </div>
 
-    <div v-else-if="!runpod.loaded" class="flex flex-1 items-center justify-center">
-      <span class="edge-code">LOADING RUNPOD</span>
+    <!-- The house loading treatment: the shape of what is coming, shimmering. -->
+    <div
+      v-else-if="!runpod.loaded"
+      class="grid min-h-0 flex-1 grid-cols-[minmax(0,340px)_minmax(0,1fr)] overflow-hidden"
+      data-test="runpod-loading"
+      aria-busy="true"
+    >
+      <div class="flex flex-col gap-2.5 border-r border-border bg-chrome p-3.5">
+        <span v-for="row in 5" :key="row" class="ms-shimmer h-7 rounded-control" />
+      </div>
+      <div class="flex flex-col gap-2.5 p-3.5">
+        <span v-for="row in 3" :key="row" class="ms-shimmer h-16 rounded-control" />
+      </div>
     </div>
 
-    <div v-else class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden">
-      <aside class="border-edge min-h-0 overflow-y-auto border-r bg-bench p-4">
+    <div
+      v-else
+      class="grid min-h-0 flex-1 grid-cols-[minmax(0,340px)_minmax(0,1fr)] overflow-hidden"
+    >
+      <aside class="min-h-0 overflow-y-auto border-r border-border bg-chrome p-3.5">
         <div class="flex items-center justify-between">
-          <h2 class="text-body-lg font-semibold text-ink">Launch an instance</h2>
-          <span class="edge-code">MOLD SERVE</span>
+          <h2 class="text-base font-semibold text-fg">Rent a GPU</h2>
+          <span class="font-mono text-micro text-fg-dim">MOLD SERVE</span>
         </div>
+        <p class="mt-1 text-xs text-fg-dim">
+          Billing starts the moment it boots and stops when you stop it.
+        </p>
 
-        <label class="mt-4 block text-caption text-ink-3" for="runpod-gpu">GPU</label>
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-gpu">Graphics card</label>
         <select
           id="runpod-gpu"
           v-model="form.gpuTypeId"
-          class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
+          class="border-border mt-1 h-9 w-full rounded-control border bg-bg-deep px-2 text-sm text-fg"
         >
           <option
             v-for="gpu in runpod.gpus"
@@ -399,9 +388,9 @@ onBeforeUnmount(() => {
           </option>
         </select>
 
-        <span class="mt-4 block text-caption text-ink-3">Cloud</span>
+        <span class="mt-4 block text-micro text-fg-dim">Kind</span>
         <div
-          class="mt-1 flex rounded-control border border-control-edge bg-bath p-0.5"
+          class="mt-1 flex rounded-control border border-border-control bg-bg-deep p-0.5"
           role="group"
           aria-label="RunPod cloud type"
         >
@@ -410,11 +399,11 @@ onBeforeUnmount(() => {
             :key="cloud"
             type="button"
             :disabled="Boolean(selectedNetworkVolume) && cloud === 'COMMUNITY'"
-            class="flex-1 rounded-control px-2 py-1.5 text-body transition-colors"
+            class="flex-1 rounded-control px-2 py-1.5 text-sm transition-colors"
             :class="
               form.cloudType === cloud
-                ? 'bg-safelight font-semibold text-on-accent'
-                : 'text-ink-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-35'
+                ? 'bg-accent font-semibold text-on-accent'
+                : 'text-fg-2 hover:text-fg disabled:cursor-not-allowed disabled:opacity-35'
             "
             @click="form.cloudType = cloud"
           >
@@ -422,12 +411,12 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <label class="mt-4 block text-caption text-ink-3" for="runpod-dc">Datacenter</label>
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-dc">Where</label>
         <select
           id="runpod-dc"
           v-model="form.datacenterId"
           :disabled="Boolean(selectedNetworkVolume)"
-          class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
+          class="border-border mt-1 h-9 w-full rounded-control border bg-bg-deep px-2 text-sm text-fg"
         >
           <option :value="null">Automatic (best stock)</option>
           <option v-for="dc in datacenters" :key="dc.id" :value="dc.id">
@@ -435,8 +424,8 @@ onBeforeUnmount(() => {
           </option>
         </select>
 
-        <label class="mt-4 block text-caption text-ink-3" for="runpod-model"
-          >Default model (optional)</label
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-model"
+          >Style to preload (optional)</label
         >
         <input
           id="runpod-model"
@@ -444,14 +433,14 @@ onBeforeUnmount(() => {
           data-selectable
           type="text"
           placeholder="flux-dev:q8"
-          class="border-edge data-mono mt-1 h-9 w-full rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3"
+          class="border-border font-mono text-xs mt-1 h-9 w-full rounded-control border bg-bg-deep px-2 text-fg placeholder:text-fg-dim"
         />
 
         <div class="mt-4 grid grid-cols-2 gap-2">
-          <label class="text-caption text-ink-3">
+          <label class="text-micro text-fg-dim">
             Container disk
             <span
-              class="mt-1 flex h-9 items-center rounded-control border border-control-edge bg-bath px-2"
+              class="mt-1 flex h-9 items-center rounded-control border border-border-control bg-bg-deep px-2"
             >
               <input
                 v-model.number="form.containerDiskGb"
@@ -459,15 +448,15 @@ onBeforeUnmount(() => {
                 type="number"
                 min="10"
                 max="1000"
-                class="data-mono min-w-0 flex-1 bg-transparent text-ink outline-none"
+                class="font-mono text-xs min-w-0 flex-1 bg-transparent text-fg outline-none"
               />
               <span>GB</span>
             </span>
           </label>
-          <label class="text-caption text-ink-3">
+          <label class="text-micro text-fg-dim">
             Workspace
             <span
-              class="mt-1 flex h-9 items-center rounded-control border border-control-edge bg-bath px-2"
+              class="mt-1 flex h-9 items-center rounded-control border border-border-control bg-bg-deep px-2"
             >
               <input
                 v-model.number="form.volumeGb"
@@ -476,18 +465,18 @@ onBeforeUnmount(() => {
                 min="0"
                 max="10000"
                 :disabled="Boolean(selectedNetworkVolume)"
-                class="data-mono min-w-0 flex-1 bg-transparent text-ink outline-none"
+                class="font-mono text-xs min-w-0 flex-1 bg-transparent text-fg outline-none"
               />
               <span>GB</span>
             </span>
           </label>
         </div>
 
-        <label class="mt-4 block text-caption text-ink-3" for="runpod-volume">Network volume</label>
+        <label class="mt-4 block text-micro text-fg-dim" for="runpod-volume">Keep files on</label>
         <select
           id="runpod-volume"
           v-model="form.networkVolumeId"
-          class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
+          class="border-border mt-1 h-9 w-full rounded-control border bg-bg-deep px-2 text-sm text-fg"
         >
           <option :value="null">None</option>
           <option
@@ -498,42 +487,42 @@ onBeforeUnmount(() => {
             {{ volume.name }} · {{ volume.size }} GB · {{ volume.dataCenterId }}
           </option>
         </select>
-        <p v-if="selectedNetworkVolume" class="mt-1 text-caption text-ink-3">
+        <p v-if="selectedNetworkVolume" class="mt-1 text-micro text-fg-dim">
           Secure Cloud · pinned to
           {{ runPodRegionLabel(selectedNetworkVolume.dataCenterId) }} · mounted at /workspace
         </p>
         <p
           v-else-if="runpod.overview.networkVolumes.length === 0"
-          class="mt-1 text-caption text-ink-3"
+          class="mt-1 text-micro text-fg-dim"
         >
           Create persistent storage in the Network volumes panel.
         </p>
 
-        <label class="mt-4 flex items-start gap-2 text-caption text-ink-2">
-          <input v-model="form.includeHfToken" type="checkbox" class="mt-0.5 accent-safelight" />
+        <label class="mt-4 flex items-start gap-2 text-micro text-fg-2">
+          <input v-model="form.includeHfToken" type="checkbox" class="mt-0.5 accent-accent" />
           Pass the saved Hugging Face token for gated model downloads
         </label>
 
         <button
           type="button"
-          class="mt-5 h-9 w-full rounded-control bg-safelight text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="mt-5 h-9 w-full rounded-control bg-accent text-sm font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
           :disabled="!form.gpuTypeId || runpod.mutating === 'create'"
           @click="launch"
         >
-          {{ runpod.mutating === "create" ? "Requesting GPU…" : "Launch GPU instance" }}
+          {{ runpod.mutating === "create" ? "Requesting GPU…" : "Rent a GPU" }}
         </button>
-        <p class="mt-2 text-caption text-ink-3">
-          Uses the Mold CUDA image matched to the selected GPU and exposes the server on port 7680.
+        <p class="mt-2 text-micro text-fg-dim">
+          Uses the mold CUDA image matched to the selected GPU and exposes the server on port 7680.
         </p>
         <button
           v-if="runpod.overview.credentialSource === 'app'"
           type="button"
-          class="mt-5 text-caption text-ink-3 hover:text-stop"
+          class="mt-5 text-micro text-fg-dim hover:text-error"
           @click="runpod.disconnect()"
         >
           Remove desktop RunPod key
         </button>
-        <p v-else class="mt-5 text-caption text-ink-3">
+        <p v-else class="mt-5 text-micro text-fg-dim">
           Credential provided by
           {{
             runpod.overview.credentialSource === "environment"
@@ -552,18 +541,18 @@ onBeforeUnmount(() => {
           :message="runpod.operationError"
           @dismiss="runpod.clearOperationError()"
         />
-        <section class="border-edge mb-5 rounded-chrome border bg-bath">
+        <section class="border-border mb-5 rounded-window border bg-bg-deep">
           <div class="flex items-center justify-between px-3 py-2.5">
             <div>
-              <h2 class="text-body-lg font-semibold text-ink">Network volumes</h2>
-              <p class="text-caption text-ink-3">
+              <h2 class="text-base font-semibold text-fg">Network volumes</h2>
+              <p class="text-micro text-fg-dim">
                 Persistent storage that survives instance deletion and remains billable until
                 deleted.
               </p>
             </div>
             <button
               type="button"
-              class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+              class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
               @click="showVolumeCreate = !showVolumeCreate"
             >
               {{ showVolumeCreate ? "Cancel" : "New volume" }}
@@ -572,18 +561,18 @@ onBeforeUnmount(() => {
 
           <form
             v-if="showVolumeCreate"
-            class="border-edge grid grid-cols-[1fr_110px_1fr_auto] items-end gap-2 border-t p-3"
+            class="border-border grid grid-cols-[1fr_110px_1fr_auto] items-end gap-2 border-t p-3"
             @submit.prevent="createNetworkVolume"
           >
-            <label class="text-caption text-ink-3">
+            <label class="text-micro text-fg-dim">
               Name
               <input
                 v-model="volumeCreate.name"
                 required
-                class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
+                class="border-border mt-1 h-8 w-full rounded-control border bg-bg px-2 text-sm text-fg"
               />
             </label>
-            <label class="text-caption text-ink-3">
+            <label class="text-micro text-fg-dim">
               Size (GB)
               <input
                 v-model.number="volumeCreate.sizeGb"
@@ -591,15 +580,15 @@ onBeforeUnmount(() => {
                 min="10"
                 max="3999"
                 required
-                class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bench px-2 text-ink"
+                class="border-border font-mono text-xs mt-1 h-8 w-full rounded-control border bg-bg px-2 text-fg"
               />
             </label>
-            <label class="text-caption text-ink-3">
+            <label class="text-micro text-fg-dim">
               Datacenter
               <select
                 v-model="volumeCreate.datacenterId"
                 required
-                class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
+                class="border-border mt-1 h-8 w-full rounded-control border bg-bg px-2 text-sm text-fg"
               >
                 <option value="" disabled>Choose a datacenter</option>
                 <option v-for="dc in networkVolumeDatacenters" :key="dc.id" :value="dc.id">
@@ -610,7 +599,7 @@ onBeforeUnmount(() => {
             <button
               type="submit"
               :disabled="runpod.mutating === 'volume:create'"
-              class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent disabled:opacity-50"
+              class="h-8 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent disabled:opacity-50"
             >
               {{ runpod.mutating === "volume:create" ? "Creating…" : "Create" }}
             </button>
@@ -618,31 +607,34 @@ onBeforeUnmount(() => {
 
           <p
             v-if="runpod.overview.networkVolumes.length === 0 && !showVolumeCreate"
-            class="border-edge border-t px-3 py-4 text-caption text-ink-3"
+            class="border-border border-t px-3 py-4 text-micro text-fg-dim"
           >
             No network volumes yet. Create one to keep models and outputs between instances.
           </p>
-          <div v-else-if="runpod.overview.networkVolumes.length" class="border-edge border-t">
+          <div v-else-if="runpod.overview.networkVolumes.length" class="border-border border-t">
             <article
               v-for="(volume, index) in runpod.overview.networkVolumes"
               :key="volume.id"
               class="px-3 py-2.5"
-              :class="index ? 'border-edge border-t' : ''"
+              :class="index ? 'border-border border-t' : ''"
             >
               <div v-if="editingVolumeId !== volume.id" class="flex items-center gap-3">
                 <div class="min-w-0 flex-1">
-                  <p class="truncate text-body font-semibold text-ink">{{ volume.name }}</p>
-                  <p class="data-mono text-caption text-ink-3">
+                  <p class="truncate text-sm font-semibold text-fg">{{ volume.name }}</p>
+                  <p class="font-mono text-micro text-fg-dim">
                     {{ volume.size }} GB · {{ runPodRegionLabel(volume.dataCenterId) }} ·
                     {{ volume.id }}
                   </p>
                 </div>
-                <span v-if="form.networkVolumeId === volume.id" class="edge-code text-halide">
+                <span
+                  v-if="form.networkVolumeId === volume.id"
+                  class="font-mono text-micro text-fg-dim whitespace-nowrap text-sapphire"
+                >
                   SELECTED
                 </span>
                 <button
                   type="button"
-                  class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                  class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
                   @click="startVolumeEdit(volume)"
                 >
                   Manage
@@ -653,21 +645,21 @@ onBeforeUnmount(() => {
                 class="grid grid-cols-[1fr_110px_auto_auto_auto] items-end gap-2"
                 @submit.prevent="updateNetworkVolume(volume)"
               >
-                <label class="text-caption text-ink-3">
+                <label class="text-micro text-fg-dim">
                   Name
                   <input
                     v-model="volumeEdit.name"
-                    class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
+                    class="border-border mt-1 h-8 w-full rounded-control border bg-bg px-2 text-sm text-fg"
                   />
                 </label>
-                <label class="text-caption text-ink-3">
+                <label class="text-micro text-fg-dim">
                   Grow to (GB)
                   <input
                     v-model.number="volumeEdit.sizeGb"
                     type="number"
                     :min="volume.size"
                     max="3999"
-                    class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bench px-2 text-ink"
+                    class="border-border font-mono text-xs mt-1 h-8 w-full rounded-control border bg-bg px-2 text-fg"
                   />
                 </label>
                 <button
@@ -676,24 +668,24 @@ onBeforeUnmount(() => {
                     (volumeEdit.name === volume.name && volumeEdit.sizeGb === volume.size) ||
                     runpod.mutating === `volume:update:${volume.id}`
                   "
-                  class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent disabled:opacity-50"
+                  class="h-8 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent disabled:opacity-50"
                 >
                   Save
                 </button>
                 <button
                   type="button"
-                  class="h-8 px-2 text-body text-ink-3 hover:text-ink"
+                  class="h-8 px-2 text-sm text-fg-dim hover:text-fg"
                   @click="editingVolumeId = null"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  class="h-8 rounded-control px-2 text-body"
+                  class="h-8 rounded-control px-2 text-sm"
                   :class="
                     confirmingVolumeDelete === volume.id
-                      ? 'bg-stop font-semibold text-on-accent'
-                      : 'text-stop'
+                      ? 'bg-error font-semibold text-on-accent'
+                      : 'text-error'
                   "
                   @blur="confirmingVolumeDelete = null"
                   @click="deleteNetworkVolume(volume)"
@@ -706,64 +698,63 @@ onBeforeUnmount(() => {
         </section>
         <div class="flex items-baseline justify-between">
           <div>
-            <h2 class="text-body-lg font-semibold text-ink">Your instances</h2>
-            <p class="text-caption text-ink-3">Status refreshes every 10 seconds.</p>
+            <h2 class="text-base font-semibold text-fg">Your instances</h2>
+            <p class="text-micro text-fg-dim">Status refreshes every 10 seconds.</p>
           </div>
-          <span class="data-mono text-caption text-ink-2"
+          <span class="font-mono text-micro text-fg-2"
             >{{ runpod.runningPods.length }} running · {{ runpod.overview.pods.length }} total</span
           >
         </div>
 
         <div
           v-if="runpod.overview.pods.length === 0"
-          class="border-edge mt-4 rounded-chrome border p-8 text-center"
+          class="border-border mt-4 rounded-window border p-8 text-center"
         >
-          <p class="text-body font-medium text-ink">No RunPod instances</p>
-          <p class="mt-1 text-caption text-ink-3">
-            Choose a GPU and launch your first Mold server.
-          </p>
+          <p class="text-sm font-medium text-fg">No rented GPUs</p>
+          <p class="mt-1 text-micro text-fg-dim">Choose a card and rent your first one.</p>
         </div>
 
-        <div v-else class="border-edge mt-4 overflow-hidden rounded-chrome border">
+        <div v-else class="border-border mt-4 overflow-hidden rounded-window border">
           <article
             v-for="(pod, index) in runpod.overview.pods"
             :key="pod.id"
-            :class="index ? 'border-edge border-t' : ''"
-            class="bg-bath p-3"
+            :class="index ? 'border-border border-t' : ''"
+            class="bg-bg-deep p-3"
           >
-            <div class="flex items-center gap-3">
+            <!-- Six nowrap controls plus the name need more width than this
+                 pane has at the app's minimum size; wrapping keeps the name
+                 and status readable instead of collapsing them to zero. -->
+            <div class="flex flex-wrap items-center gap-3">
               <span
                 class="h-2 w-2 rounded-full"
-                :class="pod.desiredStatus === 'RUNNING' ? 'bg-halide' : 'bg-ink-3'"
+                :class="pod.desiredStatus === 'RUNNING' ? 'bg-sapphire' : 'bg-fg-dim'"
                 aria-hidden="true"
               />
-              <div class="min-w-0 flex-1">
+              <!-- A real basis, so the row wraps instead of squeezing the
+                   identity block to nothing when the buttons don't fit. -->
+              <div class="min-w-0 flex-1 basis-72">
                 <div class="flex items-baseline gap-2">
-                  <span class="truncate text-body font-semibold text-ink">{{
+                  <span class="truncate text-sm font-semibold text-fg">{{
                     pod.name ?? pod.id
                   }}</span>
                   <span
-                    class="edge-code"
-                    :class="pod.desiredStatus === 'RUNNING' ? 'text-halide' : ''"
+                    class="font-mono text-micro text-fg-dim whitespace-nowrap"
+                    :class="pod.desiredStatus === 'RUNNING' ? 'text-sapphire' : ''"
                     >{{ pod.desiredStatus || "UNKNOWN" }}</span
                   >
                 </div>
-                <p class="data-mono truncate text-caption text-ink-3">
+                <p class="font-mono truncate text-micro text-fg-dim">
                   {{ podGpuName(pod) }} · {{ pod.machine?.location ?? "Placement pending" }} ·
-                  {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
-                    · {{ uptime(pod.uptimeSeconds) }}</span
-                  >
+                  <span class="text-state-cost">{{ money(pod.costPerHr) }}/hr</span
+                  ><span v-if="pod.uptimeSeconds"> · {{ uptime(pod.uptimeSeconds) }}</span>
                 </p>
-                <p
-                  v-if="podHardwareSummary(pod)"
-                  class="data-mono truncate text-caption text-ink-3"
-                >
+                <p v-if="podHardwareSummary(pod)" class="font-mono truncate text-micro text-fg-dim">
                   {{ podHardwareSummary(pod) }}
                 </p>
-                <p v-if="pod.networkVolume" class="data-mono truncate text-caption text-ink-3">
+                <p v-if="pod.networkVolume" class="font-mono truncate text-micro text-fg-dim">
                   {{ pod.networkVolume.name }} · {{ pod.networkVolume.size }} GB network volume
                 </p>
-                <p v-if="pod.networkVolume" class="mt-1 text-caption text-ink-3">
+                <p v-if="pod.networkVolume" class="mt-1 text-micro text-fg-dim">
                   Delete the instance to stop compute; /workspace remains on the volume.
                 </p>
               </div>
@@ -775,15 +766,15 @@ onBeforeUnmount(() => {
               <button
                 v-if="pod.desiredStatus === 'RUNNING'"
                 type="button"
-                class="h-7 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105"
+                class="h-7 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent hover:brightness-105"
                 @click="useInMold(pod)"
               >
-                Use in Mold
+                Use in mold
               </button>
               <button
                 v-if="!pod.networkVolume && pod.desiredStatus === 'RUNNING'"
                 type="button"
-                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+                class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg disabled:opacity-50"
                 :disabled="runpod.mutating === `stop:${pod.id}`"
                 @click="act('stop', pod)"
               >
@@ -792,7 +783,7 @@ onBeforeUnmount(() => {
               <button
                 v-else-if="!pod.networkVolume"
                 type="button"
-                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+                class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg disabled:opacity-50"
                 :disabled="runpod.mutating === `start:${pod.id}`"
                 @click="requestStart(pod)"
               >
@@ -800,18 +791,18 @@ onBeforeUnmount(() => {
               </button>
               <button
                 type="button"
-                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 hover:text-fg"
                 @click="openConsole"
               >
                 RunPod console ↗
               </button>
               <button
                 type="button"
-                class="h-7 rounded-control px-2 text-body"
+                class="h-7 rounded-control px-2 text-sm"
                 :class="
                   confirmingDelete === pod.id
-                    ? 'bg-stop font-semibold text-on-accent'
-                    : 'text-ink-3 hover:text-stop'
+                    ? 'bg-error font-semibold text-on-accent'
+                    : 'text-fg-dim hover:text-error'
                 "
                 @blur="confirmingDelete = null"
                 @click="act('delete', pod)"
@@ -826,14 +817,14 @@ onBeforeUnmount(() => {
 
     <ConfirmDialog
       :open="confirmProvision"
-      title="Launch GPU instance?"
-      confirm-label="Launch — billing begins immediately"
+      title="Rent this GPU?"
+      confirm-label="Start it — billing begins now"
       danger
       :busy="runpod.mutating === 'create'"
       @confirm="confirmLaunch"
       @cancel="confirmProvision = false"
     >
-      <div class="data-mono space-y-1 text-caption text-ink-2">
+      <div class="font-mono space-y-1 text-micro text-fg-2">
         <div>
           {{ form.gpuDisplayName || "GPU" }} ·
           {{ form.cloudType === "SECURE" ? "Secure" : "Community" }} cloud
@@ -846,13 +837,13 @@ onBeforeUnmount(() => {
             GB)</span
           ><span v-else-if="form.volumeGb"> · workspace {{ form.volumeGb }} GB</span>
         </div>
-        <div class="text-ink-3">RunPod bills this GPU by the minute while it runs.</div>
+        <div class="text-fg-dim">RunPod bills this GPU by the minute while it runs.</div>
       </div>
     </ConfirmDialog>
 
     <ConfirmDialog
       :open="!!confirmStartPod"
-      title="Resume pod?"
+      title="Start it again?"
       :confirm-label="
         confirmStartPod ? `Resume · ${money(confirmStartPod.costPerHr)}/hr` : 'Resume'
       "

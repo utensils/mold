@@ -2,8 +2,8 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// A named colour palette preset.
 ///
-/// The TUI ships eleven presets: the four Mold Studio themes from the design
-/// spec (`docs/design/mold-studio-spec.html` §05, mockup
+/// The TUI ships eleven presets: the four Mold Studio themes from the
+/// pre-redesign spec (kept for the terminal; the mockup is
 /// `docs/design/mold-tui-proposed.html`) followed by the seven legacy
 /// palettes. Studio Dark is the default and matches the desktop/web Mold
 /// dark tokens; Catppuccin Mocha is retained as the single-blue baseline the

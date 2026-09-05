@@ -22,7 +22,7 @@ describe("RunPod confirm-before-spend (G9)", () => {
     expect(source).toContain("<ConfirmDialog");
     expect(source).toContain('@confirm="confirmLaunch"');
     expect(source).toContain('@confirm="confirmStart"');
-    expect(source).toContain("billing begins immediately");
+    expect(source).toContain("billing begins now");
     expect(source).toContain("Billing resumes immediately.");
   });
 

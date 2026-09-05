@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { reactive } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import IdentityWell from "./IdentityWell.vue";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { IDENTITY_PHOTO_UNAVAILABLE } from "@studio/lib/identityConditioning";
 
+beforeEach(() => setActivePinia(createPinia()));
 afterEach(() => (document.body.innerHTML = ""));
 
 /** Bytes whose PNG header declares `width × height` — every identity
@@ -56,6 +58,10 @@ function mountWell(form: GenerateForm) {
   return mount(IdentityWell, { props: { form }, attachTo: document.body });
 }
 
+function pngBase64(width: number, height: number): string {
+  return btoa(String.fromCharCode(...new Uint8Array(pngBytes(width, height))));
+}
+
 describe("IdentityWell", () => {
   it("attaches a dropped PNG with its provenance label", async () => {
     const form = identityForm();
@@ -95,6 +101,30 @@ describe("IdentityWell", () => {
 
     expect(form.identityImage).toBeNull();
     expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain("8192");
+  });
+
+  /*
+   * A face can come from My images too — a photograph someone started a
+   * print from lives there — through the same picker the source well opens.
+   * A picked print takes the dropped file's road: the same admission checks,
+   * the same inline refusal, nothing staged when refused.
+   */
+  it("offers My images and stages a picked print through the same admission", async () => {
+    const form = identityForm();
+    const wrapper = mountWell(form);
+    await wrapper.get("[data-test='identity-gallery']").trigger("click");
+    const picker = wrapper.findComponent({ name: "ImagePickerModal" });
+    expect(picker.props("open")).toBe(true);
+
+    picker.vm.$emit("pick", [{ filename: "huge.png", base64: pngBase64(9000, 512) }]);
+    await flushPromises();
+    expect(form.identityImage).toBeNull();
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain("8192");
+
+    picker.vm.$emit("pick", [{ filename: "print.png", base64: pngBase64(512, 512) }]);
+    await flushPromises();
+    expect(form.identityImage?.filename).toBe("print.png");
+    expect(wrapper.find("[data-test='identity-conditioning-error']").exists()).toBe(false);
   });
 
   it("clears the staged photo and its inline reason", async () => {

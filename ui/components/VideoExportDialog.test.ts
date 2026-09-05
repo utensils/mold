@@ -120,7 +120,7 @@ describe("VideoExportDialog", () => {
     );
     expect(
       notice.get("[data-test='error-notice-message']").classes(),
-    ).toContain("[overflow-wrap:anywhere]");
+    ).toContain("ms-error__message");
     expect(notice.find("[data-test='copy-error-notice']").exists()).toBe(true);
   });
 });

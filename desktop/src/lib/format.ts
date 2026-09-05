@@ -3,6 +3,13 @@ export function formatGB(bytes: number): string {
   return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
 
+/** A used/total pair sharing one unit — `12.1 / 36.0 GB`. Meters already say
+ *  what they measure, so the reading beside them repeats neither the unit nor
+ *  the word (style guide: units stay tight and mono). */
+export function formatGBPair(used: number, total: number): string {
+  return `${(used / 1_000_000_000).toFixed(1)} / ${formatGB(total)}`;
+}
+
 /** Adaptive decimal units for totals that may be small (gallery sizes). */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1_000_000_000) return formatGB(bytes);
@@ -43,6 +50,27 @@ export function vramLevel(used: number, total: number): MeterLevel {
 export function percent(used: number, total: number): number {
   if (total <= 0) return 0;
   return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
+/**
+ * The READOUT for a `percent()` value: one whole number and the sign. The
+ * float belongs to the meter's width, never to a person — a machine card that
+ * printed the raw getter read "59.10320281982422%". Round here and only here.
+ */
+export function formatPercent(value: number): string {
+  return `${Math.round(value)}%`;
+}
+
+/** The mono line under a VRAM meter: `31.6 / 51.5 GB graphics memory`. Says
+ *  what the percent beside the meter is measuring, without decimals of its own. */
+export function formatGraphicsMemory(used: number, total: number): string {
+  return `${formatGBPair(used, total)} graphics memory`;
+}
+
+/** Transfer rate for the download banner's mono line: 12_400_000 → "12.4 MB/s". */
+export function formatRate(bytesPerSecond: number | null): string {
+  if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) return "—";
+  return `${(Math.max(0, bytesPerSecond) / 1_000_000).toFixed(1)} MB/s`;
 }
 
 /** Compact ETA for download rows: 42 → "42s", 192 → "3m 12s", 3845 → "1h 4m". */

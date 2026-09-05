@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /*
- * CollectionsShelf — the Collections scope's grid of cover cards plus the
- * dashed "New collection" card (V3 "Shelf"). The new card turns into an
- * inline name input; Enter creates (emit), Escape / empty cancels. Pure:
- * the parent resolves covers and runs the store calls.
+ * CollectionsShelf — the Albums scope's horizontally scrolling strip of
+ * 150px cover cards plus the dashed "New album" card, ABOVE the grid, which
+ * stays mounted beneath it. The new card turns into an inline name input;
+ * Enter creates (emit), Escape / empty cancels. Pure: the parent resolves
+ * covers and runs the store calls.
  */
 import { nextTick, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -31,8 +32,10 @@ withDefaults(
     canCreate?: boolean;
     busy?: boolean;
     nowMs?: number;
+    /** Shown in place of cards when there are none to show. */
+    note?: string | null;
   }>(),
-  { canCreate: true, busy: false },
+  { canCreate: true, busy: false, note: null },
 );
 
 const emit = defineEmits<{
@@ -72,7 +75,13 @@ defineExpose({ startCreate, isCreating: () => creating.value });
 </script>
 
 <template>
-  <div class="ms-shelf grid gap-4 p-6" data-test="collections-shelf">
+  <div
+    class="border-border flex shrink-0 gap-2.5 overflow-x-auto border-b px-3.5 py-3"
+    data-test="collections-shelf"
+  >
+    <p v-if="note" class="self-center text-xs text-fg-dim" data-test="collections-shelf-note">
+      {{ note }}
+    </p>
     <CollectionCard
       v-for="card in cards"
       :key="card.slug"
@@ -89,58 +98,51 @@ defineExpose({ startCreate, isCreating: () => creating.value });
     />
     <div
       v-if="canCreate"
-      class="flex flex-col gap-0.5 rounded-card border border-dashed border-ce bg-transparent p-2.5 text-left"
+      class="ms-shelf-card flex flex-col justify-center gap-1.5 rounded-control border border-dashed border-border-control bg-transparent p-2.5 text-left"
       data-test="new-collection-card"
     >
-      <button
-        type="button"
-        class="mb-2 flex aspect-[4/3] w-full items-center justify-center rounded-[8px] border border-dashed border-ce text-ink-3 transition-colors duration-100 hover:border-safelight hover:text-safelight focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-safelight disabled:opacity-50"
-        aria-label="New collection"
-        :disabled="busy"
-        @click="startCreate"
-      >
-        <Icon name="plus" :size="22" />
-      </button>
       <template v-if="creating">
         <input
           ref="inputEl"
           v-model="draft"
           data-selectable
           type="text"
-          placeholder="Collection name"
-          aria-label="New collection name"
-          class="border-edge h-7 w-full rounded-control border bg-bath px-2 font-display text-[15px] font-semibold text-ink outline-none focus:border-safelight"
+          placeholder="Album name"
+          aria-label="New album name"
+          class="border-border h-7 w-full rounded-control border bg-bg-deep px-2 font-sans font-semibold text-base font-semibold text-fg outline-none focus:border-accent"
           data-test="new-collection-input"
           @keydown.enter.prevent="commitCreate"
           @keydown.esc.prevent.stop="cancelCreate"
           @blur="commitCreate"
         />
-        <span class="text-[11.5px] text-ink-3">Enter to create · Esc to cancel</span>
+        <span class="text-xs text-fg-dim">Enter to create · Esc to cancel</span>
       </template>
       <template v-else>
         <button
           type="button"
-          class="font-display text-left text-[15px] font-semibold text-ink hover:text-safelight"
+          class="flex items-center gap-1.5 text-left text-xs text-fg-dim hover:text-accent"
           data-test="new-collection-label"
+          aria-label="New album"
           :disabled="busy"
           @click="startCreate"
         >
-          New collection
+          <Icon name="plus" :size="13" />
+          New album
         </button>
-        <span class="font-utility text-[10.5px] text-ink-3"
+        <span class="font-mono text-micro text-fg-dim"
           ><Keycap>{{ newCollectionChord }}</Keycap></span
         >
-        <span class="text-[11.5px] text-ink-3">
-          Name it, then add prints from the grid or a selection.
-        </span>
       </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 4-up at the desktop workspace width, 3-up below ~1100px, 2-up when narrow. */
-.ms-shelf {
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+/* The mock's strip: fixed 150px cards that scroll sideways, never a grid that
+   pushes the pictures off the screen. */
+.ms-shelf-card,
+:deep(.ms-ccard) {
+  width: 150px;
+  flex: 0 0 150px;
 }
 </style>

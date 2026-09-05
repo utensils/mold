@@ -1,8 +1,7 @@
-import type { IconName } from "@ui/icons";
 import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
 
 /**
- * The Darkroom Bench: curated metadata for the Settings surface.
+ * Settings (README §02 lexicon): curated metadata for the Settings surface.
  *
  * Known engine-config keys (`/api/config`) map to a section and a purposeful
  * editor; anything unknown falls through to Advanced as a raw provenance row,
@@ -12,76 +11,93 @@ import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganizati
  */
 
 export type SectionId =
-  | "hosts"
-  | "performance"
+  | "app"
   | "generation"
+  | "expansion"
+  | "hosts"
+  | "styles"
   | "media"
   | "library"
-  | "expansion"
+  | "licenses"
+  | "pairing"
+  | "performance"
   | "accounts"
-  | "app"
-  | "updates"
   | "profiles"
   | "advanced"
-  | "about";
+  | "updates";
 
 export interface SectionInfo {
   id: SectionId;
   label: string;
-  /** Icon-led header treatment shared by desktop and web Settings groups. */
-  icon?: IconName;
-  /** One-line explanation shown beneath the group title. */
-  summary?: string;
+  /** One plain sentence beside the section label. */
+  summary: string;
   /** Extra search terms for sections whose controls carry no curated key
-   *  (Accounts tokens, Profiles) so the global search still finds them. */
+   *  (Accounts tokens, Profiles, Look) so the global search still finds them. */
   keywords?: string[];
 }
 
-export interface AccordionSectionInfo extends SectionInfo {
-  icon: IconName;
-  summary: string;
-}
-
-export const SECTIONS: SectionInfo[] = [
-  { id: "hosts", label: "Hosts" },
-  { id: "performance", label: "Performance" },
-  { id: "generation", label: "Generation" },
-  { id: "media", label: "Saved media" },
-  { id: "library", label: "Library" },
-  { id: "expansion", label: "Prompt expansion" },
-  { id: "accounts", label: "Accounts & tokens" },
-  { id: "app", label: "Appearance & app" },
-  { id: "updates", label: "Updates" },
-  { id: "profiles", label: "Profiles" },
-  { id: "advanced", label: "Advanced" },
-  { id: "about", label: "About" },
-];
-
 /**
- * The Settings surface is now a single column: Appearance, Updates, and About
- * ride at the top as always-open cards, Hosts is a link to the Machines
- * workspace, and everything deeper collapses into the "All settings" region as
- * one-open-at-a-time accordions. This list is that region, in order — none of
- * it blocks first use (spec G7).
+ * The Settings surface is one scrolling page behind a 200px jump nav: every
+ * section is always open, in this order, and search narrows both the nav and
+ * the page to the sections that match. Nothing here blocks first use (G7);
+ * `?section=` deep links (the Library trash banner, the native Check for
+ * Updates action) jump to a section by id.
  */
-export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
+export const SECTIONS: SectionInfo[] = [
   {
-    id: "performance",
-    label: "Performance",
-    icon: "scheduler",
-    summary: "Memory, previews, queueing, and compute backends",
+    id: "app",
+    label: "Look",
+    summary: "Theme, interface size, and how the app behaves",
+    keywords: ["theme", "appearance", "dark", "light", "match system", "scale", "notifications"],
   },
   {
     id: "generation",
-    label: "Generation",
-    icon: "image",
-    summary: "Defaults for new image and video jobs",
+    label: "Defaults for new images",
+    summary: "What a fresh New image starts with",
+  },
+  {
+    id: "expansion",
+    label: "Write more for me",
+    summary: "How the prompt rewriter works and which model it uses",
+    keywords: ["expand", "expansion", "rewrite", "prompt"],
+  },
+  {
+    id: "hosts",
+    label: "Machines",
+    summary: "This device, its key, and the Mold home it works out of",
+    keywords: ["hosts", "this device", "engine", "api key", "mold home"],
+  },
+  {
+    id: "styles",
+    label: "Styles & disk",
+    summary: "Where styles and finished pictures land, and how much disk they take",
+    keywords: [
+      "models",
+      "weights",
+      "checkpoints",
+      "disk",
+      "storage",
+      "space",
+      "directory",
+      "folder",
+    ],
+  },
+  {
+    id: "licenses",
+    label: "Style licences",
+    summary: "Some styles need you to accept their terms once per machine",
+    keywords: ["licence", "license", "terms", "accept"],
+  },
+  {
+    id: "library",
+    label: "My images & trash",
+    summary: "Trash retention on this device",
+    keywords: ["trash", "retention", "collections", "albums", "deleted prints", "purge", "library"],
   },
   {
     id: "media",
-    label: "Saved media",
-    icon: "save",
-    summary: "Where photos, videos, and converted exports are saved",
+    label: "Saving pictures & clips",
+    summary: "Where saved pictures, clips, and exports go",
     keywords: [
       "save",
       "save location",
@@ -95,37 +111,39 @@ export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
     ],
   },
   {
-    id: "library",
-    label: "Library",
-    icon: "library",
-    summary: "Trash retention on this device",
-    keywords: ["trash", "retention", "collections", "deleted prints", "purge", "library"],
+    id: "pairing",
+    label: "Phone pairing",
+    summary: "Use mold on your phone",
+    keywords: ["phone", "iphone", "pair", "pairing", "qr", "mobile"],
   },
   {
-    id: "expansion",
-    label: "Prompt expansion",
-    icon: "sparkle",
-    summary: "Rewrite behavior, model, and sampling controls",
+    id: "performance",
+    label: "Speed & memory",
+    summary: "Memory, previews, queueing, and compute backends",
+    keywords: ["performance", "vram", "offload", "preview"],
   },
   {
     id: "accounts",
     label: "Accounts & tokens",
-    icon: "lock",
-    summary: "Credentials used for catalogs and model downloads",
+    summary: "Credentials used for catalogs and style downloads",
     keywords: ["hugging face", "huggingface", "hf", "civitai", "token", "api key"],
   },
   {
     id: "profiles",
     label: "Profiles",
-    icon: "history",
     summary: "Keep separate sets of engine preferences",
     keywords: ["profile"],
   },
   {
     id: "advanced",
     label: "Advanced",
-    icon: "settings",
     summary: "Uncommon and newly discovered engine options",
+  },
+  {
+    id: "updates",
+    label: "Updates & about",
+    summary: "Version, update channel, logs, and diagnostics",
+    keywords: ["update", "version", "about", "nightly", "stable", "logs", "diagnostics", "privacy"],
   },
 ];
 
@@ -154,17 +172,17 @@ export interface KeySchema {
 export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "models_dir",
-    section: "hosts",
-    label: "Models directory",
-    help: "Where pulled model weights live on this host. Moving it does not copy existing models.",
+    section: "styles",
+    label: "Where styles are kept",
+    help: "Downloaded style weights live here on this machine. Moving it does not copy the styles already there.",
     editor: "path",
     needsEngineRestart: true,
   },
   {
     key: "output_dir",
-    section: "hosts",
-    label: "Output directory",
-    help: "Where finished prints are written. Startup-only: stop the engine, run `mold config set output_dir <path>`, then restart.",
+    section: "styles",
+    label: "Where finished pictures are written",
+    help: "Startup-only: stop the engine, run `mold config set output_dir <path>`, then restart.",
     editor: "path",
     needsEngineRestart: true,
     liveReadOnly: true,
@@ -181,15 +199,15 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_model",
     section: "generation",
-    label: "Default model",
-    help: "Model preselected in a fresh composer.",
+    label: "Style to start with",
+    help: "Used whenever you open a new image.",
     editor: "select",
   },
   {
     key: "default_width",
     section: "generation",
-    label: "Default width",
-    help: "Print width for new generations.",
+    label: "Width",
+    help: "How wide a new picture starts. Bigger uses more graphics memory.",
     editor: "number",
     min: 64,
     max: 4096,
@@ -198,8 +216,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_height",
     section: "generation",
-    label: "Default height",
-    help: "Print height for new generations.",
+    label: "Height",
+    help: "How tall a new picture starts. Bigger uses more graphics memory.",
     editor: "number",
     min: 64,
     max: 4096,
@@ -208,8 +226,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_steps",
     section: "generation",
-    label: "Default steps",
-    help: "Denoise steps for new generations (models override with their own defaults).",
+    label: "Detail",
+    help: "How many passes a new picture starts with. A style with its own default wins.",
     editor: "number",
     min: 1,
     max: 150,
@@ -217,22 +235,22 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "default_negative_prompt",
     section: "generation",
-    label: "Default negative prompt",
-    help: "Applied when the composer's negative prompt is empty (families that support it).",
+    label: "Words to avoid",
+    help: "Used when you have not typed any yourself, on styles that read them.",
     editor: "text",
   },
   {
     key: "embed_metadata",
     section: "generation",
-    label: "Embed metadata in prints",
-    help: "Write prompt, seed, and parameters into PNG/JPEG files so any print can be reproduced.",
+    label: "Keep the recipe in the file",
+    help: "Writes the words, the seed, and every setting into the PNG or JPEG so the same picture can be made again.",
     editor: "toggle",
   },
   {
     key: "t5_variant",
     section: "generation",
-    label: "T5 encoder variant",
-    help: "Quantization for the FLUX T5 text encoder. Smaller variants trade fidelity for VRAM.",
+    label: "How FLUX reads your words",
+    help: "The size of its T5 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
       { value: "", label: "auto" },
@@ -245,8 +263,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "qwen3_variant",
     section: "generation",
-    label: "Qwen3 encoder variant",
-    help: "Quantization for the Flux.2/Z-Image Qwen3 text encoder.",
+    label: "How Flux.2 and Z-Image read your words",
+    help: "The size of their Qwen3 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
       { value: "", label: "auto" },
@@ -259,8 +277,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "gallery.trash_retention_days",
     section: "library",
-    label: "Keep deleted prints for",
-    help: "Prints moved to the trash are deleted forever after this long. 0 keeps them until you empty the trash.",
+    label: "Keep deleted pictures for",
+    help: "Pictures in the trash are deleted forever after this long. 0 keeps them until you empty the trash.",
     editor: "select",
     options: RETENTION_OPTIONS.map((days) => ({
       value: String(days),
@@ -285,7 +303,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     key: "expand.model",
     section: "expansion",
     label: "Local expansion model",
-    help: "Model used by the local backend (pull it from Models if missing).",
+    help: "Model used by the local backend (get it from Styles if missing).",
     editor: "text",
   },
   {
@@ -371,8 +389,8 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
   {
     key: "env.MOLD_STEP_PREVIEW",
     section: "performance",
-    label: "Live denoise previews",
-    help: "Stream a low-fi preview of the forming image after each step. Costs ~ms per step.",
+    label: "Live previews while a picture is made",
+    help: "Stream a rough preview of the forming picture after each pass. Costs ~ms per pass.",
     editor: "select",
     options: [
       { value: "", label: "On (default)" },
@@ -479,6 +497,7 @@ export function sectionMatchesSearch(
   const q = query.trim().toLowerCase();
   if (!q) return true;
   if (section.label.toLowerCase().includes(q)) return true;
+  if (section.summary.toLowerCase().includes(q)) return true;
   if (section.keywords?.some((keyword) => keyword.includes(q))) return true;
   if (schemasForSection(section.id).some((schema) => matchesSearch(query, schema))) return true;
   if (section.id === "advanced" && advancedRowKeys.some((key) => key.toLowerCase().includes(q)))

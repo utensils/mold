@@ -27,6 +27,7 @@ vi.mock("../../lib/api/client", () => ({
 }));
 
 import Lightbox from "./Lightbox.vue";
+import { overlayDepth } from "@ui/lib/overlayStack";
 import { useContextMenuStore } from "../../stores/contextMenu";
 import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
@@ -100,7 +101,7 @@ describe("Lightbox reuse", () => {
     };
     const wrapper = mountLightbox({ ...item, metadata });
 
-    await wrapper.get("button.bg-safelight").trigger("click");
+    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
 
     expect(wrapper.emitted("reuse")).toHaveLength(1);
     expect(wrapper.emitted("reuseSequence")).toBeUndefined();
@@ -113,7 +114,7 @@ describe("Lightbox reuse", () => {
       canEditSequence: true,
     });
 
-    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain("Edit sequence");
+    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain("Edit clip");
     expect(wrapper.get("[data-test='lightbox-duplicate-sequence']").text()).toBe(
       "Duplicate as new",
     );
@@ -297,14 +298,14 @@ describe("Lightbox a11y", () => {
     const wrapper = mountLightbox();
     const dialog = wrapper.get("[role='dialog']");
     expect(dialog.attributes("aria-modal")).toBe("true");
-    expect(dialog.attributes("aria-label")).toBe("Print 1 of 3");
+    expect(dialog.attributes("aria-label")).toBe("Picture 1 of 3");
   });
 
   it("labels the close and navigation controls", () => {
     const wrapper = mountLightbox();
     expect(wrapper.find("[aria-label='Close']").exists()).toBe(true);
-    expect(wrapper.find("[aria-label='Previous print']").exists()).toBe(true);
-    expect(wrapper.find("[aria-label='Next print']").exists()).toBe(true);
+    expect(wrapper.find("[aria-label='Previous picture']").exists()).toBe(true);
+    expect(wrapper.find("[aria-label='Next picture']").exists()).toBe(true);
   });
 
   it("offers full image copy from the still-image context menu", async () => {
@@ -333,10 +334,10 @@ describe("Lightbox a11y", () => {
 
 describe("Lightbox save action", () => {
   it("uses native save language for images and videos", () => {
-    expect(mountLightbox().get("[data-test='save-media']").text()).toBe("Save image");
+    expect(mountLightbox().get("[data-test='save-media']").text()).toBe("Save a copy");
     const video: GalleryImage = { ...item, filename: "print-0001.mp4", format: "mp4" };
     const wrapper = mountLightbox(video, true);
-    expect(wrapper.get("[data-test='save-media']").text()).toBe("Save video");
+    expect(wrapper.get("[data-test='save-media']").text()).toBe("Save a copy");
     expect(wrapper.get("[data-test='export-video']").text()).toContain("Export format");
   });
 
@@ -378,7 +379,7 @@ describe("Lightbox save action", () => {
   });
 });
 
-describe("Lightbox organization (V3 Shelf)", () => {
+describe("Lightbox organization", () => {
   const organization = {
     title: "smurf 04",
     favorite: true,
@@ -495,11 +496,11 @@ describe("Lightbox organization (V3 Shelf)", () => {
     expect(wrapper.emitted("restore")).toHaveLength(1);
 
     await wrapper.get("[data-test='lightbox-delete-forever']").trigger("click");
-    const dialog = document.body.querySelector("[data-test='confirm-dialog']")!;
-    expect(dialog.textContent).toContain("Delete “smurf 04” forever?");
-    expect(dialog.textContent).toContain("This can't be undone.");
-    expect(dialog.querySelector("input")).toBeNull();
-    (dialog.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    const dialog = wrapper.get("[data-test='confirm-dialog']");
+    expect(dialog.text()).toContain("Delete “smurf 04” forever?");
+    expect(dialog.text()).toContain("This can't be undone.");
+    expect(dialog.find("input").exists()).toBe(false);
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     expect(wrapper.emitted("deleteForever")).toHaveLength(1);
     wrapper.unmount();
   });
@@ -519,5 +520,154 @@ describe("Lightbox organization (V3 Shelf)", () => {
       null,
       false,
     );
+  });
+});
+
+describe("Lightbox overlay stacking", () => {
+  const organizationFor = (now: number) => ({
+    title: "smurf 04",
+    favorite: false,
+    tags: [],
+    collections: [],
+    trashedAt: now / 1000 - 10,
+    purgeAt: now / 1000 + 5 * 86_400,
+  });
+
+  it("Escape over the delete-forever question answers the question, not the lightbox", async () => {
+    const now = Date.now();
+    const wrapper = mount(Lightbox, {
+      props: {
+        item,
+        index: 0,
+        count: 3,
+        video: false,
+        canOrganize: true,
+        trashed: true,
+        organization: organizationFor(now),
+      },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+      attachTo: document.body,
+    });
+    // The grid's own Escape handler lives on the window; the confirm above the
+    // lightbox has to stop the key before it ever gets there, or the picture
+    // the question is about disappears with the question.
+    const heard: string[] = [];
+    const witness = () => heard.push("window");
+    window.addEventListener("keydown", witness);
+
+    await wrapper.get("[data-test='lightbox-delete-forever']").trigger("click");
+    expect(wrapper.find("[data-test='confirm-dialog']").exists()).toBe(true);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("[data-test='confirm-dialog']").exists()).toBe(false);
+    expect(heard).toEqual([]);
+    expect(wrapper.emitted("deleteForever")).toBeUndefined();
+
+    window.removeEventListener("keydown", witness);
+    wrapper.unmount();
+  });
+
+  it("is itself an overlay, so anything it opens is registered above it", async () => {
+    const now = Date.now();
+    // Sibling tests leave their lightboxes mounted, so this reads its own
+    // depth relative to whatever the register already holds.
+    const before = overlayDepth();
+    const wrapper = mount(Lightbox, {
+      props: {
+        item,
+        index: 0,
+        count: 3,
+        video: false,
+        canOrganize: true,
+        trashed: true,
+        organization: organizationFor(now),
+      },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+      attachTo: document.body,
+    });
+    expect(overlayDepth()).toBe(before + 1);
+    await wrapper.get("[data-test='lightbox-delete-forever']").trigger("click");
+    expect(overlayDepth()).toBe(before + 2);
+    wrapper.unmount();
+    expect(overlayDepth()).toBe(before);
+  });
+
+  it("with no question open, Escape reaches the grid so the lightbox can close", async () => {
+    const wrapper = mount(Lightbox, {
+      props: { item, index: 0, count: 3, video: false },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+      attachTo: document.body,
+    });
+    const heard: string[] = [];
+    const witness = () => heard.push("window");
+    window.addEventListener("keydown", witness);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(heard).toEqual(["window"]);
+    window.removeEventListener("keydown", witness);
+    wrapper.unmount();
+  });
+});
+
+describe("Lightbox in the Trash", () => {
+  const live = {
+    title: "smurf 04",
+    favorite: false,
+    tags: [],
+    collections: [],
+    trashedAt: null,
+    purgeAt: null,
+  };
+
+  function openMenu(wrapper: ReturnType<typeof mount>) {
+    void wrapper.get('[data-test="lightbox-media"]').trigger("contextmenu");
+    return useContextMenuStore().entries.map((entry) => ("separator" in entry ? "—" : entry.label));
+  }
+
+  /*
+   * A trashed print's settings can be reused — the grid's own tile menu is
+   * already gated there — but the Lightbox offered the whole reuse cluster on
+   * a print that is on its way to being purged, which is neither a recipe the
+   * user meant to pick up nor a photo that will still exist. Upscale and the
+   * delete block already read `fromTrash`; these do now too.
+   */
+  it("offers the reuse actions on a live print", async () => {
+    const wrapper = mountLightbox(item, false, { canOrganize: true, organization: live });
+    expect(wrapper.find("[data-test='lightbox-primary-action']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='lightbox-use-source']").exists()).toBe(true);
+    await wrapper.vm.$nextTick();
+    expect(openMenu(wrapper)).toContain("Use as source");
+    wrapper.unmount();
+  });
+
+  it("offers none of them once the print is in the trash", async () => {
+    const now = Date.now();
+    const wrapper = mountLightbox(item, false, {
+      canOrganize: true,
+      trashed: true,
+      organization: { ...live, trashedAt: now / 1000 - 10, purgeAt: now / 1000 + 5 * 86_400 },
+    });
+    expect(wrapper.find("[data-test='lightbox-primary-action']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='lightbox-use-source']").exists()).toBe(false);
+    await wrapper.vm.$nextTick();
+    expect(openMenu(wrapper)).not.toContain("Use as source");
+    // The trash's own actions are untouched.
+    expect(wrapper.find("[data-test='lightbox-restore']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='lightbox-delete-forever']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("gates on the row itself, not only on the Trash view", async () => {
+    const trashedRow = { ...item, trashed_at: Math.floor(Date.now() / 1000) - 10 };
+    const wrapper = mountLightbox(trashedRow, false, { canOrganize: true, organization: live });
+    expect(wrapper.find("[data-test='lightbox-primary-action']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='lightbox-use-source']").exists()).toBe(false);
+    await wrapper.vm.$nextTick();
+    expect(openMenu(wrapper)).not.toContain("Use as source");
+    wrapper.unmount();
   });
 });

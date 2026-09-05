@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted, toRef } from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
+import ContextMenuItem from "./ContextMenuItem.vue";
 import {
   hasCheckColumn,
   hasChildren,
@@ -10,6 +12,9 @@ import {
 } from "../../stores/contextMenu";
 
 const menu = useContextMenuStore();
+// A context menu over a dialog is the topmost overlay; registering it keeps
+// one Escape from closing both the menu and the dialog beneath it.
+useOverlayStack(toRef(menu, "visible"), "context-menu");
 
 function onKeydown(e: KeyboardEvent) {
   if (!menu.visible) return;
@@ -78,21 +83,6 @@ const submenuLabel = computed(() => {
   const parent = menu.submenu ? menu.entries[menu.submenu.parentIndex] : undefined;
   return parent && !isSeparator(parent) ? parent.label : "Submenu";
 });
-
-function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted: boolean) {
-  return [
-    entry.disabled
-      ? "cursor-default text-ink-3"
-      : entry.danger
-        ? "text-stop hover:bg-[color-mix(in_srgb,var(--stop)_16%,transparent)]"
-        : "text-ink hover:bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)]",
-    highlighted && !entry.disabled
-      ? entry.danger
-        ? "bg-[color-mix(in_srgb,var(--stop)_16%,transparent)]"
-        : "bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)]"
-      : "",
-  ];
-}
 </script>
 
 <template>
@@ -106,7 +96,7 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
     />
     <div
       v-if="menu.visible"
-      class="border-edge fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-chrome border bg-bench py-1 shadow-[0_4px_8px_rgba(0,0,0,0.5)]"
+      class="fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-control border border-border bg-surface py-1 shadow-md"
       :style="{
         left: `${menu.x}px`,
         top: `${menu.y}px`,
@@ -117,42 +107,22 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
       aria-label="Context menu"
     >
       <template v-for="(entry, i) in menu.entries" :key="i">
-        <div v-if="isSeparator(entry)" class="border-edge mx-2 my-1 border-t" role="separator" />
-        <button
+        <div v-if="isSeparator(entry)" class="border-border mx-2 my-1 border-t" role="separator" />
+        <ContextMenuItem
           v-else
-          type="button"
-          :role="entry.checked !== undefined ? 'menuitemcheckbox' : 'menuitem'"
-          :aria-checked="entry.checked !== undefined ? entry.checked : undefined"
-          :aria-disabled="entry.disabled || undefined"
-          :aria-haspopup="hasChildren(entry) ? 'menu' : undefined"
-          :aria-expanded="hasChildren(entry) ? menu.submenu?.parentIndex === i : undefined"
-          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-body transition-colors duration-75"
-          :class="itemClasses(entry, i === menu.highlighted)"
-          :disabled="entry.disabled"
-          @mouseenter="onRootEnter(entry, i, $event)"
-          @click="onRootClick(entry, $event)"
-        >
-          <span
-            v-if="hasCheckColumn(menu.entries)"
-            class="w-3.5 shrink-0 text-center font-utility text-[11px] leading-none"
-            data-test="menu-check"
-            aria-hidden="true"
-            >{{ entry.checked ? "✓" : "" }}</span
-          >
-          <span class="min-w-0 flex-1 truncate">{{ entry.label }}</span>
-          <span
-            v-if="hasChildren(entry)"
-            class="shrink-0 text-ink-3"
-            data-test="menu-chevron"
-            aria-hidden="true"
-            >›</span
-          >
-        </button>
+          :entry="entry"
+          :highlighted="i === menu.highlighted"
+          :check-column="hasCheckColumn(menu.entries)"
+          expandable
+          :expanded="menu.submenu?.parentIndex === i"
+          @enter="onRootEnter(entry, i, $event)"
+          @activate="onRootClick(entry, $event)"
+        />
       </template>
     </div>
     <div
       v-if="menu.visible && menu.submenu"
-      class="border-edge fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-chrome border bg-bench py-1 shadow-[0_4px_8px_rgba(0,0,0,0.5)]"
+      class="fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-control border border-border bg-surface py-1 shadow-md"
       :style="{
         left: `${menu.submenu.x}px`,
         top: `${menu.submenu.y}px`,
@@ -164,28 +134,15 @@ function itemClasses(entry: Exclude<MenuEntry, { separator: true }>, highlighted
       :aria-label="submenuLabel"
     >
       <template v-for="(entry, j) in menu.submenu.entries" :key="j">
-        <div v-if="isSeparator(entry)" class="border-edge mx-2 my-1 border-t" role="separator" />
-        <button
+        <div v-if="isSeparator(entry)" class="border-border mx-2 my-1 border-t" role="separator" />
+        <ContextMenuItem
           v-else
-          type="button"
-          :role="entry.checked !== undefined ? 'menuitemcheckbox' : 'menuitem'"
-          :aria-checked="entry.checked !== undefined ? entry.checked : undefined"
-          :aria-disabled="entry.disabled || undefined"
-          class="flex h-[26px] w-full items-center gap-1.5 px-3 text-left text-body transition-colors duration-75"
-          :class="itemClasses(entry, j === menu.submenu.highlighted)"
-          :disabled="entry.disabled"
-          @mouseenter="menu.submenu.highlighted = j"
-          @click="menu.activate(entry)"
-        >
-          <span
-            v-if="hasCheckColumn(menu.submenu.entries)"
-            class="w-3.5 shrink-0 text-center font-utility text-[11px] leading-none"
-            data-test="menu-check"
-            aria-hidden="true"
-            >{{ entry.checked ? "✓" : "" }}</span
-          >
-          <span class="min-w-0 flex-1 truncate">{{ entry.label }}</span>
-        </button>
+          :entry="entry"
+          :highlighted="j === menu.submenu.highlighted"
+          :check-column="hasCheckColumn(menu.submenu.entries)"
+          @enter="menu.submenu.highlighted = j"
+          @activate="menu.activate(entry)"
+        />
       </template>
     </div>
   </Teleport>

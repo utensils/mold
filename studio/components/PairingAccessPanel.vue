@@ -209,10 +209,10 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 .access-card {
-  padding: 20px;
-  border: 1px solid var(--color-edge, rgba(128, 128, 128, 0.25));
-  border-radius: 14px;
-  background: var(--color-bench, rgba(128, 128, 128, 0.06));
+  padding: 14px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
 }
 .access-header {
   display: flex;
@@ -222,19 +222,19 @@ onBeforeUnmount(() => {
 }
 h3 {
   margin: 0;
-  color: var(--color-ink, inherit);
-  font-size: 15px;
+  color: var(--mold-text);
+  font-size: var(--mold-fs-base);
   font-weight: 650;
 }
 p {
   margin: 4px 0 0;
-  color: var(--color-ink-3, #888);
-  font-size: 12px;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-xs);
   line-height: 1.45;
 }
 button {
   min-height: 36px;
-  border-radius: 8px;
+  border-radius: var(--mold-radius-2);
   font: inherit;
   font-weight: 650;
   cursor: pointer;
@@ -245,13 +245,13 @@ button:disabled {
 }
 .refresh-button,
 .cancel-button {
-  border: 1px solid var(--color-edge, #555);
+  border: var(--mold-bw) solid var(--mold-border);
   padding: 0 12px;
-  background: var(--color-surface, transparent);
-  color: var(--color-ink-2, inherit);
+  background: var(--mold-surface);
+  color: var(--mold-text-2);
 }
 .access-error {
-  color: var(--color-danger, #d44);
+  color: var(--mold-error);
 }
 .access-empty {
   margin-top: 18px;
@@ -265,17 +265,17 @@ button:disabled {
   min-height: 58px;
   align-items: center;
   gap: 12px;
-  border-top: 1px solid var(--color-edge, rgba(128, 128, 128, 0.2));
+  border-top: var(--mold-bw) solid var(--mold-border);
 }
 .client-icon {
   display: grid;
   width: 32px;
   height: 32px;
   place-items: center;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--color-accent, #de6d2f) 14%, transparent);
-  color: var(--color-accent, #de6d2f);
-  font-size: 20px;
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-blue) 14%, transparent);
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-lg);
 }
 .client-copy {
   display: grid;
@@ -285,14 +285,14 @@ button:disabled {
 }
 .client-copy strong {
   overflow: hidden;
-  color: var(--color-ink, inherit);
-  font-size: 13px;
+  color: var(--mold-text);
+  font-size: var(--mold-fs-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .client-copy span {
-  color: var(--color-ink-3, #888);
-  font-size: 11px;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-micro);
 }
 .access-actions {
   display: flex;
@@ -300,16 +300,16 @@ button:disabled {
   gap: 8px;
 }
 .revoke-button {
-  border: 1px solid
-    color-mix(in srgb, var(--color-danger, #d44) 45%, transparent);
+  border: var(--mold-bw) solid
+    color-mix(in srgb, var(--mold-error) 45%, transparent);
   padding: 0 12px;
   background: transparent;
-  color: var(--color-danger, #d44);
+  color: var(--mold-error);
 }
 .revoke-button--confirm {
-  border-color: var(--color-danger, #d44);
-  background: var(--color-danger, #d44);
-  color: white;
+  border-color: var(--mold-error);
+  background: var(--mold-error);
+  color: var(--mold-on-accent);
 }
 @media (max-width: 560px) {
   .access-row {

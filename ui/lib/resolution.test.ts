@@ -9,7 +9,7 @@ import {
 } from "./resolution";
 
 describe("dimsForMp", () => {
-  it("resolves 1 MP square to 1024×1024 (spec example)", () => {
+  it("resolves 1 MP square to 1024×1024", () => {
     expect(dimsForMp(1, 1)).toEqual({ width: 1024, height: 1024 });
   });
 

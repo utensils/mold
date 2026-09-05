@@ -1064,11 +1064,11 @@ function onKeydown(event: KeyboardEvent): void {
   height: 100%;
   min-height: 180px;
   overflow: hidden;
-  border-radius: var(--radius-card, 12px);
+  border-radius: var(--mold-radius-2, 12px);
   /* The bed prints are always viewed on; the canvas clears to transparent so
      this token shows through and follows the theme without a GL reupload. */
-  background: var(--print, #141110);
-  color: var(--on-media, #f5efff);
+  background: var(--mold-media-bed, #141110);
+  color: var(--mold-on-media, #f5efff);
 }
 .mesh-viewer__poster,
 .mesh-viewer__canvas {
@@ -1121,8 +1121,8 @@ function onKeydown(event: KeyboardEvent): void {
 .mesh-viewer__button {
   min-height: 32px;
   padding: 0 12px;
-  border: 1px solid var(--edge, rgba(255, 255, 255, 0.2));
-  border-radius: var(--radius-control, 9px);
+  border: 1px solid var(--mold-border, rgba(255, 255, 255, 0.2));
+  border-radius: var(--mold-radius-2, 9px);
   background: rgba(0, 0, 0, 0.42);
   color: inherit;
   font: inherit;

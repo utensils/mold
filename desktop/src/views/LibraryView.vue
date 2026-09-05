@@ -61,11 +61,7 @@ import {
   type MergedCollection,
 } from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
-import {
-  retainedSourceMediaDisclosable,
-  retainedSourceMediaDisclosure,
-  retainedSourceMediaInventory,
-} from "@studio/api/gallerySourceMedia";
+import { useReuseStillPrint } from "../composables/useReuseStillPrint";
 import {
   useGalleryStore,
   type FanoutResult,
@@ -80,10 +76,11 @@ import { useComposerStore } from "../stores/composer";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
-import { inTauri, ipc } from "../lib/ipc";
+import { inTauri, ipc, type SavedMedia } from "../lib/ipc";
+import { saveGalleryMedia, showSavedMediaToast } from "../lib/mediaSave";
+import { suggestedSaveName } from "../lib/gallery/saveName";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { copyLocalOutputPath } from "../lib/localOutputPath";
-import { formatBytes } from "../lib/format";
 import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu, allowsNativeSelectAll, isSelectAllChord } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
@@ -130,6 +127,7 @@ const composer = useComposerStore();
 const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
+const reuseStillPrint = useReuseStillPrint();
 /** `modelDisplayNameForId` scans the installed list; a grid of 2 000 tiles
  *  would scan it 2 000 times per render. Memoize per name, dropping the memo
  *  whenever the installed inventory changes. */
@@ -166,17 +164,17 @@ watch(
   { immediate: true },
 );
 
-// ── Scopes (V3 "Shelf": Prints | Collections | Trash) ────────────────────────
-// Capability-gated: Collections needs an organize-capable host, Trash a
-// trash-capable one (or this device's offline `.trash/` listing). With only
-// Prints the control disappears and every organization affordance hides, so
-// old servers keep today's Library and its hard-delete wording.
+// ── Scopes: Everything | Favourites | Albums | Trash ───────────────────────
+// Capability-gated: Favourites and Albums need an organize-capable host,
+// Trash a trash-capable one (or this device's offline `.trash/` listing). With
+// only Everything the control disappears and every organization affordance
+// hides, so old servers keep today's Library and its hard-delete wording.
 const organizeAvailable = computed(() => gallery.anyOrganizeCapable);
 const offlineLocalTrash = computed(() => inTauri() && !gallery.hostFor("local"));
 const trashAvailable = computed(() => gallery.anyTrashCapable || offlineLocalTrash.value);
 const scopes = computed<LibraryScope[]>(() => [
   "prints",
-  ...(organizeAvailable.value ? (["collections"] as const) : []),
+  ...(organizeAvailable.value ? (["favorites", "collections"] as const) : []),
   ...(trashAvailable.value ? (["trash"] as const) : []),
 ]);
 const scope = computed<LibraryScope>(() =>
@@ -209,7 +207,7 @@ function setScope(next: LibraryScope) {
 }
 
 /** What the grid renders right now: the trash, or the live filtered set
- *  (which already applies ♥ / tags / the open collection). */
+ *  (which already applies the Favourites scope, tags, and the open album). */
 const entries = computed<MergedPrint[]>(() =>
   inTrash.value ? gallery.trashFiltered : gallery.filtered,
 );
@@ -233,11 +231,6 @@ const entryTrashCapable = (entry: MergedPrint) => {
 };
 
 // ── Header labels ────────────────────────────────────────────────────────────
-const hostScopeLabel = computed(() =>
-  gallery.filter === "all"
-    ? null
-    : (gallery.sources.find((s) => s.key === gallery.filter)?.label ?? null),
-);
 const scopeCounts = computed(() => {
   const hidden = new Set(
     gallery.mergedCollections
@@ -249,29 +242,20 @@ const scopeCounts = computed(() => {
   ).length;
   return {
     prints,
+    favorites: favoritesCount.value,
     collections: gallery.mergedCollections.length,
     trash: gallery.trashCount,
   };
 });
-const countLabel = computed(() => {
-  if (showShelf.value) {
-    const n = shelfCards.value.length;
-    return `${n} ${n === 1 ? "collection" : "collections"}`;
-  }
-  const list = entries.value;
-  const n = list.length;
-  const noun = n === 1 ? "print" : "prints";
-  const parts = [inTrash.value ? `${n} ${noun} in trash` : `${n} ${noun}`];
-  const bytes = list.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0);
-  if (bytes > 0) parts.push(formatBytes(bytes));
-  if (hostScopeLabel.value) parts.push(hostScopeLabel.value);
-  return parts.join(" · ");
-});
 const trashBytes = computed(() =>
   gallery.trashMerged.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0),
 );
+/** The whole library's favourites, not the open scope's — the header count
+ *  beside Favourites must not change when the Trash is on screen. */
 const favoritesCount = computed(
-  () => gallery.basePrints.filter((entry) => isFavorite(entry)).length,
+  () =>
+    gallery.merged.filter((entry) => gallery.visibleInDefaultLibrary(entry) && isFavorite(entry))
+      .length,
 );
 const sourceLabel = (key: string) => gallery.sources.find((s) => s.key === key)?.label ?? key;
 /** "This Mac · plato" — every organize-capable host, for the fan-out notes. */
@@ -281,7 +265,7 @@ const organizeHostNote = computed(() => {
 });
 
 /** Every SELECTED logical print has at least one copy on an
- *  organize-capable host — the bulk bar's Favorite / Tag / Collection
+ *  organize-capable host — the bulk bar's Favourite / Tag / Album
  *  controls act on nothing otherwise. Empty selections stay enabled (the
  *  buttons already disable on `none`) so the bar reads normally. */
 const selectionOrganizeBlockedReason = computed<string | null>(() => {
@@ -289,7 +273,7 @@ const selectionOrganizeBlockedReason = computed<string | null>(() => {
   if (blocked.length === 0) return null;
   const labels = [...new Set(blocked.flatMap((e) => e.availableOn.map((s) => s.label)))];
   const n = blocked.length;
-  return `${n} selected ${n === 1 ? "print lives" : "prints live"} only on ${joinNames(labels)}, which can't organize prints.`;
+  return `${n} selected ${n === 1 ? "picture lives" : "pictures live"} only on ${joinNames(labels)}, which can't organize pictures.`;
 });
 
 /** Reveal works for files on this Mac: the IPC bucket, or a local-kind
@@ -326,6 +310,53 @@ async function saveToThisMac(entry: MergedPrint) {
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   }
+}
+
+/**
+ * Export the selection: the per-print save path, once per picture, into the
+ * configured media folder. One toast for the batch — a per-file toast for a
+ * hundred-print selection would bury the app.
+ */
+const exportBusy = ref(false);
+async function exportSelected(targets: MergedPrint[]) {
+  if (exportBusy.value || targets.length === 0) return;
+  exportBusy.value = true;
+  let saved: SavedMedia | null = null;
+  let failed = 0;
+  let firstError: string | null = null;
+  try {
+    for (const entry of targets) {
+      try {
+        saved = await saveGalleryMedia(
+          targetFor(entry),
+          entry.item.filename,
+          suggestedSaveName({ ...entry.item, title: orgOf(entry).title }),
+          null,
+          inTrash.value,
+        );
+      } catch (err) {
+        failed += 1;
+        firstError ??= err instanceof Error ? err.message : String(err);
+      }
+    }
+  } finally {
+    exportBusy.value = false;
+  }
+  if (saved && failed === 0 && targets.length === 1) {
+    showSavedMediaToast(toasts, saved);
+    return;
+  }
+  const ok = targets.length - failed;
+  if (ok > 0) {
+    // "N of M" — a batch that lost a picture says so in the count itself,
+    // not only in the error toast beside it.
+    toasts.push(
+      `Exported ${ok} of ${targets.length} ${targets.length === 1 ? "picture" : "pictures"}`,
+      "info",
+      { ...(saved ? { description: `To ${saved.directory}` } : {}) },
+    );
+  }
+  if (firstError) toasts.push(firstError, "error");
 }
 
 // ── Upscale ────────────────────────────────────────────────────────────────
@@ -647,36 +678,7 @@ function reuseSettings(entry: MergedPrint) {
   }
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
-  const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
-  const target = gallery.targetOf(entry.sourceKey);
-  // Always ask — the host is the only authority on what it retained, and the
-  // metadata under-reports inline video/audio/mask bytes. But a text-to-image
-  // print's archive entry resolves with no pins, which the server can only
-  // report as `unavailable_legacy`, so an UNAVAILABLE answer is toasted only
-  // when the print's own metadata says conditioning bytes were shipped.
-  if (target) {
-    void retainedSourceMediaInventory(entry.item.filename, target)
-      .then((inventory) => {
-        if (
-          !composer.setRetainedSourceIfCurrent(retainedVersion, {
-            filename: entry.item.filename,
-            origin: target,
-            inventory,
-          })
-        ) {
-          return;
-        }
-        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
-          ? retainedSourceMediaDisclosure(inventory.availability)
-          : null;
-        if (disclosure) toasts.push(disclosure, "error");
-      })
-      .catch(() => {
-        // The established local stash/gallery-name restore stays live. A
-        // transport failure inspecting the additive endpoint must not turn a
-        // previously working Reuse settings action into a dead end.
-      });
-  }
+  reuseStillPrint(entry);
   lightboxOpen.value = false;
   void router.push("/create");
 }
@@ -759,7 +761,7 @@ async function toggleCollection(
   // Zero addable copies would "add" nothing (and create-on-demand would
   // leave an empty collection) — refuse honestly instead.
   if (change.checked && gallery.organizeTargetsFor(targets).length === 0) {
-    toasts.push("None of the selected prints are on a machine that can organize.", "error");
+    toasts.push("None of the selected pictures are on a machine that can organize.", "error");
     return;
   }
   if (!change.checked) {
@@ -778,7 +780,7 @@ async function toggleCollection(
     change.slug ? { slug: change.slug, name } : { name },
   );
   const n = targets.length;
-  reportFanout(result, `Added ${n} ${n === 1 ? "print" : "prints"} to “${name}”`);
+  reportFanout(result, `Added ${n} ${n === 1 ? "picture" : "pictures"} to “${name}”`);
 }
 
 async function renamePrint(entry: MergedPrint, raw: string | null) {
@@ -832,7 +834,7 @@ async function createCollection(name: string, targets: MergedPrint[] = []) {
   if (targets.length > 0 && gallery.organizeTargetsFor(targets).length === 0) {
     const n = targets.length;
     toasts.push(
-      `None of the ${n === 1 ? "selected print's copies live" : `${n} selected prints' copies live`} on a machine that can organize — no collection was created.`,
+      `None of the ${n === 1 ? "selected picture's copies live" : `${n} selected pictures' copies live`} on a machine that can organize — no album was created.`,
       "error",
     );
     return;
@@ -844,9 +846,9 @@ async function createCollection(name: string, targets: MergedPrint[] = []) {
     if (targets.length > 0) {
       const added = await gallery.addToCollection(targets, { slug: result.slug, name });
       const n = targets.length;
-      reportFanout(added, `Added ${n} ${n === 1 ? "print" : "prints"} to “${name}”`);
+      reportFanout(added, `Added ${n} ${n === 1 ? "picture" : "pictures"} to “${name}”`);
     } else {
-      toasts.push(`Created collection “${name}”`);
+      toasts.push(`Created album “${name}”`);
     }
   } finally {
     organizeBusy.value = false;
@@ -869,7 +871,7 @@ async function setCollectionHidden(slug: string, hidden: boolean) {
   const name = collectionNamed(slug);
   reportFanout(
     await gallery.setCollectionHidden(slug, hidden),
-    hidden ? `Hidden collection “${name}”` : `Showing collection “${name}”`,
+    hidden ? `Hid album “${name}”` : `Showing album “${name}”`,
   );
 }
 
@@ -880,7 +882,7 @@ async function confirmDeleteCollection() {
   const name = collectionNamed(slug);
   organizeBusy.value = true;
   try {
-    if (reportFanout(await gallery.deleteCollection(slug), `Deleted collection “${name}”`)) {
+    if (reportFanout(await gallery.deleteCollection(slug), `Deleted album “${name}”`)) {
       if (gallery.collectionSlug === slug) gallery.collectionSlug = null;
     }
   } finally {
@@ -900,7 +902,7 @@ async function removeFromOpenCollection(targets: MergedPrint[]) {
   const n = targets.length;
   reportFanout(
     await gallery.removeFromCollection(targets, slug),
-    `Removed ${n} ${n === 1 ? "print" : "prints"} from “${collectionNamed(slug)}”`,
+    `Removed ${n} ${n === 1 ? "picture" : "pictures"} from “${collectionNamed(slug)}”`,
   );
   pruneSelection();
 }
@@ -912,7 +914,7 @@ async function restorePrints(targets: MergedPrint[]) {
   try {
     const result = await gallery.restore(targets);
     const n = result.restored;
-    reportFanout(result, `Restored ${n} ${n === 1 ? "print" : "prints"}`);
+    reportFanout(result, `Restored ${n} ${n === 1 ? "picture" : "pictures"}`);
   } finally {
     organizeBusy.value = false;
   }
@@ -926,7 +928,7 @@ function askDeleteForever(targets: MergedPrint[]) {
 const deleteForeverTitle = computed(() => {
   const targets = deleteForeverTargets.value ?? [];
   if (targets.length === 1) return `Delete “${tileTitle(targets[0]!)}” forever?`;
-  return `Delete ${targets.length} prints forever?`;
+  return `Delete ${targets.length} pictures forever?`;
 });
 async function confirmDeleteForever() {
   const targets = deleteForeverTargets.value ?? [];
@@ -938,12 +940,12 @@ async function confirmDeleteForever() {
     if (result.failedPrints > 0) {
       toasts.push(
         result.error ??
-          `${result.failedPrints} ${result.failedPrints === 1 ? "print" : "prints"} could not be deleted.`,
+          `${result.failedPrints} ${result.failedPrints === 1 ? "picture" : "pictures"} could not be deleted.`,
         "error",
       );
     } else {
       const n = result.deletedPrints;
-      toasts.push(`Deleted ${n} ${n === 1 ? "print" : "prints"} forever`);
+      toasts.push(`Deleted ${n} ${n === 1 ? "picture" : "pictures"} forever`);
     }
   } finally {
     organizeBusy.value = false;
@@ -963,7 +965,7 @@ function joinNames(names: string[]): string {
 const emptyTrashMessage = computed(() => {
   const n = gallery.trashCount;
   const where = joinNames(trashHostLabels.value);
-  return `Delete ${n} ${n === 1 ? "print" : "prints"} in the trash${where ? ` on ${where}` : ""} forever? This can't be undone.`;
+  return `Delete ${n} ${n === 1 ? "picture" : "pictures"} in the trash${where ? ` on ${where}` : ""} forever? This can't be undone.`;
 });
 async function confirmEmptyTrash() {
   emptyTrashOpen.value = false;
@@ -972,7 +974,7 @@ async function confirmEmptyTrash() {
     const result = await gallery.emptyTrash();
     reportFanout(
       result,
-      `Deleted ${result.purged} ${result.purged === 1 ? "print" : "prints"} forever`,
+      `Deleted ${result.purged} ${result.purged === 1 ? "picture" : "pictures"} forever`,
     );
   } finally {
     organizeBusy.value = false;
@@ -1072,6 +1074,14 @@ const shelfCards = computed<ShelfCard[]>(() => {
     }));
 });
 
+/** What the strip says instead of cards; the New card is always offered. */
+const shelfNote = computed(() => {
+  if (shelfCards.value.length > 0) return null;
+  return gallery.mergedCollections.length === 0
+    ? "No albums yet — an album lives on every machine that holds a copy."
+    : "No albums match the current search.";
+});
+
 const shelf = ref<InstanceType<typeof CollectionsShelf> | null>(null);
 
 function openCollectionSlug(slug: string) {
@@ -1092,13 +1102,13 @@ function collectionMenu(slug: string): MenuEntry[] {
   return [
     { label: "Open", action: () => openCollectionSlug(slug) },
     {
-      label: hidden ? "Show in Library" : "Hide from Library",
+      label: hidden ? "Show in My images" : "Hide from My images",
       action: () => void setCollectionHidden(slug, !hidden),
     },
     { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
     { separator: true },
     {
-      label: "Delete collection…",
+      label: "Delete album…",
       danger: true,
       action: () => (collectionDeleteSlug.value = slug),
     },
@@ -1112,12 +1122,12 @@ function openEditMenu(event: MouseEvent) {
   contextMenu.open(event, [
     { label: "Rename…", action: () => (collectionRenameSlug.value = slug) },
     {
-      label: "Remove prints…",
+      label: "Remove pictures…",
       action: () => setSelectMode(true),
     },
     { separator: true },
     {
-      label: "Delete collection…",
+      label: "Delete album…",
       danger: true,
       action: () => (collectionDeleteSlug.value = slug),
     },
@@ -1164,7 +1174,7 @@ function collectionSubmenu(entry: MergedPrint): MenuEntry[] {
     };
   });
   if (items.length > 0) items.push({ separator: true });
-  items.push({ label: "New collection…", action: () => openNewCollection(targets) });
+  items.push({ label: "New album…", action: () => openNewCollection(targets) });
   return items;
 }
 
@@ -1209,25 +1219,25 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   const trashable = entryTrashCapable(entry);
   if (selectedForBulk) {
     const targets = selectedEntries.value;
-    const allFavorite = targets.every(isFavorite);
+    const allFavourite = targets.every(isFavorite);
     const allOrganizable = targets.every(canOrganizeEntry);
     const allTrashable = targets.every(entryTrashCapable);
     return [
       ...(allOrganizable
         ? [
             {
-              label: allFavorite
-                ? `Unfavorite ${bulkCount} selected`
-                : `Favorite ${bulkCount} selected`,
-              checked: allFavorite,
-              action: () => void setFavorite(targets, !allFavorite),
+              label: allFavourite
+                ? `Unfavourite ${bulkCount} selected`
+                : `Favourite ${bulkCount} selected`,
+              checked: allFavourite,
+              action: () => void setFavorite(targets, !allFavourite),
             },
             { label: "Tags", children: tagSubmenu(entry) },
-            { label: "Add to collection", children: collectionSubmenu(entry) },
+            { label: "Add to album", children: collectionSubmenu(entry) },
             ...(gallery.collectionSlug && inCollections.value
               ? [
                   {
-                    label: `Remove ${bulkCount} selected from collection`,
+                    label: `Remove ${bulkCount} selected from album`,
                     action: () => void removeFromOpenCollection(targets),
                   },
                 ]
@@ -1248,29 +1258,29 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     ...(isSequencePrint(entry)
       ? [
           ...(canEditSequence(entry)
-            ? [{ label: "Edit sequence", action: () => void editSequence(entry) }]
+            ? [{ label: "Edit clip", action: () => void editSequence(entry) }]
             : []),
           { label: "Duplicate as new", action: () => reuseSequence(entry) },
         ]
-      : [{ label: "Reuse settings", action: () => reuseSettings(entry) }]),
+      : [{ label: "Use these settings", action: () => reuseSettings(entry) }]),
     ...(organize
       ? [
           { separator: true } as MenuEntry,
           {
-            label: favorite ? "Unfavorite" : "Favorite",
+            label: favorite ? "Unfavourite" : "Favourite",
             checked: favorite,
             action: () => toggleFavorite(entry),
           },
           { label: "Rename…", action: () => openRename(entry) },
           { label: "Tags", children: tagSubmenu(entry) },
-          { label: "Add to collection", children: collectionSubmenu(entry) },
+          { label: "Add to album", children: collectionSubmenu(entry) },
           ...(gallery.collectionSlug && inCollections.value
             ? [
                 { label: "Use as cover", action: () => void useAsCover(entry) },
                 {
                   label: selectedForBulk
-                    ? `Remove ${bulkCount} selected from collection`
-                    : "Remove from collection",
+                    ? `Remove ${bulkCount} selected from album`
+                    : "Remove from album",
                   action: () => void removeFromOpenCollection(actionTargets(entry)),
                 },
               ]
@@ -1313,7 +1323,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       action: () => void saveToThisMac(entry),
     },
     {
-      label: "Reveal in file manager",
+      label: "Show the file",
       disabled: !canReveal(entry),
       action: () =>
         void ipc.revealOutputFile(item.filename).catch((e) => {
@@ -1355,7 +1365,7 @@ watch(rowHeight, (value) => {
   }, SLIDER_PERSIST_MS);
 });
 
-// ── Delete: optimistic + undoable (§08 G12) ──────────────────────────────────
+// ── Delete: optimistic + undoable ───────────────────────────────────────────
 // The tile leaves the grid instantly; a 6 s undo toast holds the print in limbo
 // (no server call). Undo restores it; letting the toast expire commits the real
 // DELETE — which on a trash-capable host moves the print to the trash. Several
@@ -1372,7 +1382,7 @@ const pendingDeletes = new Map<
 const deleteKey = (sourceKey: string, filename: string) => `${sourceKey}::${filename}`;
 let bulkDeleteSeq = 0;
 
-// ── History drawer ──────────────────────────────────────────────────────────
+// ── History column ──────────────────────────────────────────────────────────
 // Open state lives in the URL (?panel=history) so the retired /history route
 // and the command palette can deep-link straight into it; the header button
 // toggles the same param, and closing clears it.
@@ -1401,21 +1411,17 @@ watch(searchInput, (value) => {
 
 const kindOptions = computed(() => [
   { value: "all" as GalleryKindFilter, label: "All" },
-  { value: "image" as GalleryKindFilter, label: "Images" },
-  { value: "video" as GalleryKindFilter, label: "Video" },
+  { value: "image" as GalleryKindFilter, label: "Pictures" },
+  { value: "video" as GalleryKindFilter, label: "Clips" },
   { value: "audio" as GalleryKindFilter, label: "Audio" },
-  { value: "mesh" as GalleryKindFilter, label: "3D" },
+  { value: "mesh" as GalleryKindFilter, label: "3-D" },
 ]);
 const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
-// ── Filter chips (♥ / tags / hosts) ─────────────────────────────────────────
+// ── Filter chips (tags / machines) ──────────────────────────────────────────
+// The row is present in every scope, exactly as the mock shows it.
 const chipRow = ref<InstanceType<typeof LibraryChipRow> | null>(null);
-const showChipRow = computed(
-  () =>
-    scope.value !== "trash" &&
-    !showShelf.value &&
-    (organizeAvailable.value || gallery.chipCounts.length > 1),
-);
+const showChipRow = computed(() => organizeAvailable.value || gallery.chipCounts.length > 1);
 function toggleTagFilter(name: string) {
   const key = name.toLowerCase();
   const have = gallery.tagFilter.some((t) => t.toLowerCase() === key);
@@ -1424,7 +1430,6 @@ function toggleTagFilter(name: string) {
     : [...gallery.tagFilter, name];
 }
 function clearFilters() {
-  gallery.favoritesOnly = false;
   gallery.tagFilter = [];
   gallery.filter = "all";
   if (inCollections.value) exitCollection();
@@ -1752,6 +1757,8 @@ interface TileModel {
   video: boolean;
   audio: boolean;
   mesh: boolean;
+  /** The mock's word badge: "clip 5s" / "3-D" / "audio", "" for a still. */
+  kindBadge: string;
   upscaled: boolean;
   /** Media bytes are addressed differently for a host bucket and this Mac. */
   mediaPath: string;
@@ -1759,6 +1766,25 @@ interface TileModel {
   target: ApiTarget | null;
   mediaVersion: string;
   fresh: boolean;
+}
+
+/**
+ * The tile's bottom-left word badge. A clip carries its length, which the
+ * gallery records as frames + fps (the `video_*` names are the legacy desktop
+ * aliases); a clip whose row has neither is still a clip and says so.
+ */
+function mediaKindBadge(
+  item: GalleryImage,
+  kind: { video: boolean; audio: boolean; mesh: boolean },
+): string {
+  if (kind.mesh) return "3-D";
+  if (kind.audio) return "audio";
+  if (!kind.video) return "";
+  const frames = item.metadata.frames ?? item.metadata.video_frames ?? null;
+  const fps = item.metadata.fps ?? item.metadata.video_fps ?? null;
+  if (!frames || !fps || fps <= 0) return "clip";
+  const seconds = frames / fps;
+  return `clip ${seconds >= 1 ? Math.round(seconds) : seconds.toFixed(1)}s`;
 }
 
 const tileModels = computed<TileModel[]>(() => {
@@ -1776,6 +1802,8 @@ const tileModels = computed<TileModel[]>(() => {
     // evaluates `rows` (and so this computed) synchronously during setup,
     // before the aliases declared further down are initialized.
     const video = isVideoItem(item);
+    const mesh = isMeshItem(item);
+    const audio = isAudioItem(item);
     models[i] = {
       entry,
       item,
@@ -1788,8 +1816,9 @@ const tileModels = computed<TileModel[]>(() => {
       availability: entry.availableOn.map((s) => s.label).join(" · "),
       purgeAt: org.purgeAt,
       video,
-      audio: isAudioItem(item),
-      mesh: isMeshItem(item),
+      audio,
+      mesh,
+      kindBadge: mediaKindBadge(item, { video, audio, mesh }),
       upscaled: isUpscaledImage(item),
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes
@@ -2094,8 +2123,10 @@ function onKeydown(e: KeyboardEvent) {
     header.value?.focusSearch();
     return;
   }
-  // The history drawer owns the keyboard while it's open.
-  if (historyOpen.value) return;
+  // History is a column beside the grid, not an overlay over it, so the grid
+  // keeps its keyboard while it is open — which makes every unmodified chord
+  // below, the arrows included, stand down inside a text field: the panel's
+  // own search is one, and the caret has to be able to move in it.
   // ⌘A selects exactly the current filtered result set, never hidden prints.
   if (isSelectAllChord(e) && !allowsNativeSelectAll(document.activeElement)) {
     e.preventDefault();
@@ -2164,9 +2195,11 @@ function onKeydown(e: KeyboardEvent) {
     }
     void Promise.resolve().then(() => bulkBar.value?.openTags());
   } else if (e.key === "ArrowRight") {
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     moveSelection(1);
   } else if (e.key === "ArrowLeft") {
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     moveSelection(-1);
   } else if (e.key === " ") {
@@ -2174,7 +2207,13 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     if (selected.value) lightboxOpen.value = !lightboxOpen.value;
   } else if (e.key === "Escape") {
+    // An overlay above the grid (a ModalPanel over the Lightbox) that already
+    // handled this Escape has handled it for everyone.
+    if (e.defaultPrevented) return;
     if (closeTransient()) return;
+    // A text field owns its own Escape — the History search clears itself and
+    // the lightbox behind it stays open.
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
     if (lightboxOpen.value) lightboxOpen.value = false;
     else if (selectMode.value) setSelectMode(false);
   }
@@ -2259,7 +2298,7 @@ function trashPrints(targets: MergedPrint[]) {
   scheduleDelete(
     `bulk-${++bulkDeleteSeq}`,
     locations,
-    `Moved ${n} ${n === 1 ? "print" : "prints"} to trash`,
+    `Moved ${n} ${n === 1 ? "picture" : "pictures"} to trash`,
   );
   pruneSelection();
 }
@@ -2291,12 +2330,14 @@ async function useSelectedAsSource() {
   if (entry) await useAsSource(entry);
 }
 
-// ── URL sync (?scope, ?c, ?tag, ?fav — plus the pre-existing ?host, ?print,
+// ── URL sync (?scope, ?c, ?tag — plus the pre-existing ?host, ?print,
 //    ?panel, ?tab) ───────────────────────────────────────────────────────────
 // Route → store when the params are present (a deep link or a back/forward
 // hop); store → route (replace) so the address bar always names the view.
 // Plain /library keeps the session state, like ?host always has.
-const VALID_SCOPES: readonly LibraryScope[] = ["prints", "collections", "trash"];
+// Favourites is a scope now, so the retired `?fav=1` reads as one and is
+// dropped from the address on the way back out.
+const VALID_SCOPES: readonly LibraryScope[] = ["prints", "favorites", "collections", "trash"];
 const asString = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
 
@@ -2318,7 +2359,7 @@ watch(
           .map((t) => t.trim())
           .filter((t) => t.length > 0);
       }
-      if (fav !== undefined) gallery.favoritesOnly = asString(fav) === "1";
+      if (!wantScope && asString(fav) === "1") gallery.scope = "favorites";
     } finally {
       syncingFromRoute = false;
     }
@@ -2327,14 +2368,8 @@ watch(
 );
 
 watch(
-  () =>
-    [
-      gallery.scope,
-      gallery.collectionSlug,
-      gallery.tagFilter.join(","),
-      gallery.favoritesOnly,
-    ] as const,
-  ([scopeValue, slug, tags, fav]) => {
+  () => [gallery.scope, gallery.collectionSlug, gallery.tagFilter.join(",")] as const,
+  ([scopeValue, slug, tags]) => {
     if (syncingFromRoute || openingPrintDeepLink || route.path !== "/library") return;
     const query: Record<string, string | undefined> = {
       ...(route.query as Record<string, string | undefined>),
@@ -2346,12 +2381,16 @@ watch(
     set("scope", scopeValue === "prints" ? null : scopeValue);
     set("c", scopeValue === "collections" && slug ? slug : null);
     set("tag", tags.length > 0 ? tags : null);
-    set("fav", fav ? "1" : null);
+    set("fav", null);
     const same = Object.keys({ ...route.query, ...query }).every(
       (key) => (route.query[key] ?? undefined) === (query[key] ?? undefined),
     );
     if (!same) void router.replace({ path: "/library", query });
   },
+  // Immediate so a legacy `?fav=1` link normalizes to `?scope=favorites` on
+  // arrival: the scope is already set by the route watcher above, so nothing
+  // would change afterwards to trigger the rewrite.
+  { immediate: true },
 );
 
 // Deep link: /library?host=<bucket key> pre-picks a chip ("local" = This
@@ -2417,7 +2456,6 @@ watch(
     openingPrintDeepLink = true;
     gallery.scope = hiddenCollection ? "collections" : "prints";
     gallery.collectionSlug = hiddenCollection?.slug ?? null;
-    gallery.favoritesOnly = false;
     gallery.tagFilter = [];
     gallery.filter = "all";
     gallery.mediaKind = "all";
@@ -2539,38 +2577,31 @@ onUnmounted(() => {
       :scope="scope"
       :scopes="scopes"
       :counts="scopeCounts"
-      :count-label="countLabel"
       :error="gallery.firstError"
       :thumbnail-size="rowHeight"
       :media-kind="gallery.mediaKind"
       :kind-options="kindOptions"
       :search="searchInput"
       :select-mode="selectMode"
-      :trash-count="gallery.trashCount"
-      :busy="organizeBusy"
+      :history-open="historyOpen"
       @update:scope="setScope"
       @update:thumbnail-size="rowHeight = $event"
       @update:media-kind="setKind"
       @update:search="searchInput = $event"
-      @open-history="openHistory"
+      @toggle-history="historyOpen ? closeHistory() : openHistory()"
       @toggle-select="setSelectMode(!selectMode)"
       @refresh="gallery.fetchAll()"
-      @empty-trash="emptyTrashOpen = true"
     />
 
     <LibraryChipRow
       v-if="showChipRow"
       ref="chipRow"
       :organize="organizeAvailable"
-      :favorites-only="gallery.favoritesOnly"
-      :favorites-count="favoritesCount"
       :tags="gallery.filterChipTags"
       :active-tags="gallery.tagFilter"
       :host-chips="gallery.chipCounts"
       :host-filter="gallery.filter"
-      :all-count="gallery.basePrintCount"
       :collection-name="drillInName"
-      @update:favorites-only="gallery.favoritesOnly = $event"
       @toggle-tag="toggleTagFilter"
       @update:host-filter="gallery.filter = $event"
       @clear-filters="clearFilters"
@@ -2580,29 +2611,29 @@ onUnmounted(() => {
     <!-- Collections drill-in: crumb bar with Select + Edit. -->
     <div
       v-if="inCollections && gallery.collectionSlug"
-      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge bg-[color-mix(in_srgb,var(--bench)_50%,var(--bath))] px-6"
+      class="flex h-11 shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-6"
       data-test="collection-crumbs"
     >
       <button
         type="button"
-        class="flex items-center gap-0.5 rounded-control text-body text-ink-2 hover:text-ink"
+        class="flex items-center gap-0.5 rounded-control text-sm text-fg-2 hover:text-fg"
         data-test="crumb-back"
         @click="exitCollection"
       >
         <Icon name="chevron-left" :size="14" />
-        Collections
+        Albums
       </button>
-      <span class="text-ink-3" aria-hidden="true">›</span>
-      <span class="font-display text-[15px] font-semibold text-ink" data-test="crumb-here">
+      <span class="text-fg-dim" aria-hidden="true">›</span>
+      <span class="font-sans font-semibold text-base font-semibold text-fg" data-test="crumb-here">
         {{ drillInName }}
       </span>
-      <span v-if="openCollection" class="font-utility text-[10.5px] text-ink-3">
+      <span v-if="openCollection" class="font-mono text-micro text-fg-dim">
         {{ openCollection.hosts.map((h) => sourceLabel(h.hostId)).join(" · ") }}
       </span>
       <div class="flex-1" />
       <button
         type="button"
-        class="flex h-[30px] items-center gap-1.5 rounded-chrome border border-edge bg-bench px-2.5 text-[12.5px] text-ink-2 hover:text-ink"
+        class="flex h-[30px] items-center gap-1.5 rounded-window border border-border bg-bg px-2.5 text-xs text-fg-2 hover:text-fg"
         data-test="collection-edit"
         aria-haspopup="menu"
         @click="openEditMenu"
@@ -2618,216 +2649,210 @@ onUnmounted(() => {
       :count="gallery.trashCount"
       :bytes="trashBytes"
       :link-label="retentionLinkLabel"
+      :busy="organizeBusy"
       @change-retention="changeRetention"
+      @empty-now="emptyTrashOpen = true"
     />
 
-    <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" style="contain: strict">
-      <!-- Collections shelf -->
-      <template v-if="showShelf">
+    <!-- Albums: a strip of cards ABOVE the grid, which stays mounted. -->
+    <CollectionsShelf
+      v-if="showShelf"
+      ref="shelf"
+      :cards="shelfCards"
+      :busy="organizeBusy"
+      :note="shelfNote"
+      @open="openCollectionSlug"
+      @create="(name) => createCollection(name)"
+      @contextmenu="(slug, event) => contextMenu.open(event, collectionMenu(slug))"
+    />
+
+    <div class="flex min-h-0 flex-1">
+      <div
+        ref="scrollEl"
+        data-test="library-scroll"
+        class="min-h-0 min-w-0 flex-1 overflow-y-auto"
+        style="contain: strict"
+      >
+        <!-- Trash empty states -->
         <EmptyState
-          v-if="gallery.mergedCollections.length === 0"
-          headline="No collections yet"
-          detail="Group prints however you like — a collection lives on every machine that holds a copy."
-          action="New collection"
-          @action="openNewCollection()"
+          v-if="inTrash && entries.length === 0 && gallery.trashCount > 0"
+          headline="No prints in the trash match"
+          detail="Nothing in the trash matches the current search or filter."
+        />
+        <EmptyState v-else-if="inTrash && entries.length === 0" headline="Trash is empty" />
+
+        <!-- Drill-in empty state -->
+        <EmptyState
+          v-else-if="
+            inCollections && gallery.collectionSlug && gallery.loaded && entries.length === 0
+          "
+          headline="Nothing in this album yet"
+          detail="Select pictures in My images and choose Add to album."
+          action="Go to pictures"
+          @action="setScope('prints')"
+        />
+
+        <!-- Prints empty states -->
+        <EmptyState
+          v-else-if="gallery.loaded && entries.length === 0 && gallery.hostFiltered.length > 0"
+          headline="No matching pictures"
+          detail="Nothing here matches the current search or filters."
         />
         <EmptyState
-          v-else-if="shelfCards.length === 0"
-          headline="No matching collections"
-          detail="Nothing here matches the current search."
+          v-else-if="gallery.loaded && entries.length === 0"
+          headline="No pictures here yet"
+          :detail="
+            gallery.filter === 'local'
+              ? 'Generations saved on this Mac will appear here.'
+              : 'Generate one and it lands here.'
+          "
+          action="Go to New image"
+          @action="router.push('/create')"
         />
-        <CollectionsShelf
+        <div
           v-else
-          ref="shelf"
-          :cards="shelfCards"
-          :busy="organizeBusy"
-          @open="openCollectionSlug"
-          @create="(name) => createCollection(name)"
-          @contextmenu="(slug, event) => contextMenu.open(event, collectionMenu(slug))"
-        />
-      </template>
-
-      <!-- Trash empty states -->
-      <EmptyState
-        v-else-if="inTrash && entries.length === 0 && gallery.trashCount > 0"
-        headline="No prints in the trash match"
-        detail="Nothing in the trash matches the current search or filter."
-      />
-      <EmptyState v-else-if="inTrash && entries.length === 0" headline="Trash is empty" />
-
-      <!-- Drill-in empty state -->
-      <EmptyState
-        v-else-if="inCollections && gallery.loaded && entries.length === 0"
-        headline="Nothing in this collection yet"
-        detail="Select prints in the Library and choose Add to collection."
-        action="Go to prints"
-        @action="setScope('prints')"
-      />
-
-      <!-- Prints empty states -->
-      <EmptyState
-        v-else-if="gallery.loaded && entries.length === 0 && gallery.hostFiltered.length > 0"
-        headline="No matching prints"
-        detail="Nothing here matches the current search or filters."
-      />
-      <EmptyState
-        v-else-if="gallery.loaded && entries.length === 0"
-        headline="No prints here yet"
-        :detail="
-          gallery.filter === 'local'
-            ? 'Generations saved on this Mac will appear here.'
-            : 'Generate one and it lands here.'
-        "
-        action="Go to Create"
-        @action="router.push('/create')"
-      />
-      <div v-else class="ms-lib-tile-layer" :style="{ height: `${virtualizer.getTotalSize()}px` }">
-        <!-- One flat, print-keyed list of the tiles inside the virtual window
+          class="ms-lib-tile-layer"
+          :style="{ height: `${virtualizer.getTotalSize()}px` }"
+        >
+          <!-- One flat, print-keyed list of the tiles inside the virtual window
              (see `visibleTiles`). A tile is a wrapper (click / context /
              dblclick) around a focusable button carrying the media, badges,
              and the rising edge code; the ♥ and trash actions are sibling
              overlays so they never nest a button inside a button. Every
              per-tile fact comes from its `TileModel` — the template calls
              nothing that walks the gallery. -->
-        <div
-          v-for="tile in visibleTiles"
-          :key="tile.model.key"
-          class="ms-lib-tile group overflow-hidden rounded-[9px] border"
-          :class="
-            (
-              selectMode
-                ? bulkSelection.has(tile.model.item.filename)
-                : isSelected(tile.model.entry)
-            )
-              ? 'border-transparent ring-2 ring-safelight'
-              : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
-          "
-          :style="{
-            width: `${tile.width}px`,
-            height: `${tile.height}px`,
-            '--tile-x': `${tile.x}px`,
-            '--tile-y': `${tile.y}px`,
-          }"
-          :data-filename="tile.model.item.filename"
-          @pointerdown="beginSelectionDrag($event, tile.model.entry)"
-          @click="onTileClick(tile.model.entry, $event)"
-          @contextmenu="onTileContextMenu(tile.model.entry, $event)"
-          @dblclick="onTileDblclick(tile.model.entry)"
-        >
-          <button
-            type="button"
-            class="absolute inset-0 block h-full w-full overflow-hidden text-left"
-            :aria-label="tile.model.title"
-            :aria-pressed="selectMode ? bulkSelection.has(tile.model.item.filename) : undefined"
-          >
-            <AuthedMedia
-              :path="tile.model.mediaPath"
-              :target="tile.model.target"
-              :cache-key="tile.model.entry.sourceKey"
-              :media-version="tile.model.mediaVersion"
-              :priority="tile.priority"
-              :video="tile.model.localVideo"
-              :alt="tile.model.item.metadata.prompt"
-            />
-            <!-- NEW badge (top-left) — hidden while selecting, where the
-                 checkbox owns that corner; never in the trash. -->
-            <span
-              v-if="!selectMode && !inTrash && tile.model.fresh"
-              data-test="new-badge"
-              class="ms-lib-new absolute top-2 left-2"
-            >
-              New
-            </span>
-            <!-- Upscaled + media kind share the top-right corner in one row so
-                 a Framewise-upscaled clip shows both instead of stacking them.
-                 The kind glyphs (▶ / ♪ / ◈) are the ones the iPhone Library
-                 wears, over the same predicates as the kind chips. -->
-            <span
-              v-if="
-                (!selectMode && tile.model.upscaled) ||
-                tile.model.video ||
-                tile.model.audio ||
-                tile.model.mesh
-              "
-              class="absolute top-1.5 right-1.5 flex items-center gap-1"
-            >
-              <span
-                v-if="!selectMode && tile.model.upscaled"
-                data-test="upscaled-badge"
-                class="ms-lib-upscaled"
-              >
-                Upscaled
-              </span>
-              <span
-                v-if="tile.model.video || tile.model.audio || tile.model.mesh"
-                data-test="media-kind-badge"
-                class="rounded-control bg-black/60 px-1 text-caption text-on-media"
-                :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
-              >
-                {{ tile.model.mesh ? "◈" : tile.model.audio ? "♪" : "▶" }}
-              </span>
-            </span>
-            <span
-              v-if="selectMode"
-              data-test="select-indicator"
-              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
-              :class="
-                bulkSelection.has(tile.model.item.filename)
-                  ? 'bg-safelight font-semibold text-on-accent'
-                  : 'border border-white/70 bg-black/40 text-on-media'
-              "
-            >
-              {{ bulkSelection.has(tile.model.item.filename) ? "✓" : "" }}
-            </span>
-            <!-- The badge yields to the rising edge code on hover — both live
-                 in the tile's bottom margin and must never overlap. -->
-            <span
-              v-if="showBadges"
-              data-test="host-badge"
-              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
-              :title="`Available on ${tile.model.availability}`"
-            >
-              {{ tile.model.availability }}
-            </span>
-            <span
-              v-if="!inTrash"
-              data-test="edge-strip"
-              class="edge-code absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
-            >
-              {{ tile.model.title }} · {{ tile.model.modelLabel }} · S
-              {{ tile.model.item.metadata.seed }}
-            </span>
-          </button>
-          <!-- ♥ (bottom-right): filled when favorite, faint on hover when not;
-               click toggles without opening the print. -->
-          <button
-            v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
-            type="button"
-            data-test="tile-favorite"
-            class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-on-media transition-opacity duration-100"
+          <div
+            v-for="tile in visibleTiles"
+            :key="tile.model.key"
+            class="ms-lib-tile group overflow-hidden rounded-control border"
             :class="
-              tile.model.favorite
-                ? 'ms-lib-heart--on opacity-100'
-                : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
+              (
+                selectMode
+                  ? bulkSelection.has(tile.model.item.filename)
+                  : isSelected(tile.model.entry)
+              )
+                ? 'border-transparent ring-2 ring-accent'
+                : 'border-border'
             "
-            :aria-pressed="tile.model.favorite"
-            :aria-label="tile.model.favorite ? 'Unfavorite' : 'Favorite'"
-            :title="tile.model.favorite ? 'Unfavorite' : 'Favorite'"
-            @click.stop="toggleFavorite(tile.model.entry)"
-            @dblclick.stop
+            :style="{
+              width: `${tile.width}px`,
+              height: `${tile.height}px`,
+              '--tile-x': `${tile.x}px`,
+              '--tile-y': `${tile.y}px`,
+            }"
+            :data-filename="tile.model.item.filename"
+            @pointerdown="beginSelectionDrag($event, tile.model.entry)"
+            @click="onTileClick(tile.model.entry, $event)"
+            @contextmenu="onTileContextMenu(tile.model.entry, $event)"
+            @dblclick="onTileDblclick(tile.model.entry)"
           >
-            <Icon name="heart" :size="14" />
-          </button>
-          <TrashTileActions
-            v-if="inTrash"
-            :purge-at="tile.model.purgeAt"
-            :show-actions="!selectMode"
-            :busy="organizeBusy"
-            @restore="restorePrints([tile.model.entry])"
-            @delete-forever="askDeleteForever([tile.model.entry])"
-          />
+            <button
+              type="button"
+              class="absolute inset-0 block h-full w-full overflow-hidden text-left"
+              :aria-label="tile.model.title"
+              :aria-pressed="selectMode ? bulkSelection.has(tile.model.item.filename) : undefined"
+            >
+              <AuthedMedia
+                :path="tile.model.mediaPath"
+                :target="tile.model.target"
+                :cache-key="tile.model.entry.sourceKey"
+                :media-version="tile.model.mediaVersion"
+                :priority="tile.priority"
+                :video="tile.model.localVideo"
+                :alt="tile.model.item.metadata.prompt"
+              />
+              <!-- NEW badge (top-left) — hidden while selecting, where the
+                 checkbox owns that corner; never in the trash. -->
+              <span
+                v-if="!selectMode && !inTrash && tile.model.fresh"
+                data-test="new-badge"
+                class="ms-lib-new absolute top-2 left-2"
+              >
+                New
+              </span>
+              <span
+                v-if="selectMode"
+                data-test="select-indicator"
+                class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-control text-micro"
+                :class="
+                  bulkSelection.has(tile.model.item.filename)
+                    ? 'bg-accent font-semibold text-on-accent'
+                    : 'border border-white/70 bg-black/40 text-on-media'
+                "
+              >
+                {{ bulkSelection.has(tile.model.item.filename) ? "✓" : "" }}
+              </span>
+              <!-- Word badges share the bottom-left corner in one row and yield
+                 together to the rising edge code on hover — they live in the
+                 tile's bottom margin and must never overlap it. -->
+              <span
+                v-if="showBadges || tile.model.upscaled || tile.model.kindBadge"
+                class="absolute bottom-1.5 left-1.5 flex max-w-[85%] items-center gap-1 transition-opacity duration-100 group-hover:opacity-0"
+              >
+                <span v-if="tile.model.upscaled" data-test="upscaled-badge" class="ms-lib-upscaled">
+                  Upscaled
+                </span>
+                <span
+                  v-if="tile.model.kindBadge"
+                  data-test="media-kind-badge"
+                  class="ms-lib-kind"
+                  :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
+                >
+                  {{ tile.model.kindBadge }}
+                </span>
+                <span
+                  v-if="showBadges"
+                  data-test="host-badge"
+                  class="font-mono text-micro text-fg-dim min-w-0 truncate rounded-control bg-black/60 px-1 !text-on-media"
+                  :title="`Available on ${tile.model.availability}`"
+                >
+                  {{ tile.model.availability }}
+                </span>
+              </span>
+              <span
+                v-if="!inTrash"
+                data-test="edge-strip"
+                class="font-mono text-micro text-fg-dim whitespace-nowrap absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
+              >
+                {{ tile.model.title }} · {{ tile.model.modelLabel }} · seed
+                {{ tile.model.item.metadata.seed }}
+              </span>
+            </button>
+            <!-- ★ (top-right): lit when favourite, faint on hover when not;
+               click toggles without opening the print. -->
+            <button
+              v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
+              type="button"
+              data-test="tile-favorite"
+              class="ms-lib-tile-star absolute top-1 right-1.5 z-10 flex h-5 w-5 items-center justify-center font-mono text-sm transition-opacity duration-100"
+              :class="
+                tile.model.favorite
+                  ? 'text-star opacity-100'
+                  : 'text-on-media opacity-0 group-hover:opacity-60 hover:!opacity-100'
+              "
+              :aria-pressed="tile.model.favorite"
+              :aria-label="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
+              :title="tile.model.favorite ? 'Unfavourite' : 'Favourite'"
+              @click.stop="toggleFavorite(tile.model.entry)"
+              @dblclick.stop
+            >
+              ★
+            </button>
+            <TrashTileActions
+              v-if="inTrash"
+              :purge-at="tile.model.purgeAt"
+              :show-actions="!selectMode"
+              :busy="organizeBusy"
+              @restore="restorePrints([tile.model.entry])"
+              @delete-forever="askDeleteForever([tile.model.entry])"
+            />
+          </div>
         </div>
       </div>
+
+      <!-- History is an inline column, never a modal drawer: the tiles reflow
+           beside it and stay clickable while it is open. -->
+      <HistoryDrawer :open="historyOpen" @close="closeHistory" />
     </div>
 
     <!-- Floating bulk-action bar while select mode is active. -->
@@ -2842,6 +2867,7 @@ onUnmounted(() => {
       :trash="selectionTrashCapable"
       :confirming="confirmingBulkDelete"
       :busy="bulkDeleting || organizeBusy"
+      :exporting="exportBusy"
       :collections="gallery.mergedCollections"
       :collection-selected="selectionOrganization.collectionsAll"
       :collection-mixed="selectionOrganization.collectionsSome"
@@ -2854,6 +2880,7 @@ onUnmounted(() => {
       @select-all="selectAllInFilter"
       @clear="clearBulkSelection"
       @exit="setSelectMode(false)"
+      @export="exportSelected(selectedEntries)"
       @favorite="(value) => setFavorite(selectedEntries, value)"
       @trash="deleteSelectedPrints"
       @update:confirming="confirmingBulkDelete = $event"
@@ -2930,12 +2957,10 @@ onUnmounted(() => {
       @cancel="transitionUpscale('cancel')"
     />
 
-    <HistoryDrawer :open="historyOpen" @close="closeHistory" />
-
     <!-- Naming dialogs (shared RenameDialog shell) -->
     <RenameDialog
       :open="renameTarget !== null"
-      title="Rename print"
+      title="Rename picture"
       :initial="renameTarget ? (orgOf(renameTarget).title ?? '') : ''"
       @save="onRenameSave"
       @cancel="renameTarget = null"
@@ -2949,14 +2974,14 @@ onUnmounted(() => {
     />
     <RenameDialog
       :open="newCollectionTargets !== null"
-      title="New collection"
+      title="New album"
       initial=""
       @save="onNewCollectionSave"
       @cancel="newCollectionTargets = null"
     />
     <RenameDialog
       :open="collectionRenameSlug !== null"
-      title="Rename collection"
+      title="Rename album"
       :initial="collectionNamed(collectionRenameSlug)"
       @save="onCollectionRenameSave"
       @cancel="collectionRenameSlug = null"
@@ -2965,8 +2990,8 @@ onUnmounted(() => {
     <!-- Destructive confirms (plain shared ConfirmDialog — no typed phrase) -->
     <ConfirmDialog
       :open="collectionDeleteSlug !== null"
-      :title="`Delete collection “${collectionNamed(collectionDeleteSlug)}”?`"
-      message="Its prints stay in the Library."
+      :title="`Delete album “${collectionNamed(collectionDeleteSlug)}”?`"
+      message="Its pictures stay in My images."
       confirm-label="Delete"
       danger
       @confirm="confirmDeleteCollection"
@@ -3007,12 +3032,11 @@ onUnmounted(() => {
   left: 0;
   contain: layout paint style;
   transform: translate3d(var(--tile-x), var(--tile-y), 0);
-  transition: transform var(--dur-quick) var(--ease);
+  transition: transform var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-lib-tile:hover {
   transform: translate3d(var(--tile-x), calc(var(--tile-y) - 2px), 0);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
 }
 
 .ms-lib-tile-layer {
@@ -3021,46 +3045,39 @@ onUnmounted(() => {
 }
 
 .ms-lib-tile > button:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: -2px;
 }
 
 .ms-lib-new {
-  font-family: var(--f-mono);
-  font-size: 8.5px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  background: var(--safelight);
-  color: var(--on-accent);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   padding: 2px 6px;
-  border-radius: 5px;
+  border-radius: var(--mold-radius-2);
 }
 
-.ms-lib-upscaled {
-  font-family: var(--f-mono);
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: color-mix(in srgb, var(--rebate) 88%, black);
-  color: var(--on-accent);
+/* Word badge on the crust, the one ground a tile's own pixels never match. */
+.ms-lib-kind {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
+  background: var(--mold-bg-crust);
   padding: 2px 6px;
-  border-radius: 5px;
+  white-space: nowrap;
 }
 
-/* ♥ overlay: a drop shadow keeps the glyph legible on any print; the
-   favorited state fills the outline glyph with the current color. */
-.ms-lib-heart {
+/* ★ overlay: a drop shadow keeps the glyph legible on any print. */
+.ms-lib-tile-star {
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
 }
 
-.ms-lib-heart--on :deep(svg) {
-  fill: currentColor;
-}
-
-.ms-lib-heart:focus-visible {
-  outline: 2px solid var(--safelight);
+.ms-lib-tile-star:focus-visible {
+  outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
   opacity: 1;
 }

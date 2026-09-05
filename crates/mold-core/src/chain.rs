@@ -310,9 +310,17 @@ pub struct ChainRequest {
 
     /// Generate per-stage audio and mux it into the final stitched output.
     /// Only meaningful for AV-capable families (LTX-2 / LTX-2.3); the server
-    /// rejects `Some(true)` for non-AV models. `None` means "no preference"
-    /// and resolves to off — chains opt in to audio explicitly so existing
-    /// callers don't suddenly start producing audio they didn't ask for.
+    /// rejects `Some(true)` for non-AV models.
+    ///
+    /// `None` means "the recipe's own answer", resolved by
+    /// [`crate::generation_profile::resolve_enable_audio`] — ON wherever the
+    /// family can deliver sound, OFF everywhere else. It used to collapse to
+    /// off, which made an LTX-2 sequence silent while the same model's
+    /// one-shot rendered with sound (the engine has defaulted ON for MP4
+    /// since the flag existed). `validate_and_normalize_chain_family` is the
+    /// door that resolves it, so a durable job's persisted request always
+    /// carries an explicit value and a client that wants silence sends
+    /// `Some(false)` rather than omitting the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_audio: Option<bool>,
 }

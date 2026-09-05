@@ -108,13 +108,13 @@ async function mountView(path = "/models") {
   return wrapper;
 }
 
-/** Click one of the Installed | Discover segment buttons. */
+/** Click one of the Ready to use | Browse more segment buttons. */
 async function selectSegment(
   wrapper: Awaited<ReturnType<typeof mountView>>,
-  label: "Installed" | "Discover",
+  label: "Ready to use" | "Browse more",
 ) {
-  const seg = wrapper.get('[aria-label="Model view"]');
-  const button = seg.findAll("button").find((b) => b.text() === label);
+  const seg = wrapper.get('[aria-label="Styles view"]');
+  const button = seg.findAll("button").find((b) => b.text().startsWith(label));
   await button!.trigger("click");
   await flushPromises();
 }
@@ -156,14 +156,14 @@ describe("ModelsView segments", () => {
 
   it("Discover shows the unified merged list — installed models and live catalog together", async () => {
     const wrapper = await mountView();
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     expect(wrapper.text()).toContain("flux-dev:q8");
     expect(wrapper.text()).toContain("FLUX.2 Klein");
   });
 
   it("Discover source chips are All / HuggingFace / Civitai with All the default", async () => {
     const wrapper = await mountView();
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
     expect(chips.map((c) => c.text())).toEqual(["All", "HuggingFace", "Civitai"]);
     expect(chips[0]!.attributes("aria-pressed")).toBe("true");
@@ -177,7 +177,7 @@ describe("ModelsView segments", () => {
       total: 1,
     });
     const wrapper = await mountView();
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     expect(wrapper.find("[data-test='nsfw-tag']").exists()).toBe(true);
     expect(wrapper.find("input[type='checkbox']").exists()).toBe(true);
   });
@@ -186,7 +186,7 @@ describe("ModelsView segments", () => {
     const wrapper = await mountView();
     useModelStore().all = [];
     await flushPromises();
-    const cta = wrapper.findAll("button").find((b) => b.text() === "Browse the catalog");
+    const cta = wrapper.findAll("button").find((b) => b.text() === "Browse more styles");
     expect(cta).toBeDefined();
     await cta!.trigger("click");
     await flushPromises();
@@ -199,7 +199,7 @@ describe("ModelsView segments", () => {
     expect(wrapper.text()).toContain("flux-dev:q8");
     expect(wrapper.text()).toContain("LTX-2 Distilled");
     const all = wrapper.get('[aria-label="Media type"]').findAll("button")[0]!;
-    expect(all.attributes("aria-pressed")).toBe("true");
+    expect(all.attributes("aria-checked")).toBe("true");
   });
 });
 
@@ -213,9 +213,19 @@ describe("ModelsView downloads and remote hosts", () => {
     expect(html.indexOf("downloads-tray")).toBeGreaterThan(-1);
     expect(html.indexOf("downloads-tray")).toBeLessThan(html.indexOf("flux-dev:q8"));
 
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     html = wrapper.html();
     expect(html.indexOf("downloads-tray")).toBeLessThan(html.indexOf("catalog-source-chips"));
+  });
+
+  it("pins the banner outside the scrolling list, not inside it", async () => {
+    const wrapper = await mountView();
+    useDownloadsStore().activeJobs = [job()];
+    await flushPromises();
+    const tray = wrapper.get("[data-test='downloads-tray']").element;
+    const scroll = wrapper.get("[data-test='models-scroll']").element;
+    expect(scroll.contains(tray)).toBe(false);
+    expect(scroll.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   });
 
   it("shows installed models and active downloads from a connected remote host", async () => {
@@ -333,7 +343,7 @@ describe("ModelsView media-type filter", () => {
 
   it("filters the Discover merged list by media type too", async () => {
     const wrapper = await mountView("/models?type=video");
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     expect(wrapper.text()).toContain("ltx-2:q8");
     expect(wrapper.text()).toContain("LTX-2 Distilled");
     expect(wrapper.text()).not.toContain("flux-dev:q8");
@@ -343,7 +353,7 @@ describe("ModelsView media-type filter", () => {
   it("updates the route query when a media-type chip is selected", async () => {
     const wrapper = await mountView();
     const chips = wrapper.get('[aria-label="Media type"]').findAll("button");
-    expect(chips.map((c) => c.text())).toEqual(["All", "Images", "Video"]);
+    expect(chips.map((c) => c.text())).toEqual(["All", "Pictures", "Clips"]);
 
     await chips[2]!.trigger("click");
     await flushPromises();
@@ -360,14 +370,14 @@ describe("ModelsView media-type filter", () => {
 describe("ModelsView Discover layout toggle", () => {
   it("defaults to the table layout", async () => {
     const wrapper = await mountView();
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     expect(wrapper.get("[data-test='layout-table']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='layout-grid']").attributes("aria-checked")).toBe("false");
   });
 
   it("persists the chosen layout for the app session", async () => {
     const wrapper = await mountView();
-    await selectSegment(wrapper, "Discover");
+    await selectSegment(wrapper, "Browse more");
     await wrapper.get("[data-test='layout-grid']").trigger("click");
     expect(useUiStore().catalogLayout).toBe("grid");
     wrapper.unmount();
@@ -375,7 +385,7 @@ describe("ModelsView Discover layout toggle", () => {
     // Same pinia = same app session: a fresh mount keeps the choice.
     const again = mount(ModelsView, { global: { plugins: [getActivePinia()!, router] } });
     await flushPromises();
-    await selectSegment(again, "Discover");
+    await selectSegment(again, "Browse more");
     expect(again.get("[data-test='layout-grid']").attributes("aria-checked")).toBe("true");
     expect(again.get("[data-test='layout-table']").attributes("aria-checked")).toBe("false");
     again.unmount();

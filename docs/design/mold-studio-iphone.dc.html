@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="./mold-tokens.css">
+<link rel="stylesheet" href="./fonts.css">
+<style>
+  body { margin: 0; background: var(--mold-bg-crust); font-family: var(--mold-font-sans); -webkit-font-smoothing: antialiased; }
+  a { color: var(--mold-blue); text-decoration: none; }
+  a:hover { color: var(--mold-lavender); }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--mold-surface-2); }
+  @keyframes moldspin { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+</style>
+</helmet>
+
+<div style="--mold-bg:#1E1E2E;--mold-bg-deep:#181825;--mold-bg-crust:#11111B;--mold-surface:#313244;--mold-surface-2:#45475A;--mold-surface-3:#585B70;--mold-text:#CDD6F4;--mold-text-2:#BAC2DE;--mold-text-dim:#979DB2;--mold-text-faint:#585B70;--mold-border:#45475A;--mold-border-focus:#89B4FA;--mold-blue:#89B4FA;--mold-success:#A6E3A1;--mold-warning:#F9E2AF;--mold-error:#F38BA8;--mold-star:#F9E2AF;--mold-sapphire:#74C7EC;--mold-mauve:#CBA6F7;--mold-teal:#94E2D5;--mold-lavender:#B4BEFE;--mold-font-sans:'Inter', -apple-system, sans-serif;--mold-font-mono:'JetBrains Mono', ui-monospace, monospace;--mold-fs-micro:11px;--mold-fs-xs:12px;--mold-fs-sm:13px;--mold-fs-base:14px;--mold-fs-md:16px;--mold-fs-lg:20px;--mold-fs-xl:28px;--mold-lh-snug:1.3;--mold-lh-body:1.5;font-family:var(--mold-font-sans);background:var(--mold-bg-crust);padding:40px 40px 80px;display:flex;flex-direction:column;gap:28px">
+
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:940px">
+    <div style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-xs);text-transform:uppercase;letter-spacing:.08em;color:var(--mold-text-dim)">iPhone · six themes · same structure</div>
+    <h1 style="margin:0;font-size:var(--mold-fs-xl);font-weight:600;letter-spacing:-.01em;line-height:var(--mold-lh-snug);color:var(--mold-text)">mold on iPhone — the same screen, six looks</h1>
+    <p style="margin:0;font-size:var(--mold-fs-sm);line-height:var(--mold-lh-body);color:var(--mold-text-2);text-wrap:pretty">Structure, lexicon and icon set are unchanged — five tabs, one settings sheet, rows instead of tables. Only colour and type move. The Make screen is shown in all six themes below; the remaining screens are set in <strong style="color:var(--mold-text)">Mocha</strong> so you can read one theme end-to-end.</p>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:20px;max-width:1180px">
+    <sc-for list="{{ diffs }}" as="d" hint-placeholder-count="5">
+      <div style="width:220px;display:flex;flex-direction:column;gap:6px;padding:13px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+        <span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">{{ d.area }}</span>
+        <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-body);color:var(--mold-text-2)"><strong style="color:var(--mold-text);font-weight:600">Today:</strong> {{ d.today }}</span>
+        <span style="font-size:var(--mold-fs-xs);line-height:var(--mold-lh-body);color:var(--mold-text-2)"><strong style="color:{{ accent }};font-weight:600">Here:</strong> {{ d.here }}</span>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:44px">
+
+    <!-- ══════════ 1 · MAKE, SIX THEMES ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#89b4fa;color:#181825;white-space:nowrap">Mocha</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Make</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Dark · the original</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.05em;text-transform:uppercase;color:var(--mold-text-dim);white-space:nowrap">Inter · JetBrains Mono</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="--mold-radius-1:2px;--mold-radius-2:4px;--mold-radius-3:6px;--mold-bg:#1E1E2E;--mold-bg-deep:#181825;--mold-bg-crust:#11111B;--mold-surface:#313244;--mold-surface-2:#45475A;--mold-surface-3:#585B70;--mold-text:#CDD6F4;--mold-text-2:#BAC2DE;--mold-text-dim:#979DB2;--mold-text-faint:#585B70;--mold-border:#45475A;--mold-border-focus:#89B4FA;--mold-blue:#89B4FA;--mold-success:#A6E3A1;--mold-warning:#F9E2AF;--mold-error:#F38BA8;--mold-star:#F9E2AF;--mold-sapphire:#74C7EC;--mold-mauve:#CBA6F7;--mold-teal:#94E2D5;--mold-lavender:#B4BEFE;--mold-font-sans:'Inter', -apple-system, sans-serif;--mold-font-mono:'JetBrains Mono', ui-monospace, monospace;--mold-fs-micro:11px;--mold-fs-xs:12px;--mold-fs-sm:13px;--mold-fs-base:14px;--mold-fs-md:16px;--mold-fs-lg:20px;--mold-fs-xl:28px;--mold-lh-snug:1.3;--mold-lh-body:1.5;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">New image</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg></span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 16px 10px">
+            <span style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);font-size:13px;color:var(--mold-text)"><span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>Auto<span style="color:var(--mold-text-dim)">▼</span></span>
+            <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">studio-rack now · queue 3</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Picture</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Short clip</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">3-D object</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:14px">
+            <div style="flex-shrink:0;position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 82%, transparent)">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-2)">1024² · 4.0s</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">tap to zoom</span>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">Save</span>
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">4 variations</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="font-size:15px;line-height:1.45;color:var(--mold-text-dim)">Describe the picture you want…</span>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);background:var(--mold-surface);font-size:13px;font-weight:500;color:var(--mold-text)">Photoreal ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Square ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Make 4 ▼</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17l5-4.5 3.2 2.9 3-2.6L20 17"></path></svg>Photo</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:13px;color:var(--mold-blue);font-weight:500">More settings</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">Good · 28 passes</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:40px;height:40px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-blue);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:13px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                <span style="font-size:11px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:var(--mold-blue)"></div></div>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">+2</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:var(--mold-blue);font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-blue)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#F79433;color:#1A1206;white-space:nowrap">Safelight</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Make</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Dark · the app’s own</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.05em;text-transform:uppercase;color:var(--mold-text-dim);white-space:nowrap">Schibsted · Martian Mono</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="--mold-bg:#241C15;--mold-bg-deep:#171210;--mold-bg-crust:#0A0805;--mold-surface:#332619;--mold-surface-2:#453424;--mold-surface-3:#574430;--mold-text:#F1E8DA;--mold-text-2:#C4B7AB;--mold-text-dim:#A29888;--mold-text-faint:#6A6158;--mold-border:#3F372F;--mold-border-focus:#F79433;--mold-blue:#F79433;--mold-success:#8FD39A;--mold-warning:#F5A623;--mold-error:#E5715A;--mold-star:#F5A623;--mold-sapphire:#8FB4C4;--mold-mauve:#D96B8F;--mold-teal:#8FB4C4;--mold-lavender:#B9CDD8;--mold-font-sans:'Schibsted Grotesk', system-ui, sans-serif;--mold-font-mono:'Martian Mono', ui-monospace, monospace;--mold-fs-micro:10px;--mold-fs-xs:11px;--mold-fs-sm:13px;--mold-fs-base:14px;--mold-fs-md:16px;--mold-fs-lg:20px;--mold-fs-xl:28px;--mold-lh-snug:1.3;--mold-lh-body:1.5;--mold-radius-1:6px;--mold-radius-2:9px;--mold-radius-3:16px;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">New image</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg></span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 16px 10px">
+            <span style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);font-size:13px;color:var(--mold-text)"><span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>Auto<span style="color:var(--mold-text-dim)">▼</span></span>
+            <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">studio-rack now · queue 3</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Picture</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Short clip</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">3-D object</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:14px">
+            <div style="flex-shrink:0;position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 82%, transparent)">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-2)">1024² · 4.0s</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">tap to zoom</span>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">Save</span>
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">4 variations</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="font-size:15px;line-height:1.45;color:var(--mold-text-dim)">Describe the picture you want…</span>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);background:var(--mold-surface);font-size:13px;font-weight:500;color:var(--mold-text)">Photoreal ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Square ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Make 4 ▼</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17l5-4.5 3.2 2.9 3-2.6L20 17"></path></svg>Photo</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:13px;color:var(--mold-blue);font-weight:500">More settings</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">Good · 28 passes</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:40px;height:40px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-blue);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:13px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                <span style="font-size:11px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:var(--mold-blue)"></div></div>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">+2</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:var(--mold-blue);font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-blue)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#1D4ED8;color:#F4F7FB;white-space:nowrap">Blueprint</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Make</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Light · drafting table</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.05em;text-transform:uppercase;color:var(--mold-text-dim);white-space:nowrap">Archivo · Azeret Mono</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ no }}" hint-size="402px,874px">
+        <div style="--mold-radius-1:2px;--mold-radius-2:4px;--mold-radius-3:6px;--mold-bg:#F4F7FB;--mold-bg-deep:#E9EFF7;--mold-bg-crust:#DDE6F2;--mold-surface:#FFFFFF;--mold-surface-2:#DCE6F4;--mold-surface-3:#C6D5EA;--mold-text:#0D1B2E;--mold-text-2:#33465F;--mold-text-dim:#52627A;--mold-text-faint:#94A5BB;--mold-border:#CFDCEC;--mold-border-focus:#1D4ED8;--mold-blue:#1D4ED8;--mold-success:#0F7B5F;--mold-warning:#8A5200;--mold-error:#C02B34;--mold-star:#8A5200;--mold-sapphire:#1D4ED8;--mold-mauve:#6C4CD1;--mold-teal:#0F7B8F;--mold-lavender:#5B6EE1;--mold-font-sans:'Archivo', sans-serif;--mold-font-mono:'Azeret Mono', monospace;--mold-fs-micro:10.5px;--mold-fs-xs:11.5px;--mold-fs-sm:12.5px;--mold-fs-base:13.5px;--mold-fs-md:15.5px;--mold-fs-lg:19px;--mold-fs-xl:27px;--mold-lh-snug:1.25;--mold-lh-body:1.45;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">New image</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg></span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 16px 10px">
+            <span style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);font-size:13px;color:var(--mold-text)"><span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>Auto<span style="color:var(--mold-text-dim)">▼</span></span>
+            <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">studio-rack now · queue 3</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Picture</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Short clip</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">3-D object</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:14px">
+            <div style="flex-shrink:0;position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 82%, transparent)">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-2)">1024² · 4.0s</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">tap to zoom</span>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">Save</span>
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">4 variations</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="font-size:15px;line-height:1.45;color:var(--mold-text-dim)">Describe the picture you want…</span>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);background:var(--mold-surface);font-size:13px;font-weight:500;color:var(--mold-text)">Photoreal ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Square ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Make 4 ▼</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17l5-4.5 3.2 2.9 3-2.6L20 17"></path></svg>Photo</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:13px;color:var(--mold-blue);font-weight:500">More settings</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">Good · 28 passes</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:40px;height:40px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-blue);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:13px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                <span style="font-size:11px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:var(--mold-blue)"></div></div>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">+2</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:var(--mold-blue);font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-blue)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#F0A22E;color:#141517;white-space:nowrap">Graphite</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Make</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Dark · neutral, warm signal</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.05em;text-transform:uppercase;color:var(--mold-text-dim);white-space:nowrap">IBM Plex Sans · Plex Mono</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="--mold-radius-1:2px;--mold-radius-2:4px;--mold-radius-3:6px;--mold-bg:#1B1C1E;--mold-bg-deep:#141517;--mold-bg-crust:#0E0F10;--mold-surface:#232528;--mold-surface-2:#2E3134;--mold-surface-3:#3B3E42;--mold-text:#ECEDEF;--mold-text-2:#C0C3C7;--mold-text-dim:#8A8E93;--mold-text-faint:#676B70;--mold-border:#2C2E32;--mold-border-focus:#F0A22E;--mold-blue:#F0A22E;--mold-success:#58C08A;--mold-warning:#E8C34A;--mold-error:#E5654B;--mold-star:#F0A22E;--mold-sapphire:#6BA8E5;--mold-mauve:#A98BE0;--mold-teal:#4FBFAE;--mold-lavender:#93A6E8;--mold-font-sans:'IBM Plex Sans', sans-serif;--mold-font-mono:'IBM Plex Mono', monospace;--mold-fs-micro:11px;--mold-fs-xs:12px;--mold-fs-sm:13px;--mold-fs-base:14px;--mold-fs-md:16px;--mold-fs-lg:20px;--mold-fs-xl:28px;--mold-lh-snug:1.3;--mold-lh-body:1.45;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">New image</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg></span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 16px 10px">
+            <span style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);font-size:13px;color:var(--mold-text)"><span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>Auto<span style="color:var(--mold-text-dim)">▼</span></span>
+            <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">studio-rack now · queue 3</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Picture</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Short clip</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">3-D object</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:14px">
+            <div style="flex-shrink:0;position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 82%, transparent)">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-2)">1024² · 4.0s</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">tap to zoom</span>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">Save</span>
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">4 variations</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="font-size:15px;line-height:1.45;color:var(--mold-text-dim)">Describe the picture you want…</span>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);background:var(--mold-surface);font-size:13px;font-weight:500;color:var(--mold-text)">Photoreal ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Square ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Make 4 ▼</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17l5-4.5 3.2 2.9 3-2.6L20 17"></path></svg>Photo</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:13px;color:var(--mold-blue);font-weight:500">More settings</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">Good · 28 passes</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:40px;height:40px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-blue);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:13px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                <span style="font-size:11px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:var(--mold-blue)"></div></div>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">+2</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:var(--mold-blue);font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-blue)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#0F766E;color:#FBFBFD;white-space:nowrap">Porcelain</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Make</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Light · high-key, compact</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.05em;text-transform:uppercase;color:var(--mold-text-dim);white-space:nowrap">Manrope · IBM Plex Mono</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ no }}" hint-size="402px,874px">
+        <div style="--mold-radius-1:2px;--mold-radius-2:4px;--mold-radius-3:6px;--mold-bg:#FBFBFD;--mold-bg-deep:#F3F3F6;--mold-bg-crust:#E9E9EE;--mold-surface:#FFFFFF;--mold-surface-2:#E6E6EB;--mold-surface-3:#D5D5DC;--mold-text:#16171A;--mold-text-2:#45474D;--mold-text-dim:#63666D;--mold-text-faint:#A0A3AB;--mold-border:#E1E1E7;--mold-border-focus:#0F766E;--mold-blue:#0F766E;--mold-success:#17795A;--mold-warning:#8A5200;--mold-error:#C0392B;--mold-star:#8A5200;--mold-sapphire:#2563A8;--mold-mauve:#7A4FB0;--mold-teal:#0F766E;--mold-lavender:#5B62C7;--mold-font-sans:'Manrope', sans-serif;--mold-font-mono:'IBM Plex Mono', monospace;--mold-fs-micro:10.5px;--mold-fs-xs:11.5px;--mold-fs-sm:12.5px;--mold-fs-base:13.5px;--mold-fs-md:15.5px;--mold-fs-lg:19px;--mold-fs-xl:27px;--mold-lh-snug:1.25;--mold-lh-body:1.45;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">New image</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg></span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 16px 10px">
+            <span style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);font-size:13px;color:var(--mold-text)"><span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>Auto<span style="color:var(--mold-text-dim)">▼</span></span>
+            <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">studio-rack now · queue 3</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Picture</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Short clip</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">3-D object</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:14px">
+            <div style="flex-shrink:0;position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 82%, transparent)">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-2)">1024² · 4.0s</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">tap to zoom</span>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">Save</span>
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">4 variations</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="font-size:15px;line-height:1.45;color:var(--mold-text-dim)">Describe the picture you want…</span>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);background:var(--mold-surface);font-size:13px;font-weight:500;color:var(--mold-text)">Photoreal ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Square ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Make 4 ▼</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17l5-4.5 3.2 2.9 3-2.6L20 17"></path></svg>Photo</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:13px;color:var(--mold-blue);font-weight:500">More settings</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">Good · 28 passes</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:40px;height:40px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-blue);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:13px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                <span style="font-size:11px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:var(--mold-blue)"></div></div>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">+2</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:var(--mold-blue);font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-blue)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#FF315D;color:#11090D;white-space:nowrap">Nebula</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Make</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">Dark · oxblood & crimson</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);letter-spacing:.05em;text-transform:uppercase;color:var(--mold-text-dim);white-space:nowrap">Georgia · Geist Mono</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="--mold-bg:#1B0C12;--mold-bg-deep:#11090D;--mold-bg-crust:#090407;--mold-surface:#241018;--mold-surface-2:#33161F;--mold-surface-3:#45202B;--mold-text:#FFF8EE;--mold-text-2:#C6ACA7;--mold-text-dim:#A98D8F;--mold-text-faint:#7A6266;--mold-border:#352D2F;--mold-border-focus:#FF315D;--mold-blue:#FF315D;--mold-success:#86C79A;--mold-warning:#FFB05C;--mold-error:#FF6C76;--mold-star:#FFB05C;--mold-sapphire:#D08F92;--mold-mauve:#FF6C76;--mold-teal:#E0A090;--mold-lavender:#FF6C76;--mold-font-sans:Georgia, 'Times New Roman', serif;--mold-font-mono:'Geist Mono', 'SFMono-Regular', ui-monospace, monospace;--mold-fs-micro:11px;--mold-fs-xs:12px;--mold-fs-sm:13.5px;--mold-fs-base:14.5px;--mold-fs-md:17px;--mold-fs-lg:21px;--mold-fs-xl:30px;--mold-lh-snug:1.35;--mold-lh-body:1.6;--mold-radius-1:0px;--mold-radius-2:2px;--mold-radius-3:6px;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">New image</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-text-2)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="13" y2="7"></line><line x1="18" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="7" y2="12"></line><line x1="12" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="12" y2="17"></line><line x1="17" y1="17" x2="20" y2="17"></line><circle cx="15.5" cy="7" r="2"></circle><circle cx="9.5" cy="12" r="2"></circle><circle cx="14.5" cy="17" r="2"></circle></svg></span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 16px 10px">
+            <span style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep);font-size:13px;color:var(--mold-text)"><span style="width:7px;height:7px;border-radius:50%;background:var(--mold-success)"></span>Auto<span style="color:var(--mold-text-dim)">▼</span></span>
+            <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">studio-rack now · queue 3</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Picture</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Short clip</span>
+              <span style="flex:1;text-align:center;padding:8px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">3-D object</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:14px">
+            <div style="flex-shrink:0;position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover">
+              <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:8px;padding:8px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 82%, transparent)">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-2)">1024² · 4.0s</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">tap to zoom</span>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">Save</span>
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:15px;font-weight:500;color:var(--mold-text)">4 variations</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="font-size:15px;line-height:1.45;color:var(--mold-text-dim)">Describe the picture you want…</span>
+              <div style="display:flex;gap:7px;flex-wrap:wrap">
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);background:var(--mold-surface);font-size:13px;font-weight:500;color:var(--mold-text)">Photoreal ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Square ▼</span>
+                <span style="display:inline-flex;align-items:center;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)">Make 4 ▼</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:13px;color:var(--mold-text-2)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17l5-4.5 3.2 2.9 3-2.6L20 17"></path></svg>Photo</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:13px;color:var(--mold-blue);font-weight:500">More settings</span>
+                <span style="flex:1"></span>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">Good · 28 passes</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:40px;height:40px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-blue);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:13px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                <span style="font-size:11px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                <div style="height:5px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:var(--mold-blue)"></div></div>
+              </div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">+2</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:var(--mold-blue);font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-blue)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+
+
+    <!-- ══════════ 1b · SHORT CLIP, SCENES ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;align-content:flex-start;max-width:402px;min-height:42px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);font-weight:600;padding:2px 8px;border-radius:var(--mold-radius-1);background:#89b4fa;color:#181825;white-space:nowrap">Mocha</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text);white-space:nowrap">Short clip — scenes</span><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);color:var(--mold-text-dim);white-space:nowrap">the timeline, one column</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="--mold-radius-1:2px;--mold-radius-2:4px;--mold-radius-3:6px;--mold-bg:#1E1E2E;--mold-bg-deep:#181825;--mold-bg-crust:#11111B;--mold-surface:#313244;--mold-surface-2:#45475A;--mold-surface-3:#585B70;--mold-text:#CDD6F4;--mold-text-2:#BAC2DE;--mold-text-dim:#979DB2;--mold-text-faint:#585B70;--mold-border:#45475A;--mold-border-focus:#89B4FA;--mold-blue:#89B4FA;--mold-success:#A6E3A1;--mold-warning:#F9E2AF;--mold-error:#F38BA8;--mold-star:#F9E2AF;--mold-sapphire:#74C7EC;--mold-mauve:#CBA6F7;--mold-teal:#94E2D5;--mold-lavender:#B4BEFE;--mold-font-sans:'Inter', -apple-system, sans-serif;--mold-font-mono:'JetBrains Mono', ui-monospace, monospace;--mold-fs-micro:11px;--mold-fs-xs:12px;--mold-fs-sm:13px;--mold-fs-base:14px;--mold-fs-md:16px;--mold-fs-lg:20px;--mold-fs-xl:28px;--mold-lh-snug:1.3;--mold-lh-body:1.5;font-family:var(--mold-font-sans);height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;white-space:nowrap;flex-shrink:0;color:var(--mold-text)">Short clip</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:44px;padding:0 10px;font-size:15px;font-weight:500;color:var(--mold-blue);white-space:nowrap">Reorder</span>
+          </div>
+
+          <div style="flex-shrink:0;margin:0 16px;position:relative;aspect-ratio:16/9;border-radius:var(--mold-radius-2);overflow:hidden;background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover">
+            <div style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:9px;padding:7px 10px;background:color-mix(in srgb, var(--mold-bg-crust) 80%, transparent)">
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--mold-radius-2);background:#89b4fa;flex-shrink:0"><svg width="11" height="11" viewBox="0 0 24 24" fill="#181825" stroke="none"><polygon points="7 4 19 12 7 20"></polygon></svg></span>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text);white-space:nowrap">0:06 <span style="color:var(--mold-text-dim)">/ 0:20</span></span>
+              <span style="flex:1;height:3px;border-radius:2px;background:var(--mold-surface-2);position:relative"><span style="position:absolute;left:0;top:0;bottom:0;width:30%;border-radius:2px;background:#89b4fa;display:block"></span></span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;gap:3px;height:34px;margin:10px 16px 0"><span style="flex:5 1 0;min-width:0;height:100%;border-radius:var(--mold-radius-1);background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover;opacity:.55"></span><span style="flex:8 1 0;min-width:0;height:100%;border-radius:var(--mold-radius-1);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover;box-shadow:inset 0 0 0 2px #89b4fa"></span><span style="flex:7 1 0;min-width:0;height:100%;border-radius:var(--mold-radius-1);background:var(--mold-bg-crust) url(assets/gallery/flux2-klein-zen.jpg) center/cover;opacity:.55"></span></div>
+          <span style="flex-shrink:0;padding:6px 16px 0;font-size:11px;color:var(--mold-text-dim)">Widths show how long each scene runs. Tap one to jump to it.</span>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:12px 16px 0;display:flex;flex-direction:column;gap:8px">
+
+              <div style="display:flex;align-items:center;gap:11px;min-height:64px;padding:8px 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border)">
+                <span style="display:flex;flex-direction:column;gap:2.5px;flex-shrink:0;padding:0 2px;cursor:grab"><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span></span>
+                <span style="width:48px;height:48px;flex-shrink:0;border-radius:var(--mold-radius-1);background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover"></span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                  <span style="font-size:14px;font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">A paper boat sets off</span>
+                  <span style="font-size:11px;color:var(--mold-text-dim);white-space:nowrap">Scene 1</span>
+                </div>
+                <div style="flex-shrink:0;display:flex;align-items:center;gap:0;height:32px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border)">
+                  <span style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--mold-text-2)">−</span>
+                  <span style="min-width:26px;text-align:center;font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text);white-space:nowrap">5s</span>
+                  <span style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--mold-text-2)">+</span>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:8px;padding:0 0 0 52px;min-height:34px">
+                <span style="width:var(--mold-bw);height:14px;background:var(--mold-border);margin-left:6px"></span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:var(--mold-radius-2);background:#89b4fa;color:var(--mold-bg-deep);font-size:12px;font-weight:600;white-space:nowrap"><span style="font-family:var(--mold-font-mono);font-size:11px">≈</span>Smooth</span>
+                <span style="font-size:11px;color:var(--mold-text-dim);white-space:nowrap">motion carries through</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:11px;min-height:64px;padding:8px 10px;border-radius:var(--mold-radius-2);background:var(--mold-surface);box-shadow:inset 0 0 0 2px #89b4fa">
+                <span style="display:flex;flex-direction:column;gap:2.5px;flex-shrink:0;padding:0 2px;cursor:grab"><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span></span>
+                <span style="width:48px;height:48px;flex-shrink:0;border-radius:var(--mold-radius-1);background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                  <span style="font-size:14px;font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Rain picks up, camera drifts left</span>
+                  <span style="font-size:11px;color:var(--mold-text-dim);white-space:nowrap">Scene 2</span>
+                </div>
+                <div style="flex-shrink:0;display:flex;align-items:center;gap:0;height:32px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border)">
+                  <span style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--mold-text-2)">−</span>
+                  <span style="min-width:26px;text-align:center;font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text);white-space:nowrap">8s</span>
+                  <span style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--mold-text-2)">+</span>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:center;gap:8px;padding:0 0 0 52px;min-height:34px">
+                <span style="width:var(--mold-bw);height:14px;background:var(--mold-border);margin-left:6px"></span>
+                <span style="display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:var(--mold-radius-2);background:#89b4fa;color:var(--mold-bg-deep);font-size:12px;font-weight:600;white-space:nowrap"><span style="font-family:var(--mold-font-mono);font-size:11px">◐</span>Fade</span>
+                <span style="font-size:11px;color:var(--mold-text-dim);white-space:nowrap">they blend across</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:11px;min-height:64px;padding:8px 10px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border)">
+                <span style="display:flex;flex-direction:column;gap:2.5px;flex-shrink:0;padding:0 2px;cursor:grab"><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span><span style="width:13px;height:1.5px;background:var(--mold-text-dim);display:block"></span></span>
+                <span style="width:48px;height:48px;flex-shrink:0;border-radius:var(--mold-radius-1);background:var(--mold-bg-crust) url(assets/gallery/flux2-klein-zen.jpg) center/cover"></span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                  <span style="font-size:14px;font-weight:500;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">It slips under the bridge</span>
+                  <span style="font-size:11px;color:var(--mold-text-dim);white-space:nowrap">Scene 3</span>
+                </div>
+                <div style="flex-shrink:0;display:flex;align-items:center;gap:0;height:32px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border)">
+                  <span style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--mold-text-2)">−</span>
+                  <span style="min-width:26px;text-align:center;font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text);white-space:nowrap">7s</span>
+                  <span style="width:30px;height:100%;display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--mold-text-2)">+</span>
+                </div>
+              </div>
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px;border-radius:var(--mold-radius-2);border:var(--mold-bw) dashed var(--mold-surface-3);font-size:15px;font-weight:500;color:var(--mold-text-2);white-space:nowrap">＋ Add a scene</span>
+            <span style="padding:2px 2px 10px;font-size:11px;line-height:1.45;color:var(--mold-text-dim)">Three scenes are made as one continuous clip. Tap the marker between two scenes to change how they meet.</span>
+          </div>
+
+          <div style="flex-shrink:0;padding:12px 16px 10px">
+            <span style="display:flex;align-items:center;justify-content:center;gap:8px;height:50px;border-radius:var(--mold-radius-2);background:#89b4fa;font-size:17px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;color:var(--mold-bg-deep)">Generate</span>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 2 · MORE SETTINGS SHEET ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">2</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">More settings</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">the whole inspector, one sheet</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg-crust)">
+          <div style="flex:1;min-height:0;overflow:hidden;opacity:.35;padding:16px;display:flex;flex-direction:column;gap:12px">
+            <span style="font-size:28px;font-weight:700;color:var(--mold-text)">New image</span>
+            <div style="aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/flux-dev-teahouse.jpg) center/cover"></div>
+          </div>
+          <div style="position:relative;z-index:1;flex-shrink:0;display:flex;flex-direction:column;border-top:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-3) var(--mold-radius-3) 0 0;background:var(--mold-bg-deep);box-shadow:var(--mold-shadow-md);max-height:78%">
+            <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:10px;padding:8px 16px 12px">
+              <span style="width:38px;height:4px;border-radius:var(--mold-radius-1);background:var(--mold-surface-2)"></span>
+              <div style="display:flex;align-items:center;width:100%">
+                <span style="font-size:15px;color:var(--mold-blue)">Reset</span>
+                <span style="flex:1;text-align:center;font-size:17px;font-weight:600;color:var(--mold-text)">More settings</span>
+                <span style="font-size:15px;font-weight:600;color:var(--mold-blue)">Done</span>
+              </div>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px 26px;display:flex;flex-direction:column;gap:18px">
+              <div style="display:flex;flex-direction:column;gap:9px">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Quality</span>
+                <div style="display:flex;gap:8px">
+                  <sc-for list="{{ presets }}" as="p" hint-placeholder-count="3">
+                    <div style="flex:1;display:flex;flex-direction:column;gap:3px;padding:11px 10px;border-radius:var(--mold-radius-2);min-height:56px;{{ p.style }}">
+                      <span style="font-size:14px;font-weight:600">{{ p.label }}</span>
+                      <span style="font-family:var(--mold-font-mono);font-size:10px;opacity:.75">{{ p.meta }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+
+              <sc-for list="{{ sliders }}" as="s" hint-placeholder-count="3">
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <div style="display:flex;align-items:baseline;justify-content:space-between">
+                    <span style="font-size:15px;font-weight:500;color:var(--mold-text)">{{ s.label }}</span>
+                    <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">{{ s.value }}</span>
+                  </div>
+                  <div style="position:relative;height:4px;background:var(--mold-surface)">
+                    <div style="height:100%;{{ s.fill }}"></div>
+                    <span style="position:absolute;top:-9px;width:22px;height:22px;border-radius:var(--mold-radius-2);background:var(--mold-text);{{ s.knobPhone }}"></span>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--mold-text-dim)"><span>{{ s.low }}</span><span>{{ s.high }}</span></div>
+                </div>
+              </sc-for>
+
+              <div style="flex-shrink:0;display:flex;flex-direction:column;gap:0;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden">
+                <sc-for list="{{ sheetRows }}" as="r" hint-placeholder-count="5">
+                  <div style="display:flex;align-items:center;gap:12px;padding:0 12px;min-height:52px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:2px">
+                      <span style="font-size:15px;color:var(--mold-text)">{{ r.label }}</span>
+                      <span style="font-size:11px;color:var(--mold-text-dim)">{{ r.note }}</span>
+                    </div>
+                    <sc-if value="{{ r.isToggle }}" hint-placeholder-val="{{ false }}">
+                      <span style="width:44px;height:26px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;{{ r.toggleStyle }}"><span style="width:22px;height:22px;border-radius:var(--mold-radius-2);{{ r.knobStyle }}"></span></span>
+                    </sc-if>
+                    <sc-if value="{{ r.isValue }}" hint-placeholder-val="{{ true }}">
+                      <span style="font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text-2)">{{ r.value }} ›</span>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="display:flex;flex-direction:column;gap:9px">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Add-on looks</span>
+                <sc-for list="{{ loras }}" as="l" hint-placeholder-count="2">
+                  <div style="display:flex;align-items:center;gap:11px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2)">
+                    <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:6px">
+                      <span style="font-size:14px;color:var(--mold-text)">{{ l.label }}</span>
+                      <div style="height:4px;background:var(--mold-surface)"><div style="height:100%;{{ l.fill }}"></div></div>
+                    </div>
+                    <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">{{ l.weight }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 3 · QUEUE ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">3</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">Queue</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">its own tab · swipe a row to remove</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 8px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">Queue</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="4" x2="9" y2="20"></line><line x1="15" y1="4" x2="15" y2="20"></line></svg></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg></span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px;font-size:13px;color:var(--mold-text-dim)">1 being made · 3 waiting · about a minute left</div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;flex-direction:column;gap:11px;padding:13px;border-radius:var(--mold-radius-2);background:var(--mold-surface);box-shadow:inset 0 0 0 1px {{ accent }}">
+              <div style="display:flex;gap:12px">
+                <span style="width:64px;height:64px;flex-shrink:0;border:var(--mold-bw) solid {{ accent }};background:var(--mold-bg-crust) url(assets/gallery/sd35-clocktower.jpg) center/cover"></span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:6px">
+                  <span style="font-size:15px;font-weight:600;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Neon arcade, long exposure</span>
+                  <span style="font-size:13px;color:var(--mold-text-2)">Adding detail — about 12s left</span>
+                  <div style="height:7px;background:var(--mold-bg-crust);overflow:hidden"><div style="width:64%;height:100%;background:{{ accent }}"></div></div>
+                  <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">image 2 of 4 · studio-rack</span>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px">
+                <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;height:40px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:14px;font-weight:500;color:var(--mold-text)">Pause</span>
+                <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;height:40px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:14px;font-weight:500;color:var(--mold-text-2)">Stop</span>
+                <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;height:40px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);font-size:14px;font-weight:500;color:var(--mold-blue)">What's this?</span>
+              </div>
+            </div>
+
+            <span style="font-family:var(--mold-font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Waiting</span>
+            <sc-for list="{{ phoneQueue }}" as="q" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:12px;padding:11px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);min-height:64px;{{ q.rowStyle }}">
+                <span style="width:44px;height:44px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);display:flex;align-items:center;justify-content:center;font-family:var(--mold-font-mono);font-size:13px;{{ q.thumbStyle }}{{ q.thumbBg }}">
+                  <sc-if value="{{ q.showGlyph }}" hint-placeholder-val="{{ true }}">
+                    <span>{{ q.glyph }}</span>
+                  </sc-if>
+                </span>
+                <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                  <span style="font-size:14px;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ q.title }}</span>
+                  <span style="font-size:12px;{{ q.statusStyle }}">{{ q.status }}</span>
+                </div>
+                <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">{{ q.side }}</span>
+              </div>
+            </sc-for>
+
+            <div style="flex-shrink:0;display:flex;align-items:center;gap:0;height:64px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden">
+              <div style="flex:1;display:flex;align-items:center;gap:12px;padding:0 11px;height:100%;background:var(--mold-bg-deep)">
+                <span style="width:44px;height:44px;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/qwen-image-balloon.jpg) center/cover"></span>
+                <div style="display:flex;flex-direction:column;gap:3px">
+                  <span style="font-size:14px;color:var(--mold-text)">Balloon over the valley</span>
+                  <span style="font-size:12px;color:var(--mold-text-dim)">Waiting — 4th in line</span>
+                </div>
+              </div>
+              <span style="width:84px;height:100%;display:flex;align-items:center;justify-content:center;background:var(--mold-error);font-size:13px;font-weight:600;color:var(--mold-bg-deep)">Remove</span>
+            </div>
+
+            <span style="font-family:var(--mold-font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">Finished today · 27</span>
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/sdxl-turbo-market.jpg) center/cover"></span>
+              <span style="flex:1;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/flux2-klein-owl.jpg) center/cover"></span>
+              <span style="flex:1;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-crust) url(assets/gallery/zimage-astronaut.jpg) center/cover"></span>
+            </div>
+            <div style="height:12px"></div>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:{{ accent }}">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 4 · MY IMAGES ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">4</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">My images</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">pinch to resize · long-press to select</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">My images</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-blue);font-size:15px;font-weight:500">Select</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 10px;display:flex;gap:8px">
+            <span style="flex:1;display:flex;align-items:center;gap:7px;height:36px;padding:0 10px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border);font-size:14px;color:var(--mold-text-dim)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>Search words or tags</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 10px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <sc-for list="{{ scopes }}" as="sc" hint-placeholder-count="4">
+                <span style="flex:1;text-align:center;padding:7px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;{{ sc.style }}">{{ sc.label }}</span>
+              </sc-for>
+            </div>
+          </div>
+          <div style="flex-shrink:0;display:flex;gap:7px;padding:0 16px 10px;overflow-x:auto">
+            <sc-for list="{{ tags }}" as="t" hint-placeholder-count="5">
+              <span style="flex-shrink:0;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:var(--mold-radius-2);font-size:13px;{{ t.style }}">{{ t.label }} <span style="font-family:var(--mold-font-mono);font-size:10px;opacity:.7">{{ t.count }}</span></span>
+            </sc-for>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px">
+              <sc-for list="{{ tiles }}" as="ti" hint-placeholder-count="18">
+                <div style="position:relative;aspect-ratio:1;border:var(--mold-bw) solid var(--mold-border);{{ ti.bg }}">
+                  <sc-if value="{{ ti.fav }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;top:4px;right:5px;font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-star)">★</span>
+                  </sc-if>
+                  <sc-if value="{{ ti.kindBadge }}" hint-placeholder-val="{{ false }}">
+                    <span style="position:absolute;bottom:4px;left:4px;padding:1px 5px;background:var(--mold-bg-crust);font-family:var(--mold-font-mono);font-size:9px;color:var(--mold-text-2)">{{ ti.kindBadge }}</span>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+            <div style="height:12px"></div>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:{{ accent }}">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 5 · VIEWER ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">5</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">One picture</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">details drag up from the bottom</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg-crust)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 12px">
+            <span style="display:inline-flex;align-items:center;gap:5px;height:44px;padding:0 8px;font-size:15px;color:var(--mold-blue)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="14 6 8 12 14 18"></polyline></svg>My images</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;font-family:var(--mold-font-mono);font-size:17px;color:var(--mold-star)">★</span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 002 2h12a2 2 0 002-2v-7"></path><polyline points="8 8 12 4 16 8"></polyline><line x1="12" y1="4" x2="12" y2="15"></line></svg></span>
+          </div>
+          <div style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px">
+            <img src="assets/gallery/flux-dev-teahouse.jpg" alt="" style="max-width:100%;max-height:100%;object-fit:contain;border:var(--mold-bw) solid var(--mold-border)">
+          </div>
+          <div style="flex-shrink:0;display:flex;flex-direction:column;gap:14px;padding:14px 16px 26px;border-top:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-3) var(--mold-radius-3) 0 0;background:var(--mold-bg-deep)">
+            <span style="align-self:center;width:38px;height:4px;border-radius:var(--mold-radius-1);background:var(--mold-surface-2)"></span>
+            <span style="font-size:15px;line-height:1.45;color:var(--mold-text)">A tea house at dusk, paper lanterns, rain on the stones, 35mm</span>
+            <div style="flex-shrink:0;display:flex;flex-direction:column;gap:0;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden">
+              <sc-for list="{{ meta }}" as="m" hint-placeholder-count="5">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 12px;min-height:44px;border-bottom:var(--mold-bw) solid var(--mold-border)">
+                  <span style="font-size:14px;color:var(--mold-text-dim)">{{ m.label }}</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text-2)">{{ m.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;gap:8px">
+              <span style="flex:1;display:inline-flex;align-items:center;justify-content:center;height:48px;border-radius:var(--mold-radius-2);background:{{ accent }};font-size:16px;font-weight:600;white-space:nowrap;color:var(--mold-bg-deep)">Use these settings</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span>
+            </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 6 · STYLES ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">6</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">Styles</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">rows, not a table</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">Styles</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-blue)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 10px">
+            <div style="display:flex;padding:2px;border-radius:var(--mold-radius-2);background:var(--mold-bg-deep);border:var(--mold-bw) solid var(--mold-border)">
+              <span style="flex:1;text-align:center;padding:7px 0;border-radius:var(--mold-radius-1);background:var(--mold-surface-2);font-size:13px;font-weight:600;color:var(--mold-text)">Ready to use</span>
+              <span style="flex:1;text-align:center;padding:7px 0;border-radius:var(--mold-radius-1);font-size:13px;font-weight:600;color:var(--mold-text-dim)">Browse more</span>
+            </div>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;gap:11px;margin:0 16px 12px;padding:12px;border:var(--mold-bw) solid var(--mold-warning);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+            <span style="font-family:var(--mold-font-mono);font-size:13px;color:var(--mold-warning)">↓</span>
+            <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:14px;font-weight:600;color:var(--mold-text)">Getting a video style ready</span>
+              <div style="height:6px;background:var(--mold-surface);overflow:hidden"><div style="width:18%;height:100%;background:var(--mold-warning)"></div></div>
+              <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">1.2G/6.8G · 12.4MiB/s · eta 8m12s</span>
+              <span style="font-size:12px;color:var(--mold-text-dim)">Keep making images while this downloads.</span>
+            </div>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px">
+            <div style="flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden">
+              <sc-for list="{{ styles }}" as="m" hint-placeholder-count="6">
+                <div style="display:flex;align-items:center;gap:11px;padding:12px;min-height:64px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+                  <span style="font-family:var(--mold-font-mono);font-size:13px;width:12px;text-align:center;{{ m.starStyle }}">{{ m.star }}</span>
+                  <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:3px">
+                    <span style="font-size:15px;color:var(--mold-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.friendly }}</span>
+                    <span style="font-size:12px;color:var(--mold-text-dim)">{{ m.line }}</span>
+                  </div>
+                  <span style="font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim);text-align:right">{{ m.size }}<br>{{ m.host }}</span>
+                  <span style="color:var(--mold-text-faint)">›</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="height:12px"></div>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:{{ accent }}">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 7 · MACHINES ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">7</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">Machines</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">telemetry as sentences</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:6px 16px 10px">
+            <span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">Machines</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--mold-radius-2);color:var(--mold-blue)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></span>
+          </div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:12px">
+            <sc-for list="{{ phoneMachines }}" as="h" hint-placeholder-count="3">
+              <div style="display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:var(--mold-radius-2);{{ h.card }}">
+                <div style="display:flex;align-items:center;gap:9px">
+                  <span style="width:9px;height:9px;border-radius:50%;{{ h.dot }}"></span>
+                  <span style="font-family:var(--mold-font-mono);font-size:14px;font-weight:700;color:var(--mold-text)">{{ h.label }}</span>
+                  <span style="flex:1"></span>
+                  <sc-if value="{{ h.target }}" hint-placeholder-val="{{ false }}">
+                    <span style="font-family:var(--mold-font-mono);font-size:10px;padding:3px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">making images here</span>
+                  </sc-if>
+                </div>
+                <span style="font-size:13px;line-height:1.45;color:var(--mold-text-2)">{{ h.blurb }}</span>
+                <div style="height:6px;background:var(--mold-bg-crust);overflow:hidden"><div style="height:100%;{{ h.bar }}"></div></div>
+                <div style="display:flex;justify-content:space-between;font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)"><span>{{ h.mem }}</span><span>{{ h.queueLabel }}</span></div>
+                <sc-if value="{{ h.cost }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;align-items:center;gap:10px;padding-top:2px">
+                    <span style="font-family:var(--mold-font-mono);font-size:13px;font-weight:700;color:var(--mold-warning)">{{ h.cost }}</span>
+                    <span style="flex:1"></span>
+                    <span style="display:inline-flex;align-items:center;height:36px;padding:0 12px;border-radius:var(--mold-radius-2);border:var(--mold-bw) solid var(--mold-error);font-size:13px;font-weight:600;color:var(--mold-error)">Stop &amp; stop paying</span>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+
+            <div style="display:flex;flex-direction:column;gap:11px;padding:14px;border:var(--mold-bw) dashed var(--mold-surface-3);border-radius:var(--mold-radius-2)">
+              <div style="display:flex;align-items:center;gap:9px">
+                <img src="assets/icons/runpod.svg" alt="" style="width:17px;height:17px;filter:invert(1);opacity:.75">
+                <span style="font-family:var(--mold-font-mono);font-size:14px;font-weight:700;color:var(--mold-text-2)">rent another</span>
+              </div>
+              <span style="font-size:13px;line-height:1.45;color:var(--mold-text-dim)">Borrow a fast GPU by the minute when your own machines are busy. You pay only while it runs.</span>
+              <span style="display:inline-flex;align-items:center;justify-content:center;height:44px;border-radius:var(--mold-radius-2);background:{{ accent }};font-size:15px;font-weight:600;color:var(--mold-bg-deep)">Rent a GPU</span>
+            </div>
+
+            <div style="flex-shrink:0;display:flex;flex-direction:column;gap:0;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden">
+              <sc-for list="{{ machineRows }}" as="r" hint-placeholder-count="3">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 12px;min-height:52px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+                  <span style="font-size:15px;color:var(--mold-text)">{{ r.label }}</span>
+                  <span style="font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text-2)">{{ r.value }} ›</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="height:12px"></div>
+          </div>
+
+          <div style="flex-shrink:0;display:flex;padding:6px 4px 26px;border-top:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path></svg></span>
+                <span style="font-size:10px;font-weight:500">Make</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Queue</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg></span>
+                <span style="font-size:10px;font-weight:500">Images</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:var(--mold-text-dim)">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg></span>
+                <span style="font-size:10px;font-weight:500">Styles</span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 0;min-height:48px;color:{{ accent }}">
+                <span style="display:flex;align-items:center;justify-content:center;height:24px"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></span>
+                <span style="font-size:10px;font-weight:500">Machines</span>
+              </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+
+    <!-- ══════════ 8 · SETTINGS ══════════ -->
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:baseline;gap:9px"><span style="font-family:var(--mold-font-mono);font-size:var(--mold-fs-micro);padding:2px 7px;border-radius:var(--mold-radius-1);background:{{ accent }};color:var(--mold-bg-deep)">8</span><span style="font-size:var(--mold-fs-sm);font-weight:600;color:var(--mold-text)">Settings</span><span style="font-size:var(--mold-fs-xs);color:var(--mold-text-dim)">grouped list, iOS-standard</span></div>
+      <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ yes }}" hint-size="402px,874px">
+        <div style="height:100%;padding-top:54px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--mold-bg-crust)">
+          <div style="flex-shrink:0;display:flex;align-items:center;gap:10px;padding:8px 12px 6px">
+            <span style="display:inline-flex;align-items:center;gap:5px;height:44px;padding:0 8px;font-size:15px;color:var(--mold-blue)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="14 6 8 12 14 18"></polyline></svg>New image</span>
+          </div>
+          <div style="flex-shrink:0;padding:0 16px 12px"><span style="font-size:28px;font-weight:700;letter-spacing:-.4px;color:var(--mold-text)">Settings</span></div>
+
+          <div style="flex:1;min-height:0;overflow-y:auto;padding:0 16px 26px;display:flex;flex-direction:column;gap:18px">
+            <sc-for list="{{ settingsGroups }}" as="g" hint-placeholder-count="4">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <span style="font-family:var(--mold-font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mold-text-dim)">{{ g.title }}</span>
+                <div style="flex-shrink:0;display:flex;flex-direction:column;gap:0;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);overflow:hidden">
+                  <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="3">
+                    <div style="display:flex;align-items:center;gap:12px;padding:0 12px;min-height:52px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg-deep)">
+                      <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:2px">
+                        <span style="font-size:15px;color:var(--mold-text)">{{ r.label }}</span>
+                        <span style="font-size:11px;color:var(--mold-text-dim)">{{ r.note }}</span>
+                      </div>
+                      <sc-if value="{{ r.isToggle }}" hint-placeholder-val="{{ false }}">
+                        <span style="width:44px;height:26px;border-radius:var(--mold-radius-2);padding:2px;display:flex;align-items:center;{{ r.toggleStyle }}"><span style="width:22px;height:22px;border-radius:var(--mold-radius-2);{{ r.knobStyle }}"></span></span>
+                      </sc-if>
+                      <sc-if value="{{ r.isValue }}" hint-placeholder-val="{{ true }}">
+                        <span style="font-family:var(--mold-font-mono);font-size:12px;color:var(--mold-text-2)">{{ r.value }} ›</span>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-for>
+
+            <div style="display:flex;gap:12px;padding:14px;border:var(--mold-bw) solid var(--mold-border);border-radius:var(--mold-radius-2);background:var(--mold-bg-deep)">
+              <span style="width:64px;height:64px;flex-shrink:0;border:var(--mold-bw) solid var(--mold-border);background:var(--mold-surface);display:flex;align-items:center;justify-content:center;font-family:var(--mold-font-mono);font-size:11px;color:var(--mold-text-dim)">QR</span>
+              <div style="flex:1;display:flex;flex-direction:column;gap:5px">
+                <span style="font-size:14px;font-weight:600;color:var(--mold-text)">Pair with your desktop</span>
+                <span style="font-size:12px;line-height:1.45;color:var(--mold-text-dim)">Scan the code shown in mold studio on your Mac. Both devices must be on the same network.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </x-import>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#89b4fa&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#89b4fa&quot;,&quot;#cba6f7&quot;,&quot;#94e2d5&quot;,&quot;#f5c2e7&quot;],&quot;section&quot;:&quot;Theme&quot;}}">
+class Component extends DCLogic {
+  renderVals() {
+    const accent = "#89b4fa"; // Mocha — the storyboard chrome
+    const dim = "color:var(--mold-text-dim)";
+    const img = (f) => `background:var(--mold-bg-crust) url(assets/gallery/${f}) center/cover`;
+    const seg = (a) => (a ? "background:var(--mold-surface-2);color:var(--mold-text)" : "color:var(--mold-text-dim)");
+
+    const gal = ["flux-dev-teahouse.png", "sd35-clocktower.png", "sdxl-turbo-market.png", "qwen-image-balloon.png", "zimage-astronaut.png", "flux2-klein-owl.png", "wuerstchen-lighthouse.png", "flux2-klein-zen.png"];
+
+    return {
+      accent,
+      yes: true,
+      no: false,
+
+      diffs: [
+        { area: "Navigation", today: "4 tabs — Generate · Library · Models · Machines, with Settings pushed over the top.", here: "5 tabs; Queue is promoted out of the Generate screen and Settings moves behind the gear." },
+        { area: "Parameters", today: "Advanced sheet plus separate sheets for seed, resolution, batch, LoRA, source, identity.", here: "One More settings sheet: three quality presets first, then sliders and a grouped list. The picker sheets become rows inside it." },
+        { area: "Queue", today: "A Queue section at the bottom of the Generate tab, with live activity rows.", here: "Its own tab with the active card, waiting rows you can swipe, and a finished strip. A peek card stays on Make." },
+        { area: "Wording", today: "Prompt, Model, Steps, Guidance, Seed, Hosts — TUI vocabulary carried onto the phone.", here: "The desktop lexicon, unchanged: Styles, Detail, Stick to my words, Repeat this look, Machines, Generate." },
+        { area: "3-D objects", today: "Mesh output exists in the inspector and gallery, but is easy to miss on the phone.", here: "A third output mode next to Picture and Short clip, with the mesh knobs written plainly in More settings." },
+        { area: "Density", today: "Desktop tables and multi-column rows squeezed into a 393px viewport.", here: "52–64px rows, 44px minimum targets, numbers in mono on the right, one sentence of status per item." },
+      ],
+
+      presets: [
+        { label: "Draft", meta: "~3s · 8 passes" },
+        { label: "Good", meta: "~20s · 28 passes", on: true },
+        { label: "Best", meta: "~50s · 50 passes" },
+      ].map((p) => ({
+        ...p,
+        style: p.on
+          ? `background:${accent}22;box-shadow:inset 0 0 0 1px ${accent};color:var(--mold-text)`
+          : "border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)",
+      })),
+
+      sliders: [
+        { label: "Detail", value: "28 passes", pct: 56, low: "Faster", high: "More detail" },
+        { label: "Stick to my words", value: "7.5", pct: 62, low: "Loose", high: "Literal" },
+        { label: "Image size", value: "1024 × 1024", pct: 48, low: "512", high: "1536" },
+      ].map((s) => ({
+        ...s,
+        fill: `width:${s.pct}%;background:${accent}`,
+        knobPhone: `left:calc(${s.pct}% - 11px)`,
+      })),
+
+      sheetRows: [
+        { label: "Repeat this look", note: "Same number, same look", value: "seed 4821" },
+        { label: "Start from a photo", note: "Redraw a picture you already have", value: "zen-garden.jpg" },
+        { label: "How much to change it", note: "Only when a photo is attached", value: "0.55" },
+        { label: "Where it runs", note: "Auto picks whichever machine has the style", value: "Auto" },
+        { label: "Surface detail", note: "3-D objects only · finer is slower", value: "Normal" },
+        { label: "How tight to the photo", note: "3-D objects only", value: "0.50" },
+        { label: "Simplify to", note: "Fewer faces load faster elsewhere", value: "keep all" },
+        { label: "Save every result", note: "Off means you pick what to keep", toggle: true, isOn: true },
+      ].map((r) => ({
+        ...r,
+        isToggle: !!r.toggle,
+        isValue: !r.toggle,
+        toggleStyle: r.isOn ? `justify-content:flex-end;background:${accent}` : "background:var(--mold-surface-2)",
+        knobStyle: r.isOn ? "background:var(--mold-bg-deep)" : "background:var(--mold-text-dim)",
+      })),
+
+      loras: [
+        { label: "Film grain (35mm)", weight: "0.7", pct: 70 },
+        { label: "Wet streets", weight: "0.4", pct: 40 },
+      ].map((l) => ({ ...l, fill: `width:${l.pct}%;background:${accent}` })),
+
+      phoneQueue: [
+        { title: "Rain on brass, 35mm", status: "Waiting — starts in about 20s", glyph: "2", side: "2nd" },
+        { title: "Ferry at dusk, watercolour", status: "Waiting — starts in about 40s", glyph: "3", side: "3rd" },
+        { title: "Aurora over pine, 5s clip", status: "Needs a download first — 8m12s", glyph: "↓", side: "held", warn: true },
+      ].map((q) => ({
+        ...q,
+        showGlyph: true,
+        thumbBg: ";background:var(--mold-bg-crust)",
+        thumbStyle: q.warn ? "color:var(--mold-warning)" : dim,
+        statusStyle: q.warn ? "color:var(--mold-warning)" : dim,
+        rowStyle: q.warn ? "background:var(--mold-bg-deep);border-color:var(--mold-warning)" : "background:var(--mold-bg-deep)",
+      })),
+
+      scopes: [
+        { label: "All", on: true },
+        { label: "Favourites" },
+        { label: "Albums" },
+        { label: "Trash" },
+      ].map((s) => ({ ...s, style: seg(!!s.on) })),
+
+      tags: [
+        { label: "warm", count: "42", on: true },
+        { label: "night", count: "31" },
+        { label: "product", count: "27" },
+        { label: "portrait", count: "19" },
+        { label: "＋ tag", count: "" },
+      ].map((t) => ({
+        ...t,
+        style: t.on
+          ? `background:${accent}22;box-shadow:inset 0 0 0 1px ${accent};color:var(--mold-text)`
+          : "border:var(--mold-bw) solid var(--mold-border);color:var(--mold-text-2)",
+      })),
+
+      tiles: Array.from({ length: 18 }, (_, i) => ({
+        bg: img(gal[i % gal.length]),
+        fav: i % 5 === 0,
+        kindBadge: i % 7 === 3 ? "clip" : i % 11 === 6 ? "3-D" : "",
+      })),
+
+      meta: [
+        { label: "Style", value: "flux-dev:q4" },
+        { label: "Size", value: "1024 × 1024" },
+        { label: "Detail", value: "28 passes" },
+        { label: "Repeat this look", value: "seed 4821" },
+        { label: "Made on", value: "studio-rack · 4.0s" },
+      ],
+
+      styles: [
+        { friendly: "Photoreal — best quality", line: "Photos and scenes · about 20s", size: "6.8 GB", host: "studio-rack", loaded: true },
+        { friendly: "Photoreal — fast draft", line: "Quick tries · about 3s", size: "6.9 GB", host: "this phone's Mac" },
+        { friendly: "Illustration & art", line: "Art and posters · about 25s", size: "9.4 GB", host: "studio-rack", loaded: true },
+        { friendly: "Text in images", line: "Signs and labels · about 18s", size: "8.2 GB", host: "studio-rack" },
+        { friendly: "Short video clips", line: "5-second clips · downloading", size: "6.8 GB", host: "18%" },
+        { friendly: "3-D objects from a photo", line: "Rotatable mesh · about 40s", size: "4.1 GB", host: "studio-rack" },
+      ].map((m) => ({
+        ...m,
+        star: m.loaded ? "★" : "",
+        starStyle: m.loaded ? "color:var(--mold-star)" : "color:transparent",
+      })),
+
+      phoneMachines: [
+        { label: "this iphone", blurb: "Sends work to your machines. Too small to make pictures itself.", mem: "paired with studio-rack", queueLabel: "—", pct: 0, tone: "var(--mold-surface-2)" },
+        { label: "studio-rack", blurb: "RTX 4090, 24 GB — your fastest machine. Handling everything right now.", mem: "14.9 / 24 GB", queueLabel: "3 waiting", pct: 62, tone: accent, target: true },
+        { label: "pod-8x4090", blurb: "Rented cloud GPU — running 14 minutes.", mem: "3.2 / 24 GB", queueLabel: "1 waiting", pct: 13, tone: "var(--mold-teal)", cost: "$1.44/hr · $0.34 so far" },
+      ].map((h) => ({
+        ...h,
+        target: !!h.target,
+        cost: h.cost ?? "",
+        dot: `background:${h.label === "pod-8x4090" ? "var(--mold-teal)" : h.label === "this iphone" ? "var(--mold-text-dim)" : "var(--mold-success)"}`,
+        bar: `width:${h.pct}%;background:${h.tone}`,
+        card: h.target
+          ? `background:var(--mold-surface);border:var(--mold-bw) solid ${accent}`
+          : "background:var(--mold-surface);border:var(--mold-bw) solid var(--mold-border)",
+      })),
+
+      machineRows: [
+        { label: "Connect a machine", value: "1 found" },
+        { label: "Where new work runs", value: "Auto" },
+        { label: "Warn before renting", value: "On" },
+      ],
+
+      settingsGroups: [
+        {
+          title: "Making images",
+          rows: [
+            { label: "Style to start with", note: "Used whenever you open Make", value: "Photoreal" },
+            { label: "Where new work runs", note: "Auto picks whichever machine has the style", value: "Auto" },
+            { label: "Quality", note: "Draft is fast, Best takes longer", value: "Good" },
+            { label: "How many at once", note: "Each one is queued separately", value: "4" },
+          ],
+        },
+        {
+          title: "My images",
+          rows: [
+            { label: "Save every result", note: "Off means you pick what to keep", toggle: true, isOn: true },
+            { label: "Download to my photos", note: "Copies finished pictures to iOS Photos", toggle: true, isOn: false },
+            { label: "Keep deleted for", note: "Then removed for good", value: "30 days" },
+          ],
+        },
+        {
+          title: "While the app is closed",
+          rows: [
+            { label: "Keep working in the background", note: "The queue keeps running on your machine either way", toggle: true, isOn: true },
+            { label: "Tell me when a picture is done", note: "Notification with a thumbnail", toggle: true, isOn: true },
+            { label: "Only download on Wi-Fi", note: "Styles are several gigabytes", toggle: true, isOn: true },
+          ],
+        },
+        {
+          title: "Style licences",
+          rows: [
+            { label: "Photoreal — best quality", note: "flux-dev:q4 · non-commercial", value: "Accepted" },
+            { label: "Short video clips", note: "ltx-video:bf16 · needs your OK", value: "Read terms" },
+          ],
+        },
+        {
+          title: "About",
+          rows: [
+            { label: "Version", note: "Nothing is uploaded — your machines do the work", value: "0.9.4" },
+          ],
+        },
+      ].map((g) => ({
+        ...g,
+        rows: g.rows.map((r) => ({
+          ...r,
+          isToggle: !!r.toggle,
+          isValue: !r.toggle,
+          toggleStyle: r.isOn ? `justify-content:flex-end;background:${accent}` : "background:var(--mold-surface-2)",
+          knobStyle: r.isOn ? "background:var(--mold-bg-deep)" : "background:var(--mold-text-dim)",
+        })),
+      })),
+    };
+  }
+}
+</script>
+</body>
+</html>

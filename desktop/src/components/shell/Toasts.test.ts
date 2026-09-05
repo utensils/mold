@@ -10,9 +10,18 @@ beforeEach(() => {
   vi.useFakeTimers();
 });
 
+/**
+ * The shelf teleports to <body> (see Toasts.vue). Stub the teleport so these
+ * assertions keep reading the component's own tree; the teleport itself is
+ * pinned by its own test below.
+ */
+function mountToasts() {
+  return mount(Toasts, { global: { stubs: { teleport: true } } });
+}
+
 describe("Toasts a11y roles", () => {
   it("announces info toasts politely (role=status) and errors assertively (role=alert)", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     toasts.push("Saved to Gallery");
     toasts.push("Something broke", "error");
@@ -27,16 +36,18 @@ describe("Toasts a11y roles", () => {
     expect(error.attributes("aria-live")).toBe("assertive");
   });
 
-  it("anchors the shelf to the top of the window, clear of the title bar", async () => {
-    const wrapper = mount(Toasts);
+  it("anchors the shelf bottom-right, above the status bar", async () => {
+    const wrapper = mountToasts();
     const classes = wrapper.get("[aria-label='Notifications']").classes();
 
-    expect(classes.some((c) => c.startsWith("top-"))).toBe(true);
-    expect(classes.some((c) => c.startsWith("bottom-"))).toBe(false);
+    expect(classes.some((c) => c.startsWith("bottom-[calc(var(--mold-shell-statusbar-h)"))).toBe(
+      true,
+    );
+    expect(classes.some((c) => c.startsWith("top-"))).toBe(false);
   });
 
   it("renders the newest toast first so it slides in above the older ones", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     toasts.push("Older");
     toasts.push("Newer");
@@ -49,7 +60,7 @@ describe("Toasts a11y roles", () => {
   });
 
   it("labels the toast region and dismisses on click", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     toasts.push("Hi");
     await wrapper.vm.$nextTick();
@@ -60,7 +71,7 @@ describe("Toasts a11y roles", () => {
   });
 
   it("renders an error as a compact action card with hierarchy and an explicit close control", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     const openMachines = vi.fn();
     toasts.push("Can't reach bender-7680", "error", {
@@ -76,7 +87,7 @@ describe("Toasts a11y roles", () => {
     expect(toast.get("[data-test='toast-description']").text()).toBe(
       "It stays listed for reconnect.",
     );
-    expect(toast.classes()).toContain("w-[min(25rem,calc(100vw-2rem))]");
+    expect(toast.classes()).toContain("w-80");
 
     await toast.get("[data-test='toast-action']").trigger("click");
     expect(openMachines).toHaveBeenCalledOnce();
@@ -84,7 +95,7 @@ describe("Toasts a11y roles", () => {
   });
 
   it("dismisses from the explicit close control without running the body action", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     const onClick = vi.fn();
     toasts.push("Generated", "info", { onClick });
@@ -99,7 +110,7 @@ describe("Toasts a11y roles", () => {
 
 describe("Toasts severity tones", () => {
   it("tints success green, warning yellow, and error red", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     toasts.push("Reconnected to plato", "success");
     toasts.push("Can't reach plato", "warning");
@@ -124,7 +135,7 @@ describe("Toasts severity tones", () => {
   });
 
   it("names the severity for screen readers, never color alone", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     toasts.push("Can't reach plato", "warning");
     await wrapper.vm.$nextTick();
@@ -133,7 +144,7 @@ describe("Toasts severity tones", () => {
   });
 
   it("marks warning and error with different glyphs, not just different hues", async () => {
-    const wrapper = mount(Toasts);
+    const wrapper = mountToasts();
     const toasts = useToastStore();
     toasts.push("Can't reach plato", "warning");
     toasts.push("Generation failed", "error");
@@ -146,5 +157,26 @@ describe("Toasts severity tones", () => {
     );
     expect(glyphs.warning).toBe("!");
     expect(glyphs.error).toBe("✕");
+  });
+
+  /**
+   * A `fixed` layer resolves against the nearest ancestor with a transform,
+   * filter or container-type, not the viewport. The shelf lived inside the
+   * app frame and was correct only because nothing there had grown one yet —
+   * ContextMenu and Tooltip already teleport for exactly this reason.
+   */
+  it("teleports the shelf to <body> so no ancestor can ever capture it", async () => {
+    document.body.innerHTML = "";
+    const wrapper = mount(Toasts);
+    useToastStore().push("Saved to My images");
+    await wrapper.vm.$nextTick();
+
+    const shelf = document.body.querySelector("[aria-label='Notifications']");
+    expect(shelf).not.toBeNull();
+    expect(shelf!.parentElement).toBe(document.body);
+    // Nothing of the shelf is left behind in the component's own tree.
+    expect(wrapper.find("[aria-label='Notifications']").exists()).toBe(false);
+    wrapper.unmount();
+    document.body.innerHTML = "";
   });
 });

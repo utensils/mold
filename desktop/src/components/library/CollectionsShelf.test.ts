@@ -39,19 +39,24 @@ const cards: ShelfCard[] = [
 ];
 
 describe("CollectionCard", () => {
-  it("renders a 2×2 mosaic (max four), name, mono meta, and updated time", () => {
+  it("draws ONE cover, the name, and a mono count; hosts and time are the tooltip", () => {
     const wrapper = mount(CollectionCard, {
       props: { ...cards[0]!, nowMs: NOW },
       global: { stubs: { AuthedMedia: authedMediaStub } },
     });
-    expect(wrapper.findAll("img")).toHaveLength(4);
-    expect(wrapper.get("[data-test='collection-mosaic']").classes()).toContain("grid-cols-2");
+    // The 2x2 mosaic doubled the card's height; the strip sits above the grid
+    // and stays one row tall.
+    expect(wrapper.findAll("img")).toHaveLength(1);
+    expect(wrapper.get("img").attributes("data-path")).toBe("/api/gallery/thumbnail/a.png");
     expect(wrapper.get("[data-test='collection-name']").text()).toContain("Smurfs");
     expect(wrapper.get("[data-test='collection-hidden-badge']").text()).toBe("Hidden");
     const meta = wrapper.get("[data-test='collection-meta']");
-    expect(meta.text()).toBe("9 prints · This Mac · plato");
-    expect(meta.classes()).toContain("font-utility");
-    expect(wrapper.get("[data-test='collection-updated']").text()).toBe("Updated 2h ago");
+    expect(meta.text()).toBe("9 pictures");
+    expect(meta.classes()).toContain("font-mono");
+    expect(wrapper.find("[data-test='collection-updated']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='collection-card']").attributes("title")).toBe(
+      "Smurfs · This Mac · plato · Updated 2h ago",
+    );
   });
 
   it("falls back to a glyph with no covers and a singular noun", () => {
@@ -60,8 +65,10 @@ describe("CollectionCard", () => {
       global: { stubs: { AuthedMedia: authedMediaStub } },
     });
     expect(wrapper.findAll("img")).toHaveLength(0);
-    expect(wrapper.get("[data-test='collection-meta']").text()).toBe("1 print · This Mac");
-    expect(wrapper.find("[data-test='collection-updated']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='collection-meta']").text()).toBe("1 picture");
+    expect(wrapper.get("[data-test='collection-card']").attributes("title")).toBe(
+      "River studies · This Mac",
+    );
   });
 
   it("opens on click and hands the right-click to the parent", async () => {
@@ -84,11 +91,11 @@ describe("CollectionsShelf", () => {
     });
   }
 
-  it("lists one card per collection and a dashed New collection card", async () => {
+  it("lists one card per album and a dashed New album card", async () => {
     const wrapper = mountShelf();
     const items = wrapper.findAll("[data-test='collection-card']");
     expect(items.map((c) => c.attributes("data-slug"))).toEqual(["smurfs", "river-studies"]);
-    expect(wrapper.get("[data-test='new-collection-card']").text()).toContain("New collection");
+    expect(wrapper.get("[data-test='new-collection-card']").text()).toContain("New album");
     await items[0]!.trigger("click");
     expect(wrapper.emitted("open")).toEqual([["smurfs"]]);
     await items[1]!.trigger("contextmenu");
@@ -104,11 +111,11 @@ describe("CollectionsShelf", () => {
     expect(wrapper.emitted("create")).toEqual([["Film grain tests"]]);
     expect(wrapper.find("[data-test='new-collection-input']").exists()).toBe(false);
 
-    await wrapper.get("[aria-label='New collection']").trigger("click");
+    await wrapper.get("[aria-label='New album']").trigger("click");
     await wrapper.get("[data-test='new-collection-input']").trigger("keydown", { key: "Escape" });
     expect(wrapper.find("[data-test='new-collection-input']").exists()).toBe(false);
 
-    await wrapper.get("[aria-label='New collection']").trigger("click");
+    await wrapper.get("[aria-label='New album']").trigger("click");
     await wrapper.get("[data-test='new-collection-input']").trigger("keydown", { key: "Enter" });
     expect(wrapper.emitted("create")).toHaveLength(1);
   });
@@ -116,5 +123,13 @@ describe("CollectionsShelf", () => {
   it("hides the New card when no host can organize", () => {
     const wrapper = mountShelf({ canCreate: false });
     expect(wrapper.find("[data-test='new-collection-card']").exists()).toBe(false);
+  });
+
+  it("says why the strip is empty while still offering the New card", () => {
+    const wrapper = mountShelf({ cards: [], note: "No albums match the current search." });
+    expect(wrapper.get("[data-test='collections-shelf-note']").text()).toBe(
+      "No albums match the current search.",
+    );
+    expect(wrapper.find("[data-test='new-collection-card']").exists()).toBe(true);
   });
 });

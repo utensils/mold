@@ -15,6 +15,11 @@ describe("icon registry", () => {
     }
   });
 
+  it("ships a RunPod mark of its own rather than a generic cloud", () => {
+    expect(ICON_NAMES).toContain("runpod");
+    expect(ICONS).not.toHaveProperty("cloud");
+  });
+
   it("keeps every glyph as stroke-only inner markup on the 24-unit grid", () => {
     for (const name of ICON_NAMES) {
       const markup = ICONS[name];

@@ -65,7 +65,7 @@ describe("SourceImageWell — canvasless 3-D recipes", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(true);
     expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='source-edit-mask']").exists()).toBe(false);
+    expect(wrapper.vm.maskAvailable).toBe(false);
     expect(wrapper.text()).not.toContain("Prompt strength");
   });
 
@@ -77,6 +77,6 @@ describe("SourceImageWell — canvasless 3-D recipes", () => {
     });
     await flushPromises();
     expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='source-edit-mask']").exists()).toBe(true);
+    expect(wrapper.vm.maskAvailable).toBe(true);
   });
 });

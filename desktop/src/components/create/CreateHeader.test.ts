@@ -1,13 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import CreateHeader from "./CreateHeader.vue";
+import createHeaderSource from "./CreateHeader.vue?raw";
+import segmentedControlSource from "@ui/components/SegmentedControl.vue?raw";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
-import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { useGenerateFormStore } from "../../stores/generateForm";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
@@ -34,134 +39,412 @@ function readyLocal() {
   useHostsStore().initialized = true;
 }
 
-function addRemote(id = "hal9000-7680", label = "hal9000") {
+/** Install models on the local host so the header's mesh door can appear. */
+function installLocal(entries: ModelEntry[]) {
+  useHostModelsStore().byHost.local = { entries, fetchedAt: Date.now(), error: null };
+}
+
+/** A second machine, pinned as the one Create sends work to. */
+function pinRemote(entries: ModelEntry[]) {
   useHostsStore().extras.push({
-    id,
-    label,
-    url: `http://${label}:7680`,
+    id: "plato-7680",
+    label: "plato",
+    url: "http://plato:7680",
     apiKey: null,
     status: "ready",
     error: null,
     instanceId: null,
   });
+  useHostModelsStore().byHost["plato-7680"] = { entries, fetchedAt: Date.now(), error: null };
+  useAppPrefsStore().settings = { generateTargetHost: "plato-7680" } as never;
 }
+
+const meshModel = {
+  name: "hunyuan3d-mini-turbo:fp16",
+  family: "hunyuan3d",
+  downloaded: true,
+  default_width: 0,
+  default_height: 0,
+  default_steps: 5,
+  default_guidance: 5,
+} as ModelEntry;
+
+const stillModel = {
+  name: "flux-dev:q8",
+  family: "flux",
+  downloaded: true,
+  default_width: 1024,
+  default_height: 1024,
+  default_steps: 20,
+  default_guidance: 4.5,
+} as ModelEntry;
+
+/** Listed FIRST wherever it appears, so a restore that ignores the section
+ *  rule picks it up instead of the picture style. */
+const clipModel = {
+  ...stillModel,
+  name: "ltx-video",
+  family: "ltx-video",
+  supports_sequence: true,
+} as ModelEntry;
+
+function outputSegments(wrapper: ReturnType<typeof mount>) {
+  return wrapper.get("[data-test='output-kind']").findAll("button");
+}
+
+function clipModeSegments(wrapper: ReturnType<typeof mount>) {
+  return wrapper.get("[data-test='clip-mode']").findAll("button");
+}
+
+/** A form already holding a clip style — the Simple sub-mode on screen. */
+function clipForm(): GenerateForm {
+  const f = form();
+  f.model = clipModel.name;
+  f.family = clipModel.family;
+  return f;
+}
+
+/*
+ * The toolbar must hold one row at every width the window can reach
+ * (`minWidth: 1080` in src-tauri/tauri.conf.json, minus the sidebar and a
+ * dragged-wide inspector). "Still picture" wrapped onto two lines and doubled
+ * the toolbar's height: `.ms-seg__btn` is `flex: 1` with wrappable text, so
+ * its min-content width is only its longest WORD and the flex line let it
+ * shrink there. The order of yielding is title first, then the doors' labels;
+ * the segments never wrap.
+ */
+describe("CreateHeader — the toolbar holds one row", () => {
+  it("keeps every segment on one line", () => {
+    expect(segmentedControlSource).toMatch(/\.ms-seg__btn\s*\{[^}]*white-space:\s*nowrap/s);
+  });
+
+  /*
+   * The output kind picks a SETTING, so it takes the neutral treatment. In
+   * the accent it was louder than the mock and, sitting on the same view as
+   * the accent-tinted Quality rows and mesh ladder, it stopped saying which
+   * of the two kinds of choice it was.
+   */
+  it("paints the output-kind control neutral, not accent-tinted", () => {
+    expect(createHeaderSource).toMatch(/<SegmentedControl[^>]*variant="neutral"/s);
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    expect(wrapper.get("[data-test='output-kind']").classes()).toContain("ms-seg--neutral");
+  });
+
+  it("never lets the segmented control shrink below its own segments", () => {
+    expect(createHeaderSource).toMatch(/\.ms-header__seg\s*\{[^}]*flex:\s*0\s+0\s+auto/s);
+    expect(createHeaderSource).toMatch(/<SegmentedControl[^>]*class="ms-header__seg"/s);
+  });
+
+  it("truncates the title first", () => {
+    expect(createHeaderSource).toMatch(/\.ms-header__title\s*\{[^}]*min-width:\s*0/s);
+    expect(createHeaderSource).toMatch(
+      /\.ms-header__title-text\s*\{[^}]*text-overflow:\s*ellipsis/s,
+    );
+    expect(createHeaderSource).toMatch(/\.ms-header__title-text\s*\{[^}]*white-space:\s*nowrap/s);
+  });
+
+  it("drops the doors' labels to icons before anything wraps", () => {
+    // A container query, not a viewport one: the toolbar's width is the
+    // window minus the sidebar and a user-dragged inspector.
+    expect(createHeaderSource).toMatch(/\.ms-header\s*\{[^}]*container-type:\s*inline-size/s);
+    expect(createHeaderSource).toMatch(/container-name:\s*create-header/s);
+    expect(createHeaderSource).toMatch(
+      /@container create-header \(max-width:[^)]*\)\s*\{[\s\S]*?\.ms-header__door-label\s*\{[^}]*display:\s*none/s,
+    );
+  });
+
+  it("names an icon-only door for the reader who cannot see the icon", () => {
+    readyLocal();
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    for (const id of ["open-starters", "open-recent"]) {
+      const door = wrapper.get(`[data-test='${id}']`);
+      expect(door.attributes("aria-label"), id).toBeTruthy();
+      expect(door.attributes("title"), id).toBe(door.attributes("aria-label"));
+      expect(door.find(".ms-header__door-label").exists(), id).toBe(true);
+    }
+  });
+});
 
 describe("CreateHeader", () => {
   it("no longer renders the retired Single | Sequence switch", () => {
-    // Output is a setting in the inspector now, not a place — the header
-    // must not push a route to change modes.
+    // Output is a setting, not a place — the header must not push a route to
+    // change modes.
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
     expect(wrapper.find("[data-test='composer-mode']").exists()).toBe(false);
+    expect(routerPush).not.toHaveBeenCalled();
   });
 
-  it("renders the live summary of shape, dimensions, and steps", () => {
+  describe("what to make", () => {
+    it("offers Still picture and Short clip, with the 3-D door only where a 3-D style is installed", () => {
+      readyLocal();
+      installLocal([stillModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(wrapper).map((b) => b.text())).toEqual(["Still picture", "Short clip"]);
+
+      installLocal([stillModel, meshModel]);
+      const withMesh = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(withMesh).map((b) => b.text())).toEqual([
+        "Still picture",
+        "Short clip",
+        "3-D object",
+      ]);
+    });
+
+    /*
+     * Short clip opens onto the REMEMBERED sub-mode. With no clip style on the
+     * machine there is nothing Simple could select, so the door still opens
+     * onto Scenes, which owns that empty state and says where to get one.
+     */
+    it("hands Short clip to the inspector when the machine has no clip style", async () => {
+      readyLocal();
+      installLocal([stillModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
+    });
+
+    it("hands Short clip to the inspector when Scenes is the remembered way", async () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      useSequenceDraftStore().clipMode = "scenes";
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
+    });
+
+    /*
+     * Simple is the plain render: the output stays one shot and the STYLE is
+     * what makes it a clip, so the header adopts one the way the 3-D door
+     * adopts a 3-D style. Handing the inspector `single` would have restored a
+     * PICTURE style, which is the opposite of what the door was asked for.
+     */
+    it("adopts a clip style in place for Simple, without an output switch", async () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[1]!.trigger("click");
+
+      expect(wrapper.emitted("set-output")).toBeUndefined();
+      expect(store.form.model).toBe(clipModel.name);
+      expect(useSequenceDraftStore().output).toBe("single");
+    });
+
+    it("restores the parked picture style on the way back out of a simple clip", async () => {
+      readyLocal();
+      const otherStill = { ...stillModel, name: "sdxl-base:fp16", family: "sdxl" } as ModelEntry;
+      installLocal([otherStill, clipModel, stillModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(store.form.model).toBe(clipModel.name);
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
+    });
+
+    it("returns a clip draft to one shot", async () => {
+      readyLocal();
+      installLocal([stillModel]);
+      useSequenceDraftStore().output = "sequence";
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(wrapper.emitted("set-output")).toEqual([["single"]]);
+    });
+
+    it("opens the 3-D door for a 3-D style and nothing else", () => {
+      // The door's existence is the section rule's answer, so a clip style on
+      // the machine can never be mistaken for a 3-D one.
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(wrapper).map((b) => b.text())).toEqual(["Still picture", "Short clip"]);
+    });
+
+    it("leaves 3-D holding a still style — never a clip one — when nothing was parked", async () => {
+      readyLocal();
+      installLocal([clipModel, stillModel, meshModel]);
+      const store = useGenerateFormStore();
+      store.form.model = meshModel.name;
+      store.form.family = meshModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[0]!.trigger("click");
+
+      expect(store.form.model).toBe(stillModel.name);
+      expect(store.form.family).toBe("flux");
+    });
+
+    /**
+     * The header used to partition `unionInstalled` — every style any machine
+     * has — while the inspector partitioned the picker's own target rows. A
+     * 3-D door that opens onto a style the pinned machine cannot run is a dead
+     * end, so both read the one inventory.
+     */
+    it("offers only what the machine Create is aimed at can make", () => {
+      readyLocal();
+      installLocal([stillModel, meshModel]);
+      pinRemote([stillModel]);
+      const wrapper = mount(CreateHeader, { props: { form: form() } });
+      expect(outputSegments(wrapper).map((b) => b.text())).toEqual(["Still picture", "Short clip"]);
+    });
+
+    /**
+     * The parked still style is draft state, not component state: leaving New
+     * image and coming back unmounts the header, and a `ref` took the parked
+     * style with it — the return to Still picture then reached for the first
+     * row on the machine instead of the style the person had been using.
+     */
+    it("keeps the parked still style across a visit to another workspace", async () => {
+      readyLocal();
+      const otherStill = { ...stillModel, name: "sdxl-base:fp16", family: "sdxl" } as ModelEntry;
+      installLocal([otherStill, stillModel, meshModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[2]!.trigger("click");
+      expect(store.form.model).toBe(meshModel.name);
+      wrapper.unmount();
+
+      const returned = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(returned)[0]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
+    });
+
+    it("applies the first installed 3-D style, and restores the parked still style", async () => {
+      readyLocal();
+      installLocal([stillModel, meshModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+
+      await outputSegments(wrapper)[2]!.trigger("click");
+      expect(store.form.model).toBe(meshModel.name);
+      expect(store.form.family).toBe("hunyuan3d");
+
+      await outputSegments(wrapper)[0]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
+    });
+  });
+
+  /*
+   * Simple | Scenes — how the clip gets made. It is offered only once the kind
+   * IS a clip, and what is on screen answers it, so the toggle and the view can
+   * never disagree.
+   */
+  describe("how to make the clip", () => {
+    it("offers the toggle only while the kind is a clip", () => {
+      readyLocal();
+      installLocal([stillModel, clipModel, meshModel]);
+
+      const still = mount(CreateHeader, { props: { form: form() } });
+      expect(still.find("[data-test='clip-mode']").exists()).toBe(false);
+
+      const mesh = form();
+      mesh.family = meshModel.family;
+      const threeD = mount(CreateHeader, { props: { form: mesh } });
+      expect(threeD.find("[data-test='clip-mode']").exists()).toBe(false);
+
+      const clip = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(clip.find("[data-test='clip-mode']").exists()).toBe(true);
+      expect(clipModeSegments(clip).map((b) => b.text())).toEqual(["Simple", "Scenes"]);
+      expect(clip.get("[data-test='clip-mode']").attributes("aria-label")).toBe(
+        "How to make the clip",
+      );
+    });
+
+    it("names Short clip the kind a one-shot on a clip style already is", () => {
+      // The form holds a clip style with the output still one shot: that is
+      // the Simple sub-mode, and calling it Still picture is the mislabelling
+      // the section rule exists to end.
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+      const on = outputSegments(wrapper).find((b) => b.attributes("aria-checked") === "true");
+      expect(on?.text()).toBe("Short clip");
+    });
+
+    it("reads Simple for a fresh draft and Scenes for a sequence", () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const simple = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(
+        clipModeSegments(simple)
+          .find((b) => b.attributes("aria-checked") === "true")
+          ?.text(),
+      ).toBe("Simple");
+
+      useSequenceDraftStore().output = "sequence";
+      const scenes = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(
+        clipModeSegments(scenes)
+          .find((b) => b.attributes("aria-checked") === "true")
+          ?.text(),
+      ).toBe("Scenes");
+    });
+
+    it("lands a reused clip print in Scenes", () => {
+      // `composer.setSequence` and an edit session both put the draft in
+      // `sequence`, and the store keeps the sub-mode true to it.
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const draft = useSequenceDraftStore();
+      draft.output = "sequence";
+      expect(draft.clipMode).toBe("scenes");
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+      expect(
+        clipModeSegments(wrapper)
+          .find((b) => b.attributes("aria-checked") === "true")
+          ?.text(),
+      ).toBe("Scenes");
+    });
+
+    it("hands the switch to the view, which seeds and parks the draft", async () => {
+      readyLocal();
+      installLocal([stillModel, clipModel]);
+      const wrapper = mount(CreateHeader, { props: { form: clipForm() } });
+
+      await clipModeSegments(wrapper)[1]!.trigger("click");
+      expect(wrapper.emitted("set-clip-mode")).toEqual([["scenes"]]);
+
+      // Picking what is already on screen changes nothing.
+      await clipModeSegments(wrapper)[0]!.trigger("click");
+      expect(wrapper.emitted("set-clip-mode")).toEqual([["scenes"]]);
+    });
+  });
+
+  it("carries Where it runs as the toolbar's last chip, after the doors", () => {
+    // The routing pick used to sit at the foot of the inspector's Settings
+    // list, where nobody found it. It is chrome now: always on screen, last
+    // on the row, so the machine a print goes to is one glance away.
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
-    expect(wrapper.get(".ms-header__title").text()).toBe("Untitled print");
-    expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 4 steps");
+    const chip = wrapper.get("[data-test='host-chip']");
+    expect(chip.text()).toContain("This device");
+    const header = wrapper.get("[data-test='create-header']").element;
+    const order = Array.from(header.querySelectorAll("[data-test]")).map((el) =>
+      el.getAttribute("data-test"),
+    );
+    expect(order.indexOf("host-chip")).toBeGreaterThan(order.indexOf("open-recent"));
+    expect(order.at(-1)).toBe("host-chip");
   });
 
-  it("omits the aspect and canvas for a canvasless (3-D mesh) recipe, showing octree instead", () => {
-    // A Hunyuan3D recipe renders no pixel canvas: width/height sit at the
-    // recipe's zero default (they describe a poster, not a canvas), so the
-    // old `${aspect} · ${width}×${height} · ${steps} steps` summary read
-    // "1:1 · 0×0 · 5 steps" — nonsense for a mesh. The snapshot's
-    // `canvasless` flag (mirroring the form's own source-of-truth) swaps in
-    // the octree resolution instead.
+  it("opens the inspector's Starters and Recent tabs instead of floating a popover", async () => {
     readyLocal();
-    const meshForm = form();
-    meshForm.family = "hunyuan3d";
-    meshForm.width = 0;
-    meshForm.height = 0;
-    meshForm.steps = 5;
-    meshForm.recipeCapabilities = {
-      outputFormats: ["glb"],
-      defaultOutputFormat: "glb",
-      promptMode: "ignored",
-      supportsStrength: false,
-      canvasless: true,
-      mesh: {
-        octree_resolutions: [128, 192, 256, 320, 384],
-        octree_default: 256,
-        threshold: { default: 0.6, min: 0.0, max: 1.0, step: 0.01, mode: "adjustable" },
-        target_faces_min: 100,
-        target_faces_max: 2_000_000,
-        texture: { mode: "hidden", required: false, reason: "not available" },
-      },
-      referenceImages: null,
-    };
-    const wrapper = mount(CreateHeader, { props: { form: meshForm } });
-    const text = wrapper.get(".ms-header__summary").text();
-    expect(text).not.toContain("0×0");
-    expect(text).not.toContain("1:1");
-    expect(text).toBe("octree 256 · 5 steps");
-  });
-
-  it("uses the form's explicit octree override, not the recipe default, in the mesh summary", () => {
-    readyLocal();
-    const meshForm = form();
-    meshForm.family = "hunyuan3d";
-    meshForm.width = 0;
-    meshForm.height = 0;
-    meshForm.steps = 5;
-    meshForm.mesh.octreeResolution = 192;
-    meshForm.recipeCapabilities = {
-      outputFormats: ["glb"],
-      defaultOutputFormat: "glb",
-      promptMode: "ignored",
-      supportsStrength: false,
-      canvasless: true,
-      mesh: {
-        octree_resolutions: [128, 192, 256, 320, 384],
-        octree_default: 256,
-        threshold: { default: 0.6, min: 0.0, max: 1.0, step: 0.01, mode: "adjustable" },
-        target_faces_min: 100,
-        target_faces_max: 2_000_000,
-        texture: { mode: "hidden", required: false, reason: "not available" },
-      },
-      referenceImages: null,
-    };
-    const wrapper = mount(CreateHeader, { props: { form: meshForm } });
-    expect(wrapper.get(".ms-header__summary").text()).toBe("octree 192 · 5 steps");
-  });
-
-  it("keeps the aspect and canvas summary unchanged for an ordinary (non-mesh) recipe", () => {
-    // Regression guard: an SDXL-style recipe with no recipeCapabilities
-    // snapshot (or one with canvasless: false) must still summarize as
-    // aspect · dimensions · steps.
-    readyLocal();
-    const sdxlForm = form();
-    sdxlForm.family = "sdxl";
-    sdxlForm.width = 1024;
-    sdxlForm.height = 1024;
-    sdxlForm.steps = 30;
-    sdxlForm.recipeCapabilities = {
-      outputFormats: ["png"],
-      defaultOutputFormat: "png",
-      promptMode: "required",
-      supportsStrength: false,
-      canvasless: false,
-      mesh: null,
-      referenceImages: null,
-    };
-    const wrapper = mount(CreateHeader, { props: { form: sdxlForm } });
-    expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 30 steps");
-  });
-
-  it("titles a sequence draft and summarizes clips + fps instead of steps", () => {
-    readyLocal();
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(97);
-    const sequenceForm = form();
-    sequenceForm.family = "ltx2";
-    sequenceForm.width = 1216;
-    sequenceForm.height = 704;
-    sequenceForm.fps = 24;
-    const wrapper = mount(CreateHeader, { props: { form: sequenceForm } });
-    expect(wrapper.get(".ms-header__title").text()).toBe("Untitled sequence");
-    expect(wrapper.get(".ms-header__summary").text()).toBe("16:9 · 1216×704 · 2 clips · 24 fps");
+    const wrapper = mount(CreateHeader, { props: { form: form() } });
+    await wrapper.get("[data-test='open-starters']").trigger("click");
+    await wrapper.get("[data-test='open-recent']").trigger("click");
+    expect(wrapper.emitted("open-tab")).toEqual([["starters"], ["recent"]]);
   });
 
   describe("editable print title", () => {
@@ -181,7 +464,7 @@ describe("CreateHeader", () => {
       await wrapper.get("[data-test='print-title']").trigger("click");
       const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
       expect(input.attributes("aria-label")).toBe("Print title");
-      expect(input.attributes("placeholder")).toBe("Untitled print");
+      expect(input.attributes("placeholder")).toBe("Untitled picture");
       // No raw maxlength: it counts UTF-16 code units, truncating emoji
       // titles early. The scalar-aware validator enforces the 120 limit.
       expect(input.attributes("maxlength")).toBeUndefined();
@@ -217,7 +500,7 @@ describe("CreateHeader", () => {
       const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
       await wrapper.get("[data-test='print-title']").trigger("click");
       const input = wrapper.get<HTMLInputElement>("[data-test='print-title-input']");
-      await input.setValue("bad\u0007title");
+      await input.setValue("badtitle");
       await input.trigger("keydown", { key: "Enter" });
       expect(f.title).toBe("");
       expect(wrapper.find("[data-test='print-title-input']").exists()).toBe(true);
@@ -251,88 +534,25 @@ describe("CreateHeader", () => {
       expect(wrapper.get("[data-test='print-title-error']").text()).toContain("120");
     });
 
-    it("uses the sequence placeholder for a sequence draft", async () => {
+    it("uses the 3-D placeholder for a 3-D style", async () => {
+      readyLocal();
+      const f = form();
+      f.family = "hunyuan3d";
+      const wrapper = mount(CreateHeader, { props: { form: f }, attachTo: document.body });
+      await wrapper.get("[data-test='print-title']").trigger("click");
+      expect(wrapper.get("[data-test='print-title-input']").attributes("placeholder")).toBe(
+        "Untitled 3-D object",
+      );
+    });
+
+    it("uses the clip placeholder for a sequence draft", async () => {
       readyLocal();
       useSequenceDraftStore().output = "sequence";
       const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
       await wrapper.get("[data-test='print-title']").trigger("click");
       expect(wrapper.get("[data-test='print-title-input']").attributes("placeholder")).toBe(
-        "Untitled sequence",
+        "Untitled clip",
       );
     });
-  });
-
-  it("does not open a routing menu with a single host", async () => {
-    readyLocal();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
-  });
-
-  it("toggles the routing menu open and closed from the chip", async () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: null } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(true);
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
-  });
-
-  it("lists Auto, Most capable, and every host; picking one persists and closes", async () => {
-    readyLocal();
-    const prefs = useAppPrefsStore();
-    prefs.settings = { generateTargetHost: null } as never;
-    const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined as never);
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-option-auto']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='host-option-capable']").exists()).toBe(true);
-    await wrapper.get("[data-test='host-option-hal9000-7680']").trigger("click");
-    await flushPromises();
-    expect(update).toHaveBeenCalledWith({ generateTargetHost: "hal9000-7680" });
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
-  });
-
-  it("maps Auto back to null in the persisted setting", async () => {
-    readyLocal();
-    const prefs = useAppPrefsStore();
-    prefs.settings = { generateTargetHost: "hal9000-7680" } as never;
-    const update = vi.spyOn(prefs, "update").mockResolvedValue(undefined as never);
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    await wrapper.get("[data-test='host-option-auto']").trigger("click");
-    expect(update).toHaveBeenCalledWith({ generateTargetHost: null });
-  });
-
-  it("shows a stale persisted pick as Auto when the host is gone", async () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: "ghost-7680" } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.get("[data-test='host-option-auto']").attributes("aria-checked")).toBe("true");
-  });
-
-  it("names the sticky pick on the chip", () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() } });
-    expect(wrapper.get("[data-test='host-chip']").text()).toContain("hal9000");
-  });
-
-  it("closes the menu on Escape", async () => {
-    readyLocal();
-    useAppPrefsStore().settings = { generateTargetHost: null } as never;
-    addRemote();
-    const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    await flushPromises();
-    expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
   });
 });

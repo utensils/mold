@@ -1233,7 +1233,7 @@ describe("MobileGalleryViewer info sheet", () => {
       "Steps · guidance4 · 3.5",
       "Schedulereuler-a",
       "CFG++on",
-      "Denoise strength0.65",
+      "How much to change it0.65",
       "Frames97 · 24 fps",
       "LoRAdetail.safetensors × 0.80",
       "File size1.5 MB",

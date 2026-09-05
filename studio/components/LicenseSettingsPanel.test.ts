@@ -41,11 +41,18 @@ describe("LicenseSettingsPanel", () => {
     });
     await flushPromises();
 
-    await wrapper.get(".license-settings__actions button").trigger("click");
+    // Either row opens the ONE dialog covering everything the bundle needs.
+    const rows = wrapper.findAll(".license-settings__row");
+    const pending = rows.find((row) =>
+      row.text().includes("a · Restricted use."),
+    )!;
+    expect(pending.text()).toContain("Needs your OK");
+    await pending.get("button").trigger("click");
     expect(request).toHaveBeenCalledWith(
       expect.objectContaining({
         hostLabel: "host-b",
         target: { baseUrl: "http://host-b:7680", apiKey: "b" },
+        intent: "record",
         requirements: [
           expect.objectContaining({
             installModel: "future-bundle",
@@ -57,6 +64,102 @@ describe("LicenseSettingsPanel", () => {
         ],
       }),
     );
+  });
+
+  it("renders one row per licence: mono id, the licence's name, a state word", async () => {
+    fetchLicenseListing.mockResolvedValue({
+      licenses: [
+        { ...terms("a", ["bundle-a"]), accepted: true },
+        terms("b", ["bundle-b"]),
+      ],
+    });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://h:7680", apiKey: null },
+        hostLabel: "h",
+      },
+    });
+    await flushPromises();
+
+    const rows = wrapper
+      .findAll(".license-settings__row")
+      .filter((row) => row.find(".license-settings__id").exists());
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.get(".license-settings__id").text()).toBe("a");
+    // The licence's own name is what a person recognizes; the id is the
+    // machine's handle for it, and neither stands in for the other.
+    expect(rows[0]!.get(".license-settings__name").text()).toBe(
+      "Terms a · Restricted use.",
+    );
+    expect(rows[0]!.get(".license-settings__state").text()).toBe("Accepted");
+    // Nothing to accept — the row is its two links and nothing else.
+    expect(rows[0]!.find("button").exists()).toBe(false);
+    // Pending is a warning, never an error: nothing has gone wrong yet.
+    expect(rows[1]!.get(".license-settings__state").classes()).toContain(
+      "license-settings__state--pending",
+    );
+    expect(rows[1]!.get(".license-settings__state").text()).toBe(
+      "Needs your OK",
+    );
+    expect(rows[1]!.get("button").text()).toBe("Read & accept");
+  });
+
+  it("links both the pinned terms and the project's own, through the shell", async () => {
+    const openExternal = vi.fn();
+    fetchLicenseListing.mockResolvedValue({
+      licenses: [{ ...terms("a", ["bundle-a"]), accepted: true }],
+    });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://h:7680", apiKey: null },
+        hostLabel: "h",
+        openExternal,
+      },
+    });
+    await flushPromises();
+
+    const links = wrapper.findAll(".license-settings__link");
+    expect(links.map((link) => link.text())).toEqual([
+      "Pinned terms",
+      "Project terms",
+    ]);
+    expect(links[0]!.attributes("href")).toBe("https://example.test/a/pinned");
+    expect(links[1]!.attributes("href")).toBe("https://example.test/a");
+
+    // Real links, but the shell opens them: an in-app navigation would
+    // replace the app with a licence page.
+    await links[1]!.trigger("click");
+    expect(openExternal).toHaveBeenCalledWith("https://example.test/a");
+  });
+
+  it("a pending row still records acceptance only, never a download", async () => {
+    fetchLicenseListing.mockResolvedValue({
+      licenses: [terms("b", ["bundle-b"])],
+    });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://h:7680", apiKey: null },
+        hostLabel: "h",
+      },
+    });
+    await flushPromises();
+    await wrapper.get(".license-settings__row button").trigger("click");
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: "record" }),
+    );
+  });
+
+  it("shows the machine the answers belong to in the slot the surface fills", async () => {
+    fetchLicenseListing.mockResolvedValue({ licenses: [] });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://h:7680", apiKey: null },
+        hostLabel: "h",
+      },
+      slots: { machine: '<span data-test="picker">studio-rack</span>' },
+    });
+    await flushPromises();
+    expect(wrapper.get("[data-test='picker']").text()).toBe("studio-rack");
   });
 
   it("fences a slow old-host response after the selected host changes", async () => {
@@ -80,8 +183,8 @@ describe("LicenseSettingsPanel", () => {
     resolveA({ licenses: [terms("a", ["bundle-a"])] });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Terms b");
-    expect(wrapper.text()).not.toContain("Terms a");
+    expect(wrapper.text()).toContain("b · Restricted use.");
+    expect(wrapper.text()).not.toContain("a · Restricted use.");
   });
 
   it("keeps a failed host visible with an explicit retry", async () => {

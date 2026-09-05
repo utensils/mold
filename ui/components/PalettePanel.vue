@@ -169,9 +169,9 @@ function optionId(index: number) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bench);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-card-lg);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
   box-shadow: 0 40px 90px -20px rgba(0, 0, 0, 0.7);
 }
 
@@ -180,12 +180,12 @@ function optionId(index: number) {
   align-items: center;
   gap: 11px;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
 }
 
 .ms-palette__search {
   flex: 0 0 auto;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-palette__input {
@@ -193,24 +193,24 @@ function optionId(index: number) {
   min-width: 0;
   border: 0;
   background: transparent;
-  color: var(--rebate);
-  font-family: var(--f-body);
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
   font-size: 15px;
   outline: none;
 }
 
 .ms-palette__input::placeholder {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-palette__esc {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-3);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control-sm);
+  color: var(--mold-text-dim);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-1);
   padding: 2px 6px;
 }
 
@@ -228,32 +228,32 @@ function optionId(index: number) {
   width: 100%;
   border: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   padding: 11px 12px;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   text-align: left;
   cursor: pointer;
-  font-family: var(--f-body);
-  transition: background var(--dur-quick) var(--ease);
+  font-family: var(--mold-font-sans);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-palette__row[data-hl="true"] {
-  background: var(--surface);
+  background: var(--mold-surface);
 }
 
 .ms-palette__row:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .ms-palette__section {
   flex: 0 0 48px;
   width: 48px;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-palette__label {
@@ -271,22 +271,22 @@ function optionId(index: number) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.04em;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-palette__arrow {
   flex: 0 0 auto;
-  color: var(--ce);
+  color: var(--mold-border-control);
 }
 
 .ms-palette__busy {
   padding: 14px;
   text-align: center;
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -295,7 +295,7 @@ function optionId(index: number) {
 .ms-palette__empty {
   padding: 28px;
   text-align: center;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 13px;
 }
 </style>

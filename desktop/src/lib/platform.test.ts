@@ -35,6 +35,7 @@ describe("platformUi", () => {
       modifier: "Meta",
       modifierLabel: "⌘",
       shiftLabel: "⇧",
+      altLabel: "⌥",
       deviceLabel: "This Mac",
       fileManagerLabel: "Finder",
     });
@@ -46,6 +47,7 @@ describe("platformUi", () => {
       modifier: "Control",
       modifierLabel: "Ctrl+",
       shiftLabel: "Shift+",
+      altLabel: "Alt+",
       deviceLabel: "This device",
       // Linux has no single file manager to name, so the generic stands.
       fileManagerLabel: "file manager",
@@ -58,6 +60,7 @@ describe("platformUi", () => {
       modifier: "Control",
       modifierLabel: "Ctrl+",
       shiftLabel: "Shift+",
+      altLabel: "Alt+",
       deviceLabel: "This device",
       fileManagerLabel: "File Explorer",
     });

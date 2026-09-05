@@ -1363,13 +1363,13 @@ describe("organization union + filters", () => {
     expect(gallery.organizationOf(halShared).title).toBe("Grain test");
   });
 
-  it("favoritesOnly and tag chips (AND over the union) narrow the grid", () => {
+  it("the Favourites scope and tag chips (AND over the union) narrow the grid", () => {
     const gallery = seed();
-    gallery.favoritesOnly = true;
+    gallery.scope = "favorites";
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "solo.png"]);
     gallery.tagFilter = ["BLUE", "portrait"];
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["solo.png"]);
-    gallery.favoritesOnly = false;
+    gallery.scope = "prints";
     gallery.tagFilter = ["keep"];
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png"]);
   });
@@ -1416,7 +1416,10 @@ describe("organization union + filters", () => {
     gallery.query = "";
     gallery.scope = "collections";
     gallery.collectionSlug = "smurfs";
-    expect(gallery.basePrintCount).toBe(3);
+    // The drill-in reveals the album; `basePrintCount` stays the default
+    // library's own count, which is what the shell's picture count reads.
+    expect(gallery.basePrints).toHaveLength(3);
+    expect(gallery.basePrintCount).toBe(1);
     expect(gallery.kindCounts.all).toBe(3);
     expect(gallery.filterChipTags).toEqual([
       { name: "Blue", count: 2 },
@@ -1427,6 +1430,89 @@ describe("organization union + filters", () => {
       "shared.png",
       "remote.png",
     ]);
+  });
+});
+
+describe("scope-aware chips and hidden albums", () => {
+  function seedScopes() {
+    connectLocalPlusHal();
+    advertise("local");
+    advertise("hal9000-7680");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([
+      organized("live-blue.png", 300, { tags: ["Blue"] }),
+      organized("live-keep.png", 200, { tags: ["keep"], favorite: true }),
+      organized("secret.png", 150, { tags: ["Blue"], collections: ["l1"] }),
+    ]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
+    gallery.trashBuckets["local"] = loadedBucket([
+      organized("gone-blue.png", 90, { tags: ["Blue"], trashed_at: 90 }),
+      organized("gone-keep.png", 80, { tags: ["keep"], trashed_at: 80 }),
+    ]);
+    gallery.collectionsByHost["local"] = loadedCollections([
+      { ...collection("l1", "Smurfs", 1), hidden: true },
+    ]);
+    gallery.collectionsByHost["hal9000-7680"] = loadedCollections([]);
+    return gallery;
+  }
+
+  it("a tag chip narrows the trash, and the chips count over the trash's own set", () => {
+    const gallery = seedScopes();
+    gallery.scope = "trash";
+    expect(gallery.trashFiltered.map((e) => e.item.filename)).toEqual([
+      "gone-blue.png",
+      "gone-keep.png",
+    ]);
+    expect(gallery.basePrints.map((e) => e.item.filename)).toEqual([
+      "gone-blue.png",
+      "gone-keep.png",
+    ]);
+    expect(gallery.filterChipTags).toEqual([
+      { name: "Blue", count: 1 },
+      { name: "keep", count: 1 },
+    ]);
+    gallery.tagFilter = ["blue"];
+    expect(gallery.trashFiltered.map((e) => e.item.filename)).toEqual(["gone-blue.png"]);
+  });
+
+  it("the Favourites scope never leaks into the trash's own filtering", () => {
+    const gallery = seedScopes();
+    gallery.scope = "trash";
+    gallery.tagFilter = [];
+    expect(gallery.trashFiltered).toHaveLength(2);
+  });
+
+  it("hidden album members stay hidden in every scope until an album is opened", () => {
+    const gallery = seedScopes();
+    for (const scope of ["prints", "favorites", "collections"] as const) {
+      gallery.scope = scope;
+      expect(
+        gallery.filtered.some((e) => e.item.filename === "secret.png"),
+        scope,
+      ).toBe(false);
+      expect(gallery.kindCounts.all, scope).toBe(2);
+      expect(gallery.chipCounts.find((c) => c.key === "local")!.count, scope).toBe(2);
+      expect(
+        gallery.basePrints.map((e) => e.item.filename),
+        scope,
+      ).toEqual(["live-blue.png", "live-keep.png"]);
+    }
+    gallery.scope = "collections";
+    gallery.collectionSlug = "smurfs";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["secret.png"]);
+    expect(gallery.kindCounts.all).toBe(3);
+    expect(gallery.chipCounts.find((c) => c.key === "local")!.count).toBe(3);
+    expect(gallery.basePrints).toHaveLength(3);
+  });
+
+  it("basePrintCount stays the default library count in every scope (the shell reads it)", () => {
+    const gallery = seedScopes();
+    expect(gallery.basePrintCount).toBe(2);
+    gallery.scope = "trash";
+    expect(gallery.basePrintCount).toBe(2);
+    gallery.scope = "collections";
+    gallery.collectionSlug = "smurfs";
+    expect(gallery.basePrintCount).toBe(2);
   });
 });
 

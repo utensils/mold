@@ -26,6 +26,12 @@ function freshStore() {
   return useSequenceDraftStore();
 }
 
+/** `setOutput`'s retained bridge argument; prompts are deliberately never
+ *  copied across an output switch, so nothing reads it. */
+function noBridge() {
+  return { getPrompt: () => "", setPrompt: () => {} };
+}
+
 describe("sequence draft store", () => {
   beforeEach(() => {
     localStorage = memoryStorage();
@@ -64,6 +70,25 @@ describe("sequence draft store", () => {
     next.hydrate();
     expect(next.clips[0]?.prompt).toBe("a kingfisher waits");
     expect(next.clips[0]?.cameraControl).toBe("dolly-in");
+  });
+
+  /**
+   * The style parked while a 3-D style is selected belongs to the draft, not
+   * to the toolbar that parked it: leaving New image unmounts that toolbar,
+   * and a component-local ref took the parked style with it.
+   */
+  it("keeps the parked still style beside the parked one-shot style", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.lastStillModel = "flux-dev:q8";
+    vi.advanceTimersByTime(1000);
+
+    expect(
+      JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!).lastStillModel,
+    ).toBe("flux-dev:q8");
+    const next = freshStore();
+    next.hydrate();
+    expect(next.lastStillModel).toBe("flux-dev:q8");
   });
 
   it("normalizes pre-camera drafts to an explicit empty selection", () => {
@@ -362,7 +387,10 @@ describe("sequence draft store", () => {
       true,
     );
 
-    store.clearSequence(25);
+    // Starting over restores the MODEL's audio answer, not a flat off — the
+    // caller passes the chain limits' `supports_audio`, and omitting it (as
+    // here) leaves whatever the draft already had.
+    store.clearSequence(25, false);
 
     expect(store.clips).toHaveLength(2);
     expect(store.clips.every((clip) => clip.prompt === "")).toBe(true);
@@ -390,6 +418,41 @@ describe("sequence draft store", () => {
       "ending",
     ]);
     expect(store.clips[1]!.transition).toBe("cut");
+  });
+
+  it("adopts the new model's audio answer, and only on a real switch", () => {
+    // A sequence renders with sound wherever the model delivers it, the same
+    // default a one-shot of that model gets. Switching to an audio model
+    // turns it on; switching to a silent one turns it off; a re-fetch for the
+    // SAME model (fps change, host refresh) must leave the user's own choice.
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(53);
+
+    expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97, true)).toBe(
+      true,
+    );
+    expect(store.enableAudio).toBe(true);
+
+    store.enableAudio = false;
+    expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97, true)).toBe(
+      false,
+    );
+    expect(store.enableAudio).toBe(false);
+
+    expect(store.adoptSequenceModel("wan22-i2v-a14b:q5", 53, false)).toBe(true);
+    expect(store.enableAudio).toBe(false);
+  });
+
+  it("clears back to the model's audio answer rather than to silence", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    store.enableAudio = false;
+
+    store.clearSequence(97, true);
+
+    expect(store.enableAudio).toBe(true);
   });
 
   it("persists the model that owns clip lengths and resets only on a change", () => {
@@ -481,6 +544,114 @@ describe("sequence draft store", () => {
     expect(store.clips[0]!.id).toBe(head.id);
     const tail = store.insertClip(99, 97);
     expect(store.clips[store.clips.length - 1]!.id).toBe(tail.id);
+  });
+
+  /*
+   * The clip sub-mode. `simple` is the plain one-shot render and the default;
+   * `scenes` is the authored sequence. It lives on the draft so leaving New
+   * image cannot lose it, and a sequence — however it arrived — is always the
+   * scene-by-scene way.
+   */
+  describe("how a clip is being made", () => {
+    it("starts simple and survives a reload", () => {
+      const store = freshStore();
+      store.hydrate();
+      expect(store.clipMode).toBe("simple");
+
+      store.clipMode = "scenes";
+      vi.advanceTimersByTime(1000);
+      expect(
+        JSON.parse(localStorage.getItem(SEQUENCE_DRAFT_KEY)!).clipMode,
+      ).toBe("scenes");
+
+      const reloaded = freshStore();
+      reloaded.hydrate();
+      expect(reloaded.clipMode).toBe("scenes");
+    });
+
+    it("keeps the preference when the draft leaves the clip kind", () => {
+      // Still picture and 3-D park the sub-mode; only Simple itself clears it.
+      const store = freshStore();
+      store.hydrate();
+      store.clipMode = "scenes";
+      store.setOutput("single", noBridge(), 97);
+      expect(store.clipMode).toBe("scenes");
+    });
+
+    it("calls a sequence the scene-by-scene way however it arrived", () => {
+      const viaSetOutput = freshStore();
+      viaSetOutput.hydrate();
+      viaSetOutput.setOutput("sequence", noBridge(), 97);
+      expect(viaSetOutput.clipMode).toBe("scenes");
+
+      // Reuse of a sequence print assigns `output` directly.
+      const viaReuse = freshStore();
+      viaReuse.hydrate();
+      viaReuse.output = "sequence";
+      expect(viaReuse.clipMode).toBe("scenes");
+
+      // An edit session loads a durable job.
+      const viaEdit = freshStore();
+      viaEdit.hydrate();
+      viaEdit.ensureClips(97);
+      viaEdit.loadFromJob(
+        {
+          jobId: "c9",
+          hostId: "plato",
+          baseline: viaEdit.clips.map((c) => ({ ...c })),
+          completedStages: 0,
+        },
+        viaEdit.clips.map((c) => ({ ...c })),
+        false,
+      );
+      expect(viaEdit.clipMode).toBe("scenes");
+    });
+
+    it("reads a draft written before the sub-mode existed from what it holds", () => {
+      // No `clipMode` key: two scenes somebody actually wrote is the answer,
+      // and a parked one-shot draft is not.
+      localStorage.setItem(
+        SEQUENCE_DRAFT_KEY,
+        JSON.stringify({
+          version: 1,
+          output: "single",
+          clips: [
+            { id: "a", prompt: "the gate opens", frames: 97 },
+            { id: "b", prompt: "the road bends", frames: 97 },
+          ],
+          enableAudio: false,
+          lastSingleModel: null,
+        }),
+      );
+      const authored = freshStore();
+      authored.hydrate();
+      expect(authored.clipMode).toBe("scenes");
+
+      localStorage.setItem(
+        SEQUENCE_DRAFT_KEY,
+        JSON.stringify({
+          version: 1,
+          output: "single",
+          clips: [
+            { id: "a", prompt: "", frames: 97 },
+            { id: "b", prompt: "", frames: 97 },
+          ],
+          enableAudio: false,
+          lastSingleModel: null,
+        }),
+      );
+      const blank = freshStore();
+      blank.hydrate();
+      expect(blank.clipMode).toBe("simple");
+    });
+
+    it("returns to simple on a full reset", () => {
+      const store = freshStore();
+      store.hydrate();
+      store.clipMode = "scenes";
+      store.reset();
+      expect(store.clipMode).toBe("simple");
+    });
   });
 
   it("tracks an edit session without persisting it", () => {

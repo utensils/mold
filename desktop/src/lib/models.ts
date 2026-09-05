@@ -7,12 +7,19 @@ import type { ModelEntry } from "./api/types";
 import { formatGB } from "./format";
 import {
   isCatalogModelId,
+  isOpaqueModelId,
   modelDisplayName,
   modelDisplayNameForId,
   type DisplayableModel,
 } from "@studio/lib/modelDisplay";
 
-export { isCatalogModelId, modelDisplayName, modelDisplayNameForId, type DisplayableModel };
+export {
+  isCatalogModelId,
+  isOpaqueModelId,
+  modelDisplayName,
+  modelDisplayNameForId,
+  type DisplayableModel,
+};
 
 /** Families that aren't image/video generators — grouped separately at the
  * bottom of the Installed tab. Mirrors `stores/models.ts`'s exclusion set. */
@@ -81,11 +88,6 @@ export function isUtilityModel(m: ModelEntry): boolean {
 /** Quant tag = the part after the first colon (`flux-dev:q8` → `q8`).
  * Catalog ids (`cv:252914`) carry no quant variant — their colon is part
  * of the identifier, not a `base:tag` split. */
-export function quantTag(name: string): string | null {
-  if (isCatalogModelId(name)) return null;
-  const i = name.indexOf(":");
-  return i >= 0 ? name.slice(i + 1) : null;
-}
 
 export function modelDiskBytes(m: ModelEntry): number {
   return m.disk_usage_bytes ?? 0;
@@ -150,4 +152,34 @@ export function groupInstalledModels(models: ModelEntry[]): InstalledGroups {
   utility.sort(byName);
 
   return { families, utility, maxDiskBytes };
+}
+
+/**
+ * The Styles shelf's row set: every style ready on ANY connected machine.
+ *
+ * This is the fleet, not this device — and it is the ONE authority for that
+ * count. The Ready-to-use tab badge read it while the title-bar subtitle
+ * counted `models.installed` alone, so a connected second machine put "106"
+ * beside "25 styles ready" with neither string saying which set it meant.
+ */
+export function mergeInstalledAcrossFleet<T extends ModelEntry & { hostIds?: string[] }>(
+  local: readonly ModelEntry[],
+  fleet: readonly T[],
+): (ModelEntry & { hostIds: string[] })[] {
+  const byName = new Map<string, ModelEntry & { hostIds: string[] }>(
+    local.map((entry) => [entry.name, { ...entry, hostIds: ["local"] }]),
+  );
+  for (const entry of fleet) {
+    const existing = byName.get(entry.name);
+    const hostIds = entry.hostIds ?? [];
+    if (existing) {
+      byName.set(entry.name, {
+        ...mergeModelPresentationMetadata(existing, entry),
+        hostIds: [...new Set([...existing.hostIds, ...hostIds])],
+      });
+    } else {
+      byName.set(entry.name, { ...entry, hostIds: [...hostIds] });
+    }
+  }
+  return [...byName.values()];
 }

@@ -1307,11 +1307,14 @@ Examples:
         #[arg(long, value_name = "N", default_value_t = 17, help_heading = "Video")]
         motion_tail: u32,
 
-        /// Enable synchronized audio for LTX-2 family generation.
+        /// Force synchronized audio for LTX-2 family generation. Audio is
+        /// already on by default wherever the model renders it, so this only
+        /// matters against a non-MP4 container.
         #[arg(long, help_heading = "Video", conflicts_with = "no_audio")]
         audio: bool,
 
-        /// Disable synchronized audio for LTX-2 family generation.
+        /// Render an LTX-2 clip silent. Audio is on by default for this
+        /// family, so this is how you turn it off.
         #[arg(long, help_heading = "Video", conflicts_with = "audio")]
         no_audio: bool,
 

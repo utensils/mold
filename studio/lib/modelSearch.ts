@@ -1,5 +1,5 @@
 /*
- * Model search for the ⌘K palette (spec §06 system affordances).
+ * Model search for the ⌘K palette.
  *
  * The palette already listed installed models, but only the ones the serving
  * host happened to report, and a model you did not have was simply absent —

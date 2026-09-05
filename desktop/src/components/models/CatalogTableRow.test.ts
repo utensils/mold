@@ -123,6 +123,13 @@ describe("CatalogTableRow", () => {
     expect(wrapper.get("[data-test='row-sizes']").text()).toContain("SIZE 6.4 GB");
   });
 
+  it("draws Get it filled, the treatment the catalog card already uses", () => {
+    const wrapper = mount(CatalogTableRow, { props: { entry: entry(), pulling: false } });
+    const get = wrapper.get("[data-test='pull']");
+    expect(get.classes()).toContain("ms-toolbar-button--on");
+    expect(get.classes()).not.toContain("ms-toolbar-button--accent");
+  });
+
   it("emits open from the row and pull from the button without opening", async () => {
     const wrapper = mount(CatalogTableRow, { props: { entry: entry(), pulling: false } });
     await flushPromises();
@@ -143,7 +150,7 @@ describe("CatalogTableRow", () => {
     });
     await flushPromises();
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
   });
 
   it("still offers Pull for a model another machine is missing", async () => {
@@ -152,7 +159,7 @@ describe("CatalogTableRow", () => {
     });
     await flushPromises();
     // The host chips say where it already is; the button sends it somewhere new.
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     await wrapper.get("[data-test='pull']").trigger("click");
     expect(wrapper.emitted("pull")).toHaveLength(1);
   });

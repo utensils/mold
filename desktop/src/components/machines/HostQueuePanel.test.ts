@@ -125,6 +125,20 @@ describe("HostQueuePanel", () => {
     expect(wrapper.get("[data-test='queue-row']").text()).toContain("PAUSED");
   });
 
+  it("gives the PAUSED chip one colour, since two in a static class is a coin toss", async () => {
+    // Colour utilities are all specificity 0,1,0, so the winner is the order
+    // the stylesheet emits them in, not the order of the class attribute. The
+    // chip carried both text-fg-dim and text-accent (see styles/kitLayer.test).
+    const { wrapper, jobs } = await mountPanel([], [queued("srv-queued", 0, 0)]);
+    jobs.queues.local!.paused = true;
+    await flushPromises();
+
+    const classes = wrapper.get("[data-test='paused-chip']").classes();
+    expect(classes.filter((c) => /^text-(fg|accent|error|warning)/.test(c))).toEqual([
+      "text-accent",
+    ]);
+  });
+
   it("shows dependency preparation component and progress on a queued row", async () => {
     const entry = queued("preparing", 0, 0);
     const { wrapper } = await mountPanel([], [entry], {
@@ -333,9 +347,7 @@ describe("HostQueuePanel", () => {
     await flushPromises();
     expect(cancel).not.toHaveBeenCalled();
 
-    // ConfirmDialog teleports to the body, so it is not inside the wrapper.
-    const accept = document.querySelector<HTMLButtonElement>("[data-test='confirm-accept']");
-    accept?.click();
+    await wrapper.get("[data-test='confirm-accept']").trigger("click");
     await flushPromises();
     expect(cancel).toHaveBeenCalledWith("local", "srv-0");
   });

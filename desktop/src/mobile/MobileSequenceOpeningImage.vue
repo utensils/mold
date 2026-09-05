@@ -28,6 +28,7 @@ import type { ApiTarget } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import MobileImagePickerSheet, {
   type MobileGallerySource,
   type MobilePickedImage,
@@ -56,6 +57,9 @@ const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).
 const upscalerAvailable = computed(() =>
   Boolean(props.form.upscaleModel || props.upscalers[0]?.name),
 );
+/** One label policy for the shared `strength` field, and the only thing that
+ *  knows which direction the family reads it in (LTX-2 inverts it). */
+const strength = computed(() => strengthSemantics(props.form.family));
 
 function setSourceFit(mode: SourceFitMode): void {
   props.form.sourceFit = sourceFitPolicyForMode(mode, {
@@ -95,7 +99,7 @@ function sourceImageMime(filename: string): string {
     <template v-if="draft.openingImage">
       <label class="mobile-range-field">
         <span>
-          Source strength
+          {{ strength.label }}
           <output>{{ form.strength.toFixed(2) }}</output>
         </span>
         <input
@@ -104,11 +108,14 @@ function sourceImageMime(filename: string): string {
           min="0"
           max="1"
           step="0.01"
-          aria-label="Sequence source strength"
+          :aria-label="strength.label"
           data-test="mobile-sequence-source-strength"
           :disabled="locked"
         />
       </label>
+      <p class="mobile-source-note" data-test="mobile-sequence-source-strength-hint">
+        {{ strength.hint }}
+      </p>
       <label class="field">
         <span>Fit to video frame</span>
         <select

@@ -13,7 +13,7 @@ import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage
 installMemoryLocalStorage();
 
 import GenerateView from "./GenerateView.vue";
-import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
+import InspectorPanel from "../components/create/InspectorPanel.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
@@ -92,8 +92,9 @@ async function loadIntoMeshForm(template: GenerationTemplate) {
   form.mesh.octreeResolution = 192;
   expect(form.recipeCapabilities?.canvasless).toBe(true);
 
-  await wrapper.get("[data-test='templates-toggle']").trigger("click");
-  wrapper.findComponent(TemplatesPanel).vm.$emit("load", template);
+  // Starting points are a tab in the inspector now, not a floating popover:
+  // the panel loads the template and the view answers on `load-template`.
+  wrapper.findComponent(InspectorPanel).vm.$emit("load-template", template);
   await flushPromises();
   return form;
 }
@@ -123,6 +124,22 @@ describe("GenerateView — loading a template refreshes the recipe capabilities"
     const request = buildRequest(form);
     expect(request.output_format).toBe("png");
     expect(request).not.toHaveProperty("mesh");
+  });
+
+  /**
+   * The desktop composer has no style-preset strip — the word "Style" belongs
+   * to the model. A template saved before that change still carries a preset,
+   * and applying it wholesale reinstated an invisible prompt rewriter: the
+   * words on screen were not the words that were sent.
+   */
+  it("leaves a pre-redesign template's style preset behind", async () => {
+    const template = legacyTemplate(sdxl.name, sdxl.family);
+    (template.form as unknown as Record<string, unknown>).stylePreset = "cinematic";
+
+    const form = await loadIntoMeshForm(template);
+
+    expect(form.stylePreset).toBe("");
+    expect(buildRequest(form).prompt).toBe("a river at dawn");
   });
 
   it("drops the snapshot when the template's model is not installed", async () => {

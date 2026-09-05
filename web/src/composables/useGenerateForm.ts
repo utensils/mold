@@ -50,7 +50,10 @@ import {
   fixedRecipeControlOverrides,
   recipeIsCanvasless,
 } from "@studio/lib/generationProfile";
-import { effectiveGenerationGuidance } from "@studio/lib/generationCapabilities";
+import {
+  defaultEnableAudio,
+  effectiveGenerationGuidance,
+} from "@studio/lib/generationCapabilities";
 import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
 import { coerceOutputFormatForRecipe } from "@studio/lib/outputFormat";
 import {
@@ -386,7 +389,7 @@ function modelDefaultsPatch(
     ? (next.mesh ?? emptyMeshForm())
     : emptyMeshForm();
   next.enableAudio = capabilities.supportsAudio
-    ? model.supports_audio !== false
+    ? defaultEnableAudio(capabilities, model)
     : null;
   if (!capabilities.supportsAudio) next.videoOnly = false;
   if (!capabilities.supportsScheduler) {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Card surface — flat bench card with an inset top highlight (spec §04).
+ * Card surface — flat bench card with an inset top highlight.
  * `large` bumps the radius, `dashed` swaps to a dashed cutting-edge border
  * for empty/offer cards, `padded: false` lets content own its own padding.
  */
@@ -30,18 +30,17 @@ withDefaults(
 
 <style scoped>
 .ms-card {
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
-  box-shadow: inset 0 1px 0 var(--card-hi);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
 }
 
 .ms-card--large {
-  border-radius: var(--radius-card-lg);
+  border-radius: var(--mold-radius-3);
 }
 
 .ms-card--dashed {
-  border: 1px dashed var(--ce);
+  border: 1px dashed var(--mold-border-control);
   box-shadow: none;
 }
 

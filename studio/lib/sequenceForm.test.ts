@@ -77,13 +77,17 @@ describe("buildChainRequest", () => {
     expect(req.stages[2]?.fade_frames).toBe(8);
   });
 
-  it("sends a numeric seed only when fixed, and audio only when on", () => {
+  it("sends a numeric seed only when fixed, and audio explicitly either way", () => {
+    // `enable_audio` is ALWAYS on the wire. An omitted field means "resolve
+    // the recipe's default" at the server door, and that default is on for an
+    // audio family — so omitting it when the author turned sound off would
+    // hand the audio straight back.
     const random = buildChainRequest(shared({ seed: "" }), [clip(), clip()], {
       motionTailFrames: 17,
       enableAudio: false,
     });
     expect(random.seed).toBeUndefined();
-    expect(random.enable_audio).toBeUndefined();
+    expect(random.enable_audio).toBe(false);
 
     const fixed = buildChainRequest(shared({ seed: "42" }), [clip(), clip()], {
       motionTailFrames: 17,
@@ -91,6 +95,22 @@ describe("buildChainRequest", () => {
     });
     expect(fixed.seed).toBe(42);
     expect(fixed.enable_audio).toBe(true);
+  });
+
+  it("keeps an author's silence explicit in the exported script", () => {
+    // `clipsToChainScript` is the amend body and the TOML export. A null
+    // there reads as "resolve the default" on the way back in, which for an
+    // audio family means sound — so a false has to be written down.
+    const off = clipsToChainScript(shared({}), [clip(), clip()], {
+      motionTailFrames: 17,
+      enableAudio: false,
+    });
+    const on = clipsToChainScript(shared({}), [clip(), clip()], {
+      motionTailFrames: 17,
+      enableAudio: true,
+    });
+    expect(off.chain.enable_audio).toBe(false);
+    expect(on.chain.enable_audio).toBe(true);
   });
 
   it("carries per-clip negative prompts and the opening source image", () => {

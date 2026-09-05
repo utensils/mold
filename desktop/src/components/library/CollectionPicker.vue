@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /*
- * CollectionPicker — the "In collections" checklist (Lightbox aside) and the
- * bulk bar's "Add to collection" popover share this one shape (V3 "Shelf").
- * Pure props/emits: rows are the host-merged collections, `selected` holds
- * the slugs the print(s) are in, `mixed` the slugs only some of a
- * multi-selection are in (rendered indeterminate). "New collection…" turns
+ * CollectionPicker — the "In albums" checklist (Lightbox aside) and the
+ * bulk bar's "Add to album" popover share this one shape. Pure
+ * props/emits: rows are the machine-merged albums, `selected` holds the
+ * slugs the picture(s) are in, `mixed` the slugs only some of a
+ * multi-selection are in (rendered indeterminate). "New album…" turns
  * into an inline name input; Enter creates, Escape / empty cancels.
  */
 import { computed, nextTick, ref } from "vue";
@@ -14,9 +14,9 @@ import type { MergedCollection } from "@studio/lib/libraryOrganization";
 const props = withDefaults(
   defineProps<{
     collections: MergedCollection[];
-    /** Slugs every selected print is in. */
+    /** Slugs every selected picture is in. */
     selected: string[];
-    /** Slugs only some selected prints are in (indeterminate). */
+    /** Slugs only some selected pictures are in (indeterminate). */
     mixed?: string[];
     allowCreate?: boolean;
     disabled?: boolean;
@@ -24,7 +24,7 @@ const props = withDefaults(
     hostNote?: string | null;
     /** Accessible name for the group. */
     ariaLabel?: string;
-    /** Optional per-slug count override (logical prints). */
+    /** Optional per-slug count override (logical pictures). */
     counts?: ((slug: string) => number) | null;
   }>(),
   {
@@ -32,7 +32,7 @@ const props = withDefaults(
     allowCreate: true,
     disabled: false,
     hostNote: null,
-    ariaLabel: "Collections",
+    ariaLabel: "Albums",
     counts: null,
   },
 );
@@ -96,10 +96,10 @@ defineExpose({ startCreate });
   <div role="group" :aria-label="ariaLabel" data-test="collection-picker">
     <p
       v-if="collections.length === 0 && !creating"
-      class="px-0.5 py-1 text-caption text-ink-3"
+      class="px-0.5 py-1 text-micro text-fg-dim"
       data-test="collection-picker-empty"
     >
-      No collections yet.
+      No albums yet.
     </p>
     <button
       v-for="collection in collections"
@@ -113,18 +113,18 @@ defineExpose({ startCreate });
             ? 'mixed'
             : 'false'
       "
-      class="flex h-7 w-full items-center gap-2 rounded-control px-0.5 text-left text-body text-ink transition-colors hover:bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)] disabled:cursor-default disabled:opacity-60"
+      class="flex h-7 w-full items-center gap-2 rounded-control px-0.5 text-left text-sm text-fg transition-colors hover:bg-accent-tint disabled:cursor-default disabled:opacity-60"
       :disabled="disabled"
       data-test="collection-row"
       :data-slug="collection.slug"
       @click="onToggle(collection.slug)"
     >
       <span
-        class="border-ce flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border font-utility text-[11px] leading-none"
+        class="border-border-control flex h-4 w-4 shrink-0 items-center justify-center rounded-inner border font-mono text-micro leading-none"
         :class="
           stateOf(collection.slug) === 'unchecked'
-            ? 'bg-bath text-transparent'
-            : 'border-safelight bg-safelight text-on-accent'
+            ? 'bg-bg-deep text-transparent'
+            : 'border-accent bg-accent text-on-accent'
         "
         aria-hidden="true"
         data-test="collection-box"
@@ -132,30 +132,30 @@ defineExpose({ startCreate });
         {{ stateOf(collection.slug) === "mixed" ? "–" : "✓" }}
       </span>
       <span class="min-w-0 flex-1 truncate">{{ collection.name }}</span>
-      <span class="shrink-0 font-utility text-[10px] text-ink-3">{{ countOf(collection) }}</span>
+      <span class="shrink-0 font-mono text-micro text-fg-dim">{{ countOf(collection) }}</span>
     </button>
     <template v-if="allowCreate">
       <button
         v-if="!creating"
         type="button"
-        class="flex h-7 w-full items-center gap-2 rounded-control px-0.5 text-left text-body text-ink-2 transition-colors hover:bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)] hover:text-ink disabled:cursor-default disabled:opacity-60"
+        class="flex h-7 w-full items-center gap-2 rounded-control px-0.5 text-left text-sm text-fg-2 transition-colors hover:bg-accent-tint hover:text-fg disabled:cursor-default disabled:opacity-60"
         :disabled="disabled"
         data-test="collection-new"
         @click="startCreate"
       >
         <Icon name="plus" :size="14" class="shrink-0" />
-        <span>New collection…</span>
+        <span>New album…</span>
       </button>
       <div v-else class="flex h-7 items-center gap-2 px-0.5" data-test="collection-new-form">
-        <Icon name="plus" :size="14" class="shrink-0 text-ink-3" />
+        <Icon name="plus" :size="14" class="shrink-0 text-fg-dim" />
         <input
           ref="inputEl"
           v-model="draft"
           data-selectable
           type="text"
-          placeholder="Collection name"
-          aria-label="New collection name"
-          class="border-edge h-6 min-w-0 flex-1 rounded-control border bg-transparent px-1.5 text-body text-ink outline-none focus:border-safelight"
+          placeholder="Album name"
+          aria-label="New album name"
+          class="border-border h-6 min-w-0 flex-1 rounded-control border bg-transparent px-1.5 text-sm text-fg outline-none focus:border-accent"
           data-test="collection-new-input"
           @keydown.enter.prevent="commitCreate"
           @keydown.esc.prevent.stop="cancelCreate"
@@ -165,7 +165,7 @@ defineExpose({ startCreate });
     </template>
     <p
       v-if="hostNote"
-      class="mt-1 px-0.5 font-utility text-[9.5px] text-ink-3"
+      class="mt-1 px-0.5 font-mono text-micro text-fg-dim"
       data-test="collection-host-note"
     >
       {{ hostNote }}

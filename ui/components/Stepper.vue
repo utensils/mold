@@ -19,8 +19,14 @@ const props = withDefaults(
     format?: (value: number) => string;
     /** Allow direct numeric entry in addition to the step buttons. */
     editable?: boolean;
+    /**
+     * Bare variant for nesting inside another bordered control (the
+     * composer's Make chip): no box of its own, 22px buttons, so it fits a
+     * 28px chip instead of painting a 38px box over it.
+     */
+    compact?: boolean;
   }>(),
-  { editable: false },
+  { editable: false, compact: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
@@ -91,6 +97,7 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="ms-stepper"
+    :class="{ 'ms-stepper--compact': compact }"
     :role="editable ? undefined : 'spinbutton'"
     :tabindex="editable ? undefined : 0"
     :aria-valuenow="editable ? undefined : modelValue"
@@ -147,14 +154,14 @@ function onKeydown(event: KeyboardEvent) {
   gap: 1px;
   min-height: 38px;
   padding: 2px;
-  background: var(--bath);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
-  box-shadow: inset 0 1px color-mix(in srgb, var(--rebate) 4%, transparent);
+  background: var(--mold-bg-deep);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  box-shadow: inset 0 1px color-mix(in srgb, var(--mold-text) 4%, transparent);
 }
 
 .ms-stepper:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -163,24 +170,24 @@ function onKeydown(event: KeyboardEvent) {
   height: 32px;
   border: 0;
   background: transparent;
-  color: var(--ink-2);
-  font-family: var(--f-body);
+  color: var(--mold-text-2);
+  font-family: var(--mold-font-sans);
   font-size: 18px;
   line-height: 1;
-  border-radius: var(--radius-control-sm);
+  border-radius: var(--mold-radius-1);
   cursor: pointer;
   transition:
-    color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease);
+    color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-stepper__btn:hover:not([aria-disabled="true"]) {
-  color: var(--rebate);
-  background: color-mix(in srgb, var(--rebate) 7%, transparent);
+  color: var(--mold-text);
+  background: color-mix(in srgb, var(--mold-text) 7%, transparent);
 }
 
 .ms-stepper__btn:active:not([aria-disabled="true"]) {
-  background: color-mix(in srgb, var(--rebate) 12%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 12%, transparent);
 }
 
 .ms-stepper__btn[aria-disabled="true"] {
@@ -189,7 +196,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-stepper__btn:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -197,7 +204,7 @@ function onKeydown(event: KeyboardEvent) {
   min-width: 52px;
   padding: 0 4px;
   text-align: center;
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -209,13 +216,13 @@ function onKeydown(event: KeyboardEvent) {
   border: 0;
   outline: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   appearance: textfield;
 }
 
 .ms-stepper__input:focus-visible {
-  border-radius: var(--radius-control-sm);
-  outline: 2px solid var(--safelight);
+  border-radius: var(--mold-radius-1);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 1px;
 }
 
@@ -223,5 +230,31 @@ function onKeydown(event: KeyboardEvent) {
 .ms-stepper__input::-webkit-outer-spin-button {
   margin: 0;
   appearance: none;
+}
+
+/* Compact: the host control draws the box; this only lays out − value +. */
+.ms-stepper--compact {
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.ms-stepper--compact .ms-stepper__btn {
+  width: 22px;
+  height: 22px;
+  font-size: var(--mold-fs-md);
+}
+
+.ms-stepper--compact .ms-stepper__value {
+  min-width: 28px;
+  font-size: var(--mold-fs-xs);
+}
+
+.ms-stepper--compact .ms-stepper__input {
+  width: 28px;
 }
 </style>

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /*
- * Slider row — labeled range control (prototype Detail / Prompt strength).
- * Header row pairs the label with a mono accent readout; the full-width
- * range input sits below. The readout defaults to the raw value and can be
- * overridden with a formatted string (e.g. "28 steps").
+ * Slider row — a labelled range control. The head pairs the plain word with a
+ * mono readout, the 4px track sits below it, and an optional `low`/`high` pair
+ * closes the group with the two ends named in words. The readout defaults to
+ * the raw value and can be overridden with a formatted string.
  */
 import { computed, ref, useId } from "vue";
 
@@ -23,6 +23,9 @@ const props = withDefaults(
     /** Formatted readout; defaults to String(modelValue). */
     valueLabel?: string;
     ariaValueText?: string;
+    /** The two ends of the range in plain words, e.g. Loose → Literal. */
+    low?: string;
+    high?: string;
     disabled?: boolean;
     marks?: readonly SliderMark[];
     /** Fraction of the full range captured by a mark during pointer drag. */
@@ -34,6 +37,20 @@ const props = withDefaults(
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const readout = computed(() => props.valueLabel ?? String(props.modelValue));
+
+/**
+ * How much of the track is behind the thumb, 0–100. The filled half is drawn
+ * in the accent (the mock draws every slider that way, and `LoraStack`'s
+ * weight meter already did), so a glance reads the setting without reading
+ * the number. Clamped, because a form may briefly hold a value from a recipe
+ * whose range has since narrowed.
+ */
+const fillPercent = computed(() => {
+  const span = props.max - props.min;
+  if (!(span > 0)) return 0;
+  const fraction = (props.modelValue - props.min) / span;
+  return Math.min(100, Math.max(0, fraction * 100));
+});
 const datalistId = `ms-slider-marks-${useId()}`;
 const positionedMarks = computed(() => {
   const span = props.max - props.min;
@@ -134,6 +151,7 @@ function onPointerCancel() {
       <input
         class="ms-slider__input"
         type="range"
+        :style="{ '--ms-slider-fill': `${fillPercent}%` }"
         :min="min"
         :max="max"
         :step="step"
@@ -156,6 +174,10 @@ function onPointerCancel() {
         />
       </datalist>
     </div>
+    <div v-if="low || high" class="ms-slider__ends">
+      <span>{{ low }}</span>
+      <span>{{ high }}</span>
+    </div>
   </div>
 </template>
 
@@ -167,27 +189,49 @@ function onPointerCancel() {
 }
 
 .ms-slider__label {
-  font-family: var(--f-body);
-  font-size: 12px;
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-xs);
   font-weight: 600;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .ms-slider__value {
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--safelight);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 
-/* Track — 4px bar; --radius-pill clamps to fully round on this height. */
+.ms-slider__ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+
+/* A square 4px track: the theme's radii start at the thumb. The control
+   border is the one ground that reads on every surface — a card group paints
+   itself on `--mold-surface`, which would swallow a track of the same value.
+   The travelled part is painted over that ground in the accent, so the track
+   reads as a setting rather than an empty grey rail with a knob on it. */
 .ms-slider__input {
   -webkit-appearance: none;
   appearance: none;
   display: block;
   width: 100%;
   height: 4px;
-  border-radius: var(--radius-pill);
-  background: var(--ce);
+  background: var(--mold-border-control);
+  background-image: linear-gradient(
+    to right,
+    var(--mold-blue) var(--ms-slider-fill, 0%),
+    transparent var(--ms-slider-fill, 0%)
+  );
+}
+
+/* A disabled track (a pinned recipe control) keeps the ground, not the
+   accent: nothing there is adjustable. */
+.ms-slider__input:disabled {
+  background-image: none;
 }
 
 .ms-slider__track--marked .ms-slider__input {
@@ -196,28 +240,26 @@ function onPointerCancel() {
 
 .ms-slider__input::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--safelight);
+  width: 14px;
+  height: 14px;
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-slider__input::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border: 0;
-  border-radius: 50%;
-  background: var(--safelight);
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-text);
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  transition: background var(--dur-quick) var(--ease);
+  transition: background var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-slider__input:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -249,8 +291,8 @@ function onPointerCancel() {
   display: grid;
   justify-items: center;
   transform: translateX(-50%);
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
 }
 
 .ms-slider__mark i {
@@ -263,7 +305,7 @@ function onPointerCancel() {
 
 .ms-slider__mark b {
   order: 1;
-  font-size: 8px;
+  font-size: 8px; /* literal: tick captions ride a 4px track and collide at micro */
   font-weight: 500;
   line-height: 1;
 }

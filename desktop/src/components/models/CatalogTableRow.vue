@@ -15,8 +15,9 @@ import type { CatalogEntry } from "../../lib/api/types";
  * One catalog search result in the table layout — the shared model-row
  * shape with catalog specifics on top: no preview image (that's the grid
  * card's job), lazy size resolution (HF summary rows arrive without
- * `size_bytes`), SIZE/FETCH as the two size lines, and Pull / installed
- * state in the actions column. Clicking the row opens the detail drawer.
+ * `size_bytes`), SIZE/FETCH as the two size lines, and Get it / ready
+ * state in the actions column — Get it is the filled accent button the card
+ * uses, one verb and one treatment. Clicking the row opens the detail drawer.
  */
 const props = withDefaults(
   defineProps<{
@@ -123,12 +124,12 @@ const counts = computed(() => {
     <template #meta>
       <label
         class="flex h-6 w-6 shrink-0 items-center justify-center"
-        :title="selectable ? 'Select model for batch download' : 'No download target available'"
+        :title="selectable ? 'Select style to get in a batch' : 'No machine can take it'"
         @click.stop
       >
         <input
           type="checkbox"
-          class="h-4 w-4 accent-[var(--safelight)]"
+          class="h-4 w-4 accent-accent"
           :checked="checked"
           :disabled="!selectable"
           :aria-label="`Select ${entry.display_name ?? entry.name}`"
@@ -144,17 +145,17 @@ const counts = computed(() => {
         :show-modality="false"
         :data-test="entry.nsfw ? 'nsfw-tag' : undefined"
       />
-      <span v-if="entry.author" class="min-w-0 shrink truncate text-caption text-ink-3">
+      <span v-if="entry.author" class="min-w-0 shrink truncate text-micro text-fg-dim">
         {{ entry.author }}
       </span>
-      <span v-if="counts" class="data-mono shrink-0 text-caption text-ink-3">{{ counts }}</span>
+      <span v-if="counts" class="font-mono shrink-0 text-micro text-fg-dim">{{ counts }}</span>
     </template>
     <template #actions>
-      <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
+      <span v-if="entry.installed" class="font-mono text-micro text-success">● ready</span>
       <span
         v-if="props.runtimeNotice"
         data-test="runtime-unavailable-badge"
-        class="data-mono text-caption text-ink-3"
+        class="font-mono text-micro text-fg-dim"
         :title="props.runtimeNotice.message"
       >
         {{ RUNTIME_UNAVAILABLE_BADGE }}
@@ -163,11 +164,11 @@ const counts = computed(() => {
         v-if="showAction"
         type="button"
         data-test="pull"
-        class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"
+        class="ms-toolbar-button ms-toolbar-button--on disabled:opacity-50"
         :disabled="pulling"
         @click.stop="emit('pull', entry)"
       >
-        {{ pulling ? "Pulling…" : "Pull" }}
+        {{ pulling ? "Getting it…" : "Get it" }}
       </button>
     </template>
   </ModelTableRow>

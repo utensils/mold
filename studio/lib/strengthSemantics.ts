@@ -9,9 +9,12 @@
  *   `latent_cond.py:41`: `denoise_mask = 1 - strength`): higher = more
  *   source preservation, 1.0 = pin the opening frame.
  *
- * The wire value is never inverted anywhere — only the label and help
- * text change. This helper is the single label policy for web, desktop,
- * and iPhone; components must not restate it.
+ * The wire value is never inverted anywhere — only the help text and the
+ * direction flag change. The label itself is the binding lexicon's one
+ * phrase (docs/design/README.md §2), never "img2img" or "denoise
+ * strength", on every family; `higherMeansSource` is what tells a surface
+ * which end of the track keeps the photo. This helper is the single label
+ * policy for web, desktop, and iPhone; components must not restate it.
  */
 export interface StrengthSemantics {
   label: string;
@@ -22,18 +25,20 @@ export interface StrengthSemantics {
 
 const LTX2_FAMILIES = new Set(["ltx2", "ltx-2"]);
 
+const LABEL = "How much to change it";
+
 export function strengthSemantics(family: string): StrengthSemantics {
   // `ltx-video` (the 0.9.x family) is deliberately NOT relabelled here
-  // until its engine semantics are audited; it keeps the SD wording.
+  // until its engine semantics are audited; it keeps the SD direction.
   if (LTX2_FAMILIES.has(family.trim().toLowerCase())) {
     return {
-      label: "Source strength",
+      label: LABEL,
       hint: "Higher keeps more of the source; 1.0 pins the opening frame.",
       higherMeansSource: true,
     };
   }
   return {
-    label: "Denoise strength",
+    label: LABEL,
     hint: "Higher allows more change from the source.",
     higherMeansSource: false,
   };
@@ -44,8 +49,8 @@ export function strengthSemantics(family: string): StrengthSemantics {
  * possibly an inventory-resolved family) is available. The family wins
  * when known; otherwise the model id itself is sniffed for the LTX-2
  * name markers (`ltx-2*`, `ltx2.*` — deliberately NOT `ltx-video`).
- * Catalog `cv:`/`hf:` ids without an inventory hit keep the SD wording —
- * a wrong "denoise" caption understates, never inverts, an unknown model.
+ * Catalog `cv:`/`hf:` ids without an inventory hit keep the SD direction —
+ * a wrong hint understates, never inverts, an unknown model.
  */
 export function strengthSemanticsForModel(
   model: string | null | undefined,

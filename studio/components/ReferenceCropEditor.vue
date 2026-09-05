@@ -296,7 +296,7 @@ function apply(): void {
   display: grid;
   gap: 12px;
   min-width: 0;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .crop-editor__stage {
   position: relative;
@@ -381,9 +381,9 @@ function apply(): void {
   min-width: 44px;
   min-height: 36px;
   padding: 0 12px;
-  border: 1px solid var(--edge, #bbb);
+  border: 1px solid var(--mold-border, #bbb);
   border-radius: 8px;
-  background: var(--bench, transparent);
+  background: var(--mold-bg, transparent);
   color: inherit;
   font: inherit;
   cursor: pointer;
@@ -392,11 +392,11 @@ function apply(): void {
 .crop-editor__primary {
   background: var(--accent, #333);
   border-color: var(--accent, #333);
-  color: var(--on-accent, #fff);
+  color: var(--mold-on-accent, #fff);
 }
 .crop-editor__hint {
   margin: 0;
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-size: 12px;
   line-height: 1.45;
 }

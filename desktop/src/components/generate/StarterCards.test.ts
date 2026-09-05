@@ -26,8 +26,8 @@ beforeEach(() => {
 describe("StarterCards (cold start G10)", () => {
   it("renders the first-run guide with three starters, one recommended", () => {
     const wrapper = mount(StarterCards);
-    expect(wrapper.text()).toContain("Develop your first print.");
-    expect(wrapper.text()).toContain("mold runs models locally on your machine's GPU.");
+    expect(wrapper.text()).toContain("Make your first picture.");
+    expect(wrapper.text()).toContain("mold makes pictures on this machine's own graphics card.");
     const cards = wrapper.findAll("[data-test='starter-card']");
     expect(cards).toHaveLength(3);
     expect(wrapper.text()).toContain("flux2-klein:q4");
@@ -35,7 +35,7 @@ describe("StarterCards (cold start G10)", () => {
     expect(recommended).toHaveLength(1);
     // The recommended starter is first.
     expect(cards[0]!.text()).toContain("Recommended");
-    expect(wrapper.text()).toContain("Browse all models");
+    expect(wrapper.text()).toContain("Browse more");
   });
 
   it("pulls every starter with its canonical manifest id", async () => {
@@ -67,7 +67,7 @@ describe("StarterCards (cold start G10)", () => {
 
     expect(useToastStore().items.at(-1)).toMatchObject({
       kind: "error",
-      message: "Couldn't pull z-image-turbo:q8 — unknown model",
+      message: "Couldn't get z-image-turbo:q8 — unknown model",
     });
   });
 
@@ -86,13 +86,13 @@ describe("StarterCards (cold start G10)", () => {
     // The first (matching) card is pulling; the others still offer Pull.
     expect(cards[0]!.find("[data-test='starter-pulling']").exists()).toBe(true);
     expect(cards[0]!.find("[data-test='starter-pull']").exists()).toBe(false);
-    expect(cards[0]!.get("[data-test='starter-pulling']").text()).toBe("Pulling… 46%");
+    expect(cards[0]!.get("[data-test='starter-pulling']").text()).toBe("Getting it… 46%");
     expect(cards[1]!.find("[data-test='starter-pull']").exists()).toBe(true);
   });
 
   it("emits browse for the escape hatch", async () => {
     const wrapper = mount(StarterCards);
-    await wrapper.get("button.text-halide").trigger("click");
+    await wrapper.get("button.text-sapphire").trigger("click");
     expect(wrapper.emitted("browse")).toHaveLength(1);
   });
 });

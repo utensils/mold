@@ -16,8 +16,8 @@ import type { NotificationKind } from "../stores/notifications";
 export interface NotificationTone extends SeverityMark {
   /**
    * Solid fill for a counted badge. Never a translucent hint ink such as
-   * `--ink-3`: printing a count on one has no predictable contrast. Text on
-   * any of these reads with `--on-status`.
+   * `--mold-text-dim`: printing a count on one has no predictable contrast. Text on
+   * any of these reads with `--mold-on-accent`.
    */
   badge: string;
 }
@@ -25,10 +25,10 @@ export interface NotificationTone extends SeverityMark {
 /** Badge fills, keyed to the shared marks. Green for anything that is not a
  *  warning or an error, so a bell carrying only notices reads as "all fine". */
 const BADGE_FILLS: Record<NotificationKind, string> = {
-  info: "var(--success)",
-  success: "var(--success)",
-  warning: "var(--warning)",
-  error: "var(--stop)",
+  info: "var(--mold-success)",
+  success: "var(--mold-success)",
+  warning: "var(--mold-warning)",
+  error: "var(--mold-error)",
 };
 
 export const NOTIFICATION_TONES: Record<NotificationKind, NotificationTone> = {
@@ -39,7 +39,7 @@ export const NOTIFICATION_TONES: Record<NotificationKind, NotificationTone> = {
 };
 
 /** Ink that stays legible on any `badge` fill (defined per theme). */
-export const NOTIFICATION_BADGE_INK = "var(--on-status)";
+export const NOTIFICATION_BADGE_INK = "var(--mold-on-accent)";
 
 export function notificationTone(kind: NotificationKind): NotificationTone {
   return {

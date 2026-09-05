@@ -23,6 +23,7 @@ const FAMILY_LABELS: Record<string, string> = {
   sd3: "SD3",
   "sd3.5": "SD3.5",
   "z-image": "Z-Image",
+  zimage: "Z-Image",
   "qwen-image": "Qwen Image",
   "qwen-image-edit": "Qwen Image Edit",
   wuerstchen: "Wuerstchen",

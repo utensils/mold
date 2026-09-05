@@ -131,6 +131,19 @@ describe("UpdatesSection", () => {
     );
   });
 
+  it("badges the version once a check found nothing, and only then", async () => {
+    const { updater, wrapper } = mountSection();
+    expect(wrapper.find("[data-test='update-up-to-date']").exists()).toBe(false);
+
+    updater.phase = "up-to-date";
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("[data-test='update-up-to-date']").text()).toBe("up to date");
+
+    updater.phase = "checking";
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("[data-test='update-up-to-date']").exists()).toBe(false);
+  });
+
   it("explains that browser and unsigned builds cannot self-update", async () => {
     const { updater, wrapper } = mountSection();
     updater.phase = "unsupported";

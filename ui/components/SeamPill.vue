@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
  * Seam pill — the resting transition control between two clips on the rail
- * (spec §06, mockup `docs/design`… sequence-filmstrip): a circular glyph
+ * a circular glyph
  * badge with the transition named in words beneath it; fade length rides
  * along in the caption. `motionTail` is REQUIRED so the zero-tail
  * "Join" label can never be skipped (the old SpliceMark defaulted it
@@ -72,12 +72,12 @@ const fadeSuffix = computed(() =>
   background: transparent;
   border: 0;
   border-radius: 8px;
-  color: var(--ink-2);
-  font-family: var(--f-mono);
+  color: var(--mold-text-2);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   line-height: 1;
   cursor: pointer;
-  transition: color var(--dur-quick) var(--ease);
+  transition: color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-seam--large {
@@ -89,7 +89,7 @@ const fadeSuffix = computed(() =>
 }
 
 .ms-seam:hover:not(:disabled) {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .ms-seam:disabled {
@@ -98,7 +98,7 @@ const fadeSuffix = computed(() =>
 }
 
 .ms-seam:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -108,13 +108,13 @@ const fadeSuffix = computed(() =>
   width: 32px;
   height: 32px;
   flex: 0 0 auto;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   border-radius: 50%;
-  background: var(--bench);
+  background: var(--mold-bg);
   transition:
-    border-color var(--dur-quick) var(--ease),
-    background var(--dur-quick) var(--ease),
-    transform var(--dur-quick) var(--ease);
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    background var(--mold-dur-quick) var(--mold-ease-out),
+    transform var(--mold-dur-quick) var(--mold-ease-out);
 }
 
 .ms-seam--large .ms-seam__diagram {
@@ -135,23 +135,23 @@ const fadeSuffix = computed(() =>
 }
 
 .ms-seam:hover:not(:disabled) .ms-seam__diagram {
-  border-color: var(--ink-3);
+  border-color: var(--mold-text-dim);
   transform: scale(1.04);
 }
 
 .ms-seam[data-on="true"],
 .ms-seam[data-transition="fade"] {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
 .ms-seam[data-on="true"] .ms-seam__diagram,
 .ms-seam[data-transition="fade"] .ms-seam__diagram {
-  border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 12%, transparent);
+  border-color: var(--mold-blue);
+  background: color-mix(in srgb, var(--mold-blue) 12%, transparent);
 }
 
 .ms-seam[data-on="true"] .ms-seam__diagram {
-  box-shadow: var(--sel-ring);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
 }
 
 /* A label that outgrows the seam's narrow column wraps centered instead of

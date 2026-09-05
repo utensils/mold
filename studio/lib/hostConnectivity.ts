@@ -1,5 +1,5 @@
 /*
- * Host reachability, shared by web and desktop (spec §08 G11).
+ * Host reachability, shared by web and desktop.
  *
  * Both surfaces poll every listed host on a timer, so an unreachable machine
  * reconnects on its own the moment it answers again — nothing about that is a

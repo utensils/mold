@@ -13,6 +13,7 @@ import {
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { fileToBase64 } from "../../lib/image";
 import { useToastStore } from "../../stores/toasts";
 
@@ -42,6 +43,9 @@ const fitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).
 const upscalerAvailable = computed(() =>
   Boolean(props.form.upscaleModel || props.upscalers[0]?.name),
 );
+/** The one label policy for the shared `strength` field — and the only thing
+ *  that knows which end of the track keeps the photo (LTX-2 inverts it). */
+const strength = computed(() => strengthSemantics(props.form.family));
 
 function setSourceFit(mode: SourceFitMode) {
   props.form.sourceFit = sourceFitPolicyForMode(mode, {
@@ -99,8 +103,8 @@ async function onOpeningImageFile(file: File) {
     <div v-if="draft.openingImage" class="ms-source-controls">
       <label class="ms-range">
         <span>
-          Source strength
-          <output class="data-mono">{{ form.strength.toFixed(2) }}</output>
+          {{ strength.label }}
+          <output class="font-mono text-xs">{{ form.strength.toFixed(2) }}</output>
         </span>
         <input
           v-model.number="form.strength"
@@ -111,6 +115,9 @@ async function onOpeningImageFile(file: File) {
           data-test="sequence-source-strength"
         />
       </label>
+      <p class="ms-source-hint" data-test="sequence-source-strength-hint">
+        {{ strength.hint }}
+      </p>
       <label class="ms-field">
         <span>Fit to video frame</span>
         <select
@@ -145,8 +152,8 @@ async function onOpeningImageFile(file: File) {
 
 <style scoped>
 .ms-field__label {
-  font-size: 12px;
-  color: var(--ink-2);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
   font-weight: 600;
   margin-bottom: 8px;
 }
@@ -159,8 +166,8 @@ async function onOpeningImageFile(file: File) {
 .ms-field {
   display: grid;
   gap: 6px;
-  color: var(--ink-2);
-  font-size: 11px;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-micro);
 }
 .ms-range > span {
   display: flex;
@@ -169,21 +176,26 @@ async function onOpeningImageFile(file: File) {
 }
 .ms-range input {
   width: 100%;
-  accent-color: var(--safelight);
+  accent-color: var(--mold-blue);
+}
+.ms-source-hint {
+  margin: -4px 0 0;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-micro);
 }
 .ms-input {
   width: 100%;
   box-sizing: border-box;
   min-height: 36px;
-  border: 1px solid var(--ce);
-  border-radius: 8px;
-  background: var(--bath);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding: 8px 10px;
 }
 .ms-hint {
-  color: var(--ink-3);
-  font-size: 10px;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-micro);
   line-height: 1.45;
 }
 </style>

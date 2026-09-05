@@ -5,12 +5,13 @@
 
 import { CURRENT_PLATFORM, type DesktopPlatform } from "./platform";
 
-// The five destinations map to ⌘1–⌘4 plus ⌘, for Settings.
+// The sidebar's destinations in order — ⌘1–⌘5 — plus ⌘, for Settings.
 export const NAV_ROUTES: Readonly<Record<string, string>> = {
   "1": "/create",
-  "2": "/library",
-  "3": "/models",
-  "4": "/machines",
+  "2": "/queue",
+  "3": "/library",
+  "4": "/models",
+  "5": "/machines",
   ",": "/settings",
 };
 
@@ -20,8 +21,10 @@ export type ShellAction =
   | { kind: "command-palette" }
   | { kind: "cancel-job" }
   | { kind: "new-generation" }
+  | { kind: "make-variations" }
   | { kind: "randomize-seed" }
   | { kind: "copy-seed" }
+  | { kind: "toggle-queue-pause" }
   | { kind: "ui-scale"; direction: "reset" | "in" | "out" };
 
 export interface KeyLike {
@@ -30,6 +33,22 @@ export interface KeyLike {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  repeat?: boolean;
+}
+
+/** What the shell knows about the surface a key arrived on. */
+export interface ShellKeyContext {
+  /** The element with focus, which may be entitled to the key itself. */
+  target: Element | null;
+  overlayOpen: boolean;
+  route: string;
+  /**
+   * Whether the machine Space would act on advertises a pausable queue. The
+   * shell claims a bare key only where it can act: without this, Space was
+   * swallowed on every host, spent a queue read, and did nothing — while the
+   * status bar's Space hint was already hidden on exactly those hosts.
+   */
+  canPauseQueue: boolean;
 }
 
 /**
@@ -85,9 +104,10 @@ export function allowsNativeContextMenu(el: Element | null): boolean {
 }
 
 /**
- * Resolve a keydown into a shell-level action, or null if unhandled. Requires
- * the platform primary modifier and no Alt. Route-scoped actions (such as
- * randomize seed) are resolved here but gated by the current route in the shell.
+ * Resolve a keydown into a shell-level action, or null if unhandled. Every
+ * chord here requires the platform primary modifier and no Alt. Route-scoped
+ * actions (such as randomize seed) are resolved here but gated by the current
+ * route in the shell.
  */
 export function resolveShellShortcut(
   e: KeyLike,
@@ -112,4 +132,60 @@ export function resolveShellShortcut(
   if (e.key === "=") return { kind: "ui-scale", direction: "in" };
   if (e.key === "-" || e.key === "_") return { kind: "ui-scale", direction: "out" };
   return null;
+}
+
+/**
+ * Whether a bare key belongs to the focused element rather than the shell: a
+ * field takes the character, and a button takes Space as its own activation.
+ */
+export function ownsBareKey(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (tag === "button" || tag === "a" || tag === "summary") return true;
+  if ((el as HTMLElement).isContentEditable) return true;
+  return el.getAttribute?.("role") === "button";
+}
+
+/**
+ * Whether a modal overlay owns the keyboard. Every kit panel that traps focus
+ * marks itself `aria-modal`, so one query answers for all of them.
+ */
+export function overlayOwnsKeyboard(root: ParentNode = document): boolean {
+  return root.querySelector('[aria-modal="true"]') !== null;
+}
+
+/**
+ * The two chords the focused element can claim before the shell does: Space
+ * pauses and resumes the queue (status bar hint, README §3), and ⌥↩ makes the
+ * canvas print four more times. Neither carries the primary modifier, so both
+ * stand down inside a field or on a focused control, and under any overlay —
+ * Option+Return is a newline in a prompt, and a dialog owns the keyboard while
+ * it is up. Space additionally stands down in My images, which spends it on
+ * Quick Look.
+ */
+export function resolveFocusSensitiveShortcut(
+  e: KeyLike,
+  ctx: ShellKeyContext,
+): ShellAction | null {
+  if (ctx.overlayOpen || ownsBareKey(ctx.target)) return null;
+  if (e.key === "Enter") {
+    return e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey ? { kind: "make-variations" } : null;
+  }
+  if (e.key !== " " || e.repeat) return null;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
+  if (!ctx.canPauseQueue) return null;
+  return ctx.route.startsWith("/library") ? null : { kind: "toggle-queue-pause" };
+}
+
+/**
+ * Whether a bare Backspace belongs to the focused element rather than to the
+ * webview's history. Outside a text-editing surface the webview reads
+ * Backspace as Back, which in a single-page app unmounts the whole window
+ * mid-render — so the shell swallows it everywhere the caret is not. The line
+ * is the editable-surface one `allowsNativeContextMenu` already draws: a
+ * range slider and a focused button are chrome, not text.
+ */
+export function ownsBareBackspace(el: Element | null): boolean {
+  return allowsNativeContextMenu(el);
 }

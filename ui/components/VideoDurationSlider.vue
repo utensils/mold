@@ -129,8 +129,8 @@ function update(frames: number): void {
 <style scoped>
 .video-duration__hint {
   margin: 7px 0 0;
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
   font-size: 10px;
   line-height: 1.4;
 }
@@ -141,8 +141,8 @@ function update(frames: number): void {
   background: linear-gradient(
     to bottom,
     transparent 20px,
-    var(--ce) 20px,
-    var(--ce) 24px,
+    var(--mold-border-control) 20px,
+    var(--mold-border-control) 24px,
     transparent 24px
   );
 }

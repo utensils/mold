@@ -63,6 +63,19 @@ function draftStorage(): DraftStorage | null {
   }
 }
 
+/**
+ * How a clip is being made. `simple` is the plain one-shot render — a prompt,
+ * a clip style and a length — and is the default; `scenes` is the authored
+ * multi-scene sequence. It rides on the draft rather than in the toolbar that
+ * toggles it, so leaving New image cannot lose the choice.
+ *
+ * `output` stays the authority for what is on screen: a sequence is always
+ * `scenes`, which the store keeps true wherever `output` is written. This ref
+ * is the remembered PREFERENCE the Short clip door reads when it decides
+ * which of the two to open.
+ */
+export type ClipMode = "simple" | "scenes";
+
 export interface SequenceEditSession {
   jobId: string;
   hostId: string;
@@ -89,7 +102,15 @@ interface PersistedDraftV1 {
     (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
   enableAudio: boolean;
   lastSingleModel: string | null;
+  lastStillModel?: string | null;
   sequenceModel?: string | null;
+  clipMode?: ClipMode;
+}
+
+/** Two or more scenes somebody actually wrote — how a pre-sub-mode draft
+ *  says it was being authored scene by scene. */
+function authoredScenes(clips: readonly { prompt: string }[]): boolean {
+  return clips.filter((clip) => clip.prompt.trim().length > 0).length >= 2;
 }
 
 function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
@@ -138,7 +159,11 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   const enableAudio = ref(false);
   const editing = ref<SequenceEditSession | null>(null);
   const lastSingleModel = ref<string | null>(null);
+  /** The still style parked while a 3-D style is selected. It lives here, not
+   *  in the toolbar that parks it, so leaving New image cannot lose it. */
+  const lastStillModel = ref<string | null>(null);
   const sequenceModel = ref<string | null>(null);
+  const clipMode = ref<ClipMode>("simple");
   const hydrated = ref(false);
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -182,7 +207,9 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
         : null,
       enableAudio: enableAudio.value,
       lastSingleModel: lastSingleModel.value,
+      lastStillModel: lastStillModel.value,
       sequenceModel: sequenceModel.value,
+      clipMode: clipMode.value,
     };
     try {
       draftStorage()?.setItem(SEQUENCE_DRAFT_KEY, JSON.stringify(draft));
@@ -203,7 +230,15 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     openingImage.value = saved.openingImage ?? null;
     enableAudio.value = saved.enableAudio;
     lastSingleModel.value = saved.lastSingleModel ?? null;
+    lastStillModel.value = saved.lastStillModel ?? null;
     sequenceModel.value = saved.sequenceModel ?? null;
+    // A draft written before the sub-mode existed carries the answer in what
+    // it holds: a sequence, or scenes somebody actually wrote.
+    clipMode.value =
+      saved.clipMode ??
+      (saved.output === "sequence" || authoredScenes(saved.clips)
+        ? "scenes"
+        : "simple");
   }
 
   async function restorePersistedMedia() {
@@ -370,10 +405,26 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   }
 
   /** Adopt one concrete model as the clip-duration authority. */
-  function adoptSequenceModel(model: string, defaultFrames: number): boolean {
+  /**
+   * Bind a newly selected model to the draft, resetting the values that model
+   * owns. `supportsAudio` is the chain limits' `supports_audio` for that
+   * model: a sequence renders with sound wherever the model delivers it, the
+   * same default a one-shot of the same model gets, so a model switch adopts
+   * that answer rather than leaving the previous model's. Omitting it keeps
+   * the current value, for callers that have no limits yet.
+   *
+   * Returns whether this was a real switch — a re-fetch of the same model
+   * (fps change, host refresh) must never overwrite the user's own choice.
+   */
+  function adoptSequenceModel(
+    model: string,
+    defaultFrames: number,
+    supportsAudio?: boolean,
+  ): boolean {
     if (sequenceModel.value === model) return false;
     sequenceModel.value = model;
     resetClipFrames(defaultFrames);
+    if (supportsAudio !== undefined) enableAudio.value = supportsAudio;
     return true;
   }
 
@@ -486,11 +537,17 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   }
 
   /**
-   * Clear the whole sequence: back to two fresh clips, no audio, and no
-   * edit session. Stays in Sequence — clearing means "start this story
-   * over", not "leave sequence mode" (that's the Output control's job).
+   * Clear the whole sequence: back to two fresh clips, the model's own audio
+   * answer, and no edit session. Stays in Sequence — clearing means "start
+   * this story over", not "leave sequence mode" (that's the Output control's
+   * job).
+   *
+   * `supportsAudio` is the chain limits' `supports_audio`. Starting over
+   * restores the DEFAULT, which is on wherever the model renders sound;
+   * clearing to a flat `false` handed back a silent draft the user never
+   * chose. Omitting it keeps the current value, for a caller with no limits.
    */
-  function clearSequence(defaultFrames: number) {
+  function clearSequence(defaultFrames: number, supportsAudio?: boolean) {
     if (openingImage.value?.draftId)
       void deleteDraftMedia(openingImage.value.draftId);
     for (const clip of clips) {
@@ -504,7 +561,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
       newSequenceClip(defaultFrames),
     );
     activeClipId.value = clips[0]?.id ?? null;
-    enableAudio.value = false;
+    if (supportsAudio !== undefined) enableAudio.value = supportsAudio;
     openingImage.value = null;
     editing.value = null;
   }
@@ -522,12 +579,36 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     openingImage.value = null;
     editing.value = null;
     output.value = "single";
+    clipMode.value = "simple";
   }
+
+  // A sequence IS the scene-by-scene way of working, however it arrived —
+  // `setOutput`, an edit session, a reuse that assigns `output` directly, or a
+  // restored draft. Leaving a sequence does NOT clear the preference: Still
+  // picture and 3-D park the sub-mode rather than resetting it.
+  // Sync flush: this is an invariant, not a side effect, so a caller that
+  // reads `clipMode` on the next line must never see the stale answer.
+  watch(
+    output,
+    (mode) => {
+      if (mode === "sequence") clipMode.value = "scenes";
+    },
+    { flush: "sync" },
+  );
 
   // Sync flush so the debounce timer arms on the mutation itself (the
   // callback only re-arms a setTimeout — cheap enough for every keystroke).
   watch(
-    [output, clips, openingImage, enableAudio, lastSingleModel, sequenceModel],
+    [
+      output,
+      clips,
+      openingImage,
+      enableAudio,
+      lastSingleModel,
+      lastStillModel,
+      sequenceModel,
+      clipMode,
+    ],
     () => schedulePersist(),
     { deep: true, flush: "sync" },
   );
@@ -541,7 +622,9 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     enableAudio,
     editing,
     lastSingleModel,
+    lastStillModel,
     sequenceModel,
+    clipMode,
     hydrated,
     hydrate,
     ensureClips,

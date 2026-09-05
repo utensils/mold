@@ -353,8 +353,15 @@ correctness-only and unqualified, and CPU is unsupported. See
 ## Joint Audio-Video Generation
 
 LTX-2 / LTX-2.3 is exposed as a separate `ltx2` family. Unlike `ltx-video`,
-its default container is MP4 and it can keep a synchronized audio track when
+its default container is MP4 and it renders a synchronized audio track when
 the request stays in MP4.
+
+**Audio is on by default wherever the model renders it** — one-shots, authored
+sequences, and the auto-chain a long `--frames` becomes, on every surface. Pass
+`--no-audio` (or `enable_audio: false`) to render silent; the graphical
+surfaces show the same default under **Add sound**, already switched on. A
+model with no audio decode path, and an LTX-2 checkpoint whose audio assets are
+missing, stay silent and say so.
 
 ```bash
 # Text-to-audio+video
@@ -387,7 +394,8 @@ or `--extend`). It saves no VRAM and usually yields near-static motion; see
 
 LTX-2 also adds:
 
-- `--audio` / `--no-audio`
+- `--audio` / `--no-audio` (audio is already on for MP4; `--no-audio` is how
+  you turn it off)
 - `--video-only` (skip the audio branch entirely; output-changing, conflicts
   with `--audio` and `--audio-file`)
 - `--audio-file`

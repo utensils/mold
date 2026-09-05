@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { flushPromises, mount } from "@vue/test-utils";
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
 const routerPush = vi.hoisted(() => vi.fn());
@@ -16,6 +16,7 @@ vi.mock("../../lib/api/catalog", () => ({
 }));
 
 import CommandPalette from "./CommandPalette.vue";
+import { overlayDepth, resetOverlayStackForTests } from "@ui/lib/overlayStack";
 import { useGalleryStore } from "../../stores/gallery";
 import { useUiStore } from "../../stores/ui";
 import { useAppPrefsStore } from "../../stores/appPrefs";
@@ -25,18 +26,46 @@ import { useHostsStore } from "../../stores/hosts";
 import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useComposerStore } from "../../stores/composer";
-import { useGenerationStore } from "../../stores/generation";
+import { newJob, useGenerationStore } from "../../stores/generation";
 import { useToastStore } from "../../stores/toasts";
+import { useJobsStore } from "../../stores/jobs";
+import { useGenerateFormStore } from "../../stores/generateForm";
+import { __resetQueueCommandState, useQueueCommands } from "../../composables/useQueueCommands";
+import { altShortcutLabel, shortcutLabel } from "../../lib/platform";
 import type { GalleryImage, ModelEntry } from "../../lib/api/types";
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  __resetQueueCommandState();
   routerPush.mockClear();
   searchCatalogMock.mockClear();
   searchCatalogMock.mockResolvedValue({ entries: [], page: 1, page_size: 12, total: 0 });
   startCatalogDownloadMock.mockClear();
   startCatalogDownloadMock.mockResolvedValue("job-1");
 });
+
+/** A finished still on the canvas: the only state Make 4 variations is for. */
+function finishAStill(request: Record<string, unknown> = {}) {
+  const generation = useGenerationStore();
+  const model = (request.model as string | undefined) ?? "sdxl-base:fp16";
+  const job = newJob({
+    prompt: "a brass teapot",
+    model,
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    ...request,
+  } as never);
+  Object.assign(job, {
+    clientId: 1,
+    batchId: 1,
+    id: "finished-print",
+    status: "complete",
+    result: { image: "cGl4ZWxz", filename: "teapot.png", model, format: "png" },
+  });
+  generation.jobs.push(job);
+  generation.selectedClientId = job.clientId;
+}
 
 async function openPalette() {
   const wrapper = mount(CommandPalette, { attachTo: document.body });
@@ -48,23 +77,51 @@ async function openPalette() {
 }
 
 describe("CommandPalette command registry", () => {
-  it("navigates to Models for both 'models' and 'catalog' queries", async () => {
+  /*
+   * WebKit's inline text replacement pops a "Theme ×" bubble over the query
+   * and rewrites it on Space or ↩ — the key that runs the command — so typing
+   * "theme" and pressing ↩ could execute a corrected word. A command query is
+   * not prose: the OS correction, capitalization, and spell-check are off.
+   */
+  /** The palette sits above every dialog; unregistered, a ModalPanel below
+   *  it took Escape first and stopped it before the palette's input saw it. */
+  it("registers as the topmost overlay while it is open", async () => {
+    resetOverlayStackForTests();
+    const wrapper = await openPalette();
+    expect(overlayDepth()).toBe(1);
+    useUiStore().paletteOpen = false;
+    await wrapper.vm.$nextTick();
+    expect(overlayDepth()).toBe(0);
+    wrapper.unmount();
+  });
+
+  it("turns the OS text correction off on the query field", async () => {
+    const wrapper = await openPalette();
+    const input = wrapper.get("input");
+    expect(input.attributes("autocorrect")).toBe("off");
+    expect(input.attributes("autocapitalize")).toBe("off");
+    expect(input.attributes("spellcheck")).toBe("false");
+    expect(input.attributes("autocomplete")).toBe("off");
+    wrapper.unmount();
+  });
+
+  it("navigates to Styles for the old 'models' and 'catalog' queries", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");
 
     await input.setValue("models");
     let texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Go to Models"))).toBe(true);
+    expect(texts.some((t) => t.includes("Styles"))).toBe(true);
 
-    // Muscle memory: the old "catalog" name still finds the Models entry.
+    // Muscle memory: the old "catalog" name still finds the Styles entry.
     await input.setValue("catalog");
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Go to Models"))).toBe(true);
+    expect(texts.some((t) => t.includes("Styles"))).toBe(true);
     expect(texts.some((t) => t.includes("Go to Catalog"))).toBe(false);
     wrapper.unmount();
   });
 
-  it("offers Create sequence and Open history alongside the five workspaces", async () => {
+  it("offers Make a short clip and Recent settings alongside the workspaces", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");
 
@@ -72,17 +129,17 @@ describe("CommandPalette command registry", () => {
     // Create now, so the entry deep-links rather than opening a chains page).
     await input.setValue("clips");
     let texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Create sequence"))).toBe(true);
+    expect(texts.some((t) => t.includes("Make a short clip"))).toBe(true);
 
     await input.setValue("history");
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
-    expect(texts.some((t) => t.includes("Open history"))).toBe(true);
+    expect(texts.some((t) => t.includes("Recent settings"))).toBe(true);
 
     // Picking the entry deep-links into Create's sequence output (and closes).
     await input.setValue("sequence");
     const option = wrapper
       .findAll("[role='option']")
-      .find((o) => o.text().includes("Create sequence"));
+      .find((o) => o.text().includes("Make a short clip"));
     expect(option).toBeTruthy();
     await option!.trigger("click");
     expect(routerPush).toHaveBeenCalledWith("/create?output=sequence");
@@ -117,26 +174,239 @@ describe("CommandPalette command registry", () => {
     wrapper.unmount();
   });
 
-  it("reports the confirmed count when bulk cancellation races terminal jobs", async () => {
+  it("routes Stop everything to the one shared confirm, and counts the whole fleet", async () => {
+    // The palette used to run its own loop over this client's pending prints
+    // under the same words as the rail's fleet-wide action: same name, a
+    // strict subset of the blast radius, and no confirmation on either.
     const generation = useGenerationStore();
     generation.jobs = [
       { clientId: 1, status: "queued" },
       { clientId: 2, status: "queued" },
     ] as never;
-    vi.spyOn(generation, "cancel").mockImplementation(async (id) => id === 1);
+    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     const wrapper = await openPalette();
-    await wrapper.get("input").setValue("cancel all");
+    await wrapper.get("input").setValue("stop everything");
 
     await wrapper
       .findAll("[role='option']")
-      .find((option) => option.text().includes("Cancel all 2 jobs"))!
+      .find((option) => option.text().includes("Stop everything · 2 pictures"))!
       .trigger("click");
     await flushPromises();
 
-    expect(useToastStore().items.map((item) => item.message)).toContain(
-      "Cancelled 1 job; remaining jobs already settled",
+    expect(cancel).not.toHaveBeenCalled();
+    expect(useToastStore().items).toHaveLength(0);
+    expect(useQueueCommands().stopEverythingOpen.value).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("offers Stop everything for a single live print, which the old gate hid", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ clientId: 1, status: "queued" }] as never;
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("stop everything");
+    const texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("Stop everything · 1 picture"))).toBe(true);
+    wrapper.unmount();
+  });
+});
+
+describe("CommandPalette shortcut column and mock groups", () => {
+  /** The row's mono columns: the group on the left, the shortcut on the right. */
+  function columns(option: DOMWrapper<Element>) {
+    const spans = option.findAll("span");
+    return { group: spans[0]!.text(), key: spans.at(-1)!.text() };
+  }
+
+  function rowFor(wrapper: VueWrapper, title: string) {
+    return wrapper.findAll("[role='option']").find((option) => option.text().includes(title));
+  }
+
+  it("renders a command's shortcut in the right mono column, read from the keyboard map", async () => {
+    const wrapper = await openPalette();
+    // The destination takes its chord from NAV_ROUTES; the action takes its own.
+    expect(columns(rowFor(wrapper, "New image")!).key).toBe(shortcutLabel("1"));
+    expect(columns(rowFor(wrapper, "Start a blank image")!).key).toBe(shortcutLabel("N"));
+    expect(columns(rowFor(wrapper, "Settings")!).key).toBe(shortcutLabel(","));
+    wrapper.unmount();
+  });
+
+  it("groups its rows the way the mock does — make · queue · go · styles · machines", async () => {
+    const wrapper = await openPalette();
+    useModelStore().all = [
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        downloaded: true,
+        is_loaded: false,
+        size_gb: 1,
+      } as never,
+    ];
+    await wrapper.vm.$nextTick();
+    const groups = new Map(
+      wrapper.findAll("[role='option']").map((option) => [option.text(), columns(option).group]),
     );
-    expect(useToastStore().items.map((item) => item.message)).not.toContain("Cancelled all jobs");
+    const groupOf = (title: string) =>
+      [...groups.entries()].find(([text]) => text.includes(title))?.[1];
+
+    expect(groupOf("New image")).toBe("make");
+    expect(groupOf("Surprise me")).toBe("make");
+    expect(groupOf("My images")).toBe("go");
+    expect(groupOf("Machines")).toBe("go");
+    expect(groupOf("Use flux-dev:q4")).toBe("styles");
+    expect(groupOf("Connect a machine…")).toBe("machines");
+    expect(groupOf("Rent a GPU…")).toBe("machines");
+    expect([...groups.values()]).not.toContain("do");
+    wrapper.unmount();
+  });
+
+  /*
+   * The clip's scene-by-scene way of working is a sub-mode of New image, not a
+   * place, so the palette raises the intent and goes to Create rather than
+   * deep-linking a query the view only reads while it is mounting.
+   */
+  it("opens the clip scene by scene, as one make command", async () => {
+    const wrapper = await openPalette();
+    const ui = useUiStore();
+    await wrapper.get("input").setValue("scene by scene");
+    const row = rowFor(wrapper, "Edit the clip scene by scene")!;
+    expect(row.exists()).toBe(true);
+    expect(columns(row).group).toBe("make");
+
+    await row.trigger("click");
+    expect(ui.clipScenesTick).toBe(1);
+    expect(routerPush).toHaveBeenCalledWith("/create");
+    expect(ui.paletteOpen).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("generates from the words already in the composer, exactly as the Generate menu item does", async () => {
+    const wrapper = await openPalette();
+    const ui = useUiStore();
+    await wrapper.get("input").setValue("Generate from these words");
+    const row = rowFor(wrapper, "Generate from these words")!;
+    expect(row.exists()).toBe(true);
+    expect(columns(row)).toEqual({ group: "make", key: shortcutLabel("↩") });
+
+    await row.trigger("click");
+    expect(ui.generateTick).toBe(1);
+    expect(ui.paletteOpen).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("asks for four variations of the last picture under ⌥↩", async () => {
+    finishAStill();
+    const wrapper = await openPalette();
+    const ui = useUiStore();
+    await wrapper.get("input").setValue("Make 4 variations");
+    const row = rowFor(wrapper, "Make 4 variations of the last picture")!;
+    expect(row.exists()).toBe(true);
+    expect(columns(row)).toEqual({ group: "make", key: altShortcutLabel("↩") });
+
+    await row.trigger("click");
+    expect(ui.makeVariationsTick).toBe(1);
+    expect(routerPush).toHaveBeenCalledWith("/create");
+    wrapper.unmount();
+  });
+
+  it("opens Browse more for Download a style…", async () => {
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("Download a style");
+    const row = rowFor(wrapper, "Download a style…")!;
+    expect(columns(row).group).toBe("styles");
+
+    await row.trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/models?tab=discover");
+    wrapper.unmount();
+  });
+
+  it("pauses and resumes the queue on the machine that owns it", async () => {
+    useConnectionStore().info = { baseUrl: "http://127.0.0.1:7680", apiKey: null } as never;
+    useConnectionStore().status = "ready";
+    const jobs = useJobsStore();
+    jobs.queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    };
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue();
+    const resume = vi.spyOn(jobs, "resume").mockResolvedValue();
+    // Toggling reads the host's queue first, so the decision is made against
+    // what the host says rather than against a snapshot nobody fetched.
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue();
+
+    const wrapper = await openPalette();
+    const row = rowFor(wrapper, "Pause the queue")!;
+    expect(columns(row)).toEqual({ group: "queue", key: "Space" });
+    await row.trigger("click");
+    await flushPromises();
+    expect(pause).toHaveBeenCalledWith("local");
+
+    jobs.queues["local"]!.paused = true;
+    useUiStore().paletteOpen = true;
+    await wrapper.vm.$nextTick();
+    await rowFor(wrapper, "Resume the queue")!.trigger("click");
+    await flushPromises();
+    expect(resume).toHaveBeenCalledWith("local");
+    wrapper.unmount();
+  });
+
+  it("offers no queue command on a machine that cannot pause", async () => {
+    useConnectionStore().info = { baseUrl: "http://127.0.0.1:7680", apiKey: null } as never;
+    useConnectionStore().status = "ready";
+    useJobsStore().queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: { canPause: false, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    } as never;
+
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Pause the queue")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  /**
+   * The action makes exactly one picture on a batch-locked recipe and means
+   * nothing at all before a print exists, so the palette does not list it.
+   */
+  it("offers no variations command until a still is on the canvas", async () => {
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  /** The recipe that answers is the PRINT'S, not whatever the composer holds. */
+  it("offers no variations command for a print an edit recipe made", async () => {
+    const editModel = {
+      name: "qwen-image-edit-2511:q8",
+      family: "qwen-image-edit",
+      downloaded: true,
+    } as ModelEntry;
+    useModelStore().all = [editModel];
+    useHostModelsStore().byHost.local = { entries: [editModel], fetchedAt: 1, error: null };
+    finishAStill({ model: editModel.name, edit_images: ["cGl4ZWxz"] });
+
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("keeps offering it for a repeatable print while the composer holds an edit recipe", async () => {
+    const sdxl = { name: "sdxl-base:fp16", family: "sdxl", downloaded: true } as ModelEntry;
+    useModelStore().all = [sdxl];
+    useHostModelsStore().byHost.local = { entries: [sdxl], fetchedAt: 1, error: null };
+    finishAStill();
+    const form = useGenerateFormStore().form;
+    form.family = "qwen-image-edit";
+    form.model = "qwen-image-edit-2511:q8";
+
+    const wrapper = await openPalette();
+    expect(rowFor(wrapper, "Make 4 variations of the last picture")).toBeDefined();
     wrapper.unmount();
   });
 });

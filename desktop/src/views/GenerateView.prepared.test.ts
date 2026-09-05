@@ -97,10 +97,10 @@ function mountView() {
     shallow: true,
     attachTo: document.body,
     global: {
-      // The composer textarea + Generate button now live in ComposerCard and
-      // the model picker in InspectorPanel → ModelPicker; keep them real so
-      // the view's DOM hooks and focus targets resolve. Prepared/pull
-      // surfaces stay real too.
+      // The composer textarea + Generate button live in ComposerCard and the
+      // style picker on its chip (ComposerCard's `style` slot → StylePicker →
+      // ModelPicker); keep them real so the view's DOM hooks and focus targets
+      // resolve. Prepared/pull surfaces stay real too.
       stubs: {
         ExpandControl: false,
         PreparedExpansionBatch: false,
@@ -109,6 +109,7 @@ function mountView() {
         ErrorNotice: false,
         ComposerCard: false,
         InspectorPanel: false,
+        StylePicker: false,
         ModelPicker: false,
       },
     },
@@ -979,7 +980,9 @@ describe("GenerateView prepared expansion batches", () => {
     });
   });
 
-  it("remixes Batch 1 in place with the style snapshotted before the request", async () => {
+  /** A leftover preset (an old template, a stale draft) is not read, not
+   *  written and not a staleness axis: the remix lands regardless. */
+  it("remixes Batch 1 in place, leaving a leftover style preset untouched", async () => {
     const form = useGenerateFormStore().form;
     form.batchSize = 1;
     form.stylePreset = "cinematic";
@@ -1011,7 +1014,7 @@ describe("GenerateView prepared expansion batches", () => {
     expect(wrapper.findComponent(PreparedExpansionBatch).exists()).toBe(false);
     expect(form.prompt).toBe("one");
     expect(form.batchSize).toBe(1);
-    expect(form.stylePreset).toBe("");
+    expect(form.stylePreset).toBe("anime");
 
     await wrapper.get('[data-test="generate-button"]').trigger("click");
     await flushPromises();
@@ -1183,8 +1186,11 @@ describe("GenerateView prepared expansion batches", () => {
       batch_size: 1,
       output_format: "png",
     });
-    job.status = "denoising";
-    job.step = 20;
+    // The caption strip carries the live status while a print develops and
+    // the edge code once it settles, so the model name is read on a settled
+    // print.
+    job.status = "complete";
+    job.step = 25;
     job.total = 25;
     useGenerationStore().jobs = [job];
 
@@ -1217,12 +1223,14 @@ describe("GenerateView prepared expansion batches", () => {
     const wrapper = mountView();
     await flushPromises();
 
-    const frame = wrapper.get("[data-test='preview-frame']");
-    const status = wrapper.get("[data-test='generation-live-status']");
+    // The status reads in the caption strip along the frame's bottom edge —
+    // below the developing image, never a pill floating over it.
+    const caption = wrapper.get("[data-test='canvas-caption']");
+    const status = caption.get("[data-test='generation-live-status']");
     expect(status.text()).toBe("Developing 20/25");
-    expect(frame.find("[data-test='generation-live-status']").exists()).toBe(false);
+    const preview = wrapper.get("[data-test='develop-preview']");
     expect(
-      frame.element.compareDocumentPosition(status.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+      preview.element.compareDocumentPosition(caption.element) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 

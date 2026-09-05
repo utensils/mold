@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /*
- * History drawer (spec §06) — the Library's Runs + Prompts + Sequences log on a
- * right-side @ui DrawerPanel. Runs are gallery-backed (every finished
+ * History — the Library's Runs + Prompts + Sequences log as an INLINE column
+ * beside the grid, never a modal drawer: no scrim, no `aria-modal`, and the
+ * tiles reflow next to it and stay clickable. Runs are gallery-backed (every finished
  * generation with its print, settings, and seed); Prompts is the raw prompt log
  * fanned out over every ready host; Sequences is the one place the durable
  * server-side sequence jobs are enumerated, acted on, and cleaned up — the
@@ -13,7 +14,7 @@
  */
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import DrawerPanel from "@ui/components/DrawerPanel.vue";
+import Icon from "@ui/components/Icon.vue";
 import SequenceJobRow from "@ui/components/SequenceJobRow.vue";
 import {
   HISTORY_JOBS_RENDER_CAP,
@@ -60,6 +61,7 @@ import type { MergedPrint } from "../../stores/gallery";
 import type { GalleryImage } from "../../lib/api/types";
 import { dragWidth } from "../../lib/panelResize";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useReuseStillPrint } from "../../composables/useReuseStillPrint";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -77,6 +79,7 @@ const models = useModelStore();
 const toasts = useToastStore();
 const contextMenu = useContextMenuStore();
 const appPrefs = useAppPrefsStore();
+const reuseStillPrint = useReuseStillPrint();
 
 const draftDrawerWidth = ref<number | null>(null);
 const drawerWidth = computed(() => draftDrawerWidth.value ?? appPrefs.historyDrawerWidth);
@@ -179,8 +182,22 @@ function runTime(img: GalleryImage): string {
   });
 }
 
-function useRun(img: GalleryImage) {
-  composer.set({ metadata: img.metadata });
+/** The mock's one meta line: `flux-dev:q4 · 1024² · seed 4821 · 12:41`. A
+ *  square canvas is written once with a superscript two, as the mock does. */
+function runMeta(img: GalleryImage): string {
+  const { model, width, height, seed } = img.metadata;
+  const size = width === height ? `${width}²` : `${width}×${height}`;
+  return `${model} · ${size} · seed ${seed} · ${runTime(img)}`;
+}
+
+/**
+ * "Use these settings" on a past run. It takes the SAME road the Lightbox and
+ * the Create view's Recent tab take — `composer.set` restored the numbers and
+ * dropped the photo the print was made from, because it invalidates
+ * retained-source authority. Sequences keep `composer.setSequence`.
+ */
+function useRun(entry: MergedPrint) {
+  reuseStillPrint(entry);
   emit("close");
   void router.push("/create");
 }
@@ -207,7 +224,7 @@ async function useRunAsSource(entry: MergedPrint) {
 function runMenu(entry: MergedPrint): MenuEntry[] {
   const img = entry.item;
   return [
-    { label: "Reuse settings", action: () => useRun(img) },
+    { label: "Use these settings", action: () => useRun(entry) },
     {
       label: "Use as source",
       disabled: !canUseGalleryEntryAsSource(img),
@@ -236,7 +253,7 @@ function runMenu(entry: MergedPrint): MenuEntry[] {
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
           ),
     },
-    { label: "Show in library", action: () => emit("close") },
+    { label: "Show in My images", action: () => emit("close") },
   ];
 }
 
@@ -515,7 +532,7 @@ const sequenceHostLabel = computed(() =>
 const clearSequencesLabel = computed(() => {
   if (!confirmingClearSequences.value) return "Clear inactive";
   const n = inactiveSequenceCount.value;
-  return `Delete ${n} inactive sequence${n === 1 ? "" : "s"} on ${sequenceHostLabel.value}?`;
+  return `Delete ${n} inactive clip${n === 1 ? "" : "s"} on ${sequenceHostLabel.value}?`;
 });
 
 async function clearInactiveSequences() {
@@ -531,7 +548,7 @@ async function clearInactiveSequences() {
       ? await chains.clearInactive(scope)
       : await chains.clearInactive();
     if (failed > 0) toasts.push(`Cleared ${cleared}, ${failed} could not be deleted`, "error");
-    else toasts.push(`Cleared ${cleared} sequence${cleared === 1 ? "" : "s"}`);
+    else toasts.push(`Cleared ${cleared} clip${cleared === 1 ? "" : "s"}`);
   } catch (err) {
     toasts.push(String(err), "error");
   } finally {
@@ -564,20 +581,38 @@ async function cleanUpDiskConfirmed() {
 </script>
 
 <template>
-  <DrawerPanel :open="open" :width="drawerWidth" title="History" @close="emit('close')">
-    <template #leading>
-      <PanelResizeHandle
-        class="absolute inset-y-0 -left-0.5 z-10"
-        label="Resize history"
-        @resize="onDrawerResize"
-        @commit="onDrawerCommit"
-        @reset="onDrawerReset"
-      />
-    </template>
-    <template #header>
-      <span class="ms-drawer-kicker">History</span>
+  <aside
+    v-if="open"
+    data-test="history-panel"
+    aria-label="History"
+    class="border-border relative flex shrink-0 flex-col border-l bg-chrome"
+    :style="{ width: `${drawerWidth}px` }"
+  >
+    <PanelResizeHandle
+      class="absolute inset-y-0 -left-0.5 z-10"
+      label="Resize history"
+      @resize="onDrawerResize"
+      @commit="onDrawerCommit"
+      @reset="onDrawerReset"
+    />
+    <header
+      class="border-border flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2 border-b bg-bg px-3.5"
+    >
+      <span class="text-sm font-semibold text-fg">History</span>
+      <span class="flex-1" />
+      <button
+        type="button"
+        class="flex h-6 w-6 items-center justify-center rounded-control text-fg-dim hover:text-fg"
+        aria-label="Close history"
+        @click="emit('close')"
+      >
+        <Icon name="close" :size="13" />
+      </button>
+    </header>
+
+    <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
       <div
-        class="ml-3 flex rounded-control border border-control-edge bg-bath p-0.5"
+        class="flex rounded-control border border-border-control bg-bg-deep p-0.5"
         role="group"
         aria-label="History view"
       >
@@ -585,8 +620,8 @@ async function cleanUpDiskConfirmed() {
           type="button"
           data-test="tab-runs"
           :aria-pressed="tab === 'runs'"
-          class="rounded-control px-2.5 py-1 text-body transition-colors"
-          :class="tab === 'runs' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          class="rounded-control px-2.5 py-1 text-sm transition-colors"
+          :class="tab === 'runs' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('runs')"
         >
           Runs
@@ -595,8 +630,8 @@ async function cleanUpDiskConfirmed() {
           type="button"
           data-test="tab-prompts"
           :aria-pressed="tab === 'prompts'"
-          class="rounded-control px-2.5 py-1 text-body transition-colors"
-          :class="tab === 'prompts' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          class="rounded-control px-2.5 py-1 text-sm transition-colors"
+          :class="tab === 'prompts' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('prompts')"
         >
           Prompts
@@ -605,33 +640,31 @@ async function cleanUpDiskConfirmed() {
           type="button"
           data-test="tab-sequences"
           :aria-pressed="tab === 'sequences'"
-          class="rounded-control px-2.5 py-1 text-body transition-colors"
-          :class="tab === 'sequences' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          class="rounded-control px-2.5 py-1 text-sm transition-colors"
+          :class="tab === 'sequences' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
           @click="selectTab('sequences')"
         >
-          Sequences
+          Clips
         </button>
       </div>
-    </template>
 
-    <div class="flex flex-col gap-3">
       <div v-if="tab !== 'sequences'" class="flex items-center gap-2">
         <input
           v-model="query"
           data-selectable
           type="search"
           :placeholder="tab === 'runs' ? 'Search runs…' : 'Search prompts…'"
-          class="border-edge h-7 flex-1 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
+          class="border-border h-7 flex-1 rounded-control border bg-bg-deep px-2 text-sm text-fg placeholder:text-fg-dim"
         />
         <button
           v-if="tab === 'prompts'"
           type="button"
           data-test="clear-history"
-          class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-body transition-colors duration-100"
+          class="border-border h-7 shrink-0 rounded-control border px-2.5 text-sm transition-colors duration-100"
           :class="
             confirmingClear
-              ? 'border-stop bg-stop font-semibold text-on-accent'
-              : 'text-ink-2 hover:text-stop'
+              ? 'border-error bg-error font-semibold text-on-accent'
+              : 'text-fg-2 hover:text-error'
           "
           @blur="confirmingClear = false"
           @click="clearAll"
@@ -653,27 +686,29 @@ async function cleanUpDiskConfirmed() {
         <EmptyState
           v-if="gallery.loaded && runs.length === 0 && !query"
           headline="No runs yet"
-          detail="Every print you develop shows up here with its settings and seed."
+          detail="Every picture you make shows up here with its settings and seed."
         />
-        <p v-else-if="query && runs.length === 0" class="mt-6 text-center text-body text-ink-2">
+        <p v-else-if="query && runs.length === 0" class="mt-6 text-center text-sm text-fg-2">
           No runs match “{{ query }}”.
         </p>
         <template v-for="group in runGroups" :key="group.label">
           <div class="mt-3 mb-1 flex items-center gap-2 first:mt-0">
-            <span class="edge-code">{{ group.label.toUpperCase() }}</span>
-            <div class="border-edge h-px flex-1 border-t" />
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+              group.label.toUpperCase()
+            }}</span>
+            <div class="border-border h-px flex-1 border-t" />
           </div>
           <button
             v-for="entry in group.runs"
             :key="runKey(entry)"
             type="button"
             data-test="run-row"
-            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bath"
-            @click="useRun(entry.item)"
+            class="border-border flex w-full items-center gap-2.5 rounded-control border p-2.5 text-left hover:bg-surface"
+            @click="useRun(entry)"
             @contextmenu="contextMenu.open($event, runMenu(entry))"
           >
             <div
-              class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
+              class="h-12 w-12 shrink-0 overflow-hidden rounded-inner border border-border bg-media-bed"
             >
               <AuthedMedia
                 :path="
@@ -689,30 +724,29 @@ async function cleanUpDiskConfirmed() {
                 :alt="entry.item.metadata.prompt"
               />
             </div>
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-body text-ink" :title="entry.item.metadata.prompt">
+            <div class="flex min-w-0 flex-1 flex-col gap-1">
+              <span class="truncate text-xs text-fg" :title="entry.item.metadata.prompt">
                 {{ entry.item.metadata.prompt }}
-              </div>
-              <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
-                {{ entry.item.metadata.model }} · {{ entry.item.metadata.width }}×{{
-                  entry.item.metadata.height
-                }}
-                · S {{ entry.item.metadata.seed }} · {{ entry.item.metadata.steps }} steps
-              </div>
+              </span>
+              <span class="font-mono truncate text-micro text-fg-dim" data-test="run-meta">
+                {{ runMeta(entry.item) }}
+              </span>
+              <span
+                v-if="showBadges"
+                data-test="host-badge"
+                class="font-mono truncate text-micro text-fg-dim"
+              >
+                {{ availabilityLabel(entry) }}
+              </span>
+              <span class="text-micro font-semibold text-accent">Use these settings</span>
             </div>
-            <span
-              v-if="showBadges"
-              data-test="host-badge"
-              class="edge-code max-w-24 shrink-0 truncate"
-            >
-              {{ availabilityLabel(entry) }}
-            </span>
-            <span class="data-mono shrink-0 text-caption text-ink-3">{{
-              runTime(entry.item)
-            }}</span>
           </button>
         </template>
-        <p v-if="runsCapNote" data-test="runs-cap-note" class="edge-code mt-1">
+        <p
+          v-if="runsCapNote"
+          data-test="runs-cap-note"
+          class="font-mono text-micro text-fg-dim whitespace-nowrap mt-1"
+        >
           {{ runsCapNote }}
         </p>
       </div>
@@ -722,9 +756,9 @@ async function cleanUpDiskConfirmed() {
         <EmptyState
           v-if="sequenceRows.length === 0"
           data-test="sequences-empty"
-          headline="No sequences yet"
-          detail="A sequence you develop keeps its job here — watch it, edit its clips, or clear it out."
-          action="Go to Create"
+          headline="No clips yet"
+          detail="A clip you make keeps its job here — watch it, edit its scenes, or clear it out."
+          action="Go to New image"
           @action="
             emit('close');
             router.push('/create');
@@ -735,7 +769,7 @@ async function cleanUpDiskConfirmed() {
             v-for="vm in visibleSequences"
             :key="vm.key"
             data-test="sequence-row"
-            class="rounded-control px-2 py-1.5 hover:bg-bath"
+            class="rounded-control px-2 py-1.5 hover:bg-bg-deep"
           >
             <SequenceJobRow
               class="min-w-0"
@@ -751,32 +785,36 @@ async function cleanUpDiskConfirmed() {
                   v-if="printOf(vm)"
                   type="button"
                   data-test="seq-show-print"
-                  class="border-ce shrink-0 rounded-control border px-2 py-0.5 text-caption text-ink-2 hover:text-rebate"
+                  class="border-border-control shrink-0 rounded-control border px-2 py-0.5 text-micro text-fg-2 hover:text-fg"
                   @click.stop="showPrint(vm)"
                 >
-                  Show print
+                  Show the picture
                 </button>
               </template>
             </SequenceJobRow>
           </div>
-          <p v-if="sequenceCapNote" data-test="sequence-cap-note" class="edge-code mt-1">
+          <p
+            v-if="sequenceCapNote"
+            data-test="sequence-cap-note"
+            class="font-mono text-micro text-fg-dim whitespace-nowrap mt-1"
+          >
             {{ sequenceCapNote }}
           </p>
         </template>
 
         <!-- Maintenance lives here now: destructive, host-scoped, rarely used. -->
-        <div class="border-edge mt-2 flex items-center gap-2 border-t pt-2">
+        <div class="border-border mt-2 flex items-center gap-2 border-t pt-2">
           <button
             type="button"
             data-test="seq-clear-inactive"
-            class="border-edge h-7 rounded-control border px-2.5 text-body transition-colors duration-100"
+            class="border-border h-7 rounded-control border px-2.5 text-sm transition-colors duration-100"
             :class="
               confirmingClearSequences
-                ? 'border-stop bg-stop font-semibold text-on-accent'
-                : 'text-ink-2 hover:text-stop'
+                ? 'border-error bg-error font-semibold text-on-accent'
+                : 'text-fg-2 hover:text-error'
             "
             :disabled="clearingSequences"
-            title="Delete every sequence job that isn't running or queued"
+            title="Delete every clip job that isn't running or being made"
             @blur="confirmingClearSequences = false"
             @click="clearInactiveSequences"
           >
@@ -785,8 +823,8 @@ async function cleanUpDiskConfirmed() {
           <button
             type="button"
             data-test="seq-cleanup-disk"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink"
-            title="Sweep ephemeral jobs and prune artifact directories"
+            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg"
+            title="Free the disk space cached scenes are holding"
             @click="cleanUpDisk"
           >
             Clean up disk
@@ -822,68 +860,62 @@ async function cleanUpDiskConfirmed() {
         />
         <template v-for="group in groups" :key="group.label">
           <div class="mt-3 mb-1 flex items-center gap-2 first:mt-0">
-            <span class="edge-code">{{ group.label.toUpperCase() }}</span>
-            <div class="border-edge h-px flex-1 border-t" />
+            <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
+              group.label.toUpperCase()
+            }}</span>
+            <div class="border-border h-px flex-1 border-t" />
           </div>
           <button
             v-for="(entry, i) in group.entries"
             :key="`${group.label}-${i}`"
             type="button"
             data-test="prompt-row"
-            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bath"
+            class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bg-deep"
             @click="usePrompt(entry)"
             @contextmenu="contextMenu.open($event, promptMenu(entry))"
           >
-            <span class="min-w-0 flex-1 truncate text-body text-ink" :title="entry.prompt">
+            <span class="min-w-0 flex-1 truncate text-sm text-fg" :title="entry.prompt">
               {{ entry.prompt }}
             </span>
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code max-w-24 shrink-0 truncate"
+              class="font-mono text-micro text-fg-dim whitespace-nowrap max-w-24 shrink-0 truncate"
             >
               {{ entry.hostLabel }}
             </span>
-            <span class="data-mono shrink-0 text-caption text-ink-3">{{ entry.model }}</span>
-            <span class="data-mono shrink-0 text-caption text-ink-3">{{ timeOf(entry) }}</span>
+            <span class="font-mono shrink-0 text-micro text-fg-dim">{{ entry.model }}</span>
+            <span class="font-mono shrink-0 text-micro text-fg-dim">{{ timeOf(entry) }}</span>
           </button>
         </template>
         <p
           v-if="query && visiblePrompts.length === 0 && !unavailable"
-          class="mt-6 text-center text-body text-ink-2"
+          class="mt-6 text-center text-sm text-fg-2"
         >
           No prompts match “{{ query }}”.
         </p>
       </div>
     </div>
+  </aside>
 
-    <ConfirmDialog
-      :open="confirmDeleteSequence !== null"
-      title="Delete this sequence?"
-      :message="`Removes the job and its cached clips${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished video in the Library is kept.`"
-      confirm-label="Delete"
-      danger
-      @confirm="deleteSequenceConfirmed"
-      @cancel="confirmDeleteSequence = null"
-    />
-    <ConfirmDialog
-      :open="confirmCleanUpDisk"
-      title="Clean up sequence cache?"
-      message="This discards cached scene media used for scene playback and sequence editing. Final videos in the Library remain."
-      confirm-label="Clean up"
-      danger
-      @confirm="cleanUpDiskConfirmed"
-      @cancel="confirmCleanUpDisk = false"
-    />
-  </DrawerPanel>
+  <!-- Siblings of the column: it is positioned, and a dialog nested inside it
+       would size to the column instead of the frame. -->
+  <ConfirmDialog
+    :open="confirmDeleteSequence !== null"
+    title="Delete this clip?"
+    :message="`Removes the job and its cached scenes${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished clip in My images is kept.`"
+    confirm-label="Delete"
+    danger
+    @confirm="deleteSequenceConfirmed"
+    @cancel="confirmDeleteSequence = null"
+  />
+  <ConfirmDialog
+    :open="confirmCleanUpDisk"
+    title="Clean up the clip cache?"
+    message="This discards the cached scenes used for playback and editing. Finished clips in My images stay."
+    confirm-label="Clean up"
+    danger
+    @confirm="cleanUpDiskConfirmed"
+    @cancel="confirmCleanUpDisk = false"
+  />
 </template>
-
-<style scoped>
-.ms-drawer-kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-</style>

@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   formatCount,
   formatEta,
+  formatRate,
   formatGB,
+  formatGBPair,
+  formatGraphicsMemory,
+  formatPercent,
   formatUptime,
   percent,
   timeAgo,
@@ -31,6 +35,13 @@ describe("formatGB", () => {
   it("formats decimal gigabytes with one decimal", () => {
     expect(formatGB(38_200_000_000)).toBe("38.2 GB");
     expect(formatGB(0)).toBe("0.0 GB");
+  });
+});
+
+describe("formatGBPair", () => {
+  it("names the unit once, on the total", () => {
+    expect(formatGBPair(12_100_000_000, 36_000_000_000)).toBe("12.1 / 36.0 GB");
+    expect(formatGBPair(0, 0)).toBe("0.0 / 0.0 GB");
   });
 });
 
@@ -87,6 +98,38 @@ describe("percent", () => {
     expect(percent(200, 100)).toBe(100);
     expect(percent(-5, 100)).toBe(0);
     expect(percent(1, 0)).toBe(0);
+  });
+});
+
+describe("formatPercent", () => {
+  // `percent` is a float and a meter's width wants every digit of it. The
+  // READOUT beside the meter is for a person: one whole number, and exactly
+  // one place that rounds it. The sidebar machine card read
+  // "59.10320281982422%" before this existed.
+  it("rounds to a whole number and appends the sign", () => {
+    expect(formatPercent(59.10320281982422)).toBe("59%");
+    expect(formatPercent(0)).toBe("0%");
+    expect(formatPercent(99.5)).toBe("100%");
+    expect(formatPercent(62)).toBe("62%");
+  });
+});
+
+describe("formatGraphicsMemory", () => {
+  // The machine card says WHAT its percent measures, in the same shape the
+  // Machines list cards already use ("14.9 / 24.0 GB").
+  it("names the pair and what it measures", () => {
+    expect(formatGraphicsMemory(31_600_000_000, 51_500_000_000)).toBe(
+      "31.6 / 51.5 GB graphics memory",
+    );
+  });
+});
+
+describe("formatRate", () => {
+  it("prints decimal megabytes per second, one place, and a dash when unknown", () => {
+    expect(formatRate(12_400_000)).toBe("12.4 MB/s");
+    expect(formatRate(950_000)).toBe("0.9 MB/s");
+    expect(formatRate(0)).toBe("0.0 MB/s");
+    expect(formatRate(null)).toBe("—");
   });
 });
 

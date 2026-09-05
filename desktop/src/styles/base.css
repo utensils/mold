@@ -25,11 +25,11 @@ body,
 }
 
 body {
-  background: var(--bath);
-  color: var(--rebate);
-  font-family: var(--font-body);
-  font-size: var(--text-body);
-  line-height: 1.45;
+  background: var(--mold-bg);
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-sm);
+  line-height: var(--mold-lh-body);
   -webkit-font-smoothing: antialiased;
   -webkit-user-select: none;
   user-select: none;
@@ -45,36 +45,31 @@ textarea,
   cursor: auto;
 }
 
-/* Decorative rules stay quiet, but native control boundaries must remain
-   visible at 3:1 in every theme (WCAG 1.4.11). Overriding the token preserves
-   explicit hover, focus, and error border utilities. */
-:where(input, textarea, select, button).border-edge {
-  --edge: var(--control-edge);
+/* Native control boundaries must remain visible at 3:1 in every theme (WCAG
+   1.4.11), so a form control's resting hairline is the control stroke. */
+:where(input, textarea, select, button).border-border {
+  border-color: var(--mold-border-control);
 }
 
+/* Focus changes the border colour to the accent — no glow, no second ring. */
 :focus-visible {
-  outline: 2px solid var(--safelight);
-  outline-offset: 2px;
+  outline: var(--mold-bw) solid var(--mold-border-focus);
+  outline-offset: 1px;
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--safelight) 35%, transparent);
+  background: var(--mold-accent-tint);
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--rebate) 14%, transparent);
-  border-radius: 5px;
-  border: 2px solid transparent;
-  background-clip: content-box;
+  background: var(--mold-surface-2);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--rebate) 24%, transparent);
-  border: 2px solid transparent;
-  background-clip: content-box;
+  background: var(--mold-surface-3);
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
@@ -87,68 +82,9 @@ video::-webkit-media-controls-picture-in-picture-button {
   display: none;
 }
 
-/* Utility type roles */
-.edge-code {
-  font-family: var(--font-utility);
-  font-size: var(--text-edge-code);
-  font-stretch: 87.5%;
-  letter-spacing: 0.02em;
-  font-variant-numeric: tabular-nums;
-  color: var(--ink-3);
-  white-space: nowrap;
-}
-
-.data-mono {
-  font-family: var(--font-utility);
-  font-size: var(--text-data);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Shortcut glyphs (⌘↩, ⌘E, ⌘1…) — body-sized so the symbols stay legible. */
-.kbd-hint {
-  font-family: var(--font-utility);
-  font-size: var(--text-body);
-  letter-spacing: 0.04em;
-}
-
-/* The website theme gets a compact two-color brand signature without using
-   gradient text. It is decorative only; the MOLD label stays unchanged. */
-:root[data-theme-family="mold"] .brand-wordmark {
-  color: var(--safelight);
-}
-
-:root[data-theme-family="mold"] .brand-wordmark::after {
-  content: "";
-  display: inline-block;
-  width: 0.28em;
-  height: 0.28em;
-  margin-left: 0.34em;
-  background: var(--halide);
-  border-radius: 1px;
-  vertical-align: 0.18em;
-}
-
-/* Loading shimmer for developing thumbnails — a slow safelight sweep over the
-   bench tone, evoking grain forming under the enlarger. The universal
-   reduced-motion block below freezes the sweep to a flat bench fill. */
-.grain-shimmer {
-  background-color: var(--bench);
-  background-image: linear-gradient(
-    100deg,
-    transparent 30%,
-    color-mix(in srgb, var(--safelight) 9%, transparent) 50%,
-    transparent 70%
-  );
-  background-size: 220% 100%;
-  animation: grain-shimmer 1.6s ease-in-out infinite;
-}
-@keyframes grain-shimmer {
-  from {
-    background-position: 220% 0;
-  }
-  to {
-    background-position: -220% 0;
-  }
+/* Numbers are mono with tabular figures, everywhere mono is used. */
+.font-mono {
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 /* Visually hidden, still read by assistive tech (e.g. connection-dot labels). */

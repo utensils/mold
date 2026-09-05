@@ -1,6 +1,6 @@
 <script setup lang="ts" generic="C extends RailClip">
 /*
- * Clip rail — the horizontal strip inside the composer bench (mockup 1c):
+ * Clip rail — the horizontal strip inside the composer bench:
  * clip pills with seam pills between them, a dashed add-clip pill gated by
  * the stage cap, and drag-to-reorder. The seam pill between clip N−1 and N
  * edits clip N's incoming transition; clicking it emits `seam-click` so
@@ -15,6 +15,7 @@ import {
   watch,
 } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
+import { clipLabel } from "../lib/duration";
 import ClipPill from "./ClipPill.vue";
 import SeamPill from "./SeamPill.vue";
 import type { ClipRailMedia, RailClip } from "./types";
@@ -156,10 +157,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", updateScrollAffordances);
 });
 
-function clipLabel(index: number): string {
-  return index === 0 ? "Opening clip" : `Clip ${index + 1}`;
-}
-
 // VueDraggable mutates a proxy list; we emit the id order and let the
 // store apply it so the rail never owns clip state.
 const dragModel = computed({
@@ -211,6 +208,7 @@ const dragModel = computed({
             />
             <ClipPill
               :label="clipLabel(index)"
+              :index="index"
               :frames="clip.frames"
               :fps="fps"
               :active="clip.id === activeId"
@@ -311,14 +309,14 @@ const dragModel = computed({
   height: 188px;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--rebate) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mold-text) 16%, transparent);
   border-radius: 11px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 20%),
-    color-mix(in srgb, var(--print) 94%, black);
+    color-mix(in srgb, var(--mold-media-bed) 94%, black);
   box-shadow:
     inset 0 1px rgba(255, 255, 255, 0.06),
-    0 8px 24px color-mix(in srgb, var(--print) 18%, transparent);
+    0 8px 24px color-mix(in srgb, var(--mold-media-bed) 18%, transparent);
 }
 
 .ms-rail {
@@ -334,7 +332,8 @@ const dragModel = computed({
   scroll-padding-inline: 48px;
   scroll-snap-type: x proximity;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--ink-3) 55%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--mold-text-dim) 55%, transparent)
+    transparent;
 }
 
 .ms-rail::-webkit-scrollbar {
@@ -343,7 +342,7 @@ const dragModel = computed({
 
 .ms-rail::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: color-mix(in srgb, var(--ink-3) 55%, transparent);
+  background: color-mix(in srgb, var(--mold-text-dim) 55%, transparent);
 }
 
 .ms-rail__clips {
@@ -400,21 +399,21 @@ const dragModel = computed({
   border: 1px dashed rgba(255, 255, 255, 0.22);
   border-radius: 9px;
   color: rgba(255, 255, 255, 0.62);
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
   font-size: 12px;
   cursor: pointer;
-  transition: color var(--dur-quick) var(--ease);
+  transition: color var(--mold-dur-quick) var(--mold-ease-out);
   scroll-snap-align: end;
 }
 
 .ms-rail__add:hover {
   color: white;
-  border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 8%, transparent);
+  border-color: var(--mold-blue);
+  background: color-mix(in srgb, var(--mold-blue) 8%, transparent);
 }
 
 .ms-rail__add:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -434,12 +433,12 @@ const dragModel = computed({
 
 .ms-rail__fade--start {
   left: 0;
-  background: linear-gradient(90deg, var(--print), transparent);
+  background: linear-gradient(90deg, var(--mold-media-bed), transparent);
 }
 
 .ms-rail__fade--end {
   right: 0;
-  background: linear-gradient(270deg, var(--print), transparent);
+  background: linear-gradient(270deg, var(--mold-media-bed), transparent);
 }
 
 .ms-rail__scroll {
@@ -452,10 +451,10 @@ const dragModel = computed({
   place-items: center;
   padding: 0;
   border: 1px solid color-mix(in srgb, white 22%, transparent);
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--print) 88%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mold-media-bed) 88%, transparent);
   color: white;
-  font-family: var(--f-body);
+  font-family: var(--mold-font-sans);
   font-size: 25px;
   line-height: 1;
   cursor: pointer;
@@ -472,12 +471,12 @@ const dragModel = computed({
 }
 
 .ms-rail__scroll:hover {
-  border-color: var(--safelight);
-  color: var(--safelight);
+  border-color: var(--mold-blue);
+  color: var(--mold-blue);
 }
 
 .ms-rail__scroll:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -499,7 +498,7 @@ const dragModel = computed({
 
 .ms-rail-frame :deep(.ms-seam__diagram) {
   border-color: color-mix(in srgb, white 34%, transparent);
-  background: color-mix(in srgb, var(--print) 88%, white 12%);
+  background: color-mix(in srgb, var(--mold-media-bed) 88%, white 12%);
   box-shadow: 0 2px 8px color-mix(in srgb, black 32%, transparent);
 }
 
@@ -509,13 +508,13 @@ const dragModel = computed({
 
 .ms-rail-frame :deep(.ms-seam[data-on="true"]),
 .ms-rail-frame :deep(.ms-seam[data-transition="fade"]) {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
 .ms-rail-frame :deep(.ms-seam[data-on="true"] .ms-seam__diagram),
 .ms-rail-frame :deep(.ms-seam[data-transition="fade"] .ms-seam__diagram) {
-  border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 14%, var(--print));
+  border-color: var(--mold-blue);
+  background: color-mix(in srgb, var(--mold-blue) 14%, var(--mold-media-bed));
 }
 
 .ms-rail-frame :deep(.ms-seam__caption) {

@@ -157,7 +157,7 @@ describe("gallery store derived work is indexed once per data change", () => {
     const gallery = seedFleet();
     void gallery.filtered;
     counters.reset();
-    gallery.favoritesOnly = true;
+    gallery.scope = "favorites";
     void gallery.filtered;
     gallery.tagFilter = ["portrait"];
     void gallery.filtered;

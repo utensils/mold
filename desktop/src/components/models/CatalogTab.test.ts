@@ -49,7 +49,7 @@ function deferred<T>() {
 
 function familyOptionValues(wrapper: ReturnType<typeof mount>): string[] {
   return wrapper
-    .get("select[aria-label='Model family']")
+    .get("select[aria-label='Family']")
     .findAll("option")
     .map((option) => option.attributes("value") ?? "");
 }
@@ -217,7 +217,7 @@ describe("CatalogTab media filter under pagination", () => {
     await flushPromises();
 
     expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "qwen-image"]);
-    await wrapper.get("select[aria-label='Model family']").setValue("ltx2");
+    await wrapper.get("select[aria-label='Family']").setValue("ltx2");
     await flushPromises();
     expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "qwen-image"]);
   });
@@ -291,7 +291,7 @@ describe("CatalogTab media filter under pagination", () => {
       "The catalog is catching up.",
     );
     expect(wrapper.find("[data-test='catalog-empty']").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain('Nothing on the shelf for "Alien"');
+    expect(wrapper.text()).not.toContain('No styles match "Alien"');
   });
 
   it("lists Qwen Image Edit models under the Qwen Image family", async () => {
@@ -308,7 +308,7 @@ describe("CatalogTab media filter under pagination", () => {
 
     expect(familyOptionValues(wrapper)).toContain("qwen-image");
     expect(familyOptionValues(wrapper)).not.toContain("qwen-image-edit");
-    await wrapper.get("select[aria-label='Model family']").setValue("qwen-image");
+    await wrapper.get("select[aria-label='Family']").setValue("qwen-image");
     await flushPromises();
     expect(wrapper.text()).toContain("qwen-image-edit-2511:q4");
   });
@@ -393,7 +393,7 @@ describe("CatalogTab media filter under pagination", () => {
     // Host chips are the "you have this" indicator.
     const chips = wrapper.findAll("[data-test='installed-host']").map((c) => c.text());
     expect(chips).toContain("This device");
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
     expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
     expect(wrapper.get('[data-test="catalog-description"]').text()).toBe(
@@ -923,7 +923,7 @@ describe("CatalogTab installed repair routing", () => {
     const dialog = document.body.querySelector<HTMLElement>(
       "[data-test='download-target-dialog']",
     )!;
-    expect(dialog.textContent).toContain("Choose where to repair");
+    expect(dialog.textContent).toContain("Which machine should repair");
     expect(dialog.textContent).toContain("This device");
     expect(dialog.textContent).toContain("Studio GPU");
     expect(dialog.textContent).not.toContain("Other GPU");
@@ -988,7 +988,7 @@ describe("CatalogTab installed repair routing", () => {
     await flushPromises();
 
     expect(startCatalogDownload).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain("Choose where to repair");
+    expect(document.body.textContent).not.toContain("Which machine should repair");
     wrapper.unmount();
   });
 });
@@ -1058,24 +1058,24 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     await flushPromises();
 
     // Installed elsewhere, so the row keeps its marker — and still offers the pull.
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     await wrapper.get("[data-test='pull']").trigger("click");
     await flushPromises();
 
     const dialog = document.body.querySelector<HTMLElement>(
       "[data-test='download-target-dialog']",
     )!;
-    expect(dialog.textContent).toContain("Choose where to install");
+    expect(dialog.textContent).toContain("Where should");
     // The two machines that lack it are installs; the owner is only a repair.
     expect(dialog.querySelector("[data-test='download-target-local']")?.textContent).toContain(
-      "Install",
+      "Get it",
     );
     expect(dialog.querySelector("[data-test='download-target-other-7680']")?.textContent).toContain(
-      "Install",
+      "Get it",
     );
     expect(
       dialog.querySelector("[data-test='download-target-studio-7680']")?.textContent,
-    ).toContain("Already installed");
+    ).toContain("Already here · repair");
 
     dialog.querySelector<HTMLButtonElement>("[data-test='download-target-local']")!.click();
     await flushPromises();
@@ -1100,7 +1100,7 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     wrapper.unmount();
   });
@@ -1153,7 +1153,7 @@ describe("CatalogTab install on a machine that is missing the model", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.text()).toContain("● ready");
     expect(wrapper.find("[data-test='pull']").exists()).toBe(false);
     wrapper.unmount();
   });
@@ -1591,7 +1591,7 @@ describe("CatalogTab variant chips", () => {
     expect(q8Row.attributes("data-selected")).toBe("true");
   });
 
-  it("keeps a filtered non-installed sibling as a full manifest Pull entry", async () => {
+  it("keeps a filtered non-installed sibling as a full manifest fresh-download entry", async () => {
     setActivePinia(createPinia());
     useModelStore().all = [
       {
@@ -1644,7 +1644,7 @@ describe("CatalogTab variant chips", () => {
     expect(chosen.companion_details).toEqual([
       { name: "shared runtime components", size_bytes: 8_000_000_000 },
     ]);
-    expect(wrapper.getComponent(CatalogDetailDrawer).props("action")).toBe("Pull");
+    expect(wrapper.getComponent(CatalogDetailDrawer).props("mode")).toBe("fresh");
   });
 
   it("preserves remote ownership when a filtered installed sibling is selected", async () => {

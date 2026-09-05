@@ -34,7 +34,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
 <template>
   <aside
-    class="border-edge fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bench shadow-raised"
+    class="border-border fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bg shadow-md"
     role="dialog"
     aria-modal="false"
     :aria-label="`Queued job — ${model.modelLabel}`"

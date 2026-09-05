@@ -244,7 +244,7 @@ describe("LibraryView delete keyboard handling", () => {
     const tiles = wrapper.findAll(".ms-lib-tile");
     await tiles[0]!.trigger("click");
     await tiles[1]!.trigger("click", { metaKey: true });
-    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 / 2 selected");
+    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 selected");
 
     await tiles[0]!.trigger("contextmenu");
     const menu = useContextMenuStore();
@@ -258,7 +258,7 @@ describe("LibraryView delete keyboard handling", () => {
     const confirm = wrapper
       .get('[data-test="bulk-action-bar"]')
       .findAll("button")
-      .find((button) => button.text().includes("Delete 2 prints?"));
+      .find((button) => button.text().includes("Delete 2 pictures?"));
     expect(confirm).toBeDefined();
     await confirm!.trigger("click");
     await flushPromises();
@@ -280,7 +280,7 @@ describe("LibraryView delete keyboard handling", () => {
     apiFetchTo.mockResolvedValueOnce(new Response(new Uint8Array([65, 66, 67])));
     const { wrapper, router } = await mountView(remotePrint);
 
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
     expect(tile).toBeDefined();
     await tile!.trigger("contextmenu");
 
@@ -317,7 +317,7 @@ describe("LibraryView delete keyboard handling", () => {
     form.model = "minimax-h3-ref2va:comfy-pruned-int8";
     form.family = "minimax-h3";
 
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
     expect(tile).toBeDefined();
     await tile!.trigger("contextmenu");
     const menu = useContextMenuStore();
@@ -441,7 +441,7 @@ describe("LibraryView delete keyboard handling", () => {
     const { wrapper, gallery } = await mountView(remotePrint);
     vi.useFakeTimers();
     try {
-      const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+      const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
       expect(tile).toBeDefined();
       await tile!.trigger("contextmenu");
 
@@ -482,7 +482,7 @@ describe("LibraryView delete keyboard handling", () => {
     const { wrapper, gallery } = await mountView(remotePrint);
     vi.useFakeTimers();
     try {
-      const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+      const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
       await tile!.trigger("contextmenu");
       const menu = useContextMenuStore();
       const deleteEntry = menu.entries.find(
@@ -526,7 +526,7 @@ describe("LibraryView source reuse", () => {
       }),
     );
     const { wrapper, router } = await mountView();
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 1"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 1"));
     expect(tile).toBeDefined();
     await tile!.trigger("dblclick");
     await wrapper.get("[data-test='lightbox-use-source']").trigger("click");
@@ -845,16 +845,16 @@ describe("LibraryView source reuse", () => {
   });
 });
 
-describe("LibraryView Reuse settings retained source media", () => {
+describe("LibraryView Use these settings retained source media", () => {
   const plato = { baseUrl: "http://plato:7680", apiKey: "secret" };
 
   async function reuseFromContextMenu(wrapper: ReturnType<typeof mount>) {
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
     expect(tile).toBeDefined();
     await tile!.trigger("contextmenu");
     const menu = useContextMenuStore();
     const entry = menu.entries.find(
-      (candidate) => !("separator" in candidate) && candidate.label === "Reuse settings",
+      (candidate) => !("separator" in candidate) && candidate.label === "Use these settings",
     )!;
     expect(entry).toBeDefined();
     menu.activate(entry);
@@ -884,7 +884,12 @@ describe("LibraryView Reuse settings retained source media", () => {
 
     expect(retainedInventoryMock).toHaveBeenCalledWith(t2i.filename, plato);
     expect(useToastStore().items.length).toBe(toastsBefore);
-    expect(useComposerStore().prefill).toEqual({ metadata: t2i.metadata });
+    // The settings AND the picture: the prefill names the print so the
+    // canvas shows it once the recipe lands.
+    expect(useComposerStore().prefill).toMatchObject({
+      metadata: t2i.metadata,
+      print: { filename: t2i.filename, metadata: t2i.metadata, target: plato },
+    });
     expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
     expect(router.currentRoute.value.path).toBe("/create");
     wrapper.unmount();
@@ -1030,7 +1035,10 @@ describe("LibraryView Reuse settings retained source media", () => {
     await flushPromises();
 
     expect(retainedInventoryMock).toHaveBeenCalledWith("remote-img2img.png", plato);
-    expect(useComposerStore().prefill).toEqual({ metadata: img2img.metadata });
+    expect(useComposerStore().prefill).toMatchObject({
+      metadata: img2img.metadata,
+      print: { filename: "remote-img2img.png", target: plato },
+    });
     expect(useComposerStore().retainedSource?.filename).toBe("remote-img2img.png");
     expect(router.currentRoute.value.path).toBe("/create");
     wrapper.unmount();
@@ -1038,11 +1046,9 @@ describe("LibraryView Reuse settings retained source media", () => {
 });
 
 describe("LibraryView header + NEW badges", () => {
-  it("titles the workspace Library and counts prints across all hosts", async () => {
+  it("leaves the count to the shell's title bar rather than repeating it", async () => {
     const { wrapper } = await mountView();
-    const header = wrapper.get("header");
-    expect(header.text()).toContain("Library");
-    expect(wrapper.get("[data-test='library-count']").text()).toBe("2 prints");
+    expect(wrapper.find("[data-test='library-count']").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1081,9 +1087,9 @@ describe("LibraryView header + NEW badges", () => {
       g.seenFilenames = new Set(["second.png"]);
     });
 
-    const tiles = wrapper.findAll("button").filter((b) => b.text().includes("· S "));
-    const fresh = tiles.find((b) => b.text().includes("S 1"));
-    const stale = tiles.find((b) => b.text().includes("S 2"));
+    const tiles = wrapper.findAll("button").filter((b) => b.text().includes("· seed "));
+    const fresh = tiles.find((b) => b.text().includes("seed 1"));
+    const stale = tiles.find((b) => b.text().includes("seed 2"));
     expect(fresh!.find('[data-test="new-badge"]').exists()).toBe(true);
     expect(stale!.find('[data-test="new-badge"]').exists()).toBe(false);
 
@@ -1120,7 +1126,7 @@ describe("LibraryView header + NEW badges", () => {
     wrapper.unmount();
   });
 
-  it("badges a Framewise-upscaled video tile beside its play marker", async () => {
+  it("badges a Framewise-upscaled clip with both words", async () => {
     const { wrapper } = await mountView(undefined, (gallery) => {
       const first = gallery.buckets.local?.items[0];
       if (first) {
@@ -1139,11 +1145,11 @@ describe("LibraryView header + NEW badges", () => {
     });
 
     expect(wrapper.get('[data-test="upscaled-badge"]').text()).toBe("Upscaled");
-    expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("▶");
+    expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("clip");
     wrapper.unmount();
   });
 
-  it("badges a mesh tile with the 3-D marker the iPhone Library already wears", async () => {
+  it("badges a mesh tile with the 3-D word", async () => {
     const { wrapper } = await mountView(undefined, (gallery) => {
       const first = gallery.buckets.local?.items[0];
       if (first) {
@@ -1153,7 +1159,7 @@ describe("LibraryView header + NEW badges", () => {
     });
 
     const badge = wrapper.get('[data-test="media-kind-badge"]');
-    expect(badge.text()).toBe("◈");
+    expect(badge.text()).toBe("3-D");
     expect(badge.attributes("aria-label")).toBe("3-D mesh");
     wrapper.unmount();
   });
@@ -1182,11 +1188,89 @@ describe("LibraryView history drawer", () => {
     wrapper.unmount();
   });
 
+  it("sits the history column beside the grid and leaves the tiles clickable", async () => {
+    const { wrapper, router } = await mountView();
+    await router.push({ path: "/library", query: { panel: "history" } });
+    await flushPromises();
+
+    // A sibling of the scroll container inside one flex row — not an overlay.
+    const panel = wrapper.getComponent({ name: "HistoryDrawer" }).element as HTMLElement;
+    const scroller = wrapper.get("[data-test='library-scroll']").element;
+    expect(panel.parentElement).toBe(scroller.parentElement);
+    expect(wrapper.find("[aria-modal='true']").exists()).toBe(false);
+
+    await wrapper.get(".ms-lib-tile").trigger("click");
+    await wrapper.get(".ms-lib-tile").trigger("dblclick");
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("leaves the grid its keyboard while the history column is open", async () => {
+    const { wrapper, router } = await mountView();
+    await router.push({ path: "/library", query: { panel: "history" } });
+    await flushPromises();
+
+    // A column is not an overlay, so Select all still reaches the grid.
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", ctrlKey: true, cancelable: true }),
+    );
+    await flushPromises();
+    expect(wrapper.get('[data-test="bulk-action-bar"]').text()).toContain("2 selected");
+    wrapper.unmount();
+  });
+
   it("the header History button deep-links to ?panel=history", async () => {
     const { wrapper, router } = await mountView();
     await wrapper.get('[aria-label="Open history"]').trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.query.panel).toBe("history");
+    wrapper.unmount();
+  });
+});
+
+describe("scope counts and Escape in a text field", () => {
+  async function openLightbox() {
+    const mounted = await mountView();
+    await mounted.wrapper.get(".ms-lib-tile").trigger("click");
+    await mounted.wrapper.get(".ms-lib-tile").trigger("dblclick");
+    await flushPromises();
+    expect(mounted.wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    return mounted;
+  }
+
+  it("the Favourites count reads the whole library, whatever scope is open", async () => {
+    const { wrapper, gallery } = await mountView(undefined, (g) => {
+      g.buckets.local!.items = [{ ...prints[0]!, favorite: true }, prints[1]!];
+      g.trashBuckets.local = { items: [], loading: false, error: null, loaded: true };
+    });
+    const counts = () =>
+      wrapper.getComponent({ name: "LibraryHeader" }).props("counts") as Record<string, number>;
+    expect(counts().favorites).toBe(1);
+    gallery.scope = "trash";
+    await flushPromises();
+    expect(counts().favorites).toBe(1);
+    wrapper.unmount();
+  });
+
+  it("Escape typed in a text field never closes the lightbox behind it", async () => {
+    const { wrapper } = await openLightbox();
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    field.remove();
+    wrapper.unmount();
+  });
+
+  it("an Escape an overlay above the grid already handled is not handled twice", async () => {
+    const { wrapper } = await openLightbox();
+    const handled = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    handled.preventDefault();
+    window.dispatchEvent(handled);
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
     wrapper.unmount();
   });
 });

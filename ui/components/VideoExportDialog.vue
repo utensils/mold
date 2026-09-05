@@ -261,10 +261,10 @@ function submit(): void {
   max-height: 100%;
   overflow: auto;
   padding: 22px;
-  border: 1px solid var(--edge, rgb(128 120 140 / 35%));
+  border: 1px solid var(--mold-border, rgb(128 120 140 / 35%));
   border-radius: 18px;
-  background: var(--bench, #f7f4ef);
-  color: var(--rebate, #171316);
+  background: var(--mold-bg, #f7f4ef);
+  color: var(--mold-text, #171316);
   box-shadow: 0 24px 80px rgb(0 0 0 / 38%);
 }
 .video-export-heading {
@@ -289,17 +289,17 @@ function submit(): void {
 }
 .video-export-kicker,
 legend {
-  font-family: var(--f-mono, monospace);
+  font-family: var(--mold-font-mono, monospace);
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-3, #777078);
+  color: var(--mold-text-dim, #777078);
 }
 .video-export-file {
   margin: 14px 0 18px;
   overflow: hidden;
-  color: var(--ink-2, #575057);
-  font-family: var(--f-mono, monospace);
+  color: var(--mold-text-2, #575057);
+  font-family: var(--mold-font-mono, monospace);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -314,7 +314,7 @@ legend {
 }
 fieldset > p {
   margin: 8px 0 0;
-  color: var(--ink-3, #777078);
+  color: var(--mold-text-dim, #777078);
   font-size: 12px;
 }
 .video-export-options {
@@ -340,17 +340,17 @@ fieldset > p {
   display: grid;
   min-height: 44px;
   place-items: center;
-  border: 1px solid var(--edge, rgb(128 120 140 / 35%));
+  border: 1px solid var(--mold-border, rgb(128 120 140 / 35%));
   border-radius: 10px;
   font-weight: 650;
 }
 .video-export-options input:checked + span {
-  border-color: var(--safelight, #ad5700);
-  background: color-mix(in srgb, var(--safelight, #ad5700) 12%, transparent);
-  color: var(--safelight, #ad5700);
+  border-color: var(--mold-blue, #ad5700);
+  background: color-mix(in srgb, var(--mold-blue, #ad5700) 12%, transparent);
+  color: var(--mold-blue, #ad5700);
 }
 .video-export-options input:focus-visible + span {
-  outline: 2px solid var(--safelight, #ad5700);
+  outline: 2px solid var(--mold-blue, #ad5700);
   outline-offset: 2px;
 }
 .video-export-error {
@@ -367,7 +367,7 @@ fieldset > p {
 }
 .video-export-actions button {
   min-height: 44px;
-  border: 1px solid var(--edge, rgb(128 120 140 / 35%));
+  border: 1px solid var(--mold-border, rgb(128 120 140 / 35%));
   border-radius: 10px;
   background: transparent;
   color: inherit;
@@ -375,8 +375,8 @@ fieldset > p {
 }
 .video-export-actions .video-export-primary {
   border-color: transparent;
-  background: var(--safelight, #ad5700);
-  color: var(--on-accent, white);
+  background: var(--mold-blue, #ad5700);
+  color: var(--mold-on-accent, white);
 }
 button:disabled {
   opacity: 0.55;

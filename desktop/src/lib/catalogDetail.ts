@@ -158,11 +158,11 @@ export function downloadContentsTotalBytes(items: DownloadContentItem[]): Downlo
 }
 
 /**
- * Installed entries repair (the catalog download re-fetches only missing
- * files server-side); everything else pulls.
+ * An entry already on the machine repairs (the catalog download re-fetches
+ * only the missing files server-side); everything else is a fresh download.
  */
-export function catalogActionLabel(entry: Pick<CatalogEntry, "installed">): "Pull" | "Repair" {
-  return entry.installed ? "Repair" : "Pull";
+export function catalogNeedsRepair(entry: Pick<CatalogEntry, "installed">): boolean {
+  return !!entry.installed;
 }
 
 /** Older servers don't report support explicitly; keep those entries pullable. */

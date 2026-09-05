@@ -2,30 +2,32 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
-import AccordionSection from "@ui/components/AccordionSection.vue";
 
-// The top cards and accordion bodies pull in stores and IPC that aren't the
-// subject here — stub them to identifiable markers so this suite tests the
-// SettingsView shell: the single-column structure, one-open-at-a-time
-// accordions, and search that opens the owning accordion.
+// The section bodies pull in stores and IPC that aren't the subject here —
+// stub them to identifiable markers so this suite tests the SettingsView
+// shell: the jump nav, the always-open lexicon sections, deep links, and the
+// search that narrows both to the sections that match.
 function stub(marker: string) {
   return { default: { template: `<div data-test="${marker}" />` } };
 }
-vi.mock("../components/settings/AppearanceCard.vue", () => stub("stub-appearance"));
+vi.mock("../components/settings/AppearanceCard.vue", () => stub("stub-app"));
 vi.mock("../components/settings/UpdatesSection.vue", () => stub("stub-updates"));
 vi.mock("../components/settings/AboutSection.vue", () => stub("stub-about"));
 vi.mock("../components/settings/HostsSection.vue", () => stub("stub-hosts"));
 vi.mock("../components/settings/PerformanceSection.vue", () => stub("stub-performance"));
 vi.mock("../components/settings/GenerationSection.vue", () => stub("stub-generation"));
 vi.mock("../components/settings/MediaSection.vue", () => stub("stub-media"));
+vi.mock("../components/settings/StylesDiskSection.vue", () => stub("stub-styles"));
 vi.mock("../components/settings/LibrarySection.vue", () => stub("stub-library"));
 vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansion"));
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
 vi.mock("../components/settings/AdvancedSection.vue", () => stub("stub-advanced"));
-vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-paired-access"));
+vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-pairing"));
+vi.mock("@studio/components/LicenseSettingsPanel.vue", () => stub("stub-licenses"));
 
 import SettingsView from "./SettingsView.vue";
+import { SECTIONS } from "../lib/settingsSchema";
 
 const scrollIntoView = vi.fn();
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
@@ -33,17 +35,21 @@ Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
   value: scrollIntoView,
 });
 
-async function mountView() {
+async function mountView(section?: string) {
   const pinia = createPinia();
   setActivePinia(pinia);
-  const wrapper = mount(SettingsView, { global: { plugins: [pinia] } });
+  const plugins: unknown[] = [pinia];
+  if (section) {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/settings", component: { template: "<div />" } }],
+    });
+    await router.push({ path: "/settings", query: { section } });
+    plugins.push(router);
+  }
+  const wrapper = mount(SettingsView, { global: { plugins: plugins as never[] } });
   await flushPromises();
   return wrapper;
-}
-
-/** Click a section accordion's header button. */
-async function toggleAccordion(wrapper: Awaited<ReturnType<typeof mountView>>, id: string) {
-  await wrapper.get(`[data-test="accordion-${id}"]`).get("button").trigger("click");
 }
 
 async function typeSearch(wrapper: Awaited<ReturnType<typeof mountView>>, value: string) {
@@ -51,132 +57,213 @@ async function typeSearch(wrapper: Awaited<ReturnType<typeof mountView>>, value:
   await flushPromises();
 }
 
+/** A recording IntersectionObserver — the nav highlight is driven by one, the
+ *  section bodies are mounted by another, and what this suite cares about is
+ *  how often the sections are re-registered and when a body arrives. */
+const observe = vi.fn();
+const unobserve = vi.fn();
+/** Every live observer, so a test can drive the scroll it cannot perform. */
+const observers: { callback: IntersectionObserverCallback; targets: Element[] }[] = [];
+class RecordingObserver {
+  callback: IntersectionObserverCallback;
+  targets: Element[] = [];
+  constructor(callback: IntersectionObserverCallback) {
+    this.callback = callback;
+    observers.push(this);
+  }
+  observe = (el: Element) => {
+    this.targets.push(el);
+    observe(el);
+  };
+  unobserve = (el: Element) => {
+    this.targets = this.targets.filter((t) => t !== el);
+    unobserve(el);
+  };
+  disconnect = vi.fn();
+  takeRecords = () => [];
+  root = null;
+  rootMargin = "";
+  thresholds = [];
+}
+Object.defineProperty(globalThis, "IntersectionObserver", {
+  configurable: true,
+  writable: true,
+  value: RecordingObserver,
+});
+
+/** Scroll the page past every registered section: jsdom lays nothing out, so
+ *  the observers have to be driven by hand. */
+async function scrollThroughEverySection() {
+  for (const observer of [...observers]) {
+    const entries = observer.targets.map((target) => ({
+      target,
+      isIntersecting: true,
+      boundingClientRect: { top: 0 } as DOMRectReadOnly,
+    }));
+    observer.callback(entries as never, observer as never);
+  }
+  await flushPromises();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  observers.length = 0;
 });
 
 describe("SettingsView shell", () => {
-  it("renders the top cards, the hosts doorway, and every accordion", async () => {
+  it("renders every lexicon section open, in nav order, with its body", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='appearance-card']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='updates-card']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='about-card']").exists()).toBe(true);
-    // Hosts is a doorway to the Machines workspace, not a full section here.
-    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-hosts']").exists()).toBe(true);
+    const navLabels = wrapper.findAll("nav button").map((b) => b.text());
+    expect(navLabels).toEqual(SECTIONS.map((s) => s.label));
+    expect(navLabels[0]).toBe("Look");
+    expect(navLabels.at(-1)).toBe("Updates & about");
+
+    // Every section is on the page from the start — this is one scrolling
+    // page, not an accordion. The BODIES arrive as the page is scrolled.
+    await scrollThroughEverySection();
 
     for (const id of [
-      "performance",
+      "app",
       "generation",
+      "expansion",
+      "hosts",
+      "styles",
       "media",
       "library",
-      "expansion",
+      "licenses",
+      "pairing",
+      "performance",
       "accounts",
       "profiles",
       "advanced",
+      "updates",
     ]) {
-      expect(wrapper.find(`[data-test="accordion-${id}"]`).exists()).toBe(true);
+      expect(wrapper.find(`[data-test="section-${id}"]`).exists(), id).toBe(true);
+      expect(wrapper.find(`[data-test="stub-${id}"]`).exists(), id).toBe(true);
     }
+    // About folded into Updates & about.
+    expect(
+      wrapper.get("[data-test='section-updates']").find("[data-test='stub-about']").exists(),
+    ).toBe(true);
   });
 
-  it("renders icon-led, accented All settings groups with explanatory summaries", async () => {
+  it("holds a section's body back until the page is scrolled to it", async () => {
+    // Advanced alone opens three HTTP calls and a live device subscription on
+    // mount, and most launches never scroll to it. The section, its heading
+    // and its summary are there from the start; only the body waits.
     const wrapper = await mountView();
-    const accordions = wrapper.findAllComponents(AccordionSection);
+    expect(wrapper.find("[data-test='section-advanced']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='section-advanced']").text()).toContain("Advanced");
 
-    expect(accordions).toHaveLength(8);
-    for (const accordion of accordions) {
-      expect(accordion.props("icon")).toBeTruthy();
-      expect(accordion.props("summary")).toBeTruthy();
-      expect(accordion.props("tone")).toBe("halide");
-    }
+    await scrollThroughEverySection();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
   });
 
-  it("keeps every accordion closed by default — nothing blocks first use", async () => {
+  /** A body the search brought up holds unsaved edits; clearing the search
+   *  must not unmount it just because the page has not scrolled there. */
+  it("keeps a body the search mounted once the search is cleared", async () => {
     const wrapper = await mountView();
-    for (const id of [
-      "performance",
-      "generation",
-      "media",
-      "library",
-      "expansion",
-      "accounts",
-      "profiles",
-      "advanced",
-    ]) {
-      expect(wrapper.find(`[data-test="stub-${id}"]`).exists()).toBe(false);
-    }
-  });
-
-  it("opens one accordion at a time", async () => {
-    const wrapper = await mountView();
-    await toggleAccordion(wrapper, "performance");
-    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(true);
-
-    await toggleAccordion(wrapper, "generation");
-    expect(wrapper.find("[data-test='stub-generation']").exists()).toBe(true);
-    // Opening generation closes performance.
-    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
-
-    // Clicking the open one again closes it.
-    await toggleAccordion(wrapper, "generation");
-    expect(wrapper.find("[data-test='stub-generation']").exists()).toBe(false);
-  });
-
-  it("opens the accordion named by ?section= (the Library trash banner's deep link)", async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: "/settings", component: { template: "<div />" } }],
-    });
-    await router.push({ path: "/settings", query: { section: "library" } });
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const wrapper = mount(SettingsView, { global: { plugins: [pinia, router] } });
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
+    await wrapper.get("[data-test='settings-search']").setValue("advanced");
     await flushPromises();
-    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-performance']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+    await wrapper.get("[data-test='settings-search']").setValue("");
+    await flushPromises();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
   });
 
-  it("scrolls the Updates card into view for the native update-check deep link", async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: "/settings", component: { template: "<div />" } }],
-    });
-    await router.push({ path: "/settings", query: { section: "updates" } });
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    mount(SettingsView, { global: { plugins: [pinia, router] } });
+  it("mounts the body of a section the nav jumps to, since the scroll needs it", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
+    await wrapper.get("[data-test='settings-nav-advanced']").trigger("click");
     await flushPromises();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+  });
 
+  it("mounts every body when the browser has no IntersectionObserver", async () => {
+    const real = globalThis.IntersectionObserver;
+    Object.defineProperty(globalThis, "IntersectionObserver", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      const wrapper = await mountView();
+      expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+      expect(wrapper.find("[data-test='stub-media']").exists()).toBe(true);
+    } finally {
+      Object.defineProperty(globalThis, "IntersectionObserver", {
+        configurable: true,
+        writable: true,
+        value: real,
+      });
+    }
+  });
+
+  it("highlights Look first and jumps to a section from the nav", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='settings-nav-app']").attributes("aria-current")).toBe("true");
+
+    await wrapper.get("[data-test='settings-nav-library']").trigger("click");
+    expect(wrapper.get("[data-test='settings-nav-library']").attributes("aria-current")).toBe(
+      "true",
+    );
+    expect(
+      wrapper.get("[data-test='settings-nav-app']").attributes("aria-current"),
+    ).toBeUndefined();
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
   });
 
-  it("search opens the owning accordion and hides the rest", async () => {
+  it("jumps to the section named by ?section= (the Library trash banner's deep link)", async () => {
+    const wrapper = await mountView("library");
+    expect(wrapper.get("[data-test='settings-nav-library']").attributes("aria-current")).toBe(
+      "true",
+    );
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+  });
+
+  it("jumps to Updates & about for the native update-check deep link, old name included", async () => {
+    for (const section of ["updates", "about"]) {
+      scrollIntoView.mockClear();
+      const wrapper = await mountView(section);
+      expect(wrapper.get("[data-test='settings-nav-updates']").attributes("aria-current")).toBe(
+        "true",
+      );
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    }
+  });
+
+  it("search narrows the nav and the page to the owning section", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "temperature");
 
-    // The expansion accordion owns expand.temperature — shown and open.
-    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(true);
+    // Write more for me owns expand.temperature — the one section left.
+    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(true);
     expect(wrapper.find("[data-test='stub-expansion']").exists()).toBe(true);
-    // Non-matching accordions drop out entirely.
-    expect(wrapper.find("[data-test='accordion-performance']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='accordion-generation']").exists()).toBe(false);
-    // Top cards collapse away while searching to focus the results.
-    expect(wrapper.find("[data-test='appearance-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-performance']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-app']").exists()).toBe(false);
+    expect(wrapper.findAll("nav button").map((b) => b.text())).toEqual(["Write more for me"]);
   });
 
-  it("finds keyword-only sections (Accounts) that carry no curated key", async () => {
+  it("finds keyword-only sections (Accounts, Look, Phone pairing) that carry no curated key", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "civitai");
     expect(wrapper.find("[data-test='stub-accounts']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(false);
+
+    await typeSearch(wrapper, "theme");
+    expect(wrapper.find("[data-test='section-app']").exists()).toBe(true);
+
+    await typeSearch(wrapper, "phone");
+    expect(wrapper.find("[data-test='section-pairing']").exists()).toBe(true);
   });
 
-  it("opens the Library accordion for trash / retention searches", async () => {
+  it("finds My images & trash for trash / retention searches", async () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "trash");
-    expect(wrapper.find("[data-test='accordion-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='accordion-expansion']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='section-library']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(false);
     await typeSearch(wrapper, "retention");
     expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
   });
@@ -185,20 +272,52 @@ describe("SettingsView shell", () => {
     const wrapper = await mountView();
     await typeSearch(wrapper, "zzznope");
     expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(true);
+    expect(wrapper.findAll("nav button")).toHaveLength(0);
   });
 
-  it("surfaces the Hosts doorway when a search matches a host-owned setting", async () => {
+  it("finds Styles & disk for a directory setting by key or by label", async () => {
     const wrapper = await mountView();
-    // models_dir / output_dir belong to the Hosts section, which is the doorway
-    // card (excluded from the accordions) and hidden while searching.
     await typeSearch(wrapper, "models_dir");
-    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-hosts']").exists()).toBe(true);
-    // A host-owned match is a real result, not "nothing matches".
+    expect(wrapper.find("[data-test='section-styles']").exists()).toBe(true);
     expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(false);
 
-    // The human label works too.
-    await typeSearch(wrapper, "Output directory");
-    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
+    await typeSearch(wrapper, "finished pictures");
+    expect(wrapper.find("[data-test='section-styles']").exists()).toBe(true);
+
+    // Machines keeps its own doorway, findable by the words it still owns.
+    await typeSearch(wrapper, "api key");
+    expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
+  });
+
+  it("does not re-register every section on each keystroke", async () => {
+    const wrapper = await mountView();
+    observe.mockClear();
+    unobserve.mockClear();
+
+    // "styl" narrows to one section. The sections that stayed rendered must
+    // keep the registration they already have: an inline `:ref` arrow is a
+    // new function every render, so Vue unbound and rebound all fourteen and
+    // the nav highlight flickered as the observer re-fired.
+    await typeSearch(wrapper, "s");
+    await typeSearch(wrapper, "st");
+    await typeSearch(wrapper, "sty");
+
+    // Only sections that genuinely left the page are unobserved, and only
+    // ones that genuinely arrived are observed — never the whole set. Counted
+    // over distinct ELEMENTS: each section is registered with two observers
+    // (the nav highlight's band, and the one that mounts bodies ahead of the
+    // scroll), so raw call counts would say nothing about re-registration.
+    const unobserved = new Set(unobserve.mock.calls.map((call) => call[0]));
+    expect(unobserved.size).toBeLessThan(SECTIONS.length);
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it("leaves the section card unpadded, so full-bleed rows keep their hairlines", async () => {
+    // The mock's rows carry the inset and their rules span the card; padding
+    // the card would inset every rule instead. Non-row section bodies pad
+    // themselves (see each section component).
+    const wrapper = await mountView();
+    const card = wrapper.get("[data-test='section-generation']").get("div.bg-panel");
+    expect(card.classes().some((c) => /^p[xy]?-/.test(c))).toBe(false);
   });
 });

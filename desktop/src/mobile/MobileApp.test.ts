@@ -6475,7 +6475,7 @@ describe("MobileApp generation queue", () => {
       "disabled",
     );
     expect(wrapper.get("[data-test='mobile-develop-blocker']").text()).toContain(
-      "Target faces must be a whole number from 100 to 2000000.",
+      "Use a whole number of faces from 100 to 2000000.",
     );
 
     liveForm.mesh.targetFaces = 50_000;

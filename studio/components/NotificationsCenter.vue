@@ -20,7 +20,7 @@ import {
 /*
  * The notifications bell — the durable record behind transient toasts. A long
  * server error the user never caught in time is readable here in full. One
- * shared component on web and desktop (spec §06); iPhone gets its own
+ * shared component on web and desktop; iPhone gets its own
  * placement pass. Opening the panel marks everything read; Clear empties it.
  */
 const store = useNotificationsStore();
@@ -285,15 +285,15 @@ function timeLabel(entry: NotificationEntry): string {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--ce, var(--edge, #d0d5dd));
+  border: 1px solid var(--mold-border-control, var(--mold-border, #d0d5dd));
   border-radius: 8px;
   background: transparent;
-  color: var(--ink-2, #667085);
+  color: var(--mold-text-2, #667085);
   cursor: pointer;
 }
 
 .notifications-bell:hover {
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 
 .notifications-bell__badge {
@@ -303,8 +303,8 @@ function timeLabel(entry: NotificationEntry): string {
   min-width: 15px;
   padding: 0 3px;
   border-radius: 999px;
-  background: var(--stop, #b42318);
-  color: var(--on-status, #fff);
+  background: var(--mold-error, #b42318);
+  color: var(--mold-on-accent, #fff);
   font-size: 9px;
   font-weight: 700;
   line-height: 15px;
@@ -328,19 +328,19 @@ function timeLabel(entry: NotificationEntry): string {
 .notifications-panel > header button {
   border: none;
   background: none;
-  color: var(--ink-2, #667085);
+  color: var(--mold-text-2, #667085);
   font-size: 12px;
   cursor: pointer;
 }
 
 .notifications-panel > header button:hover {
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 
 .notifications-panel__empty {
   margin: 0;
   padding: 10px 4px 12px;
-  color: var(--ink-3, #98a2b3);
+  color: var(--mold-text-dim, #98a2b3);
   font-size: 12px;
 }
 
@@ -354,7 +354,7 @@ function timeLabel(entry: NotificationEntry): string {
   display: flex;
   gap: 8px;
   padding: 8px 4px;
-  border-top: 1px solid var(--ce, var(--edge, #d0d5dd));
+  border-top: 1px solid var(--mold-border-control, var(--mold-border, #d0d5dd));
 }
 
 .notifications-panel__dot {
@@ -364,7 +364,7 @@ function timeLabel(entry: NotificationEntry): string {
   font-size: 11px;
   line-height: 1.5;
   text-align: center;
-  color: var(--ink-3, #98a2b3);
+  color: var(--mold-text-dim, #98a2b3);
 }
 
 /* Visually-hidden utility: the severity name next to each glyph, and the
@@ -398,15 +398,15 @@ function timeLabel(entry: NotificationEntry): string {
   border: 1px solid transparent;
   border-radius: 6px;
   background: none;
-  color: var(--ink-3, #98a2b3);
+  color: var(--mold-text-dim, #98a2b3);
   font-size: 11px;
   cursor: pointer;
 }
 
 .notifications-panel li:hover .notifications-panel__copy-action,
 .notifications-panel__copy-action:focus-visible {
-  border-color: var(--ce, var(--edge, #d0d5dd));
-  color: var(--ink, currentColor);
+  border-color: var(--mold-border-control, var(--mold-border, #d0d5dd));
+  color: var(--mold-text);
 }
 
 .notifications-panel__copy p {
@@ -419,7 +419,7 @@ function timeLabel(entry: NotificationEntry): string {
 }
 
 .notifications-panel__repeat {
-  color: var(--ink-3, #98a2b3);
+  color: var(--mold-text-dim, #98a2b3);
   font-size: 11px;
 }
 
@@ -428,7 +428,7 @@ function timeLabel(entry: NotificationEntry): string {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--link, var(--rebate, #2563eb));
+  color: var(--link, var(--mold-text, #2563eb));
   font: inherit;
   font-weight: 600;
   text-decoration: underline;
@@ -442,18 +442,18 @@ function timeLabel(entry: NotificationEntry): string {
 
 .notifications-panel__inline-action:focus-visible {
   border-radius: 2px;
-  outline: 2px solid var(--safelight, currentColor);
+  outline: 2px solid var(--mold-blue, currentColor);
   outline-offset: 2px;
 }
 
 .notifications-panel__inline-action:disabled {
-  color: var(--ink-3, #98a2b3);
+  color: var(--mold-text-dim, #98a2b3);
   cursor: default;
 }
 
 .notifications-panel__detail {
   margin-top: 2px !important;
-  color: var(--ink-2, #667085);
+  color: var(--mold-text-2, #667085);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -462,7 +462,7 @@ function timeLabel(entry: NotificationEntry): string {
 
 .notifications-panel__meta {
   margin-top: 3px !important;
-  color: var(--ink-3, #98a2b3);
+  color: var(--mold-text-dim, #98a2b3);
   font-size: 11px;
 }
 </style>

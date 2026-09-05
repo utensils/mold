@@ -1,12 +1,17 @@
 <script setup lang="ts">
 /*
- * LibraryHeader — the Library's 52px top bar (V3 "Shelf"). Title, the
- * scope control (Prints | Collections | Trash with mono counts), a per-scope
- * count label, then the right cluster: thumbnail slider, media-kind control,
- * search, History / Select / Refresh. Collections hides the slider and kind
- * control; Trash keeps slider + Select and swaps Refresh for **Empty trash**.
- * Scope options are whatever the parent says the connected hosts can do —
- * with a single option the control is not rendered at all.
+ * LibraryHeader — the 40px per-view toolbar over the grid: the scope control
+ * (Everything | Favourites | Albums | Trash with mono counts), search, and the
+ * media-kind control on the left, then a spacer and the right cluster
+ * (thumbnail slider, Select, History, Refresh). No count label — the shell's
+ * title bar already carries "312 pictures · 6 albums". Scope options are
+ * whatever the parent says the connected hosts can do — with a single option
+ * the control is not rendered at all.
+ *
+ * The row is 40px and never wraps, and `.ms-seg__btn` is `flex: 1` +
+ * `white-space: nowrap` — a segmented group cannot shrink below its labels.
+ * So the media kind is FLAT CHIPS (the mock's, mock:655-660) rather than a
+ * second bordered group, and the search is the row's one elastic child.
  */
 import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
@@ -21,6 +26,7 @@ import type { GalleryKindFilter, LibraryScope } from "../../stores/gallery";
 
 export interface ScopeCounts {
   prints: number;
+  favorites: number;
   collections: number;
   trash: number;
 }
@@ -31,19 +37,15 @@ const props = withDefaults(
     /** Scopes the connected hosts support, in display order. */
     scopes: readonly LibraryScope[];
     counts: ScopeCounts;
-    /** Per-scope count sentence ("24 prints · 3.1 GB"). */
-    countLabel: string;
     error?: string | null;
     thumbnailSize: number;
     mediaKind: GalleryKindFilter;
     kindOptions: readonly { value: GalleryKindFilter; label: string }[];
     search: string;
     selectMode: boolean;
-    /** Enables **Empty trash** (Trash scope). */
-    trashCount?: number;
-    busy?: boolean;
+    historyOpen?: boolean;
   }>(),
-  { error: null, trashCount: 0, busy: false },
+  { error: null, historyOpen: false },
 );
 
 const emit = defineEmits<{
@@ -51,15 +53,15 @@ const emit = defineEmits<{
   "update:thumbnailSize": [px: number];
   "update:mediaKind": [kind: GalleryKindFilter];
   "update:search": [value: string];
-  openHistory: [];
+  toggleHistory: [];
   toggleSelect: [];
   refresh: [];
-  emptyTrash: [];
 }>();
 
 const SCOPE_LABELS: Record<LibraryScope, string> = {
-  prints: "Prints",
-  collections: "Collections",
+  prints: "Everything",
+  favorites: "Favourites",
+  collections: "Albums",
   trash: "Trash",
 };
 
@@ -73,10 +75,10 @@ const scopeOptions = computed(() =>
 
 const searchPlaceholder = computed(() =>
   props.scope === "collections"
-    ? "Search collections…"
+    ? "Search albums…"
     : props.scope === "trash"
-      ? "Search trash…"
-      : "Search prompts…",
+      ? "Search the trash…"
+      : "Search words or tags…",
 );
 
 const searchEl = ref<HTMLInputElement | null>(null);
@@ -88,31 +90,65 @@ defineExpose({ focusSearch });
 
 <template>
   <header
-    class="flex h-[52px] shrink-0 items-center gap-3 border-b border-edge px-6"
+    class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-2.5 border-b border-border bg-chrome px-3.5"
     data-test="library-header"
   >
-    <span class="font-display text-[17px] font-semibold text-ink" style="font-stretch: 92%">
-      Library
-    </span>
     <SegmentedControl
       v-if="scopes.length > 1"
-      class="ms-lib-scope"
+      inline
       :model-value="scope"
       :options="scopeOptions"
-      label="Library scope"
+      label="My images scope"
       compact
       data-test="library-scope"
       @update:model-value="emit('update:scope', $event)"
     />
-    <span class="data-mono text-caption text-ink-3" data-test="library-count">{{
-      countLabel
-    }}</span>
-    <span v-if="error" class="text-caption text-stop">{{ error }}</span>
+
+    <!-- The row never wraps and neither segmented group can shrink below its
+         labels, so the search is the one elastic child: it gives first, rather
+         than pushing Refresh, History and Select out of the clipped row. -->
+    <label
+      class="flex h-[26px] min-w-0 shrink basis-[170px] items-center gap-1.5 rounded-control border border-border bg-bg px-2 focus-within:border-border-focus"
+    >
+      <Icon name="search" :size="14" class="shrink-0 text-fg-dim" />
+      <input
+        ref="searchEl"
+        :value="search"
+        data-selectable
+        type="search"
+        :placeholder="searchPlaceholder"
+        aria-label="Search pictures"
+        class="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-dim"
+        @input="emit('update:search', ($event.target as HTMLInputElement).value)"
+      />
+    </label>
+
+    <!-- Flat chips, as the mock draws them (mock:655-660) — a second bordered
+         segmented group here costs ~90px the row does not have. -->
+    <div class="flex shrink-0 gap-0.5" role="radiogroup" aria-label="Media kind">
+      <button
+        v-for="option in kindOptions"
+        :key="option.value"
+        type="button"
+        role="radio"
+        :aria-checked="option.value === mediaKind"
+        class="rounded-control px-2.5 py-[5px] text-xs whitespace-nowrap transition-colors duration-100"
+        :class="
+          option.value === mediaKind
+            ? 'bg-surface-2 font-semibold text-fg'
+            : 'text-fg-dim hover:text-fg'
+        "
+        @click="emit('update:mediaKind', option.value)"
+      >
+        {{ option.label }}
+      </button>
+    </div>
+
+    <span v-if="error" class="truncate text-micro text-error">{{ error }}</span>
 
     <div class="flex-1" />
 
     <ThumbnailSizeSlider
-      v-if="scope !== 'collections'"
       :model-value="thumbnailSize"
       :min="GALLERY_THUMBNAIL_SIZE_MIN"
       :max="GALLERY_THUMBNAIL_SIZE_MAX"
@@ -120,90 +156,39 @@ defineExpose({ focusSearch });
       @update:model-value="emit('update:thumbnailSize', $event)"
     />
 
-    <SegmentedControl
-      v-if="scope === 'prints'"
-      :model-value="mediaKind"
-      :options="kindOptions"
-      label="Media kind"
-      @update:model-value="emit('update:mediaKind', $event)"
-    />
-
-    <label
-      class="flex h-[34px] w-[180px] items-center gap-2 rounded-chrome border border-ce bg-bench px-2.5"
-    >
-      <Icon name="search" :size="14" class="shrink-0 text-ink-3" />
-      <input
-        ref="searchEl"
-        :value="search"
-        data-selectable
-        type="search"
-        :placeholder="searchPlaceholder"
-        aria-label="Search prints"
-        class="min-w-0 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3"
-        @input="emit('update:search', ($event.target as HTMLInputElement).value)"
-      />
-    </label>
-
     <button
       type="button"
-      class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
-      title="History"
-      aria-label="Open history"
-      @click="emit('openHistory')"
-    >
-      <Icon name="history" :size="17" />
-    </button>
-    <button
-      type="button"
-      class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome transition-colors duration-100"
-      :class="
-        selectMode
-          ? 'bg-[color-mix(in_srgb,var(--safelight)_16%,transparent)] text-safelight'
-          : 'text-ink-3 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink'
-      "
+      class="ms-toolbar-button"
+      :class="selectMode ? 'ms-toolbar-button--on' : ''"
       :aria-pressed="selectMode"
-      title="Select"
+      title="Select pictures"
       aria-label="Toggle select mode"
       @click="emit('toggleSelect')"
     >
-      <Icon name="check" :size="17" />
+      Select
     </button>
     <button
-      v-if="scope === 'trash'"
       type="button"
-      data-test="empty-trash"
-      class="flex h-[34px] shrink-0 items-center gap-1.5 rounded-chrome border px-3 text-body text-stop transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--stop)_10%,transparent)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
-      style="border-color: color-mix(in srgb, var(--stop) 50%, transparent)"
-      :disabled="trashCount === 0 || busy"
-      @click="emit('emptyTrash')"
+      class="ms-toolbar-button"
+      :class="historyOpen ? 'ms-toolbar-button--on' : ''"
+      :aria-pressed="historyOpen"
+      title="History"
+      :aria-label="historyOpen ? 'Close history' : 'Open history'"
+      @click="emit('toggleHistory')"
     >
-      <Icon name="trash" :size="14" />
-      Empty trash
+      History
     </button>
+    <!-- Refresh is not the poll: `pollExtras` deliberately skips the primary
+         bucket because it is live over SSE, so this is the only way back to a
+         current grid when that stream has dropped. -->
     <button
-      v-else
       type="button"
-      class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
+      class="ms-toolbar-button ms-toolbar-button--icon"
       title="Refresh"
-      aria-label="Refresh library"
+      aria-label="Refresh my images"
       @click="emit('refresh')"
     >
-      <Icon name="refresh" :size="17" />
+      <Icon name="refresh" :size="14" />
     </button>
   </header>
 </template>
-
-<style scoped>
-/* The scope control reads as tabs: label + mono count side by side. */
-.ms-lib-scope :deep(.ms-seg__btn) {
-  flex-direction: row;
-  gap: 6px;
-}
-
-.ms-lib-scope :deep(.ms-seg__sub) {
-  font-family: var(--f-mono);
-  font-size: 10.5px;
-  color: inherit;
-  opacity: 0.8;
-}
-</style>

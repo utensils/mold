@@ -461,7 +461,7 @@ describe("MobileSharedParams mesh controls", () => {
     await faces.trigger("change");
     expect(form.mesh.targetFaces).toBe(9_000_000);
     expect(wrapper.get("[data-test='mobile-mesh-target-faces-error']").text()).toBe(
-      "Target faces must be a whole number from 100 to 2000000.",
+      "Use a whole number of faces from 100 to 2000000.",
     );
     expect(faces.attributes("aria-invalid")).toBe("true");
 

@@ -104,8 +104,8 @@ function reset() {
       <AccordionSection
         v-if="activeClip"
         icon="negative"
-        :title="`Clip ${activeIndex + 1} negative prompt`"
-        summary="What to steer away from in this clip"
+        :title="`Scene ${activeIndex + 1} — what to steer away from`"
+        summary="What this scene should keep out"
         :open="true"
         :header-interactive="false"
         data-test="sequence-section-negative"
@@ -117,7 +117,7 @@ function reset() {
           rows="2"
           placeholder="blurry, low quality, deformed…"
           class="ms-textarea"
-          aria-label="Active clip negative prompt"
+          aria-label="What the selected scene should steer away from"
         />
         <p
           v-if="!guidanceCaps.supportsNegativePrompt"
@@ -136,7 +136,7 @@ function reset() {
       <AccordionSection
         v-if="activeClip && cameraControlsEnabled"
         icon="video"
-        :title="`Clip ${activeIndex + 1} camera motion`"
+        :title="`Scene ${activeIndex + 1} camera motion`"
         :summary="
           cameraControls.find((control) => control.id === activeClip?.cameraControl)?.label ??
           activeClip.cameraControl ??
@@ -193,20 +193,20 @@ function reset() {
   margin-bottom: 10px;
 }
 .ms-adv__summary {
-  color: var(--ink-3);
-  font-family: var(--f-mono);
-  font-size: 10px;
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
 }
 .ms-adv__reset {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
-  border-radius: 8px;
+  color: var(--mold-text-2);
+  border-radius: var(--mold-radius-3);
   cursor: pointer;
 }
 .ms-adv__reset {
   padding: 5px 9px;
-  font-size: 11px;
+  font-size: var(--mold-fs-micro);
 }
 .ms-adv__list {
   display: flex;
@@ -217,20 +217,20 @@ function reset() {
   width: 100%;
   box-sizing: border-box;
   resize: none;
-  border: 1px solid var(--ce);
-  border-radius: 8px;
-  background: var(--bath);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding: 9px 10px;
 }
 .ms-input {
   width: 100%;
   box-sizing: border-box;
   min-height: 36px;
-  border: 1px solid var(--ce);
-  border-radius: 8px;
-  background: var(--bath);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding: 8px 10px;
 }
 .ms-camera-path,
@@ -238,8 +238,8 @@ function reset() {
   margin-top: 9px;
 }
 .ms-hint {
-  color: var(--ink-3);
-  font-size: 10px;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-micro);
   line-height: 1.45;
 }
 .ms-chips {
@@ -249,7 +249,7 @@ function reset() {
   margin-top: 9px;
 }
 .ms-switch-row {
-  color: var(--ink-2);
-  font-size: 12px;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
 }
 </style>

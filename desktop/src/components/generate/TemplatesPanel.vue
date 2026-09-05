@@ -106,10 +106,10 @@ async function requestDelete(template: GenerationTemplate) {
 
 <template>
   <div data-test="templates-panel">
-    <div class="mt-5 mb-2 flex items-center gap-2">
-      <span class="edge-code">Templates</span>
-      <span class="data-mono text-caption text-ink-3">{{ templates.length }}</span>
-      <div class="border-edge h-px flex-1 border-t" />
+    <div class="mb-2 flex items-center gap-2">
+      <span class="font-mono text-micro text-fg-dim whitespace-nowrap">Templates</span>
+      <span class="font-mono text-micro text-fg-dim">{{ templates.length }}</span>
+      <div class="border-border h-px flex-1 border-t" />
     </div>
 
     <!-- Save current form -->
@@ -120,20 +120,20 @@ async function requestDelete(template: GenerationTemplate) {
         type="text"
         placeholder="Template name"
         data-test="template-name"
-        class="border-edge h-8 min-w-0 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
+        class="border-border h-8 min-w-0 rounded-control border bg-bg-deep px-2 text-sm text-fg placeholder:text-fg-dim"
         @keydown.enter="saveCurrent"
       />
       <button
         type="button"
         data-test="template-save"
         :disabled="saving"
-        class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
+        class="h-8 rounded-control bg-accent px-3 text-sm font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
         @click="saveCurrent"
       >
         {{ saving ? "Saving…" : "Save" }}
       </button>
     </div>
-    <p v-if="error" class="mt-1 text-caption text-stop" role="alert">{{ error }}</p>
+    <p v-if="error" class="mt-1 text-micro text-error" role="alert">{{ error }}</p>
 
     <!-- Search + sort -->
     <div class="mt-2 grid grid-cols-[1fr_auto] gap-2">
@@ -143,13 +143,13 @@ async function requestDelete(template: GenerationTemplate) {
         type="search"
         placeholder="Search templates"
         data-test="template-search"
-        class="border-edge h-8 min-w-0 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
+        class="border-border h-8 min-w-0 rounded-control border bg-bg-deep px-2 text-sm text-fg placeholder:text-fg-dim"
       />
       <select
         v-model="sort"
         data-test="template-sort"
         aria-label="Sort templates"
-        class="border-edge h-8 rounded-control border bg-bath px-1.5 text-body text-ink"
+        class="border-border h-8 rounded-control border bg-bg-deep px-1.5 text-sm text-fg"
         @change="refresh"
       >
         <option value="updated-desc">Newest</option>
@@ -164,7 +164,7 @@ async function requestDelete(template: GenerationTemplate) {
       <div
         v-for="template in visibleTemplates"
         :key="template.id"
-        class="border-edge grid grid-cols-[1fr_auto_auto] items-center gap-1 border-t py-1 first:border-t-0"
+        class="border-border grid grid-cols-[1fr_auto_auto] items-center gap-1 border-t py-1 first:border-t-0"
         data-test="template-row"
       >
         <!-- Inline rename -->
@@ -175,7 +175,7 @@ async function requestDelete(template: GenerationTemplate) {
           type="text"
           data-test="template-rename-input"
           aria-label="Rename template"
-          class="border-edge h-7 min-w-0 rounded-control border bg-bath px-2 text-body text-ink"
+          class="border-border h-7 min-w-0 rounded-control border bg-bg-deep px-2 text-sm text-fg"
           @keydown.enter="commitRename(template.id)"
           @keydown.esc="cancelRename"
           @blur="commitRename(template.id)"
@@ -184,11 +184,11 @@ async function requestDelete(template: GenerationTemplate) {
           v-else
           type="button"
           data-test="template-load"
-          class="min-w-0 truncate text-left text-body text-ink-2 hover:text-ink"
+          class="min-w-0 truncate text-left text-sm text-fg-2 hover:text-fg"
           @click="loadTemplate(template)"
         >
           <span data-test="template-row-name" class="truncate">{{ template.name }}</span>
-          <span class="data-mono ml-1.5 text-caption text-ink-3">
+          <span class="font-mono ml-1.5 text-micro text-fg-dim">
             {{ template.form.model ? modelLabel(template.form.model) : "no model" }}
           </span>
         </button>
@@ -196,7 +196,7 @@ async function requestDelete(template: GenerationTemplate) {
         <button
           type="button"
           data-test="template-rename"
-          class="rounded-control px-1.5 py-0.5 text-caption text-ink-3 hover:bg-bath hover:text-ink"
+          class="rounded-control px-1.5 py-0.5 text-micro text-fg-dim hover:bg-bg-deep hover:text-fg"
           @click="startRename(template)"
         >
           Rename
@@ -204,8 +204,10 @@ async function requestDelete(template: GenerationTemplate) {
         <button
           type="button"
           data-test="template-delete"
-          class="rounded-control px-1.5 py-0.5 text-caption hover:bg-bath"
-          :class="confirmingDeleteId === template.id ? 'text-stop' : 'text-ink-3 hover:text-stop'"
+          class="rounded-control px-1.5 py-0.5 text-micro hover:bg-bg-deep"
+          :class="
+            confirmingDeleteId === template.id ? 'text-error' : 'text-fg-dim hover:text-error'
+          "
           @click="requestDelete(template)"
         >
           {{ confirmingDeleteId === template.id ? "Confirm?" : "Delete" }}
@@ -214,7 +216,7 @@ async function requestDelete(template: GenerationTemplate) {
       <p
         v-if="visibleTemplates.length === 0"
         data-test="template-empty"
-        class="py-2 text-caption text-ink-3"
+        class="py-2 text-micro text-fg-dim"
       >
         {{
           search.trim() ? "No templates match." : "No templates yet — Save the current settings."

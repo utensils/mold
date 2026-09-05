@@ -30,7 +30,8 @@ Both axes must be multiples of 32, and of 64 for lip dub. Size the action to
 that duration, keep one continuous take per clip, and keep lip sync inside a
 single clip. With a source image attached, describe only what changes from it;
 restating the frame inaccurately makes the model cut. Distilled LTX-2.5 fixes
-guidance at 1.0.
+guidance at 1.0. Audio renders by default on MP4 output, one-shots and
+sequences alike, so write the soundscape unless the request says silent.
 
 ## Examples
 

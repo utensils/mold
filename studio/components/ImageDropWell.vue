@@ -213,7 +213,7 @@ function onDrop(event: DragEvent): void {
 .image-well {
   display: grid;
   gap: 7px;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .image-well__input {
   display: none;
@@ -227,9 +227,9 @@ function onDrop(event: DragEvent): void {
   place-items: center;
   min-height: 88px;
   padding: 12px;
-  border: 1px dashed var(--edge, #bbb);
+  border: 1px dashed var(--mold-border, #bbb);
   border-radius: 10px;
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-size: 12px;
   line-height: 1.45;
   text-align: center;
@@ -239,15 +239,15 @@ function onDrop(event: DragEvent): void {
     color 0.1s;
 }
 .image-well__zone--over {
-  border-color: var(--safelight, #b45309);
-  color: var(--safelight, #b45309);
+  border-color: var(--mold-blue, #b45309);
+  color: var(--mold-blue, #b45309);
 }
 .image-well__zone--inert {
   cursor: default;
   opacity: 0.6;
 }
 .image-well__zone:focus-visible {
-  outline: 2px solid var(--safelight, #b45309);
+  outline: 2px solid var(--mold-blue, #b45309);
   outline-offset: 1px;
 }
 .image-well__filename {
@@ -255,7 +255,7 @@ function onDrop(event: DragEvent): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .image-well__preview {
   display: grid;
@@ -268,12 +268,12 @@ function onDrop(event: DragEvent): void {
   display: block;
   max-width: 100%;
   max-height: 160px;
-  border: 1px solid var(--edge, #bbb);
+  border: 1px solid var(--mold-border, #bbb);
   border-radius: 10px;
 }
 .image-well__preview figcaption {
   overflow: hidden;
-  color: var(--ink-3, #737373);
+  color: var(--mold-text-dim, #737373);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -285,10 +285,10 @@ function onDrop(event: DragEvent): void {
 .image-well__action {
   min-height: 30px;
   padding: 5px 10px;
-  border: 1px solid var(--edge, #bbb);
+  border: 1px solid var(--mold-border, #bbb);
   border-radius: 8px;
-  background: var(--bench, transparent);
-  color: var(--ink-3, #737373);
+  background: var(--mold-bg, transparent);
+  color: var(--mold-text-dim, #737373);
   font-size: 12px;
   cursor: pointer;
 }
@@ -300,7 +300,7 @@ function onDrop(event: DragEvent): void {
   text-underline-offset: 2px;
 }
 .image-well__action:hover {
-  color: var(--ink, currentColor);
+  color: var(--mold-text);
 }
 .image-well__action:disabled {
   opacity: 0.5;
@@ -322,8 +322,8 @@ function onDrop(event: DragEvent): void {
 }
 .image-well--touch .image-well__action {
   min-height: var(--image-well-touch-target, 44px);
-  color: var(--ink, currentColor);
-  font-family: var(--font-utility, inherit);
+  color: var(--mold-text);
+  font-family: var(--mold-font-mono);
   font-size: 14px;
   font-weight: 700;
   text-decoration: none;

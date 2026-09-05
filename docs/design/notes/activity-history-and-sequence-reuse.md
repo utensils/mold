@@ -48,7 +48,7 @@ present-tense work.
 
 This keeps the five-workspace IA intact (§04: do not re-expand it), keeps the
 spec's restraint budget (§10), and gives G2's "the Create activity strip renders
-this client's own work" an honest boundary: this client's own work *in flight*.
+this client's own work" an honest boundary: this client's own work _in flight_.
 
 ---
 
@@ -63,18 +63,18 @@ each with a `✕`. There are no settled rows, no "+N more", no collapse chevron,
 and no maintenance buttons. The prototype never contemplated settled work in the
 strip at all. Today's desktop strip is strictly a superset that nobody designed.
 
-The "+N more" recollection is worth honoring anyway — as an *overflow count*,
+The "+N more" recollection is worth honoring anyway — as an _overflow count_,
 not an expandable pile. That is the digest chip in A.2.
 
 ## A.1 Lifespans and their homes
 
 A job has three lifespans, and today all three are crammed into one surface.
 
-| Lifespan | What it is | Home | Actions there |
-| --- | --- | --- | --- |
-| **In flight** | queued / running prints and sequences | Create activity strip; sidebar **Now developing** | cancel; watch (sequence) |
-| **Needs a decision** | failed print; failed / interrupted sequence | Create activity strip, capped and expiring | resume, dismiss, read the error |
-| **Settled** | completed / cancelled; failed once it has aged out | canvas (the one you just watched), **Library** (the print), **Library ▸ History ▸ Sequences** (the job record) | open, edit sequence, reuse settings, delete, clear inactive, clean up disk |
+| Lifespan             | What it is                                         | Home                                                                                                           | Actions there                                                              |
+| -------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **In flight**        | queued / running prints and sequences              | Create activity strip; sidebar **Now developing**                                                              | cancel; watch (sequence)                                                   |
+| **Needs a decision** | failed print; failed / interrupted sequence        | Create activity strip, capped and expiring                                                                     | resume, dismiss, read the error                                            |
+| **Settled**          | completed / cancelled; failed once it has aged out | canvas (the one you just watched), **Library** (the print), **Library ▸ History ▸ Sequences** (the job record) | open, edit sequence, reuse settings, delete, clear inactive, clean up disk |
 
 Two things follow that are worth stating plainly:
 
@@ -105,6 +105,7 @@ takes `jobs: Job[]` plus `sequences?: ActivityJobVM[]` and emits
    Nothing else. `completed` and `cancelled` never render a row: completion is
    not news the composer needs to carry, and a cancellation was the user's own
    decision one second ago.
+
 3. **Digest** — one mono chip at the end of the header row when there is
    settled work the strip is deliberately not showing.
 
@@ -158,7 +159,7 @@ the wire.
 
 **Keep "Now developing".** The strip is already called Activity; naming the
 sidebar section Activity too would give one product two words for two different
-things that share a name. And §11 fixes *develop/developing* as the vocabulary
+things that share a name. And §11 fixes _develop/developing_ as the vocabulary
 for generating. Renaming it costs vocabulary and buys nothing the digest chip
 doesn't already deliver.
 
@@ -183,7 +184,7 @@ What changes:
 `desktop/src/components/library/HistoryDrawer.vue` already is "the past" —
 **Runs** (gallery-backed) and **Prompts** (`prompt_history`-backed), opened at
 `?panel=history`, reachable from the command palette. A durable sequence job is
-the past *with actions attached*. It belongs here, not in a new workspace and
+the past _with actions attached_. It belongs here, not in a new workspace and
 not in the status popover.
 
 - **Tab label: Sequences.** Not "Jobs" — §11 has no "job" in the user-facing
@@ -192,7 +193,7 @@ not in the status popover.
   → `sequenceToVM` → `mergeActivity`, so active jobs sort to the top and the tab
   is never lying about what is running.
 - **Row** (shared component, A.7): state chip · model display name · `N clips ·
-  M/N` · host label · relative time · error text when present.
+M/N` · host label · relative time · error text when present.
 - **Actions:** `sequenceActions(state)` unchanged — `Open`/`Watch`, `Edit`,
   `Resume`, `Delete` — plus **Show print** when a gallery row on that host
   carries `metadata.chain_job_id === job.id`. `Edit` and `Open` close the drawer
@@ -203,12 +204,12 @@ not in the status popover.
   host, so the chip scopes the footer action for free.
 - **Footer:** `Clear inactive` (two-press confirm, mirroring the Prompts tab's
   `Clear…`, label spelling out scope and count: `Delete 6 inactive sequences on
-  plato?`) and `Clean up disk`. Both toast their outcome as they do today.
+plato?`) and `Clean up disk`. Both toast their outcome as they do today.
 - **Render cap:** `HISTORY_JOBS_RENDER_CAP = 200`, newest first, with a mono
   footnote `showing 200 of 431` when clipped. No virtualization; a user at 431
   jobs is being told to run Clear inactive, which is right there.
 - **Empty state:** `No sequences yet.` with exactly one primary action, `Go to
-  Create` (§11 empty-state rule).
+Create` (§11 empty-state rule).
 - **Freshness:** `chainJobs.syncPolling()` only polls while something is active,
   so the drawer must `void chains.fetchAll()` once on open (and on tab switch to
   Sequences) or a settled list goes stale.
@@ -242,7 +243,7 @@ New canvas state — **settled watched sequence**:
 
 - When the watched job settles, the canvas shows the finished video (poster
   frame, playable) with the standard caption line: `model · N clips · seed · time
-  · host`.
+· host`.
 - Caption actions: **Edit sequence** and **Show in library**.
 - Resolution of the video: after finalize the store already bumps
   `chains.finalizedTick` and Create refetches the gallery; find the row whose
@@ -263,13 +264,13 @@ The moment a failed print keeps a row, it sorts against sequence
 
 ## A.6 Failed jobs — how prominent, where, how long
 
-| | Failed print | Failed / interrupted sequence |
-| --- | --- | --- |
-| Server record | none (`generation.jobs` is session state; web persists 10 in localStorage) | durable job row, resumable |
-| Strip | attention row, 5 min or until dismissed, error text inline | attention row, 5 min or until dismissed, error text inline, `Resume` |
-| After it ages out | gone — and that is honest, it was never recorded | still in History ▸ Sequences with `Resume` / `Edit` / `Delete` |
-| Canvas | existing `GenerateErrorNotice` for the active job | new: error notice + `Resume` (A.5) |
-| Sidebar | last-3 window shows it in `--stop` (existing behavior) | not shown (A.3) |
+|                   | Failed print                                                               | Failed / interrupted sequence                                        |
+| ----------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Server record     | none (`generation.jobs` is session state; web persists 10 in localStorage) | durable job row, resumable                                           |
+| Strip             | attention row, 5 min or until dismissed, error text inline                 | attention row, 5 min or until dismissed, error text inline, `Resume` |
+| After it ages out | gone — and that is honest, it was never recorded                           | still in History ▸ Sequences with `Resume` / `Edit` / `Delete`       |
+| Canvas            | existing `GenerateErrorNotice` for the active job                          | new: error notice + `Resume` (A.5)                                   |
+| Sidebar           | last-3 window shows it in `--stop` (existing behavior)                     | not shown (A.3)                                                      |
 
 Note this **adds** failed-print rows to desktop, which shows none today
 (`generation.pending` already excludes `error`). That is deliberate: web's strip
@@ -280,13 +281,13 @@ the honest counterweight to removing 40 completed rows.
 
 ## A.7 Retention constants (single source, `studio/lib/activity.ts`)
 
-| Constant | Value | Meaning |
-| --- | --- | --- |
-| `SETTLED_VISIBLE_MS` | `5 * 60_000` | how long a settled-but-wrong job keeps a strip row |
-| `MAX_ATTENTION_ROWS` | `2` | strip rows for wrong-but-settled work; overflow → digest |
-| `HISTORY_JOBS_RENDER_CAP` | `200` | rows rendered in History ▸ Sequences |
-| `GENERATION_HISTORY_LIMIT` | `50` | existing sidebar last-finished window (`desktop/src/stores/generation.ts`, unchanged) |
-| `PRINT_PRUNE_KEEP` | `12` | existing `generation.prune` cap (unchanged) |
+| Constant                   | Value        | Meaning                                                                               |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------------- |
+| `SETTLED_VISIBLE_MS`       | `5 * 60_000` | how long a settled-but-wrong job keeps a strip row                                    |
+| `MAX_ATTENTION_ROWS`       | `2`          | strip rows for wrong-but-settled work; overflow → digest                              |
+| `HISTORY_JOBS_RENDER_CAP`  | `200`        | rows rendered in History ▸ Sequences                                                  |
+| `GENERATION_HISTORY_LIMIT` | `50`         | existing sidebar last-finished window (`desktop/src/stores/generation.ts`, unchanged) |
+| `PRINT_PRUNE_KEEP`         | `12`         | existing `generation.prune` cap (unchanged)                                           |
 
 ## A.8 Mobile (iPhone) — brief
 
@@ -324,7 +325,7 @@ What mobile gets:
   reads server timestamps.
 - **Server-side job retention/TTL** — right idea, wrong PR; `POST /api/chain-jobs/gc`
   already exists and `Clear inactive` is the user-facing control. Note as follow-up.
-- **Making the strip a real shared queue with reorder** — that is G2's *Machines*
+- **Making the strip a real shared queue with reorder** — that is G2's _Machines_
   half, already resolved there via `PATCH /api/queue/:id`.
 
 ---
@@ -359,18 +360,18 @@ shot box. Sequence-aware reuse never surfaces that join.
 `ChainStageMetadata { prompt, frames, transition, fade_frames, seed }` vs
 `SequenceClipForm { id, prompt, frames, transition, fadeFrames, negativePrompt, sourceImage }`.
 
-| Field | Source | Rule |
-| --- | --- | --- |
-| `prompt` | `chain.stages[i].prompt` | direct |
-| `frames` | `chain.stages[i].frames` | direct, then clamped (below) |
-| `transition` | `chain.stages[i].transition` | direct; clip 0 coerced to `smooth` by the form, as always |
-| `fadeFrames` | `chain.stages[i].fade_frames` | direct, else `DEFAULT_FADE_FRAMES` |
-| `id` | — | fresh client uuid per clip |
-| `negativePrompt` | `metadata.negative_prompt` | **clip 1 only.** `synthetic_generate_request` records `first.negative_prompt` — clip 1's. Spraying it across every clip would invent authorship. Clips 2..n get `""`. |
-| `sourceImage` | `metadata.source_image_sha256` | **desktop only, clip 1 only.** The recorded sha is clip 1's opening frame; desktop's Tauri source stash (`ipc.sourceStashGet`) can restore it when still present. Web and iPhone leave it `null`. |
-| per-clip seed | `chain.stages[i].seed` | **not applied.** The rail carries no per-clip seed (the wire carries `seed_offset`), and deriving an offset from an effective u64 seed is guesswork. The shared seed comes from `metadata.seed` exactly as single-print reuse does. |
-| shared params | row metadata | `applyMetadataToForm` unchanged — model, width/height, steps, guidance, fps, seed, strength, format |
-| `motion_tail_frames` | `chain.motion_tail_frames` | **validation only**, not applied — the live tail is `sequenceMotionTailFrames(selectedEntry)`, a property of the model. Used to clamp (below). |
+| Field                | Source                         | Rule                                                                                                                                                                                                                                |
+| -------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`             | `chain.stages[i].prompt`       | direct                                                                                                                                                                                                                              |
+| `frames`             | `chain.stages[i].frames`       | direct, then clamped (below)                                                                                                                                                                                                        |
+| `transition`         | `chain.stages[i].transition`   | direct; clip 0 coerced to `smooth` by the form, as always                                                                                                                                                                           |
+| `fadeFrames`         | `chain.stages[i].fade_frames`  | direct, else `DEFAULT_FADE_FRAMES`                                                                                                                                                                                                  |
+| `id`                 | —                              | fresh client uuid per clip                                                                                                                                                                                                          |
+| `negativePrompt`     | `metadata.negative_prompt`     | **clip 1 only.** `synthetic_generate_request` records `first.negative_prompt` — clip 1's. Spraying it across every clip would invent authorship. Clips 2..n get `""`.                                                               |
+| `sourceImage`        | `metadata.source_image_sha256` | **desktop only, clip 1 only.** The recorded sha is clip 1's opening frame; desktop's Tauri source stash (`ipc.sourceStashGet`) can restore it when still present. Web and iPhone leave it `null`.                                   |
+| per-clip seed        | `chain.stages[i].seed`         | **not applied.** The rail carries no per-clip seed (the wire carries `seed_offset`), and deriving an offset from an effective u64 seed is guesswork. The shared seed comes from `metadata.seed` exactly as single-print reuse does. |
+| shared params        | row metadata                   | `applyMetadataToForm` unchanged — model, width/height, steps, guidance, fps, seed, strength, format                                                                                                                                 |
+| `motion_tail_frames` | `chain.motion_tail_frames`     | **validation only**, not applied — the live tail is `sequenceMotionTailFrames(selectedEntry)`, a property of the model. Used to clamp (below).                                                                                      |
 
 **Frames clamp.** Clip duration must stay strictly greater than the active motion
 tail (an existing invariant). If the model's current tail differs from the
@@ -382,7 +383,7 @@ never silently resize without saying it.
 **Lossiness is disclosed, once, quietly.** After a sequence reuse the composer
 shows a single mono line beneath the rail:
 `reused 5 clips · negatives and clip sources aren't recorded in prints`
-— only listing the parts that were actually lossy for *this* row. This is the
+— only listing the parts that were actually lossy for _this_ row. This is the
 §11 rule (errors and caveats say what happened, no apology) and it is what keeps
 "Reuse settings" from over-claiming reproducibility.
 
@@ -390,16 +391,16 @@ shows a single mono line beneath the rail:
 
 **Origin host.** The chain job lives only on the machine that produced it.
 
-| Surface | Row wrapper | Host id |
-| --- | --- | --- |
-| desktop | `MergedPrint` | `gallery.hostFor(entry.sourceKey)?.id` |
-| web | `HostGalleryImage` | `entry.hostId` (`ORIGIN_HOST_ID` → origin host) |
-| iPhone | `GalleryPrint` | `print.hostId` / `print.target` |
+| Surface | Row wrapper        | Host id                                         |
+| ------- | ------------------ | ----------------------------------------------- |
+| desktop | `MergedPrint`      | `gallery.hostFor(entry.sourceKey)?.id`          |
+| web     | `HostGalleryImage` | `entry.hostId` (`ORIGIN_HOST_ID` → origin host) |
+| iPhone  | `GalleryPrint`     | `print.hostId` / `print.target`                 |
 
 Rules:
 
 - Resolve **only** from the entry's own origin bucket. A merged print may appear
-  in `availableOn` on three hosts; the other two hold auto-saved *copies*, not the
+  in `availableOn` on three hosts; the other two hold auto-saved _copies_, not the
   producer. Never probe siblings.
 - Desktop's `hostFor("local")` returns `null` unless the local server is
   `ready` — an unresolved host means **no Edit action**, only Reuse.
@@ -411,7 +412,7 @@ Rules:
 - **Check on click**, once: `chains.fetchDetail(hostId, jobId)`.
   - `404` → the job was deleted or GC'd. **Auto-fall back to the Reuse path**
     and toast `That sequence job is gone from plato. Reused its settings
-    instead.` The click is never a dead end (the same rule the prepared-expansion
+instead.` The click is never a dead end (the same rule the prepared-expansion
     invariant states: never leave an enabled control as a text-only dead end).
   - network / 5xx → `Can't reach plato:7680. Check the host in Machines.`
     (§11 server-error copy). Do **not** silently downgrade to Reuse — the job
@@ -422,7 +423,7 @@ Rules:
     is lossless (real negatives, real source images, real cached-stage count) and
     already tested; Library must not grow a parallel one.
   - `detail.script == null` → existing toast `This job carries no editable
-    script.`, then offer Reuse.
+script.`, then offer Reuse.
 - **Web needs typed status.** `web/src/api.ts requireJson` throws a plain `Error`
   with the status in the message string; the 404 branch must not be implemented
   by substring-matching. Web gets the studio `ApiError` (or a thin typed wrapper)
@@ -451,28 +452,38 @@ Rules:
 store imports, no Tauri:
 
 ```ts
-export function chainMetadataToClips(chain: ChainOutputMetadata,
-  opts: { negativePromptForFirstClip?: string | null }): SequenceClipForm[];
+export function chainMetadataToClips(
+  chain: ChainOutputMetadata,
+  opts: { negativePromptForFirstClip?: string | null },
+): SequenceClipForm[];
 
 export interface SequenceReusePlan {
   clips: SequenceClipForm[];
   recordedMotionTailFrames: number;
   lossy: { negatives: boolean; clipSources: boolean; perClipSeeds: boolean };
 }
-export function planSequenceReuse(metadata: OutputMetadataLike): SequenceReusePlan | null;
+export function planSequenceReuse(
+  metadata: OutputMetadataLike,
+): SequenceReusePlan | null;
 
-export function clampClipsToMotionTail(clips: SequenceClipForm[],
-  motionTailFrames: number, minFrames: number): { clips: SequenceClipForm[]; raised: number };
+export function clampClipsToMotionTail(
+  clips: SequenceClipForm[],
+  motionTailFrames: number,
+  minFrames: number,
+): { clips: SequenceClipForm[]; raised: number };
 
 export type SequenceEditAvailability = "available" | "absent" | "unknown-host";
 export function sequenceEditAvailability(args: {
   chainJobId: string | null | undefined;
   hostId: string | null;
-  knownJobIds: readonly string[] | null;   // null = listing not loaded
+  knownJobIds: readonly string[] | null; // null = listing not loaded
 }): SequenceEditAvailability;
 
 /** job → print, for the canvas result and History's "Show print". */
-export function isPrintOfChainJob(metadata: OutputMetadataLike, jobId: string): boolean;
+export function isPrintOfChainJob(
+  metadata: OutputMetadataLike,
+  jobId: string,
+): boolean;
 ```
 
 `OutputMetadataLike` is a structural minimum (`{ chain?, chain_job_id?,
@@ -533,31 +544,31 @@ today; only the TS types are missing them.
 
 `docs/design/mold-studio-spec.html` — small, surgical, in the spec's voice.
 
-1. **§06 "Generate"** — append to the activity-strip sentence: *"The strip is
+1. **§06 "Generate"** — append to the activity-strip sentence: _"The strip is
    present tense: it mirrors the running job and any queued jobs (cancellable),
    holds a failed job briefly so it can be resumed or dismissed, and collapses
-   everything else into a count that opens History."*
+   everything else into a count that opens History."_
 2. **§06 "Make a sequence"** — amend the final sentences. Current text says
-   sequences "render in the *same* activity strip as prints (queued/running/settled,
-   watch, cancel, resume)". Change `settled` out of that list, and add: *"A settled
+   sequences "render in the _same_ activity strip as prints (queued/running/settled,
+   watch, cancel, resume)". Change `settled` out of that list, and add: _"A settled
    sequence leaves the strip: its video lands in the canvas with **Edit sequence**
    and **Show in library**, its print is in the Library carrying every clip's
    prompt, and its job record is in **Library ▸ History ▸ Sequences**, which is
    also where **Clear inactive** and **Clean up disk** live. From a sequence print,
    **Reuse settings** starts a fresh sequence from the recorded clips; **Edit
-   sequence** re-enters the original job with its cached clips."*
+   sequence** re-enters the original job with its cached clips."_
 3. **G2 resolution** — replace "with watch/cancel/resume/edit per row" with
-   "…renders this client's own work *while it is in flight*, plus a failed job
+   "…renders this client's own work _while it is in flight_, plus a failed job
    briefly; settled work resolves to Library ▸ History ▸ Sequences (G15)."
 4. **G14 resolution** — append: "settled sequence jobs live in Library ▸ History
    ▸ Sequences, and a sequence print reloads its clips into the rail from
    `metadata.chain`."
-5. **New gap G15 — "Activity is present tense."** *Settled jobs accumulate in the
-   Create activity strip instead of resolving to a result and a history.* **Done
+5. **New gap G15 — "Activity is present tense."** _Settled jobs accumulate in the
+   Create activity strip instead of resolving to a result and a history._ **Done
    when** the Create strip shows only in-flight work plus a capped, expiring
    attention row, a finished sequence lands in the canvas with its actions, and
    the durable job list with its maintenance actions lives in Library ▸ History ▸
-   Sequences on desktop and web. **Resolution:** *(fill on landing.)*
+   Sequences on desktop and web. **Resolution:** _(fill on landing.)_
 6. **§11 copy table** — add rows:
    - Activity digest — `4 settled sequences` · `1 failed · 4 settled sequences`
    - Sequence toast — `Sequence ready — saved to Library`
@@ -575,58 +586,60 @@ change, not a contradiction of it.
 
 ### `studio/` (shared, no shell imports)
 
-| File | Change |
-| --- | --- |
-| `studio/lib/activity.ts` | Add `settledAtMs: number \| null` to both VM variants. Export `isSettled`, `needsAttention`, `SETTLED_VISIBLE_MS`, `MAX_ATTENTION_ROWS`, `partitionActivity(rows, { nowMs, dismissed, settledVisibleMs, maxAttentionRows })` → `{ active, attention, settledSequences, hiddenAttention }`, and `activityDigestLabel(partition)`. `sequenceToVM` sets `settledAtMs = updated_at_unix_ms` when settled. Keep `mergeActivity` as-is (partition consumes its output). |
-| `studio/lib/api/chainTypes.ts` | Add `ChainStageMetadata`, `ChainOutputMetadata` mirroring `crates/mold-core/src/chain.rs`. |
-| `studio/lib/sequenceReuse.ts` | **New.** `chainMetadataToClips`, `planSequenceReuse`, `clampClipsToMotionTail`, `sequenceEditAvailability`, `isPrintOfChainJob`. |
-| `studio/lib/sequenceForm.ts` | No change (`chainScriptToClips` stays the lossless `ChainScript` path used by Edit). |
+| File                           | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `studio/lib/activity.ts`       | Add `settledAtMs: number \| null` to both VM variants. Export `isSettled`, `needsAttention`, `SETTLED_VISIBLE_MS`, `MAX_ATTENTION_ROWS`, `partitionActivity(rows, { nowMs, dismissed, settledVisibleMs, maxAttentionRows })` → `{ active, attention, settledSequences, hiddenAttention }`, and `activityDigestLabel(partition)`. `sequenceToVM` sets `settledAtMs = updated_at_unix_ms` when settled. Keep `mergeActivity` as-is (partition consumes its output). |
+| `studio/lib/api/chainTypes.ts` | Add `ChainStageMetadata`, `ChainOutputMetadata` mirroring `crates/mold-core/src/chain.rs`.                                                                                                                                                                                                                                                                                                                                                                        |
+| `studio/lib/sequenceReuse.ts`  | **New.** `chainMetadataToClips`, `planSequenceReuse`, `clampClipsToMotionTail`, `sequenceEditAvailability`, `isPrintOfChainJob`.                                                                                                                                                                                                                                                                                                                                  |
+| `studio/lib/sequenceForm.ts`   | No change (`chainScriptToClips` stays the lossless `ChainScript` path used by Edit).                                                                                                                                                                                                                                                                                                                                                                              |
 
 ### `ui/`
 
-| File | Change |
-| --- | --- |
-| `ui/components/SequenceJobRow.vue` | **New.** Presentational, props-in/emits-out (`vm: ActivityJobVM & { kind: "sequence" }`, `dense?: boolean`, `actions`, `modelLabel`), emits `action`. Same precedent as `SeamPill`/`ClipRail`/`ClipPill`. Rendered by the strip's attention rows, History ▸ Sequences, and web's drawer. |
-| `ui/components/ProgressBar.vue`, `DrawerPanel.vue`, `EmptyStateBlock.vue` | No change; reused. |
+| File                                                                      | Change                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ui/components/SequenceJobRow.vue`                                        | **New.** Presentational, props-in/emits-out (`vm: ActivityJobVM & { kind: "sequence" }`, `dense?: boolean`, `actions`, `modelLabel`), emits `action`. Same precedent as `SeamPill`/`ClipRail`/`ClipPill`. Rendered by the strip's attention rows, History ▸ Sequences, and web's drawer. |
+| `ui/components/ProgressBar.vue`, `DrawerPanel.vue`, `EmptyStateBlock.vue` | No change; reused.                                                                                                                                                                                                                                                                       |
 
 ### `desktop/`
 
-| File | Change |
-| --- | --- |
-| `desktop/src/lib/generationJob.ts` | Add `createdAtMs` (wall clock at submit) and `settledAtMs` to `Job`. |
-| `desktop/src/stores/generation.ts` | Stamp both; stamp `settledAtMs` where `status` flips to `complete`/`error`. `prune` unchanged. |
-| `desktop/src/components/create/ActivityStrip.vue` | The main edit. `printVMs.createdAtMs = job.createdAtMs`; build VMs from **all** jobs (not just `pending`); run `partitionActivity`; render active rows + attention rows (via `SequenceJobRow` / a print equivalent) + digest chip; local `dismissed: Set<string>`; **remove** `Clear inactive` / `Clean up disk`; digest routes to `/library?panel=history&tab=sequences`; `Watch`→`Open` label rule. |
-| `desktop/src/views/GenerateView.vue` | New settled-watched-sequence canvas state + caption actions (`Edit sequence`, `Show in library`); resolve the print via `isPrintOfChainJob`; failed-watched-job notice with `Resume`; completion toast; consume `composer.takeSequence()` in a new `applySequenceHandoff()`. |
-| `desktop/src/components/shell/NavRail.vue` | `railJobs` gains live sequence entries via the shared merge (clip counter as status line); settled window stays prints-only at 3. |
-| `desktop/src/components/library/HistoryDrawer.vue` | Third tab **Sequences**; `tab` synced to `?tab=`; `chains.fetchAll()` on open/tab-switch; rows via `SequenceJobRow`; `Show print` action; footer `Clear inactive` (host-scoped, two-press) + `Clean up disk`; render cap + footnote; empty state. |
-| `desktop/src/views/LibraryView.vue` | Lightbox + tile menu: sequence-aware `Reuse settings`; `Edit sequence` gated by `sequenceEditAvailability`; 404 auto-fallback; pass origin host id through. |
-| `desktop/src/components/gallery/Lightbox.vue` | New emits `reuse-sequence`, `edit-sequence`; new props `canEditSequence`, `isSequence`. |
-| `desktop/src/stores/composer.ts` | `pendingSequence` + `setSequence()` / `takeSequence()`. |
-| `desktop/src/lib/api/types.ts` | `OutputMetadata` gains `chain_job_id`, `chain` (imported from `@studio`). |
-| `desktop/src/components/shell/StatusPopover.vue` | **No change** (deliberate). |
+| File                                               | Change                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desktop/src/lib/generationJob.ts`                 | Add `createdAtMs` (wall clock at submit) and `settledAtMs` to `Job`.                                                                                                                                                                                                                                                                                                                                  |
+| `desktop/src/stores/generation.ts`                 | Stamp both; stamp `settledAtMs` where `status` flips to `complete`/`error`. `prune` unchanged.                                                                                                                                                                                                                                                                                                        |
+| `desktop/src/components/create/ActivityStrip.vue`  | The main edit. `printVMs.createdAtMs = job.createdAtMs`; build VMs from **all** jobs (not just `pending`); run `partitionActivity`; render active rows + attention rows (via `SequenceJobRow` / a print equivalent) + digest chip; local `dismissed: Set<string>`; **remove** `Clear inactive` / `Clean up disk`; digest routes to `/library?panel=history&tab=sequences`; `Watch`→`Open` label rule. |
+| `desktop/src/views/GenerateView.vue`               | New settled-watched-sequence canvas state + caption actions (`Edit sequence`, `Show in library`); resolve the print via `isPrintOfChainJob`; failed-watched-job notice with `Resume`; completion toast; consume `composer.takeSequence()` in a new `applySequenceHandoff()`.                                                                                                                          |
+| `desktop/src/components/shell/NavRail.vue`         | `railJobs` gains live sequence entries via the shared merge (clip counter as status line); settled window stays prints-only at 3.                                                                                                                                                                                                                                                                     |
+| `desktop/src/components/library/HistoryDrawer.vue` | Third tab **Sequences**; `tab` synced to `?tab=`; `chains.fetchAll()` on open/tab-switch; rows via `SequenceJobRow`; `Show print` action; footer `Clear inactive` (host-scoped, two-press) + `Clean up disk`; render cap + footnote; empty state.                                                                                                                                                     |
+| `desktop/src/views/LibraryView.vue`                | Lightbox + tile menu: sequence-aware `Reuse settings`; `Edit sequence` gated by `sequenceEditAvailability`; 404 auto-fallback; pass origin host id through.                                                                                                                                                                                                                                           |
+| `desktop/src/components/gallery/Lightbox.vue`      | New emits `reuse-sequence`, `edit-sequence`; new props `canEditSequence`, `isSequence`.                                                                                                                                                                                                                                                                                                               |
+| `desktop/src/stores/composer.ts`                   | `pendingSequence` + `setSequence()` / `takeSequence()`.                                                                                                                                                                                                                                                                                                                                               |
+| `desktop/src/lib/api/types.ts`                     | `OutputMetadata` gains `chain_job_id`, `chain` (imported from `@studio`).                                                                                                                                                                                                                                                                                                                             |
+| `desktop/src/components/shell/StatusPopover.vue`   | **No change** (deliberate).                                                                                                                                                                                                                                                                                                                                                                           |
+
+> The desktop rows below name the pre-redesign shell: `ActivityStrip.vue` and `NavRail.vue` became `shell/QueueRail.vue` + `views/QueueView.vue` (the queue rows from `composables/useQueueActivity.ts`), and `StatusPopover.vue` became `shell/StatusBar.vue`.
 
 ### `web/`
 
-| File | Change |
-| --- | --- |
-| `web/src/components/create/ActivityStrip.vue` | Same partition/digest/attention treatment; keeps its existing per-row `dismiss` for prints and extends it to sequences; drops `clear-inactive` / `cleanup-disk` emits. |
-| `web/src/pages/CreatePage.vue` | Stop passing the maintenance handlers; add the settled-sequence canvas result + caption actions; digest routes to `/library?panel=history&tab=sequences`. |
-| `web/src/composables/useGenerateStream.ts` | Add `settledAt` to `Job`; keep `SETTLED_HISTORY_CAP`/`AUTO_REMOVE_DONE_MS` for successful prints. |
-| `web/src/composables/useChainJobs.ts` (landing) | Expose the per-host listing to the new drawer; add a `fetchAll()`-equivalent the drawer can call on open. |
-| `web/src/components/library/HistoryDrawer.vue` | **New.** `DrawerPanel` in a `fixed inset-0` host, Sequences tab only, tab bar hidden at one tab; same rows/footer/cap/empty state as desktop. |
-| `web/src/pages/LibraryPage.vue` | `?panel=history` open state + toolbar button; sequence-aware `onReuse`; `Edit sequence` with the same availability + 404 rules. |
-| `web/src/components/gallery/Lightbox.vue` | New `reuse-sequence` / `edit-sequence` emits. |
-| `web/src/api.ts` | Typed status on chain-job errors (adopt studio `ApiError`); per-host `listChainJobs` / `deleteChainJob` (currently origin-hardwired). |
-| `web/src/types.ts` | `OutputMetadata` gains `chain_job_id`, `chain`. |
-| `web/src/lib/sequenceParams.ts` | Reuse path applies shared params via the landing's `applySharedToForm`. |
+| File                                            | Change                                                                                                                                                                 |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web/src/components/create/ActivityStrip.vue`   | Same partition/digest/attention treatment; keeps its existing per-row `dismiss` for prints and extends it to sequences; drops `clear-inactive` / `cleanup-disk` emits. |
+| `web/src/pages/CreatePage.vue`                  | Stop passing the maintenance handlers; add the settled-sequence canvas result + caption actions; digest routes to `/library?panel=history&tab=sequences`.              |
+| `web/src/composables/useGenerateStream.ts`      | Add `settledAt` to `Job`; keep `SETTLED_HISTORY_CAP`/`AUTO_REMOVE_DONE_MS` for successful prints.                                                                      |
+| `web/src/composables/useChainJobs.ts` (landing) | Expose the per-host listing to the new drawer; add a `fetchAll()`-equivalent the drawer can call on open.                                                              |
+| `web/src/components/library/HistoryDrawer.vue`  | **New.** `DrawerPanel` in a `fixed inset-0` host, Sequences tab only, tab bar hidden at one tab; same rows/footer/cap/empty state as desktop.                          |
+| `web/src/pages/LibraryPage.vue`                 | `?panel=history` open state + toolbar button; sequence-aware `onReuse`; `Edit sequence` with the same availability + 404 rules.                                        |
+| `web/src/components/gallery/Lightbox.vue`       | New `reuse-sequence` / `edit-sequence` emits.                                                                                                                          |
+| `web/src/api.ts`                                | Typed status on chain-job errors (adopt studio `ApiError`); per-host `listChainJobs` / `deleteChainJob` (currently origin-hardwired).                                  |
+| `web/src/types.ts`                              | `OutputMetadata` gains `chain_job_id`, `chain`.                                                                                                                        |
+| `web/src/lib/sequenceParams.ts`                 | Reuse path applies shared params via the landing's `applySharedToForm`.                                                                                                |
 
 ### `desktop/src/mobile/` (iPhone)
 
-| File | Change |
-| --- | --- |
-| `MobileApp.vue` | Attention-row treatment in the queue section via `partitionActivity`; `reusePrint()` gains the sequence branch (host switch → models refresh → clips + shared params → `tab = "generate"`). No History ▸ Sequences, no digest chip. |
-| `desktop/src/mobile/reuse.ts` | `applyMobileGalleryMetadata` gains a sequence result (`{ clips, lossy }`) so the model-substitution logic stays in one place. |
-| `MobileGalleryViewer.vue` | `Use as prompt` becomes sequence-aware for a sequence print (label stays; behavior loads the clip rail). |
+| File                          | Change                                                                                                                                                                                                                              |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MobileApp.vue`               | Attention-row treatment in the queue section via `partitionActivity`; `reusePrint()` gains the sequence branch (host switch → models refresh → clips + shared params → `tab = "generate"`). No History ▸ Sequences, no digest chip. |
+| `desktop/src/mobile/reuse.ts` | `applyMobileGalleryMetadata` gains a sequence result (`{ clips, lossy }`) so the model-substitution logic stays in one place.                                                                                                       |
+| `MobileGalleryViewer.vue`     | `Use as prompt` becomes sequence-aware for a sequence print (label stays; behavior loads the clip rail).                                                                                                                            |
 
 ### Rust / server
 
@@ -773,7 +786,7 @@ shouldn't.
 - **`@ui` overlay panels are `position:absolute; inset:0`.** Web's new drawer
   needs a `fixed inset-0` viewport host or it renders off-screen. Previously bitten.
 - **`printVMs.createdAtMs = job.clientId`** is a counter, not a timestamp. It
-  must be fixed *before* print rows survive the merge, or every failed print sorts
+  must be fixed _before_ print rows survive the merge, or every failed print sorts
   to the bottom forever.
 - **Chain polling stops when nothing is active** (`syncPolling`), so any surface
   that lists settled sequences must fetch on open.

@@ -329,6 +329,7 @@ The devshell includes Rust toolchain, CUDA toolkit, and convenience commands:
 | ----------------- | --------------------------------------------------------- |
 | `build`           | Fast local `mold` build (`dev-fast`) with embedded web UI |
 | `build-workspace` | `cargo build` (debug, all crates)                         |
+| `build-clean`     | Remove every build artifact, backend and frontend         |
 | `build-release`   | Shipping release build with the full feature set          |
 | `build-server`    | Fast local server build with GPU + preview + expand       |
 | `serve`           | Start the mold server                                     |

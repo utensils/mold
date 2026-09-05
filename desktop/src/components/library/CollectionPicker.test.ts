@@ -33,7 +33,7 @@ describe("CollectionPicker", () => {
     expect(rows[0]!.find("[data-test='collection-box']").text()).toBe("✓");
     expect(rows[1]!.find("[data-test='collection-box']").text()).toBe("–");
     expect(rows[0]!.text()).toContain("9");
-    expect(wrapper.find("[role='group']").attributes("aria-label")).toBe("Collections");
+    expect(wrapper.find("[role='group']").attributes("aria-label")).toBe("Albums");
     wrapper.unmount();
   });
 
@@ -59,7 +59,7 @@ describe("CollectionPicker", () => {
     wrapper.unmount();
   });
 
-  it("New collection… turns into an inline input; Enter creates, empty / Escape cancels", async () => {
+  it("New album… turns into an inline input; Enter creates, empty / Escape cancels", async () => {
     const wrapper = mountPicker();
     await wrapper.find("[data-test='collection-new']").trigger("click");
     const input = wrapper.find<HTMLInputElement>("[data-test='collection-new-input']");
@@ -87,9 +87,7 @@ describe("CollectionPicker", () => {
       props: { collections: [], selected: [], allowCreate: false },
     });
     expect(wrapper.find("[data-test='collection-new']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='collection-picker-empty']").text()).toBe(
-      "No collections yet.",
-    );
+    expect(wrapper.find("[data-test='collection-picker-empty']").text()).toBe("No albums yet.");
     wrapper.unmount();
   });
 

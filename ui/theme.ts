@@ -17,8 +17,9 @@ export interface ThemeMeta {
   readonly id: ThemeId;
   readonly label: string;
   readonly tone: ThemeTone;
-  /** The single accent, for swatches — components read the token, never this. */
-  readonly accent: string;
+  /** The tone as the picker says it: "Dark · the original". `tone` stays the
+   *  machine value THEME_TONE and THEME_PAIR are keyed on. */
+  readonly toneLabel: string;
   /** "Sans · Mono" pairing, for the picker's type line. */
   readonly type: string;
   readonly blurb: string;
@@ -29,7 +30,7 @@ export const THEME_META: readonly ThemeMeta[] = [
     id: "mocha",
     label: "Mocha",
     tone: "dark",
-    accent: "#89b4fa",
+    toneLabel: "Dark · the original",
     type: "Inter · JetBrains Mono",
     blurb:
       "Violet-leaning charcoal, one blue accent, nothing else raises its voice.",
@@ -38,7 +39,7 @@ export const THEME_META: readonly ThemeMeta[] = [
     id: "safelight",
     label: "Safelight",
     tone: "dark",
-    accent: "#f79433",
+    toneLabel: "Dark · the app's own",
     type: "Schibsted Grotesk · Martian Mono",
     blurb:
       "The darkroom family: warm browns, amber for anything you press, softer corners.",
@@ -47,7 +48,7 @@ export const THEME_META: readonly ThemeMeta[] = [
     id: "blueprint",
     label: "Blueprint",
     tone: "light",
-    accent: "#1d4ed8",
+    toneLabel: "Light · drafting table",
     type: "Archivo · Azeret Mono",
     blurb:
       "Cool daylight and drafting-table blue, set one notch tighter and smaller.",
@@ -56,7 +57,7 @@ export const THEME_META: readonly ThemeMeta[] = [
     id: "graphite",
     label: "Graphite",
     tone: "dark",
-    accent: "#f0a22e",
+    toneLabel: "Dark · neutral, warm signal",
     type: "IBM Plex Sans · IBM Plex Mono",
     blurb:
       "True neutral greys, hairline separators, one amber signal for anything live.",
@@ -65,7 +66,7 @@ export const THEME_META: readonly ThemeMeta[] = [
     id: "porcelain",
     label: "Porcelain",
     tone: "light",
-    accent: "#0f766e",
+    toneLabel: "Light · high-key, compact",
     type: "Manrope · IBM Plex Mono",
     blurb:
       "Near-white panels on a soft grey desk, deep teal for anything you can press.",
@@ -74,7 +75,7 @@ export const THEME_META: readonly ThemeMeta[] = [
     id: "nebula",
     label: "Nebula",
     tone: "dark",
-    accent: "#ff315d",
+    toneLabel: "Dark · oxblood & crimson",
     type: "Georgia · Geist Mono",
     blurb:
       "Oxblood panels over near-black, hot crimson for actions, square corners.",

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import PlacementSection from "./PlacementSection.vue";
+import { useConnectionStore } from "../../stores/connection";
 import { useModelStore } from "../../stores/models";
 import type { ModelEntry } from "../../lib/api/types";
 
@@ -48,8 +49,15 @@ function model(name: string, family: string): ModelEntry {
   };
 }
 
+/** The section reads the machine's cards whenever the connection is up, so a
+ *  mount that means to see GPUs says the connection is up. (Before, it read
+ *  them once on mount — which is why arriving in Settings ahead of the engine
+ *  left every select GPU-less for the session.) */
 async function mountWithModels(models: ModelEntry[]) {
   setActivePinia(createPinia());
+  const conn = useConnectionStore();
+  conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: null };
+  conn.status = "ready";
   const store = useModelStore();
   store.all = models;
   const wrapper = mount(PlacementSection);
@@ -175,5 +183,28 @@ describe("PlacementSection", () => {
     expect(placement.text_encoders).toEqual({ kind: "cpu" });
     expect(placement.advanced.transformer).toEqual({ kind: "gpu", ordinal: 1 });
     expect(placement.advanced.vae).toEqual({ kind: "cpu" });
+  });
+
+  it("reads the machine's cards when the engine comes up after mount", async () => {
+    setActivePinia(createPinia());
+    const conn = useConnectionStore();
+    useModelStore().all = [model("flux-dev:q4", "flux")];
+    const wrapper = mount(PlacementSection);
+    await flushPromises();
+    const before = wrapper
+      .find('[data-test="placement-text-encoders"]')
+      .findAll("option")
+      .map((o) => o.attributes("value"));
+    expect(before).toEqual(["auto", "cpu"]);
+
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: null };
+    conn.status = "ready";
+    await flushPromises();
+
+    const options = wrapper
+      .find('[data-test="placement-text-encoders"]')
+      .findAll("option")
+      .map((o) => o.attributes("value"));
+    expect(options).toEqual(["auto", "cpu", "gpu:0", "gpu:1"]);
   });
 });

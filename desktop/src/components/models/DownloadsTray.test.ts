@@ -57,6 +57,19 @@ describe("DownloadsTray a11y", () => {
     expect(bar.attributes("aria-label")).toContain("flux-dev:q4");
   });
 
+  /**
+   * `percent()` returns a float — the raw getter wrote 59.10320281982422% into
+   * the style attribute. A meter's width is a whole number of percent.
+   */
+  it("writes whole-number meter widths", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job({ bytes_done: 6_800_000_000, bytes_total: 11_507_000_000 })];
+    const wrapper = mount(DownloadsTray);
+    for (const fill of wrapper.findAll('[role="progressbar"] > *')) {
+      expect(fill.attributes("style")).toMatch(/^width: \d+%;?$/);
+    }
+  });
+
   it("labels the cancel control with the model name and target host", () => {
     const store = useDownloadsStore();
     store.activeJobs = [job()];
@@ -216,7 +229,7 @@ describe("DownloadsTray a11y", () => {
     ];
     const wrapper = mount(DownloadsTray);
 
-    expect(wrapper.get('[data-test="download-status"]').text()).toBe("active");
+    expect(wrapper.get('[data-test="download-status"]').text()).toBe("Downloading");
     expect(wrapper.get('[data-test="download-current-file"]').text()).toBe("unet.safetensors");
     expect(wrapper.get('[data-test="download-files"]').text()).toContain("1/4");
     expect(wrapper.get('[data-test="download-eta"]').text()).toContain("1m 30s");
@@ -244,7 +257,7 @@ describe("DownloadsTray a11y", () => {
     ];
     const wrapper = mount(DownloadsTray);
 
-    expect(wrapper.get('[data-test="download-status"]').text()).toBe("preparing");
+    expect(wrapper.get('[data-test="download-status"]').text()).toBe("Getting ready");
     expect(wrapper.get('[data-test="download-current-file"]').text()).toContain("Verifying file");
     expect(wrapper.find('[data-test="download-files"]').exists()).toBe(false);
   });
@@ -262,7 +275,7 @@ describe("DownloadsTray a11y", () => {
     await toggle.trigger("click");
     const list = wrapper.get('[data-test="history-list"]');
     expect(list.text()).toContain("flux-dev:q4");
-    expect(list.text()).toContain("failed");
+    expect(list.text()).toContain("Failed");
     expect(list.text()).toContain("connection reset");
   });
 
@@ -279,7 +292,7 @@ describe("DownloadsTray a11y", () => {
     expect(wrapper.get('[data-test="history-toggle"]').text()).toContain("History (1)");
     await wrapper.get('[data-test="history-toggle"]').trigger("click");
     const statuses = wrapper.findAll('[data-test="history-status"]');
-    expect(statuses.map((status) => status.text())).toEqual(["completed"]);
+    expect(statuses.map((status) => status.text())).toEqual(["Finished"]);
     expect(wrapper.text()).not.toContain("permission denied");
   });
 
@@ -388,5 +401,37 @@ describe("DownloadsTray host scoping", () => {
     seedTwoHostHistory();
     const wrapper = mount(DownloadsTray);
     expect(wrapper.get("[data-test='history-toggle']").text()).toContain("History (2)");
+  });
+});
+
+describe("DownloadsTray compact summary", () => {
+  it("reads as one line: the style, its percent and eta, and what is left", () => {
+    useDownloadsStore().activeJobs = [job()];
+    const wrapper = mount(DownloadsTray, { props: { compact: true } });
+
+    const summary = wrapper.get("[data-test='downloads-summary']");
+    expect(summary.text()).toContain("flux-dev:q4");
+    expect(summary.get("[data-test='downloads-summary-progress']").text()).toContain("25% · eta");
+    expect(summary.text()).toContain("Nothing else queued to download.");
+    expect(summary.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
+  });
+
+  it("counts the rest instead of stacking a banner per download", () => {
+    useDownloadsStore().activeJobs = [job(), job({ id: "j2", model: "z-image:q8" })];
+    const wrapper = mount(DownloadsTray, { props: { compact: true } });
+
+    const summary = wrapper.get("[data-test='downloads-summary']");
+    expect(summary.text()).toContain("1 more waiting to download.");
+    expect(summary.text()).not.toContain("z-image:q8");
+  });
+
+  it("drops the banner chrome the card already draws — no cancel, no history", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job()];
+    store.history = [job({ id: "h1", status: "completed" })];
+    const wrapper = mount(DownloadsTray, { props: { compact: true } });
+
+    expect(wrapper.find("[data-test='history-toggle']").exists()).toBe(false);
+    expect(wrapper.findAll("button")).toHaveLength(0);
   });
 });

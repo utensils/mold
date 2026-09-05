@@ -38,6 +38,7 @@ import {
   markJobSettled,
   metadataOnlyResult,
   newJob,
+  type GalleryPrintOnCanvas,
   type Job,
 } from "../lib/generationJob";
 import {
@@ -62,7 +63,10 @@ import {
   type DurableMediaCapabilities,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
-import { createRetainedSourceMediaReuseSession } from "@studio/api/gallerySourceMedia";
+import {
+  createRetainedSourceMediaReuseSession,
+  retainedSourceMediaDisclosable,
+} from "@studio/api/gallerySourceMedia";
 import {
   buildGenerationBatchStatusRequest,
   chunkGenerationBatchTrackers,
@@ -99,6 +103,7 @@ export {
   jobStatusCode,
   metadataOnlyResult,
   newJob,
+  type GalleryPrintOnCanvas,
   type Job,
   type JobStatus,
 } from "../lib/generationJob";
@@ -598,6 +603,8 @@ export const useGenerationStore = defineStore("generation", {
           const dismissed = record.effectReceipts.includes(dismissalReceipt(summary.index));
           const job = createStoreJob(
             {
+              // A placeholder, never the words the print was made from: this
+              // job's request cannot repeat it (see Job.repeatable below).
               prompt: "Recovered generation",
               model: summary.model,
               width: summary.width,
@@ -612,6 +619,7 @@ export const useGenerationStore = defineStore("generation", {
           if (dismissed) durableHiddenJobIds.add(job.clientId);
           else this.jobs.push(job);
           job.batchId = localBatchId;
+          job.repeatable = false;
           job.hostId = record.tracker.hostId;
           job.hostLabel = record.hostLabel;
           job.remote = record.hostKind === "remote";
@@ -1364,6 +1372,9 @@ export const useGenerationStore = defineStore("generation", {
       const jobs = plans.map((plan) => {
         const job = this.startJob(plan);
         job.batchId = batchId;
+        // A retained-media relay hands the host an authority the request does
+        // not carry, so the request alone cannot make this print again.
+        if (requestOptions.retainedSource) job.repeatable = false;
         if (route) {
           job.hostId = route.hostId;
           job.hostLabel = route.label;
@@ -1851,6 +1862,73 @@ export const useGenerationStore = defineStore("generation", {
     /** Revoke every held object URL and clear all jobs (teardown/tests). */
     targetForJob(clientId: number): ApiTarget | null {
       return targets.get(clientId) ?? null;
+    },
+    /**
+     * Put a finished print from My images on the canvas, as the settled job
+     * it once was. "Use these settings again" restores the recipe; this shows
+     * the picture that recipe made, so a Recent row and the Lightbox's button
+     * land the same thing on the same canvas — the print, its caption, and
+     * the caption's next steps. The job is historical: it raises no
+     * completion toast, mirrors nothing, and its media is fetched from the
+     * print's own bucket exactly as a durable completion's is. The completion
+     * is synthesized from the saved metadata, so it carries what the canvas
+     * probes on — the container, the frame count, the poster kind — and
+     * nothing it would have to invent.
+     */
+    showGalleryPrint(print: GalleryPrintOnCanvas, request: GenerateRequest): Job {
+      const meta = print.metadata;
+      const format = requestFormat(print.filename, meta.output_format ?? "png");
+      const frames = meta.frames ?? meta.video_frames ?? null;
+      const job = createStoreJob(request, this.nextClientId++);
+      // The request is the form's snapshot at hand-off, taken before any
+      // source, mask, face or reference bytes are restored into it. A print
+      // that recorded such conditioning is repeatable only if the snapshot
+      // already carries it; otherwise four variations would be unconditioned.
+      job.repeatable =
+        !retainedSourceMediaDisclosable(meta) ||
+        Boolean(
+          request.source_image ||
+          request.id_image ||
+          (request.edit_images?.length ?? 0) > 0 ||
+          request.source_video ||
+          (request.keyframes?.length ?? 0) > 0,
+        );
+      job.batchId = this.nextBatchId++;
+      job.id = meta.job_id ?? "";
+      job.hostId = print.hostId;
+      job.hostLabel = print.hostLabel;
+      job.remote = print.hostId !== null;
+      job.mirrorRemoteOutput = false;
+      job.retainEncodedResult = false;
+      job.metadataOnlyCompletion = true;
+      job.streamStarted = true;
+      job.suppressFreshCompletion = true;
+      job.visualSeed = String(meta.seed);
+      job.step = job.total;
+      job.result = {
+        image: "",
+        format,
+        width: meta.width,
+        height: meta.height,
+        seed_used: meta.seed,
+        generation_time_ms: 0,
+        model: meta.model,
+        filename: print.filename,
+        metadata: meta,
+        ...(frames !== null && format !== "glb"
+          ? { video_frames: frames, video_fps: meta.fps ?? meta.video_fps ?? null }
+          : {}),
+        // The canvas asks whether a print is audio by the presence of a sample
+        // rate; the saved metadata records none, and the value is not read.
+        ...(format === "wav" ? { audio_sample_rate: 0 } : {}),
+      };
+      settleJob(job, "complete");
+      job.settledAtMs = print.settledAtMs;
+      if (print.target) targets.set(job.clientId, print.target);
+      this.jobs.push(job);
+      this.selectedClientId = job.clientId;
+      void this.refreshRemoteResultUrl(job.clientId).catch(() => undefined);
+      return job;
     },
     resetJobs() {
       for (const job of this.jobs) {

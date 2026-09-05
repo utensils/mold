@@ -198,13 +198,13 @@ defineExpose({ close });
   min-height: 44px;
   flex: 1;
   border: 0;
-  background: var(--surface, transparent);
-  color: var(--ink, currentColor);
+  background: var(--mold-surface, transparent);
+  color: var(--mold-text);
   font-size: 14px;
 }
 .swipe-row__action--danger {
-  background: var(--stop);
-  color: var(--on-status, #fff);
+  background: var(--mold-error);
+  color: var(--mold-on-accent, #fff);
 }
 .swipe-row__surface {
   position: relative;
@@ -214,18 +214,18 @@ defineExpose({ close });
   box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  background: var(--bench, var(--bath));
+  background: var(--mold-bg, var(--mold-bg-deep));
   will-change: transform;
 }
 .swipe-row__surface--settling {
-  transition: transform var(--dur-base, 180ms) var(--ease, ease);
+  transition: transform var(--mold-dur-base, 180ms) var(--mold-ease-out, ease);
 }
 .swipe-row__more {
   min-width: 44px;
   min-height: 44px;
   border: 0;
   background: none;
-  color: var(--ink-3, currentColor);
+  color: var(--mold-text-dim, currentColor);
   font-size: 16px;
 }
 @media (prefers-reduced-motion: reduce) {

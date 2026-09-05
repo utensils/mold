@@ -48,13 +48,13 @@ const emit = defineEmits<{
   select: [vm: SequenceVM];
 }>();
 
-// State color follows the development-temperature rule (spec §2.1).
+// State colour follows the development-temperature rule.
 const STATE_CLASS: Record<ChainJobState, string> = {
-  queued: "ms-seqrow__state--halide",
-  running: "ms-seqrow__state--safelight",
-  paused: "ms-seqrow__state--halide",
-  interrupted: "ms-seqrow__state--halide",
-  failed: "ms-seqrow__state--stop",
+  queued: "ms-seqrow__state--waiting",
+  running: "ms-seqrow__state--active",
+  paused: "ms-seqrow__state--waiting",
+  interrupted: "ms-seqrow__state--waiting",
+  failed: "ms-seqrow__state--failed",
   completed: "ms-seqrow__state--ink",
   cancelled: "ms-seqrow__state--muted",
 };
@@ -177,30 +177,30 @@ const errorExpanded = ref(false);
 }
 
 .ms-seqrow__state {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9.5px;
   text-transform: uppercase;
   flex: 0 0 auto;
 }
-.ms-seqrow__state--halide {
-  color: var(--halide);
+.ms-seqrow__state--waiting {
+  color: var(--mold-sapphire);
 }
-.ms-seqrow__state--safelight {
-  color: var(--safelight);
+.ms-seqrow__state--active {
+  color: var(--mold-blue);
 }
-.ms-seqrow__state--stop {
-  color: var(--stop);
+.ms-seqrow__state--failed {
+  color: var(--mold-error);
 }
 .ms-seqrow__state--ink {
-  color: var(--ink);
+  color: var(--mold-text);
 }
 .ms-seqrow__state--muted {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .ms-seqrow__model {
   font-size: 12px;
-  color: var(--rebate);
+  color: var(--mold-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -208,9 +208,9 @@ const errorExpanded = ref(false);
 }
 
 .ms-seqrow__meta {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: 9.5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   flex: 0 0 auto;
 }
 
@@ -228,7 +228,7 @@ const errorExpanded = ref(false);
   padding: 0;
   background: transparent;
   font-size: 10.5px;
-  color: var(--stop);
+  color: var(--mold-error);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -245,8 +245,8 @@ const errorExpanded = ref(false);
 
 .ms-seqrow__error-toggle {
   flex: 0 0 auto;
-  color: var(--ink-3);
-  font-family: var(--f-mono);
+  color: var(--mold-text-dim);
+  font-family: var(--mold-font-mono);
   font-size: 9px;
   text-transform: uppercase;
 }
@@ -299,20 +299,20 @@ const errorExpanded = ref(false);
 
 .ms-seqrow__btn {
   flex: 0 0 auto;
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   border-radius: 7px;
   padding: 3px 9px;
   font-size: 11px;
   cursor: pointer;
 }
 .ms-seqrow__btn:hover {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .ms-seqrow__btn--danger:hover {
-  color: var(--stop);
-  border-color: var(--stop);
+  color: var(--mold-error);
+  border-color: var(--mold-error);
 }
 
 .ms-seqrow__dismiss {
@@ -321,12 +321,12 @@ const errorExpanded = ref(false);
   height: 20px;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   border-radius: 50%;
   font-size: 11px;
   cursor: pointer;
 }
 .ms-seqrow__dismiss:hover {
-  color: var(--stop);
+  color: var(--mold-error);
 }
 </style>

@@ -41,10 +41,11 @@ const effectiveTitle = () =>
   gap: 10px;
   min-width: 0;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--stop) 28%, var(--edge));
+  border: 1px solid
+    color-mix(in srgb, var(--mold-error) 28%, var(--mold-border));
   border-radius: 9px;
-  background: color-mix(in srgb, var(--stop) 7%, var(--bath));
-  color: var(--ink-2);
+  background: color-mix(in srgb, var(--mold-error) 7%, var(--mold-bg-deep));
+  color: var(--mold-text-2);
 }
 .ms-action-blocker__mark {
   display: grid;
@@ -53,19 +54,19 @@ const effectiveTitle = () =>
   height: 22px;
   place-items: center;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--stop) 14%, transparent);
-  color: var(--stop);
-  font-family: var(--f-mono);
+  background: color-mix(in srgb, var(--mold-error) 14%, transparent);
+  color: var(--mold-error);
+  font-family: var(--mold-font-mono);
   font-size: 12px;
   font-weight: 700;
 }
 .ms-action-blocker--warn {
-  border-color: color-mix(in srgb, var(--warning) 32%, var(--edge));
-  background: color-mix(in srgb, var(--warning) 8%, var(--bath));
+  border-color: color-mix(in srgb, var(--mold-warning) 32%, var(--mold-border));
+  background: color-mix(in srgb, var(--mold-warning) 8%, var(--mold-bg-deep));
 }
 .ms-action-blocker--warn .ms-action-blocker__mark {
-  background: color-mix(in srgb, var(--warning) 16%, transparent);
-  color: var(--warning);
+  background: color-mix(in srgb, var(--mold-warning) 16%, transparent);
+  color: var(--mold-warning);
 }
 .ms-action-blocker__copy {
   display: flex;
@@ -78,7 +79,7 @@ const effectiveTitle = () =>
 }
 .ms-action-blocker__copy strong {
   flex: 0 0 auto;
-  color: var(--ink);
+  color: var(--mold-text);
   font-weight: 700;
 }
 .ms-action-blocker__copy span {

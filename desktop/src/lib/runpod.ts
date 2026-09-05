@@ -223,7 +223,7 @@ export function estimatedPodCost(costPerHr: number, uptimeSeconds: number): numb
 }
 
 /**
- * Live session cost for the running-cost meter (§08 G9): the server reports
+ * Live session cost for the running-cost meter: the server reports
  * `uptimeSeconds` only when the overview is polled, so the meter ticks by
  * adding the wall-clock time elapsed since that snapshot was read. Pure so the
  * meter math is unit-testable without timers.

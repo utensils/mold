@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import SliderRow from "./SliderRow.vue";
+import SliderRowSource from "./SliderRow.vue?raw";
 
 function make(extra: Record<string, unknown> = {}) {
   return mount(SliderRow, {
@@ -13,6 +14,73 @@ describe("SliderRow", () => {
     const wrapper = make();
     expect(wrapper.find(".ms-slider__label").text()).toBe("Detail");
     expect(wrapper.find(".ms-slider__value").text()).toBe("28");
+  });
+
+  it("closes the group with the two ends in words only when they are given", () => {
+    expect(make().find(".ms-slider__ends").exists()).toBe(false);
+    const ends = make({ low: "Loose", high: "Literal" }).find(
+      ".ms-slider__ends",
+    );
+    expect(ends.exists()).toBe(true);
+    expect(ends.text()).toContain("Loose");
+    expect(ends.text()).toContain("Literal");
+  });
+
+  it("draws a square track with a themed-radius thumb, never a pill", () => {
+    const source = SliderRowSource;
+    expect(source).not.toContain("border-radius: 999px");
+    expect(source).not.toContain("border-radius: 50%");
+    expect(source).toContain("border-radius: var(--mold-radius-1)");
+    // The control border is the one track ground that reads on every surface;
+    // a card group paints itself on `--mold-surface` and would swallow it.
+    expect(source).toContain("background: var(--mold-border-control)");
+    expect(source).not.toContain("background: var(--mold-surface)");
+  });
+
+  /*
+   * The mock draws the travelled part of every slider in the accent, and
+   * LoraStack's weight meter already did; without it Detail, Stick to my
+   * words, How much to change it and How tight to the photo all read as an
+   * empty grey rail with a knob somewhere on it.
+   */
+  describe("track fill", () => {
+    const fill = (wrapper: ReturnType<typeof make>) =>
+      wrapper.find(".ms-slider__input").attributes("style") ?? "";
+
+    it("paints the accent up to the value and the ground after it", () => {
+      expect(SliderRowSource).toMatch(
+        /background-image: linear-gradient\(\s*to right,\s*var\(--mold-blue\) var\(--ms-slider-fill, 0%\),\s*transparent var\(--ms-slider-fill, 0%\)/,
+      );
+    });
+
+    it("sets the fill to the fraction of the range behind the thumb", () => {
+      // 28 of 6..50 is exactly half.
+      expect(fill(make())).toContain("--ms-slider-fill: 50%");
+      expect(fill(make({ modelValue: 6 }))).toContain("--ms-slider-fill: 0%");
+      expect(fill(make({ modelValue: 50 }))).toContain(
+        "--ms-slider-fill: 100%",
+      );
+      expect(fill(make({ modelValue: 17 }))).toContain("--ms-slider-fill: 25%");
+    });
+
+    it("clamps a value the recipe's range no longer covers", () => {
+      expect(fill(make({ modelValue: 400 }))).toContain(
+        "--ms-slider-fill: 100%",
+      );
+      expect(fill(make({ modelValue: -80 }))).toContain("--ms-slider-fill: 0%");
+    });
+
+    it("shows no fill for a range with no span", () => {
+      expect(fill(make({ min: 12, max: 12, modelValue: 12 }))).toContain(
+        "--ms-slider-fill: 0%",
+      );
+    });
+
+    it("keeps the accent off a disabled track", () => {
+      expect(SliderRowSource).toMatch(
+        /\.ms-slider__input:disabled \{\s*background-image: none;/,
+      );
+    });
   });
 
   it("prefers valueLabel for the readout when provided", () => {

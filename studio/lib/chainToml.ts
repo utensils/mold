@@ -238,6 +238,11 @@ export function parseChainScript(text: string): ChainScript {
   if (motionTail !== undefined) script.chain.motion_tail_frames = motionTail;
   const seed = seedString(c.seed);
   if (seed !== undefined) script.chain.seed = seed;
-  if (c.enable_audio === true) script.chain.enable_audio = true;
+  // An explicit `false` is carried, not dropped: an omitted field now means
+  // "resolve the recipe's default" at the server door, and that default is ON
+  // for an audio family — so dropping a `false` would re-enable the sound the
+  // author turned off on the next amend or re-import.
+  if (typeof c.enable_audio === "boolean")
+    script.chain.enable_audio = c.enable_audio;
   return script;
 }

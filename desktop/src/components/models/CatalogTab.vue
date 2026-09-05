@@ -28,6 +28,7 @@ import {
 import { isCatalogModelId, modelDisplayName } from "../../lib/models";
 import { type MediaType } from "../../lib/modelAvailability";
 import { useInfiniteScrollSentinel } from "../../lib/useInfiniteScrollSentinel";
+import Chip from "@ui/components/Chip.vue";
 import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer, { type DrawerVariant } from "./CatalogDetailDrawer.vue";
@@ -62,6 +63,8 @@ const inventoryKnown = useInventoryKnown();
  *  control); an explicit `layout` prop still overrides for embeddings/tests. */
 const effectiveLayout = computed(() => props.layout ?? ui.catalogLayout);
 
+// The toggle's "list" arm is mounted as `table` here, so only the store's own
+// two layouts can arrive; the guard is the type narrowing that says so.
 function setCatalogLayout(layout: CatalogLayoutChoice) {
   if (layout !== "list") ui.setCatalogLayout(layout);
 }
@@ -634,8 +637,12 @@ function selectDrawerVariant(id: string): void {
 }
 
 /** Pull vs Repair in the drawer follows the fleet, not this one row's flag. */
-const detailAction = computed(() =>
-  detailEntry.value ? installPlan(detailEntry.value).label : undefined,
+const detailMode = computed<"fresh" | "repair" | undefined>(() =>
+  detailEntry.value
+    ? installPlan(detailEntry.value).label === "Repair"
+      ? "repair"
+      : "fresh"
+    : undefined,
 );
 
 /** Pull (or Repair — same endpoint, missing files only) from the drawer. */
@@ -728,46 +735,34 @@ onUnmounted(() => {
     <!-- Filter chips -->
     <div class="flex flex-wrap items-center gap-2">
       <div class="flex items-center gap-1" data-test="catalog-source-chips">
-        <button
+        <Chip
           v-for="s in ['all', 'hf', 'civitai'] as const"
           :key="s"
-          type="button"
-          class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="source === s ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
-          :aria-pressed="source === s"
+          compact
+          :active="source === s"
           @click="source = s"
         >
           {{ s === "all" ? "All" : s === "hf" ? "HuggingFace" : "Civitai" }}
-        </button>
+        </Chip>
       </div>
 
-      <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Model kind">
-        <button
-          type="button"
-          class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="kind === '' ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
-          :aria-pressed="kind === ''"
-          @click="kind = ''"
-        >
-          All
-        </button>
-        <button
+      <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Kind">
+        <Chip compact :active="kind === ''" @click="kind = ''"> All </Chip>
+        <Chip
           v-for="opt in CATALOG_KIND_OPTIONS"
           :key="opt.value"
-          type="button"
-          class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="kind === opt.value ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
-          :aria-pressed="kind === opt.value"
+          compact
+          :active="kind === opt.value"
           @click="kind = opt.value"
         >
           {{ opt.label }}
-        </button>
+        </Chip>
       </div>
 
       <select
         v-model="family"
-        aria-label="Model family"
-        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+        aria-label="Family"
+        class="border-border h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg"
       >
         <option value="">All families</option>
         <option v-for="f in familyOptions" :key="f" :value="f">{{ f }}</option>
@@ -777,15 +772,15 @@ onUnmounted(() => {
         v-model="sort"
         data-test="catalog-sort"
         aria-label="Sort by"
-        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+        class="border-border h-7 rounded-control border bg-bg-deep px-1.5 text-micro text-fg"
       >
         <option v-for="opt in CATALOG_SORT_OPTIONS" :key="opt.value" :value="opt.value">
           {{ opt.label }}
         </option>
       </select>
 
-      <label class="flex items-center gap-1 text-caption text-ink-2">
-        <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
+      <label class="flex items-center gap-1 text-micro text-fg-2">
+        <input v-model="includeNsfw" type="checkbox" class="accent-accent" />
         Include NSFW
       </label>
 
@@ -803,10 +798,10 @@ onUnmounted(() => {
     <div
       v-if="error || providerErrors.length"
       data-test="catalog-provider-warning"
-      class="flex items-center gap-3 rounded-control border px-3 py-2 text-caption"
+      class="flex items-center gap-3 rounded-control border px-3 py-2 text-micro"
       :class="
         error
-          ? 'border-stop/30 bg-stop/5 text-stop'
+          ? 'border-error/30 bg-error/5 text-error'
           : 'border-warning/30 bg-warning/10 text-warning'
       "
       role="alert"
@@ -835,19 +830,19 @@ onUnmounted(() => {
 
     <div
       v-if="selected.size > 0"
-      class="border-edge sticky top-2 z-20 flex flex-wrap items-center gap-3 rounded-control border bg-bench/95 p-2.5 shadow-raised backdrop-blur"
+      class="border-border sticky top-2 z-20 flex flex-wrap items-center gap-3 rounded-control border bg-bg/95 p-2.5 shadow-md backdrop-blur"
       data-test="catalog-batch-bar"
       aria-live="polite"
     >
-      <strong class="text-body text-ink">{{ selected.size }} selected</strong>
+      <strong class="text-sm text-fg">{{ selected.size }} selected</strong>
       <template v-if="batchTargets.length">
-        <label class="ml-auto flex items-center gap-2 text-caption text-ink-2">
+        <label class="ml-auto flex items-center gap-2 text-micro text-fg-2">
           Target machine
           <select
             v-model="selectedTargetId"
             data-test="catalog-batch-target"
             :disabled="batchStarting"
-            class="border-edge h-8 rounded-control border bg-bath px-2 text-caption text-ink"
+            class="border-border h-8 rounded-control border bg-bg-deep px-2 text-micro text-fg"
           >
             <option value="" disabled>Choose a machine…</option>
             <option v-for="target in batchTargets" :key="target.host.id" :value="target.host.id">
@@ -858,19 +853,23 @@ onUnmounted(() => {
         <button
           type="button"
           data-test="catalog-batch-download"
-          class="h-8 rounded-control bg-safelight px-3 text-caption font-semibold text-on-accent disabled:opacity-50"
+          class="h-8 rounded-control bg-accent px-3 text-micro font-semibold text-on-accent disabled:opacity-50"
           :disabled="!selectedBatchTarget || batchStarting"
           @click="startBatch"
         >
-          {{ batchStarting ? "Starting…" : `Download ${selected.size}` }}
+          {{
+            batchStarting
+              ? "Starting…"
+              : `Get ${selected.size} ${selected.size === 1 ? "style" : "styles"}`
+          }}
         </button>
       </template>
-      <span v-else class="ml-auto text-caption text-stop">
-        No machine can receive every selected model.
+      <span v-else class="ml-auto text-micro text-error">
+        No machine can receive every selected style.
       </span>
       <button
         type="button"
-        class="border-edge h-8 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink"
+        class="ms-toolbar-button"
         :disabled="batchStarting"
         @click="selected = new Map()"
       >
@@ -882,12 +881,12 @@ onUnmounted(() => {
          the Video chip explains itself instead of rendering a blank grid. -->
     <div
       v-if="!loading && displayEntries.length === 0 && !error && providerErrors.length === 0"
-      class="p-8 text-center text-body text-ink-2"
+      class="p-8 text-center text-sm text-fg-2"
       data-test="catalog-empty"
     >
       <template v-if="combinedEntries.length === 0">
-        <template v-if="query">Nothing on the shelf for "{{ query }}".</template>
-        <template v-else>Search the catalog to find models.</template>
+        <template v-if="query">No styles match "{{ query }}".</template>
+        <template v-else>Search to find more styles.</template>
       </template>
       <template v-else>
         <p>{{ filteredEmptyMessage }}</p>
@@ -895,10 +894,10 @@ onUnmounted(() => {
           v-if="(mediaType ?? 'all') !== 'all'"
           type="button"
           data-test="clear-media-filter"
-          class="border-edge mt-3 h-7 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink"
+          class="ms-toolbar-button mt-3"
           @click="emit('clear-media-filter')"
         >
-          Show all media types
+          Show every kind
         </button>
       </template>
     </div>
@@ -909,8 +908,8 @@ onUnmounted(() => {
       v-if="loading || displayEntries.length > 0"
       :class="
         effectiveLayout === 'grid'
-          ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
-          : 'border-edge divide-edge flex flex-col divide-y overflow-hidden rounded-control border bg-bench'
+          ? 'grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3'
+          : 'border-border divide-border flex flex-col divide-y border bg-panel'
       "
     >
       <template v-for="entry in displayEntries" :key="entry.id">
@@ -950,7 +949,7 @@ onUnmounted(() => {
       v-if="hasMore"
       ref="sentinel"
       data-test="catalog-scroll-sentinel"
-      class="flex h-8 items-center justify-center text-caption text-ink-2"
+      class="flex h-8 items-center justify-center text-micro text-fg-2"
       aria-hidden="true"
     >
       {{ loading ? "Loading…" : "" }}
@@ -971,7 +970,7 @@ onUnmounted(() => {
       :target="detailTarget.target"
       :forward-credentials="detailTarget.forward"
       :variants="detailVariants"
-      :action="detailAction"
+      :mode="detailMode"
       :runtime-notice="runtimeNoticeFor(detailEntry.id)"
       @close="detailEntry = null"
       @pull="pullFromDrawer"

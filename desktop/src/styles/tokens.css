@@ -1,78 +1,100 @@
 /*
- * Safelight — mold desktop design tokens.
+ * Mold Studio desktop — the Tailwind utility layer.
  *
- * The palette itself now lives in the shared Mold Studio design system
- * (ui/tokens.css) so every surface — desktop, iOS, web, mobile web — draws
- * from one source. This file only maps those shared CSS variables onto the
- * Tailwind utility layer the desktop app already uses, and defines the few
- * legacy aliases the shared system doesn't carry.
- *
- * The app is a digital darkroom: Halide (cold) = queued/latent, Safelight
- * (warm) = running/active/primary, Rebate (paper) = done/text, Stop = failed.
- * Chrome inverts in light mode ("lights on"); media surfaces never invert.
+ * Every colour, font, size, and radius here resolves through a --mold-* token
+ * from the shared design system (ui/tokens.css, ui/mold-desktop.css), so a
+ * theme switch re-tints the whole utility layer and no component ever names
+ * a hex, a font, or a literal radius. This file maps tokens onto utility
+ * names and nothing else — never introduce a raw value.
  */
 @import "tailwindcss";
 @import "../../../ui/tokens.css";
+@import "../../../ui/mold-desktop.css";
 
 @theme {
-  /* Color — every hue resolves through the shared palette variables, so a
-     theme-family / appearance switch re-tints the whole utility layer. */
-  --color-desk: var(--desk);
-  --color-bath: var(--bath);
-  --color-bench: var(--bench);
-  --color-surface: var(--surface);
-  --color-rebate: var(--rebate);
-  --color-halide: var(--halide);
-  --color-safelight: var(--safelight);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-stop: var(--stop);
-  --color-ink: var(--rebate);
-  --color-ink-2: var(--ink-2);
-  --color-ink-3: var(--ink-3);
-  --color-edge: var(--edge);
-  --color-ce: var(--ce);
-  /* Alias kept so existing `*-control-edge` utilities keep resolving. */
-  --color-control-edge: var(--ce);
-  --color-sel-bg: var(--sel-bg);
-  --color-sel-ink: var(--sel-ink);
-  --color-card-hi: var(--card-hi);
-  --color-on-accent: var(--on-accent);
-  --color-on-media: var(--on-media);
-  /* Media surfaces never invert. */
-  --color-print-surface: var(--print);
-  /* Empty work areas follow the active chrome theme. */
-  --color-empty-surface: var(--empty-surface);
+  /* ── Colour ─────────────────────────────────────────────────────── */
+  --color-bg: var(--mold-bg);
+  --color-bg-deep: var(--mold-bg-deep);
+  --color-bg-crust: var(--mold-bg-crust);
+  --color-surface: var(--mold-surface);
+  --color-surface-2: var(--mold-surface-2);
+  --color-surface-3: var(--mold-surface-3);
 
-  /* Type — each theme names its own sans and mono (ui/tokens.css); the
-     legacy display role is the theme's sans, set heavier where it is used. */
-  --font-display: var(--f-display);
-  --font-body: var(--f-body);
-  --font-utility: var(--f-mono);
+  /* `fg` so the utility reads text-fg-dim rather than text-text-dim. */
+  --color-fg: var(--mold-text);
+  --color-fg-2: var(--mold-text-2);
+  --color-fg-dim: var(--mold-text-dim);
+  --color-fg-faint: var(--mold-text-faint);
 
-  /* Type scale (the only sizes): display 34/22/18, body 15/13/11, utility 12/10.5 */
-  --text-display-lg: 2.125rem;
-  --text-display: 1.375rem;
-  --text-display-sm: 1.125rem;
-  --text-body-lg: 0.9375rem;
-  --text-body: 0.8125rem;
-  --text-caption: 0.6875rem;
-  --text-data: 0.75rem;
-  --text-edge-code: 0.65625rem;
+  --color-border: var(--mold-border);
+  --color-border-focus: var(--mold-border-focus);
+  --color-border-control: var(--mold-border-control);
 
-  /* Radius: chrome 6 / controls 4 / media 2. Prints have near-square corners. */
-  --radius-chrome: 6px;
-  --radius-control: 4px;
-  --radius-media: 2px;
+  --color-accent: var(--mold-blue);
+  --color-on-accent: var(--mold-on-accent);
+  --color-accent-tint: var(--mold-accent-tint);
 
-  /* Elevation (flat-first) */
-  --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.5);
-}
+  --color-success: var(--mold-success);
+  --color-warning: var(--mold-warning);
+  --color-error: var(--mold-error);
+  --color-star: var(--mold-star);
 
-/* Legacy aliases the shared palette (ui/tokens.css) doesn't define. Kept in
-   :root — NOT @theme — because they only feed other CSS variables, never a
-   Tailwind utility of their own. */
-:root {
-  --control-edge: var(--ce);
-  --empty-surface: var(--bath);
+  --color-sapphire: var(--mold-sapphire);
+  --color-mauve: var(--mold-mauve);
+  --color-teal: var(--mold-teal);
+  --color-lavender: var(--mold-lavender);
+
+  --color-chrome: var(--mold-chrome);
+  --color-canvas: var(--mold-canvas);
+  --color-panel: var(--mold-panel);
+  --color-panel-raised: var(--mold-panel-raised);
+  --color-row-hover: var(--mold-row-hover);
+  --color-row-selected: var(--mold-row-selected);
+
+  /* Job state: a status, never an accent. --mold-desktop.css aliases each
+     onto a token that already exists. */
+  --color-state-active: var(--mold-state-active);
+  --color-state-waiting: var(--mold-state-waiting);
+  --color-state-done: var(--mold-state-done);
+  --color-state-blocked: var(--mold-state-blocked);
+  --color-state-failed: var(--mold-state-failed);
+  --color-state-cost: var(--mold-state-cost);
+
+  --color-media-bed: var(--mold-media-bed);
+  --color-on-media: var(--mold-on-media);
+  --color-scrim: var(--mold-scrim);
+
+  /* ── Type ───────────────────────────────────────────────────────── */
+  --font-sans: var(--mold-font-sans);
+  --font-mono: var(--mold-font-mono);
+
+  /* Tailwind ships a line-height beside every size; restate both so a
+     theme's leading wins over the stock one. */
+  --text-micro: var(--mold-fs-micro);
+  --text-micro--line-height: var(--mold-lh-snug);
+  --text-xs: var(--mold-fs-xs);
+  --text-xs--line-height: var(--mold-lh-snug);
+  --text-sm: var(--mold-fs-sm);
+  --text-sm--line-height: var(--mold-lh-body);
+  --text-base: var(--mold-fs-base);
+  --text-base--line-height: var(--mold-lh-body);
+  --text-md: var(--mold-fs-md);
+  --text-md--line-height: var(--mold-lh-snug);
+  --text-lg: var(--mold-fs-lg);
+  --text-lg--line-height: var(--mold-lh-snug);
+  --text-xl: var(--mold-fs-xl);
+  --text-xl--line-height: var(--mold-lh-snug);
+
+  /* The theme's two leadings, so `leading-snug` / `leading-body` move with a
+     theme swap where Tailwind's fixed 1.375 / 1.625 would not. */
+  --leading-snug: var(--mold-lh-snug);
+  --leading-body: var(--mold-lh-body);
+
+  /* ── Radius (theme-scoped: Safelight 6/9/16, Nebula 0/2/6) ──────── */
+  --radius-inner: var(--mold-radius-1);
+  --radius-control: var(--mold-radius-2);
+  --radius-window: var(--mold-radius-3);
+
+  /* ── Elevation: the window and dialogs only ─────────────────────── */
+  --shadow-md: var(--mold-shadow-md);
 }

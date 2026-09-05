@@ -182,10 +182,10 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 24px;
   align-items: center;
-  padding: 20px;
-  border: 1px solid var(--color-edge, rgba(128, 128, 128, 0.25));
-  border-radius: 14px;
-  background: var(--color-bench, rgba(128, 128, 128, 0.06));
+  padding: 14px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
 }
 .pairing-copy {
   min-width: 0;
@@ -201,58 +201,57 @@ onBeforeUnmount(() => {
   width: 36px;
   height: 36px;
   flex: 0 0 auto;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--color-accent, #de6d2f) 18%, transparent);
-  color: var(--color-accent, #de6d2f);
-  font-size: 22px;
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-blue) 18%, transparent);
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-lg);
 }
 h3 {
   margin: 0;
-  color: var(--color-ink, inherit);
-  font-size: 15px;
+  color: var(--mold-text);
+  font-size: var(--mold-fs-base);
   font-weight: 650;
 }
 p {
   margin: 4px 0 0;
-  color: var(--color-ink-3, #888);
-  font-size: 12px;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-xs);
   line-height: 1.45;
 }
 .pairing-address {
   display: grid;
   gap: 6px;
   margin-top: 16px;
-  color: var(--color-ink-2, inherit);
-  font-size: 11px;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
 }
 .pairing-address input {
   min-width: 0;
   height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--color-edge, #555);
-  border-radius: 8px;
-  background: var(--color-surface, transparent);
-  color: var(--color-ink, inherit);
-  font:
-    500 12px ui-monospace,
-    SFMono-Regular,
-    monospace;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+  color: var(--mold-text);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
 }
 .pairing-hint code {
-  color: var(--color-ink-2, inherit);
+  color: var(--mold-text-2);
 }
 .pairing-error {
-  color: var(--color-danger, #d44);
+  color: var(--mold-error);
 }
 .pairing-button {
   min-height: 36px;
   margin-top: 14px;
   padding: 0 14px;
   border: 0;
-  border-radius: 8px;
-  background: var(--color-accent, #de6d2f);
-  color: white;
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   font-weight: 650;
   cursor: pointer;
 }
@@ -263,9 +262,11 @@ p {
 .pairing-code {
   width: 164px;
   padding: 9px;
-  border-radius: 12px;
+  border-radius: var(--mold-radius-2);
+  /* The white plate is the QR's quiet zone, not decoration. Inside the app
+     window depth is surface value alone — no drop shadow (mold-desktop.css). */
+  border: var(--mold-bw) solid var(--mold-border);
   background: white;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
   transition: opacity 0.2s;
 }
 .pairing-code img {
@@ -280,7 +281,7 @@ p {
   margin-top: 5px;
   white-space: nowrap;
   color: #333;
-  font-size: 9px;
+  font-size: var(--mold-fs-micro);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-align: center;

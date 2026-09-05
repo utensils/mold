@@ -1,5 +1,7 @@
 <script setup lang="ts">
+/* The one-field dialog: a name, Cancel, Save. */
 import { nextTick, ref, watch } from "vue";
+import ModalPanel from "@ui/components/ModalPanel.vue";
 
 const props = defineProps<{ open: boolean; title: string; initial: string }>();
 const emit = defineEmits<{ save: [name: string]; cancel: [] }>();
@@ -26,47 +28,37 @@ function save() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      v-if="open"
-      data-test="rename-dialog"
-      class="fixed inset-0 z-50 flex justify-center bg-[color-mix(in_srgb,var(--bath)_40%,transparent)] pt-24"
-      @click.self="emit('cancel')"
-    >
-      <div
-        class="border-edge h-fit w-72 rounded-chrome border bg-bench p-3 shadow-xl"
-        role="dialog"
-        aria-modal="true"
-        :aria-label="title"
+  <ModalPanel
+    :open="open"
+    :width="480"
+    :title="title"
+    data-test="rename-dialog"
+    @close="emit('cancel')"
+  >
+    <input
+      ref="inputEl"
+      v-model="value"
+      data-selectable
+      type="text"
+      class="h-8 w-full rounded-control border border-border bg-bg px-2.5 text-sm text-fg outline-none focus:border-border-focus"
+      @keydown.enter.prevent="save"
+    />
+    <template #footer>
+      <button
+        type="button"
+        class="min-h-8 rounded-control border border-border px-3.5 py-1.5 text-xs text-fg-2 transition-colors duration-100 hover:border-border-focus hover:text-fg"
+        @click="emit('cancel')"
       >
-        <p class="mb-2 text-caption font-medium text-ink-2">{{ title }}</p>
-        <input
-          ref="inputEl"
-          v-model="value"
-          data-selectable
-          type="text"
-          class="border-edge w-full rounded-control border bg-transparent px-2 py-1 text-body text-ink outline-none focus:border-safelight"
-          @keydown.enter.prevent="save"
-          @keydown.esc.prevent="emit('cancel')"
-        />
-        <div class="mt-2 flex justify-end gap-2">
-          <button
-            type="button"
-            class="h-7 rounded-control px-2 text-caption text-ink-2 hover:text-ink"
-            @click="emit('cancel')"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-test="rename-save"
-            class="h-7 rounded-control bg-safelight px-3 text-caption font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
-            @click="save"
-          >
-            Save
-          </button>
-        </div>
-      </div>
-    </div>
-  </Teleport>
+        Cancel
+      </button>
+      <button
+        type="button"
+        data-test="rename-save"
+        class="min-h-8 rounded-control bg-accent px-3.5 py-1.5 text-xs font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
+        @click="save"
+      >
+        Save
+      </button>
+    </template>
+  </ModalPanel>
 </template>
