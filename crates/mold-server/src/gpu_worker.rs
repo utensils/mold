@@ -4789,6 +4789,11 @@ fn finish_generation_success(
     // job that already produced its output from one that never ran. Output
     // filenames are wall-clock, so nothing downstream could tell them apart.
     metadata.job_id = Some(job.id.clone());
+    // The render's wall-clock time rides the embedded metadata as well as the
+    // gallery row, so a mirrored or imported print keeps it. Zero is "not
+    // measured", never a real duration.
+    metadata.generation_time_ms =
+        (response.generation_time_ms > 0).then_some(response.generation_time_ms);
     if let Some(video) = response.video.as_ref() {
         metadata.apply_video_output(video);
         metadata.upscale_model = None;

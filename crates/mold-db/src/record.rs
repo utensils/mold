@@ -144,9 +144,18 @@ impl GenerationRecord {
             .or(Some(self.created_at_ms))
             .map(|ms| (ms / 1000) as u64)
             .unwrap_or(0);
+        // The row's `generation_time_ms` predates the embedded field, so a
+        // legacy print whose file carries none still answers from the row.
+        let mut metadata = self.metadata.clone();
+        if metadata.generation_time_ms.is_none() {
+            metadata.generation_time_ms = self
+                .generation_time_ms
+                .filter(|ms| *ms > 0)
+                .map(|ms| ms as u64);
+        }
         mold_core::GalleryImage {
             filename: self.filename.clone(),
-            metadata: self.metadata.clone(),
+            metadata,
             timestamp,
             format: Some(self.format),
             size_bytes: self.file_size_bytes.map(|n| n as u64),
@@ -181,6 +190,7 @@ mod tests {
             collection: None,
             tags: None,
             title: None,
+            generation_time_ms: None,
             source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
@@ -320,5 +330,38 @@ mod tests {
         rec.file_mtime_ms = Some(20_000);
         let gi = rec.to_gallery_image();
         assert_eq!(gi.timestamp, 20);
+    }
+
+    /// The row recorded the render time long before the embedded metadata
+    /// carried it, so a legacy print answers from the row; a print whose
+    /// metadata already says how long it took keeps its own number; zero on
+    /// the row is "not measured", never a real duration.
+    #[test]
+    fn to_gallery_image_fills_generation_time_from_the_row() {
+        let mut rec = GenerationRecord::from_save(
+            Path::new("/o"),
+            "f.png",
+            OutputFormat::Png,
+            meta(),
+            RecordSource::Server,
+            5_000,
+        );
+        assert_eq!(rec.to_gallery_image().metadata.generation_time_ms, None);
+
+        rec.generation_time_ms = Some(4_200);
+        assert_eq!(
+            rec.to_gallery_image().metadata.generation_time_ms,
+            Some(4_200)
+        );
+
+        rec.generation_time_ms = Some(0);
+        assert_eq!(rec.to_gallery_image().metadata.generation_time_ms, None);
+
+        rec.generation_time_ms = Some(9_000);
+        rec.metadata.generation_time_ms = Some(4_200);
+        assert_eq!(
+            rec.to_gallery_image().metadata.generation_time_ms,
+            Some(4_200)
+        );
     }
 }

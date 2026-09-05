@@ -123,6 +123,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         collection: None,
         tags: None,
         title: None,
+        generation_time_ms: None,
         source_fit: None,
         guidance_overrides: None,
         sample_shift: None,

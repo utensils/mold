@@ -43,6 +43,20 @@ describe("RecentPrints", () => {
     expect(rows[1]!.text()).toContain("Harbour");
   });
 
+  it("says how long a print took beside its style, and nothing when it does not know", () => {
+    // `OutputMetadata.generation_time_ms` is additive: an older host or a
+    // synthesized row carries none, and the mono line then says only the
+    // style — never "0.0s".
+    const timed = print("teapot.png", "Brass teapot", "sdxl-base:fp16");
+    (timed.item.metadata as { generation_time_ms?: number }).generation_time_ms = 4_000;
+    const wrapper = mount(RecentPrints, {
+      props: { prints: [timed, print("harbour.png", "Harbour", "flux-dev:q4")] },
+    });
+    const rows = wrapper.findAll("[data-test='recent-print']");
+    expect(rows[0]!.get(".ms-recent__meta").text()).toBe("sdxl-base:fp16 · 4.0s");
+    expect(rows[1]!.get(".ms-recent__meta").text()).toBe("flux-dev:q4");
+  });
+
   it("hands the whole print back on click", async () => {
     const entry = print("teapot.png", "Brass teapot", "sdxl-base:fp16");
     const wrapper = mount(RecentPrints, { props: { prints: [entry] } });

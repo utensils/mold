@@ -58,6 +58,7 @@ import {
 } from "../lib/benchLayout";
 import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
+import { formatGenerationTime } from "@studio/lib/generationTime";
 import { outputKindFor, outputKindForModel } from "../composables/useCreateOutputKind";
 import { useOutputKindDoor } from "../composables/useOutputKindDoor";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
@@ -2500,7 +2501,12 @@ const captionMeta = computed(() => {
     : j.result
       ? squareSizeLabel(j.result.width, j.result.height)
       : squareSizeLabel(j.width, j.height);
-  const time = j.result ? `${(j.result.generation_time_ms / 1000).toFixed(1)}s` : "";
+  // The live completion carries the time; a print put back on the canvas
+  // carries it in its metadata (additive) or not at all — never "0.0s".
+  const time =
+    formatGenerationTime(j.result?.generation_time_ms) ??
+    formatGenerationTime(j.result?.metadata?.generation_time_ms) ??
+    "";
   return [size, time].filter(Boolean).join(" · ");
 });
 

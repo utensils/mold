@@ -28,6 +28,7 @@ import { formatGB } from "../../lib/format";
 import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
 import { useHostStatusStore } from "../../stores/hostStatus";
 import { useModelStore } from "../../stores/models";
+import { useGalleryStore } from "../../stores/gallery";
 
 function model(part: Partial<ModelEntry> = {}): ModelEntry {
   return {
@@ -124,11 +125,13 @@ describe("InstalledTab shelf", () => {
 
     const headers = wrapper.findAll("[data-test='styles-columns']");
     expect(headers).toHaveLength(1);
-    // SPEED is in the mock but nothing on ModelEntry times a render.
+    // SPEED has no field on ModelEntry; it is read from the prints already
+    // made with the style (`typicalGenerationTimes`).
     expect(headers[0]!.findAll("span").map((c) => c.text())).toEqual([
       "Name",
       "Good for",
       "Size",
+      "Speed",
       "Machine",
       "",
     ]);
@@ -158,6 +161,48 @@ describe("InstalledTab shelf", () => {
     const header = wrapper.get("[data-test='styles-columns']");
     for (const row of rows) {
       expect(row.find("[data-test='row-note']").exists()).toBe(true);
+      expect(row.element.children.length).toBe(header.element.children.length);
+    }
+  });
+
+  /**
+   * The mock's SPEED column: `~20s` from the prints already made with the
+   * style, the median of the newest few timed ones, and an empty cell — never
+   * a guess — for a style nobody has timed. The cell is emitted either way so
+   * the pinned axis holds.
+   */
+  it("reads each style's typical time off its recent prints", async () => {
+    useModelStore().all = [model(), model({ name: "sdxl-base:fp16", family: "sdxl" })];
+    const gallery = useGalleryStore();
+    const print = (model: string, ms: number | undefined, n: number) =>
+      ({
+        filename: `p-${n}.png`,
+        timestamp: 1_000 - n,
+        metadata: {
+          prompt: "x",
+          model,
+          seed: n,
+          ...(ms == null ? {} : { generation_time_ms: ms }),
+        },
+      }) as unknown as import("../../lib/api/types").GalleryImage;
+    gallery.buckets.local = {
+      items: [
+        print("flux-dev:q4", 4_000, 1),
+        print("flux-dev:q4", 40_000, 2),
+        print("flux-dev:q4", 5_000, 3),
+        print("sdxl-base:fp16", undefined, 4),
+      ],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+    const wrapper = mount(InstalledTab);
+    await flushPromises();
+
+    const speeds = wrapper.findAll("[data-test='row-speed']").map((c) => c.text());
+    expect(speeds).toEqual(["~5s", ""]);
+    const header = wrapper.get("[data-test='styles-columns']");
+    for (const row of wrapper.findAll("[data-test='model-table-row']")) {
       expect(row.element.children.length).toBe(header.element.children.length);
     }
   });

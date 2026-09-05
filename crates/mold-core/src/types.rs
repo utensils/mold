@@ -2757,6 +2757,14 @@ pub struct OutputMetadata {
     /// actually resolve. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
+    /// How long the render took, wall clock, in milliseconds — the same
+    /// number the complete event and the gallery row carry, embedded so a
+    /// mirror, an import, or a reconcile-from-disk keeps it. Additive; absent
+    /// on prints made before it was recorded and on synthesized metadata.
+    /// `GenerationRecord::to_gallery_image` fills it from the row for a
+    /// legacy print whose file predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_time_ms: Option<u64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -3046,6 +3054,7 @@ impl OutputMetadata {
         Self {
             prompt: req.prompt.clone(),
             title: req.title.clone(),
+            generation_time_ms: None,
             // Creation-time filing rides through as requested. Admission has
             // already normalized the tags and resolved the collection ref to
             // a concrete name, so what lands here is what will be applied.
@@ -5444,6 +5453,25 @@ impl GpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Additive: a print written before the field parses to `None`, and the
+    /// field never appears in JSON unless it was measured, so older clients
+    /// and older files keep their exact bytes.
+    #[test]
+    fn output_metadata_generation_time_is_additive() {
+        let legacy = r#"{"prompt":"a cat","model":"flux-dev:q8","seed":1,"steps":4,"guidance":1.0,"width":8,"height":8,"version":"0.1"}"#;
+        let parsed: OutputMetadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.generation_time_ms, None);
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert!(json.get("generation_time_ms").is_none());
+
+        let mut timed = parsed.clone();
+        timed.generation_time_ms = Some(4_200);
+        let json = serde_json::to_value(&timed).unwrap();
+        assert_eq!(json["generation_time_ms"], 4_200);
+        let back: OutputMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(back.generation_time_ms, Some(4_200));
+    }
 
     #[test]
     fn gpu_selection_parses_all_none_and_legacy_empty() {

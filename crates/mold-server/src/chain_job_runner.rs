@@ -2288,13 +2288,16 @@ fn finalize_job(
                     }
                 }
             };
-            let metadata =
+            let mut metadata =
                 effective.stitched_output_metadata(gallery_format, frame_count, Some(&provenance));
+            // The stitched print took as long as its stages did, summed; the
+            // same number goes on the gallery row below.
             let generation_time_ms: u64 = manifest
                 .stage_status
                 .iter()
                 .filter_map(|stage| stage.generation_time_ms)
                 .sum();
+            metadata.generation_time_ms = (generation_time_ms > 0).then_some(generation_time_ms);
             let gallery_filename =
                 chain_gallery_filename(&job.id, take, metadata.title.as_deref(), gallery_format);
             published_gallery_filename = Some(gallery_filename.clone());

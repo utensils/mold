@@ -277,6 +277,17 @@ describe("showGalleryPrint", () => {
     expect(streamableMediaUrl.mock.calls[0]?.[1]).toMatchObject({ target: print.target });
   });
 
+  it("carries the recorded render time, and zero when the print does not know", () => {
+    const store = useGenerationStore();
+    const timed = store.showGalleryPrint(
+      { ...print, metadata: { ...metadata, generation_time_ms: 4_200 } },
+      request(),
+    );
+    expect(timed.result?.generation_time_ms).toBe(4_200);
+    const untimed = store.showGalleryPrint(print, request());
+    expect(untimed.result?.generation_time_ms).toBe(0);
+  });
+
   it("carries the container and frame count the canvas probes on", () => {
     const store = useGenerationStore();
     const clip = store.showGalleryPrint(
