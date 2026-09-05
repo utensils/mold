@@ -76,10 +76,16 @@ before their performance qualification. Admission now accepts a Metal device,
 the public runtime profile is `supported-compact-fl2va-cuda-sm89-or-metal`, and
 the released macOS builds carry the `h3` feature. The route exists in a
 shipped binary. What is still missing is hardware qualification:
-no H3 checkpoint has ever completed a render on Metal. A Metal attempt is
-refused below a unified-memory floor that the compact stack's ~42.5 GB working
-set puts out of reach of a 48 GB machine, so lifting this tier needs a
-64 GB-class Apple Silicon host. Expect Metal to be slow when it is qualified (the reference MLX
+no retained H3 end-to-end Metal render has been qualified. The compact stack's
+~42.5 GB download size is not its simultaneous memory requirement: Metal
+streams Qwen language layers and DiT blocks, and admission sums host and device
+memory within each phase before selecting the peak. A 48 GB machine's fit
+therefore depends on the request and live headroom; it is not yet qualified.
+Metal attention completes each query chunk and copies its result into one
+preallocated output so temporary score allocations cannot accumulate across
+chunks. `mold system metal-memory status` reports the local budget, including
+`iogpu.wired_limit_mb` when available; this system setting is not a process
+memory cap or an OOM guarantee. See [Metal memory](../guide/metal-memory.md). Expect Metal to be slow when it is qualified (the reference MLX
 port measures minutes per step at 5 s) so this is a portability path, not a
 speed one.
 :::
