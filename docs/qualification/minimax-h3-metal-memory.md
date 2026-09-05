@@ -73,6 +73,33 @@ The CPU-only `h3` library check, Candle single-source contract, and H3 attention
 CUDA FlashAttention dispatch and arithmetic are untouched; this Mac cannot
 execute a CUDA hardware regression.
 
+## Reproduced INT8 row-chunk lifetime regression
+
+The subsequent guarded server attempt completed multimodal conditioning
+(56.4 seconds), loaded the VAEs, and encoded visual conditions. During the
+first transformer evaluation, repeated 115,605,504-byte allocations reached
+8,570,241,024 allocated bytes, and the next allocation was refused by the
+8 GiB ceiling. The process exited cleanly; kernel pressure stayed normal
+and swap did not grow. There was no completed video.
+
+A model-free `ComfyInt8ConvRotLinear::forward_reference` regression with
+1024×1024 activations, 4096 output features and 64-row chunks reproduced
+the pooled-buffer retention: **345,374,720 bytes** after forward. Metal now
+copies each row result into one destination and completes the row pass
+before proceeding; retained allocation fell to **29,491,200 bytes**.
+The CUDA native early return and CPU arithmetic are unchanged. Six ordinary
+INT8 tests pass, including F32 CPU parity and BF16 single-pass Metal parity
+with bias and a partial final chunk. CPU BF16 matmul is unavailable, so
+the BF16 comparison is explicitly a chunk-assembly check, not a CPU oracle.
+
+The ignored native allocation regression must run alone:
+
+```sh
+nix develop -c cargo test -p mold-ai-candle --features h3,metal --lib \
+  metal_reference_releases_row_chunk_temporaries -- \
+  --ignored --nocapture --test-threads=1
+```
+
 ## Upstream comparison
 
 - ComfyUI `250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a`,
@@ -108,11 +135,23 @@ a 12 GiB available-memory floor, normal kernel pressure, and no more than
 tier at 256×256 and 107 frames with a synthetic first frame, in a separate
 `MOLD_HOME`; its own admission must recalculate its budget.
 
-The watchdog **refused before launching the model process**: the baseline
+The initial watchdog attempts **refused before launching the model process**: the baseline
 had less than 24 GiB available. No full-model GPU allocation, output video,
 or end-to-end H3 qualification resulted. The reservation was released.
 The qualification-only Candle instrumentation and path patches are not
 part of the shipped change; the repository's Candle pin is unchanged.
+
+After memory was freed, the branch was rebased onto
+`b880155ff72b84c4f1df50368cf98bf64c024358` and the guarded binary rebuilt
+at `a0bb2e3edf57d32509614f513becf0be8267594b`. The forced-local attempt
+passed the baseline guard, but failed before inference after 198.6 seconds:
+`public runtime registry is incomplete: prepared_attempt=false;
+budget_echo=false; typed_attention=false; runnable_contract=true;
+family_registry=true`. The local engine constructor uses the generic
+factory with admission-only authority; the server owner prepares the
+one-shot runnable attempt separately. This is a dispatch integration
+failure, not evidence that the checkpoint exceeds memory. Kernel pressure
+remained normal and swap did not grow. No video was produced.
 
 ## Remaining acceptance
 
