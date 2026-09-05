@@ -912,8 +912,14 @@ function onBenchContextMenu(event: MouseEvent) {
    * grew a scrollbar before the lane's shrink weight ever engaged. Zero lets
    * it take exactly its protected parent shell's space and flex the lane down
    * for real.
+   *
+   * Width floors at auto too: a scene title is nowrap with an ellipsis, and a
+   * flex item's min-content contribution ignores its overflow, so the root
+   * would be as wide as every prompt laid end to end and the bench would cut
+   * the transport's and the footer's right edge off.
    */
   min-height: 0;
+  min-width: 0;
   border-top: var(--mold-bw) solid var(--mold-border);
   background: var(--mold-bg-deep);
   padding: 0 12px 11px;

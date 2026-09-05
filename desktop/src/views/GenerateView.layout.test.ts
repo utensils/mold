@@ -217,6 +217,12 @@ describe("GenerateView layout", () => {
     // it counts the lane's preferred basis and the panel scrolls before the
     // lane's shrink weight ever engages.
     expect(sequenceComposerSource).toMatch(/\.ms-timeline\s*\{[^}]*min-height:\s*0/s);
+    // ...and out of min-content WIDTH flooring too: a scene title is nowrap
+    // with an ellipsis, and a flex item's min-content contribution ignores its
+    // overflow, so floored at auto the root is as wide as every prompt laid
+    // end to end and the bench cuts the transport's and the footer's right
+    // edge off (three scenes were enough).
+    expect(sequenceComposerSource).toMatch(/\.ms-timeline\s*\{[^}]*min-width:\s*0/s);
     // The preferred lane height must be the flex BASIS, never a `height`: a
     // specified height becomes the wrapper's min-content contribution and
     // resurrects the scrollbar the shrink weight exists to prevent.
