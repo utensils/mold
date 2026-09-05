@@ -170,6 +170,25 @@ fn metal_telemetry_spends_the_host_samples_available_pool() {
 }
 
 #[test]
+fn unavailable_unified_sample_is_not_zero_capacity() {
+    let ram = crate::resources::ram_snapshot_from_system_with_available(|_| None);
+    assert_eq!(ram.available, None, "a failed query is not a measured zero");
+    let gpu = crate::resources::metal_snapshot_from_ram(&ram);
+    assert_eq!(
+        gpu.vram_used, ram.used,
+        "retain the existing estimated fallback"
+    );
+
+    let zero = crate::resources::ram_snapshot_from_system_with_available(|_| Some(0));
+    assert_eq!(zero.available, Some(0));
+    let gpu = crate::resources::metal_snapshot_from_ram(&zero);
+    assert_eq!(
+        gpu.vram_used, gpu.vram_total,
+        "a successful zero sample must block"
+    );
+}
+
+#[test]
 fn ram_snapshot_satisfies_invariants() {
     let ram = crate::resources::ram_snapshot();
     assert!(ram.total > 0, "total RAM should be >0 on any host");

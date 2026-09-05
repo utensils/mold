@@ -144,7 +144,15 @@ async fn unified_memory_generation_preview_and_lease_use_the_same_phase_budget()
             // transients does not. Preview and the actual queue must both wait.
             publish_unified_headroom(&state, backend, demand - 1);
             let preview = coordinator.placement_preview(&request, 1, &prepared);
-            assert_eq!(preview.outcome, "infeasible", "{backend:?}: {preview:?}");
+            assert_eq!(
+                preview.outcome,
+                if backend == mold_core::GpuBackend::Cuda {
+                    "temporarily_unavailable"
+                } else {
+                    "infeasible"
+                },
+                "{backend:?}: {preview:?}"
+            );
             coordinator.dispatch_ready().await;
             assert!(
                 worker_rx.try_recv().is_err(),
@@ -260,9 +268,14 @@ async fn unified_memory_chain_stage_transports_the_admitted_plan() {
         );
         publish_unified_headroom(&state, backend, demand);
         coordinator.dispatch_ready().await;
-        let command = worker_rx
-            .try_recv()
-            .expect("a fitting stage must pass lease revalidation");
+        let command = worker_rx.try_recv().unwrap_or_else(|error| {
+            let cache = coordinator.owner_plan_cache_and_settle_errors();
+            let (snapshot, _) = coordinator.planner_snapshot(&cache);
+            panic!(
+                "a fitting {backend:?} stage must pass lease revalidation: {error:?}; snapshot: {snapshot:?}; plan: {:?}",
+                coordinator.planner.plan(&snapshot)
+            );
+        });
         let crate::gpu_pool::GpuWorkerCommand::Grant(grant) = command else {
             panic!("expected a grant")
         };

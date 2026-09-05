@@ -541,6 +541,22 @@ pub fn ram_snapshot() -> RamSnapshot {
 /// RSS-only probes (`used_by_mold` before/after an unload), which have no
 /// business reading arcstats. Admission goes through [`ram_snapshot`].
 pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
+    ram_snapshot_from_system_with_available(|sys| {
+        // Metal admission and worker preflight spend the same free + inactive
+        // authority. Preserve a failed query as unavailable, not zero capacity.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = sys;
+            mold_inference::device::available_system_memory_bytes()
+        }
+        #[cfg(not(target_os = "macos"))]
+        Some(sys.available_memory())
+    })
+}
+
+pub(crate) fn ram_snapshot_from_system_with_available(
+    sample_available: impl FnOnce(&System) -> Option<u64>,
+) -> RamSnapshot {
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing()
             .with_memory(sysinfo::MemoryRefreshKind::everything())
@@ -555,18 +571,13 @@ pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
     );
     let total = sys.total_memory();
     let used = sys.used_memory();
-    // Metal admission and worker preflight spend the same free + inactive
-    // authority. Do not add sysinfo's broader reclaimable-page estimate.
-    #[cfg(target_os = "macos")]
-    let available = mold_inference::device::available_system_memory_bytes().unwrap_or(0);
-    #[cfg(not(target_os = "macos"))]
-    let available = sys.available_memory();
+    let available = sample_available(&sys);
     let used_by_mold = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
     let used_by_other = used.saturating_sub(used_by_mold);
     RamSnapshot {
         total,
         used,
-        available: Some(available.min(total)),
+        available: available.map(|bytes| bytes.min(total)),
         reclaimable_zfs_arc: None,
         used_by_mold,
         used_by_other,
