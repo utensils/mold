@@ -325,7 +325,11 @@ fn probe_image(
         image::ImageFormat::Gif => "image/gif",
         _ => anyhow::bail!("unsupported image format; use PNG, JPEG, WebP, or GIF"),
     };
-    let (width, height) = reader.into_dimensions()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
+    limits.max_image_height = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
+    limits.max_alloc = Some(minimax_h3::MAX_REFERENCE_IMAGE_PIXELS.saturating_mul(4));
+    let (width, height) = mold_inference::img_utils::oriented_image_dimensions(reader, limits)?;
     Ok(GenerationReference::Image {
         media: GenerationReferenceAuthority::Descriptor,
         provenance,
@@ -525,6 +529,7 @@ fn probe_wav(file: File) -> Result<WavProbe> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     fn authenticated_client() -> MoldClient {
         MoldClient::with_api_key("http://127.0.0.1:9", "sekrit".into())
@@ -571,6 +576,26 @@ mod tests {
         assert_eq!(fingerprint.len(), 64);
         assert!(!fingerprint.contains("tmp"));
         assert!(!format!("{references:?}").contains("/tmp"));
+    }
+
+    #[test]
+    fn image_probe_reports_exif_oriented_dimensions() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mold-inference/src/ltx2/testdata/preprocess/portrait_exif6.jpg"
+        ));
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let descriptor = probe_image(file, GenerationReferenceProvenance::default()).unwrap();
+        assert!(matches!(
+            descriptor,
+            GenerationReference::Image {
+                width: 64,
+                height: 96,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -168,9 +168,19 @@ pub fn decode_mask_image(
 /// to sRGB (malformed profiles warn and assume sRGB, mirroring upstream
 /// decode.py:164-166).
 pub fn decode_oriented_srgb(bytes: &[u8]) -> Result<RgbImage> {
-    let reader = image::ImageReader::new(Cursor::new(bytes))
+    decode_oriented_srgb_with_limits(bytes, image::Limits::default())
+}
+
+/// [`decode_oriented_srgb`] with caller-supplied decoder limits.
+///
+/// H3 accepts user media through several durable and local entry points. They
+/// all need the same EXIF/ICC semantics without giving up the family's strict
+/// dimension and allocation bounds merely to share this decoder.
+pub fn decode_oriented_srgb_with_limits(bytes: &[u8], limits: image::Limits) -> Result<RgbImage> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .context("failed to sniff source image format")?;
+    reader.limits(limits);
     let mut decoder = reader
         .into_decoder()
         .context("failed to decode source image")?;
@@ -205,6 +215,36 @@ pub fn decode_oriented_srgb(bytes: &[u8]) -> Result<RgbImage> {
             convert_icc_to_srgb(rgb, &profile, layout)
         }
         _ => rgb,
+    })
+}
+
+/// Read the dimensions the upright decoded pixels will have without
+/// allocating the image.
+///
+/// The reader must already have a format (normally via
+/// `with_guessed_format`). Keeping this beside the decode path means every H3
+/// descriptor agrees with the pixels after EXIF orientation is applied.
+pub fn oriented_image_dimensions<R>(
+    mut reader: image::ImageReader<R>,
+    limits: image::Limits,
+) -> Result<(u32, u32)>
+where
+    R: std::io::BufRead + std::io::Seek,
+{
+    reader.limits(limits);
+    let mut decoder = reader
+        .into_decoder()
+        .context("failed to decode source image")?;
+    let (width, height) = decoder.dimensions();
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    Ok(match orientation {
+        image::metadata::Orientation::Rotate90
+        | image::metadata::Orientation::Rotate270
+        | image::metadata::Orientation::Rotate90FlipH
+        | image::metadata::Orientation::Rotate270FlipH => (height, width),
+        _ => (width, height),
     })
 }
 

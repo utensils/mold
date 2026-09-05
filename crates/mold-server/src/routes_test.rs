@@ -13735,6 +13735,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_generate_refuses_unqualified_identity_before_queue_or_download() {
+        let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "prompt": "a portrait",
+            "model": "qwen-image:fp8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1,
+            "output_format": "png",
+            "id_image": "iVBORw0KGgo="
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(json_body(response).await["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("face-identity"));
+        assert!(journal.list_all().is_empty());
+        assert!(state.job_registry.is_empty());
+        assert!(queue_rx.try_recv().is_err());
+        let downloads = state.downloads.listing().await;
+        assert!(downloads.active.is_none());
+        assert!(downloads.queued.is_empty());
+    }
+
+    #[tokio::test]
     async fn configured_h3_artifact_path_is_rejected_before_queueing() {
         let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());
         spawn_durable_feeder(&state);
