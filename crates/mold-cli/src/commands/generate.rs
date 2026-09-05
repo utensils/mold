@@ -2827,6 +2827,52 @@ async fn generate_local(
     .await
 }
 
+/// The process signal handler delegates only while this exact local H3
+/// invocation is active. The scope cancels on async caller drop as well.
+#[cfg(any(feature = "cuda", feature = "metal"))]
+static LOCAL_H3_CANCELLATION: std::sync::Mutex<Option<mold_inference::InferenceCancellationToken>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn cancel_active_local_h3() -> bool {
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    if let Some(token) = LOCAL_H3_CANCELLATION
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+    {
+        token.cancel();
+        return true;
+    }
+    false
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+struct LocalH3Cancellation(mold_inference::InferenceCancellationToken);
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+impl LocalH3Cancellation {
+    fn register(token: mold_inference::InferenceCancellationToken) -> Result<Self> {
+        let mut active = LOCAL_H3_CANCELLATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active.is_some() {
+            anyhow::bail!("a local H3 invocation already owns cancellation");
+        }
+        *active = Some(token.clone());
+        Ok(Self(token))
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+impl Drop for LocalH3Cancellation {
+    fn drop(&mut self) {
+        self.0.cancel();
+        *LOCAL_H3_CANCELLATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
+}
+
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 struct LocalOwnerPool {
     command_txs: std::collections::BTreeMap<
@@ -2979,7 +3025,15 @@ async fn generate_local_batch(
         LocalBatchAdmission, LocalLease,
     };
 
-    let (base_req, _paths, effective_config, overrides) = prepare_local_request(
+    let is_h3 = mold_core::minimax_h3::task_for_model(&req.model).is_some();
+    mold_server::local_h3::validate_invocation(is_h3, batch, false, req.references.is_some())
+        .map_err(anyhow::Error::msg)?;
+    if is_h3 && req.references.is_some() {
+        anyhow::bail!(
+            "MiniMax H3 local references require owned source bindings; use the server for Ref2VA"
+        );
+    }
+    let (mut base_req, _paths, effective_config, overrides) = prepare_local_request(
         req,
         config,
         gpus,
@@ -3001,6 +3055,12 @@ async fn generate_local_batch(
         overrides.qwen2_variant.as_deref(),
         overrides.qwen2_text_encoder_mode.as_deref(),
     );
+    // Freeze the exact single H3 request, including any prompt override and
+    // generated seed, before admission hashes it. Generic batch engines can
+    // reuse a plan; an H3 attempt cannot.
+    if is_h3 {
+        base_req = local_batch_requests(&base_req, 1, base_seed, batch_prompts).remove(0);
+    }
     let local_plan = plan_local_batch(&base_req, &effective_config, &overrides).await?;
     let mut admission = LocalBatchAdmission::new(
         &local_plan.candidates,
@@ -3022,6 +3082,10 @@ async fn generate_local_batch(
         Failed(usize, u32, anyhow::Error),
         Crashed(usize, anyhow::Error),
     }
+    let local_cancellation = mold_inference::InferenceCancellationToken::default();
+    let _cancel_on_drop = is_h3
+        .then(|| LocalH3Cancellation::register(local_cancellation.clone()))
+        .transpose()?;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LocalOwnerEvent>();
     let mut command_txs = std::collections::BTreeMap::new();
     let mut workers = tokio::task::JoinSet::new();
@@ -3038,6 +3102,7 @@ async fn generate_local_batch(
         let crash_tx = event_tx.clone();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
         let render = tokio::spawn(render_progress(rx));
+        let cancellation = local_cancellation.clone();
         workers.spawn(async move {
             let joined = tokio::task::spawn_blocking(move || {
                 // Engine construction, loading, generation, and drop all remain
@@ -3048,6 +3113,27 @@ async fn generate_local_batch(
                 while let Ok(Some((index, mut request))) = command_rx.recv() {
                     mold_server::execution_plan::materialize_request(&execution_plan, &mut request);
                     let result = (|| -> Result<GenerateResponse> {
+                        #[cfg(feature = "h3")]
+                        if is_h3 {
+                            let mut progress =
+                                mold_inference::progress::ProgressReporter::default();
+                            progress.set_callback(Box::new({
+                                let tx = tx.clone();
+                                move |event| {
+                                    let _ = tx.send(event.into());
+                                }
+                            }));
+                            return mold_server::local_h3::run_once(
+                                &request,
+                                &config,
+                                &execution_plan,
+                                &prepared_execution_inputs,
+                                cancellation.clone(),
+                                &mut progress,
+                            );
+                        }
+                        #[cfg(not(feature = "h3"))]
+                        let _ = &cancellation;
                         if engine.is_none() {
                             let mut created = build_local_engine_from_plan(
                                 &request,
@@ -5471,6 +5557,29 @@ mod tests {
         assert_eq!(requests[1].seed, Some(42));
         assert_eq!(requests[0].batch_size, 1);
         assert_eq!(requests[1].batch_size, 1);
+    }
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[test]
+    fn local_h3_cancellation_belongs_to_one_invocation_and_clears_on_drop() {
+        assert!(!cancel_active_local_h3());
+        let first = mold_inference::InferenceCancellationToken::default();
+        let scope = LocalH3Cancellation::register(first.clone()).unwrap();
+        assert!(LocalH3Cancellation::register(
+            mold_inference::InferenceCancellationToken::default()
+        )
+        .is_err());
+        assert!(!first.is_cancelled());
+        assert!(cancel_active_local_h3());
+        assert!(first.is_cancelled());
+        drop(scope);
+        assert!(!cancel_active_local_h3());
+        let next = mold_inference::InferenceCancellationToken::default();
+        let scope = LocalH3Cancellation::register(next.clone()).unwrap();
+        assert!(!next.is_cancelled());
+        drop(scope);
+        assert!(next.is_cancelled());
+        assert!(!cancel_active_local_h3());
     }
 
     #[test]

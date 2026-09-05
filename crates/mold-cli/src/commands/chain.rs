@@ -622,6 +622,14 @@ async fn run_chain_local(
         LocalBatchAdmission,
     };
 
+    mold_server::local_h3::validate_invocation(
+        mold_core::minimax_h3::task_for_model(&chain_req.model).is_some(),
+        1,
+        true,
+        false,
+    )
+    .map_err(anyhow::Error::msg)?;
+
     // Normalise so we have expanded stages locally too. The exact-fit last
     // stage the HDR path applies survives this round trip: its shrunken
     // frame count is 8k+1 by construction and `normalise` on an

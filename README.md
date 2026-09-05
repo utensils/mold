@@ -84,6 +84,8 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Wuerstchen, LTX Video, Wan, MiniMax H3, and Hunyuan3D. See the
   [model catalog](https://utensils.io/mold/models/) for variants and hardware
   requirements.
+  MiniMax H3 forced-local execution accepts one FL2VA request; batches,
+  sequences, and Ref2VA reference uploads require the server route.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
   identity photos, prompt expansion, and upscaling.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,

@@ -2137,7 +2137,7 @@ pub(crate) fn prepare_for_owner(
         })?
         .unwrap_or_default();
     progress.set_cancellation_token(cancellation);
-    let prepared = mold_inference::prepare_h3_private_fl2va_attempt(
+    let prepared = prepare_bound_attempt(
         mold_inference::H3PrivateFl2VaPrepareInput {
             request: &request,
             frozen_factory,
@@ -2174,12 +2174,32 @@ pub(crate) fn prepare_for_owner(
     );
     progress.clear_cancellation_token();
     progress.clear_callback();
-    let prepared = prepared.map_err(private_prepare_error_message)?;
+    let boxed = prepared?;
+    // The bindings retain their opened descriptors; the private staging and
+    // the hydrated copy are released here, before the attempt runs.
+    drop(references);
+    drop(hydration);
+    job.h3_prepared_attempt = Some(boxed);
+    Ok(())
+}
 
+/// Shared preparation seam for server and local owners. The caller owns the
+/// live device/memory fence; only this seam turns admission into an executable
+/// one-shot attempt and validates every identity returned by inference.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn prepare_bound_attempt(
+    input: mold_inference::H3PrivateFl2VaPrepareInput<'_>,
+    progress: &mold_inference::progress::ProgressReporter,
+) -> Result<BoxedH3PreparedAttempt, String> {
+    let owner = input.owner_fence.clone();
+    let admission_evidence = input.admission_evidence;
+    let expected_media = H3PreparedMediaContract::from_request(input.request)?;
+    let prepared = mold_inference::prepare_h3_private_fl2va_attempt(input, progress)
+        .map_err(private_prepare_error_message)?;
     let boxed = InferenceH3PreparedAttempt::boxed(prepared);
     let facts = boxed.facts();
-    if facts.device_id != device_id
-        || facts.device_ordinal != worker.gpu.ordinal
+    if facts.device_id != owner.device_id
+        || facts.device_ordinal != owner.device_ordinal
         || facts.execution_identity_sha256 != admission_evidence.execution_fingerprint()
         || facts.prepared_attempt_identity_sha256
             != admission_evidence.prepared_attempt_identity_sha256()
@@ -2190,9 +2210,9 @@ pub(crate) fn prepare_for_owner(
             != admission_evidence.artifact_qualification_identity_sha256()
         || facts.runtime_qualification_identity_sha256
             != admission_evidence.runtime_qualification_identity_sha256()
-        || facts.work_identity_sha256 != work_identity_sha256
-        || facts.cancellation_scope_identity_sha256 != cancellation_scope_identity_sha256
-        || facts.memory_ledger_sequence != fence.memory_ledger_sequence
+        || facts.work_identity_sha256 != owner.work_identity_sha256
+        || facts.cancellation_scope_identity_sha256 != owner.cancellation_scope_identity_sha256
+        || facts.memory_ledger_sequence != owner.memory_ledger_sequence
         || facts.predicted_device_peak_bytes != admission_evidence.predicted_device_peak_bytes()
         || facts.predicted_host_increment_bytes
             != admission_evidence.predicted_host_increment_bytes()
@@ -2205,12 +2225,37 @@ pub(crate) fn prepare_for_owner(
     {
         return Err("MiniMax H3 prepared attempt changed from the frozen owner admission".into());
     }
-    // The bindings retain their opened descriptors; the private staging and
-    // the hydrated copy are released here, before the attempt runs.
-    drop(references);
-    drop(hydration);
-    job.h3_prepared_attempt = Some(boxed);
-    Ok(())
+    Ok(boxed)
+}
+
+/// Execute the same one-shot owner value on either transport. Publication is
+/// still the caller's responsibility, after these identity and media fences.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn run_bound_attempt(
+    prepared: &mut BoxedH3PreparedAttempt,
+    scope: H3AttemptScope<'_>,
+    request: &mold_core::GenerateRequest,
+    media: mold_core::minimax_h3::ResolvedMediaPresence,
+    progress: &mut mold_inference::progress::ProgressReporter,
+    allocation_commit: H3AllocationCommit,
+) -> anyhow::Result<H3ClaimedRunOutput> {
+    let scope_facts = scope.facts();
+    let facts = prepared.facts();
+    crate::gpu_worker::validate_h3_prepared_attempt_facts(scope_facts, &facts)?;
+    facts
+        .media
+        .validate_for_request_with_media(request, media)
+        .map_err(anyhow::Error::msg)?;
+    let output = prepared.run_once(scope, progress, allocation_commit)?;
+    crate::gpu_worker::validate_h3_terminal_identity(scope_facts, &facts, &output)?;
+    crate::gpu_worker::validate_h3_publication_for_request(
+        request,
+        media,
+        scope_facts.device_ordinal(),
+        &facts,
+        &output,
+    )?;
+    Ok(output)
 }
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -3583,6 +3628,38 @@ mod structural_tests {
         let debug = format!("{cloned:?}");
         assert!(!debug.contains(&auth.identity));
         assert!(!debug.contains(&request.prompt));
+    }
+
+    #[test]
+    fn local_owner_request_binding_refuses_siblings_before_preparation() {
+        let mut original = request(mold_core::minimax_h3::FL2VA_COMFY);
+        original.seed = Some(42);
+        let auth = authenticated();
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &original,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        grant.validate_bound_request(&original).unwrap();
+        for mutate in [
+            (|request: &mut mold_core::GenerateRequest| request.seed = Some(43))
+                as fn(&mut mold_core::GenerateRequest),
+            |request| request.prompt.push_str(" sibling"),
+            |request| request.width += 32,
+            |request| request.model = mold_core::minimax_h3::REF2VA_COMFY.into(),
+        ] {
+            let mut sibling = original.clone();
+            mutate(&mut sibling);
+            let mut prepared = false;
+            assert!(grant
+                .validate_bound_request(&sibling)
+                .map(|()| prepared = true)
+                .is_err());
+            assert!(!prepared);
+        }
     }
 
     /// The idempotency subject binds whatever the BUILD GRAPH gives it, and

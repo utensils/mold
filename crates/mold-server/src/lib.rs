@@ -23,6 +23,7 @@ mod h3_attempt;
 ))]
 mod h3_private_bridge;
 mod hunyuan3d_admission;
+pub mod local_h3;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;
