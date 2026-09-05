@@ -4872,26 +4872,6 @@ fn finish_generation_success(
                 &job.gallery_publication_gate,
             );
         }
-        // "Save every result" off: published exactly as any other print (so
-        // settlement, replay and provenance are untouched), then moved
-        // straight to the trash while this writer is still held. A print whose
-        // Framewise follow-up still needs the source stays live — the upscale
-        // was asked for, and `enqueue_gallery_video_job` reads the file from
-        // the output dir.
-        if !job.request.saves_to_gallery() && video_upscale_model.is_none() {
-            crate::gallery_trash::trash_published_outputs_blocking(
-                dir,
-                &saved_names,
-                db,
-                &job.gallery_publication_gate,
-                events,
-            );
-        } else if !job.request.saves_to_gallery() {
-            tracing::info!(
-                job_id = %job.id,
-                "save_to_gallery=false: kept live because a Framewise upscale still needs the source"
-            );
-        }
     }
 
     // Persist the requested video follow-up before reporting generation
@@ -4913,6 +4893,26 @@ fn finish_generation_success(
             tracing::error!(job_id = %job.id, %message);
             durable_generation_settlement::fail_blocking(job, DurableDisposition::Retain, message);
             return;
+        }
+    }
+
+    // "Save every result" off: published exactly as any other print (so
+    // settlement, replay and provenance are untouched), then moved straight to
+    // the trash. It runs AFTER the Framewise enqueue above on purpose — that
+    // enqueue hard-links the source into its own pinned work dir, so the
+    // follow-up keeps rendering from the same inode while the gallery entry
+    // moves, and the preference is honoured with no print left live
+    // indefinitely.
+    if !job.request.saves_to_gallery() {
+        if let Some(dir) = job.output_dir.as_deref() {
+            let _gallery_writer = job.gallery_publication_gate.blocking_write();
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir,
+                &saved_names,
+                job.metadata_db.as_ref().as_ref(),
+                &job.gallery_publication_gate,
+                Some(job.events.as_ref()),
+            );
         }
     }
 

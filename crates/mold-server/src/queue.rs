@@ -2575,7 +2575,6 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if let Some(ref dir) = job.output_dir {
                 let _gallery_writer = state.gallery_publication_gate.write().await;
                 let dir = dir.clone();
-                let trash_dir = dir.clone();
                 let model = request.model.clone();
                 let batch_size = request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
@@ -2671,38 +2670,9 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     })
                 };
                 saved_names = save_task.await.unwrap_or_default();
-                // "Save every result" off — the same publish-then-trash the
-                // GPU worker performs, on the single-worker path, under the
-                // publication writer this block already holds (a second
-                // acquisition would deadlock against it). A print whose
-                // Framewise follow-up still needs the source stays live: the
-                // upscale was asked for, and it reads the file from the
-                // output dir.
-                if !request.saves_to_gallery() && video_upscale_model.is_none() {
-                    let dir = trash_dir;
-                    let names = saved_names.clone();
-                    let db = state.metadata_db.clone();
-                    let gate = state.gallery_publication_gate.clone();
-                    let events = state.events.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::gallery_trash::trash_published_outputs_blocking(
-                            &dir,
-                            &names,
-                            db.as_ref().as_ref(),
-                            &gate,
-                            Some(events.as_ref()),
-                        );
-                    })
-                    .await
-                    .ok();
-                } else if !request.saves_to_gallery() {
-                    tracing::info!(
-                        job_id = %job.id,
-                        "save_to_gallery=false: kept live because a Framewise upscale still needs the source"
-                    );
-                }
             }
 
+            let trash_after_publication = !request.saves_to_gallery();
             drop(request);
             // Persist the requested video follow-up before reporting the
             // generation successful. Preparation itself runs on the blocking
@@ -2724,6 +2694,38 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     )
                     .await;
                     return;
+                }
+            }
+
+            // "Save every result" off: published exactly as any other print
+            // (so settlement, replay and provenance are untouched), then
+            // moved straight to the trash. It runs AFTER the Framewise
+            // enqueue above on purpose — that enqueue hard-links the source
+            // into its own pinned work dir, so the follow-up keeps rendering
+            // from the same inode while the gallery entry moves, and the
+            // preference is honoured with no print left live indefinitely.
+            // The publication writer is taken here, not held from the save
+            // block above (which released it) — a second acquisition under
+            // that guard would deadlock this worker.
+            if trash_after_publication {
+                if let Some(dir) = job.output_dir.clone() {
+                    let names = saved_names.clone();
+                    let db = state.metadata_db.clone();
+                    let gate = state.gallery_publication_gate.clone();
+                    let events = state.events.clone();
+                    let writer_gate = gate.clone();
+                    let _gallery_writer = writer_gate.write().await;
+                    tokio::task::spawn_blocking(move || {
+                        crate::gallery_trash::trash_published_outputs_blocking(
+                            &dir,
+                            &names,
+                            db.as_ref().as_ref(),
+                            &gate,
+                            Some(events.as_ref()),
+                        );
+                    })
+                    .await
+                    .ok();
                 }
             }
 

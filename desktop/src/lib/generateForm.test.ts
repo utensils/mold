@@ -3379,13 +3379,14 @@ describe("file under", () => {
     // A template saved before the field existed hydrates it undefined. A
     // falsy check there sent every print from a legacy starting point
     // straight to the trash; only an explicit `false` opts out.
-    const legacy = {
+    // Omitted by destructuring, not `delete`: the property is required on
+    // `GenerateForm`, and the phone build's typecheck refuses deleting one.
+    const { saveResult: _absent, ...legacy } = {
       ...newGenerateForm(),
       model: "flux-dev:q8",
       family: "flux",
       prompt: "x",
-    } as GenerateForm & { saveResult?: boolean };
-    delete legacy.saveResult;
+    };
     expect("save_to_gallery" in buildRequest(legacy as GenerateForm)).toBe(false);
   });
 

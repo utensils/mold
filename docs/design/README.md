@@ -292,7 +292,10 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   so a throwaway never lists in My images yet stays recoverable until
   retention empties the trash. The inspector's toggle sits under Repeat this
   look with its hint; a sequence has no such switch — its stitched clip is the
-  durable job's whole deliverable, and the chain body carries no such field.
+  durable job's whole deliverable, and the chain body carries no such field. A
+  requested Framewise upscale still runs: it is enqueued before the trash step
+  and pins its source by hard link. Its own published print is a second,
+  explicitly requested result and keeps saving.
 - **Rent this GPU states RunPod's own hourly rate** for the chosen cloud
   (`gpuTypes.securePrice` / `communityPrice`), in the picker and in the
   "billing begins now" confirm; with none reported, the confirm keeps its

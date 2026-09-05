@@ -1722,9 +1722,9 @@ pub struct GenerateRequest {
     /// exactly as any other — and then moves it STRAIGHT to the trash, where
     /// retention purges it, so a throwaway does not clutter the library yet
     /// stays recoverable until the trash empties. A sequence has no such
-    /// switch: its stitched print is the durable job's whole deliverable, and
-    /// a video whose Framewise upscale follow-up still needs the source stays
-    /// live rather than losing the upscale that was asked for.
+    /// switch: its stitched print is the durable job's whole deliverable. A
+    /// requested Framewise upscale is unaffected — it is enqueued first and
+    /// pins its source by hard link, so the print is trashed all the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_to_gallery: Option<bool>,
     /// Original user prompt before expansion (set by client when expanding locally).
