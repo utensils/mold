@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       [
+        "CHANGELOG.md",
         "apps/mobile/**",
         "studio/**",
         "ui/**",
