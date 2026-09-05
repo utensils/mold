@@ -1,1 +1,0 @@
-- Fixed MiniMax H3 forced-local FL2VA execution stopping at incomplete factory authority by preparing and consuming one owned request through the server's validated runtime boundary. Local H3 batches and chains are now refused before preparation; Ref2VA reference uploads continue to use the server.

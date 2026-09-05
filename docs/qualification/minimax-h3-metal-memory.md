@@ -208,6 +208,34 @@ comparisons for one reduced-size fixture, not bit-exactness or general quality
 thresholds. The reference and its batch identity are retained in the sibling
 `hal9000-cuda/` evidence directory.
 
+## Forced-local owned-attempt repair
+
+The CLI now prepares one exact H3 request through the server's shared owned
+runtime boundary, preserving the device grant, identity validation,
+cancellation and terminal media checks. Local batches, chains and Ref2VA
+references are refused before artifact preparation until those paths have
+per-request ownership. The process's existing Ctrl+C handler cancels the
+active local H3 attempt instead of exiting underneath GPU work.
+
+On HPE/plato, the repair (`bf25f9c6`, integrated here as `bd4bb0fa`) passed
+CUDA CLI checking and Clippy with warnings denied, 53 focused server
+ownership/identity/budget/publication tests, and 11 CLI cancellation and
+request-provenance tests. Both CLI and server test harnesses compile.
+The parent reviewed the owned-attempt extraction; an independent review of
+the attention and INT8 lifetime fixes found no actionable issues, including
+checking the pinned Candle `slice_set` semantics. This review does not
+substitute for the retained Metal run or the separate CUDA hardware tests.
+An additional 31 H3 quantized-operation tests passed on Metal.
+
+The final guarded forced-local render at `bd4bb0fa` completed in
+1,270.1 seconds wall time (1,076.0 seconds reported generation time).
+Its MP4 SHA-256 is **identical to the retained server render above**, proving
+byte-for-byte output agreement for this exact request through both owners.
+Minimum host availability was 17,917,067,264 bytes (16.69 GiB); maximum
+reported native allocation was 7,757,168,640 bytes under the same 8 GiB ceiling.
+Pressure stayed normal, swap did not grow, and no Metal command failure
+occurred. The separate qualification process and reservation were released.
+
 ## Remaining acceptance
 
 - Complete per-phase runtime measurements for the intended Turbo/default shape; the small base admission budget above is established.
