@@ -411,6 +411,9 @@ export interface GenerateRequestWire {
   prompt: string;
   /** User-authored print title (D5). Additive; absent = untitled. */
   title?: string | null;
+  /** "Save every result" off: the host publishes, then moves the print
+   * straight to the trash. Additive; absent = save. */
+  save_to_gallery?: boolean | null;
   /** Creation-time filing ("File under"). Tags the host applies to the
    * print's gallery row as it lands. Additive; absent = file nothing. */
   tags?: string[];

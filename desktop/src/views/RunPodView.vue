@@ -5,6 +5,7 @@ import {
   podGpuName,
   podHardwareSummary,
   podProxyUrl,
+  runPodHourlyRate,
   runPodRegionLabel,
   type RunPodCreateInput,
   type RunPodNetworkVolume,
@@ -55,6 +56,9 @@ const form = reactive<RunPodCreateInput>({
 const selectedGpu = computed(() =>
   runpod.gpus.find((gpu) => (gpu.id ?? gpu.gpuId) === form.gpuTypeId),
 );
+/** RunPod's own on-demand rate for the chosen card on the chosen cloud, so
+ *  the "billing begins now" confirm states a number; null says nothing. */
+const selectedHourlyRate = computed(() => runPodHourlyRate(selectedGpu.value, form.cloudType));
 
 const selectedNetworkVolume = computed(() =>
   runpod.overview.networkVolumes.find((volume) => volume.id === form.networkVolumeId),
@@ -384,7 +388,10 @@ onBeforeUnmount(() => {
           >
             {{ gpu.displayName }} ·
             {{ gpu.memoryInGb == null ? "VRAM unknown" : `${gpu.memoryInGb} GB` }} ·
-            {{ gpu.stockStatus ?? "No stock" }}
+            {{ gpu.stockStatus ?? "No stock"
+            }}<template v-if="runPodHourlyRate(gpu, form.cloudType) !== null">
+              · {{ money(runPodHourlyRate(gpu, form.cloudType)!) }}/hr</template
+            >
           </option>
         </select>
 
@@ -836,6 +843,13 @@ onBeforeUnmount(() => {
             }}
             GB)</span
           ><span v-else-if="form.volumeGb"> · workspace {{ form.volumeGb }} GB</span>
+        </div>
+        <div
+          v-if="selectedHourlyRate !== null"
+          class="text-state-cost"
+          data-test="rent-hourly-rate"
+        >
+          {{ money(selectedHourlyRate) }}/hr while it runs
         </div>
         <div class="text-fg-dim">RunPod bills this GPU by the minute while it runs.</div>
       </div>

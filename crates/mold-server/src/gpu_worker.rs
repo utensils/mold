@@ -4872,6 +4872,18 @@ fn finish_generation_success(
                 &job.gallery_publication_gate,
             );
         }
+        // "Save every result" off: published exactly as any other print (so
+        // settlement, replay and provenance are untouched), then moved
+        // straight to the trash while this writer is still held.
+        if !job.request.saves_to_gallery() {
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir,
+                &saved_names,
+                db,
+                &job.gallery_publication_gate,
+                events,
+            );
+        }
     }
 
     // Persist the requested video follow-up before reporting generation

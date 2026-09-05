@@ -4004,6 +4004,10 @@ pub struct ServerStatus {
     /// older servers or when the mount cannot be determined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models_disk: Option<DiskUsage>,
+    /// What this machine's gallery takes on disk, from the metadata DB's own
+    /// per-row sizes. Absent on older servers and when the DB is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gallery_storage: Option<GalleryStorage>,
     /// Host-RAM telemetry from the scheduler's admission ledger. Absent on
     /// older servers and wherever that ledger does not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4013,6 +4017,22 @@ pub struct ServerStatus {
     /// configuration rather than a degradation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_media: Option<DurableMediaStatus>,
+}
+
+/// Bytes and prints this machine's gallery holds, live and in the trash,
+/// summed from the metadata DB's per-row `file_size_bytes` — the "pictures
+/// take 12.4 GB" line on a machine's Storage card. Rows whose size the DB
+/// never recorded count as prints but add no bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryStorage {
+    #[schema(example = 1203_u64)]
+    pub prints: u64,
+    #[schema(example = 13314398208_u64)]
+    pub bytes: u64,
+    #[schema(example = 12_u64)]
+    pub trash_prints: u64,
+    #[schema(example = 104857600_u64)]
+    pub trash_bytes: u64,
 }
 
 /// Total/free bytes for the filesystem backing a directory (currently the
@@ -9258,6 +9278,7 @@ mod tests {
             queue_paused: Some(true),
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: Some(DurableMediaStatus {
                 available: false,

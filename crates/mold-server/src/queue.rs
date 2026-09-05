@@ -2670,6 +2670,27 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     })
                 };
                 saved_names = save_task.await.unwrap_or_default();
+                // "Save every result" off — the same publish-then-trash the
+                // GPU worker performs, on the single-worker path.
+                if !request.saves_to_gallery() {
+                    let dir = dir.clone();
+                    let names = saved_names.clone();
+                    let db = state.metadata_db.clone();
+                    let gate = state.gallery_publication_gate.clone();
+                    let events = state.events.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _gallery_writer = gate.blocking_write();
+                        crate::gallery_trash::trash_published_outputs_blocking(
+                            &dir,
+                            &names,
+                            db.as_ref().as_ref(),
+                            &gate,
+                            Some(events.as_ref()),
+                        );
+                    })
+                    .await
+                    .ok();
+                }
             }
 
             drop(request);

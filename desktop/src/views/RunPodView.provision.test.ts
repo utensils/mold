@@ -26,6 +26,16 @@ describe("RunPod confirm-before-spend (G9)", () => {
     expect(source).toContain("Billing resumes immediately.");
   });
 
+  it("states RunPod's own hourly rate in the rent confirm when the provider reports one", () => {
+    // The number comes from `gpuTypes.securePrice` / `communityPrice` for
+    // the cloud the pod will run on (`runPodHourlyRate`); with none reported
+    // the confirm keeps its by-the-minute sentence and invents nothing.
+    expect(source).toContain("runPodHourlyRate(selectedGpu.value, form.cloudType)");
+    expect(source).toMatch(
+      /v-if="selectedHourlyRate !== null"[\s\S]*?data-test="rent-hourly-rate"[\s\S]*?money\(selectedHourlyRate\) \}\}\/hr/,
+    );
+  });
+
   it("shows a live running-cost meter on billing pods", () => {
     expect(source).toContain("<PodCostMeter");
     expect(source).toContain(':uptime-seconds="pod.uptimeSeconds"');

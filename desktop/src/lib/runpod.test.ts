@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  runPodHourlyRate,
   friendlyRunPodError,
   isNetworkVolumeDatacenter,
   isRunPodHostUrl,
@@ -164,5 +165,18 @@ describe("formatUsd", () => {
   it("renders a USD amount", () => {
     expect(formatUsd(0.69)).toBe("$0.69");
     expect(formatUsd(12)).toBe("$12.00");
+  });
+});
+
+describe("runPodHourlyRate", () => {
+  it("answers the chosen cloud's on-demand price and nothing when unpriced", () => {
+    const gpu = { securePrice: 1.44, communityPrice: 0.79 };
+    expect(runPodHourlyRate(gpu, "SECURE")).toBe(1.44);
+    expect(runPodHourlyRate(gpu, "COMMUNITY")).toBe(0.79);
+    expect(runPodHourlyRate({ securePrice: 0 }, "SECURE")).toBeNull();
+    expect(runPodHourlyRate({ communityPrice: null }, "COMMUNITY")).toBeNull();
+    expect(runPodHourlyRate({}, "SECURE")).toBeNull();
+    expect(runPodHourlyRate(null, "SECURE")).toBeNull();
+    expect(runPodHourlyRate(undefined, "COMMUNITY")).toBeNull();
   });
 });

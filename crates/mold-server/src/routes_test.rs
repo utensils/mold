@@ -21805,6 +21805,88 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// "Save every result" off: the print is published exactly as any other
+    /// and then moved straight to the trash — row flagged, bytes in
+    /// `.trash/`, live path gone — so the library never lists it while the
+    /// trash keeps it until retention empties.
+    #[tokio::test]
+    async fn save_to_gallery_off_publishes_then_trashes() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "throwaway.png", None);
+        let names = crate::queue::SavedOutputNames {
+            output: Some("throwaway.png".into()),
+            original: None,
+        };
+        {
+            let _writer = state.gallery_publication_gate.write().await;
+            crate::gallery_trash::trash_published_outputs_blocking(
+                dir.path(),
+                &names,
+                db.as_ref().as_ref(),
+                &state.gallery_publication_gate,
+                None,
+            );
+        }
+        let row = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "throwaway.png")
+            .unwrap()
+            .expect("the row survives, flagged");
+        assert!(row.trashed_at_ms.is_some());
+        assert!(!dir.path().join("throwaway.png").is_file());
+        assert!(crate::batch_transaction::gallery_trash_dir(dir.path())
+            .join("throwaway.png")
+            .is_file());
+        // Nothing saved (an aborted render): nothing to trash, no panic.
+        let _writer = state.gallery_publication_gate.write().await;
+        crate::gallery_trash::trash_published_outputs_blocking(
+            dir.path(),
+            &crate::queue::SavedOutputNames::default(),
+            db.as_ref().as_ref(),
+            &state.gallery_publication_gate,
+            None,
+        );
+    }
+
+    /// A sequence's stitched print is the durable job's deliverable, so the
+    /// opt-out is refused there by name; a one-shot passes this gate.
+    #[test]
+    fn save_to_gallery_off_is_refused_for_a_sequence() {
+        let sequence: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a river",
+            "model": "ltx-video",
+            "save_to_gallery": false,
+            "output_mode": "sequence"
+        }))
+        .unwrap();
+        let error = crate::routes::validate_generate_request(
+            &sequence,
+            None,
+            mold_core::ReferenceForm::Admitted,
+        )
+        .unwrap_err();
+        assert!(error.contains("not available for a sequence"), "{error}");
+
+        let one_shot: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a river",
+            "model": "flux-dev:q8",
+            "save_to_gallery": false
+        }))
+        .unwrap();
+        if let Err(error) = crate::routes::validate_generate_request(
+            &one_shot,
+            None,
+            mold_core::ReferenceForm::Admitted,
+        ) {
+            assert!(!error.contains("sequence"), "{error}");
+        }
+    }
+
     /// Every new organization/trash mutator and listing must wait behind
     /// the atomic publication writer exactly like the historical routes.
     #[tokio::test]

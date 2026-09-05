@@ -186,6 +186,45 @@ fn ensure_row_for_live_file(db: &MetadataDb, dir: &Path, name: &str, live_path: 
     db.upsert(&record).is_ok()
 }
 
+/// "Save every result" off: move a just-published print (and its
+/// pre-upscale original, when one was kept) straight to the trash. Caller
+/// holds the gallery writer, exactly as for a user's own Delete. A failure
+/// is logged and never fails the render: the print reached the gallery, and
+/// a stray live copy is the lesser wrong.
+pub(crate) fn trash_published_outputs_blocking(
+    dir: &Path,
+    saved: &crate::queue::SavedOutputNames,
+    db: Option<&MetadataDb>,
+    gate: &GalleryPublicationGate,
+    events: Option<&crate::events::EventBroadcaster>,
+) {
+    let Some(db) = db else {
+        tracing::warn!("save_to_gallery=false: no metadata DB, the print stays live");
+        return;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    for name in [saved.output.as_deref(), saved.original.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        match trash_print_blocking(dir, name, db, gate, now_ms) {
+            Ok(_) => {
+                if let Some(events) = events {
+                    events.publish(mold_core::ServerEvent::GalleryRemoved {
+                        filename: name.to_string(),
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(filename = name, error = %error.error, "save_to_gallery=false: could not move the print to the trash");
+            }
+        }
+    }
+}
+
 /// Move one print to the trash. Caller holds the gallery writer.
 pub(crate) fn trash_print_blocking(
     dir: &Path,

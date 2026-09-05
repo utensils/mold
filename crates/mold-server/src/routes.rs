@@ -3610,6 +3610,12 @@ pub(crate) fn validate_generate_request(
     if let Some(title) = req.title.as_deref() {
         mold_core::validate_print_title(title)?;
     }
+    // A sequence's stitched print IS the durable job's deliverable; there is
+    // no such thing as a sequence nobody keeps.
+    if !req.saves_to_gallery() && req.output_mode == Some(mold_core::GenerationOutputMode::Sequence)
+    {
+        return Err("save_to_gallery=false is not available for a sequence".into());
+    }
     match reference_form {
         mold_core::ReferenceForm::Admitted => {
             mold_core::validate_generate_request_with_family(req, family_hint)
@@ -5790,6 +5796,17 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
         let cache = state.models_disk_cache.clone();
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
+    // The gallery's bytes are one aggregate query on the metadata DB — cheap,
+    // but a DB call all the same, so it takes the same cached, single-flight
+    // road as the disk stats rather than running on every poll.
+    let (gallery_storage, needs_storage_refresh) = state.gallery_storage_cache.read();
+    if needs_storage_refresh {
+        let cache = state.gallery_storage_cache.clone();
+        let db = state.metadata_db.clone();
+        tokio::task::spawn_blocking(move || {
+            cache.store(db.as_ref().as_ref().and_then(|db| db.storage_totals().ok()))
+        });
+    }
 
     // `queue_capacity` is only the hydrated runtime window. Route selection
     // needs the total waiting load, including SQLite-owned work that has not
@@ -5893,6 +5910,7 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
+        gallery_storage,
         host_memory: state.scheduled_work.host_memory(),
         durable_media: state
             .queue_journal

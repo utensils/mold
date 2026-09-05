@@ -14,6 +14,23 @@ export interface RunPodGpu {
   communityCloud: boolean;
   stockStatus: string | null;
   available: boolean;
+  /** RunPod's on-demand USD per GPU-hour per cloud. Additive: absent on an
+   * older desktop backend or when the provider reports none. */
+  securePrice?: number | null;
+  communityPrice?: number | null;
+}
+
+/**
+ * The hourly rate the rent confirm states, for the cloud the pod will run
+ * on. `null` when the provider reported none — the confirm then keeps its
+ * by-the-minute sentence alone rather than inventing a number.
+ */
+export function runPodHourlyRate(
+  gpu: Pick<RunPodGpu, "securePrice" | "communityPrice"> | null | undefined,
+  cloudType: "SECURE" | "COMMUNITY",
+): number | null {
+  const price = cloudType === "SECURE" ? gpu?.securePrice : gpu?.communityPrice;
+  return typeof price === "number" && Number.isFinite(price) && price > 0 ? price : null;
 }
 
 export interface RunPodDatacenter {

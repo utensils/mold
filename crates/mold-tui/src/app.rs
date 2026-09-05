@@ -12699,6 +12699,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         };
@@ -12772,6 +12773,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         });
@@ -19150,6 +19152,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         };
@@ -19182,6 +19185,7 @@ mod tests {
                 queue_paused: None,
                 instance_id: None,
                 models_disk: None,
+                gallery_storage: None,
                 host_memory: None,
                 durable_media: None,
             }),
@@ -19214,6 +19218,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         };
@@ -20637,6 +20642,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         });
@@ -20708,6 +20714,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            gallery_storage: None,
             host_memory: None,
             durable_media: None,
         };
@@ -20749,6 +20756,7 @@ mod tests {
                 queue_paused: None,
                 instance_id: None,
                 models_disk: None,
+                gallery_storage: None,
                 host_memory: None,
                 durable_media: None,
             });
@@ -21178,6 +21186,7 @@ mod tests {
                 queue_paused: Some(false),
                 instance_id: Some("instance-64".into()),
                 models_disk: None,
+                gallery_storage: None,
                 host_memory: None,
                 durable_media: None,
             })),
@@ -21425,6 +21434,7 @@ mod tests {
                 queue_paused: None,
                 instance_id: Some("uuid-a".into()),
                 models_disk: None,
+                gallery_storage: None,
                 host_memory: None,
                 durable_media: None,
             };

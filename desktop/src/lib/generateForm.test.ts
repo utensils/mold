@@ -3366,6 +3366,15 @@ describe("file under", () => {
     expect(buildRequest(form).tags).toBeUndefined();
   });
 
+  it("puts only the Save-every-result opt-out on the wire", () => {
+    // Absent is the host's default of saving; `false` is the one thing a
+    // client says, and it says it only when the switch is off.
+    const form = { ...newGenerateForm(), model: "flux-dev:q8", family: "flux", prompt: "x" };
+    expect("save_to_gallery" in buildRequest(form)).toBe(false);
+    form.saveResult = false;
+    expect(buildRequest(form).save_to_gallery).toBe(false);
+  });
+
   it("ships the title ghost tag plus manual tags on the wire", () => {
     const form = newGenerateForm();
     form.fileUnderAutoTag = true;
