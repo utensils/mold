@@ -13,6 +13,11 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [0.27.1] - 2026-09-05
 
+- **Account for unified memory in Metal server admission.** Queues and placement
+  previews include CPU-parked encoders and concurrent host allocations in the
+  device budget. Chain stages retain consistent lease accounting, and server
+  memory samples use the same available-memory authority as worker preflight
+  ([#1059](https://github.com/utensils/mold/issues/1059)).
 - **Retire crates.io distribution.** New releases use GitHub artifacts,
   Nix/FlakeHub, Docker, AUR, or source builds. Remove the repeatedly failing
   registry publisher and obsolete registry installation instructions; existing

@@ -92,6 +92,13 @@ def normalize(value: str) -> str:
 
 
 ci_text, desktop_text, ios_text, android_text = (Path(path).read_text() for path in sys.argv[1:])
+# A late-fragment repair changes only the promoted changelog, but release-plz
+# still requires Apple delivery at that exact main SHA before tagging it.
+for label, text in (("desktop", desktop_text), ("iOS", ios_text)):
+    push = re.search(r"(?ms)^  push:\n(.*?)(?=^  [A-Za-z0-9_-]+:)", text)
+    if push is None or '"CHANGELOG.md"' not in push.group(1):
+        raise SystemExit(f"FAIL: {label} must run for changelog-only release repair pushes")
+
 trusted = (
     "github.event_name == 'pull_request' && "
     "github.actor == 'release-plz-mold[bot]' && "
