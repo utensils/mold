@@ -228,3 +228,22 @@ because neither directly loads the Comfy INT8 ConvRot checkpoint. CUDA
 qualification is performed on its dedicated host. BF16 remains available and
 retained, but a stopped BF16 runtime run is recorded as operator-deferred, not
 misreported as passing.
+
+
+### CUDA follow-up oracle (2026-09-05)
+
+The pinned ComfyUI GGUF Q4 reference completed its 8-step first pass and
+3-step spatial refinement on one L40S. Its retained manifest is
+`/storage/mold/uat-cuda-reliability/oracle-home/output/verification/ltx-2.5/cuda/comfyui/reference-20260905T234810Z/manifest.json`.
+The inspected frame contains brass automata on a wet reflective surface,
+consistent with the subject and setting of the fixture prompt. This establishes
+an executable reference, not pixel parity with Mold. ComfyUI stayed pinned at
+`a1079ba16f2674734b065eb036fbfdddaa321a4d`, with ComfyUI-GGUF at
+`6ea2651e7df66d7585f6ffee804b20e92fb38b8a`.
+
+For this NixOS scratch environment, Triton needed
+`TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` and `C_INCLUDE_PATH` pointing to
+the venv interpreter's real Python include directory. The torch wheel's
+`site-packages/nvidia/*/lib` directories preceded the devshell libraries in
+`LD_LIBRARY_PATH`, so cuDNN loaded its matching sublibraries. Earlier failed
+attempts remain beside the successful capture.
