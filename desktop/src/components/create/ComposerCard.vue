@@ -256,6 +256,7 @@ defineExpose({ focus, expand, record });
             :min="1"
             :max="batchLocked ? 1 : MAX_BATCH_SIZE"
             :editable="!batchLocked"
+            compact
             label="How many to make"
             @update:model-value="form.batchSize = $event"
           />
@@ -417,7 +418,10 @@ defineExpose({ focus, expand, record });
 }
 .ms-chip--stepper {
   cursor: default;
-  padding-right: 4px;
+  gap: 2px;
+  /* The compact Stepper's − button carries its own 22px hit box, so the
+   * chip's right padding is only the 2px that keeps it off the border. */
+  padding-right: 2px;
 }
 .ms-composer__status {
   font-size: var(--mold-fs-micro);

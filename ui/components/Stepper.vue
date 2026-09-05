@@ -19,8 +19,14 @@ const props = withDefaults(
     format?: (value: number) => string;
     /** Allow direct numeric entry in addition to the step buttons. */
     editable?: boolean;
+    /**
+     * Bare variant for nesting inside another bordered control (the
+     * composer's Make chip): no box of its own, 22px buttons, so it fits a
+     * 28px chip instead of painting a 38px box over it.
+     */
+    compact?: boolean;
   }>(),
-  { editable: false },
+  { editable: false, compact: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
@@ -91,6 +97,7 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="ms-stepper"
+    :class="{ 'ms-stepper--compact': compact }"
     :role="editable ? undefined : 'spinbutton'"
     :tabindex="editable ? undefined : 0"
     :aria-valuenow="editable ? undefined : modelValue"
@@ -223,5 +230,31 @@ function onKeydown(event: KeyboardEvent) {
 .ms-stepper__input::-webkit-outer-spin-button {
   margin: 0;
   appearance: none;
+}
+
+/* Compact: the host control draws the box; this only lays out − value +. */
+.ms-stepper--compact {
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.ms-stepper--compact .ms-stepper__btn {
+  width: 22px;
+  height: 22px;
+  font-size: 15px;
+}
+
+.ms-stepper--compact .ms-stepper__value {
+  min-width: 28px;
+  font-size: var(--mold-fs-xs);
+}
+
+.ms-stepper--compact .ms-stepper__input {
+  width: 28px;
 }
 </style>

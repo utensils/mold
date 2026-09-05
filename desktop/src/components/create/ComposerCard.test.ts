@@ -326,6 +326,12 @@ describe("ComposerCard — batch", () => {
     expect(stepper.props("editable")).toBe(true);
   });
 
+  it("nests a compact Stepper so the chip stays one bordered control", () => {
+    const wrapper = mountComposer(baseForm());
+    const stepper = wrapper.get("[data-test='batch-chip']").findComponent(Stepper);
+    expect(stepper.props("compact")).toBe(true);
+  });
+
   it("accepts a directly entered large positive batch", async () => {
     const form = baseForm();
     const wrapper = mountComposer(form);
