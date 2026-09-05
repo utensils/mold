@@ -1581,6 +1581,31 @@ fn fixed_dmd_steps_note(ladder: crate::manifest::WanDmdLadder) -> String {
     )
 }
 
+/// The three step counts a client can offer as a quality ladder: a faster
+/// draft, the recipe's own default, and a slower pass.
+///
+/// The rungs are relative to the DEFAULT rather than to the control's bounds,
+/// because the default is the only number the recipe actually vouches for —
+/// the bounds are a validation envelope (`1..=100` for most families), and
+/// thirds of that envelope would offer 33 steps for a 4-step Klein render.
+/// Half rounds up so a 1-step default cannot produce a zero rung, and both
+/// outer rungs are clamped into `[min, max]` before the list is deduped, so a
+/// narrow band collapses rather than escaping the control.
+///
+/// A FIXED control never comes here: a wan DMD tier and an H3 Turbo tier are
+/// distilled onto one schedule length, and a second rung would advertise a
+/// render they cannot perform.
+fn steps_ladder(min: u32, default: u32, max: u32) -> Vec<u32> {
+    let mut rungs = vec![
+        default.div_ceil(2).max(min),
+        default,
+        (default * 3).div_ceil(2).min(max),
+    ];
+    rungs.sort_unstable();
+    rungs.dedup();
+    rungs
+}
+
 fn recipe(
     input: &GenerationProfileInput<'_>,
     id: &str,
@@ -1910,6 +1935,21 @@ fn recipe(
         (None, true) => h3_compact_steps,
         (None, false) => input.default_steps,
     };
+    let steps_min = match (wan_dmd_steps, h3_compact_turbo_steps, family) {
+        (Some(steps), _, _) | (None, Some(steps), _) => steps,
+        (None, None, "minimax-h3") => crate::minimax_h3::COMPACT_MIN_STEPS,
+        _ => 1,
+    };
+    let steps_max = match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
+        (Some(steps), _, _) | (None, Some(steps), _) => steps,
+        (None, None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
+        (None, None, false) => 100,
+    };
+    let steps_mode = if wan_dmd_steps.is_some() || h3_compact_turbo_steps.is_some() {
+        ControlMode::Fixed
+    } else {
+        ControlMode::Adjustable
+    };
     let defaults = GenerationDefaultsProfile {
         width: if audio_only || mesh_only {
             0
@@ -1938,23 +1978,19 @@ fn recipe(
         resolution,
         steps: IntegerControl {
             default: default_steps,
-            min: match (wan_dmd_steps, h3_compact_turbo_steps, family) {
-                (Some(steps), _, _) | (None, Some(steps), _) => steps,
-                (None, None, "minimax-h3") => crate::minimax_h3::COMPACT_MIN_STEPS,
-                _ => 1,
-            },
-            max: match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
-                (Some(steps), _, _) | (None, Some(steps), _) => steps,
-                (None, None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
-                (None, None, false) => 100,
-            },
+            min: steps_min,
+            max: steps_max,
             step: 1,
-            recommended: vec![default_steps],
-            mode: if wan_dmd_steps.is_some() || h3_compact_turbo_steps.is_some() {
-                ControlMode::Fixed
+            // A pinned count has one rung by definition: a wan DMD tier and
+            // an H3 Turbo tier are distilled onto one schedule length, so
+            // offering a second number would advertise a render they cannot
+            // perform. Everything adjustable gets the ladder.
+            recommended: if steps_mode == ControlMode::Fixed {
+                vec![default_steps]
             } else {
-                ControlMode::Adjustable
+                steps_ladder(steps_min, default_steps, steps_max)
             },
+            mode: steps_mode,
             note: wan_dmd_ladder
                 .map(fixed_dmd_steps_note)
                 .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note)),
@@ -3784,7 +3820,21 @@ mod tests {
                 );
             }
             assert_eq!(recipe.steps.default, steps, "{model}");
-            assert_eq!(recipe.steps.recommended, vec![steps], "{model}");
+            // A pinned Turbo schedule has exactly one rung; the base tag
+            // offers the ladder around its default, inside the compact band.
+            if turbo {
+                assert_eq!(recipe.steps.recommended, vec![steps], "{model}");
+            } else {
+                assert_eq!(
+                    recipe.steps.recommended,
+                    steps_ladder(
+                        crate::minimax_h3::COMPACT_MIN_STEPS,
+                        steps,
+                        crate::minimax_h3::COMPACT_MAX_STEPS
+                    ),
+                    "{model}"
+                );
+            }
 
             let temporal = recipe.temporal.as_ref().unwrap();
             assert_eq!(temporal.frames.mode, ControlMode::Adjustable, "{model}");
@@ -3900,6 +3950,11 @@ mod tests {
             assert_eq!(recipe.steps.mode, ControlMode::Adjustable, "{model}");
             assert_eq!(recipe.steps.min, 2, "{model}");
             assert_eq!(recipe.steps.max, 100, "{model}");
+            assert_eq!(
+                recipe.steps.recommended,
+                steps_ladder(2, crate::minimax_h3::DEFAULT_STEPS, 100),
+                "{model}: an adjustable H3 tier offers the ladder"
+            );
 
             let temporal = recipe.temporal.as_ref().unwrap();
             assert_eq!(temporal.frames.mode, ControlMode::Adjustable, "{model}");
@@ -4127,5 +4182,75 @@ mod tests {
         })
         .unwrap();
         assert!(!encoded.contains("note"), "{encoded}");
+    }
+
+    /// The steps ladder is half the default, the default, and half again —
+    /// clamped into the control's own band and deduped.
+    #[test]
+    fn the_steps_ladder_is_three_rungs_around_the_default() {
+        // FLUX / SDXL.
+        assert_eq!(steps_ladder(1, 30, 100), vec![15, 30, 45]);
+        // FLUX.2 [klein].
+        assert_eq!(steps_ladder(1, 4, 100), vec![2, 4, 6]);
+        // Z-Image — the halves round up, never to zero.
+        assert_eq!(steps_ladder(1, 9, 100), vec![5, 9, 14]);
+        // LTX-2.
+        assert_eq!(steps_ladder(1, 8, 100), vec![4, 8, 12]);
+
+        // The band clamps both ends rather than escaping the control.
+        assert_eq!(steps_ladder(2, 4, 5), vec![2, 4, 5]);
+        assert_eq!(steps_ladder(20, 30, 35), vec![20, 30, 35]);
+
+        // A degenerate band collapses to one rung instead of repeating it.
+        assert_eq!(steps_ladder(4, 4, 4), vec![4]);
+        assert_eq!(steps_ladder(1, 1, 100), vec![1, 2]);
+    }
+
+    /// Every shipped recipe advertises a ladder a client can render as a
+    /// quality picker: sorted, deduped, inside the control, and containing
+    /// the default. A fixed control (a wan DMD tier, an H3 Turbo tier) keeps
+    /// its single pinned rung.
+    #[test]
+    fn every_shipped_recipe_offers_a_usable_steps_ladder() {
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.is_generation_model())
+        {
+            let profile = generation_profile_for_manifest(manifest);
+            for recipe in &profile.recipes {
+                let context = format!("{} recipe {}", manifest.name, recipe.id);
+                let ladder = &recipe.steps.recommended;
+                assert!(!ladder.is_empty(), "{context}: empty steps ladder");
+                assert!(
+                    ladder.windows(2).all(|pair| pair[0] < pair[1]),
+                    "{context}: steps ladder is not sorted and deduped: {ladder:?}"
+                );
+                assert!(
+                    ladder
+                        .iter()
+                        .all(|rung| (recipe.steps.min..=recipe.steps.max).contains(rung)),
+                    "{context}: steps ladder escapes [{}, {}]: {ladder:?}",
+                    recipe.steps.min,
+                    recipe.steps.max
+                );
+                assert!(
+                    ladder.contains(&recipe.steps.default),
+                    "{context}: steps ladder omits the default {}: {ladder:?}",
+                    recipe.steps.default
+                );
+                if recipe.steps.mode == ControlMode::Fixed {
+                    assert_eq!(
+                        ladder,
+                        &vec![recipe.steps.default],
+                        "{context}: a pinned step count has exactly one rung"
+                    );
+                } else if recipe.steps.min < recipe.steps.max {
+                    assert!(
+                        ladder.len() >= 2,
+                        "{context}: an adjustable control needs a choice: {ladder:?}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -465,13 +465,13 @@ pub async fn run_chain(
 
     let ctx = CliContext::new(host.as_deref());
     let config = ctx.config().clone();
-    // The CLI's chain door, mirroring the server's
+    // The CLI's chain door for a LOCAL run, mirroring the server's
     // `validate_and_normalize_chain_family`: an unset `enable_audio` means
     // the recipe's own answer, which is ON wherever the family delivers
-    // sound. Resolving here covers the forced-local orchestrator run — which
-    // never sees a server door — and makes a remote submission carry the same
-    // explicit value the host would have resolved anyway.
-    req.enable_audio = Some(resolve_chain_enable_audio(&req, &config));
+    // sound. The forced-local orchestrator never sees a server door, so it
+    // is answered here; a remote submission leaves `None` so the host
+    // answers with its own muxer rather than this binary's.
+    req.enable_audio = resolve_chain_enable_audio(&req, &config, local);
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let _ = embed_metadata; // reserved for future metadata-embed work on chain output
 
@@ -1139,7 +1139,8 @@ pub async fn run_from_script(
     let mut req = built.normalise_with_family(authority.family_hint())?;
     // `run_chain` resolves this too; doing it here as well is what lets the
     // dry run describe the render that would happen rather than the script.
-    req.enable_audio = Some(resolve_chain_enable_audio(&req, &config));
+    // A remote submission stays `None` — the host answers that one.
+    req.enable_audio = resolve_chain_enable_audio(&req, &config, local);
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1260,17 +1261,43 @@ pub(crate) fn sugar_recipe(model: &str, config: &mold_core::Config) -> SugarReci
     }
 }
 
-/// The chain's audio answer, resolved the way the server door resolves it.
+/// The chain's audio answer **for a local run**, resolved the way the server
+/// door resolves it.
 ///
 /// `mold_core::generation_profile::resolve_enable_audio` is the rule and
 /// `family_emits_audio` is the family half; the CLI reads both directly
 /// because `mold-inference`'s capability table (which the server asks) lives
 /// behind the GPU feature gates and a CPU-only `mold` still submits chains.
 ///
+/// **Only a local run is answered here.** The muxer half of the question is
+/// `cfg!(feature = "mp4")`, which describes *this binary* and says nothing
+/// about the host a remote chain is submitted to — and `mp4` is not a default
+/// feature, so folding it in before the local/remote fork stamped
+/// `Some(false)` onto every remote chain from a plain build (silencing the
+/// resolved default) and `Some(true)` from an mp4 build (turning a
+/// muxer-less host's APNG degrade into a hard refusal at
+/// `routes_chain::validate_and_normalize_chain_family`). A remote submission
+/// therefore leaves `None` — the wire contract on
+/// [`mold_core::chain::ChainRequest::enable_audio`] — and the host answers,
+/// exactly as the format half of the same question already works through
+/// [`super::generate::delivery_capabilities_for_run`].
+///
+/// An explicit value is always the caller's and survives both routes.
+///
 /// An unclassified family answers off — the same conservative reading the
 /// server applies to an empty family, and the only safe one: `Some(true)` on
 /// a family with no audio path is a request admission refuses by name.
-pub(crate) fn resolve_chain_enable_audio(req: &ChainRequest, config: &mold_core::Config) -> bool {
+pub(crate) fn resolve_chain_enable_audio(
+    req: &ChainRequest,
+    config: &mold_core::Config,
+    local: bool,
+) -> Option<bool> {
+    if let Some(explicit) = req.enable_audio {
+        return Some(explicit);
+    }
+    if !local {
+        return None;
+    }
     let authority = resolve_chain_model_authority(&req.model, config);
     let deliverable = !authority.family.is_empty()
         && mold_core::generation_profile::family_emits_audio(&authority.family)
@@ -1278,7 +1305,21 @@ pub(crate) fn resolve_chain_enable_audio(req: &ChainRequest, config: &mold_core:
         // exactly as the one-shot engine reads it.
         && req.output_format == OutputFormat::Mp4
         && cfg!(feature = "mp4");
-    mold_core::generation_profile::resolve_enable_audio(req.enable_audio, deliverable)
+    Some(mold_core::generation_profile::resolve_enable_audio(
+        None,
+        deliverable,
+    ))
+}
+
+/// How a planning surface (`--dry-run`, `mold chain validate`) names the
+/// audio answer. `None` is not silence — it is a submission whose muxer this
+/// binary does not own, so it must not be printed as "off".
+pub(crate) fn describe_enable_audio(enable_audio: Option<bool>) -> &'static str {
+    match enable_audio {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "decided by the host",
+    }
 }
 
 /// Replace a script-authored motion tail with the one the family and the
@@ -1555,7 +1596,8 @@ pub async fn run_from_sugar(
     let mut req = built.normalise_with_family(authority.family_hint())?;
     // `run_chain` resolves this too; doing it here as well is what lets the
     // dry run describe the render that would happen rather than the script.
-    req.enable_audio = Some(resolve_chain_enable_audio(&req, &config));
+    // A remote submission stays `None` — the host answers that one.
+    req.enable_audio = resolve_chain_enable_audio(&req, &config, local);
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1594,14 +1636,9 @@ fn print_dry_run_summary(req: &ChainRequest) {
     println!("estimated total frames: {total_frames} ({duration_s:.2}s @ {fps}fps)",);
     // Audio is a resolved default now, not an opt-in, so a dry run has to say
     // which way it went — the caller's script may never mention the field.
-    println!(
-        "audio: {}",
-        if req.enable_audio == Some(true) {
-            "on"
-        } else {
-            "off"
-        }
-    );
+    // An unset value is not "off": it is a remote submission whose muxer this
+    // binary does not own, and the host resolves it at admission.
+    println!("audio: {}", describe_enable_audio(req.enable_audio));
     for (i, s) in req.stages.iter().enumerate() {
         let tag = match s.transition {
             TransitionMode::Smooth => "smooth",
@@ -2775,5 +2812,142 @@ mod tests {
         assert!(req.prompt.is_none());
         assert!(req.total_frames.is_none());
         assert!(req.clip_frames.is_none());
+    }
+
+    /// A remote chain submission leaves `enable_audio` unset (#1583/R1).
+    ///
+    /// `mp4` is not a default feature, so folding `cfg!(feature = "mp4")`
+    /// into the request before the local/remote fork stamped `Some(false)`
+    /// onto every remote chain from a plain build — silencing the resolved
+    /// default the server would have applied — and `Some(true)` from an mp4
+    /// build, which turns a muxer-less host's APNG degrade into a hard
+    /// refusal at admission. The wire contract is that an unset value means
+    /// "the host decides", exactly as the format half already works
+    /// (`generate::delivery_capabilities_for_run`).
+    #[test]
+    fn a_remote_chain_leaves_the_audio_answer_to_the_host() {
+        let config = mold_core::Config::default();
+        let req = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
+            width: 1216,
+            height: 704,
+            output_format: mold_core::OutputFormat::Mp4,
+            ..empty_chain_request()
+        };
+        assert_eq!(
+            resolve_chain_enable_audio(&req, &config, false),
+            None,
+            "a remote submission must not carry this build's muxer as the answer"
+        );
+
+        // The same holds for a family that emits no sound at all: the host
+        // is still the one that answers.
+        let silent = ChainRequest {
+            model: "wan22-ti2v-5b:q8".to_string(),
+            stages: vec![stage_with_frames("a paper boat", 49)],
+            width: 704,
+            height: 384,
+            ..req.clone()
+        };
+        assert_eq!(resolve_chain_enable_audio(&silent, &config, false), None);
+    }
+
+    /// A forced-local chain resolves audio here, because the local
+    /// orchestrator has no server door behind it.
+    #[test]
+    fn a_local_chain_resolves_audio_against_this_build() {
+        let config = mold_core::Config::default();
+        let audio_family = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
+            width: 1216,
+            height: 704,
+            output_format: mold_core::OutputFormat::Mp4,
+            ..empty_chain_request()
+        };
+        assert_eq!(
+            resolve_chain_enable_audio(&audio_family, &config, true),
+            Some(cfg!(feature = "mp4")),
+            "a local run can only deliver a track this build links a muxer for"
+        );
+
+        // MP4 is the only container the stitched chain can carry a track in.
+        let apng = ChainRequest {
+            output_format: mold_core::OutputFormat::Apng,
+            ..audio_family.clone()
+        };
+        assert_eq!(
+            resolve_chain_enable_audio(&apng, &config, true),
+            Some(false)
+        );
+
+        // A family with no audio path is off regardless of the muxer.
+        let silent = ChainRequest {
+            model: "wan22-ti2v-5b:q8".to_string(),
+            stages: vec![stage_with_frames("a paper boat", 49)],
+            width: 704,
+            height: 384,
+            ..audio_family.clone()
+        };
+        assert_eq!(
+            resolve_chain_enable_audio(&silent, &config, true),
+            Some(false)
+        );
+    }
+
+    /// An mp4 build renders an LTX-2 chain with sound without being asked.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn a_local_mp4_build_turns_ltx2_chain_audio_on_by_default() {
+        let config = mold_core::Config::default();
+        let req = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
+            width: 1216,
+            height: 704,
+            output_format: mold_core::OutputFormat::Mp4,
+            ..empty_chain_request()
+        };
+        assert_eq!(resolve_chain_enable_audio(&req, &config, true), Some(true));
+    }
+
+    /// An explicit choice is the caller's, on both routes.
+    #[test]
+    fn an_explicit_audio_choice_survives_both_routes() {
+        let config = mold_core::Config::default();
+        let base = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            stages: vec![stage_with_frames("a drone shot over pine forest", 97)],
+            width: 1216,
+            height: 704,
+            output_format: mold_core::OutputFormat::Mp4,
+            ..empty_chain_request()
+        };
+
+        let off = ChainRequest {
+            enable_audio: Some(false),
+            ..base.clone()
+        };
+        assert_eq!(resolve_chain_enable_audio(&off, &config, true), Some(false));
+        assert_eq!(
+            resolve_chain_enable_audio(&off, &config, false),
+            Some(false)
+        );
+
+        let on = ChainRequest {
+            enable_audio: Some(true),
+            ..base
+        };
+        assert_eq!(resolve_chain_enable_audio(&on, &config, true), Some(true));
+        assert_eq!(resolve_chain_enable_audio(&on, &config, false), Some(true));
+    }
+
+    /// A planning surface never prints an unresolved audio answer as "off".
+    #[test]
+    fn a_planning_surface_says_who_decides_an_unset_audio_answer() {
+        assert_eq!(describe_enable_audio(Some(true)), "on");
+        assert_eq!(describe_enable_audio(Some(false)), "off");
+        assert_eq!(describe_enable_audio(None), "decided by the host");
     }
 }
