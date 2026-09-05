@@ -401,6 +401,104 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
+/// Identity of an installed artifact. Local tokens are metadata identities,
+/// never claims that model bytes match an upstream SHA-256.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum InstalledArtifactIdentity {
+    Sha256(String),
+    LocalInstallation(String),
+}
+
+impl InstalledArtifactIdentity {
+    pub fn observed_sha256(&self) -> Option<&str> {
+        match self {
+            Self::Sha256(value) => Some(value),
+            Self::LocalInstallation(_) => None,
+        }
+    }
+    /// Domain-separated cache key, including for legacy/local installations.
+    pub fn cache_key(&self) -> String {
+        match self {
+            Self::Sha256(value) => format!("sha256:{value}"),
+            Self::LocalInstallation(value) => format!("local:{value}"),
+        }
+    }
+}
+
+/// Resolve an installed regular file without reading its body. Receipt failures
+/// never trigger verification. The representation is frozen for the process;
+/// after 4096 distinct identities the deterministic local fallback bounds memory.
+pub fn installed_artifact_identity(path: &Path) -> anyhow::Result<InstalledArtifactIdentity> {
+    let file = crate::secure_file::open_regular_file_no_follow(path)?;
+    installed_artifact_identity_from_file(path, &file)
+}
+
+pub fn installed_artifact_identity_from_file(
+    path: &Path,
+    file: &std::fs::File,
+) -> anyhow::Result<InstalledArtifactIdentity> {
+    use sha2::{Digest, Sha256};
+    type Registry = std::sync::Mutex<
+        std::collections::HashMap<(PathBuf, PinnedFileIdentity), InstalledArtifactIdentity>,
+    >;
+    static REGISTRY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+    static SCOPE: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "installed artifact is not a regular file"
+    );
+    let identity = pinned_file_identity(file)?;
+    let current = crate::secure_file::open_regular_file_no_follow(path)?;
+    anyhow::ensure!(
+        pinned_file_identity(&current)? == identity,
+        "installed artifact changed while opening"
+    );
+    let absolute = crate::secure_file::absolute_lexical_path(path)?;
+    let key = (absolute.clone(), identity);
+    let mut registry = REGISTRY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(value) = registry.get(&key) {
+        return Ok(value.clone());
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"mold.local-installation.v1\0");
+    hash.update(SCOPE.get_or_init(uuid::Uuid::new_v4).as_bytes());
+    hash.update(absolute.as_os_str().as_encoded_bytes());
+    hash.update(serde_json::to_vec(&identity)?);
+    let local = InstalledArtifactIdentity::LocalInstallation(format!("{:x}", hash.finalize()));
+    if registry.len() >= 4096 {
+        return Ok(local);
+    }
+    let value = read_durable_pinned_digest(&absolute, identity)
+        .map(InstalledArtifactIdentity::Sha256)
+        .unwrap_or(local);
+    registry.insert(key, value.clone());
+    Ok(value)
+}
+
+/// Cheap completeness check for a cached model. The caller retains its existing
+/// acquisition lock/partial ownership and format checks. No digest is read.
+pub fn installed_file_is_complete(path: &Path, expected_size: Option<u64>) -> bool {
+    let Ok(file) = crate::secure_file::open_regular_file_no_follow(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if metadata.len() == 0 {
+        return false;
+    }
+    if let Some(expected) = expected_size.filter(|size| *size != 0) {
+        if metadata.len() != expected {
+            return false;
+        }
+    }
+    recorded_sha256_marker_len(path).is_none_or(|len| len == metadata.len())
+}
+
 /// Compute the SHA-256 hex digest of a file.
 pub fn compute_sha256(path: &std::path::Path) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};
@@ -1472,26 +1570,14 @@ impl hf_hub::api::Progress for SyncCallbackProgress {
     }
 }
 
-/// Returns `true` if the file already exists at `clean_path` with the correct
-/// size and (if a SHA-256 is available) the correct digest.
-///
-/// **Side-effect**: if the file exists with matching size but failing integrity,
-/// `verify_file_integrity` will delete the corrupted file before returning `false`.
+/// Reuse a complete installed file without hashing it, even on a cold process.
 fn is_already_placed(
-    clean_path: &std::path::Path,
+    clean_path: &Path,
     file: &ModelFile,
-    model_name: &str,
-    skip_verify: bool,
+    _model_name: &str,
+    _skip_verify: bool,
 ) -> bool {
-    let size_ok = clean_path
-        .metadata()
-        .map(|m| m.len() == file.size_bytes)
-        .unwrap_or(false);
-    if !size_ok {
-        return false;
-    }
-    // Verify integrity — a same-size but corrupted file must not be accepted
-    verify_file_integrity(clean_path, file, model_name, skip_verify).is_ok()
+    installed_file_is_complete(clean_path, Some(file.size_bytes))
 }
 
 /// Return an existing valid clean path for a manifest file, migrating from a
@@ -1512,7 +1598,7 @@ fn find_existing_placed_file(
         }
         if candidate_path != canonical_path {
             hardlink_or_copy(&candidate_path, &canonical_path)?;
-            verify_file_integrity(&canonical_path, file, &manifest.name, skip_verify)?;
+            // Migration reuses installed bytes; it is not a new acquisition.
         }
         return Ok(Some(canonical_path));
     }
@@ -4168,6 +4254,73 @@ mod tests {
         let error = verify_pinned_file(&link, &expected, "link.bin", "pinned-bundle")
             .expect_err("a pinned artifact reached through a symlink is not proven");
         assert!(matches!(error, DownloadError::Other(_)), "{error}");
+    }
+
+    #[test]
+    fn installed_identity_is_stable_without_receipts_and_changes_on_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.bin");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let before = pinned_digest_hash_count_for(&path);
+        let first = installed_artifact_identity(&path).unwrap();
+        assert!(matches!(
+            first,
+            InstalledArtifactIdentity::LocalInstallation(_)
+        ));
+        assert_eq!(installed_artifact_identity(&path).unwrap(), first);
+        assert_eq!(pinned_digest_hash_count_for(&path), before);
+        // Even a later explicit digest calculation must not change an active identity.
+        pinned_file_digest(&path).unwrap();
+        assert_eq!(installed_artifact_identity(&path).unwrap(), first);
+        std::fs::rename(&path, dir.path().join("old.bin")).unwrap();
+        std::fs::write(&path, b"bbbb").unwrap();
+        assert_ne!(installed_artifact_identity(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn installed_identity_survives_cold_child_process_without_hashing() {
+        const KEY: &str = "MOLD_TEST_INSTALLED_ARTIFACT_CHILD";
+        if let Some(path) = std::env::var_os(KEY) {
+            let path = PathBuf::from(path);
+            assert_eq!(pinned_digest_hash_count(), 0);
+            assert!(installed_file_is_complete(&path, Some(15)));
+            assert!(matches!(
+                installed_artifact_identity(&path).unwrap(),
+                InstalledArtifactIdentity::LocalInstallation(_)
+            ));
+            assert_eq!(pinned_digest_hash_count(), 0);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.bin");
+        std::fs::write(&path, b"installed bytes").unwrap();
+        for _ in 0..2 {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "download::tests::installed_identity_survives_cold_child_process_without_hashing"])
+                .env(KEY, &path).status().unwrap();
+            assert!(status.success());
+        }
+    }
+
+    #[test]
+    fn existing_complete_model_never_hashes_or_deletes_bytes() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.bin");
+        std::fs::write(&path, b"installed bytes").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".into(),
+            hf_filename: "installed.bin".into(),
+            component: crate::manifest::ModelComponent::Transformer,
+            size_bytes: 15,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+        let before = pinned_digest_hash_count_for(&path);
+        assert!(is_already_placed(&path, &file, "test:q8", false));
+        assert_eq!(pinned_digest_hash_count_for(&path), before);
+        assert!(path.exists());
+        assert!(!has_sha256_marker(&path));
     }
 
     #[test]
