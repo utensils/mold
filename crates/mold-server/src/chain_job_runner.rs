@@ -2297,7 +2297,7 @@ fn finalize_job(
                 .iter()
                 .filter_map(|stage| stage.generation_time_ms)
                 .sum();
-            metadata.generation_time_ms = (generation_time_ms > 0).then_some(generation_time_ms);
+            metadata.record_generation_time(generation_time_ms);
             let gallery_filename =
                 chain_gallery_filename(&job.id, take, metadata.title.as_deref(), gallery_format);
             published_gallery_filename = Some(gallery_filename.clone());

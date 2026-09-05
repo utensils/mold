@@ -3000,6 +3000,15 @@ pub struct OutputMetadata {
 }
 
 impl OutputMetadata {
+    /// Record how long the render took, from the completion's own number.
+    /// Zero is the wire's "not measured" and leaves the field absent, so a
+    /// saved print never claims a duration it does not have. Every
+    /// publication path calls this — the GPU worker and the single-worker
+    /// fallback alike — so the embedded chunk and the gallery row agree.
+    pub fn record_generation_time(&mut self, generation_time_ms: u64) {
+        self.generation_time_ms = (generation_time_ms > 0).then_some(generation_time_ms);
+    }
+
     pub fn from_generate_request(
         req: &GenerateRequest,
         seed: u64,
@@ -5466,7 +5475,9 @@ mod tests {
         assert!(json.get("generation_time_ms").is_none());
 
         let mut timed = parsed.clone();
-        timed.generation_time_ms = Some(4_200);
+        timed.record_generation_time(0);
+        assert_eq!(timed.generation_time_ms, None);
+        timed.record_generation_time(4_200);
         let json = serde_json::to_value(&timed).unwrap();
         assert_eq!(json["generation_time_ms"], 4_200);
         let back: OutputMetadata = serde_json::from_value(json).unwrap();

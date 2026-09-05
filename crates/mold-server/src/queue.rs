@@ -2559,6 +2559,9 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // replay, which would re-render it into a duplicate — and output
             // filenames are wall-clock, so nothing downstream could merge them.
             metadata.job_id = Some(job.id.clone());
+            // The same duration the GPU worker embeds, so a print made on the
+            // CPU fallback keeps its time through an export or a rescan too.
+            metadata.record_generation_time(response.generation_time_ms);
             if let Some(video) = response.video.as_ref() {
                 metadata.apply_video_output(video);
                 // The source print is not itself upscaled. Its requested

@@ -24,6 +24,7 @@ vi.mock("../../lib/openExternal", () => ({
 }));
 
 import InstalledTab from "./InstalledTab.vue";
+import installedTabSource from "./InstalledTab.vue?raw";
 import { formatGB } from "../../lib/format";
 import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
 import { useHostStatusStore } from "../../stores/hostStatus";
@@ -205,6 +206,22 @@ describe("InstalledTab shelf", () => {
     for (const row of wrapper.findAll("[data-test='model-table-row']")) {
       expect(row.element.children.length).toBe(header.element.children.length);
     }
+  });
+
+  /**
+   * The pinned axis is 42.5rem of fixed tracks plus gaps. At the app's own
+   * minimum window (1080px) with the 270px sidebar open, the shelf is about
+   * 810px wide and the name track would be left with the residency star and
+   * nothing else. The shelf is a size container: below the width where a
+   * name still fits, Speed folds away — header cell and row cell together,
+   * so the axis keeps one track per cell — before the name collapses.
+   */
+  it("folds the Speed column away before the name column collapses", () => {
+    expect(installedTabSource).toMatch(/\.model-table\s*\{[^}]*container-type:\s*inline-size/s);
+    expect(installedTabSource).toMatch(
+      /@container[^{]*\(max-width:[^)]*\)\s*\{[\s\S]*?--model-row-columns:\s*minmax\(0,\s*1fr\) 7\.5rem 12rem 8rem 10\.5rem/s,
+    );
+    expect(installedTabSource).toMatch(/model-table__speed[\s\S]*display:\s*none/s);
   });
 
   it("names a family group once, in words, never a second wire slug per row", async () => {

@@ -361,7 +361,7 @@ async function unload(m: LibraryModelEntry) {
       <span>Name</span>
       <span>Good for</span>
       <span>Size</span>
-      <span>Speed</span>
+      <span class="model-table__speed">Speed</span>
       <span>Machine</span>
       <span />
     </div>
@@ -512,11 +512,29 @@ async function unload(m: LibraryModelEntry) {
    own grid, so only identical track sizes share an axis. */
 .model-table {
   --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 4.5rem 8rem 10.5rem;
+  container-type: inline-size;
+  container-name: styles-shelf;
 }
 
 .model-table__header {
   display: grid;
   grid-template-columns: var(--model-row-columns);
   gap: 12px;
+}
+
+/* At the app's minimum window with the sidebar open the shelf is ~810px, and
+   42.5rem of fixed tracks would leave the name track with the residency star
+   alone. Speed is the column that folds first — its header cell and every
+   row's cell together, so the axis keeps one track per cell — and the pinned
+   axis drops back to the five tracks it had before the column existed. */
+@container styles-shelf (max-width: 60rem) {
+  .model-table {
+    --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 8rem 10.5rem;
+  }
+
+  .model-table__speed,
+  .model-table :deep(.model-table-row__speed) {
+    display: none;
+  }
 }
 </style>
