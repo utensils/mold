@@ -23,8 +23,9 @@ vi.mock("../lib/api/client", () => ({
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {}, inTauri: () => false }));
 
-import { useQueueCommands, type QueueCommands } from "./useQueueCommands";
+import { __resetQueueCommandState, useQueueCommands, type QueueCommands } from "./useQueueCommands";
 import { useConnectionStore } from "../stores/connection";
+import { useHostsStore } from "../stores/hosts";
 import { useJobsStore } from "../stores/jobs";
 
 function commands(): QueueCommands {
@@ -61,6 +62,7 @@ function snapshot(paused: boolean, canPause = true) {
 describe("useQueueCommands — Space on the display host's queue", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    __resetQueueCommandState();
     readyLocalHost();
   });
 
@@ -88,15 +90,168 @@ describe("useQueueCommands — Space on the display host's queue", () => {
   it("does nothing on a host that does not advertise queue pause", async () => {
     const jobs = useJobsStore();
     const pause = vi.spyOn(jobs, "pause").mockResolvedValue();
-    vi.spyOn(jobs, "refreshHost").mockImplementation(async () => {
-      jobs.queues["local"] = snapshot(false, false);
-    });
+    // The snapshot has already been read — the shell polls every host's queue
+    // from launch — and it says this machine cannot pause. Space must cost
+    // nothing at all: no request, and no swallowed key (see shortcuts.ts).
+    jobs.queues["local"] = snapshot(false, false);
+    const refresh = vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined as never);
 
     const api = commands();
     await api.togglePause();
 
+    expect(refresh).not.toHaveBeenCalled();
     expect(pause).not.toHaveBeenCalled();
     expect(api.canPause.value).toBe(false);
+  });
+});
+
+/**
+ * The rail's active card is fleet-wide — it shows whichever machine started
+ * most recently — while its pause button was bound to the DISPLAY host. On
+ * two machines that meant the card showed B's render and paused A.
+ */
+describe("useQueueCommands — pausing the row's own machine", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    readyLocalHost();
+  });
+
+  function twoHosts() {
+    useHostsStore().extras.push({
+      id: "plato",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: "plato-instance",
+    });
+    const jobs = useJobsStore();
+    jobs.queues["local"] = { ...(snapshot(false) as object), hostId: "local" } as never;
+    jobs.queues["plato"] = { ...(snapshot(false) as object), hostId: "plato" } as never;
+    return jobs;
+  }
+
+  it("pauses the machine the row runs on, not the one pinned for display", async () => {
+    const jobs = twoHosts();
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue();
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined as never);
+
+    const api = commands();
+    expect(useHostsStore().all.map((h) => h.id)).toContain("plato");
+    expect(api.canPauseFor("plato")).toBe(true);
+
+    await api.togglePauseFor("plato");
+    expect(pause).toHaveBeenCalledWith("plato");
+    expect(pause).not.toHaveBeenCalledWith("local");
+  });
+
+  it("reads a row's own machine, whatever kind of row it is", () => {
+    twoHosts();
+    const api = commands();
+    expect(api.hostIdFor({ kind: "print", print: { hostId: "plato" } } as never)).toBe("plato");
+    expect(api.hostIdFor({ kind: "sequence", sequence: { hostId: "plato" } } as never)).toBe(
+      "plato",
+    );
+    expect(api.hostIdFor({ kind: "shared", shared: { hostId: "plato" } } as never)).toBe("plato");
+  });
+
+  it("reports each machine's own paused state", () => {
+    const jobs = twoHosts();
+    jobs.queues["plato"] = { ...(snapshot(true) as object), hostId: "plato" } as never;
+    const api = commands();
+    expect(api.pausedFor("plato")).toBe(true);
+    expect(api.pausedFor("local")).toBe(false);
+    expect(api.pausedFor(null)).toBe(false);
+  });
+});
+
+/**
+ * Stop everything cancels every live print on every machine. It is the widest
+ * destructive action in the app and it used to be one unconfirmed click, while
+ * the narrower per-host Cancel all already armed itself.
+ */
+describe("useQueueCommands — Stop everything asks first", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    readyLocalHost();
+  });
+
+  it("opens the confirm instead of acting, and acts only on confirm", async () => {
+    const jobs = useJobsStore();
+    jobs.queues["local"] = snapshot(false);
+    const cancelAll = vi.spyOn(jobs, "cancelAll").mockResolvedValue(undefined as never);
+
+    const api = commands();
+    expect(api.stopEverythingOpen.value).toBe(false);
+
+    api.askStopEverything();
+    expect(api.stopEverythingOpen.value).toBe(true);
+    expect(cancelAll).not.toHaveBeenCalled();
+
+    await api.confirmStopEverything();
+    expect(cancelAll).toHaveBeenCalledWith("local");
+    expect(api.stopEverythingOpen.value).toBe(false);
+    expect(api.stopEverythingBusy.value).toBe(false);
+  });
+
+  it("closes without acting when the dialog is dismissed", async () => {
+    const jobs = useJobsStore();
+    jobs.queues["local"] = snapshot(false);
+    const cancelAll = vi.spyOn(jobs, "cancelAll").mockResolvedValue(undefined as never);
+
+    const api = commands();
+    api.askStopEverything();
+    api.cancelStopEverything();
+    expect(api.stopEverythingOpen.value).toBe(false);
+    expect(cancelAll).not.toHaveBeenCalled();
+  });
+
+  it("shares one dialog across every surface that offers the action", () => {
+    const rail = commands();
+    const view = commands();
+    rail.askStopEverything();
+    expect(view.stopEverythingOpen.value).toBe(true);
+    view.cancelStopEverything();
+    expect(rail.stopEverythingOpen.value).toBe(false);
+  });
+
+  it("counts the pictures and the machines the confirm is about to stop", () => {
+    const jobs = useJobsStore();
+    jobs.queues["local"] = snapshot(false);
+    const api = commands();
+    expect(api.stopEverythingSummary.value).toBe(
+      "Stops 0 pictures on 1 machine. Anything part-finished is lost.",
+    );
+  });
+});
+
+/**
+ * `useQueueCommands` is instantiated per SURFACE and per ROW (QueueRowMenu is
+ * rendered once per row), so an in-flight cancel guard held per instance let
+ * the Queue view's Stop button stay armed while the same row's ⋯ ▸ Stop had a
+ * request in the air.
+ */
+describe("useQueueCommands — the in-flight cancel guard is shared", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    readyLocalHost();
+  });
+
+  it("disarms the same row in every instance while one cancel is in flight", () => {
+    const rail = commands();
+    const rowMenu = commands();
+    const row = {
+      kind: "shared",
+      shared: { kind: "generation", key: "local:generation:1", can_cancel: true, stale: false },
+    } as never;
+
+    expect(rowMenu.canCancel(row)).toBe(true);
+    rail.cancellingShared.value = ["local:generation:1"];
+    expect(rowMenu.canCancel(row)).toBe(false);
   });
 });
 

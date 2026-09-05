@@ -6,6 +6,7 @@ import Sidebar from "./components/shell/Sidebar.vue";
 import StatusBar from "./components/shell/StatusBar.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
+import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
@@ -27,6 +28,7 @@ import {
   allowsNativeSelectAll,
   isSelectAllChord,
   overlayOwnsKeyboard,
+  ownsBareBackspace,
   resolveFocusSensitiveShortcut,
   resolveShellShortcut,
 } from "./lib/shortcuts";
@@ -35,6 +37,7 @@ import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
 import { useEventsStore } from "./stores/events";
+import { useGalleryStore } from "./stores/gallery";
 import { useHostsStore } from "./stores/hosts";
 import { useHostStatusStore } from "./stores/hostStatus";
 import { useJobsStore } from "./stores/jobs";
@@ -49,6 +52,7 @@ const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
 const events = useEventsStore();
+const gallery = useGalleryStore();
 const hostsStore = useHostsStore();
 const hostStatus = useHostStatusStore();
 const jobs = useJobsStore();
@@ -182,6 +186,20 @@ function onKeydown(e: KeyboardEvent) {
     }
     return;
   }
+  // The webview reads a bare Backspace outside a field as history Back, which
+  // in a single-page app unmounts the whole window. Nothing in the shell binds
+  // the key, so it dies here rather than in each view that might leave it
+  // unconsumed.
+  if (
+    e.key === "Backspace" &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !ownsBareBackspace(document.activeElement)
+  ) {
+    e.preventDefault();
+    return;
+  }
   const route = router.currentRoute.value.path;
   const action =
     resolveShellShortcut(e) ??
@@ -189,6 +207,9 @@ function onKeydown(e: KeyboardEvent) {
       target: document.activeElement,
       overlayOpen: ui.paletteOpen || contextMenu.visible || overlayOwnsKeyboard(),
       route,
+      // Space is claimed only where it can act. The status bar already hides
+      // its Space hint on a machine with no pause; this makes the key agree.
+      canPauseQueue: queueCommands.canPause.value,
     });
   if (!action) return;
   e.preventDefault();
@@ -367,6 +388,12 @@ onMounted(async () => {
   // while the local connection store owns its own error presentation.
   await Promise.allSettled([connectionStartup, hostStartup]);
   generation.resumeDurableGenerations();
+  // The sidebar's picture count, the Queue's Done today and Create's Recent
+  // strip all read the gallery store, so its one load belongs to the shell —
+  // every other loader is a view or an overlay opening, and both refresh paths
+  // refuse a bucket nobody has read. Guarded, because a workspace may have
+  // opened during startup and loaded it already.
+  if (!gallery.loaded) void gallery.fetchAll();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
@@ -393,6 +420,18 @@ onUnmounted(() => {
     <StatusBar />
     <Toasts />
     <CommandPalette />
+    <!-- Stop everything is fleet-wide and irreversible, and three doors open
+         it (the rail, the Queue view, the palette). One dialog, in the shell. -->
+    <ConfirmDialog
+      :open="queueCommands.stopEverythingOpen.value"
+      title="Stop everything?"
+      :message="queueCommands.stopEverythingSummary.value"
+      confirm-label="Stop everything"
+      danger
+      :busy="queueCommands.stopEverythingBusy.value"
+      @confirm="queueCommands.confirmStopEverything()"
+      @cancel="queueCommands.cancelStopEverything()"
+    />
     <ContextMenu />
     <LicenseAcceptanceDialog :open-external="openExternal" />
   </div>

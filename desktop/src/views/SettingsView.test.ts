@@ -57,13 +57,28 @@ async function typeSearch(wrapper: Awaited<ReturnType<typeof mountView>>, value:
   await flushPromises();
 }
 
-/** A recording IntersectionObserver — the nav highlight is driven by one, and
- *  what this suite cares about is how often the sections are re-registered. */
+/** A recording IntersectionObserver — the nav highlight is driven by one, the
+ *  section bodies are mounted by another, and what this suite cares about is
+ *  how often the sections are re-registered and when a body arrives. */
 const observe = vi.fn();
 const unobserve = vi.fn();
+/** Every live observer, so a test can drive the scroll it cannot perform. */
+const observers: { callback: IntersectionObserverCallback; targets: Element[] }[] = [];
 class RecordingObserver {
-  observe = observe;
-  unobserve = unobserve;
+  callback: IntersectionObserverCallback;
+  targets: Element[] = [];
+  constructor(callback: IntersectionObserverCallback) {
+    this.callback = callback;
+    observers.push(this);
+  }
+  observe = (el: Element) => {
+    this.targets.push(el);
+    observe(el);
+  };
+  unobserve = (el: Element) => {
+    this.targets = this.targets.filter((t) => t !== el);
+    unobserve(el);
+  };
   disconnect = vi.fn();
   takeRecords = () => [];
   root = null;
@@ -76,8 +91,23 @@ Object.defineProperty(globalThis, "IntersectionObserver", {
   value: RecordingObserver,
 });
 
+/** Scroll the page past every registered section: jsdom lays nothing out, so
+ *  the observers have to be driven by hand. */
+async function scrollThroughEverySection() {
+  for (const observer of [...observers]) {
+    const entries = observer.targets.map((target) => ({
+      target,
+      isIntersecting: true,
+      boundingClientRect: { top: 0 } as DOMRectReadOnly,
+    }));
+    observer.callback(entries as never, observer as never);
+  }
+  await flushPromises();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  observers.length = 0;
 });
 
 describe("SettingsView shell", () => {
@@ -87,6 +117,10 @@ describe("SettingsView shell", () => {
     expect(navLabels).toEqual(SECTIONS.map((s) => s.label));
     expect(navLabels[0]).toBe("Look");
     expect(navLabels.at(-1)).toBe("Updates & about");
+
+    // Every section is on the page from the start — this is one scrolling
+    // page, not an accordion. The BODIES arrive as the page is scrolled.
+    await scrollThroughEverySection();
 
     for (const id of [
       "app",
@@ -111,6 +145,47 @@ describe("SettingsView shell", () => {
     expect(
       wrapper.get("[data-test='section-updates']").find("[data-test='stub-about']").exists(),
     ).toBe(true);
+  });
+
+  it("holds a section's body back until the page is scrolled to it", async () => {
+    // Advanced alone opens three HTTP calls and a live device subscription on
+    // mount, and most launches never scroll to it. The section, its heading
+    // and its summary are there from the start; only the body waits.
+    const wrapper = await mountView();
+    expect(wrapper.find("[data-test='section-advanced']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='section-advanced']").text()).toContain("Advanced");
+
+    await scrollThroughEverySection();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+  });
+
+  it("mounts the body of a section the nav jumps to, since the scroll needs it", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
+    await wrapper.get("[data-test='settings-nav-advanced']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+  });
+
+  it("mounts every body when the browser has no IntersectionObserver", async () => {
+    const real = globalThis.IntersectionObserver;
+    Object.defineProperty(globalThis, "IntersectionObserver", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      const wrapper = await mountView();
+      expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+      expect(wrapper.find("[data-test='stub-media']").exists()).toBe(true);
+    } finally {
+      Object.defineProperty(globalThis, "IntersectionObserver", {
+        configurable: true,
+        writable: true,
+        value: real,
+      });
+    }
   });
 
   it("highlights Look first and jumps to a section from the nav", async () => {
@@ -215,8 +290,12 @@ describe("SettingsView shell", () => {
     await typeSearch(wrapper, "sty");
 
     // Only sections that genuinely left the page are unobserved, and only
-    // ones that genuinely arrived are observed — never the whole set.
-    expect(unobserve.mock.calls.length).toBeLessThan(SECTIONS.length);
+    // ones that genuinely arrived are observed — never the whole set. Counted
+    // over distinct ELEMENTS: each section is registered with two observers
+    // (the nav highlight's band, and the one that mounts bodies ahead of the
+    // scroll), so raw call counts would say nothing about re-registration.
+    const unobserved = new Set(unobserve.mock.calls.map((call) => call[0]));
+    expect(unobserved.size).toBeLessThan(SECTIONS.length);
     expect(observe).not.toHaveBeenCalled();
   });
 

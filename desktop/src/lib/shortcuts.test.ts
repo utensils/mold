@@ -5,6 +5,7 @@ import {
   allowsNativeSelectAll,
   isSelectAllChord,
   overlayOwnsKeyboard,
+  ownsBareBackspace,
   resolveFocusSensitiveShortcut,
   resolveShellShortcut,
   type ShellKeyContext,
@@ -110,6 +111,7 @@ describe("resolveFocusSensitiveShortcut", () => {
     target: null,
     overlayOpen: false,
     route: "/create",
+    canPauseQueue: true,
     ...over,
   });
 
@@ -142,6 +144,20 @@ describe("resolveFocusSensitiveShortcut", () => {
   it("stands down under an overlay, and in My images where Space is Quick Look", () => {
     expect(resolveFocusSensitiveShortcut(space(), context({ overlayOpen: true }))).toBeNull();
     expect(resolveFocusSensitiveShortcut(space(), context({ route: "/library" }))).toBeNull();
+  });
+
+  it("leaves Space alone on a machine whose queue cannot be paused", () => {
+    // The shell claims a bare key only where it can act: a host that does not
+    // advertise pause used to swallow Space, fire a queue read, and do
+    // nothing. The status bar already hides its Space hint on such a host.
+    expect(resolveFocusSensitiveShortcut(space(), context({ canPauseQueue: false }))).toBeNull();
+    // ⌥↩ is unrelated to the queue and keeps working there.
+    expect(
+      resolveFocusSensitiveShortcut(
+        space({ key: "Enter", altKey: true }),
+        context({ canPauseQueue: false }),
+      ),
+    ).toEqual({ kind: "make-variations" });
   });
 
   it("ignores a modified or repeating Space, and every other bare key", () => {
@@ -187,6 +203,32 @@ describe("resolveFocusSensitiveShortcut", () => {
       ),
     ).toBeNull();
     expect(resolveFocusSensitiveShortcut(space({ key: "Enter" }), context())).toBeNull();
+  });
+});
+
+describe("ownsBareBackspace", () => {
+  it("keeps Backspace only inside a text-editing surface", () => {
+    // Backspace outside a field is the webview's history Back. Nothing in the
+    // shell binds it, and a Back inside a single-page app unmounts the whole
+    // window — so the shell swallows it everywhere the caret is not.
+    expect(ownsBareBackspace(document.createElement("input"))).toBe(true);
+    expect(ownsBareBackspace(document.createElement("textarea"))).toBe(true);
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    document.body.appendChild(editable);
+    expect(ownsBareBackspace(editable)).toBe(true);
+  });
+
+  it("claims Backspace on chrome, including a focused control or nothing at all", () => {
+    expect(ownsBareBackspace(null)).toBe(false);
+    expect(ownsBareBackspace(document.body)).toBe(false);
+    expect(ownsBareBackspace(document.createElement("button"))).toBe(false);
+    // A range slider is an input, but it is chrome: Backspace does nothing in
+    // it and everything to the window.
+    const range = document.createElement("input");
+    range.type = "range";
+    expect(ownsBareBackspace(range)).toBe(false);
+    expect(ownsBareBackspace(document.createElement("select"))).toBe(false);
   });
 });
 

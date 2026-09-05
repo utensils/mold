@@ -41,6 +41,13 @@ const batchPosition = (row: QueueRow) => batchPositionLabel(row, generation.jobs
 const explainOpen = ref(false);
 
 const active = computed(() => queue.active.value);
+// The active card is fleet-wide — it shows whichever machine started most
+// recently — so its pause, its label and its meter tint all belong to THAT
+// machine. The header's pause above is the display host's, deliberately: it
+// is the whole-queue control the status bar's Space hint describes.
+const activeHostId = computed(() => (active.value ? commands.hostIdFor(active.value) : null));
+const activeCanPause = computed(() => commands.canPauseFor(activeHostId.value));
+const activePaused = computed(() => commands.pausedFor(activeHostId.value));
 // The rail is context, not the record: it shows what fits a sidebar without
 // becoming a scroll of its own. The Queue view is the full list.
 const RAIL_ROWS = 12;
@@ -111,7 +118,7 @@ function progressPct(row: QueueRow): number | null {
         title="Stop everything"
         aria-label="Stop everything"
         :disabled="queue.liveCount.value === 0"
-        @click="commands.stopEverything()"
+        @click="commands.askStopEverything()"
       >
         <Icon name="stop" :size="12" />
       </button>
@@ -172,30 +179,26 @@ function progressPct(row: QueueRow): number | null {
             <div class="flex items-center gap-1.5">
               <span
                 class="block h-1.5 flex-1 overflow-hidden bg-bg-crust"
-                :class="commands.paused.value ? 'opacity-50' : ''"
+                :class="activePaused ? 'opacity-50' : ''"
                 aria-hidden="true"
               >
                 <span
                   class="block h-full bg-accent"
                   :style="{ width: `${progressPct(active) ?? 8}%` }"
-                  :class="progressPct(active) === null && !commands.paused.value ? 'ms-pulse' : ''"
+                  :class="progressPct(active) === null && !activePaused ? 'ms-pulse' : ''"
                 />
               </span>
               <button
-                v-if="commands.canPause.value"
+                v-if="activeCanPause"
                 type="button"
                 data-test="queue-active-pause"
                 class="ms-toolbar-button ms-toolbar-button--icon"
-                :class="commands.paused.value ? 'border-accent text-accent' : ''"
-                :title="
-                  commands.paused.value ? 'Resume the queue' : 'Pause the queue after this image'
-                "
-                :aria-label="
-                  commands.paused.value ? 'Resume the queue' : 'Pause the queue after this image'
-                "
-                @click.stop="commands.togglePause()"
+                :class="activePaused ? 'border-accent text-accent' : ''"
+                :title="activePaused ? 'Resume the queue' : 'Pause the queue after this image'"
+                :aria-label="activePaused ? 'Resume the queue' : 'Pause the queue after this image'"
+                @click.stop="commands.togglePauseFor(activeHostId)"
               >
-                <Icon :name="commands.paused.value ? 'play' : 'pause'" :size="11" />
+                <Icon :name="activePaused ? 'play' : 'pause'" :size="11" />
               </button>
               <button
                 v-if="commands.canCancel(active)"

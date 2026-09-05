@@ -12,10 +12,15 @@ import Icon from "@ui/components/Icon.vue";
 import { trashRetentionSummary, type RetentionHost } from "@studio/lib/libraryOrganization";
 import { formatBytes } from "../../lib/format";
 
+/** The banner's rows carry the host key the retention control routes on; the
+ *  shared summary only needs the label and the number. */
+type BannerRetentionHost = RetentionHost & { key?: string };
+
 const props = withDefaults(
   defineProps<{
-    /** Trash-capable hosts, This device first. */
-    hosts: RetentionHost[];
+    /** Trash-capable hosts. This device leads WHEN it keeps a trash: a host
+     *  with none is skipped, so the first row can be a remote. */
+    hosts: BannerRetentionHost[];
     /** Logical prints in the trash across hosts. */
     count: number;
     /** Bytes across the trash, when known. */
@@ -37,9 +42,14 @@ const countLabel = computed(() => {
   return props.bytes != null && props.bytes > 0 ? `${base} · ${formatBytes(props.bytes)}` : base;
 });
 
-/** This device leads the list, so its retention is the one the control names. */
+/** The machine the control edits: This device where it keeps a trash — that
+ *  is the one the change is routed to — otherwise the first machine listed.
+ *  Machines that differ are named in the sentence beside it. */
+const retentionHost = computed(
+  () => props.hosts.find((host) => host.key === "local") ?? props.hosts[0] ?? null,
+);
 const retentionLabel = computed(() => {
-  const days = props.hosts[0]?.retentionDays ?? 0;
+  const days = retentionHost.value?.retentionDays ?? 0;
   return days > 0 ? `Keep for ${days} ${days === 1 ? "day" : "days"} ▼` : "Keep forever ▼";
 });
 </script>

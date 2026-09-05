@@ -87,8 +87,31 @@ mkdir -p "$fake/web/node_modules/x" "$fake/website/node_modules/y"
 [ ! -e "$fake/website/node_modules" ] || fail "--node-modules kept website/node_modules"
 [ -f "$fake/web/src/main.ts" ] || fail "--node-modules touched sources"
 
-# ── a CARGO_TARGET_DIR is emptied, never removed ───────────────────────────
+# ── a shared target dir is NAMED, with its warning, before anything goes ──
+# The target dirs on the development machines are one directory behind every
+# worktree of the repo, so this is the message that says which one and what
+# else loses its build. It has to arrive before the removal, not with it.
 shared="$work/shared-target"
+mkdir -p "$shared/debug"
+touch "$shared/debug/thing"
+# The script names the RESOLVED path, which on macOS differs from $TMPDIR's.
+shared_real="$(cd "$shared" && pwd -P)"
+out="$(CARGO_TARGET_DIR="$shared" "$script" --root "$fake" --dry-run)"
+case "$out" in
+  *"shared build directory: $shared_real"*) ;;
+  *) fail "the shared target directory was not named before emptying" ;;
+esac
+case "$out" in
+  *"warning:"*) ;;
+  *) fail "no warning before emptying a shared target directory" ;;
+esac
+named_at="$(printf '%s\n' "$out" | grep -n "shared build directory:" | head -1 | cut -d: -f1)"
+removed_at="$(printf '%s\n' "$out" | grep -n "would remove the contents of" | head -1 | cut -d: -f1)"
+[ -n "$named_at" ] && [ -n "$removed_at" ] || fail "expected both the notice and the removal line"
+[ "$named_at" -lt "$removed_at" ] || fail "the warning did not come before the removal"
+[ -f "$shared/debug/thing" ] || fail "--dry-run removed the shared target contents"
+
+# ── a CARGO_TARGET_DIR is emptied, never removed ───────────────────────────
 mkdir -p "$shared/debug"
 touch "$shared/debug/thing"
 CARGO_TARGET_DIR="$shared" "$script" --root "$fake" >/dev/null

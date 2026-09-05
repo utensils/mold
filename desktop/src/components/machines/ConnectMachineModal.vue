@@ -21,6 +21,10 @@ const appPrefs = useAppPrefsStore();
 const hosts = useHostsStore();
 
 const address = ref("");
+/** What to call this machine. A discovered machine arrives with a name; a
+ *  typed address has none, and this is the one moment the user knows what the
+ *  box is. Renaming later is possible, from Machines. */
+const displayName = ref("");
 const apiKey = ref("");
 const makeTarget = ref(false);
 const error = ref<string | null>(null);
@@ -120,7 +124,12 @@ async function connect() {
   connecting.value = true;
   error.value = null;
   try {
-    const host = await hosts.connect(url, apiKey.value || null, selected.value?.name ?? null);
+    // A typed name wins; otherwise a discovered machine keeps its own.
+    const host = await hosts.connect(
+      url,
+      apiKey.value || null,
+      displayName.value.trim() || selected.value?.name || null,
+    );
     if (makeTarget.value) await appPrefs.update({ generateTargetHost: host.id });
     emit("connected");
     emit("close");
@@ -214,6 +223,20 @@ async function connect() {
           type="text"
           placeholder="http://192.168.1.31:7680"
           class="h-8 rounded-control border border-border bg-bg px-2.5 font-mono text-xs text-fg outline-none placeholder:text-fg-faint focus:border-border-focus"
+          @keydown.enter="canConnect && connect()"
+        />
+      </label>
+
+      <!-- What to call it -->
+      <label v-if="!initialHost" class="flex flex-col gap-1.5">
+        <span class="text-xs text-fg-dim">Name, if you want one</span>
+        <input
+          v-model="displayName"
+          data-selectable
+          data-test="connect-name"
+          type="text"
+          placeholder="Render box"
+          class="h-8 rounded-control border border-border bg-bg px-2.5 text-xs text-fg outline-none placeholder:text-fg-faint focus:border-border-focus"
           @keydown.enter="canConnect && connect()"
         />
       </label>

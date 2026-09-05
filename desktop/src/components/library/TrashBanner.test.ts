@@ -54,6 +54,36 @@ describe("TrashBanner", () => {
     expect(wrapper.emitted("emptyNow")).toHaveLength(1);
   });
 
+  it("names the retention of the machine the control actually edits", async () => {
+    // The list is not always This-device-first: a host with no trash is
+    // skipped entirely, so the first row can be a remote. The control routes
+    // to Settings whenever This device keeps a trash, and it used to print the
+    // first row's number there — contradicting its own sentence two spans left.
+    const wrapper = mount(TrashBanner, {
+      props: {
+        hosts: [
+          { key: "plato", label: "plato", retentionDays: 7 },
+          { key: "local", label: "This device", retentionDays: 30 },
+        ],
+        count: 2,
+      },
+    });
+    expect(wrapper.get("[data-test='trash-banner-link']").text()).toBe("Keep for 30 days ▼");
+  });
+
+  it("falls back to the first machine when this device keeps no trash", () => {
+    const wrapper = mount(TrashBanner, {
+      props: {
+        hosts: [
+          { key: "plato", label: "plato", retentionDays: 7 },
+          { key: "render", label: "Render box", retentionDays: 14 },
+        ],
+        count: 2,
+      },
+    });
+    expect(wrapper.get("[data-test='trash-banner-link']").text()).toBe("Keep for 7 days ▼");
+  });
+
   it("disables Empty now at zero", () => {
     const wrapper = mount(TrashBanner, {
       props: { hosts: [{ label: "This device", retentionDays: 30 }], count: 0 },

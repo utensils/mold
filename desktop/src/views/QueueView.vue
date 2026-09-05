@@ -160,7 +160,7 @@ function previewSrc(row: QueueRow): string | null {
         data-test="queue-stop-all"
         class="ms-toolbar-button ms-toolbar-button--danger-hover"
         :disabled="queue.liveCount.value === 0"
-        @click="commands.stopEverything()"
+        @click="commands.askStopEverything()"
       >
         Stop everything
       </button>

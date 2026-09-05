@@ -111,22 +111,6 @@ export const useHostStatusStore = defineStore("hostStatus", {
     hostMemoryPressure(): HostMemoryLevel {
       return hostMemoryLevel(this.hostMemory) ?? "ok";
     },
-    /** Queue depth and loaded models for whichever host is displayed. */
-    queue(): { modelsLoaded: string[]; depth: number | null; capacity: number | null } {
-      if (this.displayingRemote) {
-        const t = useHostsStore().telemetry[this.displayHost!.id];
-        return {
-          modelsLoaded: t?.modelsLoaded ?? [],
-          depth: t?.queueDepth ?? null,
-          capacity: t?.queueCapacity ?? null,
-        };
-      }
-      return {
-        modelsLoaded: this.status?.models_loaded ?? [],
-        depth: this.status?.queue_depth ?? null,
-        capacity: this.status?.queue_capacity ?? null,
-      };
-    },
     /** One plain-English line for the machine card and the status bar. */
     sentence(): string {
       const remote = this.displayingRemote;

@@ -20,8 +20,26 @@ export interface QueueCommands {
   canPause: ComputedRef<boolean>;
   paused: ComputedRef<boolean>;
   togglePause(): Promise<void>;
-  /** Cancel every live print this client owns and every host's queue. */
+  /** The same three questions for ONE named machine, which is what a queue row
+   * needs: the rail's active card is fleet-wide, so the machine it shows is
+   * not necessarily the one the status bar displays. */
+  canPauseFor(hostId: string | null): boolean;
+  pausedFor(hostId: string | null): boolean;
+  togglePauseFor(hostId: string | null): Promise<void>;
+  /** The machine a row's work runs on, whatever kind of row it is. */
+  hostIdFor(row: QueueRow): string | null;
+  /** Cancel every live print this client owns and every host's queue. The
+   * unconfirmed primitive: every surface goes through `askStopEverything`. */
   stopEverything(): Promise<void>;
+  /** Raise the one shared confirm. The action is fleet-wide and irreversible,
+   * so no surface fires it directly. */
+  askStopEverything(): void;
+  confirmStopEverything(): Promise<void>;
+  cancelStopEverything(): void;
+  stopEverythingOpen: Ref<boolean>;
+  stopEverythingBusy: Ref<boolean>;
+  /** What the confirm says it is about to stop, in pictures and machines. */
+  stopEverythingSummary: ComputedRef<string>;
   canCancel(row: QueueRow): boolean;
   cancel(row: QueueRow): Promise<void>;
   /** Whether this row may be dragged: its host offers reorder and the row is
@@ -35,6 +53,31 @@ export interface QueueCommands {
   open(row: QueueRow): void;
   contextMenu(event: MouseEvent, row: QueueRow): void;
   cancellingShared: Ref<string[]>;
+}
+
+/*
+ * Module scope, deliberately. `useQueueCommands` is instantiated per SURFACE
+ * (rail, Queue view, status bar, palette, App) and per ROW — `QueueRowMenu` is
+ * rendered once per row — so state that describes the APP rather than one
+ * caller has to live above the factory:
+ *
+ *  - `cancellingShared` is the in-flight guard for a shared row's Stop. Held
+ *    per instance, the Queue view's Stop stayed armed while the same row's
+ *    ⋯ ▸ Stop had a request in the air, and both were sent.
+ *  - the Stop-everything dialog is ONE dialog, rendered once in App.vue and
+ *    opened from three doors (the rail, the Queue view, ⌘K).
+ *
+ * Pinia does not reset these between tests; `__resetQueueCommandState()` does.
+ */
+const cancellingShared = ref<string[]>([]);
+const stopEverythingOpen = ref(false);
+const stopEverythingBusy = ref(false);
+
+/** Clear the module-scoped queue state. Tests only. */
+export function __resetQueueCommandState(): void {
+  cancellingShared.value = [];
+  stopEverythingOpen.value = false;
+  stopEverythingBusy.value = false;
 }
 
 /**
@@ -55,7 +98,6 @@ export function useQueueCommands(): QueueCommands {
   const toasts = useToastStore();
   const queue = useQueueActivity();
   const openLiveWork = useOpenLiveWork();
-  const cancellingShared = ref<string[]>([]);
 
   const displayQueue = computed(() => {
     const host = hostStatus.displayHost;
@@ -64,27 +106,54 @@ export function useQueueCommands(): QueueCommands {
   const canPause = computed(() => displayQueue.value?.caps?.canPause === true);
   const paused = computed(() => displayQueue.value?.paused === true);
 
+  /** One named machine's queue snapshot, or null while nothing has read it. */
+  function queueFor(hostId: string | null) {
+    return hostId ? (jobs.queues[hostId] ?? null) : null;
+  }
+  function canPauseFor(hostId: string | null): boolean {
+    return queueFor(hostId)?.caps?.canPause === true;
+  }
+  function pausedFor(hostId: string | null): boolean {
+    return queueFor(hostId)?.paused === true;
+  }
+
   function report(error: unknown) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
 
   /**
-   * Pause or resume the display host's queue. The snapshot is refreshed FIRST:
+   * Pause or resume ONE machine's queue. The snapshot is refreshed FIRST:
    * `paused` is read off `jobs.queues`, and pausing a host whose snapshot has
    * not been read yet writes nothing back — so a second Space would pause
    * again instead of resuming, leaving the queue stopped with no way back.
+   *
+   * The one thing that happens BEFORE that refresh is the capability check,
+   * and only against a snapshot that has already been read: a machine known
+   * not to pause costs no request at all, while a machine nobody has asked yet
+   * still refreshes, because a cold launch must be able to pause.
    */
-  async function togglePause() {
-    const host = hostStatus.displayHost;
+  async function togglePauseFor(hostId: string | null) {
+    if (!hostId) return;
+    const display = hostStatus.displayHost;
+    const host =
+      hosts.all.find((candidate) => candidate.id === hostId) ??
+      (display?.id === hostId ? display : null);
     if (!host) return;
+    if (queueFor(hostId) && !canPauseFor(hostId)) return;
     try {
       await jobs.refreshHost(host);
-      if (!canPause.value) return;
-      if (paused.value) await jobs.resume(host.id);
-      else await jobs.pause(host.id);
+      if (!canPauseFor(hostId)) return;
+      if (pausedFor(hostId)) await jobs.resume(hostId);
+      else await jobs.pause(hostId);
     } catch (error) {
       report(error);
     }
+  }
+
+  /** Pause or resume the DISPLAY host's queue — the rail's header control,
+   * the status bar's hint, and Space. */
+  async function togglePause() {
+    await togglePauseFor(hostStatus.displayHost?.id ?? null);
   }
 
   async function cancelPrint(job: Job) {
@@ -160,15 +229,30 @@ export function useQueueCommands(): QueueCommands {
     else await chainJobs.cancel(row.sequence.hostId, row.sequence.jobId).catch(report);
   }
 
-  /** The host a row's server queue lives on, and the row's server id. */
+  /** The host a row's server queue lives on, and the row's server id. A
+   * sequence answers with its chain job, which lives in a different id space
+   * from the generation queue — so it resolves a HOST but never matches a
+   * queue entry, and the reorder and per-job pause entries stay empty for it. */
   function serverRef(row: QueueRow): { hostId: string; id: string } | null {
     if (row.kind === "print") {
       return row.print.id ? { hostId: row.print.hostId ?? "local", id: row.print.id } : null;
+    }
+    if (row.kind === "sequence") {
+      return { hostId: row.sequence.hostId, id: row.sequence.jobId };
     }
     if (row.kind === "shared" && row.shared.kind === "generation") {
       return { hostId: row.shared.hostId, id: row.shared.id };
     }
     return null;
+  }
+
+  /** The machine a row's work runs on. Unlike `serverRef` this answers for a
+   * print that has no server id yet, because the queue it belongs to is
+   * already decided. */
+  function hostIdFor(row: QueueRow): string | null {
+    if (row.kind === "print") return row.print.hostId ?? hosts.primaryHost?.id ?? "local";
+    if (row.kind === "sequence") return row.sequence.hostId;
+    return row.shared.hostId;
   }
 
   /** This row's slot among its host's QUEUED entries — the index space the
@@ -267,6 +351,50 @@ export function useQueueCommands(): QueueCommands {
       if (host.status === "ready" && jobs.queues[host.id]?.caps?.canCancelAll) {
         await jobs.cancelAll(host.id).catch(report);
       }
+    }
+  }
+
+  /** Every machine the fan-out would touch: one that owns a cancellable row,
+   * or one whose queue offers Cancel all. */
+  const stopEverythingHostCount = computed(() => {
+    const ids = new Set<string>();
+    for (const row of queue.rows.value) {
+      if (!canCancel(row)) continue;
+      const id = hostIdFor(row);
+      if (id) ids.add(id);
+    }
+    for (const host of hosts.all) {
+      if (host.status === "ready" && jobs.queues[host.id]?.caps?.canCancelAll) ids.add(host.id);
+    }
+    return ids.size;
+  });
+
+  const stopEverythingSummary = computed(() => {
+    const pictures = queue.liveCount.value;
+    const machines = stopEverythingHostCount.value;
+    return (
+      `Stops ${pictures} ${pictures === 1 ? "picture" : "pictures"} on ` +
+      `${machines} ${machines === 1 ? "machine" : "machines"}. ` +
+      "Anything part-finished is lost."
+    );
+  });
+
+  function askStopEverything() {
+    stopEverythingOpen.value = true;
+  }
+
+  function cancelStopEverything() {
+    if (!stopEverythingBusy.value) stopEverythingOpen.value = false;
+  }
+
+  async function confirmStopEverything() {
+    if (stopEverythingBusy.value) return;
+    stopEverythingBusy.value = true;
+    try {
+      await stopEverything();
+    } finally {
+      stopEverythingBusy.value = false;
+      stopEverythingOpen.value = false;
     }
   }
 
@@ -372,7 +500,17 @@ export function useQueueCommands(): QueueCommands {
     canPause,
     paused,
     togglePause,
+    canPauseFor,
+    pausedFor,
+    togglePauseFor,
+    hostIdFor,
     stopEverything,
+    askStopEverything,
+    confirmStopEverything,
+    cancelStopEverything,
+    stopEverythingOpen,
+    stopEverythingBusy,
+    stopEverythingSummary,
     canCancel,
     cancel,
     canReorder,

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
@@ -14,6 +14,11 @@ import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useComposerStore } from "../../stores/composer";
 import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
 import { useJobsStore } from "../../stores/jobs";
+import { __resetQueueCommandState } from "../../composables/useQueueCommands";
+
+// The queue composable's in-flight guard and Stop-everything dialog live at
+// module scope (one app, one dialog), and pinia does not clear them.
+beforeEach(() => __resetQueueCommandState());
 
 const stub = { template: "<div />" };
 const authedMediaStub = {
@@ -809,6 +814,63 @@ describe("Sidebar queue controls", () => {
     await wrapper.get("[data-test='queue-active-pause']").trigger("click");
     await flushPromises();
     expect(pause).toHaveBeenCalledWith("local");
+  });
+
+  it("pauses the machine the active card is showing, not the pinned one", async () => {
+    // The active card is fleet-wide: it shows whichever machine started most
+    // recently. Its pause was bound to the DISPLAY host, so on two machines
+    // the card showed plato's render and paused This Mac.
+    const wrapper = await mountAt("/create");
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    connection.status = "ready";
+    useHostsStore().extras.push({
+      id: "plato",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: "plato-instance",
+    });
+    const liveActivity = useLiveActivityStore();
+    vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
+    liveActivity.hosts = {
+      plato: {
+        hostId: "plato",
+        hostLabel: "plato",
+        target: { baseUrl: "http://plato:7680", apiKey: null },
+        routeUrl: "http://plato:7680",
+        instanceId: "plato-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "plato-running",
+            kind: "generation",
+            phase: "running",
+            model: "flux-dev",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: true,
+          },
+        ],
+      },
+    } as never;
+    const jobs = useJobsStore();
+    // BOTH machines can pause, so only the binding decides which one is hit.
+    jobs.queues.local = { entries: [], caps: { canPause: true }, paused: false } as never;
+    jobs.queues.plato = { entries: [], caps: { canPause: true }, paused: false } as never;
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined as never);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-active-pause']").trigger("click");
+    await flushPromises();
+    expect(pause).toHaveBeenCalledWith("plato");
+    expect(pause).not.toHaveBeenCalledWith("local");
   });
 
   it("shortens the rail's status to a middot the full Queue view keeps as a dash", async () => {

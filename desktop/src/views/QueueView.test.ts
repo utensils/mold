@@ -1,8 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { defineComponent } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
-import { createPinia, setActivePinia } from "pinia";
+import { createPinia, getActivePinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 import QueueView from "./QueueView.vue";
+import {
+  __resetQueueCommandState,
+  useQueueCommands,
+  type QueueCommands,
+} from "../composables/useQueueCommands";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useConnectionStore } from "../stores/connection";
 import { isSeparator, useContextMenuStore } from "../stores/contextMenu";
@@ -13,6 +19,10 @@ import { useJobsStore, type HostQueueSnapshot } from "../stores/jobs";
 
 const stub = { template: "<div />" };
 let router: Router;
+
+// One app, one Stop-everything dialog: that state is module-scoped and pinia
+// does not clear it between tests.
+beforeEach(() => __resetQueueCommandState());
 
 async function mountView() {
   router = createRouter({
@@ -36,6 +46,22 @@ async function mountView() {
 
 function menuLabels() {
   return useContextMenuStore().entries.flatMap((e) => (isSeparator(e) ? [] : [e.label]));
+}
+
+/** A handle on the same shared queue commands the view holds — the Stop
+ *  everything dialog is module-scoped and rendered once, in the shell. */
+function queueCommands(): QueueCommands {
+  let api!: QueueCommands;
+  mount(
+    defineComponent({
+      setup() {
+        api = useQueueCommands();
+        return () => null;
+      },
+    }),
+    { global: { plugins: [getActivePinia() as never, router] } },
+  );
+  return api;
 }
 
 describe("QueueView", () => {
@@ -136,9 +162,48 @@ describe("QueueView", () => {
     await row.get("[data-test='queue-row-menu']").trigger("click");
     expect(menuLabels()).toEqual(["Open", "Stop"]);
 
+    // Stop everything is the widest destructive action in the app: it asks
+    // first, from every door, and the one dialog lives in the shell.
     await wrapper.get("[data-test='queue-stop-all']").trigger("click");
     await flushPromises();
+    expect(cancel).not.toHaveBeenCalled();
+    const commands = queueCommands();
+    expect(commands.stopEverythingOpen.value).toBe(true);
+    expect(commands.stopEverythingSummary.value).toContain("Anything part-finished is lost.");
+
+    await commands.confirmStopEverything();
+    await flushPromises();
     expect(cancel).toHaveBeenCalledWith("local", "job-1");
+    expect(commands.stopEverythingOpen.value).toBe(false);
+  });
+
+  it("closes the Stop everything confirm without stopping anything", async () => {
+    const wrapper = await mountView();
+    const chains = useChainJobsStore();
+    chains.byHost.local = {
+      jobs: [
+        {
+          id: "job-1",
+          state: "running",
+          model: "ltx-video",
+          stage_count: 3,
+          current_stage: 1,
+          created_at_unix_ms: Date.now(),
+          updated_at_unix_ms: Date.now(),
+          error: null,
+        },
+      ],
+      error: null,
+    };
+    const cancel = vi.spyOn(chains, "cancel").mockResolvedValue(undefined as never);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-stop-all']").trigger("click");
+    const commands = queueCommands();
+    commands.cancelStopEverything();
+    await flushPromises();
+    expect(commands.stopEverythingOpen.value).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
   });
   it("lets a waiting print jump the line where its host can reorder", async () => {
     const wrapper = await mountView();

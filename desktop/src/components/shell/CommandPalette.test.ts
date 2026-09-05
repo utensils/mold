@@ -29,11 +29,13 @@ import { newJob, useGenerationStore } from "../../stores/generation";
 import { useToastStore } from "../../stores/toasts";
 import { useJobsStore } from "../../stores/jobs";
 import { useGenerateFormStore } from "../../stores/generateForm";
+import { __resetQueueCommandState, useQueueCommands } from "../../composables/useQueueCommands";
 import { altShortcutLabel, shortcutLabel } from "../../lib/platform";
 import type { GalleryImage, ModelEntry } from "../../lib/api/types";
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  __resetQueueCommandState();
   routerPush.mockClear();
   searchCatalogMock.mockClear();
   searchCatalogMock.mockResolvedValue({ entries: [], page: 1, page_size: 12, total: 0 });
@@ -157,26 +159,38 @@ describe("CommandPalette command registry", () => {
     wrapper.unmount();
   });
 
-  it("reports the confirmed count when bulk cancellation races terminal jobs", async () => {
+  it("routes Stop everything to the one shared confirm, and counts the whole fleet", async () => {
+    // The palette used to run its own loop over this client's pending prints
+    // under the same words as the rail's fleet-wide action: same name, a
+    // strict subset of the blast radius, and no confirmation on either.
     const generation = useGenerationStore();
     generation.jobs = [
       { clientId: 1, status: "queued" },
       { clientId: 2, status: "queued" },
     ] as never;
-    vi.spyOn(generation, "cancel").mockImplementation(async (id) => id === 1);
+    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     const wrapper = await openPalette();
     await wrapper.get("input").setValue("stop everything");
 
     await wrapper
       .findAll("[role='option']")
-      .find((option) => option.text().includes("Stop everything · 2 waiting"))!
+      .find((option) => option.text().includes("Stop everything · 2 pictures"))!
       .trigger("click");
     await flushPromises();
 
-    expect(useToastStore().items.map((item) => item.message)).toContain(
-      "Cancelled 1 job; remaining jobs already settled",
-    );
-    expect(useToastStore().items.map((item) => item.message)).not.toContain("Cancelled all jobs");
+    expect(cancel).not.toHaveBeenCalled();
+    expect(useToastStore().items).toHaveLength(0);
+    expect(useQueueCommands().stopEverythingOpen.value).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("offers Stop everything for a single live print, which the old gate hid", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ clientId: 1, status: "queued" }] as never;
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("stop everything");
+    const texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("Stop everything · 1 picture"))).toBe(true);
     wrapper.unmount();
   });
 });

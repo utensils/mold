@@ -26,6 +26,7 @@ vi.mock("../../lib/api/client", async (importOriginal) => ({
 import ConnectMachineModal from "./ConnectMachineModal.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
+import { useHostsStore } from "../../stores/hosts";
 
 const LOCKED = {
   name: "locked-7680",
@@ -51,6 +52,26 @@ async function mountModal(props: Record<string, unknown> = {}) {
   return wrapper;
 }
 
+/** The same modal with the hosts store's `connect` stubbed. The spy is placed
+ *  BEFORE the mount, on the very pinia the component is given, so what the
+ *  dialog hands the store is read off one object and not two. */
+async function mountWithConnectSpy() {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const conn = useConnectionStore();
+  conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+  conn.status = "ready";
+  const connect = vi
+    .spyOn(useHostsStore(), "connect")
+    .mockResolvedValue({ id: "connected-host" } as never);
+  const wrapper = mount(ConnectMachineModal, {
+    props: { open: true },
+    global: { plugins: [pinia] },
+  });
+  await flushPromises();
+  return { wrapper, connect };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   discoverServers.mockResolvedValue([]);
@@ -73,6 +94,29 @@ describe("ConnectMachineModal", () => {
     expect(testRemoteHost).toHaveBeenCalledWith("http://hal9000:7680", null);
     expect(wrapper.emitted("connected")).toHaveLength(1);
     expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
+  it("names a hand-typed machine at connect time", async () => {
+    // A discovered machine arrives with a name; a typed address sent null and
+    // got whatever label the store could derive from the URL, so the one
+    // moment the user knows what to call the machine had no field for it.
+    const { wrapper, connect } = await mountWithConnectSpy();
+    await wrapper.get("[data-test='connect-address']").setValue("hal9000");
+    await wrapper.get("[data-test='connect-name']").setValue("Render box");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+
+    expect(connect).toHaveBeenCalledWith("hal9000", null, "Render box");
+  });
+
+  it("keeps a discovered machine's own name when the field is left empty", async () => {
+    discoverServers.mockResolvedValue([{ ...LOCKED, name: "studio-7680", authRequired: false }]);
+    const { wrapper, connect } = await mountWithConnectSpy();
+    await wrapper.get("[data-test='connect-discovered']").trigger("click");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+
+    expect(connect).toHaveBeenCalledWith("http://192.168.1.30:7680", null, "studio-7680");
   });
 
   it("probes a bare IP through the default protocol and port", async () => {

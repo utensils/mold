@@ -575,7 +575,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
       <span
         v-if="resumeNeeded"
         data-test="paused-chip"
-        class="font-mono text-micro text-fg-dim whitespace-nowrap text-accent"
+        class="font-mono text-micro whitespace-nowrap text-accent"
       >
         PAUSED
       </span>

@@ -74,12 +74,18 @@ remove_path() {
   fi
 }
 
-# Empty a directory but keep it (and any symlink that points at it).
+# Empty a directory but keep it (and any symlink that points at it). Every
+# directory that reaches here is SHARED — a symlinked target, or a
+# CARGO_TARGET_DIR — and on the development machines that is one directory
+# behind every worktree of the repo, so name it and say what else loses its
+# build BEFORE removing anything.
 empty_dir() {
   local dir="$1"
   local real
   real="$(cd "$dir" && pwd -P)"
   if [ -n "$(ls -A "$real")" ]; then
+    echo "build-clean: shared build directory: $real"
+    echo "build-clean: warning: every checkout and worktree pointing there loses its build"
     say "the contents of ${dir#"$root"/} ($real)"
     [ "$dry_run" = 1 ] || find "$real" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
     removed=$((removed + 1))

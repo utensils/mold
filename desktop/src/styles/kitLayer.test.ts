@@ -48,7 +48,11 @@ describe("ui/kit.css cascade layer", () => {
   it.each(IMPORTERS)("%s imports the kit, so the layer reaches it", (file) => {
     const css = read(file);
     expect(css).toMatch(/@import\s+"[^"]*ui\/kit\.css"/);
-    expect(css).toMatch(/@import\s+"tailwindcss"|tokens\.css/);
+    // `|` binds looser than everything else in a regex, so the old form here
+    // was `@import "tailwindcss"` OR the bare substring `tokens.css` — which a
+    // comment, a `url()` or a `@source` line satisfies, and which carries no
+    // `@import` context at all. Both alternatives belong inside the quotes.
+    expect(css).toMatch(/@import\s+"(?:tailwindcss|[^"]*tokens\.css)"/);
   });
 
   it("keeps base.css's deliberately unlayered form-control rule unlayered", () => {

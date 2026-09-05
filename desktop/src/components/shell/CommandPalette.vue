@@ -13,6 +13,7 @@ import { useGenerationStore } from "../../stores/generation";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useQueueActivity } from "../../composables/useQueueActivity";
 import { useQueueCommands } from "../../composables/useQueueCommands";
 import { THEME_META } from "../../lib/theme";
 import { NAV_ROUTES } from "../../lib/shortcuts";
@@ -72,6 +73,9 @@ const batchLocked = computed(() =>
 // The same queue authority Space and the sidebar act on, so the palette can
 // never pause a different machine than the status bar's hint promises.
 const queueCommands = useQueueCommands();
+// Stop everything is fleet-wide, so its count is the fleet's live work, not
+// this client's pending prints.
+const queue = useQueueActivity();
 const inventoryKnown = useInventoryKnown();
 
 /**
@@ -424,25 +428,18 @@ const staticCommands = computed<Command[]>(() => {
       },
     });
   }
-  if (generation.pending.length > 1) {
+  // The same fleet-wide action the rail and the Queue view offer, through the
+  // same confirm. The palette used to run a private loop over THIS client's
+  // pending prints under the same words: a strict subset of the blast radius,
+  // and no confirmation on either.
+  if (queue.liveCount.value > 0) {
+    const live = queue.liveCount.value;
     cmds.push({
       id: "act-cancel-all",
-      title: `Stop everything · ${generation.pending.length} waiting`,
+      title: `Stop everything · ${live} ${live === 1 ? "picture" : "pictures"}`,
       keywords: ["cancel", "all", "jobs", "queue", "stop"],
       run: () => {
-        const ids = generation.pending.map((j) => j.clientId);
-        void Promise.all(ids.map((id) => generation.cancel(id)))
-          .then((outcomes) => {
-            const cancelled = outcomes.filter(Boolean).length;
-            if (cancelled === outcomes.length) toasts.push("Cancelled all jobs");
-            else if (cancelled > 0)
-              toasts.push(
-                `Cancelled ${cancelled} ${cancelled === 1 ? "job" : "jobs"}; remaining jobs already settled`,
-              );
-          })
-          .catch((error) =>
-            toasts.push(error instanceof Error ? error.message : String(error), "error"),
-          );
+        queueCommands.askStopEverything();
         close();
       },
     });

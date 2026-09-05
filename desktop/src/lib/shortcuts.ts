@@ -42,6 +42,13 @@ export interface ShellKeyContext {
   target: Element | null;
   overlayOpen: boolean;
   route: string;
+  /**
+   * Whether the machine Space would act on advertises a pausable queue. The
+   * shell claims a bare key only where it can act: without this, Space was
+   * swallowed on every host, spent a queue read, and did nothing — while the
+   * status bar's Space hint was already hidden on exactly those hosts.
+   */
+  canPauseQueue: boolean;
 }
 
 /**
@@ -167,5 +174,18 @@ export function resolveFocusSensitiveShortcut(
   }
   if (e.key !== " " || e.repeat) return null;
   if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
+  if (!ctx.canPauseQueue) return null;
   return ctx.route.startsWith("/library") ? null : { kind: "toggle-queue-pause" };
+}
+
+/**
+ * Whether a bare Backspace belongs to the focused element rather than to the
+ * webview's history. Outside a text-editing surface the webview reads
+ * Backspace as Back, which in a single-page app unmounts the whole window
+ * mid-render — so the shell swallows it everywhere the caret is not. The line
+ * is the editable-surface one `allowsNativeContextMenu` already draws: a
+ * range slider and a focused button are chrome, not text.
+ */
+export function ownsBareBackspace(el: Element | null): boolean {
+  return allowsNativeContextMenu(el);
 }

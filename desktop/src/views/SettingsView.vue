@@ -87,7 +87,25 @@ const active = ref<SectionId>("app");
 const sectionEls = new Map<SectionId, HTMLElement>();
 const contentEl = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
+let bodyObserver: IntersectionObserver | null = null;
 let settling: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Which section bodies have been reached. The page is one scroll of open
+ * sections — that is the layout — but a body is a live component: Advanced
+ * alone opens three HTTP calls and a device event subscription on mount, and
+ * most launches never scroll to it. A body arrives well before it is looked
+ * at and then stays, so scrolling back is never a second fetch.
+ */
+const reached = ref<SectionId[]>([]);
+function reach(id: SectionId) {
+  if (!reached.value.includes(id)) reached.value.push(id);
+}
+/** While searching, the matches ARE the page: the user asked for them by
+ *  name, and there is nothing to scroll past. */
+function bodyMounted(id: SectionId): boolean {
+  return searching.value || reached.value.includes(id);
+}
 
 /** Vue re-invokes a function `:ref` on EVERY patch of its element, so this
  *  must be idempotent: re-registering all fourteen sections on each keystroke
@@ -96,11 +114,15 @@ function bindSection(id: SectionId, el: Element | ComponentPublicInstance | null
   const previous = sectionEls.get(id);
   const next = el instanceof HTMLElement ? el : null;
   if (previous === next) return;
-  if (previous) observer?.unobserve(previous);
+  if (previous) {
+    observer?.unobserve(previous);
+    bodyObserver?.unobserve(previous);
+  }
   if (next) {
     sectionEls.set(id, next);
     next.dataset.section = id;
     observer?.observe(next);
+    bodyObserver?.observe(next);
   } else sectionEls.delete(id);
 }
 
@@ -120,6 +142,8 @@ function sectionBinder(id: SectionId) {
 
 function jump(id: SectionId) {
   active.value = id;
+  // The scroll needs something to land on, so the body comes first.
+  reach(id);
   // A smooth scroll passes other sections on its way; hold the pick until it lands.
   if (settling) clearTimeout(settling);
   settling = setTimeout(() => (settling = null), 800);
@@ -127,7 +151,24 @@ function jump(id: SectionId) {
 }
 
 onMounted(() => {
-  if (typeof IntersectionObserver === "undefined") return;
+  if (typeof IntersectionObserver === "undefined") {
+    // No observer, no scroll signal: an eager page beats an empty one.
+    for (const section of SECTIONS) reach(section.id);
+    return;
+  }
+  // Two observers, two questions. The scroll-spy's band is the top of the
+  // page, which is where the nav highlight belongs; a body has to arrive
+  // WELL before it is looked at, so it gets its own generous margin.
+  bodyObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const id = (entry.target as HTMLElement).dataset.section as SectionId | undefined;
+        if (id) reach(id);
+      }
+    },
+    { root: contentEl.value, rootMargin: "400px 0px 800px 0px" },
+  );
   observer = new IntersectionObserver(
     (entries) => {
       if (settling) return;
@@ -139,10 +180,14 @@ onMounted(() => {
     },
     { root: contentEl.value, rootMargin: "0px 0px -70% 0px" },
   );
-  for (const el of sectionEls.values()) observer.observe(el);
+  for (const el of sectionEls.values()) {
+    observer.observe(el);
+    bodyObserver.observe(el);
+  }
 });
 onBeforeUnmount(() => {
   observer?.disconnect();
+  bodyObserver?.disconnect();
   if (settling) clearTimeout(settling);
 });
 
@@ -239,7 +284,8 @@ watch(
         </div>
 
         <div class="rounded-control border border-border bg-panel">
-          <template v-if="s.id === 'licenses'">
+          <template v-if="!bodyMounted(s.id)" />
+          <template v-else-if="s.id === 'licenses'">
             <LicenseSettingsPanel
               :target="licenseTarget"
               :host-label="licenseHostLabel"

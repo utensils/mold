@@ -192,7 +192,6 @@ describe("hostStatus host-aware display", () => {
     const store = await startHostStatus();
     expect(store.displayHost?.id).toBe("local");
     expect(store.displayingRemote).toBe(false);
-    expect(store.queue).toEqual({ modelsLoaded: [], depth: 0, capacity: 200 });
   });
 
   it("shows the host selected in the Create header while idle", async () => {
@@ -201,11 +200,6 @@ describe("hostStatus host-aware display", () => {
     useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
     const store = await startHostStatus();
     expect(store.displayHost?.label).toBe("hal9000");
-    expect(store.queue).toEqual({
-      modelsLoaded: ["flux2-klein:q4"],
-      depth: 2,
-      capacity: 200,
-    });
     expect(streamCalls.at(-1)?.target?.baseUrl).toBe("http://hal9000:7680");
   });
 
@@ -267,11 +261,6 @@ describe("hostStatus host-aware display", () => {
     const store = await startHostStatus();
 
     expect(store.displayHost?.label).toBe("plato");
-    expect(store.queue).toEqual({
-      modelsLoaded: ["qwen-image:bf16"],
-      depth: 1,
-      capacity: 200,
-    });
   });
 
   it("follows a live remote job: chip, queue, and models come from that host", async () => {
@@ -283,11 +272,6 @@ describe("hostStatus host-aware display", () => {
 
     expect(store.displayHost?.label).toBe("hal9000");
     expect(store.displayingRemote).toBe(true);
-    expect(store.queue).toEqual({
-      modelsLoaded: ["flux2-klein:q4"],
-      depth: 2,
-      capacity: 200,
-    });
   });
 
   it("re-targets the resources stream at the display host", async () => {
@@ -317,8 +301,6 @@ describe("hostStatus host-aware display", () => {
     await flushPromises();
 
     expect(store.displayHost?.id).toBe("local");
-    expect(store.queue.depth).toBe(0);
-    expect(store.queue.capacity).toBe(200);
     // The resources stream re-targets the primary (no explicit target).
     expect(streamCalls.at(-1)?.target ?? null).toBeNull();
   });
