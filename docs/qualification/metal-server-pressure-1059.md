@@ -96,10 +96,13 @@ server environment. The downloaded file was
 6,043,068,256 bytes, matching the manifest. SHA-256:
 `2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc`.
 
-The 12 GiB qualification guard is stricter than the production policy's 8 GiB
-host floor on this machine. Crossing the external guard alone does not prove
-that production's floor was violated or that the admission estimate was wrong.
-The attempts do not justify a scheduler-policy change on their own.
+The external guard used a 12 GiB trigger on raw available memory. Production
+derives headroom from an 8 GiB host floor and Metal working-set observations;
+scheduled reservations also constrain admission. These are different checks,
+so neither threshold alone establishes which policy is stricter. Crossing the
+external guard does not by itself prove that production's floor was violated
+or that the admission estimate was wrong. The attempts do not justify a
+scheduler-policy change on their own.
 
 ## Evidence and remaining acceptance
 
