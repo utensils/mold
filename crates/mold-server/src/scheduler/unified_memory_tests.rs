@@ -160,9 +160,19 @@ async fn unified_memory_generation_preview_and_lease_use_the_same_phase_budget()
             );
             assert!(coordinator.leases.is_empty());
 
-            // At the exact boundary, max-of-phases fits; summing encoder and
-            // denoise would refuse. Host RAM is reserved only on CUDA.
-            publish_unified_headroom(&state, backend, demand);
+            // Metal fits at the exact unified boundary; summing encoder and
+            // denoise would refuse. CUDA keeps FLUX preflight's existing
+            // 10% device margin, so exercise its grant with ample VRAM.
+            // Host RAM is reserved only on CUDA.
+            publish_unified_headroom(
+                &state,
+                backend,
+                if backend == mold_core::GpuBackend::Metal {
+                    demand
+                } else {
+                    24 << 30
+                },
+            );
             let preview = coordinator.placement_preview(&request, 1, &prepared);
             assert_eq!(preview.outcome, "planned", "{backend:?}: {preview:?}");
             coordinator.dispatch_ready().await;
@@ -266,7 +276,17 @@ async fn unified_memory_chain_stage_transports_the_admitted_plan() {
             coordinator.pending_owner_work["unified-stage"].unschedulable_since_ms,
             Some(17)
         );
-        publish_unified_headroom(&state, backend, demand);
+        // Preserve CUDA's existing FLUX preflight margin; only Metal
+        // admits the exact unified demand tested here.
+        publish_unified_headroom(
+            &state,
+            backend,
+            if backend == mold_core::GpuBackend::Metal {
+                demand
+            } else {
+                24 << 30
+            },
+        );
         coordinator.dispatch_ready().await;
         let command = worker_rx.try_recv().unwrap_or_else(|error| {
             let cache = coordinator.owner_plan_cache_and_settle_errors();
