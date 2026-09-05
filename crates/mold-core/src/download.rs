@@ -2359,11 +2359,14 @@ impl AcquisitionStage {
         // Publication is the only point where installed readers can see bytes.
         std::fs::rename(&self.path, destination)?;
         if let Some(digest) = digest {
-            write_sha256_marker(destination, &digest)?;
+            if let Err(error) = write_sha256_marker(destination, &digest) {
+                tracing::warn!(%error, "failed to record acquired artifact marker");
+            }
             // Bind the receipt to our retained file, never a competing writer's
             // replacement that happened to occupy the destination on reopen.
-            let identity = pinned_file_identity(&retained)?;
-            if let Err(error) = write_durable_pinned_digest(destination, identity, &digest) {
+            if let Err(error) = pinned_file_identity(&retained)
+                .and_then(|identity| write_durable_pinned_digest(destination, identity, &digest))
+            {
                 tracing::warn!(%error, "failed to record acquired artifact identity");
             }
         } else {
@@ -2403,7 +2406,9 @@ fn publish_verified_hf_cache(
         write_sha256_marker(&stage.path, &digest)?;
     }
     stage.publish(&destination)?;
-    cache.create_ref(revision)?;
+    if let Err(error) = cache.create_ref(revision) {
+        tracing::warn!(%error, "failed to update verified HF cache ref");
+    }
     Ok(())
 }
 
@@ -2459,13 +2464,15 @@ async fn download_and_place_file<P: Progress + Clone + Send + Sync + 'static>(
         let stage = AcquisitionStage::new(clean_path)?;
         hardlink_or_copy(&hf_path, &stage.path)?;
         verify_file_integrity(&stage.path, file, model_name, skip_verify)?;
-        publish_verified_hf_cache(
+        if let Err(error) = publish_verified_hf_cache(
             &models_dir(),
             &file.hf_repo,
             &file.hf_filename,
             &hf_path,
             &stage.path,
-        )?;
+        ) {
+            tracing::warn!(%error, "failed to mirror verified acquisition into HF cache");
+        }
         stage.publish(clean_path)?;
         Ok(clean_path.to_path_buf())
     })
@@ -2711,7 +2718,11 @@ where
             pinned_file_digest(&stage.path).map_err(|e| DownloadError::Other(e.to_string()))?;
         write_sha256_marker(&stage.path, &digest)?;
     }
-    publish_verified_hf_cache(models_root, hf_repo, hf_filename, &hf_path, &stage.path)?;
+    if let Err(error) =
+        publish_verified_hf_cache(models_root, hf_repo, hf_filename, &hf_path, &stage.path)
+    {
+        tracing::warn!(%error, "failed to mirror verified acquisition into HF cache");
+    }
     stage.publish(&clean_path)?;
     Ok(clean_path)
 }
@@ -4704,6 +4715,43 @@ mod tests {
         assert!(cached.starts_with(root.path().join(".hf-cache")));
         assert_eq!(std::fs::read(cached).unwrap(), b"verified");
         stage.publish(&destination).unwrap();
+        assert!(installed_file_is_complete(&destination, Some(8)));
+    }
+
+    #[test]
+    fn published_acquisition_survives_auxiliary_marker_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("model.bin");
+        let stage = AcquisitionStage::new(&destination).unwrap();
+        std::fs::write(&stage.path, b"verified").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"verified"));
+        verify_pinned_file(&stage.path, &digest, "model.bin", "test").unwrap();
+        // A directory at the sidecar path deterministically rejects its rename.
+        std::fs::create_dir(sha256_marker_path(&destination)).unwrap();
+        stage.publish(&destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified");
+        assert!(installed_file_is_complete(&destination, Some(8)));
+    }
+
+    #[test]
+    fn published_acquisition_survives_auxiliary_hf_ref_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let hf = root
+            .path()
+            .join(".hf-acquisition-cache/models--org--model/snapshots/abc123/model.bin");
+        std::fs::create_dir_all(hf.parent().unwrap()).unwrap();
+        std::fs::write(&hf, b"verified").unwrap();
+        let destination = root.path().join("shared/model.bin");
+        let stage = AcquisitionStage::new(&destination).unwrap();
+        hardlink_or_copy(&hf, &stage.path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"verified"));
+        verify_pinned_file(&stage.path, &digest, "model.bin", "test").unwrap();
+        // Snapshot publication succeeds, but the cache ref cannot be written.
+        std::fs::create_dir_all(root.path().join(".hf-cache/models--org--model/refs/main"))
+            .unwrap();
+        publish_verified_hf_cache(root.path(), "org/model", "model.bin", &hf, &stage.path).unwrap();
+        stage.publish(&destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified");
         assert!(installed_file_is_complete(&destination, Some(8)));
     }
 

@@ -423,7 +423,7 @@ fn the_exif_orientation_twin_decodes_upright() {
 fn extractor() -> Option<IdentityExtractor> {
     let dir = PathBuf::from(std::env::var_os("MOLD_TEST_PULID_ASSETS")?);
     Some(
-        IdentityExtractor::from_paths(
+        IdentityExtractor::from_paths_verified(
             &dir.join("scrfd_10g_bnkps.onnx"),
             &dir.join("glintr100.onnx"),
         )
@@ -435,8 +435,8 @@ fn extractor() -> Option<IdentityExtractor> {
 #[ignore = "requires the antelopev2 ONNX models via MOLD_TEST_PULID_ASSETS"]
 fn detection_and_embedding_match_insightface() {
     let extractor = extractor().expect("set MOLD_TEST_PULID_ASSETS to the antelopev2 directory");
-    assert_eq!(extractor.detector_sha256(), DETECTOR_SHA256);
-    assert_eq!(extractor.recognizer_sha256(), RECOGNIZER_SHA256);
+    assert_eq!(extractor.detector_sha256(), Some(DETECTOR_SHA256));
+    assert_eq!(extractor.recognizer_sha256(), Some(RECOGNIZER_SHA256));
 
     let mut worst_landmark = 0.0f64;
     let mut worst_cosine = 1.0f32;

@@ -116,3 +116,27 @@ concurrent and restarted jobs; this branch does not deploy itself.
 The automatic architecture-graph hook found hundreds of changes since its old
 baseline and required a full `/understand --full` rebuild. Following its
 FULL_UPDATE stop rule, this task did not rewrite that unrelated graph.
+
+## Greptile follow-up validation
+
+The marker/ref publication regressions both failed before the fix. Afterward,
+the download module passed 109 tests and the identity module passed 139 tests
+(with 6 heavyweight fixture tests ignored). ONNX regressions now assert explicit
+absence/presence of an observed digest. The parity integration test uses the new
+explicitly verifying constructor; its external-asset cases remain opt-in.
+
+The parity integration suite passed 10 tests, with 4 external-asset cases ignored.
+
+The Rust CI run at `92c6aff1` exposed two old execution-equivalence integration
+fixtures that expected planning to hash newly written, unverified files. Those
+fixtures now explicitly establish verified receipts before planning, retaining
+the original equal-content/different-runtime-layout assertions. This changes
+fixture setup rather than restoring a runtime integrity scan.
+
+Clippy passed for core/inference with PuLID, all targets and warnings denied.
+Receipt-specific integration fixtures run in isolated child processes with
+private writable attestation stores on Unix, where durable receipts are
+supported. A separate portable regression covers distinct local identities for
+unverified equal-byte files.
+
+The final execution-equivalence integration suite passed all 14 tests.

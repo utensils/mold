@@ -196,3 +196,17 @@ green or claim production deployment. The reported host benchmark is an isolated
 artifact-resolution experiment, not an end-to-end GPU model-switch benchmark.
 No implementation changes, commits, pushes, deployment or PR creation were
 performed by this reviewer.
+
+## Greptile follow-up
+
+Both reported P2 findings were valid and addressed:
+
+- Auxiliary marker/receipt/ref writes after publication now warn instead of
+  reporting a failed acquisition. Optional HF mirroring failures also allow the
+  verified clean-path publication to continue. Artifact rename and verification
+  failures still propagate. Two deterministic regressions block the marker/ref
+  destinations with directories and require successful installation.
+- `IdentityExtractor` digest accessors now return `Option<&str>`: local installs
+  without receipts return `None`. `from_paths_verified` is an explicit CPU
+  qualification constructor, used by the asset-backed parity test to require
+  actual verified digests. Ordinary constructors keep the non-hashing policy.

@@ -40,6 +40,14 @@ pub struct LoadedOnnxModel {
     pub bytes: usize,
 }
 
+impl LoadedOnnxModel {
+    /// Observed digest from explicit verification or an installed receipt.
+    /// Local installations without a receipt have no observed digest.
+    pub fn observed_sha256(&self) -> Option<&str> {
+        (!self.sha256.is_empty()).then_some(self.sha256.as_str())
+    }
+}
+
 /// Rewrite `Resize` inputs that name a **zero-element** initializer into the
 /// empty-string form that means "not provided".
 ///
@@ -726,7 +734,7 @@ mod tests {
         let wrong = "0".repeat(64);
         let loaded = load_installed_onnx_model(&path, Some(pin(&wrong, len_of(&path)))).unwrap();
         assert!(
-            loaded.sha256.is_empty(),
+            loaded.observed_sha256().is_none(),
             "must not invent an observed digest"
         );
         assert!(load_installed_onnx_model(&path, Some(pin(&wrong, len_of(&path) + 1))).is_err());
@@ -739,7 +747,7 @@ mod tests {
         let (path, digest) = write_proto(dir.path(), "model.onnx", false);
         let loaded = load_onnx_model(&path, Some(pin(&digest, len_of(&path))))
             .expect("the pinned model loads");
-        assert_eq!(loaded.sha256, digest);
+        assert_eq!(loaded.observed_sha256(), Some(digest.as_str()));
     }
 
     /// The whole point of #1222's P1 fix: a modified model is refused even
