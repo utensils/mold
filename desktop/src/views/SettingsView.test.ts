@@ -160,6 +160,19 @@ describe("SettingsView shell", () => {
     expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
   });
 
+  /** A body the search brought up holds unsaved edits; clearing the search
+   *  must not unmount it just because the page has not scrolled there. */
+  it("keeps a body the search mounted once the search is cleared", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
+    await wrapper.get("[data-test='settings-search']").setValue("advanced");
+    await flushPromises();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+    await wrapper.get("[data-test='settings-search']").setValue("");
+    await flushPromises();
+    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+  });
+
   it("mounts the body of a section the nav jumps to, since the scroll needs it", async () => {
     const wrapper = await mountView();
     expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);

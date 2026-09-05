@@ -2341,8 +2341,14 @@ watch(
 
 /** Amending an existing clip is not a new print: the one Generate button says
  *  what it will actually do to the clip already on the timeline. */
+// "Update clip" only while the button really amends: an edit session parked
+// behind the Simple toggle is kept, but Simple's Generate makes a new print.
 const buttonLabel = computed(() =>
-  composerSubmitting.value ? "Cancel" : draft.editing ? "Update clip" : "Generate",
+  composerSubmitting.value
+    ? "Cancel"
+    : isSequence.value && draft.editing
+      ? "Update clip"
+      : "Generate",
 );
 /** The queue depth rides beside the button, never inside its one word. */
 const queuedNote = computed(() =>
@@ -2874,7 +2880,10 @@ async function repeatPrint(candidate: Job, count: number) {
   submissionPlanning.value = true;
   try {
     const request: GenerateRequest = { ...source, batch_size: count };
-    const printHostId = candidate.hostId ?? null;
+    // The print's own machine, always named: to placement a null selection is
+    // AUTOMATIC (any ready machine), and a print this device made carries
+    // hostId null, so the fallback is the primary rather than the fleet.
+    const printHostId = candidate.hostId ?? hosts.primaryHost?.id ?? null;
     const entry = hostModels.contractEntryForTarget(request.model, printHostId);
     const family = entry?.family ?? "";
     const routingModel = entry

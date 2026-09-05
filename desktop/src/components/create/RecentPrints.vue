@@ -34,7 +34,9 @@ const rows = computed(() =>
       key: `${entry.sourceKey}::${entry.item.filename}`,
       title: displayTitle(entry.item),
       meta: modelDisplayNameForId(entry.item.metadata.model, props.models ?? []),
-      path: galleryMediaPath(entry.item.filename, target ? "host" : "local", true),
+      // No authority, no picture: a "local" path here would read the
+      // filesystem directly while the local server may well be running.
+      path: target ? galleryMediaPath(entry.item.filename, "host", true) : null,
       target,
       mediaVersion:
         entry.item.media_version ?? `${entry.item.timestamp}:${entry.item.size_bytes ?? "unknown"}`,
@@ -56,6 +58,7 @@ const rows = computed(() =>
     >
       <span class="ms-recent__thumb">
         <AuthedMedia
+          v-if="row.path"
           :path="row.path"
           :target="row.target"
           :cache-key="row.entry.sourceKey"

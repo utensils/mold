@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import ContextMenu from "./ContextMenu.vue";
+import { overlayDepth, resetOverlayStackForTests } from "@ui/lib/overlayStack";
 import { useContextMenuStore } from "../../stores/contextMenu";
 
 beforeEach(() => {
@@ -21,6 +22,23 @@ function openMenu() {
     ],
   });
 }
+
+describe("ContextMenu — an overlay like any other", () => {
+  /** A menu over a dialog is the topmost overlay: registered, one Escape
+   *  closes the menu and leaves the dialog beneath it standing. */
+  it("registers on the overlay stack while it is open", async () => {
+    resetOverlayStackForTests();
+    const wrapper = mount(ContextMenu, { attachTo: document.body });
+    expect(overlayDepth()).toBe(0);
+    openMenu();
+    await wrapper.vm.$nextTick();
+    expect(overlayDepth()).toBe(1);
+    useContextMenuStore().close();
+    await wrapper.vm.$nextTick();
+    expect(overlayDepth()).toBe(0);
+    wrapper.unmount();
+  });
+});
 
 describe("ContextMenu a11y roles", () => {
   it("exposes a vertical menu with menuitem roles and a separator", async () => {

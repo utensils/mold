@@ -880,6 +880,13 @@ describe("GenerateView — sequence output", () => {
     await flushPromises();
 
     expect(composer.props("buttonLabel")).toBe("Update clip");
+
+    // Parking the edit behind Simple keeps the session, but Simple's Generate
+    // makes a NEW print, so the button must not promise an amendment there.
+    draft.setOutput("single", { getPrompt: () => "", setPrompt: () => undefined }, 25);
+    await flushPromises();
+    expect(draft.editing).not.toBeNull();
+    expect(composer.props("buttonLabel")).toBe("Generate");
   });
 
   it("compensates a cancelled in-flight amendment on its frozen target", async () => {

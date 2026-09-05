@@ -102,10 +102,15 @@ function reach(id: SectionId) {
   if (!reached.value.includes(id)) reached.value.push(id);
 }
 /** While searching, the matches ARE the page: the user asked for them by
- *  name, and there is nothing to scroll past. */
+ *  name, and there is nothing to scroll past. A match is also REACHED, so a
+ *  body holding half-typed edits survives the search being cleared instead
+ *  of unmounting because the page never scrolled to it. */
 function bodyMounted(id: SectionId): boolean {
   return searching.value || reached.value.includes(id);
 }
+watch(visibleSections, (sections) => {
+  if (searching.value) for (const section of sections) reach(section.id);
+});
 
 /** Vue re-invokes a function `:ref` on EVERY patch of its element, so this
  *  must be idempotent: re-registering all fourteen sections on each keystroke

@@ -48,6 +48,17 @@ const active = computed(() => queue.active.value);
 const activeHostId = computed(() => (active.value ? commands.hostIdFor(active.value) : null));
 const activeCanPause = computed(() => commands.canPauseFor(activeHostId.value));
 const activePaused = computed(() => commands.pausedFor(activeHostId.value));
+/** The card pauses the ROW's machine while the rail header pauses the display
+ *  host, so the two controls a few pixels apart name their machines. */
+const activeHostLabel = computed(() => {
+  const id = activeHostId.value;
+  return (id && hosts.all.find((host) => host.id === id)?.label) || "this machine";
+});
+const activePauseTitle = computed(() =>
+  activePaused.value
+    ? `Resume the queue on ${activeHostLabel.value}`
+    : `Pause the queue on ${activeHostLabel.value} after this image`,
+);
 // The rail is context, not the record: it shows what fits a sidebar without
 // becoming a scroll of its own. The Queue view is the full list.
 const RAIL_ROWS = 12;
@@ -194,8 +205,8 @@ function progressPct(row: QueueRow): number | null {
                 data-test="queue-active-pause"
                 class="ms-toolbar-button ms-toolbar-button--icon"
                 :class="activePaused ? 'border-accent text-accent' : ''"
-                :title="activePaused ? 'Resume the queue' : 'Pause the queue after this image'"
-                :aria-label="activePaused ? 'Resume the queue' : 'Pause the queue after this image'"
+                :title="activePauseTitle"
+                :aria-label="activePauseTitle"
                 @click.stop="commands.togglePauseFor(activeHostId)"
               >
                 <Icon :name="activePaused ? 'play' : 'pause'" :size="11" />

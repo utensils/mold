@@ -16,6 +16,7 @@ vi.mock("../../lib/api/catalog", () => ({
 }));
 
 import CommandPalette from "./CommandPalette.vue";
+import { overlayDepth, resetOverlayStackForTests } from "@ui/lib/overlayStack";
 import { useGalleryStore } from "../../stores/gallery";
 import { useUiStore } from "../../stores/ui";
 import { useAppPrefsStore } from "../../stores/appPrefs";
@@ -82,6 +83,18 @@ describe("CommandPalette command registry", () => {
    * "theme" and pressing ↩ could execute a corrected word. A command query is
    * not prose: the OS correction, capitalization, and spell-check are off.
    */
+  /** The palette sits above every dialog; unregistered, a ModalPanel below
+   *  it took Escape first and stopped it before the palette's input saw it. */
+  it("registers as the topmost overlay while it is open", async () => {
+    resetOverlayStackForTests();
+    const wrapper = await openPalette();
+    expect(overlayDepth()).toBe(1);
+    useUiStore().paletteOpen = false;
+    await wrapper.vm.$nextTick();
+    expect(overlayDepth()).toBe(0);
+    wrapper.unmount();
+  });
+
   it("turns the OS text correction off on the query field", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");

@@ -171,6 +171,30 @@ describe("GenerateView — Make 4 variations", () => {
   });
 
   /**
+   * A print made on this device carries `hostId: null`, and to placement
+   * null means AUTOMATIC — any ready machine. Variations promise the print's
+   * own machine, so the resubmit pins the primary rather than letting a
+   * remote box be handed a LoRA path that only exists here.
+   */
+  it("pins this device for a print this device made", async () => {
+    const form = await mountWithAPrint();
+    finishPrint();
+    await flushPromises();
+    const feasible = vi.spyOn(useHostsStore(), "resolveFeasible");
+    vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    void form;
+
+    useUiStore().makeVariations();
+    await flushPromises();
+
+    expect(feasible).toHaveBeenCalled();
+    expect(feasible.mock.calls[0]![0]).toBe(useHostsStore().primaryHost?.id ?? "local");
+  });
+
+  /**
    * The count rides the ONE submission. Writing it to the form left every
    * later Generate quietly making four pictures.
    */

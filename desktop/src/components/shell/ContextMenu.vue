@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted, toRef } from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
 import ContextMenuItem from "./ContextMenuItem.vue";
 import {
   hasCheckColumn,
@@ -11,6 +12,9 @@ import {
 } from "../../stores/contextMenu";
 
 const menu = useContextMenuStore();
+// A context menu over a dialog is the topmost overlay; registering it keeps
+// one Escape from closing both the menu and the dialog beneath it.
+useOverlayStack(toRef(menu, "visible"), "context-menu");
 
 function onKeydown(e: KeyboardEvent) {
   if (!menu.visible) return;

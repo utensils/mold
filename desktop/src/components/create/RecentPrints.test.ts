@@ -69,6 +69,9 @@ describe("RecentPrints", () => {
     });
 
     expect(wrapper.get("[data-test='recent-print']").text()).toContain("Brass teapot");
+    // ...and shows no picture rather than reading the filesystem directly
+    // while the local server may well be running.
+    expect(wrapper.findComponent({ name: "AuthedMedia" }).exists()).toBe(false);
   });
 
   it("renders an empty list without a row", () => {

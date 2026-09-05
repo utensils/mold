@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useUiStore } from "../../stores/ui";
 import { useGalleryStore } from "../../stores/gallery";
 import { useModelStore } from "../../stores/models";
@@ -49,6 +50,10 @@ interface Command extends Matchable {
 const AUTO_TARGET_IDS = ["capable"] as const;
 
 const ui = useUiStore();
+// The palette sits above every dialog (z 120 over the modal's 100), so it
+// registers as the topmost overlay: otherwise a ModalPanel underneath took
+// Escape first and stopped it before the palette's own input ever saw it.
+useOverlayStack(toRef(ui, "paletteOpen"), "command-palette");
 const router = useRouter();
 const gallery = useGalleryStore();
 const models = useModelStore();
