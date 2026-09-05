@@ -102,3 +102,18 @@ the preceding closures at that revision. The final validation refresh passed
 CPU workspace and Metal all-targets clippy, core policy tests and injected
 inference tests. A stale test-comment description was corrected afterward;
 there are no further implementation changes or outstanding review findings.
+
+## Patch-base integration review
+
+Claude Fable 5.1 reviewed the rebase onto `087f779af` and integration fix
+`f088e6d97`. No integration bug was found: the host floor and cache credit
+are each charged once, #1593's unified admission demand survives, and
+resource collection shares one host observation. The actual Candle pin
+`744ae3b` was rechecked. Three low-severity findings were addressed:
+
+- Update the path-scoped server rules for fresh Metal rechecks and missing
+  policy observations instead of retaining the old RAM-only description.
+- Name and describe the old resource test as legacy display telemetry; the
+  new shared-host regression separately covers fail-closed admission policy.
+- Bound the unified-memory fixture to its advertised 24 GiB capacity so a
+  future oversized demand cannot silently invalidate exact-fit assertions.

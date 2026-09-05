@@ -2,9 +2,9 @@
 
 Branch: `feat/metal-memory-policy`. Original implementation base: `c6b925473`;
 rebased onto patch repair `087f779af`. Delivery uses the existing
-PR [#1592](https://github.com/utensils/mold/pull/1592), reopened after v0.27.1
-publication. Required sequencing: patch first, then exact-head feature checks
-and merge, with branch protection unchanged.
+PR [#1592](https://github.com/utensils/mold/pull/1592), reopened while v0.27.1
+publication completes. Its CI may run concurrently; merge follows patch
+publication and exact-head feature checks, with branch protection unchanged.
 
 ## Completed local checks
 
@@ -91,3 +91,15 @@ fixtures provide the Metal policy that admission now requires.
 Before these adjustments, the rebased server tests failed to compile at the
 new snapshot field and helper call sites. Afterward, all 3 unified-memory
 tests, the new shared-host regression, and all 18 resource tests passed.
+
+On rebased implementation `f088e6d97`, CPU workspace and Metal package
+all-targets clippy passed with warnings denied, along with 67 preflight and
+71 registry-filtered tests. The Metal injected filter passed all 6 tests
+with its native snapshot probe ignored and allocator smoke test excluded.
+An existing post-upscale recovery test exceeded its two-second deadline
+in two runs; it subsequently passed unchanged in isolation on both the
+patch base (0.72 s) and feature branch (0.70 s). This is recorded as a
+parallel-run timeout: the complete scheduler suite subsequently passed all
+152 tests with `--test-threads=1`, while the parallel rerun exceeded the same
+recovery deadline. No timeout or production behavior was changed to obtain
+that result. The Metal-enabled warm-cache admission regression also passed.

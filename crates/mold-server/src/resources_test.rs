@@ -171,13 +171,13 @@ fn metal_telemetry_spends_the_host_samples_available_pool() {
 }
 
 #[test]
-fn unavailable_unified_sample_is_not_zero_capacity() {
+fn legacy_unified_telemetry_distinguishes_missing_and_zero_samples() {
     let ram = crate::resources::ram_snapshot_from_system_with_available(|_| None);
     assert_eq!(ram.available, None, "a failed query is not a measured zero");
     let gpu = crate::resources::metal_snapshot_from_ram(&ram, |_, _| None);
     assert_eq!(
         gpu.vram_used, ram.used,
-        "retain the existing estimated fallback"
+        "legacy display telemetry retains its estimated fallback; policy admission does not"
     );
 
     let zero = crate::resources::ram_snapshot_from_system_with_available(|_| Some(0));
@@ -185,7 +185,7 @@ fn unavailable_unified_sample_is_not_zero_capacity() {
     let gpu = crate::resources::metal_snapshot_from_ram(&zero, |_, _| None);
     assert_eq!(
         gpu.vram_used, gpu.vram_total,
-        "a successful zero sample must block"
+        "legacy display telemetry reports no available bytes for a measured zero"
     );
 }
 

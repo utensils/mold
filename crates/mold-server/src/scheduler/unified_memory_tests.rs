@@ -46,6 +46,10 @@ fn unified_memory_fixture(
 }
 
 fn publish_unified_headroom(state: &AppState, backend: mold_core::GpuBackend, available: u64) {
+    assert!(
+        available <= 24 << 30,
+        "fixture headroom must fit its 24 GiB capacity so exact-fit assertions remain meaningful"
+    );
     state.resources.publish(mold_core::ResourceSnapshot {
         hostname: "test".into(),
         timestamp: 0,
