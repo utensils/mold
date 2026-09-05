@@ -6,7 +6,8 @@ import {
   IDENTITY_PHOTO_UNAVAILABLE,
   identityImageError,
 } from "@studio/lib/identityConditioning";
-import type { GenerateForm } from "../../lib/generateForm";
+import ImagePickerModal from "../generate/ImagePickerModal.vue";
+import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import { fileToBase64, isStillImageFile } from "../../lib/image";
 import { identityConditioningValidationError } from "../../lib/generateValidation";
 
@@ -20,13 +21,18 @@ import { identityConditioningValidationError } from "../../lib/generateValidatio
  * reports the same message), not an event that scrolls away, and the whole
  * block is mounted only for a checkpoint that advertises identity support.
  *
- * Upload and drop only: there is deliberately no gallery picker yet, because a
- * gallery print is a render, not a reference photograph.
+ * A face can also come from My images — the same picker the source well
+ * opens — because a photograph someone started a print from lives there too.
+ * A picked print takes exactly the road a dropped file takes: the same
+ * header-only admission checks, the same inline refusal, nothing staged on a
+ * refusal.
  */
 const props = defineProps<{ form: GenerateForm }>();
 
 /** A local read/format refusal, cleared by the next successful pick. */
 const ingestError = ref<string | null>(null);
+
+const pickerOpen = ref(false);
 
 /**
  * Preview type from the provenance label, exactly as the shared H3 boundary
@@ -68,15 +74,25 @@ async function onFile(file: File) {
     ingestError.value = "Couldn't read the image.";
     return;
   }
-  // The server's own header-only pre-checks, run before anything is staged so
-  // a photo that cannot be admitted never becomes part of the draft.
+  stage(file.name || "identity photo", base64);
+}
+
+/** One admission for every road in: the server's own header-only pre-checks
+ * run before anything is staged, so a photo that cannot be admitted never
+ * becomes part of the draft. */
+function stage(filename: string, base64: string) {
   const refused = identityImageError(base64);
   if (refused) {
     ingestError.value = refused;
     return;
   }
   ingestError.value = null;
-  props.form.identityImage = { filename: file.name || "identity photo", base64 };
+  props.form.identityImage = { filename, base64 };
+}
+
+function onGalleryPicked(picked: PickedImage[]) {
+  const first = picked[0];
+  if (first) stage(first.filename || "identity photo", first.base64);
 }
 
 function onClear() {
@@ -91,7 +107,17 @@ function onClear() {
     :mime-type="mimeType"
     :filename="form.identityImage?.filename ?? null"
     :error="error"
+    gallery
     @file="onFile"
+    @gallery="pickerOpen = true"
     @clear="onClear"
+  />
+  <ImagePickerModal
+    :open="pickerOpen"
+    :multiple="false"
+    title="Pick a face photo"
+    gallery-only
+    @pick="onGalleryPicked"
+    @close="pickerOpen = false"
   />
 </template>

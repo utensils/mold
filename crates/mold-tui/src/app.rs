@@ -1173,11 +1173,22 @@ impl GenerateParams {
                 .pipeline
                 .map(|pipeline| pipeline.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
+            // The field is only offered for a family that renders sound, so
+            // an unset flag here means the recipe's own answer, which is what
+            // `ltx2::execution::wants_audio_output` resolves: on for MP4,
+            // off for a container that cannot carry a track. A bare
+            // "default" read as "unknown" and hid a setting that was already
+            // on — name the value, keep the word that says nobody chose it.
             ParamField::Audio => self
                 .enable_audio
-                .map(|enabled| if enabled { "on" } else { "off" })
-                .unwrap_or("default")
-                .to_string(),
+                .map(|enabled| if enabled { "on" } else { "off" }.to_string())
+                .unwrap_or_else(|| {
+                    if self.format == OutputFormat::Mp4 {
+                        "on (default)".to_string()
+                    } else {
+                        "off (default)".to_string()
+                    }
+                }),
             ParamField::SpatialUpscale => match self.spatial_upscale {
                 None => "native".to_string(),
                 Some(Ltx2SpatialUpscale::X1_5) => "1.5×".to_string(),

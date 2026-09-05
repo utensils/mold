@@ -395,10 +395,10 @@
 
         <!-- inspector -->
         <div style="width:300px;flex-shrink:0;display:flex;flex-direction:column;background:var(--mold-bg-deep);border-left:var(--mold-bw) solid var(--mold-border)">
-          <div style="flex-shrink:0;display:flex;padding:8px 10px;gap:2px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg)">
-            <span onClick="{{ setTabSettings }}" style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insSettings }}">Settings</span>
-            <span onClick="{{ setTabStarters }}" style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insStarters }}">Starters</span>
-            <span onClick="{{ setTabHistory }}" style="flex:1;text-align:center;padding:6px 0;border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insHistory }}">Recent</span>
+          <div style="flex-shrink:0;display:flex;align-items:center;height:40px;padding:0 10px;gap:2px;border-bottom:var(--mold-bw) solid var(--mold-border);background:var(--mold-bg)">
+            <span onClick="{{ setTabSettings }}" style="flex:1;display:flex;align-items:center;justify-content:center;height:var(--mold-ctl-md);border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insSettings }}">Settings</span>
+            <span onClick="{{ setTabStarters }}" style="flex:1;display:flex;align-items:center;justify-content:center;height:var(--mold-ctl-md);border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insStarters }}">Starters</span>
+            <span onClick="{{ setTabHistory }}" style="flex:1;display:flex;align-items:center;justify-content:center;height:var(--mold-ctl-md);border-radius:var(--mold-radius-2);font-size:var(--mold-fs-xs);font-weight:600;white-space:nowrap;cursor:pointer;{{ insHistory }}">Recent</span>
           </div>
 
           <div style="flex:1;min-height:0;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:18px">

@@ -669,7 +669,10 @@ function resetSettings() {
   // onto the attached source (#1166).
   emit("canvas-intent", "model-default");
   if (isSequence.value) {
-    draft.enableAudio = false;
+    // Reset restores the MODEL's answer, not a flat off: sound is on wherever
+    // the clip renders it, so resetting to false handed back a silent draft
+    // the user never chose.
+    draft.enableAudio = props.chainLimits?.supports_audio === true;
     // `resetFormToModelDefaults` discards one-shot source media wholesale; the
     // sequence's opening image is the same primary-form media, so it goes with
     // it. (`form.strength` / `form.sourceFit` are already reset above.)

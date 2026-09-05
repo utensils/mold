@@ -107,21 +107,23 @@ pub fn capability_for_family(family: &str) -> Option<ChainCapability> {
         "wan" => Some(ChainCapability {
             frames_per_clip_cap: WAN_FRAMES_PER_CLIP_CAP,
             carryover: CarryoverKind::IndependentClips,
-            // The family has no audio decode path at all.
-            supports_audio: false,
+            // The family has no audio decode path at all — asked of the one
+            // core authority so a chain and a one-shot cannot disagree about
+            // which families render sound.
+            supports_audio: mold_core::generation_profile::family_emits_audio("wan"),
             runtime_seconds_cap: None,
         }),
         "ltx2" => Some(ChainCapability {
             frames_per_clip_cap: mold_core::validation::max_frames_for_family("ltx2")
                 .unwrap_or(LTX_VIDEO_FRAMES_PER_CLIP_CAP),
             carryover: CarryoverKind::TemporalHandoff,
-            supports_audio: true,
+            supports_audio: mold_core::generation_profile::family_emits_audio("ltx2"),
             runtime_seconds_cap: mold_core::validation::max_runtime_seconds_for_family("ltx2"),
         }),
         "ltx-video" => Some(ChainCapability {
             frames_per_clip_cap: LTX_VIDEO_FRAMES_PER_CLIP_CAP,
             carryover: CarryoverKind::IndependentClips,
-            supports_audio: false,
+            supports_audio: mold_core::generation_profile::family_emits_audio("ltx-video"),
             runtime_seconds_cap: None,
         }),
         _ => None,

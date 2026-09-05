@@ -465,6 +465,13 @@ pub async fn run_chain(
 
     let ctx = CliContext::new(host.as_deref());
     let config = ctx.config().clone();
+    // The CLI's chain door, mirroring the server's
+    // `validate_and_normalize_chain_family`: an unset `enable_audio` means
+    // the recipe's own answer, which is ON wherever the family delivers
+    // sound. Resolving here covers the forced-local orchestrator run — which
+    // never sees a server door — and makes a remote submission carry the same
+    // explicit value the host would have resolved anyway.
+    req.enable_audio = Some(resolve_chain_enable_audio(&req, &config));
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let _ = embed_metadata; // reserved for future metadata-embed work on chain output
 
@@ -1125,11 +1132,14 @@ pub async fn run_from_script(
     // otherwise be rejected for a seam that was never going to be applied,
     // and the dry-run totals below would describe a render that cannot happen.
     let mut built = build_request_from_script(&script)?;
-    let authority =
-        resolve_chain_model_authority(&built.model, &mold_core::Config::load_or_default());
+    let config = mold_core::Config::load_or_default();
+    let authority = resolve_chain_model_authority(&built.model, &config);
     let substitution = normalize_script_motion_tail(&mut built, &authority);
     report_motion_tail_substitution(substitution, &built.model);
-    let req = built.normalise_with_family(authority.family_hint())?;
+    let mut req = built.normalise_with_family(authority.family_hint())?;
+    // `run_chain` resolves this too; doing it here as well is what lets the
+    // dry run describe the render that would happen rather than the script.
+    req.enable_audio = Some(resolve_chain_enable_audio(&req, &config));
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1248,6 +1258,27 @@ pub(crate) fn sugar_recipe(model: &str, config: &mold_core::Config) -> SugarReci
         clip_cap,
         family,
     }
+}
+
+/// The chain's audio answer, resolved the way the server door resolves it.
+///
+/// `mold_core::generation_profile::resolve_enable_audio` is the rule and
+/// `family_emits_audio` is the family half; the CLI reads both directly
+/// because `mold-inference`'s capability table (which the server asks) lives
+/// behind the GPU feature gates and a CPU-only `mold` still submits chains.
+///
+/// An unclassified family answers off — the same conservative reading the
+/// server applies to an empty family, and the only safe one: `Some(true)` on
+/// a family with no audio path is a request admission refuses by name.
+pub(crate) fn resolve_chain_enable_audio(req: &ChainRequest, config: &mold_core::Config) -> bool {
+    let authority = resolve_chain_model_authority(&req.model, config);
+    let deliverable = !authority.family.is_empty()
+        && mold_core::generation_profile::family_emits_audio(&authority.family)
+        // MP4 is the only container the stitched chain can carry a track in,
+        // exactly as the one-shot engine reads it.
+        && req.output_format == OutputFormat::Mp4
+        && cfg!(feature = "mp4");
+    mold_core::generation_profile::resolve_enable_audio(req.enable_audio, deliverable)
 }
 
 /// Replace a script-authored motion tail with the one the family and the
@@ -1521,7 +1552,10 @@ pub async fn run_from_sugar(
     let authority = resolve_chain_model_authority(&built.model, &config);
     let substitution = normalize_script_motion_tail(&mut built, &authority);
     report_motion_tail_substitution(substitution, &built.model);
-    let req = built.normalise_with_family(authority.family_hint())?;
+    let mut req = built.normalise_with_family(authority.family_hint())?;
+    // `run_chain` resolves this too; doing it here as well is what lets the
+    // dry run describe the render that would happen rather than the script.
+    req.enable_audio = Some(resolve_chain_enable_audio(&req, &config));
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1558,6 +1592,16 @@ fn print_dry_run_summary(req: &ChainRequest) {
     let duration_s = total_frames as f64 / fps as f64;
     println!("{stage_count} stages");
     println!("estimated total frames: {total_frames} ({duration_s:.2}s @ {fps}fps)",);
+    // Audio is a resolved default now, not an opt-in, so a dry run has to say
+    // which way it went — the caller's script may never mention the field.
+    println!(
+        "audio: {}",
+        if req.enable_audio == Some(true) {
+            "on"
+        } else {
+            "off"
+        }
+    );
     for (i, s) in req.stages.iter().enumerate() {
         let tag = match s.transition {
             TransitionMode::Smooth => "smooth",

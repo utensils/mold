@@ -104,7 +104,9 @@ function onKeydown(event: KeyboardEvent) {
       :disabled="disabled"
       @click="pick(option.value)"
     >
-      <span class="ms-seg__label">{{ option.label }}</span>
+      <span class="ms-seg__label" :data-label="option.label">{{
+        option.label
+      }}</span>
       <span v-if="option.sub" class="ms-seg__sub">{{ option.sub }}</span>
     </button>
   </div>
@@ -145,8 +147,32 @@ function onKeydown(event: KeyboardEvent) {
     color var(--mold-dur-quick) var(--mold-ease-out);
 }
 
+/* Compact is the TOOLBAR size: the whole control is one `--mold-ctl-md`
+ * tall (border + 2px inset + segment), the height of the chips beside it. A
+ * padded segment grew with the theme's type scale until, in a serif theme,
+ * the control filled the 40px bar and its border sat on the bar's rule. */
+.ms-seg--compact {
+  padding: 2px;
+}
 .ms-seg--compact .ms-seg__btn {
-  padding: 4px 12px;
+  height: calc(var(--mold-ctl-md) - 4px - 2 * var(--mold-bw));
+  padding: 0 12px;
+  justify-content: center;
+}
+
+/* The selected segment is bold, and bold is wider — so picking a segment
+ * used to resize the control and shift its neighbours. Each label carries a
+ * hidden bold ghost of itself, so a segment is always as wide as its bold
+ * self and the control never changes width on selection. */
+.ms-seg__label::after {
+  content: attr(data-label);
+  display: block;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  font-weight: 700;
+  user-select: none;
+  pointer-events: none;
 }
 
 .ms-seg--wrap {

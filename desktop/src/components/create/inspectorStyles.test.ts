@@ -56,10 +56,29 @@ describe("inspector local styles", () => {
    */
   it("lets the mesh face-budget field win over the seed input it shares a class with", () => {
     expect(inspectorSource).toContain("ms-seed__input ms-card__faces");
-    expect(rule(inspectorSource, ".ms-seed__input.ms-card__faces")).toContain("width: auto");
+    expect(rule(inspectorSource, ".ms-seed__input.ms-card__faces")).toContain(
+      "width: calc(17ch + 16px + 18px)",
+    );
     expect(rule(inspectorSource, ".ms-seed__input.ms-card__faces")).toContain(
       "height: var(--mold-ctl-md)",
     );
     expect(rule(inspectorSource, ".ms-card__faces")).toBe("");
+  });
+
+  /*
+   * The tab strip sits beside the view toolbar with only the panel divider
+   * between them, so its bottom rule has to land on the toolbar's. Padded
+   * 8px around a 6px-padded tab it came out 46px against the toolbar's 40,
+   * and the two rules met the divider at different heights.
+   */
+  it("makes the tab strip exactly one view toolbar tall, tabs on the control ladder", () => {
+    const strip = rule(inspectorSource, ".ms-inspector__tabs");
+    expect(strip).toContain("height: var(--mold-shell-viewbar-h)");
+    expect(strip).toContain("flex: 0 0 var(--mold-shell-viewbar-h)");
+    expect(strip).toContain("align-items: center");
+    expect(strip).not.toMatch(/padding: \d+px \d+px/);
+    const tab = rule(inspectorSource, ".ms-inspector__tab");
+    expect(tab).toContain("height: var(--mold-ctl-md)");
+    expect(tab).toContain("padding: 0;");
   });
 });

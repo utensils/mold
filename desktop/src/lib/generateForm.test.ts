@@ -274,6 +274,43 @@ function ltx2Form() {
 }
 
 describe("model-specific audio capability", () => {
+  it("turns audio ON for a model that renders sound", () => {
+    // The default flip. Picking an audio model is asking for a clip with
+    // sound; the same model's CLI one-shot has always rendered one, and the
+    // desktop form used to ship silence unless the user found the toggle.
+    const form = newGenerateForm();
+    expect(form.enableAudio).toBe(false); // no model chosen yet
+    applyModelDefaults(form, ltx2Model());
+    expect(form.enableAudio).toBe(true);
+  });
+
+  it("leaves audio off for a family with no audio path", () => {
+    const form = newGenerateForm();
+    form.enableAudio = true;
+    applyModelDefaults(form, { ...ltx2Model(), name: "flux-dev:q4", family: "flux" });
+    expect(form.enableAudio).toBe(false);
+  });
+
+  it("restores a request that recorded no enable_audio to the model default", () => {
+    // A print rendered before the flag was recorded did NOT render silent:
+    // the engine resolved it, and for an audio model on MP4 that was sound.
+    // Restoring `false` invented a silence the print never had.
+    const model = ltx2Model();
+    const request = {
+      prompt: "a smurf village",
+      model: model.name,
+      width: 768,
+      height: 512,
+      steps: 30,
+    };
+    const form = newGenerateForm();
+    applyRequestToForm(form, request, [model]);
+    expect(form.enableAudio).toBe(true);
+
+    applyRequestToForm(form, { ...request, enable_audio: false }, [model]);
+    expect(form.enableAudio).toBe(false);
+  });
+
   it("turns audio off when an LTX-2 checkpoint has video-only assets", () => {
     const form = newGenerateForm();
     form.enableAudio = true;
@@ -874,14 +911,14 @@ describe("buildRequest — LTX-2 advanced video", () => {
   });
 
   it("never sends enable_audio=false for the audio-only t2a pipeline", () => {
-    // A fresh form has `enableAudio = false`, and picking `t2a` only moves the
-    // output format — so every first-time desktop text-to-audio request used
-    // to arrive as `pipeline=t2a` + `enable_audio=false`, which the server
-    // rejects outright ("pipeline=t2a cannot be combined with
+    // Picking `t2a` only moves the output format, so a form carrying audio
+    // OFF would arrive as `pipeline=t2a` + `enable_audio=false`, which the
+    // server rejects outright ("pipeline=t2a cannot be combined with
     // enable_audio=false"). Audio is what t2a renders; the flag cannot
-    // contradict it.
+    // contradict it. The user reaching that state by turning sound off is
+    // now the only way in — the model default is ON.
     const form = ltx2Form();
-    expect(form.enableAudio).toBe(false);
+    form.enableAudio = false;
     form.pipeline = "t2a";
     form.outputFormat = "wav";
     expect(buildRequest(form).enable_audio).not.toBe(false);
@@ -918,11 +955,15 @@ describe("buildRequest — LTX-2 advanced video", () => {
   });
 
   it("still ships an explicit enable_audio for ordinary video pipelines", () => {
+    // Explicit in BOTH directions. The model default is on, so the wire
+    // carries `true` unasked; turning sound off has to reach the server as a
+    // real `false`, because an omitted field means "resolve the default"
+    // there and would hand the audio straight back.
     const form = ltx2Form();
     form.pipeline = "two-stage";
-    expect(buildRequest(form).enable_audio).toBe(false);
-    form.enableAudio = true;
     expect(buildRequest(form).enable_audio).toBe(true);
+    form.enableAudio = false;
+    expect(buildRequest(form).enable_audio).toBe(false);
   });
 
   it("omits audio_file for a2vid when no audio was picked", () => {
@@ -944,6 +985,9 @@ describe("buildRequest — LTX-2 advanced video", () => {
     // LTX-2 selection must not ride a MiniMax H3 request just because H3
     // also advertises audio — server validation would refuse every print.
     const form = ltx2Form();
+    // `video_only` and audio contradict each other, and audio is now on by
+    // default — so the flag is only meaningful once sound is off.
+    form.enableAudio = false;
     form.videoOnly = true;
     expect(buildRequest(form).video_only).toBe(true);
     form.family = "minimax-h3";

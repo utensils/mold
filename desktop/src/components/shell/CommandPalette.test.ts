@@ -72,6 +72,22 @@ async function openPalette() {
 }
 
 describe("CommandPalette command registry", () => {
+  /*
+   * WebKit's inline text replacement pops a "Theme ×" bubble over the query
+   * and rewrites it on Space or ↩ — the key that runs the command — so typing
+   * "theme" and pressing ↩ could execute a corrected word. A command query is
+   * not prose: the OS correction, capitalization, and spell-check are off.
+   */
+  it("turns the OS text correction off on the query field", async () => {
+    const wrapper = await openPalette();
+    const input = wrapper.get("input");
+    expect(input.attributes("autocorrect")).toBe("off");
+    expect(input.attributes("autocapitalize")).toBe("off");
+    expect(input.attributes("spellcheck")).toBe("false");
+    expect(input.attributes("autocomplete")).toBe("off");
+    wrapper.unmount();
+  });
+
   it("navigates to Styles for the old 'models' and 'catalog' queries", async () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");

@@ -652,6 +652,42 @@ pub fn prompt_requirement_for_family(
     }
 }
 
+/// Whether this family's renderer emits an audio track at all.
+///
+/// The family half of the audio contract, and the ONE place it is decided:
+/// the recipe's advertised `capabilities.supports_audio`, the chain
+/// capability table, and every default resolved by [`resolve_enable_audio`]
+/// read this rather than carrying their own family list.
+///
+/// LTX-2 answers to `GenerateRequest.enable_audio`; MiniMax H3 emits
+/// synchronized audio unconditionally and the flag is inert there (its
+/// admission arm returns before the flag is ever read). Every other family
+/// has no audio decode path.
+pub fn family_emits_audio(family: &str) -> bool {
+    let family = canonical_family(family);
+    family == "ltx2" || crate::minimax_h3::is_family(family)
+}
+
+/// Resolve `enable_audio` for one render.
+///
+/// An explicit value always wins — a user who turned sound off gets silence,
+/// and a user who turned it on gets an admission error where the recipe
+/// cannot deliver. **Unset means the recipe's own answer, and that answer is
+/// ON wherever the recipe can deliver audio.** A video model that renders
+/// sound is what the user asked for when they picked it; making them find a
+/// toggle first shipped silent clips by default.
+///
+/// `supports_audio` is the recipe's advertised capability
+/// (`capabilities.supports_audio`, or [`family_emits_audio`] where only the
+/// family is known), never a second family list at the call site.
+///
+/// This is the same rule the LTX-2 engine has always applied to a one-shot
+/// (`enable_audio.unwrap_or(output == Mp4)`); it is now the rule at the chain
+/// doors and in every client too, which is where the two had diverged.
+pub fn resolve_enable_audio(requested: Option<bool>, supports_audio: bool) -> bool {
+    requested.unwrap_or(supports_audio)
+}
+
 /// The advertised sentence for a non-required prompt.
 fn prompt_reason(mode: PromptRequirement) -> Option<String> {
     match mode {
@@ -3586,6 +3622,54 @@ mod tests {
         assert!(generation_profile_default_output_format(&h3, None)
             .unwrap_err()
             .contains("no default recipe"));
+    }
+
+    /// The family half of the audio contract. LTX-2 answers to the flag;
+    /// H3 emits sound unconditionally; nothing else has a decode path.
+    #[test]
+    fn family_emits_audio_names_the_two_audio_families() {
+        assert!(family_emits_audio("ltx2"));
+        assert!(family_emits_audio("ltx-2"));
+        assert!(family_emits_audio("minimax-h3"));
+        assert!(!family_emits_audio("ltx-video"));
+        assert!(!family_emits_audio("wan"));
+        assert!(!family_emits_audio("flux"));
+        assert!(!family_emits_audio(""));
+    }
+
+    /// Unset means the recipe's own answer, and that answer is ON wherever
+    /// the recipe can deliver audio. This is the whole default flip: a video
+    /// model that renders sound does so without the user finding a toggle.
+    #[test]
+    fn unset_enable_audio_resolves_on_for_an_audio_recipe() {
+        assert!(resolve_enable_audio(None, true));
+        assert!(!resolve_enable_audio(None, false));
+    }
+
+    /// An explicit value always wins, in both directions — including an
+    /// explicit `true` on a recipe that cannot deliver, which admission
+    /// refuses by name rather than this function silencing.
+    #[test]
+    fn explicit_enable_audio_always_wins_over_the_recipe_default() {
+        assert!(!resolve_enable_audio(Some(false), true));
+        assert!(resolve_enable_audio(Some(true), false));
+        assert!(resolve_enable_audio(Some(true), true));
+        assert!(!resolve_enable_audio(Some(false), false));
+    }
+
+    /// The recipe an LTX-2 checkpoint advertises is the input the default
+    /// reads, so the profile and the resolved value cannot drift.
+    #[test]
+    fn an_ltx2_recipe_advertises_the_capability_the_default_reads() {
+        let mut ltx = input("ltx-2.3-22b-distilled:fp8", "ltx2");
+        ltx.supports_audio = true;
+        let profile = resolve_generation_profile(ltx);
+        let recipe = profile.recipes.first().expect("ltx2 has a recipe");
+        assert!(recipe.capabilities.supports_audio);
+        assert!(resolve_enable_audio(
+            None,
+            recipe.capabilities.supports_audio
+        ));
     }
 
     #[test]

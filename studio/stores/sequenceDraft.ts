@@ -370,10 +370,26 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   }
 
   /** Adopt one concrete model as the clip-duration authority. */
-  function adoptSequenceModel(model: string, defaultFrames: number): boolean {
+  /**
+   * Bind a newly selected model to the draft, resetting the values that model
+   * owns. `supportsAudio` is the chain limits' `supports_audio` for that
+   * model: a sequence renders with sound wherever the model delivers it, the
+   * same default a one-shot of the same model gets, so a model switch adopts
+   * that answer rather than leaving the previous model's. Omitting it keeps
+   * the current value, for callers that have no limits yet.
+   *
+   * Returns whether this was a real switch — a re-fetch of the same model
+   * (fps change, host refresh) must never overwrite the user's own choice.
+   */
+  function adoptSequenceModel(
+    model: string,
+    defaultFrames: number,
+    supportsAudio?: boolean,
+  ): boolean {
     if (sequenceModel.value === model) return false;
     sequenceModel.value = model;
     resetClipFrames(defaultFrames);
+    if (supportsAudio !== undefined) enableAudio.value = supportsAudio;
     return true;
   }
 
@@ -486,11 +502,17 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   }
 
   /**
-   * Clear the whole sequence: back to two fresh clips, no audio, and no
-   * edit session. Stays in Sequence — clearing means "start this story
-   * over", not "leave sequence mode" (that's the Output control's job).
+   * Clear the whole sequence: back to two fresh clips, the model's own audio
+   * answer, and no edit session. Stays in Sequence — clearing means "start
+   * this story over", not "leave sequence mode" (that's the Output control's
+   * job).
+   *
+   * `supportsAudio` is the chain limits' `supports_audio`. Starting over
+   * restores the DEFAULT, which is on wherever the model renders sound;
+   * clearing to a flat `false` handed back a silent draft the user never
+   * chose. Omitting it keeps the current value, for a caller with no limits.
    */
-  function clearSequence(defaultFrames: number) {
+  function clearSequence(defaultFrames: number, supportsAudio?: boolean) {
     if (openingImage.value?.draftId)
       void deleteDraftMedia(openingImage.value.draftId);
     for (const clip of clips) {
@@ -504,7 +526,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
       newSequenceClip(defaultFrames),
     );
     activeClipId.value = clips[0]?.id ?? null;
-    enableAudio.value = false;
+    if (supportsAudio !== undefined) enableAudio.value = supportsAudio;
     openingImage.value = null;
     editing.value = null;
   }

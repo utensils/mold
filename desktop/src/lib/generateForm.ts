@@ -87,7 +87,11 @@ import {
 } from "@studio/lib/identityConditioning";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
-import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
+import {
+  defaultEnableAudio,
+  effectiveGenerationGuidance,
+  isWanFamily,
+} from "@studio/lib/generationCapabilities";
 import { conditioningForRequest, type ExclusiveWell } from "@studio/lib/sourceMediaPlan";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isAudioOnlyPipeline, stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
@@ -526,6 +530,12 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   // the advertised default prefills like any other model switch. The
   // row-refresh path (`reconcileModelCapabilities` alone) keeps the marker.
   form.negativeExplicitClear = false;
+  // Picking a model is fresh authority for audio too: on wherever the model
+  // renders sound. The row's own `supports_audio === false` (a video-only
+  // LTX-2 checkpoint) vetoes it here, and `reconcileModelCapabilities` below
+  // clamps every family that has no audio path at all — together they are
+  // `defaultEnableAudio`, computed against the caps that call already builds.
+  form.enableAudio = m.supports_audio !== false;
   reconcileModelCapabilities(form, m);
   if (form.cameraControl) {
     form.loras = syncCameraMotionLora(
@@ -607,8 +617,12 @@ export function applyRecipeDefaults(
     form.extendVideo = null;
     form.extendOverlapFrames = null;
   }
+  // Audio follows the recipe, in both directions. A recipe boundary is fresh
+  // model-owned authority, and the recipe's answer is ON wherever it can
+  // deliver sound — the same default `mold_core::generation_profile::
+  // resolve_enable_audio` gives the request that omits the flag.
+  form.enableAudio = defaultEnableAudio({ supportsAudio: recipe.capabilities.supports_audio }, m);
   if (!recipe.capabilities.supports_audio) {
-    form.enableAudio = false;
     form.audioFile = null;
     form.videoOnly = false;
   }
@@ -827,6 +841,10 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
       form.sourceFit = coerceSourceFitForMaskless(form.sourceFit);
     }
   }
+  // A clamp, never a set-true: this runs on a host refresh for the SAME
+  // model, where the user's own answer is authority. The default is applied
+  // at the model pick (`applyModelDefaults`) and at a recipe boundary
+  // (`applyRecipeDefaults`).
   if (!caps.supportsAudio || m.supports_audio === false) {
     form.enableAudio = false;
     form.videoOnly = false;
@@ -1643,7 +1661,12 @@ export function applyRequestToForm(
     request.model.startsWith("ltx-2.5") &&
     form.durationPredictionSupported;
   form.fps = request.fps ?? form.fps;
-  form.enableAudio = request.enable_audio ?? false;
+  // A request that recorded no `enable_audio` did not render silent: the
+  // engine resolved it, and for an audio model delivering MP4 the answer was
+  // sound. `applyModelDefaults` above already put that answer on the form, so
+  // falling back to it restores what the print actually was — `?? false`
+  // restored a silence the print never had.
+  form.enableAudio = request.enable_audio ?? form.enableAudio;
   form.videoOnly = request.video_only === true;
   form.audioFile = request.audio_file
     ? { filename: "Audio input", base64: request.audio_file }

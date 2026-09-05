@@ -61,12 +61,12 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.8-13b-dev` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.8-13b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
-| `ltx-2-19b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 458 |
-| `ltx-2-19b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 458 |
-| `ltx-2.3-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 458 |
-| `ltx-2.3-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 458 |
-| `ltx-2.5-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 539 |
-| `ltx-2.5-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 539 |
+| `ltx-2-19b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
+| `ltx-2-19b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
+| `ltx-2.3-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
+| `ltx-2.3-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
+| `ltx-2.5-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 559 |
+| `ltx-2.5-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 559 |
 | `wan21-t2v-1.3b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
 | `wan21-t2v-14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
 | `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 684 |
@@ -1161,7 +1161,8 @@ Both axes must be multiples of 32, and of 64 for lip dub. Size the action to
 that duration, keep one continuous take per clip, and keep lip sync inside a
 single clip. With a source image attached, describe only what changes from it;
 restating the frame inaccurately makes the model cut. Distilled LTX-2.5 fixes
-guidance at 1.0.
+guidance at 1.0. Audio renders by default on MP4 output, one-shots and
+sequences alike, so write the soundscape unless the request says silent.
 
 #### Examples
 

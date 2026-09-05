@@ -578,6 +578,9 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     };
 
     // Optional LTX-2 audio follows the user override; H3 audio is inherent.
+    // An unset override stays `None` on the wire on purpose — that is how the
+    // engine's own default (on for MP4) answers, and the bot must not mint a
+    // second opinion from a model cache that is empty until the first refresh.
     let enable_audio = if is_h3 {
         Some(true)
     } else if is_ltx2 {
@@ -1018,7 +1021,8 @@ pub async fn generate(
     #[description = "Random seed for reproducibility"] seed: Option<u64>,
     #[description = "Strength: SD img2img 1.0 = full noise; LTX-2 I2V 1.0 = pin source frame"]
     strength: Option<f64>,
-    #[description = "Enable synchronized audio (LTX-2 + MP4 only)"] audio: Option<bool>,
+    #[description = "Synchronized audio — on by default for LTX-2 MP4; false to mute"]
+    audio: Option<bool>,
     #[description = "LTX-2 pipeline mode (advanced)"] pipeline: Option<PipelineChoice>,
     #[description = "Negative prompt — what to avoid (CFG models); 'none' disables wan's tuned default"]
     negative_prompt: Option<String>,

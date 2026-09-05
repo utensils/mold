@@ -1003,7 +1003,10 @@ function resetCreateSettings(): void {
   // wells `resetFormToModelDefaults` just discarded. `clearOpeningImage` is
   // the narrow store write: clips stay, and the persisted blob is reclaimed.
   if (isSequence.value) {
-    draft.enableAudio = false;
+    // Reset restores the MODEL's answer, not a flat off: audio is on
+    // wherever the chain renders sound, so resetting to false handed back a
+    // silent draft the user never chose.
+    draft.enableAudio = chainLimits.value?.supports_audio === true;
     draft.clearOpeningImage();
   }
 }
@@ -5672,7 +5675,11 @@ async function loadChainLimits(): Promise<void> {
     if (!limits.supports_audio) draft.enableAudio = false;
     if (!draft.editing) {
       const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
-      draft.adoptSequenceModel(entry.name, frames);
+      // A model switch adopts that model's audio answer — on wherever the
+      // chain renders sound, matching a one-shot of the same model. A
+      // re-fetch for the SAME model returns false from `adoptSequenceModel`
+      // and leaves the user's own choice alone.
+      draft.adoptSequenceModel(entry.name, frames, limits.supports_audio);
     }
   } catch {
     if (version === chainLimitsFetch) chainLimits.value = null;

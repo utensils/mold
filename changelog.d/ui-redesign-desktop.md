@@ -147,3 +147,9 @@
   to that kind. A clip style that cannot join scenes stays listed under Short
   clip and explains itself on the row, and switching back to Still picture now
   restores a picture style rather than whichever style was first on the machine.
+- **Sound is on by default.** Every video model that can render audio now does
+  so unless you say otherwise, on the desktop app, the phone, the web app, the
+  terminal, the TUI, and Discord. A sequence used to come out silent while the
+  same model's single clip had sound; both now render with it. Turning **Add
+  sound** off is remembered and sent explicitly, so a silent clip stays silent,
+  and a model with no audio to give stays silent and says so.

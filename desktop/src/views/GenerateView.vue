@@ -1675,7 +1675,11 @@ async function loadChainLimits() {
     if (!limits.supports_audio) draft.enableAudio = false;
     if (!draft.editing) {
       const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
-      draft.adoptSequenceModel(entry.name, frames);
+      // A model switch adopts that model's audio answer — on wherever the
+      // chain renders sound, matching a one-shot of the same model. A
+      // re-fetch for the SAME model returns false from `adoptSequenceModel`
+      // and leaves the user's own choice alone.
+      draft.adoptSequenceModel(entry.name, frames, limits.supports_audio);
     }
   } catch {
     if (version === chainLimitsFetch) chainLimits.value = null;

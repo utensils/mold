@@ -547,6 +547,43 @@ pub(crate) fn validate_and_normalize_chain_family(
             req.model, family
         )));
     }
+    // The audio default is RESOLVED here, once, for every durable chain job —
+    // `POST /api/chain-jobs`, an amend candidate, and
+    // `POST /api/generate/chain/validate` all pass through this door. Unset
+    // means the recipe's own answer (`resolve_enable_audio`), which is ON
+    // wherever the family can deliver sound: an LTX-2 sequence now renders
+    // with audio exactly like the same model's one-shot, which has defaulted
+    // ON for MP4 at the engine since the flag existed. The two had diverged,
+    // and a sequence was the silent one.
+    //
+    // Resolving to an EXPLICIT value is the point: every downstream reader —
+    // the stage-request builder, `finalize_job`'s mux gate, and
+    // `stage_cache_ready` — asks `== Some(true)`, so a persisted manifest
+    // carries the answer rather than re-deriving it. A manifest written
+    // before this door resolved keeps its `None` and stays silent, which is
+    // the only correct answer for stages already rendered without sound.
+    //
+    // An empty family (mock / catalog-synth models) is left alone for the
+    // same reason the refusal above skips it: nothing here classified it.
+    if !family.is_empty() {
+        // A build with no mp4 muxer cannot deliver a chain's audio at all,
+        // and the refusal in `validate_chain_build_features` only covers an
+        // EXPLICIT ask. The default must not mint the request that build
+        // would then fail to finish.
+        #[cfg(feature = "mp4")]
+        let deliverable = crate::chain_limits::family_supports_audio(&family)
+            // MP4 is the only container a stitched chain can carry a track
+            // in, exactly as `ltx2::execution::wants_audio_output` reads it
+            // for a one-shot. A gif/webp chain would render every stage's
+            // audio at full GPU cost and then transcode it away.
+            && req.output_format == mold_core::OutputFormat::Mp4;
+        #[cfg(not(feature = "mp4"))]
+        let deliverable = false;
+        req.enable_audio = Some(mold_core::generation_profile::resolve_enable_audio(
+            req.enable_audio,
+            deliverable,
+        ));
+    }
     Ok(())
 }
 
@@ -772,6 +809,100 @@ mod tests {
         let config = state.config.read().await;
         validate_and_normalize_chain_family(&config, &mut request)
             .expect("a two-stage LTX-2 checkpoint must pass chain preflight");
+    }
+
+    /// The door is where a chain's audio default is resolved, and an LTX-2
+    /// sequence that never mentions the field renders WITH sound — the same
+    /// answer the model's one-shot has always given for MP4.
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn chain_preflight_resolves_an_unset_audio_default_on_for_ltx2() {
+        let state = AppState::for_tests();
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "ltx-2.3-22b-dev:fp8".into();
+        assert_eq!(request.enable_audio, None, "the fixture asks for nothing");
+
+        let config = state.config.read().await;
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("an LTX-2 chain passes preflight");
+        assert_eq!(
+            request.enable_audio,
+            Some(true),
+            "an unset flag on an audio family must resolve to sound"
+        );
+    }
+
+    /// A build with no mp4 muxer cannot deliver a chain's audio at all, so
+    /// the default must not mint a request that build would fail to finish —
+    /// `validate_chain_build_features` only refuses an EXPLICIT ask, and it
+    /// runs before this door.
+    #[cfg(not(feature = "mp4"))]
+    #[tokio::test]
+    async fn chain_preflight_resolves_audio_off_without_the_mp4_muxer() {
+        let state = AppState::for_tests();
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "ltx-2.3-22b-dev:fp8".into();
+
+        let config = state.config.read().await;
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("an LTX-2 chain passes preflight");
+        assert_eq!(request.enable_audio, Some(false));
+    }
+
+    /// A container that cannot carry a track resolves OFF. The stitched print
+    /// would transcode the audio away, so defaulting it on would pay full GPU
+    /// cost per stage for nothing.
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn chain_preflight_resolves_audio_off_for_a_silent_container() {
+        let state = AppState::for_tests();
+        let mut request = req(OutputFormat::Gif);
+        request.model = "ltx-2.3-22b-dev:fp8".into();
+
+        let config = state.config.read().await;
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("an LTX-2 chain passes preflight");
+        assert_eq!(request.enable_audio, Some(false));
+    }
+
+    /// A family with no audio decode path resolves OFF, never `Some(true)` —
+    /// which its own admission would refuse by name.
+    #[test]
+    fn chain_preflight_resolves_an_unset_audio_default_off_for_a_silent_family() {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "ltx-video-2b:fp16".into();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            request.model.clone(),
+            mold_core::ModelConfig {
+                family: Some("ltx-video".into()),
+                ..Default::default()
+            },
+        );
+
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("an ltx-video chain passes preflight");
+        assert_eq!(
+            request.enable_audio,
+            Some(false),
+            "ltx-video has no audio decode path; the default must stay silent"
+        );
+    }
+
+    /// An explicit `false` survives the door. This is the silent-regression
+    /// guard: with the default flipped, a client that means "no sound" must
+    /// say so, and the door must not overwrite it.
+    #[tokio::test]
+    async fn chain_preflight_keeps_an_explicit_audio_refusal() {
+        let state = AppState::for_tests();
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "ltx-2.3-22b-dev:fp8".into();
+        request.enable_audio = Some(false);
+
+        let config = state.config.read().await;
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("an LTX-2 chain passes preflight");
+        assert_eq!(request.enable_audio, Some(false));
     }
 
     #[tokio::test]

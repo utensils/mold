@@ -194,6 +194,7 @@ function onBlur() {
       :model-value="outputKind"
       :options="outputOptions"
       variant="neutral"
+      compact
       label="What to make"
       @update:model-value="setOutputKind"
     />

@@ -447,7 +447,7 @@ function removeScene() {
 function clearSequence() {
   clearConfirmOpen.value = false;
   openSeamId.value = null;
-  draft.clearSequence(newClipFrames.value);
+  draft.clearSequence(newClipFrames.value, props.chainLimits?.supports_audio);
   toasts.push("Clip cleared");
 }
 

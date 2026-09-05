@@ -281,7 +281,7 @@ pub async fn sequence(
     #[description = "Inference steps"] steps: Option<u32>,
     #[description = "Guidance scale"] guidance: Option<f64>,
     #[description = "Base seed"] seed: Option<u64>,
-    #[description = "Generate synchronized audio"] audio: Option<bool>,
+    #[description = "Synchronized audio — on by default where supported"] audio: Option<bool>,
 ) -> Result<()> {
     let prompts = match parse_prompts(&prompts) {
         Ok(prompts) => prompts,

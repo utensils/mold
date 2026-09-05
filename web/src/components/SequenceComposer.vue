@@ -132,7 +132,7 @@ async function clearSequence() {
   });
   if (!accepted) return;
   openSeamId.value = null;
-  draft.clearSequence(defaultFrames.value);
+  draft.clearSequence(defaultFrames.value, limits.value?.supports_audio);
   toast("info", "Sequence cleared");
 }
 const importFileInput = ref<HTMLInputElement | null>(null);
@@ -182,7 +182,10 @@ async function loadLimits() {
       limits.value,
       motionTail.value,
     );
-    draft.adoptSequenceModel(props.model, frames);
+    // A model switch adopts that model's audio answer — on wherever the
+    // chain renders sound, matching a one-shot of the same model. A re-fetch
+    // for the SAME model changes nothing and the user's choice stands.
+    draft.adoptSequenceModel(props.model, frames, limits.value.supports_audio);
   }
 }
 

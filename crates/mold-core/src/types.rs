@@ -595,7 +595,24 @@ impl ExpandContext {
             fps,
             clip_frames: None,
             negative_prompt_supported,
-            audio: req.enable_audio,
+            // An unset flag is not "no audio" — the render resolves it, and
+            // for an audio family delivering MP4 the answer is on. The
+            // expander is describing the render, so a silent scene written
+            // for a clip that will have sound is the failure this avoids.
+            // An explicit value and a family with no audio path both answer
+            // exactly as before.
+            audio: match req.enable_audio {
+                Some(value) => Some(value),
+                // Unset means the recipe's own answer
+                // (`generation_profile::resolve_enable_audio`), which for an
+                // audio family is what `ltx2::execution::wants_audio_output`
+                // resolves: on unless the container cannot carry a track or
+                // the request opted out of the audio branch.
+                None => crate::generation_profile::family_emits_audio(family).then(|| {
+                    req.video_only != Some(true)
+                        && req.resolved_output_format() == OutputFormat::Mp4
+                }),
+            },
             references,
             loras,
             prompt_mode,

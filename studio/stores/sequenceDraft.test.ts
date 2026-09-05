@@ -362,7 +362,10 @@ describe("sequence draft store", () => {
       true,
     );
 
-    store.clearSequence(25);
+    // Starting over restores the MODEL's audio answer, not a flat off — the
+    // caller passes the chain limits' `supports_audio`, and omitting it (as
+    // here) leaves whatever the draft already had.
+    store.clearSequence(25, false);
 
     expect(store.clips).toHaveLength(2);
     expect(store.clips.every((clip) => clip.prompt === "")).toBe(true);
@@ -390,6 +393,41 @@ describe("sequence draft store", () => {
       "ending",
     ]);
     expect(store.clips[1]!.transition).toBe("cut");
+  });
+
+  it("adopts the new model's audio answer, and only on a real switch", () => {
+    // A sequence renders with sound wherever the model delivers it, the same
+    // default a one-shot of that model gets. Switching to an audio model
+    // turns it on; switching to a silent one turns it off; a re-fetch for the
+    // SAME model (fps change, host refresh) must leave the user's own choice.
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(53);
+
+    expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97, true)).toBe(
+      true,
+    );
+    expect(store.enableAudio).toBe(true);
+
+    store.enableAudio = false;
+    expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97, true)).toBe(
+      false,
+    );
+    expect(store.enableAudio).toBe(false);
+
+    expect(store.adoptSequenceModel("wan22-i2v-a14b:q5", 53, false)).toBe(true);
+    expect(store.enableAudio).toBe(false);
+  });
+
+  it("clears back to the model's audio answer rather than to silence", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    store.enableAudio = false;
+
+    store.clearSequence(97, true);
+
+    expect(store.enableAudio).toBe(true);
   });
 
   it("persists the model that owns clip lengths and resets only on a change", () => {

@@ -105,7 +105,11 @@ describe("normalizeServerChainScript", () => {
     ]);
   });
 
-  it("carries enable_audio only when the server said true", () => {
+  // An omitted `enable_audio` means "resolve the recipe's default" at the
+  // server door, and that default is ON for an audio family — so a `false`
+  // the server reported has to survive, or the next amend re-enables sound
+  // the author turned off. Only a missing/non-boolean field stays absent.
+  it("carries enable_audio in both directions and drops only a missing one", () => {
     const on = normalizeServerChainScript({
       chain: { model: "m", enable_audio: true },
       stage: [{ prompt: "a" }],
@@ -114,8 +118,13 @@ describe("normalizeServerChainScript", () => {
       chain: { model: "m", enable_audio: false },
       stage: [{ prompt: "a" }],
     });
+    const absent = normalizeServerChainScript({
+      chain: { model: "m" },
+      stage: [{ prompt: "a" }],
+    });
     expect(on?.chain.enable_audio).toBe(true);
-    expect(off?.chain.enable_audio).toBeUndefined();
+    expect(off?.chain.enable_audio).toBe(false);
+    expect(absent?.chain.enable_audio).toBeUndefined();
   });
 
   it("keeps supported source strength while dropping unknown chain fields", () => {
