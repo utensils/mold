@@ -104,6 +104,14 @@ pub(crate) fn resolve_family(model: &str, config: &Config) -> Option<String> {
 
 fn require_local_request_model_activation(req: &GenerateRequest, config: &Config) -> Result<()> {
     let family = resolve_family(&req.model, config);
+    // Model qualification is a name/family fact, so ask it before any local
+    // resolver can repair or auto-pull a checkpoint. Full identity validation
+    // still runs after resolution against the refreshed generation profile.
+    if mold_core::identity::request_mentions_identity(req)
+        && !mold_core::identity::identity_qualified_model_with_family(&req.model, family.as_deref())
+    {
+        anyhow::bail!(mold_core::identity::identity_model_gate_message(&req.model));
+    }
     let models_root = config.resolved_models_dir();
     mold_core::require_generate_request_model_activation(
         req,
@@ -118,6 +126,26 @@ fn require_local_request_model_activation(req: &GenerateRequest, config: &Config
         crate::catalog_bridge::require_known_model_activation(config, identity)?;
     }
     Ok(())
+}
+
+/// Cross the local model-resolution/acquisition boundary only after every
+/// config-only activation rule has accepted the request.
+///
+/// The injected boundary is intentional: a regression can prove that an
+/// unqualified PuLID request invokes no resolver at all, without installing or
+/// downloading a checkpoint merely to observe the ordering.
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+async fn resolve_local_model_after_activation_with<T, F, Fut>(
+    request: &GenerateRequest,
+    config: &Config,
+    resolve: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    require_local_request_model_activation(request, config)?;
+    resolve().await
 }
 
 /// Validate a request on the forced-local path.
@@ -2712,9 +2740,11 @@ async fn prepare_local_request(
     let model_name = req.model.clone();
     let mut req = req.clone();
 
-    require_local_request_model_activation(&req, config)?;
-
-    let (paths, effective_config, pulled) = resolve_or_pull_model(&model_name, config).await?;
+    let (paths, effective_config, pulled) =
+        resolve_local_model_after_activation_with(&req, config, || {
+            resolve_or_pull_model(&model_name, config)
+        })
+        .await?;
     if pulled {
         let model_cfg = effective_config.resolved_model_config(&model_name);
         let family = resolve_family(&model_name, &effective_config);
@@ -4054,6 +4084,7 @@ fn default_filename(
 mod tests {
     use super::*;
     use mold_core::ModelConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn wan_surface_parity_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(concat!(
@@ -6521,6 +6552,32 @@ mod tests {
 
         request.lora.as_mut().unwrap().path = format!("{root}/flux/ordinary-adapter.safetensors");
         assert!(require_local_request_model_activation(&request, &config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn unqualified_identity_request_never_crosses_local_model_resolution() {
+        let config = Config::default();
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "qwen-image:fp8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+        request.id_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
+        let calls = AtomicUsize::new(0);
+
+        let result = resolve_local_model_after_activation_with(&request, &config, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     /// Metadata must survive a zero-length prompt on every embedded surface.
