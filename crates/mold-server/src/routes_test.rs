@@ -21713,6 +21713,98 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// `?view=trash` reads the trashed bytes even after a NEW live print has
+    /// taken the same name — the case the live-first resolution could not
+    /// serve — and never falls back to that twin; a bad view is refused.
+    #[tokio::test]
+    async fn gallery_media_routes_take_a_trash_view() {
+        let _mold_home =
+            EnvVarGuard::set("MOLD_HOME", tempfile::tempdir().unwrap().path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_print(&db, dir.path(), "twin.png", None);
+        let trashed_bytes = std::fs::read(dir.path().join("twin.png")).unwrap();
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(empty_request("DELETE", "/api/gallery/image/twin.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // A new live print lands under the same name.
+        let live_bytes = b"a different, newer print".to_vec();
+        std::fs::write(dir.path().join("twin.png"), &live_bytes).unwrap();
+
+        let body_of = |resp: axum::response::Response| async move {
+            axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec()
+        };
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/image/twin.png"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_of(resp).await, live_bytes, "live-first by default");
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/image/twin.png?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_of(resp).await,
+            trashed_bytes,
+            "the trash view reads the trash"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/thumbnail/twin.png?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the trash view has a thumbnail"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/image/twin.png?view=wat"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown view is refused as the listing refuses it"
+        );
+
+        // The trashed file gone: the trash view 404s rather than answering
+        // with the live twin.
+        std::fs::remove_file(
+            crate::batch_transaction::gallery_trash_dir(dir.path()).join("twin.png"),
+        )
+        .unwrap();
+        let resp = app
+            .oneshot(empty_request(
+                "GET",
+                "/api/gallery/image/twin.png?view=trash",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Every new organization/trash mutator and listing must wait behind
     /// the atomic publication writer exactly like the historical routes.
     #[tokio::test]

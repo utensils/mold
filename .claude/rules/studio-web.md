@@ -60,3 +60,5 @@ Sequence mode on web, desktop, and iPhone filters the picker to chain-capable in
 
 **Sequence-validator wording:** `sequenceValidation`'s sentences name the piece and the whole in the CALLER's words through `SequenceLimits.wording` (`DEFAULT_SEQUENCE_WORDING` is `clip` / `sequence`, what web and the phone say; desktop passes `DESKTOP_SEQUENCE_WORDING`, `scene` / `clip`). Never fork the validator per surface and never grep-replace its nouns — pass the wording.
 
+**Licence-row invariant:** `GET /api/licenses` rows carry `required_by_styles` (additive; `{ name, description }` per gated manifest, from `license_acceptance::styles_requiring`, same order as `required_by`), and the shared `LicenseSettingsPanel` leads every row with `licenseFriendlyLine` — the styles' registry descriptions, else their ids on an older host, else the licence's own name — over `licenseDetailLine` in mono (the licence name and summary, or the id and summary when the name already leads). The licence id never leads a row; it rides the row's tooltip. Acceptance stays per LICENCE (one row, one Read & accept), never per style.
+

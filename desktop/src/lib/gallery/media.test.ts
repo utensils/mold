@@ -464,6 +464,22 @@ describe("galleryMediaPath", () => {
     expect(thumbnailFilenameOfPath("mold-thumb://localhost/abcd/256/a.png?v=1")).toBeNull();
   });
 
+  it("marks Trash-view HOST media so the server reads `.trash/` too", () => {
+    // The HTTP routes took the same `?view=trash` switch the native protocol
+    // had; before it a Trash row on a remote machine whose name a new live
+    // print had taken showed that twin's pixels.
+    expect(galleryMediaPath("print one.png", "host", false, true)).toBe(
+      "/api/gallery/image/print%20one.png?view=trash",
+    );
+    expect(galleryMediaPath("print one.png", "host", true, true)).toMatch(
+      /^\/api\/gallery\/thumbnail\/print%20one\.png\?size=(256|512)&fmt=jpeg&view=trash$/,
+    );
+    // Live rows keep their exact paths, so nothing cached under them moves.
+    expect(galleryMediaPath("print one.png", "host", false, false)).toBe(
+      "/api/gallery/image/print%20one.png",
+    );
+  });
+
   it("marks Trash-view local media so the native protocol reads `.trash/`", () => {
     // A trashed row must never be shadowed by a newer live file under the
     // same name — the query flips the protocol's live-first resolution.
@@ -476,11 +492,7 @@ describe("galleryMediaPath", () => {
     expect(galleryMediaPath("print one.png", "local", false, true)).toBe(
       "mold-local://localhost/print%20one.png?view=trash",
     );
-    // Host media stays on the plain API path: the origin server resolves
-    // its own trashed rows into `.trash/`.
-    expect(galleryMediaPath("print one.png", "host", false, true)).toBe(
-      "/api/gallery/image/print%20one.png",
-    );
+    // Host media asks the server for the trash view outright (pinned above).
   });
 });
 

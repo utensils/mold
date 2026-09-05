@@ -2014,8 +2014,14 @@ pub async fn prepare_gallery_thumbnail(
                 );
                 // Older servers ignore the query and answer their 256 px PNG;
                 // the cache sniffs the bytes rather than trusting the request.
-                let api_path =
-                    format!("/api/gallery/thumbnail/{encoded}?size={}&fmt=jpeg", size.pixels());
+                // `view=trash` is ignored the same way, and on a current
+                // server reads the `.trash/` bytes even when a new live print
+                // took the name — the same switch the local authority sends.
+                let trash = if from_trash { "&view=trash" } else { "" };
+                let api_path = format!(
+                    "/api/gallery/thumbnail/{encoded}?size={}&fmt=jpeg{trash}",
+                    size.pixels()
+                );
                 let fetch = fetch_gallery_bytes(
                     thumbnail_client(),
                     target,

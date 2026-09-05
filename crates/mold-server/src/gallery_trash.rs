@@ -60,6 +60,36 @@ pub(crate) struct GalleryDeleteQuery {
     pub(crate) permanent: Option<bool>,
 }
 
+/// `?view=trash` on the media, thumbnail, and preview routes: ask for the
+/// `.trash/` bytes even when a NEW live file has since landed under the same
+/// name. The native `mold-local:` protocol already took the same switch; the
+/// HTTP routes resolved live-first with no way to ask otherwise, so a Trash
+/// row on a remote machine could show its live twin's pixels.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct GalleryMediaQuery {
+    #[serde(default)]
+    pub(crate) view: Option<String>,
+}
+
+impl GalleryMediaQuery {
+    pub(crate) fn reads_trash(&self) -> Result<bool, ApiError> {
+        Ok(crate::routes::GalleryView::parse(self.view.as_deref())?
+            == crate::routes::GalleryView::Trash)
+    }
+}
+
+/// Where a gallery filename's bytes live for the view the client asked for:
+/// the trash view answers ONLY `<dir>/.trash/<name>` (so a missing trashed
+/// file 404s rather than falling back to a live twin); the library view is
+/// [`resolve_gallery_media_source`]'s live-then-trash answer.
+pub(crate) fn resolve_gallery_media_for_view(dir: &Path, name: &str, from_trash: bool) -> PathBuf {
+    if from_trash {
+        batch_transaction::gallery_trash_dir(dir).join(name)
+    } else {
+        resolve_gallery_media_source(dir, name)
+    }
+}
+
 /// Where a gallery filename's bytes live right now: the live path when it
 /// exists, else `<dir>/.trash/<name>`. Media, thumbnail, and preview routes
 /// resolve through this so a trashed print still renders.
@@ -1014,5 +1044,38 @@ mod tests {
             resolve_gallery_media_source(dir.path(), "missing.png"),
             dir.path().join("missing.png")
         );
+    }
+
+    /// `?view=trash` reads the trash even when a live twin exists, and never
+    /// falls back to that twin when the trashed file is gone.
+    #[test]
+    fn trash_view_reads_only_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = batch_transaction::gallery_trash_dir(dir.path());
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(dir.path().join("twin.png"), b"new live").unwrap();
+        std::fs::write(trash.join("twin.png"), b"old trashed").unwrap();
+
+        assert_eq!(
+            resolve_gallery_media_for_view(dir.path(), "twin.png", true),
+            trash.join("twin.png")
+        );
+        assert_eq!(
+            resolve_gallery_media_for_view(dir.path(), "twin.png", false),
+            dir.path().join("twin.png")
+        );
+        assert_eq!(
+            resolve_gallery_media_for_view(dir.path(), "gone.png", true),
+            trash.join("gone.png")
+        );
+        assert!(!resolve_gallery_media_for_view(dir.path(), "gone.png", true).is_file());
+
+        let query = |view: Option<&str>| GalleryMediaQuery {
+            view: view.map(str::to_string),
+        };
+        assert!(!query(None).reads_trash().unwrap());
+        assert!(!query(Some("library")).reads_trash().unwrap());
+        assert!(query(Some("trash")).reads_trash().unwrap());
+        assert!(query(Some("wat")).reads_trash().is_err());
     }
 }

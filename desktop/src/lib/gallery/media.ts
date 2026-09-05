@@ -522,9 +522,11 @@ export const galleryMediaPath = (
       : localMediaPath(filename, fromTrash)
     : thumbnail
       ? // The shared rendition policy rides every host tile request (this is
-        // the phone's thumbnail path); an older server ignores the query.
-        `${thumbnailPath(filename)}?${thumbnailRenditionQuery()}`
-      : mediaPath(filename);
+        // the phone's thumbnail path); an older server ignores the query, as
+        // it ignores `view=trash` — which on a current server reads the
+        // `.trash/` bytes even when a new live print took the same name.
+        `${thumbnailPath(filename)}?${thumbnailRenditionQuery()}${fromTrash ? "&view=trash" : ""}`
+      : `${mediaPath(filename)}${fromTrash ? "?view=trash" : ""}`;
 
 /**
  * Whether a gallery print is a video. The single source of truth shared by

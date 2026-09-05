@@ -11757,6 +11757,13 @@ pub struct ThirdPartyLicenseStatus {
     /// Manifest names that cannot be downloaded until this is accepted.
     #[serde(default)]
     pub required_by: Vec<String>,
+    /// The same styles as `required_by`, each with the plain words the
+    /// registry describes it by, so a licence row can lead with what it
+    /// unlocks ("FLUX.1 Dev Q4 — smaller/faster, good quality") rather than
+    /// a licence id. Additive; an older server omits it and a client falls
+    /// back to `required_by`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_by_styles: Vec<LicensedStyle>,
 }
 
 /// Response body of `GET /api/licenses`.
@@ -11766,6 +11773,15 @@ pub struct ThirdPartyLicenseStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LicenseListing {
     pub licenses: Vec<ThirdPartyLicenseStatus>,
+}
+
+/// A style a licence gates, in the registry's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LicensedStyle {
+    /// The manifest name — the id every API call addresses the style by.
+    pub name: String,
+    /// The manifest's plain-words description, for the row's friendly line.
+    pub description: String,
 }
 
 /// One license the user accepted, carrying the EXACT terms they were shown.

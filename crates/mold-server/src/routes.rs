@@ -10041,7 +10041,11 @@ async fn get_gallery_image(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
+    // Not `Option<Query<_>>`: an unknown `?view=` must be refused (422, as
+    // the listing refuses it), never the live view by accident.
+    Query(query): Query<crate::gallery_trash::GalleryMediaQuery>,
 ) -> Result<axum::response::Response, ApiError> {
+    let from_trash = query.reads_trash()?;
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
@@ -10062,7 +10066,10 @@ async fn get_gallery_image(
 
     // A trashed print still streams: resolve the live path first, then
     // `<dir>/.trash/<name>`, so the trash view and a restore preview render.
-    let path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
+    // `?view=trash` asks for the trashed bytes outright, so a Trash row whose
+    // name a NEW live print has since taken shows its own pixels.
+    let path =
+        crate::gallery_trash::resolve_gallery_media_for_view(&output_dir, &clean_name, from_trash);
     let content_type = content_type_for_filename(&clean_name);
     serve_media_file(&path, &headers, content_type, "image not found").await
 }
@@ -10222,6 +10229,8 @@ fn content_type_for_filename(name: &str) -> &'static str {
 struct ThumbnailQuery {
     size: Option<u32>,
     fmt: Option<String>,
+    /// `trash` reads the `.trash/` bytes even when a live twin exists.
+    view: Option<String>,
 }
 
 /// Names the rendition the server UNDERSTOOD (`256-png`, `512-jpg`), so a
@@ -10242,7 +10251,9 @@ async fn get_gallery_thumbnail(
 ) -> Result<Response, ApiError> {
     let variant = crate::thumbnails::ThumbnailVariant::from_query(query.size, query.fmt.as_deref())
         .map_err(ApiError::validation)?;
-    let mut response = render_gallery_thumbnail(state, headers, filename, variant).await?;
+    let from_trash = crate::gallery_trash::GalleryMediaQuery { view: query.view }.reads_trash()?;
+    let mut response =
+        render_gallery_thumbnail(state, headers, filename, variant, from_trash).await?;
     if let Ok(value) = header::HeaderValue::from_str(&variant.rendition_label()) {
         response.headers_mut().insert(
             header::HeaderName::from_static(THUMBNAIL_RENDITION_HEADER),
@@ -10257,6 +10268,7 @@ async fn render_gallery_thumbnail(
     headers: HeaderMap,
     filename: String,
     variant: crate::thumbnails::ThumbnailVariant,
+    from_trash: bool,
 ) -> Result<Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
@@ -10275,7 +10287,8 @@ async fn render_gallery_thumbnail(
         return Err(ApiError::validation("invalid filename"));
     }
 
-    let source_path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
+    let source_path =
+        crate::gallery_trash::resolve_gallery_media_for_view(&output_dir, &clean_name, from_trash);
     if !source_path.is_file() {
         return Err(ApiError::not_found(format!(
             "image not found: {clean_name}"
@@ -10547,7 +10560,9 @@ fn thumbnail_response(
 async fn get_gallery_preview(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
+    Query(query): Query<crate::gallery_trash::GalleryMediaQuery>,
 ) -> Result<axum::response::Response, ApiError> {
+    let from_trash = query.reads_trash()?;
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
@@ -10572,7 +10587,8 @@ async fn get_gallery_preview(
     // orphaned and must not be served.
     // Check the source file first and 404 before touching the cache so a
     // stale `.preview.gif` never leaks deleted content.
-    let source_path = crate::gallery_trash::resolve_gallery_media_source(&output_dir, &clean_name);
+    let source_path =
+        crate::gallery_trash::resolve_gallery_media_for_view(&output_dir, &clean_name, from_trash);
     if !tokio::fs::metadata(&source_path)
         .await
         .map(|m| m.is_file())

@@ -729,6 +729,7 @@ mod tests {
             summary: "Server's summary".into(),
             accepted: false,
             required_by: vec!["pulid-flux".into()],
+            required_by_styles: Vec::new(),
         }
     }
 
