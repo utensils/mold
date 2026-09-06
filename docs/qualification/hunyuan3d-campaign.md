@@ -1451,8 +1451,26 @@ the remaining P8-P15 features, and every client surface.
   gallery file remains present with the same digest. Khronos validation again
   reports zero errors, warnings, infos or hints. Blender 5.0.1 independently
   imports and renders the remote artifact with the expected two color spaces.
-  This proves successful settlement and restart reconciliation. Interruption
-  during an active heterogeneous workflow remains a separate P2 gate.
+  This proves successful settlement and restart reconciliation.
+
+### Active interruption, replay, and completion
+
+- The packaged backend at `4debd335` ran a second isolated durable server on
+  port 17682. Job `031cbe03-a525-4e64-99ac-5661b81f7851` used the retained
+  Tencent demo image, 15 shape steps, octree 192, 100,000 target faces, PBR
+  painting at 1024 pixels, and seed 15111496.
+- The server was terminated while the job reported `Unwrapping mesh`, after
+  shape inference had completed and paint preparation had begun. On restart,
+  durable recovery reported one cleared runtime claim, one paused running job,
+  and one charged replay. The queue exposed the same job ID as `paused` with
+  `replayed: true`; an explicit resume restarted the request from its durable
+  inputs rather than creating a replacement job.
+- The resumed job completed in 483.945 seconds and settled the queue to zero.
+  Its gallery metadata retains the original job ID, seed, texture controls and
+  source digest. The resulting 4,683,100-byte GLB has SHA-256
+  `2125008fe6e7d545838e8f2620cc474587c259991c35c810537a3f91d6471a84`;
+  Khronos glTF Validator reports zero errors, warnings, infos or hints in
+  `backend-pbr-v1/gltf-validator.json`.
 
 ### Durable named-stage progress correction
 
@@ -1469,5 +1487,10 @@ the remaining P8-P15 features, and every client surface.
 - The focused Rust regressions and 18 Studio progress/detail tests pass. Studio's
   shared queue detail renders, for example, `Generating PBR views 7 of 15`, so
   web, desktop and iPhone shells using that component receive the same state.
-  A rebuilt-server live capture is still required before this correction is a
-  qualified runtime milestone.
+- The interruption run then exposed a second projection defect: `/api/activity`
+  preserved the stage name but read only denoise `step`/`total`, dropping
+  `stage_current`/`stage_total` and classifying a live named stage as loading.
+  `activity-stage-counters-red.log` retains the failing route regression.
+  Commit `198db06e` makes activity prefer named-stage counters and classify
+  them as running; `activity-stage-counters-green-v2.log` retains the passing
+  route and queue parity regression at `Generating PBR views 7 of 15`.
