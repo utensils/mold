@@ -4,3 +4,4 @@
 - **CUDA half-precision convolutions.** Use float32 accumulation for cuDNN Conv1D and Conv2D with float16 tensors, reducing accumulated numerical error while preserving float16 storage.
 - **Real-ESRGAN precision.** Keep RRDB residual and LeakyReLU scalars in float32 before rounding half-precision activations, matching upstream Torch arithmetic.
 - **Upscaler cancellation.** Stop RRDB inference between network blocks and reject cancellation during the final tile or output encoding before returning an image.
+- **Real-ESRGAN cuDNN dispatch.** Keep its first convolution on cuDNN when that backend is selected, avoiding an im2col rounding difference that accumulates through the residual network.

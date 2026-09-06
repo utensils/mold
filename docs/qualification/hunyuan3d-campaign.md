@@ -1064,3 +1064,51 @@ it is not a completion checklist with assumed passes.
   Clippy passes with warnings denied (`paint-upscaler-cancel-clippy-v1.log`).
   The first build log is retained: its callback error-conversion compile
   errors were corrected without changing cancellation behavior.
+
+### P7 first-convolution dispatch isolation
+
+- Canonical Torch cuDNN logging records 351 successful backend executions;
+  read-only review separates executed plans from heuristic candidates and
+  duplicate internal logs (`paint-upscaler-cudnn-review-v1`). Every dense block
+  uses the same engines, so there is no algorithm transition after body 11.
+  A controlled Torch legacy-API run is identical at every captured stage to
+  the canonical newer-API run (`paint-upscaler-v7-comparison-v1`).
+- Rust records 350 cuDNN calls: its first RGB convolution falls below Candle's
+  automatic size threshold and takes im2col. That first stage differs in just
+  1,242 of 16,777,216 values. The oracle's explicitly diagnostic
+  `--diagnostic-first-features` option substitutes that retained Rust stage
+  and runs the remaining Torch network unchanged. All eight downstream
+  captured stages then match Rust **byte for byte**, including signed zero
+  (`paint-upscaler-common-first-comparison-v2`). This isolates the accumulated
+  drift to the first convolution for this fixture. The normal Rust parity
+  test rejects diagnostic substitutions as qualification oracles.
+- Candle commit `5c74a518ce1c11e31036949b736a35649a1d96ca` lets an explicit
+  Conv2D algorithm bypass the size heuristic while preserving the enabled
+  policy requirement and unsupported-launch fallback. The GPU regression
+  first fails (`candle-explicit-cudnn-red-v1.log`); all 12 convolution tests
+  then pass (`candle-explicit-cudnn-green-v1.log`). The RRDB first convolution
+  explicitly selects the observed legacy `ImplicitPrecompGemm` algorithm;
+  a disabled cuDNN policy still uses im2col. Qualification checks that this
+  first convolution actually dispatched, not merely that cuDNN was enabled.
+- All dependency declarations, both Candle-containing lockfiles, and H3's
+  backend provenance point to that commit. The Nix source archive hash is
+  `sha256-9Q+34Aow5+d9xzz6uedU6zTbKYtyOugbUEOyXRCnLbU=`. Single-Candle identity,
+  desktop lock sync and desktop Nix source-hash contracts pass. Full upscaler
+  comparison against the original unsubstituted oracle remains the exit gate.
+- That original-oracle comparison now passes on both full 512-to-2048 view-00
+  streams. Albedo (`paint-upscaler-explicit-first-albedo00-v1`) has zero error
+  at all nine stages and identical final pixels; the independent comparator
+  confirms every stage is byte-identical, including signed zero
+  (`paint-upscaler-explicit-first-bits-v1`). MR
+  (`capture-20260906T124151Z-2a259017c113/upscaler`) likewise has zero numerical
+  stage error and identical pixels; its log asserts the first convolution
+  actually dispatched on cuDNN. Peak sampled MR board use is 7,169 MiB, and
+  instrumented runtime is 19.13 seconds. No tolerance changed.
+- The final upscaler unit selection passes 31 tests, with two explicit GPU
+  oracle tests ignored (`paint-upscaler-explicit-first-unit-v1.log`). All 220
+  Hunyuan3D regression tests pass, with 20 explicit oracle tests ignored
+  (`paint-upscaler-explicit-first-hunyuan-v1.log`). The remaining five views
+  per stream, actual image preprocessing/adapter integration and complete
+  paint publication remain active requirements.
+- All-target CUDA/cuDNN Clippy passes with warnings denied after the fork pin
+  and qualification guards (`paint-upscaler-explicit-first-clippy-v1.log`).

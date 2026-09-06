@@ -136,7 +136,16 @@ impl RRDBNet {
     ) -> Result<Self> {
         let cfg = conv_cfg();
 
-        let conv_first = candle_nn::conv2d(3, num_feat, 3, cfg, vb.pp("conv_first"))?;
+        // Tencent's first convolution also uses cuDNN. Its small RGB im2col
+        // buffer falls below Candle's automatic performance threshold, but
+        // those early rounding differences amplify through all 23 RRDBs.
+        // An explicit algorithm bypasses that heuristic only when the caller
+        // has enabled cuDNN; the normal im2col policy remains authoritative.
+        let first_cfg = Conv2dConfig {
+            cudnn_fwd_algo: Some(candle_core::conv::CudnnFwdAlgo::ImplicitPrecompGemm),
+            ..cfg
+        };
+        let conv_first = candle_nn::conv2d(3, num_feat, 3, first_cfg, vb.pp("conv_first"))?;
 
         let mut body = Vec::with_capacity(num_block);
         for i in 0..num_block {
@@ -253,6 +262,29 @@ mod tests {
     use candle_core::{DType, Device};
     use candle_nn::VarMap;
 
+    fn require_unmodified_oracle(metadata: &serde_json::Value) -> Result<()> {
+        anyhow::ensure!(
+            metadata.get("diagnostic_first_features").is_none()
+                && !metadata["argv"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("--diagnostic-")))),
+            "diagnostic tensor substitutions cannot qualify the upscaler"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn substituted_oracles_cannot_qualify_network_parity() {
+        assert!(require_unmodified_oracle(&serde_json::json!({"argv": ["capture.py"]})).is_ok());
+        assert!(
+            require_unmodified_oracle(&serde_json::json!({"diagnostic_first_features": {}}))
+                .is_err()
+        );
+        assert!(require_unmodified_oracle(&serde_json::json!({"argv": ["capture.py", "--diagnostic-first-features", "value.safetensors"]})).is_err());
+    }
+
     #[test]
     fn rrdb_cancellation_at_every_boundary_preserves_reuse() -> Result<()> {
         let (_weights, model) = build_test_rrdbnet(4, 2, 2, 4);
@@ -298,6 +330,9 @@ mod tests {
         let fixture = PathBuf::from(std::env::var("MOLD_PAINT_UPSCALER_ORACLE")?);
         let output = PathBuf::from(std::env::var("MOLD_PAINT_UPSCALER_OUTPUT")?);
         let weights = PathBuf::from(std::env::var("MOLD_PAINT_UPSCALER_WEIGHTS")?);
+        require_unmodified_oracle(&serde_json::from_slice(&std::fs::read(
+            fixture.join("completed.json"),
+        )?)?)?;
         std::fs::create_dir(&output)?;
         let _scope = crate::conv_policy::ConvScope::for_family("hunyuan3d");
         let device = Device::new_cuda(0)?;
@@ -328,7 +363,16 @@ mod tests {
         let mut comparisons = serde_json::Map::new();
         let mut failed = Vec::new();
         let start = std::time::Instant::now();
+        let dispatch_before = candle_core::cudnn_policy::dispatch_count();
         let result = model.forward_with_observer(&input, |name, actual| {
+            if name == "conv_first" && candle_core::cudnn_policy::is_enabled() {
+                let dispatched = candle_core::cudnn_policy::dispatch_count() - dispatch_before;
+                anyhow::ensure!(
+                    dispatched == 1,
+                    "first convolution did not execute on cuDNN"
+                );
+                eprintln!("first convolution cuDNN dispatches={dispatched}");
+            }
             let Some(expected) = oracle.get(name) else {
                 return Ok(());
             };

@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -29,6 +30,8 @@ def main():
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--crop-size", type=int)
+    parser.add_argument("--diagnostic-first-features", type=Path,
+                        help="diagnostic only: replace first convolution output with a saved value tensor")
     args = parser.parse_args()
     root = args.upstream.resolve()
     revision = subprocess.check_output(
@@ -59,6 +62,13 @@ def main():
     metadata = {
         "argv": sys.argv, "revision": revision, "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(), "tensor_count": len(installed),
+        "cudnn_version": torch.backends.cudnn.version(),
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "environment": {key: os.environ.get(key) for key in
+                        ("CUDA_VISIBLE_DEVICES", "TORCH_CUDNN_V8_API_DISABLED",
+                         "CUDNN_LOGLEVEL_DBG", "CUDNN_LOGDEST_DBG")},
         "weights_sha256": sha256(args.weights), "pth_sha256": sha256(args.pth),
         "image_sha256": sha256(args.image),
         "sources": {inspect.getfile(cls): sha256(inspect.getfile(cls))
@@ -86,11 +96,22 @@ def main():
         image = image.crop((0, 0, args.crop_size, args.crop_size))
     image.save(args.output / "input.png")
     network = imageSuperNet(SimpleNamespace(realesrgan_ckpt_path=str(args.pth)))
+    first_features = None
+    if args.diagnostic_first_features is not None:
+        first_features = load_file(str(args.diagnostic_first_features))["value"].cuda()
+        metadata["diagnostic_first_features"] = {
+            "path": str(args.diagnostic_first_features.resolve()),
+            "sha256": sha256(args.diagnostic_first_features),
+        }
     captured = {}
     layouts = {}
 
     def hook(name):
         def capture(module, inputs, output):
+            if name == "conv_first" and first_features is not None:
+                if output.shape != first_features.shape or output.dtype != first_features.dtype:
+                    raise ValueError("diagnostic first features must match shape and dtype")
+                output = first_features
             layouts[name] = {
                 "input_stride": inputs[0].stride(), "output_stride": output.stride(),
                 "input_channels_last": inputs[0].is_contiguous(memory_format=torch.channels_last),
@@ -99,6 +120,7 @@ def main():
             captured[name] = output.detach().cpu().contiguous().clone()
             if name == "conv_first":
                 captured["input"] = inputs[0].detach().cpu().contiguous().clone()
+            return output
         return capture
 
     handles = []
