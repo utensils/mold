@@ -7,7 +7,6 @@ import {
 } from "../../composables/useGenerateForm";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import { createPinia, setActivePinia } from "pinia";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { identityActiveCount } from "@studio/lib/identityConditioning";
 
 // The upscale section reads the host's model list. Only upscalers matter here.
@@ -63,7 +62,6 @@ function factory(
 ) {
   const pinia = createPinia();
   setActivePinia(pinia);
-  if (extra.output === "sequence") useSequenceDraftStore().ensureClips(97);
   return mount(AdvancedDrawer, {
     props: { open: true, modelValue: baseForm(overrides), family, ...extra },
     global: {
@@ -76,7 +74,7 @@ function factory(
   });
 }
 
-describe("AdvancedDrawer sequence contract", () => {
+describe("AdvancedDrawer section contract", () => {
   it("keeps all H3 media controls in the primary form", () => {
     const fl2va = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",
@@ -109,108 +107,24 @@ describe("AdvancedDrawer sequence contract", () => {
     expect(references.text()).not.toContain("Ordered references");
   });
 
-  it("preserves but disables clip negatives for a distilled recipe", () => {
-    const wrapper = factory(
-      "ltx2",
-      { model: "ltx-2.3-22b-distilled:fp8" },
-      { output: "sequence" },
-    );
-    useSequenceDraftStore().clips[0]!.negativePrompt = "flicker";
-    const input = wrapper.get("[data-test='sequence-negative-input']");
-    expect(input.attributes("disabled")).toBeDefined();
-    expect(useSequenceDraftStore().clips[0]!.negativePrompt).toBe("flicker");
-    expect(
-      wrapper.get("[data-test='sequence-negative-unavailable-hint']").text(),
-    ).toContain("does not use negative-prompt guidance");
-  });
-
-  it("shows only sequence-owned controls", () => {
-    const wrapper = factory("ltx2", {}, { output: "sequence" });
-    // The opening frame is primary-form source media, not an Advanced knob.
-    expect(
-      wrapper.find("[data-test='sequence-section-opening-image']").exists(),
-    ).toBe(false);
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-well']").exists(),
-    ).toBe(false);
-    expect(
-      wrapper.find("[data-test='sequence-source-strength']").exists(),
-    ).toBe(false);
-    expect(wrapper.find("[data-test='sequence-source-fit']").exists()).toBe(
-      false,
-    );
+  // Create is one-shot only: per-clip Advanced fields are retired, and the
+  // one-shot sections are no longer hidden behind an output mode.
+  it("renders no per-clip sequence fields, and keeps the one-shot sections", () => {
+    const wrapper = factory("ltx2", { model: "ltx-2-19b-distilled:fp8" });
     expect(
       wrapper.find("[data-test='sequence-section-negative']").exists(),
-    ).toBe(true);
-    expect(wrapper.find("[data-test='sequence-section-audio']").exists()).toBe(
+    ).toBe(false);
+    expect(wrapper.find("[data-test='sequence-section-camera']").exists()).toBe(
       false,
     );
-    expect(wrapper.find("[data-test='section-source']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='section-lora']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='section-output']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='section-video']").exists()).toBe(false);
-  });
-
-  it("edits and resets camera motion on the active clip", async () => {
-    vi.mocked(fetch).mockResolvedValue({
-      ok: true,
-      json: async () => [
-        {
-          id: "dolly-in",
-          label: "Dolly in",
-          size_bytes: 327_309_208,
-          installed: false,
-          download_model: "ltx2-camera-control-dolly-in-19b",
-          download_repo: "Lightricks/camera",
-          download_filename: "dolly-in.safetensors",
-          download_sha256: "a".repeat(64),
-        },
-      ],
-    } as Response);
-    const wrapper = factory(
-      "ltx2",
-      { model: "ltx-2-19b-distilled:fp8" },
-      { output: "sequence" },
+    expect(wrapper.find("[data-test='sequence-negative-input']").exists()).toBe(
+      false,
     );
-    const draft = useSequenceDraftStore();
-    draft.clips[1]!.cameraControl = "jib-up";
-    await vi.waitFor(() =>
-      expect(
-        wrapper.get("[data-test='sequence-camera-motion']").findAll("option"),
-      ).toHaveLength(3),
+    expect(wrapper.find("[data-test='sequence-camera-motion']").exists()).toBe(
+      false,
     );
-    expect(draft.clips[1]?.cameraControl).toBeNull();
-    await wrapper
-      .get("[data-test='sequence-camera-motion']")
-      .setValue("dolly-in");
-    expect(draft.clips[0]?.cameraControl).toBe("dolly-in");
-    expect(
-      wrapper.get("[data-test='sequence-camera-motion']").text(),
-    ).toContain("downloads on first use");
-    await wrapper.get("[data-test='advanced-reset']").trigger("click");
-    expect(draft.clips[0]?.cameraControl).toBeNull();
-  });
-
-  it("sequence Reset preserves the opening image and source conditioning", async () => {
-    const wrapper = factory(
-      "ltx2",
-      { model: "ltx-2-19b-distilled:fp8", strength: 0.6 },
-      { output: "sequence" },
-    );
-    const draft = useSequenceDraftStore();
-    draft.enableAudio = true;
-    draft.openingImage = {
-      kind: "upload",
-      filename: "open.png",
-      base64: "CCCC",
-    } as never;
-    await wrapper.get("[data-test='advanced-reset']").trigger("click");
-    expect(draft.openingImage).not.toBeNull();
-    expect(draft.enableAudio).toBe(true);
-    // Strength/fit render beside the opening-image well, not in Advanced.
-    const patched = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as
-      GenerateFormState | undefined;
-    expect(patched?.strength ?? 0.6).toBe(0.6);
+    expect(wrapper.find("[data-test='section-output']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='section-video']").exists()).toBe(true);
   });
 });
 

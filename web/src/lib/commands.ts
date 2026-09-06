@@ -74,12 +74,6 @@ const GO: Array<{
   },
   { id: "go-settings", label: "Settings", path: "/settings" },
   {
-    id: "go-sequence",
-    label: "Compose sequence",
-    path: "/create?mode=sequence",
-    keywords: ["chain", "video"],
-  },
-  {
     id: "go-library-images",
     label: "Browse image prints",
     path: "/library?type=images",

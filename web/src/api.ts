@@ -1,6 +1,4 @@
 import type {
-  ChainJobDetail,
-  ChainJobListing,
   ChainJobSummary,
   ChainRequestWire,
   CreateChainJobResponse,
@@ -16,17 +14,11 @@ import type {
   ServerStatus,
   SseProgressEvent,
   SseUpscaleCompleteEvent,
-  RetakeRequest,
   UpscaleRequestWire,
   QueueEntry,
   QueueListing,
 } from "./types";
 import { postSseJsonStream, type StreamError } from "./lib/apiStream";
-import type {
-  AmendRequest as AmendRequestWire,
-  AmendResponse as AmendResponseWire,
-  ChainValidationResponse,
-} from "@studio/lib/api/chainTypes";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { ApiError, conditionalApiJsonTo } from "@studio/api/client";
 import {
@@ -35,11 +27,6 @@ import {
   queuePageRequestForCapacity,
   type QueuePageRequest,
 } from "@studio/api/queuePlan";
-export type {
-  ChainValidationResponse,
-  ChainValidationStage,
-} from "@studio/lib/api/chainTypes";
-
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
 // mold server; in prod the SPA is served by the same server, same origin.
 const base = "";
@@ -64,22 +51,6 @@ export async function deleteGalleryImage(filename: string): Promise<void> {
   if (!res.ok && res.status !== 204) {
     throw new Error(`DELETE failed: ${res.status} ${res.statusText}`);
   }
-}
-
-export interface ChainLimits {
-  model: string;
-  frames_per_clip_cap: number;
-  fps?: number | null;
-  frames_per_clip_runtime_seconds?: number | null;
-  frames_per_clip_recommended: number;
-  max_stages: number;
-  max_total_frames: number;
-  fade_frames_max: number;
-  transition_modes: string[];
-  quantization_family: string;
-  supports_audio: boolean;
-  supports_sequence: boolean;
-  sequence_unsupported_reason?: string | null;
 }
 
 export function imageUrl(filename: string): string {
@@ -219,31 +190,6 @@ export async function reorderQueueJob(
   return (await res.json()) as QueueEntry;
 }
 
-const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();
-const CHAIN_LIMITS_TTL_MS = 30_000;
-
-export async function fetchChainLimits(
-  model: string,
-  target?: StreamTarget,
-  fps?: number | null,
-): Promise<ChainLimits> {
-  const now = Date.now();
-  // Limits are per model AND per host — a remote's checkpoint may chain
-  // where the origin's doesn't.
-  const effectiveFps = fps && fps > 0 ? Math.floor(fps) : null;
-  const key = `${targetBase(target)}|${model}|${effectiveFps ?? "default"}`;
-  const cached = chainLimitsCache.get(key);
-  if (cached && now - cached.at < CHAIN_LIMITS_TTL_MS) return cached.value;
-  const res = await fetch(
-    `${targetBase(target)}/api/capabilities/chain-limits?model=${encodeURIComponent(model)}${effectiveFps ? `&fps=${effectiveFps}` : ""}`,
-    { headers: targetHeaders(target) },
-  );
-  if (!res.ok) throw new Error(`chain-limits fetch failed: ${res.status}`);
-  const value: ChainLimits = await res.json();
-  chainLimitsCache.set(key, { value, at: now });
-  return value;
-}
-
 export async function expandPrompt(
   req: ExpandRequestWire,
   signal?: AbortSignal,
@@ -298,34 +244,6 @@ function targetHeaders(target?: StreamTarget): Record<string, string> {
   return target?.apiKey ? { "x-api-key": target.apiKey } : {};
 }
 
-/** Normalize and validate a sequence on its exact rendering host without
- * creating a durable job or starting any downloads. */
-export async function validateChain(
-  req: ChainRequestWire,
-  target?: StreamTarget,
-): Promise<ChainValidationResponse> {
-  const res = await fetch(`${targetBase(target)}/api/generate/chain/validate`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...targetHeaders(target),
-    },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) {
-    const body = await res
-      .clone()
-      .json()
-      .catch(() => null);
-    const detail =
-      typeof body === "object" && body !== null && "error" in body
-        ? String((body as { error: unknown }).error)
-        : await res.text().catch(() => "");
-    throw new ApiHttpError("Sequence validation", res.status, detail);
-  }
-  return (await res.json()) as ChainValidationResponse;
-}
-
 /** Advisory VRAM preflight against the machine that will render the print. */
 export async function fetchGenerationEstimate(
   req: GenerateRequestWire,
@@ -371,9 +289,6 @@ export async function upscaleStream(
   });
 }
 
-/** POST /api/generate/chain/stream — SSE stream for chained video
- * generation. Same SSE framing as `/api/generate/stream` but with a
- * `ChainRequest` body and chain-shaped progress/complete events. */
 /** HTTP failure that keeps the status reachable — amend conflict handling
  * (409 → create-as-new fallback) branches on it. */
 export class ApiHttpError extends Error {
@@ -442,39 +357,6 @@ export async function createChainJob(
   return requireJson<CreateChainJobResponse>(res, "POST /api/chain-jobs");
 }
 
-export async function listChainJobs(
-  target?: StreamTarget,
-): Promise<ChainJobListing> {
-  return chainJobJson("", target);
-}
-
-export async function getChainJob(
-  id: string,
-  target?: StreamTarget,
-): Promise<ChainJobDetail> {
-  return chainJobJson(`/${encodeURIComponent(id)}`, target);
-}
-
-export async function resumeChainJob(
-  id: string,
-  target?: StreamTarget,
-): Promise<ChainJobSummary> {
-  return chainJobJson(`/${encodeURIComponent(id)}/resume`, target, {
-    method: "POST",
-  });
-}
-
-export async function retakeChainJob(
-  id: string,
-  req: RetakeRequest,
-  target?: StreamTarget,
-): Promise<ChainJobSummary> {
-  return chainJobJson(`/${encodeURIComponent(id)}/retake`, target, {
-    method: "POST",
-    body: req,
-  });
-}
-
 export async function cancelChainJob(
   id: string,
   target?: StreamTarget,
@@ -484,79 +366,8 @@ export async function cancelChainJob(
   });
 }
 
-export async function deleteChainJob(
-  id: string,
-  target?: StreamTarget,
-): Promise<void> {
-  const res = await fetch(
-    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}`,
-    { method: "DELETE", headers: targetHeaders(target) },
-  );
-  if (!res.ok && res.status !== 204) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      `DELETE /api/chain-jobs/${id} failed: ${res.status} ${text}`.trim(),
-    );
-  }
-}
-
-/** POST /api/chain-jobs/:id/amend — full edited stage list; the server
- * recomputes the preserved prefix and re-renders only dirty stages. A 409
- * (`ApiHttpError.status`) means the job has moved on and the edit must be
- * created as a new sequence instead. */
-export async function amendChainJob(
-  id: string,
-  req: AmendRequestWire,
-  target?: StreamTarget,
-  operationId?: string,
-): Promise<AmendResponseWire> {
-  return chainJobJson(`/${encodeURIComponent(id)}/amend`, target, {
-    method: "POST",
-    body: req,
-    operationId,
-  });
-}
-
-/** Cancel a create/amend by its client-known id, including before the
- * mutation response exposes a durable job id. */
-export async function cancelChainJobMutation(
-  jobId: string,
-  operationId: string,
-  target?: StreamTarget,
-): Promise<void> {
-  const path = `/api/chain-jobs/${encodeURIComponent(jobId)}/operations/${encodeURIComponent(operationId)}/cancel`;
-  const res = await fetch(`${targetBase(target)}${path}`, {
-    method: "POST",
-    headers: targetHeaders(target),
-    keepalive: true,
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new ApiHttpError(`POST ${path}`, res.status, body);
-  }
-}
-
-export async function gcChainJobs(target?: StreamTarget): Promise<{
-  swept_ephemeral_jobs: number;
-  pruned_artifact_dirs: number;
-}> {
-  return chainJobJson("/gc", target, {
-    method: "POST",
-  });
-}
-
 export function chainJobEventsUrl(id: string, target?: StreamTarget): string {
   return `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/events`;
-}
-
-export function chainJobStagePreviewUrl(
-  id: string,
-  idx: number,
-  target?: StreamTarget,
-): string {
-  return `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/stages/${encodeURIComponent(
-    String(idx),
-  )}/preview`;
 }
 
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────

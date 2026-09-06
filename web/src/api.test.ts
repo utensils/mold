@@ -1,24 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  amendChainJob,
   ApiHttpError,
   cancelChainJob,
-  cancelChainJobMutation,
   chainJobEventsUrl,
-  chainJobStagePreviewUrl,
   createChainJob,
-  deleteChainJob,
   deleteModel,
   fetchQueue,
-  gcChainJobs,
-  fetchChainLimits,
-  getChainJob,
-  listChainJobs,
-  resumeChainJob,
-  retakeChainJob,
   upscaleStream,
   updateQueueJobTargetGpu,
-  validateChain,
   type UpscaleStreamHandlers,
 } from "./api";
 import type { ChainRequestWire, UpscaleRequestWire } from "./types";
@@ -42,10 +31,17 @@ function upscaleHandlers() {
   };
 }
 
+/** What `useGenerateStream` sends when one render is longer than the
+ *  checkpoint's single-pass clip size: ONE prompt, `ephemeral: true`, and no
+ *  authored stages — web has no other chain body left. */
 function chainRequest(): ChainRequestWire {
   return {
     model: "ltx-2-19b-distilled:fp8",
-    stages: [{ prompt: "a cat", frames: 97, transition: "smooth" }],
+    ephemeral: true,
+    output_mode: "one-shot",
+    prompt: "a cat",
+    total_frames: 200,
+    clip_frames: 97,
   } as ChainRequestWire;
 }
 
@@ -184,109 +180,6 @@ describe("queue api", () => {
   });
 });
 
-describe("chain validation api", () => {
-  it("requests chain limits for the selected fps", async () => {
-    const limits = {
-      model: "ltx-2-19b-distilled:fp8",
-      frames_per_clip_cap: 241,
-      frames_per_clip_recommended: 97,
-      max_stages: 16,
-      max_total_frames: 3856,
-      fade_frames_max: 32,
-      transition_modes: ["smooth"],
-      quantization_family: "fp8",
-      supports_audio: true,
-      supports_sequence: true,
-    };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response(JSON.stringify(limits), { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      fetchChainLimits(limits.model, undefined, 12),
-    ).resolves.toEqual(limits);
-    expect(fetchMock).toHaveBeenCalledWith(
-      `/api/capabilities/chain-limits?model=${encodeURIComponent(limits.model)}&fps=12`,
-      { headers: {} },
-    );
-  });
-
-  it("validates on the exact authenticated host without creating a job", async () => {
-    const response = {
-      model: "ltx-2-19b-distilled:fp8",
-      width: 1216,
-      height: 704,
-      fps: 24,
-      motion_tail_frames: 17,
-      stage_count: 1,
-      estimated_total_frames: 97,
-      estimated_duration_ms: 4042,
-      stages: [
-        {
-          prompt: "a cat",
-          frames: 97,
-          output_frames: 97,
-          transition: "smooth",
-          fade_frames: null,
-          has_source_image: false,
-          has_negative_prompt: false,
-        },
-      ],
-      warnings: [],
-      vram_estimate: null,
-    };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(JSON.stringify(response), { status: 200 }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await validateChain(chainRequest(), {
-      baseUrl: "http://render-box:7680",
-      apiKey: "secret",
-    });
-
-    expect(result).toEqual(response);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://render-box:7680/api/generate/chain/validate",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "content-type": "application/json",
-          "x-api-key": "secret",
-        }),
-        body: JSON.stringify(chainRequest()),
-      }),
-    );
-  });
-
-  it("surfaces the server's structured validation detail without raw JSON", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            error: "motion_tail_frames must be less than clip 2 frames",
-            code: "VALIDATION_ERROR",
-          }),
-          { status: 422 },
-        ),
-      ),
-    );
-
-    const error = await validateChain(chainRequest()).catch(
-      (candidate: unknown) => candidate,
-    );
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain(
-      "motion_tail_frames must be less than clip 2 frames",
-    );
-    expect((error as Error).message).not.toContain("VALIDATION_ERROR");
-  });
-});
-
 describe("upscaleStream", () => {
   it("preserves Retry-After on HTTP errors", async () => {
     installDriver((_onEvent, onHttpError) => {
@@ -346,7 +239,7 @@ describe("model lifecycle api helpers", () => {
   });
 });
 
-describe("chain job api helpers", () => {
+describe("auto-chained long video", () => {
   function installFetch(body: unknown = {}, status = 200) {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(body), {
@@ -358,25 +251,7 @@ describe("chain job api helpers", () => {
     return fetchMock;
   }
 
-  it("creates, lists, gets, resumes, retakes, cancels, deletes, and GC's jobs", async () => {
-    const summary = {
-      id: "job/1",
-      state: "queued",
-      model: "ltx-2",
-      stage_count: 2,
-      current_stage: 0,
-      created_at_unix_ms: 1,
-      updated_at_unix_ms: 2,
-      error: null,
-      ephemeral: false,
-    };
-    const detail = {
-      ...summary,
-      stages: [],
-      finalizes: [],
-      retakes: [],
-      script: { schema: "mold.chain.v1", chain: {}, stage: [] },
-    };
+  it("creates the ephemeral job, cancels it, and names its event stream", async () => {
     const fetchMock = installFetch({ job_id: "job/1" });
     await createChainJob(chainRequest(), undefined, "create-op");
     expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
@@ -388,6 +263,32 @@ describe("chain job api helpers", () => {
       body: JSON.stringify(chainRequest()),
     });
 
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "job/1",
+          state: "cancelled",
+          model: "ltx-2",
+          stage_count: 3,
+          current_stage: 1,
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 2,
+          error: null,
+          ephemeral: true,
+        }),
+      ),
+    );
+    await cancelChainJob("job/1");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/chain-jobs/job%2F1/cancel",
+      { method: "POST", headers: {} },
+    );
+
+    expect(chainJobEventsUrl("job/1")).toBe("/api/chain-jobs/job%2F1/events");
+  });
+
+  it("surfaces request warnings the host attached to the accepted job", async () => {
+    const fetchMock = installFetch({ job_id: "job/2" });
     const onRequestWarnings = vi.fn();
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ job_id: "job/2" }), {
@@ -405,121 +306,24 @@ describe("chain job api helpers", () => {
     expect(onRequestWarnings).toHaveBeenCalledWith([
       "retimed clip; output was still created",
     ]);
-
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ jobs: [summary] })),
-    );
-    await expect(listChainJobs()).resolves.toEqual({ jobs: [summary] });
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
-      headers: {},
-    });
-
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detail)));
-    await expect(getChainJob("job/1")).resolves.toEqual(detail);
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1", {
-      headers: {},
-    });
-
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
-    await resumeChainJob("job/1");
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/chain-jobs/job%2F1/resume",
-      {
-        method: "POST",
-        headers: {},
-      },
-    );
-
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
-    await retakeChainJob("job/1", { stage_idx: 1, mode: "splice" });
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/chain-jobs/job%2F1/retake",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ stage_idx: 1, mode: "splice" }),
-      },
-    );
-
-    const amendRequest = { stages: chainRequest().stages ?? [], steps: 12 };
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...summary, preserved_stages: 1 })),
-    );
-    await amendChainJob("job/1", amendRequest, undefined, "amend-op");
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/chain-jobs/job%2F1/amend",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-mold-operation-id": "amend-op",
-        },
-        body: JSON.stringify(amendRequest),
-      },
-    );
-
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
-    await cancelChainJob("job/1");
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/chain-jobs/job%2F1/cancel",
-      {
-        method: "POST",
-        headers: {},
-      },
-    );
-
-    fetchMock.mockResolvedValueOnce(new Response("", { status: 202 }));
-    await cancelChainJobMutation("job/1", "amend-op");
-    expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/chain-jobs/job%2F1/operations/amend-op/cancel",
-      { method: "POST", headers: {}, keepalive: true },
-    );
-
-    fetchMock.mockResolvedValueOnce(new Response("", { status: 204 }));
-    await deleteChainJob("job/1");
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1", {
-      method: "DELETE",
-      headers: {},
-    });
-
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ swept_ephemeral_jobs: 1, pruned_artifact_dirs: 2 }),
-      ),
-    );
-    await expect(gcChainJobs()).resolves.toEqual({
-      swept_ephemeral_jobs: 1,
-      pruned_artifact_dirs: 2,
-    });
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/gc", {
-      method: "POST",
-      headers: {},
-    });
   });
 
-  it("preserves typed HTTP errors from durable sequence requests", async () => {
-    installFetch({ error: "job moved on" }, 409);
+  it("preserves typed HTTP errors from a refused cancel", async () => {
+    installFetch({ error: "job already settled" }, 409);
 
-    const error = await amendChainJob("job/1", {
-      stages: chainRequest().stages ?? [],
-    }).catch((cause: unknown) => cause);
+    const error = await cancelChainJob("job/1").catch(
+      (cause: unknown) => cause,
+    );
 
     expect(error).toBeInstanceOf(ApiHttpError);
     expect(error).toMatchObject({
       message:
-        'POST /api/chain-jobs/job/1/amend failed: 409 {"error":"job moved on"}',
+        'POST /api/chain-jobs/job/1/cancel failed: 409 {"error":"job already settled"}',
       status: 409,
     });
   });
 
-  it("encodes chain job event and preview URLs", () => {
-    expect(chainJobEventsUrl("job/1")).toBe("/api/chain-jobs/job%2F1/events");
-    expect(chainJobStagePreviewUrl("job/1", 12)).toBe(
-      "/api/chain-jobs/job%2F1/stages/12/preview",
-    );
-  });
-
-  it("keeps every durable sequence request on an authenticated remote host", async () => {
+  it("keeps creation and its event stream on an authenticated remote host", async () => {
     const fetchMock = installFetch({ job_id: "remote-1" });
     const target = { baseUrl: "http://plato:7680", apiKey: "secret" };
 
@@ -536,5 +340,24 @@ describe("chain job api helpers", () => {
     expect(chainJobEventsUrl("remote-1", target)).toBe(
       "http://plato:7680/api/chain-jobs/remote-1/events",
     );
+  });
+
+  it("exposes no authoring endpoint any more", async () => {
+    const api = await import("./api");
+    for (const gone of [
+      "fetchChainLimits",
+      "validateChain",
+      "listChainJobs",
+      "getChainJob",
+      "resumeChainJob",
+      "retakeChainJob",
+      "amendChainJob",
+      "cancelChainJobMutation",
+      "deleteChainJob",
+      "gcChainJobs",
+      "chainJobStagePreviewUrl",
+    ]) {
+      expect(api).not.toHaveProperty(gone);
+    }
   });
 });

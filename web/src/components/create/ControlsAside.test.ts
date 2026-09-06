@@ -8,7 +8,6 @@ import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { createPinia, setActivePinia } from "pinia";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   useGenerateForm,
   __testing__,
@@ -22,7 +21,6 @@ import {
 import { __testing__ as routingTesting } from "../../composables/useHostRouting";
 import { CAPABLE_TARGET_ID } from "../../lib/hostRouting";
 import type { GenerateFormState } from "../../types";
-import type { ChainLimits } from "../../api";
 
 const pushMock = vi.hoisted(() => vi.fn());
 vi.mock("vue-router", () => ({
@@ -52,21 +50,6 @@ function factory(overrides: Partial<GenerateFormState> = {}, family = "flux") {
   return mount(ControlsAside, {
     props: { modelValue: baseForm(overrides), family, advCount: 0 },
   });
-}
-
-function chainLimits(supportsAudio: boolean): ChainLimits {
-  return {
-    model: "ltx-2-19b-distilled:fp8",
-    frames_per_clip_cap: 121,
-    frames_per_clip_recommended: 97,
-    max_stages: 16,
-    max_total_frames: 1936,
-    fade_frames_max: 24,
-    transition_modes: ["smooth", "cut", "fade"],
-    quantization_family: "fp8",
-    supports_audio: supportsAudio,
-    supports_sequence: true,
-  };
 }
 
 describe("ControlsAside", () => {
@@ -334,8 +317,7 @@ describe("ControlsAside", () => {
     );
   });
 
-  it("keeps sequence generated audio in the primary settings", async () => {
-    const draft = useSequenceDraftStore();
+  it("keeps generated audio on the form for an AV checkpoint", () => {
     const model = {
       name: "ltx-2-19b-distilled:fp8",
       family: "ltx2",
@@ -346,34 +328,15 @@ describe("ControlsAside", () => {
         modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
         family: "ltx2",
         model,
-        output: "sequence",
-        chainLimits: chainLimits(true),
       },
     });
-    wrapper.getComponent(SwitchToggle).vm.$emit("update:modelValue", true);
-    expect(draft.enableAudio).toBe(true);
-  });
-
-  it("keeps sequence audio disabled when the routed host rejects it", () => {
-    const model = {
-      name: "ltx-2-19b-distilled:fp8",
-      family: "ltx2",
-      supports_audio: true,
-    } as ModelInfoExtended;
-    const wrapper = mount(ControlsAside, {
-      props: {
-        modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
-        family: "ltx2",
-        model,
-        output: "sequence",
-        chainLimits: chainLimits(false),
-      },
-    });
-
-    expect(wrapper.getComponent(SwitchToggle).props("disabled")).toBe(true);
-    expect(wrapper.text()).toContain(
-      "Generated audio is unavailable for this sequence on the selected host",
-    );
+    const toggle = wrapper.getComponent(SwitchToggle);
+    expect(toggle.props("disabled")).toBe(false);
+    toggle.vm.$emit("update:modelValue", false);
+    expect(
+      (wrapper.emitted("update:modelValue")?.at(-1)?.[0] as GenerateFormState)
+        .enableAudio,
+    ).toBe(false);
   });
 
   it("does not expose the audio toggle for an H3 model restored without a family", () => {
@@ -813,68 +776,33 @@ describe("ControlsAside", () => {
     );
   });
 
-  // ── Output card (mockup 1c/3a: "mode is a setting, not a place") ─────
-  it("renders the Output card ahead of Shape and emits the mode change", async () => {
+  // Create is one-shot only: there is no output mode to choose any more.
+  it("renders no Output mode control", () => {
     const wrapper = factory();
-    const card = wrapper.get("[data-test='output-card']");
-    // The Output card is the first group so it reads as part of the model
-    // decision, above Shape.
-    const firstGroup = wrapper.find(".controls__group");
-    expect(firstGroup.element).toBe(card.element);
-    const sequenceButton = card
-      .findAll("button")
-      .find((b) => b.text() === "Sequence")!;
-    await sequenceButton.trigger("click");
-    expect(wrapper.emitted("update:output")?.[0]).toEqual(["sequence"]);
-  });
-
-  it("captions Sequence mode with the parked-clips explanation", () => {
-    const wrapper = mount(ControlsAside, {
-      props: {
-        modelValue: baseForm(),
-        family: "ltx2",
-        advCount: 0,
-        output: "sequence",
-        clipCount: 3,
-      },
-    });
-    expect(wrapper.get("[data-test='output-caption']").text()).toBe(
-      "3 clips on the composer rail · one-shot and sequence prompts stay separate.",
+    expect(wrapper.find("[data-test='output-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='output-mode']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='output-caption']").exists()).toBe(false);
+    expect(wrapper.findAll("button").some((b) => b.text() === "Sequence")).toBe(
+      false,
     );
   });
 
-  it("locks Batch to 1 in sequence mode with the one-timeline caption", () => {
+  it("leads the rail with Shape, and keeps Batch unlocked for a video model", () => {
     const wrapper = mount(ControlsAside, {
       props: {
-        modelValue: baseForm({ batchSize: 4 }),
+        modelValue: baseForm({ batchSize: 4, width: 1024, height: 1024 }),
         family: "ltx2",
         advCount: 0,
-        output: "sequence",
-        clipCount: 2,
       },
     });
+    expect(wrapper.find(".controls__group").text()).toContain("Shape");
+    expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
+    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
     const stepper = wrapper
       .findAllComponents(Stepper)
       .find((s) => s.props("label") === "Batch size")!;
-    expect(stepper.props("modelValue")).toBe(1);
-    expect(stepper.props("max")).toBe(1);
-    expect(wrapper.get("[data-test='batch-locked']").text()).toContain(
-      "a sequence renders one timeline",
-    );
-  });
-
-  it("keeps Shape, Resolution, Detail, Prompt strength, and Seed live in sequence mode", () => {
-    const wrapper = mount(ControlsAside, {
-      props: {
-        modelValue: baseForm({ width: 1024, height: 1024 }),
-        family: "ltx2",
-        advCount: 0,
-        output: "sequence",
-        clipCount: 2,
-      },
-    });
-    expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
-    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
+    expect(stepper.props("modelValue")).toBe(4);
+    expect(wrapper.find("[data-test='batch-locked']").exists()).toBe(false);
     const labels = wrapper
       .findAllComponents(SliderRow)
       .map((row) => row.props("label"));

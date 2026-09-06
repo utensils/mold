@@ -238,9 +238,9 @@ export interface ChainJobMeta {
   stageCount: number;
   currentStage: number;
   estimatedTotalFrames: number | null;
-  /** The durable chain job this sequence is, once created. Cancel routes on
-   * this rather than on `serverId`: a chain is cancelled through
-   * `DELETE /api/chain-jobs/:id`, never the generation queue. */
+  /** The durable chain job this render is, once created. Cancel routes on
+   * this rather than on `serverId`: a chain is cancelled through its own
+   * chain-job route, never the generation queue. */
   jobId?: string | null;
 }
 
@@ -460,7 +460,7 @@ const STORAGE_KEY = "mold.generate.jobs";
 
 /// Maximum number of *settled* (done/error/canceled) jobs we keep in the
 /// ordinary localStorage rail. Actionable durable batches use independently
-/// projected recovery records; running sequences remain in this rail.
+/// projected recovery records; running auto-chained videos stay in this rail.
 /// Past this cap, oldest settled jobs are forgotten on the next persist
 /// cycle. Completed media itself lives in the gallery DB.
 const SETTLED_HISTORY_CAP = 10;
@@ -2003,20 +2003,20 @@ function submitJobs(
 }
 
 /**
- * Sequences only. Every generation is admitted through
+ * Auto-chained long videos only. Every generation is admitted through
  * `POST /api/generation-batches`; there is no attached generation stream left
  * to fall back to, so a request this machine cannot carry durably is refused
  * by `submitDurableJobs` rather than re-routed here.
  */
 /**
- * Create an auto-chained sequence as a durable chain job and follow its own
+ * Create an auto-chained long video as a durable chain job and follow its own
  * event stream.
  *
- * `ephemeral: true` is what keeps it out of Library ▸ History ▸ Sequences and
- * out of the print's saved provenance — the user asked for one shot, not a
- * sequence. The subscription is deliberately PER JOB: `useChainJobs.watch` is
- * a singleton driving the sequence rail, and an auto-chain row must not take
- * it over.
+ * `ephemeral: true` is what keeps it out of `GET /api/chain-jobs` and out of
+ * the print's saved job id — the user asked for one shot, and the host split
+ * it only because the checkpoint cannot render that length in one pass. The
+ * subscription is deliberately PER JOB, so two long videos in flight never
+ * share one stream.
  */
 async function followAutoChainJob(
   job: Job,
@@ -2074,13 +2074,13 @@ async function followAutoChainJob(
           markCancellationConfirmed(job);
           return;
         }
-        job.error = terminal.error ?? "The sequence failed.";
+        job.error = terminal.error ?? "The render failed.";
         recordFailedSettlement(job);
       });
     },
     onclose: () => {
       if (!controller.signal.aborted && !settled) {
-        throw new Error("Sequence event stream closed.");
+        throw new Error("Chain event stream closed.");
       }
     },
     onerror: (error) => {
@@ -2093,7 +2093,7 @@ async function followAutoChainJob(
   });
 }
 
-/** A finished sequence is one saved print: hydrate it from the machine's
+/** A finished chain is one saved print: hydrate it from the machine's
  * gallery exactly as a durable print's completion does. */
 async function completeAutoChainJob(job: Job, filename: string): Promise<void> {
   try {
@@ -2280,7 +2280,7 @@ async function cancelJob(id: string): Promise<void> {
   }
   if (job.cancelling) return;
   job.cancelling = true;
-  // A sequence IS a chain job: it is cancelled on its own route, never on the
+  // An auto-chained video IS a chain job: cancelled on its own route, never on the
   // generation queue, which has no row for it.
   const chainJobId = job.chain?.jobId;
   if (chainJobId) {

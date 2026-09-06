@@ -71,10 +71,6 @@ const props = withDefaults(
     /** The origin host can actually execute this media's upscale workflow. */
     upscaleEnabled?: boolean;
     models?: ModelInfoExtended[] | undefined;
-    /** Stitched from a sequence (`metadata.chain`): reuse loads a clip rail. */
-    isSequence?: boolean;
-    /** Its producing job is (without probing) still on its origin host. */
-    canEditSequence?: boolean;
     /** Some copy of this print lives on a host with `gallery.organize`:
      * title / favorite / tags / collections are editable. */
     canOrganize?: boolean;
@@ -100,7 +96,6 @@ const emit = defineEmits<{
   (e: "use-source", item: GalleryImage): void;
   (e: "upscale", item: GalleryImage): void;
   (e: "delete", item: GalleryImage): void;
-  (e: "edit-sequence", item: GalleryImage): void;
   (e: "rename", item: GalleryImage, title: string | null): void;
   (e: "favorite", item: GalleryImage, favorite: boolean): void;
   (e: "add-tag", item: GalleryImage, tag: string): void;
@@ -506,16 +501,6 @@ watch(
   },
 );
 
-function onEditSequence() {
-  if (props.item) emit("edit-sequence", props.item);
-}
-function onPrimaryAction() {
-  if (props.isSequence && props.canEditSequence) {
-    onEditSequence();
-    return;
-  }
-  onReuse();
-}
 function onReuse() {
   if (props.item) emit("reuse", props.item);
 }
@@ -917,7 +902,7 @@ async function performVideoExport(options: VideoExportOptions) {
               Restore
             </button>
             <button
-              class="lb__quiet lb__quiet--danger lb__edit-sequence"
+              class="lb__quiet lb__quiet--danger"
               data-test="lightbox-delete-forever"
               @click="onDeleteForever"
             >
@@ -928,7 +913,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <button
               class="lb__reuse"
               data-test="lightbox-primary-action"
-              @click="onPrimaryAction"
+              @click="onReuse"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -942,21 +927,7 @@ async function performVideoExport(options: VideoExportOptions) {
                 <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
                 <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
               </svg>
-              {{
-                isSequence
-                  ? canEditSequence
-                    ? "Edit sequence"
-                    : "Duplicate as new"
-                  : "Reuse these settings"
-              }}
-            </button>
-            <button
-              v-if="canEditSequence"
-              class="lb__quiet lb__edit-sequence"
-              data-test="lightbox-duplicate-sequence"
-              @click="onReuse"
-            >
-              Duplicate as new
+              Reuse these settings
             </button>
           </template>
           <div class="lb__pair">
@@ -1263,7 +1234,7 @@ async function performVideoExport(options: VideoExportOptions) {
           <template v-if="inTrash">
             <button class="lb__reuse" @click="onRestore">Restore</button>
             <button
-              class="lb__quiet lb__quiet--danger lb__edit-sequence"
+              class="lb__quiet lb__quiet--danger"
               @click="onDeleteForever"
             >
               Delete forever
@@ -1273,7 +1244,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <button
               class="lb__reuse"
               data-test="lightbox-primary-action"
-              @click="onPrimaryAction"
+              @click="onReuse"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -1287,21 +1258,7 @@ async function performVideoExport(options: VideoExportOptions) {
                 <path d="M3 12a9 9 0 019-9 9 9 0 016.7 3M21 3v6h-6" />
                 <path d="M21 12a9 9 0 01-9 9 9 9 0 01-6.7-3M3 21v-6h6" />
               </svg>
-              {{
-                isSequence
-                  ? canEditSequence
-                    ? "Edit sequence"
-                    : "Duplicate as new"
-                  : "Reuse these settings"
-              }}
-            </button>
-            <button
-              v-if="canEditSequence"
-              class="lb__quiet lb__edit-sequence"
-              data-test="lightbox-duplicate-sequence"
-              @click="onReuse"
-            >
-              Duplicate as new
+              Reuse these settings
             </button>
           </template>
           <div class="lb__pair">

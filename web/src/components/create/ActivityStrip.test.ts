@@ -1,9 +1,6 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import ActivityStrip from "./ActivityStrip.vue";
-import { sequenceToVM } from "@studio/lib/activity";
-import type { ActivityJobVM } from "@studio/lib/activity";
-import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
 import { buildQueueStatusIndex } from "@studio/lib/queuePosition";
 import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
 import type { Job } from "../../composables/useGenerateStream";
@@ -44,25 +41,15 @@ function makeJob(overrides: Partial<Job> = {}): Job {
 
 const NOW = Date.now();
 
-function makeSequenceVM(
-  overrides: Partial<ChainJobSummary> = {},
-  host: { hostId: string; hostLabel: string } = {
-    hostId: "origin",
-    hostLabel: "this server",
-  },
-): ActivityJobVM {
-  const summary: ChainJobSummary = {
-    id: "chain-1",
-    state: "running",
-    model: "ltx-2-19b-distilled:fp8",
-    stage_count: 3,
-    current_stage: 1,
-    created_at_unix_ms: NOW - 120_000,
-    updated_at_unix_ms: NOW - 60_000,
-    ...overrides,
-  };
-  const progress = summary.state === "running" ? { step: 4, total: 8 } : null;
-  return sequenceToVM(summary, host, progress);
+/** A print the stream has already settled as a failure — the only settled
+ *  row the strip still holds. */
+function makeFailedJob(id: string, settledAgoMs: number): Job {
+  return makeJob({
+    id,
+    state: "error",
+    error: "boom",
+    settledAt: NOW - settledAgoMs,
+  });
 }
 
 describe("ActivityStrip", () => {
@@ -167,15 +154,14 @@ describe("ActivityStrip", () => {
   });
 
   it("keeps initiating-client history after the shared terminal snapshot disappears", () => {
-    const completed = makeSequenceVM({ state: "completed" });
     const wrapper = mount(ActivityStrip, {
-      props: { jobs: [], sequences: [completed] },
+      props: { jobs: [makeFailedJob("job-1", 30_000)] },
     });
     expect(wrapper.find("[data-test='shared-live-activity']").exists()).toBe(
       false,
     );
-    expect(wrapper.get("[data-test='activity-digest']").text()).toContain(
-      "1 settled sequence",
+    expect(wrapper.find("[data-test='activity-error-job-1']").exists()).toBe(
+      true,
     );
   });
 
@@ -309,25 +295,14 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("1 other queued print");
   });
 
-  it("opens queued prints and sequences with Space", async () => {
+  it("opens queued prints with Space", async () => {
     const queued = makeJob({ id: "job-2", workStarted: false });
-    const sequence = makeSequenceVM();
-    const wrapper = mount(ActivityStrip, {
-      props: { jobs: [queued], sequences: [sequence] },
-    });
+    const wrapper = mount(ActivityStrip, { props: { jobs: [queued] } });
 
     await wrapper
       .get("[data-test='activity-queued-job-2']")
       .trigger("keydown", { key: " " });
     expect((wrapper.emitted("open")?.[0]?.[0] as Job).id).toBe(queued.id);
-
-    await wrapper
-      .get("[data-test='activity-sequence-chain-1']")
-      .trigger("keydown", { key: " " });
-    expect(wrapper.emitted("sequence-action")?.[0]).toEqual([
-      "watch",
-      sequence,
-    ]);
   });
 
   it("falls back to the stage line when no percent is available", () => {
@@ -350,94 +325,16 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("Loading model");
   });
 
-  it("shows a sequence row with model, clip count, state, and stage progress", () => {
-    const vm = makeSequenceVM();
+  it("renders no sequence rows at all", () => {
+    // Authored sequences are retired from the web surface; a chain job the
+    // CLI creates reaches this strip only as a read-only fleet row.
     const wrapper = mount(ActivityStrip, {
-      props: { jobs: [], sequences: [vm] },
+      props: { jobs: [makeJob()] },
     });
-    const row = wrapper.get("[data-test='activity-sequence-chain-1']");
-    expect(row.text()).toContain("ltx-2-19b-distilled:fp8");
-    expect(row.text()).toContain("3 clips");
-    expect(row.text()).toContain("running");
-    expect(row.text()).toContain("clip 2/3");
-    expect(row.text()).toContain("50%");
-  });
-
-  it("is visible when only sequence jobs exist, without any maintenance", () => {
-    const wrapper = mount(ActivityStrip, {
-      props: { jobs: [], sequences: [makeSequenceVM({ state: "completed" })] },
-    });
-    expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(true);
-    // Clear inactive / Clean up disk are destructive, host-scoped, and now
-    // live in Library ▸ History ▸ Sequences.
-    expect(wrapper.find("[data-test='activity-clear-inactive']").exists()).toBe(
-      false,
+    expect(wrapper.findAll("[data-test^='activity-sequence-']")).toHaveLength(
+      0,
     );
-    expect(wrapper.find("[data-test='activity-cleanup-disk']").exists()).toBe(
-      false,
-    );
-  });
-
-  it("emits state-appropriate sequence actions with the VM attached", async () => {
-    const running = makeSequenceVM();
-    const failed = makeSequenceVM({ id: "chain-2", state: "failed" });
-    const wrapper = mount(ActivityStrip, {
-      props: { jobs: [], sequences: [running, failed] },
-    });
-    await wrapper
-      .get("[data-test='activity-sequence-chain-1'] [data-action='cancel']")
-      .trigger("click");
-    expect(wrapper.emitted("sequence-action")?.[0]).toEqual([
-      "cancel",
-      running,
-    ]);
-
-    const failedRow = wrapper.get("[data-test='activity-sequence-chain-2']");
-    expect(failedRow.find("[data-action='resume']").exists()).toBe(true);
-    expect(failedRow.find("[data-action='edit']").exists()).toBe(true);
-    expect(failedRow.find("[data-action='delete']").exists()).toBe(true);
-    await failedRow.get("[data-action='edit']").trigger("click");
-    expect(wrapper.emitted("sequence-action")?.at(-1)).toEqual([
-      "edit",
-      failed,
-    ]);
-  });
-
-  it("orders active sequences ahead of settled-but-wrong ones", () => {
-    const failed = makeSequenceVM({
-      id: "chain-failed",
-      state: "failed",
-      error: "boom",
-      updated_at_unix_ms: NOW,
-    });
-    const running = makeSequenceVM({
-      id: "chain-live",
-      created_at_unix_ms: NOW - 600_000,
-    });
-    const wrapper = mount(ActivityStrip, {
-      props: { jobs: [], sequences: [failed, running] },
-    });
-    const rows = wrapper.findAll("[data-test^='activity-sequence-']");
-    expect(rows[0]?.attributes("data-test")).toBe(
-      "activity-sequence-chain-live",
-    );
-    expect(rows[1]?.attributes("data-test")).toBe(
-      "activity-sequence-chain-failed",
-    );
-  });
-
-  it("badges the host on sequence rows from other machines", () => {
-    const wrapper = mount(ActivityStrip, {
-      props: {
-        jobs: [],
-        sequences: [
-          makeSequenceVM({}, { hostId: "plato-7680", hostLabel: "plato" }),
-        ],
-      },
-    });
-    expect(
-      wrapper.get("[data-test='activity-sequence-chain-1']").text(),
-    ).toContain("plato");
+    expect(wrapper.find("[data-test='activity-digest']").exists()).toBe(false);
   });
 
   it("keeps failed jobs visible without repeating the canvas error", async () => {
@@ -466,104 +363,38 @@ describe("ActivityStrip", () => {
 // "Activity is present tense": settled work resolves to the Library, and the
 // strip keeps only a capped, expiring set of rows that still want a decision.
 describe("ActivityStrip — present tense", () => {
-  it("digests completed sequences instead of listing them", () => {
+  it("keeps a fresh failure with a dismiss control", async () => {
     const wrapper = mount(ActivityStrip, {
-      props: {
-        jobs: [],
-        sequences: [
-          makeSequenceVM({ id: "a", state: "completed" }),
-          makeSequenceVM({ id: "b", state: "completed" }),
-        ],
-      },
+      props: { jobs: [makeFailedJob("f1", 60_000)] },
     });
-    expect(wrapper.findAll("[data-test^='activity-sequence-']")).toHaveLength(
-      0,
+    expect(wrapper.get("[data-test='activity-error-f1']").text()).toContain(
+      "Failed — open Create for details",
     );
-    expect(wrapper.get("[data-test='activity-digest']").text()).toBe(
-      "2 settled sequences",
-    );
-  });
-
-  it("keeps a fresh failure with actions but not duplicate detail", async () => {
-    const wrapper = mount(ActivityStrip, {
-      props: {
-        jobs: [],
-        sequences: [
-          makeSequenceVM({
-            state: "failed",
-            error: "stage 2 blew up",
-            updated_at_unix_ms: NOW - 60_000,
-          }),
-        ],
-      },
-    });
-    const row = wrapper.get("[data-test='activity-sequence-chain-1']");
-    expect(row.text()).not.toContain("stage 2 blew up");
-    expect(row.find("[data-action='resume']").exists()).toBe(true);
-
-    await row
-      .get("[data-test='activity-seq-dismiss-chain-1']")
-      .trigger("click");
-    expect(wrapper.findAll("[data-test^='activity-sequence-']")).toHaveLength(
-      0,
-    );
-    // Dismiss is client-side; the durable job stays on its host.
-    expect(wrapper.emitted("sequence-action")).toBeUndefined();
+    await wrapper.get("[data-test='activity-dismiss-f1']").trigger("click");
+    expect(wrapper.emitted("dismiss")?.[0]).toEqual(["f1"]);
   });
 
   it("ages a failure out of the strip after five minutes", () => {
     const wrapper = mount(ActivityStrip, {
+      props: { jobs: [makeFailedJob("f1", 6 * 60_000)] },
+    });
+    expect(wrapper.findAll("[data-test^='activity-error-']")).toHaveLength(0);
+    // Nothing counts the overflow any more — the digest chip went with the
+    // sequence composer.
+    expect(wrapper.find("[data-test='activity-digest']").exists()).toBe(false);
+  });
+
+  it("caps attention rows at two", () => {
+    const wrapper = mount(ActivityStrip, {
       props: {
-        jobs: [],
-        sequences: [
-          makeSequenceVM({
-            state: "failed",
-            error: "boom",
-            updated_at_unix_ms: NOW - 6 * 60_000,
-          }),
+        jobs: [
+          makeFailedJob("f1", 3_000),
+          makeFailedJob("f2", 2_000),
+          makeFailedJob("f3", 1_000),
         ],
       },
     });
-    expect(wrapper.findAll("[data-test^='activity-sequence-']")).toHaveLength(
-      0,
-    );
-    expect(wrapper.get("[data-test='activity-digest']").text()).toBe(
-      "1 settled sequence",
-    );
-  });
-
-  it("caps attention rows at two and counts the overflow as failed", () => {
-    const failed = (id: string, ago: number) =>
-      makeSequenceVM({
-        id,
-        state: "failed",
-        error: "boom",
-        updated_at_unix_ms: NOW - ago,
-      });
-    const wrapper = mount(ActivityStrip, {
-      props: {
-        jobs: [],
-        sequences: [
-          failed("f1", 3_000),
-          failed("f2", 2_000),
-          failed("f3", 1_000),
-        ],
-      },
-    });
-    expect(wrapper.findAll("[data-test^='activity-sequence-']")).toHaveLength(
-      2,
-    );
-    expect(wrapper.get("[data-test='activity-digest']").text()).toContain(
-      "1 failed",
-    );
-  });
-
-  it("asks the page to open History when the digest is clicked", async () => {
-    const wrapper = mount(ActivityStrip, {
-      props: { jobs: [], sequences: [makeSequenceVM({ state: "completed" })] },
-    });
-    await wrapper.get("[data-test='activity-digest']").trigger("click");
-    expect(wrapper.emitted("show-history")).toHaveLength(1);
+    expect(wrapper.findAll("[data-test^='activity-error-']")).toHaveLength(2);
   });
 
   it("hides itself when every job has settled and nothing is left to count", () => {

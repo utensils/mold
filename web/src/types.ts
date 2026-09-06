@@ -80,8 +80,6 @@ export type Scheduler =
   | { "edm-dpm-pp-2m": unknown };
 
 export interface OutputMetadata {
-  /** User-facing authoring mode; independent of internal auto-chaining. */
-  output_mode?: "one-shot" | "sequence" | null;
   /** User-authored print title as it was at creation (D5). Embedded so
    * mirrors carry it; the gallery row's editable title wins for display. */
   title?: string | null;
@@ -131,16 +129,12 @@ export interface OutputMetadata {
   references?: GenerationReferenceMetadata[] | null;
   /** Ordered byte-free keyframe provenance (newer servers only). */
   keyframes?: KeyframeMetadata[] | null;
-  /** Durable sequence job this print was stitched from. Present only for
-   * chain jobs with a server-side record — ephemeral chain outputs and
-   * pre-#564 rows carry nothing (additive; newer servers only). */
-  chain_job_id?: string | null;
   /** Queue id of the generation that produced this print — the server's replay
    * idempotence key, and the exact answer to "did my job produce this?".
    * Absent on hosts that predate it. */
   job_id?: string | null;
-  /** Per-clip execution provenance for a stitched output. `output_mode`
-   * decides whether Reuse settings exposes it as an authored sequence. */
+  /** Per-clip execution provenance for a stitched output. Web renders such a
+   * print like any other and reuses it as a plain one-shot. */
   chain?: ChainOutputMetadata | null;
   scheduler?: Scheduler | null;
   output_format?: OutputFormat | null;
@@ -572,8 +566,6 @@ export interface ModelInfoExtended extends ModelDefaults {
    * that predate continuation — read absence as "no". */
   supports_extend?: boolean | null;
   extend_default_overlap_frames?: number | null;
-  /** Model-specific sequence support; absent on older servers. */
-  supports_sequence?: boolean | null;
   /**
    * Per-model source-image conditioning contract (#772): `"unsupported"`,
    * `"optional"`, or `"required"`. Additive — absent on older servers AND on
@@ -814,9 +806,12 @@ export interface SseUpscaleCompleteEvent {
   upscale_time_ms: number;
 }
 
-// ── Chained video generation (POST /api/generate/chain/stream) ────────────
-// Mirrors `mold_core::chain::{ChainRequest, ChainStage,
-// ChainProgressEvent, SseChainCompleteEvent}`.
+// ── Auto-chained long video (POST /api/chain-jobs, `ephemeral: true`) ─────
+// A render whose requested length exceeds the checkpoint's single-pass clip
+// size is split into clips and stitched back into ONE print. There is no
+// authoring surface: web builds this wire body itself in `useGenerateStream`.
+// Mirrors `mold_core::chain::{ChainRequest, ChainStage, ChainProgressEvent,
+// SseChainCompleteEvent}`.
 export interface ChainStageWire {
   prompt: string;
   frames: number;
@@ -835,8 +830,8 @@ export interface ChainRequestWire {
    * artifacts afterwards. Absent for an authored sequence, which is durable
    * and belongs in History. */
   ephemeral?: boolean;
-  /** Title for the STITCHED print — a sequence renders one print, so this
-   * titles that print and never an intermediate clip. Additive. */
+  /** Title for the STITCHED print — an auto-chained render still produces ONE
+   * print, so this titles that print and never an intermediate clip. */
   title?: string | null;
   /** Creation-time filing for the stitched print, same normalization and
    * limits as `GenerateRequestWire.tags`. Additive. */
@@ -931,82 +926,8 @@ export type ChainJobState =
   | "completed"
   | "cancelled";
 
-export type StageState = "pending" | "running" | "completed" | "failed";
-
-export interface ChainJobStageDetail {
-  idx: number;
-  state: StageState;
-  seed: string;
-  frames_emitted: number | null;
-  generation_time_ms: number | null;
-  has_preview: boolean;
-  has_media?: boolean;
-  cache_ready?: boolean;
-  error: string | null;
-}
-
-export interface FinalizeRecord {
-  output: string;
-  at_unix_ms: number;
-  stage_seeds: string[];
-}
-
-export interface RetakeAmendment {
-  stage_idx: number;
-  mode: "cascade" | "splice";
-  old_seed: string;
-  new_seed: string;
-  old_prompt: string | null;
-  new_prompt: string | null;
-  at_unix_ms: number;
-}
-
-// script is a NEW wire-exact mirror (NOT @studio/lib/chainToml's ChainScript):
-// Rust ChainScript serializes stages under the key "stage"
-// (#[serde(rename = "stage")], chain.rs:236) — mirror pins that name.
-export interface ChainScriptWire {
-  schema: string;
-  chain: Record<string, unknown>;
-  stage: ChainStageWire[];
-}
-
-export interface ChainJobDetail extends ChainJobSummary {
-  stages: ChainJobStageDetail[];
-  finalizes: FinalizeRecord[];
-  retakes: RetakeAmendment[];
-  script: ChainScriptWire;
-}
-
-export interface ChainJobListing {
-  jobs: ChainJobSummary[];
-}
-
 export interface CreateChainJobResponse {
   job_id: string;
-}
-
-export type ChainJobEvent =
-  | { type: "snapshot"; job: ChainJobDetail }
-  | { type: "stage_start"; stage_idx: number }
-  | { type: "denoise_step"; stage_idx: number; step: number; total: number }
-  | {
-      type: "stage_done";
-      stage_idx: number;
-      frames_emitted: number;
-      has_preview: boolean;
-      has_media?: boolean;
-      cache_ready?: boolean;
-    }
-  | { type: "yielded"; pending_small_jobs: number }
-  | { type: "finalizing"; total_frames: number }
-  | { type: "finalized"; output: string; take: number }
-  | { type: "state_changed"; state: ChainJobState; error: string | null };
-
-export interface RetakeRequest {
-  stage_idx: number;
-  mode: "cascade" | "splice";
-  seed_offset?: string;
-  prompt?: string;
 }
 
 export type ExpandTask =

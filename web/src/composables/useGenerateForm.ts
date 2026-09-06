@@ -27,6 +27,7 @@ import {
   supportsScheduler,
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
+import { oneShotPromptForPrint } from "../lib/chainPrintReuse";
 import {
   defaultSourceFitPolicy,
   parseSourceFitPolicy,
@@ -704,7 +705,10 @@ export function applyMetadataToForm(
   );
   return {
     ...next,
-    prompt: metadata.prompt ?? "",
+    // A print stitched from clips records every clip's prompt newline-joined
+    // in `metadata.prompt`; the composer is one shot, so it restores the
+    // FIRST clip's own prompt. An ordinary print is untouched.
+    prompt: oneShotPromptForPrint(metadata),
     // Creation-time title; the Library overrides it with the row's editable
     // title before handing off, so the composer shows what the print is
     // called now.

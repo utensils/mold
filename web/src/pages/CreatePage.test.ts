@@ -18,20 +18,9 @@ import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting
 import { useHostRouting } from "../composables/useHostRouting";
 import { usePullResume } from "../composables/usePullResume";
 import {
-  __testing__ as chainJobsTesting,
-  useChainJobs,
-} from "../composables/useChainJobs";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import {
-  pendingSequenceHandoff,
-  setSequenceHandoff,
-  takeSequenceHandoff,
-} from "../composables/useSequenceHandoff";
-import {
   setGenerationHandoff,
   takeGenerationHandoff,
 } from "../composables/useGenerationHandoff";
-import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
@@ -51,7 +40,6 @@ import type {
 } from "../types";
 import type { Job } from "../composables/useGenerateStream";
 import type {
-  ChainJobDetail,
   ChainRequestWire,
   CreateChainJobResponse,
 } from "@studio/lib/api/chainTypes";
@@ -177,34 +165,7 @@ vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
   previewGenerationPlacement: placementPreviewMock,
   previewChainPlacement: placementPreviewMock,
 }));
-const fetchChainLimitsMock = vi.hoisted(() =>
-  vi.fn(async () => ({
-    model: "ltx-2-19b-distilled:fp8",
-    frames_per_clip_cap: 97,
-    frames_per_clip_recommended: 97,
-    max_stages: 16,
-    max_total_frames: 97 * 16,
-    fade_frames_max: 32,
-    transition_modes: ["smooth", "cut", "fade"],
-    quantization_family: "fp8",
-    supports_audio: true,
-    supports_sequence: true,
-  })),
-);
-const listChainJobsMock = vi.hoisted(() =>
-  vi.fn(async () => ({ jobs: [] as unknown[] })),
-);
-const getChainJobMock = vi.hoisted(() => vi.fn());
 const cancelChainJobMock = vi.hoisted(() => vi.fn(async () => ({})));
-const cancelChainJobMutationMock = vi.hoisted(() =>
-  vi.fn(async () => undefined),
-);
-const resumeChainJobMock = vi.hoisted(() => vi.fn(async () => ({})));
-const deleteChainJobMock = vi.hoisted(() => vi.fn(async () => undefined));
-const gcChainJobsMock = vi.hoisted(() =>
-  vi.fn(async () => ({ swept_ephemeral_jobs: 0, pruned_artifact_dirs: 0 })),
-);
-const amendChainJobMock = vi.hoisted(() => vi.fn());
 const cancelPrintMock = vi.hoisted(() => vi.fn(async () => undefined));
 const postDownloadMock = vi.hoisted(() => vi.fn(async () => undefined));
 const postCatalogDownloadMock = vi.hoisted(() => vi.fn(async () => ({})));
@@ -212,7 +173,6 @@ const postCatalogDownloadMock = vi.hoisted(() => vi.fn(async () => ({})));
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
-    // Real error class so `instanceof ApiHttpError` branches stay honest.
     ApiHttpError: actual.ApiHttpError,
     looksLikeCatalogId: actual.looksLikeCatalogId,
     postDownload: postDownloadMock,
@@ -234,19 +194,8 @@ vi.mock("../api", async (importOriginal) => {
     upscaleStream: upscaleStreamMock,
     imageUrl: (name: string) => `/api/gallery/image/${name}`,
     thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
-    fetchChainLimits: fetchChainLimitsMock,
-    listChainJobs: listChainJobsMock,
-    getChainJob: getChainJobMock,
     cancelChainJob: cancelChainJobMock,
-    cancelChainJobMutation: cancelChainJobMutationMock,
-    resumeChainJob: resumeChainJobMock,
-    retakeChainJob: vi.fn(async () => ({})),
-    deleteChainJob: deleteChainJobMock,
-    gcChainJobs: gcChainJobsMock,
-    amendChainJob: amendChainJobMock,
     chainJobEventsUrl: (id: string) => `/api/chain-jobs/${id}/events`,
-    chainJobStagePreviewUrl: (id: string, idx: number) =>
-      `/api/chain-jobs/${id}/stages/${idx}/preview`,
   };
 });
 
@@ -359,28 +308,6 @@ const RecentGridStub = defineComponent({
   template: '<div data-test="recent-grid">{{ entries.length }}</div>',
 });
 
-/** Flip the shared draft store into Sequence output (the Output card's job)
- * without going through a mounted ControlsAside. */
-function enterSequenceMode() {
-  const draft = useSequenceDraftStore();
-  draft.hydrate();
-  draft.setOutput("sequence", { getPrompt: () => "", setPrompt: () => {} }, 97);
-  return draft;
-}
-
-function installedSequenceModel() {
-  return {
-    name: "ltx-2-19b-distilled:fp8",
-    family: "ltx2",
-    downloaded: true,
-    supports_sequence: true,
-    default_width: 1216,
-    default_height: 704,
-    default_steps: 8,
-    default_guidance: 3,
-  };
-}
-
 describe("CreatePage layout and behavior", () => {
   beforeEach(async () => {
     // The routing singleton outlives a test's component; let any poll still in
@@ -391,8 +318,6 @@ describe("CreatePage layout and behavior", () => {
     galleryListing.value = [entry];
     localStorage.clear();
     setActivePinia(createPinia());
-    chainJobsTesting.reset();
-    takeSequenceHandoff();
     takeGenerationHandoff();
     usePullResume().cancel();
     generateFormTesting.resetForTest();
@@ -438,16 +363,7 @@ describe("CreatePage layout and behavior", () => {
       }),
     );
     placementPreviewMock.mockClear();
-    fetchChainLimitsMock.mockClear();
-    listChainJobsMock.mockClear();
-    listChainJobsMock.mockResolvedValue({ jobs: [] });
-    getChainJobMock.mockReset();
     cancelChainJobMock.mockClear();
-    cancelChainJobMutationMock.mockClear();
-    resumeChainJobMock.mockClear();
-    deleteChainJobMock.mockClear();
-    gcChainJobsMock.mockClear();
-    amendChainJobMock.mockReset();
     routeQuery.value = {};
     routerReplaceMock.mockClear();
     hostStatusMock.mockClear();
@@ -466,6 +382,45 @@ describe("CreatePage layout and behavior", () => {
     vi.stubGlobal("prompt", vi.fn());
   });
 
+  // ── The sequence composer is retired ────────────────────────────────
+  // Create is one shot only. What survives is AUTO-CHAINING: a render longer
+  // than the checkpoint's single-pass clip size is still split and stitched
+  // by the host (`useGenerateStream.followAutoChainJob`), which is the
+  // `chainDecision` path below and not an authoring surface.
+  it("ignores a legacy ?output=sequence deep link instead of redirecting", async () => {
+    routeQuery.value = { output: "sequence" };
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(routerReplaceMock).not.toHaveBeenCalled();
+    expect(routeQuery.value).toEqual({ output: "sequence" });
+    expect(wrapper.find("[data-test='sequence-composer-stub']").exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='composer-submit']").exists()).toBe(true);
+  });
+
+  it("never creates a chain job for an ordinary one-shot submit", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:fp16", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:fp16";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(createChainJobMock).not.toHaveBeenCalled();
+    expect(submitMock).toHaveBeenCalled();
+  });
+
   it("uses the Mold Studio composer + controls-region workspace", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -478,7 +433,6 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("applies settings selected from recovered Now developing work", async () => {
-    enterSequenceMode();
     promptHistoryApiMock.mockImplementation(async (...args: unknown[]) =>
       args[1] === "/api/queue/remote-print/preview"
         ? {
@@ -512,7 +466,6 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    expect(useSequenceDraftStore().output).toBe("single");
     expect(useGenerateForm().state.value).toMatchObject({
       prompt: "recovered lighthouse",
       seedMode: "static",
@@ -961,87 +914,6 @@ describe("CreatePage layout and behavior", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("uses a Recent still as the Sequence opening image", async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async () => ({
-      ok: true,
-      blob: async () => new Blob(["image"], { type: "image/png" }),
-    })) as never;
-    const stubs: Record<string, Component> = pageStubs();
-    stubs.RecentGrid = defineComponent({
-      props: ["entries"],
-      template:
-        '<button data-test="context-recent-sequence" @contextmenu.prevent="$emit(\'context-menu\', { item: entries[0], x: 20, y: 20 })">context</button>',
-    });
-    const wrapper = mount(CreatePage, { global: { stubs } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    const form = useGenerateForm();
-    form.state.value.sourceFitPolicy = {
-      mode: "upscale-then-fit",
-      upscalerModel: "real-esrgan-x4plus:fp16",
-      fit: { mode: "pad-fit" },
-    };
-
-    await wrapper
-      .get('[data-test="context-recent-sequence"]')
-      .trigger("contextmenu");
-    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
-    await flushPromises();
-    expect(draft.openingImage).toMatchObject({ filename: entry.filename });
-    expect(form.state.value.imageAttachments).toHaveLength(0);
-    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
-    wrapper.unmount();
-    globalThis.fetch = originalFetch;
-  });
-
-  it("disables Recent video sources while Sequence is active", async () => {
-    const video = { ...entry, filename: "clip.mp4", format: "mp4" as const };
-    const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn();
-    globalThis.fetch = fetchMock as never;
-    const stubs: Record<string, Component> = pageStubs();
-    stubs.RecentGrid = defineComponent({
-      props: ["entries"],
-      setup: () => ({ video }),
-      template:
-        '<button data-test="context-recent-sequence-video" @contextmenu.prevent="$emit(\'context-menu\', { item: video, x: 20, y: 20 })">context</button>',
-    });
-    const wrapper = mount(CreatePage, {
-      attachTo: document.body,
-      global: { stubs },
-    });
-    await flushPromises();
-    enterSequenceMode();
-
-    await wrapper
-      .get('[data-test="context-recent-sequence-video"]')
-      .trigger("contextmenu");
-    const action = wrapper.get('[data-test="recent-context-source"]');
-    expect(action.attributes("disabled")).toBeDefined();
-    expect(action.attributes("title")).toContain("must be an image");
-    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
-      "Open",
-    );
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
-    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
-      "Reuse settings",
-    );
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
-    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
-      "Delete",
-    );
-    await action.trigger("click");
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(useGenerateForm().state.value.sourceVideo).toBeNull();
-    wrapper.unmount();
-    globalThis.fetch = originalFetch;
-  });
-
   it("routes a Recent still into the active MiniMax H3 first frame", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () => ({
@@ -1405,33 +1277,6 @@ describe("CreatePage layout and behavior", () => {
     wrapper.unmount();
   });
 
-  it("restores a recent normal print into One shot while Sequence is active", async () => {
-    const stubs: Record<string, Component> = pageStubs();
-    stubs.RecentGrid = defineComponent({
-      props: ["entries"],
-      template:
-        '<button data-test="open-recent" @click="$emit(\'open\', entries[0])">open</button>',
-    });
-    stubs.Lightbox = defineComponent({
-      props: ["item"],
-      template:
-        '<button v-if="item" data-test="lightbox-reuse" @click="$emit(\'reuse\', item)">reuse</button>',
-    });
-    const wrapper = mount(CreatePage, { global: { stubs } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    await flushPromises();
-
-    await wrapper.get('[data-test="open-recent"]').trigger("click");
-    await wrapper.get('[data-test="lightbox-reuse"]').trigger("click");
-    await flushPromises();
-
-    expect(draft.output).toBe("single");
-    expect(useGenerateForm().state.value.model).toBe(entry.metadata.model);
-    expect(useGenerateForm().state.value.prompt).toBe(entry.metadata.prompt);
-    expect(useGenerateForm().state.value.seed).toBe(entry.metadata.seed);
-  });
-
   it("resets the rail settings to the model defaults, undoably", async () => {
     hostModelsMock.mockResolvedValue([
       {
@@ -1485,18 +1330,6 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.seed).toBe(42);
     expect(form.state.value.negativePrompt).toBe("blurry");
     expect(form.state.value.batchSize).toBe(4);
-
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.enableAudio = true;
-    await flushPromises();
-    await wrapper.get("[data-test='controls-reset']").trigger("click");
-    expect(draft.enableAudio).toBe(false);
-    const sequenceToast = [...notifications.toasts]
-      .reverse()
-      .find((t) => /settings/i.test(t.text));
-    runToastAction(sequenceToast!.id);
-    expect(draft.enableAudio).toBe(true);
   });
 
   it("returns the canvas authority to the model on reset, and undo restores it (#1166)", async () => {
@@ -2251,8 +2084,13 @@ describe("CreatePage layout and behavior", () => {
 
   it("keeps a long advanced video request single-shot and preserves its settings", async () => {
     const guidedModel = {
-      ...installedSequenceModel(),
       name: "ltx-2-19b-dev:fp8",
+      family: "ltx2",
+      downloaded: true,
+      default_width: 1216,
+      default_height: 704,
+      default_steps: 8,
+      default_guidance: 3,
     };
     hostModelsMock.mockResolvedValue([guidedModel]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
@@ -2364,24 +2202,6 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.maskImage).toBeNull();
   });
 
-  it("defaults a sequence gallery pick to crop fill", async () => {
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.sourceFitPolicy = { mode: "lanczos-resize" };
-    const draft = enterSequenceMode();
-
-    wrapper
-      .getComponent({ name: "ImagePickerModal" })
-      .vm.$emit("pick", [
-        { kind: "upload", filename: "opening.png", base64: "OPENING" },
-      ]);
-    await nextTick();
-
-    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
-    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
-  });
-
   it("defaults the first Qwen edit target to crop fill", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("qwen-image-edit:q4", "qwen-image-edit"),
@@ -2402,533 +2222,6 @@ describe("CreatePage layout and behavior", () => {
 
     expect(form.state.value.imageAttachments).toHaveLength(2);
     expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
-  });
-
-  it("keeps the visible Output control synchronized with sequence mode", async () => {
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    enterSequenceMode();
-    await flushPromises();
-
-    const controls = wrapper.getComponent({ name: "ControlsAside" });
-    expect(controls.props("output")).toBe("sequence");
-    expect(controls.props("clipCount")).toBe(2);
-  });
-
-  it("renders the sequence opening image in the primary form, never in Advanced", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    enterSequenceMode();
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
-    ).toBe(true);
-    // The one-shot well steps aside in Sequence, and Advanced no longer owns
-    // an opening-image section at all.
-    expect(wrapper.find("[data-test='source-media-panel']").exists()).toBe(
-      false,
-    );
-    expect(
-      wrapper.find("[data-test='sequence-section-opening-image']").exists(),
-    ).toBe(false);
-  });
-
-  it("parks a retained opening image out of the request for an unsupported checkpoint", async () => {
-    // The well is gone, so the user can neither see nor remove the image; the
-    // request must not carry conditioning the server would refuse.
-    hostModelsMock.mockResolvedValue([
-      { ...installedSequenceModel(), source_image: "unsupported" },
-    ]);
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "the opening";
-    draft.clips[1]!.prompt = "the landing";
-    draft.openingImage = { filename: "opening.png", base64: "U1RBTEU=" };
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
-    ).toBe(false);
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await flushPromises();
-
-    expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    const request = createChainJobMock.mock.calls[0]?.[0] as unknown as {
-      stages: Array<Record<string, unknown>>;
-    };
-    expect(request.stages).toHaveLength(2);
-    for (const stage of request.stages) {
-      expect(stage).not.toHaveProperty("source_image");
-    }
-    // The draft keeps the image for a checkpoint that can use it later.
-    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
-  });
-
-  it("hides the opening image when the checkpoint advertises no source-image contract", async () => {
-    hostModelsMock.mockResolvedValue([
-      { ...installedSequenceModel(), source_image: "unsupported" },
-    ]);
-    enterSequenceMode();
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    expect(
-      wrapper.find("[data-test='sequence-opening-image-panel']").exists(),
-    ).toBe(false);
-  });
-
-  it("keeps the opening image out of the Advanced count and clears it on Reset", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    const stubs: Record<string, Component> = pageStubs();
-    stubs.ControlsAside = defineComponent({
-      name: "ControlsAside",
-      template:
-        "<aside data-test='controls-stub'><button data-test='controls-reset' @click=\"$emit('reset-settings')\">reset</button></aside>",
-    });
-    stubs.AdvancedDrawer = defineComponent({
-      name: "AdvancedDrawer",
-      props: { advCount: { type: Number, default: 0 } },
-      template: "<div data-test='advanced-stub' :data-count='advCount' />",
-    });
-    const draft = enterSequenceMode();
-    const wrapper = mount(CreatePage, { global: { stubs } });
-    await flushPromises();
-
-    draft.openingImage = {
-      filename: "opening.png",
-      base64: "QUJD",
-      width: 1216,
-      height: 704,
-    };
-    await flushPromises();
-    // Advanced badges Advanced content; primary-form source media is not it.
-    expect(
-      wrapper.get("[data-test='advanced-stub']").attributes("data-count"),
-    ).toBe("0");
-
-    await wrapper.get("[data-test='controls-reset']").trigger("click");
-    expect(draft.openingImage).toBeNull();
-
-    const notifications = useNotifications();
-    const toast = [...notifications.toasts]
-      .reverse()
-      .find((t) => /settings/i.test(t.text));
-    runToastAction(toast!.id);
-    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
-  });
-
-  it("selects a chain-capable model from the pinned host when Sequence is restored", async () => {
-    const studio = addHost({
-      url: "http://studio:7680",
-      name: "Studio",
-    });
-    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
-    const still = {
-      name: "flux-schnell:q8",
-      family: "flux",
-      downloaded: true,
-      default_width: 1024,
-      default_height: 1024,
-      default_steps: 4,
-      default_guidance: 1,
-    };
-    const video = {
-      name: "ltx-2.3-22b-distilled:fp8",
-      family: "ltx2",
-      downloaded: true,
-      supports_sequence: true,
-      default_width: 1216,
-      default_height: 704,
-      default_steps: 8,
-      default_guidance: 3,
-      default_frames: 97,
-    };
-    hostModelsMock.mockImplementation(async (host: { id: string }) =>
-      host.id === studio.id ? [still, video] : [still],
-    );
-    const form = useGenerateForm();
-    form.state.value.model = still.name;
-    form.state.value.modelFamily = still.family;
-    enterSequenceMode();
-
-    mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    expect(form.state.value.model).toBe(video.name);
-    expect(form.state.value.modelFamily).toBe("ltx2");
-  });
-
-  it("clears an image-only pinned-host model and renders the browse state without submitting", async () => {
-    const studio = addHost({
-      url: "http://studio:7680",
-      name: "Studio",
-    });
-    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
-    const still = {
-      name: "flux-schnell:q8",
-      family: "flux",
-      downloaded: true,
-      default_width: 1024,
-      default_height: 1024,
-      default_steps: 4,
-      default_guidance: 1,
-    };
-    const videoElsewhere = {
-      name: "ltx-video",
-      family: "ltx-video",
-      downloaded: true,
-      supports_sequence: true,
-      default_width: 1024,
-      default_height: 576,
-      default_steps: 25,
-      default_guidance: 3,
-    };
-    hostModelsMock.mockImplementation(async (host: { id: string }) =>
-      host.id === studio.id ? [still] : [videoElsewhere],
-    );
-    const form = useGenerateForm();
-    form.state.value.model = still.name;
-    form.state.value.modelFamily = still.family;
-    enterSequenceMode();
-
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    expect(form.state.value.model).toBe("");
-    expect(
-      wrapper.get("[data-test='chain-unsupported']").attributes("data-empty"),
-    ).toBe("true");
-    expect(wrapper.get("[data-test='chain-unsupported']").text()).toContain(
-      "No chain-capable video model is installed on the selected machine",
-    );
-    expect(wrapper.find("[data-test='sequence-generate']").exists()).toBe(
-      false,
-    );
-    expect(createChainJobMock).not.toHaveBeenCalled();
-  });
-
-  it("submits the sequence with the LIVE inspector values (stale-inspector regression)", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "the opening";
-    draft.clips[1]!.prompt = "the landing";
-    draft.clips[1]!.cameraControl = "dolly-in";
-    // Turn the inspector's knobs WHILE in sequence mode — the old
-    // ScriptComposer kept private copies that silently ignored these.
-    const form = useGenerateForm();
-    form.state.value.width = 1216;
-    form.state.value.height = 704;
-    form.state.value.steps = 4;
-    form.state.value.guidance = 5.5;
-    form.state.value.fps = 24;
-    await flushPromises();
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await flushPromises();
-
-    expect(fetchChainLimitsMock).toHaveBeenCalledWith(
-      "ltx-2-19b-distilled:fp8",
-      expect.anything(),
-      24,
-    );
-    expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    expect(createChainJobMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: "ltx-2-19b-distilled:fp8",
-        width: 1216,
-        height: 704,
-        steps: 4,
-        // Distilled recipes materialize their fixed guidance at submission
-        // while preserving the inspector's adjustable value for other models.
-        guidance: 1,
-        fps: 24,
-        output_format: "mp4",
-        stages: [
-          expect.objectContaining({ prompt: "the opening" }),
-          expect.objectContaining({
-            prompt: "the landing",
-            loras: [
-              {
-                path: "camera-control:dolly-in",
-                scale: 1,
-                name: "Dolly in",
-              },
-            ],
-          }),
-        ],
-      }),
-      expect.objectContaining({ baseUrl: expect.any(String) }),
-      expect.stringMatching(/^[0-9a-f-]{36}$/),
-      expect.any(Function),
-    );
-    expect(placementPreviewMock).toHaveBeenCalledWith(
-      expect.objectContaining({ baseUrl: expect.any(String) }),
-      expect.objectContaining({
-        model: "ltx-2-19b-distilled:fp8",
-        stages: [
-          expect.objectContaining({ prompt: "the opening" }),
-          expect.objectContaining({ prompt: "the landing" }),
-        ],
-      }),
-      1,
-      expect.any(Object),
-    );
-    expect(submitMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps a successfully submitted sequence when tracked-job persistence fails", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "one";
-    draft.clips[1]!.prompt = "two";
-    await flushPromises();
-    const setItem = vi
-      .spyOn(Storage.prototype, "setItem")
-      .mockImplementation(function (this: Storage, key, value) {
-        if (key === "mold.create.tracked-sequences.v1")
-          throw new DOMException("blocked", "QuotaExceededError");
-        return Reflect.apply(
-          Object.getOwnPropertyDescriptor(Storage.prototype, "setItem")!.value,
-          this,
-          [key, value],
-        );
-      });
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await flushPromises();
-
-    // The durable job was created and is being watched despite storage
-    // being unavailable — persistence is recovery convenience only.
-    expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    expect(useChainJobs().state.watching).toMatchObject({ jobId: "job-1" });
-    setItem.mockRestore();
-  });
-
-  it("redirects legacy ?mode=sequence deep links to ?output=sequence", async () => {
-    routeQuery.value = { mode: "sequence" };
-    mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    expect(routerReplaceMock).toHaveBeenCalledWith({
-      query: { output: "sequence" },
-    });
-  });
-
-  it("consumes ?output=sequence once and strips it from the URL", async () => {
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    routeQuery.value = { output: "sequence" };
-    mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    expect(useSequenceDraftStore().output).toBe("sequence");
-    expect(routerReplaceMock).toHaveBeenCalledWith({ query: {} });
-  });
-
-  it("reuses a Library sequence print as a NEW draft with no edit session", async () => {
-    useGenerateForm().state.value.prompt = "parked one shot";
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2.3-22b-distilled:fp8",
-        family: "ltx2",
-        size_gb: 35,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 8,
-        default_guidance: 3,
-        default_width: 1216,
-        default_height: 704,
-        default_frames: 97,
-        description: "Sequence model",
-        supports_sequence: true,
-      },
-    ]);
-    setSequenceHandoff({
-      kind: "reuse",
-      metadata: {
-        // A sequence print records every clip's prompt newline-joined; the
-        // reuse path must never surface that join.
-        prompt: "a harbour at dawn\nthe boats leave",
-        model: "ltx-2.3-22b-distilled:fp8",
-        seed: 4242,
-        steps: 8,
-        guidance: 3,
-        width: 1216,
-        height: 704,
-        negative_prompt: "blurry",
-        chain_job_id: "job-9",
-        chain: {
-          stage_count: 2,
-          motion_tail_frames: 17,
-          stages: [
-            { prompt: "a harbour at dawn", frames: 97, transition: "smooth" },
-            { prompt: "the boats leave", frames: 9, transition: "cut" },
-          ],
-        },
-      } as OutputMetadata,
-    });
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    const draft = useSequenceDraftStore();
-    expect(draft.output).toBe("sequence");
-    expect(draft.clips.map((c) => c.prompt)).toEqual([
-      "a harbour at dawn",
-      "the boats leave",
-    ]);
-    // Clip 2 was 9 frames — at/below the model's 17-frame tail — so it is
-    // raised, and the surface says so instead of silently resizing.
-    expect(draft.clips[1]!.frames).toBeGreaterThan(17);
-    expect(draft.editing).toBeNull();
-    expect(useGenerateForm().state.value.prompt).toBe("parked one shot");
-    const note = wrapper.get("[data-test='sequence-reuse-note']").text();
-    expect(note).toContain("reused 2 clips");
-    expect(note).toContain("Clip durations raised to fit");
-    // One-shot: a back-nav must not replay the handoff.
-    expect(pendingSequenceHandoff().value).toBeNull();
-  });
-
-  it("explains Sequence for a non-chain model instead of a dead composer", async () => {
-    useGenerateForm().state.value.modelFamily = "flux2";
-    useGenerateForm().state.value.model = "flux2-klein:q4";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    enterSequenceMode();
-    await nextTick();
-    // Sequence output stays reachable, but a non-chain model gets a clear
-    // explanation — not a composer with a live-looking Generate button.
-    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='sequence-composer-stub']").exists()).toBe(
-      false,
-    );
-    // "back to one shot" returns to the composer.
-    await wrapper.get("[data-test='chain-back-to-single']").trigger("click");
-    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
-      false,
-    );
-  });
-
-  it("switches an image model to an installed sequence-compatible model and filters the picker", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "flux2-klein:q4",
-        family: "flux2",
-        size_gb: 4,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 4,
-        default_guidance: 1,
-        default_width: 1024,
-        default_height: 1024,
-        description: "Image model",
-        supports_sequence: false,
-      },
-      {
-        name: "ltx-2.3-22b-dev:fp8",
-        family: "ltx2",
-        size_gb: 34,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 20,
-        default_guidance: 3,
-        default_width: 1216,
-        default_height: 704,
-        description: "Two-stage video model",
-        supports_sequence: false,
-      },
-      {
-        name: "ltx-2.3-22b-distilled:fp8",
-        family: "ltx2",
-        size_gb: 35,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 8,
-        default_guidance: 3,
-        default_width: 1216,
-        default_height: 704,
-        description: "Sequence model",
-        supports_sequence: true,
-      },
-    ]);
-    useGenerateForm().state.value.model = "flux2-klein:q4";
-    useGenerateForm().state.value.modelFamily = "flux2";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    enterSequenceMode();
-    await flushPromises();
-
-    expect(useGenerateForm().state.value.model).toBe(
-      "ltx-2.3-22b-distilled:fp8",
-    );
-    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
-    expect(
-      (picker.props("models") as ModelInfoExtended[]).map(
-        (model) => model.name,
-      ),
-    ).toEqual(["ltx-2.3-22b-distilled:fp8"]);
-    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
-      false,
-    );
-  });
-
-  it("links an empty sequence setup to filtered video checkpoint discovery", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "flux2-klein:q4",
-        family: "flux2",
-        size_gb: 4,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 4,
-        default_guidance: 1,
-        default_width: 1024,
-        default_height: 1024,
-        description: "Image model",
-        supports_sequence: false,
-      },
-    ]);
-    useGenerateForm().state.value.model = "flux2-klein:q4";
-    useGenerateForm().state.value.modelFamily = "flux2";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    enterSequenceMode();
-    await nextTick();
-
-    expect(
-      wrapper.get("[data-test='browse-sequence-models']").attributes("to"),
-    ).toBe("/models?tab=discover&type=video&kind=checkpoint&intent=sequence");
-  });
-
-  it("does not treat a restored 19B dev checkpoint as sequence-capable before inventory loads", async () => {
-    useGenerateForm().state.value.model = "ltx-2-19b-dev:fp8";
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    enterSequenceMode();
-    await nextTick();
-
-    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
   });
 
   it("fans an ordinary batch out into one routed request per print", async () => {
@@ -3201,28 +2494,6 @@ describe("CreatePage layout and behavior", () => {
     // The chip travels as natural language the server weaves into the
     // expander's system message — never as a literal prompt suffix.
     expect(modal.props("styleDirective")).toBe(styleHint("cinematic"));
-  });
-
-  it("never steers a clip expand with the composer's style chip", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.model = "ltx2:q8";
-    form.state.value.modelFamily = "ltx2";
-    form.state.value.stylePreset = "cinematic";
-    await nextTick();
-
-    enterSequenceMode();
-    await nextTick();
-    await wrapper.get("[data-test='clip-expand']").trigger("click");
-    await nextTick();
-
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("prompt")).toBe("a stage prompt");
-    expect(modal.props("task")).toBe("text-to-video");
-    // The style row belongs to the single-print composer, not to clip text.
-    expect(modal.props("styleDirective")).toBeNull();
   });
 
   it("resolves image-conditioned video expansion without sending source bytes", async () => {
@@ -3696,34 +2967,6 @@ describe("CreatePage layout and behavior", () => {
     });
   });
 
-  it("applies a clip expansion to the clip, never the composer's prompt or style", async () => {
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.model = "ltx2:q8";
-    form.state.value.modelFamily = "ltx2";
-    form.state.value.prompt = "a lighthouse";
-    form.state.value.stylePreset = "cinematic";
-    await nextTick();
-
-    const draft = enterSequenceMode();
-    await nextTick();
-    const clip = draft.clips[0]!;
-    wrapper
-      .getComponent({ name: "SequenceComposer" })
-      .vm.$emit("expand-clip", clip.id, clip.prompt);
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "a rewritten stage");
-    await nextTick();
-
-    expect(clip.prompt).toBe("a rewritten stage");
-    expect(form.state.value.prompt).toBe("a lighthouse");
-    expect(form.state.value.stylePreset).toBe("cinematic");
-  });
-
   it("carries the preset negative when a variation is adopted into the composer", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
@@ -3784,28 +3027,6 @@ describe("CreatePage layout and behavior", () => {
     // Variations cleared → nothing reviewed is left on the canvas.
     const canvas = wrapper.find("[data-test='result-canvas']");
     expect(canvas.exists() ? canvas.attributes("data-count") : "0").toBe("0");
-  });
-
-  it("feeds durable sequence jobs from every host into the activity strip", async () => {
-    listChainJobsMock.mockResolvedValue({
-      jobs: [
-        {
-          id: "chain-9",
-          state: "running",
-          model: "ltx-2-19b-distilled:fp8",
-          stage_count: 3,
-          current_stage: 1,
-          created_at_unix_ms: 5,
-          updated_at_unix_ms: 5,
-        },
-      ],
-    });
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const strip = wrapper.getComponent({ name: "ActivityStrip" });
-    expect(
-      (strip.props("sequences") as { jobId: string }[]).map((s) => s.jobId),
-    ).toEqual(["chain-9"]);
   });
 
   it("reports an unconfirmed print cancellation instead of claiming success", async () => {
@@ -3928,604 +3149,6 @@ describe("CreatePage layout and behavior", () => {
         trainedWords: [],
       },
     ]);
-  });
-
-  it("deletes settled durable jobs through the strip's Delete action", async () => {
-    listChainJobsMock.mockResolvedValue({
-      jobs: [
-        {
-          id: "failed-job",
-          state: "failed",
-          model: "ltx-2.3-22b-dev:fp8",
-          stage_count: 1,
-          current_stage: 0,
-          created_at_unix_ms: 1,
-          updated_at_unix_ms: 2,
-          error: "TwoStage is unsupported",
-        },
-      ],
-    });
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    wrapper
-      .getComponent({ name: "ActivityStrip" })
-      .vm.$emit("sequence-action", "delete", {
-        kind: "sequence",
-        hostId: ORIGIN_HOST_ID,
-        jobId: "failed-job",
-      });
-    await flushPromises();
-
-    expect(deleteChainJobMock).toHaveBeenCalledWith(
-      "failed-job",
-      expect.objectContaining({ baseUrl: expect.any(String) }),
-    );
-    expect(cancelChainJobMock).not.toHaveBeenCalled();
-  });
-
-  it("reattaches to a tracked in-flight sequence after a reload", async () => {
-    localStorage.setItem(
-      "mold.create.tracked-sequences.v1",
-      JSON.stringify([{ hostId: ORIGIN_HOST_ID, jobId: "durable-job-7" }]),
-    );
-    listChainJobsMock.mockResolvedValue({
-      jobs: [
-        {
-          id: "durable-job-7",
-          state: "running",
-          model: "ltx-2-19b-distilled:fp8",
-          stage_count: 2,
-          current_stage: 0,
-          created_at_unix_ms: 1,
-          updated_at_unix_ms: 1,
-        },
-      ],
-    });
-    mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    expect(useChainJobs().state.watching).toEqual({
-      hostId: ORIGIN_HOST_ID,
-      jobId: "durable-job-7",
-    });
-  });
-
-  it("loads a durable job into an edit session and amends through it", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2-19b-distilled:fp8",
-        family: "ltx2",
-        size_gb: 20,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 8,
-        default_guidance: 3,
-        default_width: 1216,
-        default_height: 704,
-        description: "Sequence model",
-        supports_sequence: true,
-      },
-    ]);
-    getChainJobMock.mockResolvedValue({
-      id: "job-9",
-      state: "completed",
-      model: "ltx-2-19b-distilled:fp8",
-      stage_count: 2,
-      current_stage: 1,
-      created_at_unix_ms: 1,
-      updated_at_unix_ms: 2,
-      error: null,
-      stages: [
-        { idx: 0, state: "completed" },
-        { idx: 1, state: "completed" },
-      ],
-      script: {
-        schema: "mold.chain.v1",
-        chain: {
-          model: "ltx-2-19b-distilled:fp8",
-          width: 640,
-          height: 384,
-          fps: 24,
-          seed: 7,
-          steps: 6,
-          guidance: 4,
-          strength: 1,
-          motion_tail_frames: 17,
-          output_format: "mp4",
-        },
-        stages: [
-          {
-            prompt: "one",
-            frames: 97,
-            source_image_b64: "iVBORw0KGgoAAAANSUhEUgAAAoAAAAGA",
-            source_image_path: "opening.png",
-          },
-          { prompt: "two", frames: 97, transition: "cut" },
-        ],
-      },
-    });
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    wrapper
-      .getComponent({ name: "ActivityStrip" })
-      .vm.$emit("sequence-action", "edit", {
-        kind: "sequence",
-        hostId: ORIGIN_HOST_ID,
-        jobId: "job-9",
-      });
-    await flushPromises();
-
-    const draft = useSequenceDraftStore();
-    expect(draft.editing).toMatchObject({
-      jobId: "job-9",
-      hostId: ORIGIN_HOST_ID,
-      completedStages: 2,
-    });
-    expect(draft.clips.map((c) => c.prompt)).toEqual(["one", "two"]);
-    expect(draft.openingImage).toEqual({
-      filename: "opening image",
-      base64: "iVBORw0KGgoAAAANSUhEUgAAAoAAAAGA",
-      width: 640,
-      height: 384,
-    });
-    expect(draft.clips[1]?.transition).toBe("cut");
-    // The job's shared params landed on the LIVE form.
-    const form = useGenerateForm();
-    expect(form.state.value.width).toBe(640);
-    expect(form.state.value.height).toBe(384);
-    expect(form.state.value.steps).toBe(6);
-    expect(form.state.value.seedMode).toBe("static");
-    expect(form.state.value.seed).toBe(7);
-
-    amendChainJobMock.mockResolvedValue({
-      id: "job-9",
-      state: "queued",
-      model: "ltx-2-19b-distilled:fp8",
-      stage_count: 2,
-      current_stage: 0,
-      created_at_unix_ms: 1,
-      updated_at_unix_ms: 3,
-      preserved_stages: 1,
-    });
-    draft.clips[1]!.prompt = "two, but stormier";
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await flushPromises();
-
-    expect(amendChainJobMock).toHaveBeenCalledWith(
-      "job-9",
-      expect.objectContaining({
-        stages: [
-          expect.objectContaining({
-            prompt: "one",
-            source_image: "iVBORw0KGgoAAAANSUhEUgAAAoAAAAGA",
-          }),
-          expect.objectContaining({ prompt: "two, but stormier" }),
-        ],
-      }),
-      expect.objectContaining({ baseUrl: expect.any(String) }),
-      expect.stringMatching(/^[0-9a-f-]{36}$/),
-    );
-    expect(amendChainJobMock.mock.calls[0]?.[1]).toEqual(
-      expect.objectContaining({ strength: 1 }),
-    );
-    expect(createChainJobMock).not.toHaveBeenCalled();
-    expect(draft.editing).toBeNull();
-  });
-
-  it("preserves the edit session when an amend conflicts (409)", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2-19b-distilled:fp8",
-        family: "ltx2",
-        size_gb: 20,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 8,
-        default_guidance: 3,
-        default_width: 1216,
-        default_height: 704,
-        description: "Sequence model",
-        supports_sequence: true,
-      },
-    ]);
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "one";
-    draft.clips[1]!.prompt = "two";
-    draft.loadFromJob(
-      {
-        jobId: "job-9",
-        hostId: ORIGIN_HOST_ID,
-        baseline: draft.clips.map((c) => ({ ...c })),
-        completedStages: 1,
-      },
-      draft.clips.map((c) => ({ ...c })),
-      false,
-    );
-    await flushPromises();
-    await flushPromises();
-    amendChainJobMock.mockRejectedValue(
-      new ApiHttpError("POST /api/chain-jobs/job-9/amend", 409, "moved on"),
-    );
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await flushPromises();
-
-    expect(amendChainJobMock).toHaveBeenCalledTimes(1);
-    expect(createChainJobMock).not.toHaveBeenCalled();
-    expect(draft.editing).toMatchObject({
-      jobId: "job-9",
-      hostId: ORIGIN_HOST_ID,
-    });
-    expect(wrapper.get("[data-test='sequence-submit-error']").text()).toContain(
-      "Your edits are still here",
-    );
-  });
-
-  it("compensates a cancelled in-flight sequence amendment on its frozen target", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2-19b-distilled:fp8",
-        family: "ltx2",
-        size_gb: 20,
-        is_loaded: false,
-        last_used: null,
-        hf_repo: "",
-        downloaded: true,
-        default_steps: 8,
-        default_guidance: 3,
-        default_width: 1216,
-        default_height: 704,
-        description: "Sequence model",
-        supports_sequence: true,
-      },
-    ]);
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "one";
-    draft.clips[1]!.prompt = "two";
-    draft.loadFromJob(
-      {
-        jobId: "job-9",
-        hostId: ORIGIN_HOST_ID,
-        baseline: draft.clips.map((clip) => ({ ...clip })),
-        completedStages: 1,
-      },
-      draft.clips.map((clip) => ({ ...clip })),
-      false,
-    );
-    await flushPromises();
-    let finishAmend!: (value: { preserved_stages: number }) => void;
-    amendChainJobMock.mockReturnValueOnce(
-      new Promise((resolve) => (finishAmend = resolve)),
-    );
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await vi.waitFor(() => expect(amendChainJobMock).toHaveBeenCalledTimes(1));
-    const frozenTarget = amendChainJobMock.mock.calls[0]?.[2];
-    const operationId = amendChainJobMock.mock.calls[0]?.[3];
-    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
-    const cancel = wrapper.get("[data-test='sequence-generate']");
-    expect(cancel.text()).toContain("Cancel");
-    await cancel.trigger("click");
-    await vi.waitFor(() =>
-      expect(cancelChainJobMutationMock).toHaveBeenCalledWith(
-        "job-9",
-        operationId,
-        frozenTarget,
-      ),
-    );
-    finishAmend({ preserved_stages: 0 });
-    await flushPromises();
-
-    expect(cancelChainJobMock).toHaveBeenCalledWith("job-9", frozenTarget);
-    expect(draft.editing).toMatchObject({ jobId: "job-9" });
-  });
-
-  it("cancels sequence creation before a lost job-id response", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2-19b-distilled:fp8",
-        family: "ltx2",
-        downloaded: true,
-        supports_sequence: true,
-        default_width: 1216,
-        default_height: 704,
-        default_steps: 8,
-        default_guidance: 3,
-      },
-    ]);
-    createChainJobMock.mockReturnValueOnce(new Promise(() => {}));
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "one";
-    draft.clips[1]!.prompt = "two";
-    await flushPromises();
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await vi.waitFor(() => expect(createChainJobMock).toHaveBeenCalledTimes(1));
-    const target = createChainJobMock.mock.calls[0]?.[1];
-    const operationId = createChainJobMock.mock.calls[0]?.[2];
-    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-
-    await vi.waitFor(() =>
-      expect(cancelChainJobMutationMock).toHaveBeenCalledWith(
-        operationId,
-        operationId,
-        target,
-      ),
-    );
-    expect(cancelChainJobMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps one stage playing while later stages finish and stops invalidated media", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2-19b-distilled:fp8",
-        family: "ltx2",
-        downloaded: true,
-        supports_sequence: true,
-        default_width: 1216,
-        default_height: 704,
-        default_steps: 8,
-        default_guidance: 3,
-      },
-    ]);
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "opening";
-    draft.clips[1]!.prompt = "arrival";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    const chains = useChainJobs();
-    chains.watch(ORIGIN_HOST_ID, "job-playback");
-    const playbackDetail = {
-      id: "job-playback",
-      state: "running",
-      model: "ltx-2-19b-distilled:fp8",
-      stage_count: 2,
-      current_stage: 1,
-      created_at_unix_ms: 1,
-      updated_at_unix_ms: 2,
-      error: null,
-      stages: [
-        {
-          idx: 0,
-          state: "completed",
-          seed: "1",
-          frames_emitted: 97,
-          generation_time_ms: 1,
-          has_preview: false,
-          has_media: true,
-          cache_ready: true,
-          error: null,
-        },
-        {
-          idx: 1,
-          state: "running",
-          seed: "2",
-          frames_emitted: null,
-          generation_time_ms: null,
-          has_preview: false,
-          has_media: false,
-          cache_ready: false,
-          error: null,
-        },
-      ],
-      script: {
-        schema: "mold.chain.v1",
-        chain: { model: "ltx-2-19b-distilled:fp8", fps: 24 },
-        stages: [
-          { prompt: "opening", frames: 97 },
-          { prompt: "arrival", frames: 97 },
-        ],
-      },
-    } satisfies ChainJobDetail;
-    chains.state.live.detail = playbackDetail;
-    await flushPromises();
-
-    await wrapper.get("[data-test='stub-play-first']").trigger("click");
-    await flushPromises();
-    const firstSrc = wrapper
-      .get("[data-test='sequence-stage-player'] video")
-      .attributes("src");
-    expect(firstSrc).toContain("/api/chain-jobs/job-playback/stages/0/media");
-
-    chains.state.live.detail = {
-      ...playbackDetail,
-      stages: [
-        playbackDetail.stages[0]!,
-        {
-          ...playbackDetail.stages[1]!,
-          state: "completed",
-          has_media: true,
-          cache_ready: true,
-        },
-      ],
-    };
-    await flushPromises();
-    expect(
-      wrapper
-        .get("[data-test='sequence-stage-player'] video")
-        .attributes("src"),
-    ).toBe(firstSrc);
-
-    const completedDetail = chains.state.live.detail!;
-    chains.state.live.detail = {
-      ...completedDetail,
-      stages: [
-        {
-          ...completedDetail.stages[0]!,
-          state: "pending",
-          has_media: false,
-          cache_ready: false,
-        },
-        completedDetail.stages[1]!,
-      ],
-    };
-    await flushPromises();
-    expect(wrapper.find("[data-test='sequence-stage-player']").exists()).toBe(
-      false,
-    );
-  });
-
-  it("restores cached filmstrip previews after Create unmounts and remounts", async () => {
-    hostModelsMock.mockResolvedValue([
-      {
-        name: "ltx-2-19b-distilled:fp8",
-        family: "ltx2",
-        downloaded: true,
-        supports_sequence: true,
-        default_width: 1216,
-        default_height: 704,
-        default_steps: 8,
-        default_guidance: 3,
-      },
-    ]);
-    const draft = enterSequenceMode();
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    draft.clips[0]!.prompt = "edited opening";
-    draft.clips[1]!.prompt = "edited ending";
-    draft.loadFromJob(
-      {
-        jobId: "job-remount",
-        hostId: ORIGIN_HOST_ID,
-        baseline: draft.clips.map((clip) => ({ ...clip })),
-        completedStages: 2,
-      },
-      draft.clips.map((clip) => ({ ...clip })),
-      false,
-    );
-    const detail = {
-      id: "job-remount",
-      state: "completed",
-      model: "ltx-2-19b-distilled:fp8",
-      stage_count: 2,
-      current_stage: 2,
-      created_at_unix_ms: 1,
-      updated_at_unix_ms: 2,
-      error: null,
-      stages: [
-        {
-          idx: 0,
-          state: "completed",
-          seed: "1",
-          frames_emitted: 97,
-          generation_time_ms: 1,
-          has_preview: true,
-          has_media: false,
-          cache_ready: true,
-          error: null,
-        },
-        {
-          idx: 1,
-          state: "completed",
-          seed: "2",
-          frames_emitted: 97,
-          generation_time_ms: 1,
-          has_preview: false,
-          has_media: false,
-          cache_ready: true,
-          error: null,
-        },
-      ],
-      script: {
-        schema: "mold.chain.v1",
-        chain: { model: "ltx-2-19b-distilled:fp8", fps: 24 },
-        stages: [
-          { prompt: "server opening", frames: 97 },
-          { prompt: "server ending", frames: 97 },
-        ],
-      },
-    } satisfies ChainJobDetail;
-    const chains = useChainJobs();
-    chains.watch(ORIGIN_HOST_ID, detail.id);
-    chains.state.live.detail = detail;
-    // Earlier wrappers in this file share the chain-job singleton. Let their
-    // watchers settle before measuring the two mounts owned by this test.
-    const settleFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      blob: async () => new Blob(["settled"], { type: "image/jpeg" }),
-    } as Response);
-    await flushPromises();
-    settleFetch.mockRestore();
-    const fetchPreview = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      blob: async () => new Blob(["preview"], { type: "image/jpeg" }),
-    } as Response);
-    let urlIndex = 0;
-    const createUrl = vi
-      .spyOn(URL, "createObjectURL")
-      .mockImplementation(() => `blob:preview-${++urlIndex}`);
-    const revokeUrl = vi
-      .spyOn(URL, "revokeObjectURL")
-      .mockImplementation(() => {});
-
-    const first = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const firstMedia = first
-      .getComponent({ name: "SequenceComposer" })
-      .props("stageMediaByClipId") as Record<string, { posterUrl?: string }>;
-    const firstPoster = firstMedia[draft.clips[0]!.id]?.posterUrl;
-    expect(firstPoster).toMatch(/^blob:preview-/);
-    first.unmount();
-    expect(revokeUrl).toHaveBeenCalledWith(firstPoster);
-
-    const second = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const secondMedia = second
-      .getComponent({ name: "SequenceComposer" })
-      .props("stageMediaByClipId") as Record<string, { posterUrl?: string }>;
-    const secondPoster = secondMedia[draft.clips[0]!.id]?.posterUrl;
-    const previewFetchCount = fetchPreview.mock.calls.filter(([url]) =>
-      String(url).includes("/stages/0/preview"),
-    ).length;
-    fetchPreview.mockRestore();
-    createUrl.mockRestore();
-    revokeUrl.mockRestore();
-    second.unmount();
-    expect(secondPoster).toMatch(/^blob:preview-/);
-    expect(secondPoster).not.toBe(firstPoster);
-    expect(previewFetchCount).toBe(2);
-  });
-
-  it("keeps the Output control reachable on phones in sequence mode", async () => {
-    vi.stubGlobal(
-      "matchMedia",
-      vi.fn(() => ({
-        matches: true,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    );
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    enterSequenceMode();
-    await nextTick();
-
-    expect(wrapper.find("[data-test='phone-sequence-controls']").exists()).toBe(
-      true,
-    );
-    expect(wrapper.find("[data-test='sequence-composer-stub']").exists()).toBe(
-      true,
-    );
-    vi.unstubAllGlobals();
-    vi.stubGlobal("prompt", vi.fn());
   });
 
   // ── File under (Create-time Library organization) ─────────────────────
@@ -4661,39 +3284,6 @@ describe("CreatePage layout and behavior", () => {
     }
   });
 
-  it("files the stitched print of a sequence, never its clips", async () => {
-    filingFleet();
-    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
-    useGenerateForm().state.value.modelFamily = "ltx2";
-    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const draft = enterSequenceMode();
-    draft.clips[0]!.prompt = "the opening";
-    draft.clips[1]!.prompt = "the landing";
-    useGenerateForm().state.value.title = "Smurfs";
-    await flushPromises();
-
-    await wrapper.get("[data-test='sequence-generate']").trigger("click");
-    await flushPromises();
-
-    expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    const calls = createChainJobMock.mock.calls as unknown as Record<
-      string,
-      unknown
-    >[][];
-    const body = calls[0]![0]!;
-    expect(body).toMatchObject({
-      title: "Smurfs",
-      tags: ["smurfs"],
-      collection: { name: "Smurfs" },
-    });
-    for (const stage of body.stages as Record<string, unknown>[]) {
-      expect(stage.tags).toBeUndefined();
-      expect(stage.collection).toBeUndefined();
-    }
-  });
-
   it("drops the ghost tag when the title auto-tag preference is off", async () => {
     const wrapper = await mountFiling();
     autoTagTitle.value = false;
@@ -4815,8 +3405,6 @@ describe("CreatePage host routing", () => {
     galleryListing.value = [entry];
     localStorage.clear();
     setActivePinia(createPinia());
-    chainJobsTesting.reset();
-    takeSequenceHandoff();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
@@ -4839,7 +3427,6 @@ describe("CreatePage host routing", () => {
         estimate_confidence: "high",
       },
     });
-    listChainJobsMock.mockResolvedValue({ jobs: [] });
     routeQuery.value = {};
     routerReplaceMock.mockClear();
     hostStatusMock.mockReset();
@@ -5393,23 +3980,6 @@ describe("CreatePage host routing", () => {
     expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
-  it("does not show the obsolete origin-only sequence warning", async () => {
-    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
-    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
-    localStorage.setItem("mold.composer.mode", "script");
-    hostModelsMock.mockResolvedValue([
-      { ...flux, name: "ltx-2:fp8", family: "ltx2" },
-    ]);
-
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    await nextTick();
-
-    expect(wrapper.find("[data-test='sequence-origin-note']").exists()).toBe(
-      false,
-    );
-  });
-
   it("routes Most capable to the strongest GPU", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     placementPreviewMock.mockImplementation(async (...args: unknown[]) => ({
@@ -5611,8 +4181,6 @@ describe("CreatePage 3-D mesh prints", () => {
     galleryListing.value = [entry];
     localStorage.clear();
     setActivePinia(createPinia());
-    chainJobsTesting.reset();
-    takeSequenceHandoff();
     takeGenerationHandoff();
     generateFormTesting.resetForTest();
     resetNotifications();
@@ -5921,46 +4489,9 @@ function pageStubs() {
     AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
     ActivityStrip: {
       name: "ActivityStrip",
-      props: ["jobs", "sequences"],
-      emits: [
-        "cancel",
-        "dismiss",
-        "open",
-        "sequence-action",
-        "clear-inactive",
-        "cleanup-disk",
-      ],
-      template:
-        "<div data-test='activity-stub' :data-sequences='(sequences||[]).length' />",
-    },
-    SequenceComposer: {
-      name: "SequenceComposer",
-      props: [
-        "model",
-        "family",
-        "shared",
-        "modelDefaultFrames",
-        "target",
-        "chainLevelDirty",
-        "stageMediaByClipId",
-        "playingClipId",
-        "submitting",
-      ],
-      emits: [
-        "submit",
-        "cancel",
-        "duplicate-as-new",
-        "discard-edit",
-        "expand-clip",
-        "import-shared",
-        "play-clip",
-      ],
-      template:
-        "<div data-test='sequence-composer-stub'>" +
-        "<button data-test='sequence-generate' @click=\"$emit(submitting ? 'cancel' : 'submit')\">{{ submitting ? 'Cancel' : 'go' }}</button>" +
-        "<button v-if='Object.keys(stageMediaByClipId || {}).length' data-test='stub-play-first' @click=\"$emit('play-clip', Object.keys(stageMediaByClipId)[0])\">play</button>" +
-        "<button data-test='clip-expand' @click=\"$emit('expand-clip', 'clip-x', 'a stage prompt')\">expand</button>" +
-        "</div>",
+      props: ["jobs"],
+      emits: ["cancel", "retry", "dismiss", "open", "shared-open"],
+      template: "<div data-test='activity-stub' />",
     },
     ExpandModal: {
       name: "ExpandModal",

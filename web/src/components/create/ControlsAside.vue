@@ -26,7 +26,6 @@ import {
 } from "@studio/lib/generationProfile";
 import { emptyMeshForm, type MeshFormState } from "@studio/lib/meshControls";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
-import type { OutputMode } from "@studio/lib/sequence";
 import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import {
@@ -43,8 +42,6 @@ import {
 } from "@studio/lib/sourceResolution";
 import HostRoutingPicker from "./HostRoutingPicker.vue";
 import { useHostRouting } from "../../composables/useHostRouting";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import type { ChainLimits } from "../../api";
 
 const props = withDefaults(
   defineProps<{
@@ -62,21 +59,12 @@ const props = withDefaults(
     /** Seed of the most recent finished print — powers "lock last seed"
      * (desktop InspectorPanel parity). */
     lastSeed?: number | null;
-    /** Output is a setting, not a place (mockup 1c/3a): One shot | Sequence
-     * lives here between the model picker and Shape. */
-    output?: OutputMode;
-    /** Clips currently parked on the composer rail (sequence caption). */
-    clipCount?: number;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
-    /** Authoritative limits from the host selected for this sequence. */
-    chainLimits?: ChainLimits | null;
   }>(),
   {
     advCount: 0,
     mobile: false,
     lastSeed: null,
-    output: "single",
-    clipCount: 0,
     model: null,
     sourceDimensions: null,
     canvasIntent: "model-default",
@@ -85,7 +73,6 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
-  "update:output": [value: OutputMode];
   "open-advanced": [];
   /* The rail only knows the form, not the catalog row behind it, so the page
    * owns the actual reset (model defaults + the undo offer). */
@@ -181,10 +168,8 @@ const resolutionWarning = computed(() => {
   );
   return finding?.level === "warn" ? finding.message : null;
 });
-const sequenceMode = computed(() => props.output === "sequence");
 const canPredictDuration = computed(
   () =>
-    !sequenceMode.value &&
     props.model?.supports_duration_prediction === true &&
     props.model.runtime_ready !== false,
 );
@@ -199,25 +184,14 @@ function setPredictDuration(value: boolean) {
       : (props.modelValue.frames ?? props.model?.default_frames ?? 25),
   });
 }
-const draft = useSequenceDraftStore();
 const showGenerateAudio = computed(() => capabilities.value.offersAudioControl);
-const generateAudio = computed(() =>
-  sequenceMode.value
-    ? draft.enableAudio
-    : props.modelValue.enableAudio !== false,
-);
-const audioOutputSupported = computed(() =>
-  sequenceMode.value
-    ? props.chainLimits?.supports_audio === true
-    : capabilities.value.supportsAudio && props.model?.supports_audio !== false,
+const generateAudio = computed(() => props.modelValue.enableAudio !== false);
+const audioOutputSupported = computed(
+  () =>
+    capabilities.value.supportsAudio && props.model?.supports_audio !== false,
 );
 const audioOutputUnavailableReason = computed(() => {
   if (!showGenerateAudio.value || audioOutputSupported.value) return null;
-  if (sequenceMode.value) {
-    return props.chainLimits?.supports_audio === false
-      ? "Generated audio is unavailable for this sequence on the selected host."
-      : null;
-  }
   if (props.model?.supports_audio === false) {
     return "Audio assets are not included with this checkpoint. Video generation remains available.";
   }
@@ -227,11 +201,9 @@ const audioOutputUnavailableReason = computed(() => {
   );
 });
 function setGenerateAudio(value: boolean) {
-  if (sequenceMode.value) draft.enableAudio = value;
-  else patch({ enableAudio: value });
+  patch({ enableAudio: value });
 }
-// Edit families (Qwen image edit) render one print at a time; a sequence
-// renders one timeline.
+// Edit families (Qwen image edit) render one print at a time.
 const batchLocked = computed(
   () =>
     capabilities.value.forcesBatchSizeOne ||
@@ -242,14 +214,8 @@ const batchLocked = computed(
           ? (props.modelValue.referenceImages?.length ?? 0)
           : props.modelValue.imageAttachments.length,
       lastWrite: props.modelValue.exclusiveWell ?? null,
-    }) === "references" ||
-    sequenceMode.value,
+    }) === "references",
 );
-
-const outputSegments = [
-  { value: "single", label: "One shot" },
-  { value: "sequence", label: "Sequence" },
-] as const;
 
 // Reroll: a fresh random seed for the next print without leaving Fixed mode —
 // mirrors the desktop inspector's reroll. Switches to Random so the server
@@ -381,21 +347,6 @@ function lockLastSeed() {
       </button>
     </div>
 
-    <div class="controls__group controls__output" data-test="output-card">
-      <div class="controls__label">Output</div>
-      <SegmentedControl
-        data-test="output-mode"
-        :model-value="output"
-        :options="outputSegments"
-        label="Output"
-        @update:model-value="emit('update:output', $event as OutputMode)"
-      />
-      <p v-if="sequenceMode" class="controls__hint" data-test="output-caption">
-        {{ clipCount }} clips on the composer rail · one-shot and sequence
-        prompts stay separate.
-      </p>
-    </div>
-
     <div v-if="!canvasless" class="controls__group">
       <div class="controls__label">Shape</div>
       <ShapePicker
@@ -516,10 +467,7 @@ function lockLastSeed() {
       </p>
     </div>
 
-    <div
-      v-if="capabilities.supportsVideo && !sequenceMode"
-      class="controls__group"
-    >
+    <div v-if="capabilities.supportsVideo" class="controls__group">
       <div
         v-if="canPredictDuration"
         class="controls__toggle"
@@ -662,11 +610,7 @@ function lockLastSeed() {
         />
       </div>
       <p v-if="batchLocked" class="controls__hint" data-test="batch-locked">
-        {{
-          sequenceMode
-            ? "locked to 1 — a sequence renders one timeline."
-            : "locked to 1 — edit models render one print at a time."
-        }}
+        locked to 1 — edit models render one print at a time.
       </p>
     </div>
 
@@ -746,15 +690,6 @@ function lockLastSeed() {
 
 .controls__group {
   margin-bottom: 20px;
-}
-
-/* Output is the one mode-defining setting — a highlighted card so it reads
- * apart from the tuning sliders below it. */
-.controls__output {
-  border: 1px solid var(--sel-border, var(--ce));
-  background: var(--sel-bg, var(--bath));
-  border-radius: var(--radius-card);
-  padding: 12px;
 }
 
 .controls__label {
