@@ -58,6 +58,24 @@ impl PaintVae {
                 * LATENT_SCALE)?,
         )
     }
+    /// Encode a base request's ordered views. Geometry conditions retain their
+    /// incoming dtype through normalization, as in Tencent encode_images.
+    pub fn encode_views_with_noise(&self, images: &Tensor, noise: &Tensor) -> Result<Tensor> {
+        let pixels = super::paint_pixels::normalize_views(images)?;
+        let (batch, views, _, height, width) = images.dims5()?;
+        ensure!(
+            noise.dims() == [batch, views, 4, height / 8, width / 8],
+            "paint view posterior noise shape differs from image batch"
+        );
+        let noise = noise.reshape((batch * views, 4, height / 8, width / 8))?;
+        Ok(self.encode_with_noise(&pixels, &noise)?.reshape((
+            batch,
+            views,
+            4,
+            height / 8,
+            width / 8,
+        ))?)
+    }
     /// Decode scaled diffusion latents to NCHW pixels in the VAE's [-1,1] range.
     pub fn decode(&self, latents: &Tensor) -> Result<Tensor> {
         let (batch, channels, height, width) = latents.dims4()?;

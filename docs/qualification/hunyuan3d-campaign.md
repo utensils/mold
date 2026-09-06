@@ -2,7 +2,8 @@
 
 Branch: `work/issues-1511-1496`. Scope and gates:
 [`hunyuan3d-complete-campaign-plan.md`](../design/hunyuan3d-complete-campaign-plan.md).
-The user requested full implementation with no deferred work. No PR is authorized.
+The user requested full implementation with no deferred work. Open a PR only after
+full implementation, verification and subagent peer review; that gate is not met.
 
 ## Capture harness
 
@@ -705,3 +706,47 @@ it is not a completion checklist with assumed passes.
   passes after removing the import made unused by extraction
   (`paint-projection-shared-clippy-v2.log`); the initial lint failure remains
   retained in v1. Rust formatting checks pass.
+
+
+## Paint image boundaries and staged runner
+
+- `paint-pixels-oracle-v1` captures unchanged Tencent `encode_images` through
+  AST extraction and Diffusers 0.30 `VaeImageProcessor.postprocess`. Checked-in
+  fixtures cover input-dtype normalization, half-to-float model boundaries,
+  material ordering and ties-to-even RGB conversion. Three CPU tests pass
+  (`paint-pixels-green-v1.log`) after the absent-implementation failure.
+- Position maps now retain their own F16/F32 precision independently of encoded
+  conditioning. Tencent's PIL converter hardcodes half even for a float model;
+  the focused guidance regression fails before this correction and passes after
+  it (`paint-map-dtype-red-v1.log`, `paint-map-dtype-green-v1.log`).
+- `paint_pipeline` connects DINO, VAE reference/normal/position encoding, the
+  fifteen-step denoiser and material decoding with explicit posterior/diffusion
+  noise. Lexical scopes release each network before loading the next; VAE
+  decoding reloads after denoising. Tensor-boundary callbacks support retained
+  comparisons and cancellation. Validation covers all image/noise inputs before
+  checkpoint loading. This is internal integration, not a qualified paint engine.
+- Read-only peer review caught the reference-image cast boundary: reference
+  pixels must reach model precision BEFORE normalization, whereas geometry
+  pixels retain their input precision. A distinct failing regression captures
+  that difference (`paint-reference-cast-red-v1.log`).
+- `scripts/capture-hunyuan3d-paint-pipeline.py` runs Tencent's actual multiview
+  entrypoint, retaining DINO input/output, three image/posterior/latent groups,
+  initial diffusion noise, fifteen samples, decoded pixels and material PNGs.
+  `paint-pipeline-oracle-v2` completed six 512-pixel views in 10.455 seconds with
+  13,771,083,776 allocated / 20,476,592,128 reserved peak CUDA bytes. These are
+  Torch allocator measurements, not a Rust memory claim. The earlier failed
+  module-loader invocation remains in v1. Model loading resolves Tencent's
+  published legacy class name without replacing any network forward.
+
+- The staged runner's three validation/cancellation/reference-cast regressions
+  pass (`paint-pipeline-green-v3.log`); the complete paint component selection
+  passes 36 tests with thirteen explicit oracle tests ignored
+  (`paint-pipeline-all-paint-v1.log`). Inference Clippy with CUDA/cuDNN and
+  mesh-texture features passes with warnings denied (`paint-pipeline-clippy-v1.log`).
+- Full installed Rust integration is captured separately in
+  `capture-20260906T100514Z-368852622599` using the exact Tencent input/noise
+  tensors. Conditioning maxima already exceed the unchanged .01 VAE limit
+  (reference .011230469, normal .013671875, position .010009766), so this run
+  is not a parity pass regardless of its eventual material output. All stages
+  continue for diagnostic comparison; the test reports failure after saving
+  its material outputs and comparison table.

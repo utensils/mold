@@ -58,12 +58,19 @@ impl PaintInputs {
         {
             candle_core::bail!("invalid paint conditioning dimensions or dtype")
         }
-        for tensor in [
-            &self.position,
-            &self.reference,
-            &self.dino,
-            &self.position_maps,
-        ] {
+        // Tencent's PIL converter retains half-precision position maps even
+        // when the model and encoded conditioning use float32.
+        if !matches!(self.position_maps.dtype(), DType::F16 | DType::F32)
+            || !self
+                .position_maps
+                .device()
+                .same_device(self.normal.device())
+        {
+            candle_core::bail!(
+                "paint position maps must be floating point on the conditioning device"
+            )
+        }
+        for tensor in [&self.position, &self.reference, &self.dino] {
             if tensor.dtype() != self.normal.dtype()
                 || !tensor.device().same_device(self.normal.device())
             {
@@ -333,6 +340,16 @@ mod tests {
             );
         }
         assert!(branches.guidance_branches().is_err());
+        Ok(())
+    }
+    #[test]
+    fn paint_guidance_retains_half_position_maps_for_float_model() -> Result<()> {
+        let mut inputs = tiny_inputs()?;
+        inputs.position_maps = inputs.position_maps.to_dtype(DType::F16)?;
+        let branches = inputs.guidance_branches()?;
+        assert_eq!(branches.layout()?, (3, 2, 8, 2));
+        assert_eq!(branches.normal.dtype(), DType::F32);
+        assert_eq!(branches.position_maps.dtype(), DType::F16);
         Ok(())
     }
     #[test]
