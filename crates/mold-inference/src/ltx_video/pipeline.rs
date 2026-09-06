@@ -772,6 +772,17 @@ impl LtxVideoEngine {
         let start = Instant::now();
         let preset = LtxModelPreset::for_model(&self.base.model_name)?;
 
+        if req.source_image.is_some() {
+            if let Some(message) = mold_core::validation::source_image_contract_violation(
+                Some("ltx-video"),
+                &self.base.model_name,
+                None,
+                true,
+            ) {
+                bail!(message);
+            }
+        }
+
         // Video parameters with defaults
         let num_frames = req.frames.unwrap_or(25);
         let fps = req.fps.unwrap_or(24);
@@ -878,7 +889,9 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
 // independently and relies on the stitch layer to glue clips together (Cut
 // is the natural seam; Smooth is forced to motion_tail=0 server-side which
 // makes it equivalent to Cut). Trade-off: longer videos with no temporal
-// context handoff. Subjects can drift between clips. Future work: add img2vid
+// context handoff. Authored scenes may change or drift between clips; an
+// automatic one-shot split is refused before it reaches this renderer because
+// identical prompt+seed stages would repeat. Future work: add img2vid
 // to LtxVideoEngine and feed the carry tail's last frame as `source_image`
 // with strength~0.7.
 

@@ -3640,9 +3640,9 @@ async fn enforce_source_image_capability(
     // manifest refusal, though — see `SourceImageCapability::resolve`, which
     // owns that precedence for every door. The manifest stays the answer when
     // there is nothing to probe (not yet downloaded, unreadable headers).
-    // Non-wan families have no header probe; their manifest contract binds
-    // directly — plain LTX-Video declares Unsupported and its engine really
-    // does ignore an attached image.
+    // Non-wan families have no header probe. Legacy LTX-Video is resolved from
+    // the engine-wide limitation even when a custom model has no manifest;
+    // the engine also refuses as the final defense against silent discard.
     let manifest_contract = mold_core::manifest::find_manifest(&request.model)
         .and_then(|manifest| manifest.defaults.source_image);
     let capability = if resolved_family == Some("wan") {
@@ -3656,6 +3656,8 @@ async fn enforce_source_image_capability(
     } else {
         manifest_contract
     };
+    let capability =
+        mold_core::validation::source_image_capability_for_engine(resolved_family, capability);
     // Keyframes (#779) and an extend (#783) carry the source frames too, so
     // the shared predicate owns the whole list — an extend's first frames come
     // from the tail of the clip it continues, and counting only an image left

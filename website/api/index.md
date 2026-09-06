@@ -827,20 +827,21 @@ share a filesystem.
 `prompt` is the only field without a default, and it is required in every case
 but one. All other fields have defaults or model-specific validation.
 
-::: tip Optional prompt (LTX-2 / LTX-Video image-to-video)
+::: tip Optional prompt (LTX-2 image-to-video)
 An empty or whitespace-only `prompt` is accepted **only** when both of these
 hold:
 
-1. the resolved model family is `ltx2` or `ltx-video`, and
+1. the resolved model family is `ltx2`, and
 2. the request carries visual conditioning; `source_image`, a non-empty
    `keyframes[]`, `source_video` / `source_video_path`, or `extend_video` /
    `extend_video_path`.
 
 Anything else (pure text-to-video, or any image family even with a
-`source_image`) still fails with `prompt must not be empty`. For `cv:` / `hf:`
-catalog IDs the family comes from the server's catalog resolution, so a
-promptless request works only on a host that can resolve the model to one of
-those two families.
+`source_image`) still fails with `prompt must not be empty`. Legacy `ltx-video`
+is text-to-video only in Mold: it requires a prompt and rejects source-image
+conditioning. For `cv:` / `hf:` catalog IDs the family comes from the server's
+catalog resolution, so a promptless request works only on a host that can
+resolve the model to LTX-2.
 
 LTX-2's Gemma encoder pads to a fixed 1,024-token context and replaces padded
 positions with learned register embeddings, so `""` is a trained context rather

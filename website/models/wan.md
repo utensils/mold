@@ -810,7 +810,7 @@ one.
 Every door refuses that up front rather than spending the renders: `mold run`,
 the web/desktop Studio's Create rail, and `POST /api/chain-jobs`, which answers
 422 for an `ephemeral` (one-shot) chain on such a tier. All three render one
-sentence, from `mold_core::chain::text_only_wan_auto_chain_refusal`. Ask for
+sentence, from `mold_core::chain::text_only_auto_chain_refusal`. Ask for
 `--frames` within the tier's budget, or use an image-conditioned tier —
 `wan22-i2v-a14b:*` or `wan22-ti2v-5b:fp16` / `:q8` / `:turbo`. Note the tag:
 `wan22-ti2v-5b:dmd` refuses the source frame, so it falls under this same rule

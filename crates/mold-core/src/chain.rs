@@ -201,9 +201,8 @@ pub struct ChainRequest {
     #[schema(example = 24)]
     pub fps: u32,
 
-    /// Chain base seed. Per-stage seeds are derived as
-    /// `base_seed ^ ((stage_idx as u64) << 32)` by the orchestrator so the
-    /// whole chain is reproducible from a single seed value.
+    /// Chain base seed. Every stage uses it unchanged unless that authored
+    /// stage supplies a `seed_offset`, which is XORed into the base seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 42)]
     pub seed: Option<u64>,
@@ -727,11 +726,12 @@ pub fn routing_clip_frames(family: &str, model: &str) -> Option<u32> {
     }
 }
 
-/// The refusal a **one-shot** auto-chain earns on a text-to-video wan tier —
-/// the single authority every door renders.
+/// The refusal a **one-shot** auto-chain earns when its engine has no context
+/// handoff — the single authority every door renders.
 ///
-/// A wan checkpoint whose advertised `source_image` contract is `Unsupported`
-/// has no conditioning channel at all, so nothing crosses a clip boundary:
+/// A wan checkpoint whose advertised `source_image` contract is `Unsupported`,
+/// or any legacy LTX-Video checkpoint, has no usable conditioning channel in
+/// its Mold engine, so nothing crosses a clip boundary:
 /// every stage re-derives the scene from the same prompt and the same seed and
 /// the "longer" video is the same clip rendered again, with a visible reset at
 /// each seam. Measured on `wan22-t2v-a14b:q8` at 219 frames / 3 stages, frames
@@ -752,39 +752,49 @@ pub fn routing_clip_frames(family: &str, model: &str) -> Option<u32> {
 /// family would send a user to a tier this same rule turns away.
 ///
 /// `family` is a parameter rather than a manifest lookup because an installed
-/// `cv:` / `hf:` checkpoint is only classified through the server's sidecar
-/// overlay, and because the contract means something different elsewhere: an
-/// LTX-2 tier carries latent context across the seam whatever it says about
-/// source images. An unclassified contract (`None`) is "unknown", never a
-/// declared refusal — #783 added wan auto-chaining precisely so opaque catalog
-/// ids route, and refusing them on a guess would undo that.
+/// `cv:` / `hf:` checkpoint is classified through the server's sidecar overlay.
+/// An unclassified wan contract (`None`) is "unknown", never a declared
+/// refusal. Legacy LTX-Video is family-authoritative instead: Mold has no
+/// image-to-video path for any checkpoint using that engine. LTX-2 carries
+/// latent context across the seam whatever its source-image contract says.
 ///
 /// `clip_frames` is the size ONE generation renders — [`routing_clip_frames`],
 /// or the caller's own `--clip-frames` / `clip_frames` override.
-pub fn text_only_wan_auto_chain_refusal(
+pub fn text_only_auto_chain_refusal(
     family: Option<&str>,
     model: &str,
     source_image: Option<crate::SourceImageCapability>,
     total_frames: u32,
     clip_frames: u32,
 ) -> Option<String> {
-    if family != Some("wan")
-        || !matches!(
-            source_image,
-            Some(crate::SourceImageCapability::Unsupported)
-        )
-        || total_frames <= clip_frames
-    {
+    if total_frames <= clip_frames {
         return None;
     }
-    Some(format!(
-        "'{model}' is text-to-video and cannot continue motion across a clip \
-         boundary, so rendering {total_frames} frames would repeat the same \
-         ~{clip_frames}-frame clip rather than extend it. Reduce the frame count \
-         to {clip_frames} or fewer for one continuous clip, or use an \
-         image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which \
-         seeds each continuation with the previous clip's final frame."
-    ))
+    match family {
+        Some("wan")
+            if matches!(
+                source_image,
+                Some(crate::SourceImageCapability::Unsupported)
+            ) =>
+        {
+            Some(format!(
+                "'{model}' is text-to-video and cannot continue motion across a clip \
+                 boundary, so rendering {total_frames} frames would repeat the same \
+                 ~{clip_frames}-frame clip rather than extend it. Reduce the frame count \
+                 to {clip_frames} or fewer for one continuous clip, or use an \
+                 image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which \
+                 seeds each continuation with the previous clip's final frame."
+            ))
+        }
+        Some("ltx-video") => Some(format!(
+            "'{model}' is legacy LTX-Video and cannot continue motion across a clip \
+             boundary, so rendering {total_frames} frames would repeat the same \
+             ~{clip_frames}-frame clip rather than extend it. Reduce the frame count \
+             to {clip_frames} or fewer for one continuous clip, or use LTX-2.3 or \
+             LTX-2.5, which carries context into each continuation."
+        )),
+        _ => None,
+    }
 }
 
 impl ChainRequest {
@@ -2885,7 +2895,7 @@ mod tests {
     /// repeated with a visible reset at each seam. Chaining it is not a longer
     /// render, it is the same render three times.
     #[test]
-    fn text_only_wan_auto_chain_refusal_matches_the_surface_parity_fixture() {
+    fn text_only_auto_chain_refusal_matches_the_surface_parity_fixture() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../tests/fixtures/wan/surface-parity-v1.json"
@@ -2927,7 +2937,7 @@ mod tests {
             );
 
             assert_eq!(
-                text_only_wan_auto_chain_refusal(
+                text_only_auto_chain_refusal(
                     Some("wan"),
                     model,
                     manifest.defaults.source_image,
@@ -2939,7 +2949,7 @@ mod tests {
             );
             // At or below the clip size there is no chain to refuse.
             assert_eq!(
-                text_only_wan_auto_chain_refusal(
+                text_only_auto_chain_refusal(
                     Some("wan"),
                     model,
                     manifest.defaults.source_image,
@@ -2964,7 +2974,7 @@ mod tests {
             );
             assert_eq!(routing_clip_frames("wan", model), Some(clip));
             assert_eq!(
-                text_only_wan_auto_chain_refusal(
+                text_only_auto_chain_refusal(
                     Some("wan"),
                     model,
                     manifest.defaults.source_image,
@@ -2980,13 +2990,13 @@ mod tests {
         // "unknown", never a declared refusal. #783 added wan auto-chaining
         // precisely so those route; refusing them on a guess would undo it.
         assert_eq!(
-            text_only_wan_auto_chain_refusal(Some("wan"), "cv:12345", None, total, 121),
+            text_only_auto_chain_refusal(Some("wan"), "cv:12345", None, total, 121),
             None,
         );
         // The contract only means this on wan. LTX-2 carries latent context
         // across the seam whatever its source-image contract says.
         assert_eq!(
-            text_only_wan_auto_chain_refusal(
+            text_only_auto_chain_refusal(
                 Some("ltx2"),
                 "ltx-2-19b-distilled:fp8",
                 Some(crate::SourceImageCapability::Unsupported),
@@ -2995,8 +3005,45 @@ mod tests {
             ),
             None,
         );
+        // Legacy LTX-Video has the same one-shot failure mode as a text-only
+        // Wan tier: no carry reaches the next stage, while prompt and seed
+        // stay fixed. It must refuse the automatic split rather than repeat.
+        assert!(text_only_auto_chain_refusal(
+            Some("ltx-video"),
+            "ltx-video-0.9.6-distilled:bf16",
+            Some(crate::SourceImageCapability::Unsupported),
+            total,
+            LTX_VIDEO_DEFAULT_CLIP_FRAMES,
+        )
+        .is_some());
+
+        let ltx_fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/ltx-video/surface-parity-v1.json"
+        )))
+        .expect("legacy fixture parses");
+        let block = &ltx_fixture["auto_chain"]["text_only_refusal"];
+        let model = block["model"].as_str().expect("legacy model");
+        let total = block["total_frames"].as_u64().expect("legacy total") as u32;
+        let clip = block["clip_frames"].as_u64().expect("legacy clip") as u32;
+        let expected = block["template"]
+            .as_str()
+            .expect("legacy template")
+            .replace("{model}", model)
+            .replace("{total_frames}", &total.to_string())
+            .replace("{clip_frames}", &clip.to_string());
         assert_eq!(
-            text_only_wan_auto_chain_refusal(
+            text_only_auto_chain_refusal(
+                Some("ltx-video"),
+                model,
+                Some(crate::SourceImageCapability::Unsupported),
+                total,
+                clip,
+            ),
+            Some(expected),
+        );
+        assert_eq!(
+            text_only_auto_chain_refusal(
                 None,
                 "wan21-t2v-1.3b:turbo",
                 Some(crate::SourceImageCapability::Unsupported),

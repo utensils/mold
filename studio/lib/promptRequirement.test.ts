@@ -105,7 +105,7 @@ describe("promptRequired / promptOptional", () => {
       promptOptional({ family: "ltx2", extendVideo: { base64: "x" } }),
     ).toBe(true);
     expect(promptOptional({ family: "ltx-video", sourceImage: "b64" })).toBe(
-      true,
+      false,
     );
   });
 

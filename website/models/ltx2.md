@@ -468,9 +468,10 @@ unchanged either way.) The default is `0.75`.
 
 ## The prompt is optional for image-to-video
 
-LTX-2 and the older `ltx-video` family accept an **empty prompt**, but only when
-the request already carries something to animate; a source image, keyframes, a
-source video, or an `--extend` continuation:
+LTX-2 accepts an **empty prompt**, but only when the request already carries
+something to animate: a source image, keyframes, a source video, or an
+`--extend` continuation. Mold's legacy `ltx-video` engine is text-to-video only
+and therefore still requires a prompt:
 
 ```bash
 # Animate a still with no prompt at all
@@ -1020,6 +1021,16 @@ The sequential pipeline loads the shared T5-XXL encoder, the LTX Video
 transformer, and the causal video VAE one at a time to keep peak memory
 manageable. The 2B variants fit comfortably on a 24 GB GPU; the 13B variants
 do not.
+
+Mold's legacy engine does not implement upstream LTX-Video image conditioning.
+It rejects source images instead of silently ignoring them; use LTX-2.3 or
+LTX-2.5 to animate a still. It also cannot carry context between independently
+rendered clips. Legacy one-shots therefore remain one denoise instead of being
+automatically split at the 97-frame LTX-2 routing default; the engine accepts up
+to 257 frames, subject to available GPU memory. Explicitly authored multi-scene
+sequences remain available and label those seams **Join**. A manually submitted
+ephemeral legacy chain is refused at server admission rather than returning the
+same deterministic clip repeatedly.
 
 ```bash
 # Fast legacy path

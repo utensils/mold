@@ -33,6 +33,12 @@ an automatic split would render the same clip again rather than extend it.
 that tier's clip size with the same sentence. An authored sequence still
 composes those clips deliberately.
 
+Legacy LTX-Video also has no image-to-video handoff. Mold therefore keeps its
+one-shot requests as one denoise up to the 257-frame engine ceiling instead of
+automatically splitting at 97 and rerunning the same prompt and seed. Use
+LTX-2.3/LTX-2.5 for image-conditioned continuation; an explicitly authored
+sequence may still join independent legacy clips on purpose.
+
 ```bash
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
   --frames 97 --clip-frames 49

@@ -24,7 +24,6 @@ import type { ReferenceImagesCapabilities } from "./referenceImagesProfile";
 const PROMPT_OPTIONAL_FAMILIES: ReadonlySet<string> = new Set([
   "ltx2",
   "ltx-2",
-  "ltx-video",
 ]);
 
 /**

@@ -104,9 +104,10 @@ presets.
 The main workspace with four panels:
 
 - **Prompt**: Multi-line text area (Shift+Enter for newlines, emacs
-  keybindings). Required, except for an LTX-2 / LTX-Video model that already has
-  a source image attached, where an empty prompt is accepted and prompt
-  expansion is skipped for that run
+  keybindings). Required, except for an LTX-2 model that already has a source
+  image attached, where an empty prompt is accepted and prompt expansion is
+  skipped for that run. Legacy LTX-Video is text-to-video only in Mold and
+  rejects source-image conditioning
 - **Parameters**: six essentials rows for an image model — plus **Duration**
   (and **Predict duration** where the model advertises duration prediction)
   for a video model — followed by the Advanced accordion

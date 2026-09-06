@@ -637,9 +637,9 @@ pub fn materialize_generation_profile_output_default(
 ///
 ///   - `Ignored` for a mesh family: it has no text encoder anywhere in it, so
 ///     a prompt is provenance and nothing else.
-///   - `Optional` for the LTX families with visual conditioning: an image or
-///     a clip already determines the render, and an unprompted continuation is
-///     a legitimate request rather than a mistake.
+///   - `Optional` for LTX-2 with visual conditioning: an image or clip already
+///     determines the render. Legacy LTX-Video remains required because Mold's
+///     engine cannot accept visual conditioning.
 ///   - `Required` everywhere else.
 pub fn prompt_requirement_for_family(
     family: Option<&str>,
@@ -647,7 +647,7 @@ pub fn prompt_requirement_for_family(
 ) -> PromptRequirement {
     match family.map(canonical_family) {
         Some(family) if family == crate::manifest::HUNYUAN3D_FAMILY => PromptRequirement::Ignored,
-        Some("ltx2" | "ltx-video") if has_visual_conditioning => PromptRequirement::Optional,
+        Some("ltx2") if has_visual_conditioning => PromptRequirement::Optional,
         _ => PromptRequirement::Required,
     }
 }
@@ -1613,6 +1613,8 @@ fn recipe(
     pipeline: Option<Ltx2PipelineMode>,
 ) -> GenerationRecipeProfile {
     let family = canonical_family(input.family);
+    let source_image =
+        validation::source_image_capability_for_engine(Some(family), input.source_image);
     // The reviewed compact H3 stack has one canvas, one step count, and one
     // frame count. All three are derived from the identity, never from
     // `input.default_*` — those are laundered through user `model_prefs` in
@@ -1837,7 +1839,7 @@ fn recipe(
         && !mesh_only
         && !matches!(family, "ltx-video" | "ltx2" | "wan" | "minimax-h3")
         && !references_replace_source
-        && input.source_image != Some(SourceImageCapability::Unsupported);
+        && source_image != Some(SourceImageCapability::Unsupported);
     // Denoise strength describes how much of an existing latent survives. A
     // family that never starts from one — audio-only, mesh, wan's pinned
     // conditioning frames, the source-driven edit pipelines, and any recipe
@@ -1848,7 +1850,7 @@ fn recipe(
         && !wan
         && family != "minimax-h3"
         && !references_replace_source
-        && input.source_image != Some(SourceImageCapability::Unsupported);
+        && source_image != Some(SourceImageCapability::Unsupported);
     // The advertised mode is the answer for a CONDITIONED request, because
     // that is the only one that can differ from `Required`. A client resolves
     // it against the request it is actually building — the same
@@ -1856,7 +1858,7 @@ fn recipe(
     // can never carry conditioning advertises `Required` outright.
     let prompt_mode = prompt_requirement_for_family(
         Some(family),
-        !audio_only && input.source_image != Some(SourceImageCapability::Unsupported),
+        !audio_only && source_image != Some(SourceImageCapability::Unsupported),
     );
     let controlnet_supported = family == "sd15";
     // Identity conditioning is advertised only when this binary can actually
@@ -2023,7 +2025,7 @@ fn recipe(
                 false,
                 "This recipe does not encode a negative prompt.",
             ),
-            source_image: input.source_image,
+            source_image,
             reference_images: Some(reference_images),
             supports_lora: lora_supported,
             supports_controlnet: controlnet_supported,
@@ -2102,7 +2104,7 @@ fn recipe(
                 // (`model_manager::synchronize_generation_profile_capabilities`),
                 // so a ladder-keyed cold profile would contradict the hot one.
                 supports_first_last_frame: wan
-                    && input.source_image != Some(SourceImageCapability::Unsupported),
+                    && source_image != Some(SourceImageCapability::Unsupported),
                 first_last_frame_min_frames: wan.then_some(validation::WAN_TI2V_FLF_MIN_FRAMES),
                 reason: if wan_dmd_ladder.is_some() {
                     Some(

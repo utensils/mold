@@ -168,7 +168,7 @@ pushed screen opened from the header.
   additive `guidance_overrides` contract (STG scale/blocks, CFG rescale,
   modality scale, and skip stride), validates before queueing, counts the group
   in its badge, and keeps empty fields absent so pipeline defaults remain exact.
-  The **prompt is optional** for an `ltx2` / `ltx-video` model once the form
+  The **prompt is optional** for an `ltx2` model once the form
   carries visual conditioning (source image, keyframes, source video, or a
   continuation): Develop enables, the pre-submit guard stops requiring text, and
   the prompt placeholder says so. Every other model — including image families
@@ -176,7 +176,9 @@ pushed screen opened from the header.
   `ignored` prompt mode — still requires a prompt here. This follows the shared
   `@studio/lib/promptRequirement` rule and its shared copy, so iPhone, desktop,
   and web cannot set different expectations; `MobileSequenceComposer` applies
-  the same rule to clip rails through `SequenceLimits.promptOptional`. A blank
+  the same rule to clip rails through `SequenceLimits.promptOptional`. Legacy
+  `ltx-video` remains prompt-required and rejects image conditioning because
+  Mold's legacy engine is text-to-video only. A blank
   prompt saves no VRAM and usually renders near-static motion — never imply
   otherwise in native copy.
   A Hunyuan3D model reshapes the whole form instead of just the prompt rule:

@@ -387,10 +387,11 @@ mold run ltx-2-19b-distilled:fp8 \
 mold run ltx-2-19b-distilled:fp8 --image ./still.png --frames 97 --format mp4
 ```
 
-The prompt is optional for `ltx2` and `ltx-video` (and only for them) when the
+The prompt is optional for `ltx2` when the
 request already carries visual conditioning (`--image`, `--keyframe`, `--video`,
 or `--extend`). It saves no VRAM and usually yields near-static motion; see
 [the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video).
+Legacy `ltx-video` remains prompt-required and rejects image conditioning.
 
 LTX-2 also adds:
 

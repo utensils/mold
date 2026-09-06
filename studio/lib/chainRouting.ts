@@ -143,10 +143,11 @@ export function autoChainFieldList(
   return `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}`;
 }
 
-/** Families accepted by the server's `chain_limits::family_cap` whitelist. */
-const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
+/** Families that may turn a one-shot into a context-preserving chain.
+ * Legacy LTX-Video remains available to explicitly authored sequences, but
+ * its one-shot router stays single up to the engine ceiling. */
+const AUTO_CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
   "ltx2",
-  "ltx-video",
   "wan",
 ]);
 
@@ -177,9 +178,9 @@ export function wanCarriesContext(
 }
 
 /**
- * The refusal a **one-shot** auto-chain earns on a text-to-video wan tier.
+ * The refusal a **one-shot** auto-chain earns when no context can cross its seam.
  *
- * Byte-identical mirror of `mold_core::chain::text_only_wan_auto_chain_refusal`,
+ * Byte-identical mirror of `mold_core::chain::text_only_auto_chain_refusal`,
  * which is the single authority: the CLI router calls it and the server renders
  * it at `POST /api/chain-jobs` for the same ephemeral job this router submits,
  * so a user meets one sentence whichever door they came through. The shared
@@ -197,7 +198,7 @@ export function wanCarriesContext(
  * stages and is untouched: repeated clips there are what the author asked for.
  */
 /**
- * The single-request frame ceiling of a wan tier that cannot be auto-chained.
+ * The single-request frame ceiling of a model that cannot be auto-chained.
  *
  * For every other video model the routing clip size and the single-request
  * ceiling are different numbers: the ceiling is what one denoise may ask for,
@@ -207,40 +208,48 @@ export function wanCarriesContext(
  * more was offering a value submit would turn away. `null` for every model
  * this does not apply to, which is the only thing callers should key on.
  */
-export function textOnlyWanSingleClipCeiling(
+export function textOnlyAutoChainSingleClipCeiling(
   family: string | null | undefined,
   model: string,
   sourceImage: string | null | undefined,
   tierDefault: number | null | undefined,
 ): number | null {
-  if (canonicalizeFamily(family) !== "wan" || sourceImage !== "unsupported") {
+  const normalizedFamily = canonicalizeFamily(family);
+  if (normalizedFamily !== "wan" || sourceImage !== "unsupported") {
     return null;
   }
   return wanRoutingClipFrames(model, tierDefault);
 }
 
-export function textOnlyWanAutoChainRefusal(
+export function textOnlyAutoChainRefusal(
   family: string | null | undefined,
   model: string,
   sourceImage: string | null | undefined,
   totalFrames: number,
   clipFrames: number,
 ): string | null {
-  if (
-    canonicalizeFamily(family) !== "wan" ||
-    sourceImage !== "unsupported" ||
-    totalFrames <= clipFrames
-  ) {
-    return null;
+  if (totalFrames <= clipFrames) return null;
+  const normalizedFamily = canonicalizeFamily(family);
+  if (normalizedFamily === "wan" && sourceImage === "unsupported") {
+    return (
+      `'${model}' is text-to-video and cannot continue motion across a clip ` +
+      `boundary, so rendering ${totalFrames} frames would repeat the same ` +
+      `~${clipFrames}-frame clip rather than extend it. Reduce the frame count ` +
+      `to ${clipFrames} or fewer for one continuous clip, or use an ` +
+      `image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which ` +
+      `seeds each continuation with the previous clip's final frame.`
+    );
   }
-  return (
-    `'${model}' is text-to-video and cannot continue motion across a clip ` +
-    `boundary, so rendering ${totalFrames} frames would repeat the same ` +
-    `~${clipFrames}-frame clip rather than extend it. Reduce the frame count ` +
-    `to ${clipFrames} or fewer for one continuous clip, or use an ` +
-    `image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b:turbo), which ` +
-    `seeds each continuation with the previous clip's final frame.`
-  );
+  if (normalizedFamily === "ltx-video") {
+    return (
+      `'${model}' is legacy LTX-Video and cannot continue motion across a clip ` +
+      `boundary, so rendering ${totalFrames} frames would repeat the same ` +
+      `~${clipFrames}-frame clip rather than extend it. Reduce the frame count ` +
+      `to ${clipFrames} or fewer for one continuous clip, or use LTX-2.3 or ` +
+      `LTX-2.5, which carries context into each continuation.`
+    );
+  }
+  return null;
 }
 
 /**
@@ -387,7 +396,7 @@ export function decideChainRouting(
   // of the family. The old `model.includes("distilled")` test refused a dev
   // checkpoint the server chains, and only tolerated opaque catalog IDs by
   // special-casing them.
-  const isChainCapable = CHAIN_CAPABLE_FAMILIES.has(normalizedFamily);
+  const isChainCapable = AUTO_CHAIN_CAPABLE_FAMILIES.has(normalizedFamily);
 
   if (!isChainCapable) {
     // Non-chainable models still get their family's own single-request
@@ -410,11 +419,11 @@ export function decideChainRouting(
     : LTX2_DEFAULT_CLIP_FRAMES;
   if (frames <= clipFrames) return { kind: "single" };
 
-  // A wan tier that declares it carries nothing across a seam cannot be
-  // auto-chained into a longer video — it would render the same clip again.
+  // A family that carries nothing across a seam cannot be auto-chained into
+  // a longer video — it would render the same clip again.
   // The sentence is `mold-core`'s, rendered identically here so the Studio,
   // the CLI, and the server's own 422 read the same.
-  const textOnly = textOnlyWanAutoChainRefusal(
+  const textOnly = textOnlyAutoChainRefusal(
     normalizedFamily,
     model,
     sourceImage,

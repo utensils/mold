@@ -3313,12 +3313,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_optional_for_conditioned_video_families() {
-        // An LTX-2 / LTX-Video request that already carries a source image,
-        // keyframes, a source video, or an extend may run unprompted.
-        for family in ["ltx2", "ltx-video"] {
-            assert_eq!(require_prompt(None, family, true).unwrap(), "");
-        }
+    fn prompt_optional_for_conditioned_ltx2() {
+        // An LTX-2 request that already carries a source image, keyframes, a
+        // source video, or an extend may run unprompted. Legacy LTX-Video's
+        // Mold engine cannot carry that conditioning, so its prompt remains
+        // required.
+        assert_eq!(require_prompt(None, "ltx2", true).unwrap(), "");
+        assert!(require_prompt(None, "ltx-video", true).is_err());
         // An explicit prompt still wins.
         assert_eq!(
             require_prompt(Some("a turtle".to_string()), "ltx2", true).unwrap(),

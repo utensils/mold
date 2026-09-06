@@ -156,12 +156,9 @@ describe("video duration controls", () => {
     expect(videoGenerationCount(257, 24, wanTi2v)).toBe(3);
   });
 
-  it("keeps LTX-Video sequencing even though it advertises no source image", () => {
-    // `unsupported` is not by itself the rule: every LTX-Video tier advertises
-    // it, and that family IS auto-chained (its clips simply concatenate, the
-    // same honest Join behaviour). Keying the reset or the ceiling on the
-    // contract string alone would shorten a carried duration here for no
-    // reason and take away sequencing the family supports.
+  it("keeps LTX-Video one-shot durations inside the engine ceiling", () => {
+    // Authored sequences still concatenate independent clips. A one-shot
+    // stays one denoise instead of splitting at the 97-frame routing default.
     const ltxVideo = {
       name: "ltx-video-0.9.6:bf16",
       family: "ltx-video",
@@ -172,7 +169,7 @@ describe("video duration controls", () => {
     };
     expect(maxVideoFrames(ltxVideo, 30)).toBe(257);
     expect(videoFramesForModelSelection(97, ltxVideo)).toBe(97);
-    expect(videoGenerationCount(177, 30, ltxVideo)).toBe(2);
+    expect(videoGenerationCount(177, 30, ltxVideo)).toBe(1);
   });
 
   it("validates frame counts against the selected model grid", () => {

@@ -1244,12 +1244,12 @@ pub(crate) fn resolved_family_for(model_name: &str) -> Option<&str> {
 
 /// Whether `req` must carry a non-empty prompt.
 ///
-/// Video families whose text encoder pads to a fixed-width context (LTX-2's
-/// Gemma connector replaces every padded position with learned register
-/// embeddings, so `""` is a trained context rather than a degenerate one)
-/// accept an empty prompt as long as the request carries visual conditioning
-/// to continue: a source image, keyframes, a source video, or an extend. Pure
-/// text-to-video and every image family keep the prompt required.
+/// LTX-2's text encoder pads to a fixed-width context, and its Gemma connector
+/// replaces every padded position with learned register embeddings, so `""`
+/// is a trained context rather than a degenerate one. It may accept an empty
+/// prompt when the request carries visual conditioning to continue: a source
+/// image, keyframes, a source video, or an extend. Pure text-to-video and every
+/// image family keep the prompt required.
 ///
 /// Note this buys no VRAM — the Gemma context is a fixed-size tensor whose
 /// footprint is independent of the token count — and an unprompted clip tends
@@ -1763,8 +1763,9 @@ pub fn request_carries_source_frames(req: &GenerateRequest) -> bool {
 /// names the actual model instead of mislabeling it as Wan. `has_source`
 /// counts first/last-frame keyframes as well as a source image (#779): both
 /// carry source frames, so either satisfies a required contract and either is
-/// refused by a text-to-video-only checkpoint. A `None` capability enforces
-/// nothing — the engine remains the authority.
+/// refused by a text-to-video-only checkpoint. A `None` capability remains
+/// unknown for checkpoint-dependent families; legacy LTX-Video resolves to
+/// `Unsupported` from the engine-wide limitation.
 pub fn source_image_contract_violation(
     family: Option<&str>,
     model: &str,
@@ -1772,6 +1773,7 @@ pub fn source_image_contract_violation(
     has_source: bool,
 ) -> Option<String> {
     use crate::types::SourceImageCapability;
+    let capability = source_image_capability_for_engine(family, capability);
     let wan = family == Some("wan");
     match capability {
         Some(SourceImageCapability::Unsupported) if has_source => Some(if wan {
@@ -1794,6 +1796,23 @@ pub fn source_image_contract_violation(
             format!("{model} needs a source image; supply one")
         }),
         _ => None,
+    }
+}
+
+/// Resolve source-image support against limitations of the engine itself.
+///
+/// A missing manifest/catalog value means "unknown" for checkpoint-dependent
+/// families. Legacy LTX-Video is different: its Mold engine has no image
+/// conditioning path for any checkpoint, so an opaque custom model cannot
+/// widen the capability merely because its catalog metadata is absent.
+pub fn source_image_capability_for_engine(
+    family: Option<&str>,
+    advertised: Option<crate::types::SourceImageCapability>,
+) -> Option<crate::types::SourceImageCapability> {
+    if family == Some("ltx-video") {
+        Some(crate::types::SourceImageCapability::Unsupported)
+    } else {
+        advertised
     }
 }
 
@@ -2310,6 +2329,11 @@ fn validate_generate_request_after_activation_with(
     reference_form: ReferenceForm,
 ) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
+    if family == Some("ltx-video") && req.source_image.is_some() {
+        if let Some(message) = source_image_contract_violation(family, &req.model, None, true) {
+            return Err(message);
+        }
+    }
 
     if req.references.is_some() && !family.is_some_and(crate::minimax_h3::is_family) {
         return Err(
@@ -5356,13 +5380,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_allowed_for_ltx_video_with_source_image() {
+    fn legacy_ltx_video_rejects_source_image_before_prompt_validation() {
         let mut req = valid_req();
         req.model = "ltx-video-0.9.8-2b-distilled:bf16".to_string();
         req.output_format = Some(OutputFormat::Mp4);
         req.prompt = String::new();
         req.source_image = Some(png_bytes());
-        validate_generate_request(&req).unwrap();
+        let error = validate_generate_request(&req)
+            .expect_err("legacy LTX-Video cannot use visual conditioning");
+        assert!(error.contains("image-to-video path"), "got: {error}");
     }
 
     #[test]
@@ -5422,7 +5448,7 @@ mod tests {
             prompt_requirement_for_family(Some("hunyuan3d"), true),
             PromptRequirement::Ignored
         );
-        for family in ["ltx2", "ltx-2", "ltx-video"] {
+        for family in ["ltx2", "ltx-2"] {
             assert_eq!(
                 prompt_requirement_for_family(Some(family), true),
                 PromptRequirement::Optional,
@@ -5434,6 +5460,11 @@ mod tests {
                 "{family} unconditioned"
             );
         }
+        assert_eq!(
+            prompt_requirement_for_family(Some("ltx-video"), true),
+            PromptRequirement::Required,
+            "legacy LTX-Video cannot carry the conditioning that makes a prompt optional"
+        );
         for family in ["flux", "sdxl", "wan", "z-image"] {
             assert_eq!(
                 prompt_requirement_for_family(Some(family), true),

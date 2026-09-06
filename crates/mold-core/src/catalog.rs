@@ -413,14 +413,15 @@ pub fn build_model_catalog(
         let has_profile_identity = model_cfg.family.is_some();
         let sequence_capable = chain_capable_family(&family);
         // Config-only models have local weights but no manifest task
-        // structure, so mold-core cannot classify the conditioning contract:
-        // the server's `annotate_source_image_capabilities` pass reads it off
-        // the checkpoint headers and re-derives `supports_extend` from the
-        // same helper. Unknown here, never a second hardcoded family list —
+        // structure, so checkpoint-dependent conditioning stays unknown for
+        // the server's header probe. Legacy LTX-Video is the exception: the
+        // engine itself has no source-image path, so the family resolves to
+        // Unsupported even without manifest metadata. Never infer support —
         // `extend_capable_model` is the one authority, and it answers `false`
         // for an unclassified wan checkpoint rather than promising a
         // continuation a text-to-video export cannot accept (#783).
-        let source_image_contract: Option<crate::types::SourceImageCapability> = None;
+        let source_image_contract =
+            crate::validation::source_image_capability_for_engine(Some(&family), None);
         let guidance_identity = format!(
             "{} {}",
             name,
@@ -554,9 +555,8 @@ pub fn build_model_catalog(
                 &guidance_identity,
                 None,
             )),
-            // Config-only models have local weights: the server's annotate
-            // pass derives the contract from checkpoint headers, the same
-            // classification the engine applies (#772).
+            // Config-only checkpoint-dependent models are refined by the
+            // server probe. Engine-wide limitations are already concrete.
             source_image: source_image_contract,
             generation_profile: Some(generation_profile),
         });
@@ -1311,6 +1311,39 @@ mod tests {
             .resolution
             .aspect_groups
             .is_empty());
+    }
+
+    #[test]
+    fn config_only_legacy_ltx_video_advertises_the_engine_refusal() {
+        let mut models = HashMap::new();
+        models.insert(
+            "local-ltx-video".to_string(),
+            ModelConfig {
+                family: Some("ltx-video".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let config = Config {
+            models,
+            ..Config::default()
+        };
+
+        let entry = build_model_catalog(&config, None, false)
+            .into_iter()
+            .find(|model| model.name == "local-ltx-video")
+            .expect("config-only legacy model should exist");
+        assert_eq!(
+            entry.source_image,
+            Some(crate::SourceImageCapability::Unsupported)
+        );
+        assert_eq!(
+            entry
+                .generation_profile
+                .as_ref()
+                .and_then(|profile| profile.default_recipe())
+                .and_then(|recipe| recipe.capabilities.source_image),
+            Some(crate::SourceImageCapability::Unsupported)
+        );
     }
 
     #[test]
