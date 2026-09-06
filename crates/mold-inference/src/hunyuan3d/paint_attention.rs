@@ -3,7 +3,7 @@
 //! 82920d643c0dc2f7bfd7255f45f62d386edfe60c.
 
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 /// The three checkpoint projection layouts. Text, DINO and multiview use Plain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,12 +141,7 @@ pub(super) fn linear(
     ))
 }
 
-pub(super) fn projected(layer: &candle_nn::Linear, input: &Tensor) -> Result<Tensor> {
-    // Torch includes bias in float32 accumulation, then rounds the output once.
-    layer
-        .forward(&input.to_dtype(DType::F32)?)?
-        .to_dtype(input.dtype())
-}
+pub(super) use mold_candle::stable_diffusion::linear::forward as projected;
 
 impl Projections {
     fn new(vb: VarBuilder, query: usize, context: usize, suffix: &str) -> Result<Self> {
@@ -391,6 +386,38 @@ mod tests {
             include_bytes!("../../../../tests/fixtures/hunyuan3d/paint-attention.safetensors"),
             device,
         )
+    }
+
+    fn check_noncontiguous_linear_bias(device: &Device) -> Result<()> {
+        let x = Tensor::new(&[[[1f32 + 1. / 1024., 1. + 1. / 1024.], [0., 0.]]], device)?
+            .to_dtype(DType::F16)?
+            .transpose(1, 2)?;
+        assert!(!x.is_contiguous());
+        let layer = candle_nn::Linear::new(
+            Tensor::new(&[[450.25f32, 0.]], device)?,
+            Some(Tensor::new(&[1f32 + 427. / 1024.], device)?),
+        );
+        for (input, expected) in [
+            (&x, 452.25f32),
+            (&x.contiguous()?, 452.),
+            (&x.squeeze(0)?, 452.),
+        ] {
+            let actual = projected(&layer, input)?
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            assert_eq!(actual, vec![expected; 2]);
+        }
+        Ok(())
+    }
+    #[test]
+    fn noncontiguous_paint_linear_rounds_product_before_bias() -> Result<()> {
+        check_noncontiguous_linear_bias(&Device::Cpu)
+    }
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn noncontiguous_paint_linear_rounds_product_before_bias_cuda() -> Result<()> {
+        check_noncontiguous_linear_bias(&Device::new_cuda(0)?)
     }
 
     #[test]

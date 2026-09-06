@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, help="UNet directory containing config.json and .bin")
     parser.add_argument("--tiny", action="store_true")
+    parser.add_argument("--reference-trace", action="store_true", help="capture failing reference spatial stages on their exact inputs")
     parser.add_argument("--guidance-inputs", action="store_true", help="expand one source into the actual three pipeline guidance branches")
     parser.add_argument("--trajectory", action="store_true", help="also capture the fifteen-step guided sampler")
     parser.add_argument("--scheduler-config", type=Path)
@@ -92,6 +93,22 @@ def main():
     hooks = [model.unet_dual.register_forward_hook(counter("reference")),
              model.unet.image_proj_model_dino.register_forward_hook(counter("dino_projector")),
              model.unet.register_forward_hook(counter("main"))]
+    trace = {}
+    trace_layouts = {}
+    if args.reference_trace:
+        def trace_stage(name):
+            def observe(module, inputs, output):
+                if name+".input" not in trace:
+                    trace_layouts[name] = dict(stride=list(inputs[0].stride()),contiguous=inputs[0].is_contiguous())
+                    for key,value in dict(input=inputs[0],output=output,weight=module.weight,bias=module.bias).items():
+                        trace[name+"."+key] = value.detach().cpu().contiguous()
+            return observe
+        for up_index, attention_index in [(1,2),(2,0),(2,1)]:
+            spatial = model.unet_dual.up_blocks[up_index].attentions[attention_index]
+            name = f"trace.up_{up_index}_{attention_index}_0"
+            for stage,module in [("groupnorm",spatial.norm),("projection",spatial.proj_in),
+                                 ("layernorm",spatial.transformer_blocks[0].transformer.norm1)]:
+                hooks.append(module.register_forward_hook(trace_stage(name+"."+stage)))
     batch, materials, views, size = 3, 2, args.views, args.latent_size
 
     def signal(shape, offset=0):
@@ -170,6 +187,7 @@ def main():
                 latents = scheduler.step(context["noise_pred"],timestep,latents).prev_sample
                 tensors[f"trajectory.sample.{index}"] = latents.cpu().contiguous()
                 tensors[f"trajectory.x0.{index}"] = scheduler.model_outputs[-1].cpu().contiguous()
+    tensors.update(trace)
     save_file(tensors,str(args.output/"paint-unet.safetensors"))
     for hook in hooks:
         hook.remove()
@@ -178,7 +196,7 @@ def main():
     metadata = dict(revision=revision,sources={name:sha256(folder/name) for name in ("modules.py","attn_processor.py")},
                     torch=torch.__version__,diffusers=diffusers.__version__,gpu=torch.cuda.get_device_name(),
                     seed=25026,dtype=args.dtype,attention_backend=args.attention_backend,tiny=args.tiny,config=config,batch=batch,materials=materials,
-                    views=views,references=args.references,guidance_inputs=args.guidance_inputs,trajectory=args.trajectory,latent_size=size,timesteps=[500,400],reference_scale=[0,1,1],
+                    views=views,references=args.references,reference_trace=args.reference_trace,trace_layouts=trace_layouts,guidance_inputs=args.guidance_inputs,trajectory=args.trajectory,latent_size=size,timesteps=[500,400],reference_scale=[0,1,1],
                     invocation_counts=invocation_counts,
                     peak_allocated=torch.cuda.max_memory_allocated(),peak_reserved=torch.cuda.max_memory_reserved())
     if args.trajectory:

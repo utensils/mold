@@ -294,6 +294,80 @@ mod tests {
             device,
         )
     }
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires retained installed-weight spatial trace"]
+    fn captured_paint_spatial_stages_match_tencent() -> anyhow::Result<()> {
+        use std::{collections::HashMap, path::PathBuf};
+        let root = PathBuf::from(std::env::var("MOLD_PAINT_SPATIAL_ORACLE")?);
+        let output = PathBuf::from(std::env::var("MOLD_PAINT_SPATIAL_OUTPUT")?);
+        std::fs::create_dir(&output)?;
+        let device = Device::new_cuda(0)?;
+        let tensors = candle_core::safetensors::load(root.join("paint-unet.safetensors"), &device)?;
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("paint-unet.json"))?)?;
+        let mut passed = true;
+        for site in ["up_1_2_0", "up_2_0_0", "up_2_1_0"] {
+            for stage in ["groupnorm", "projection", "layernorm"] {
+                let key = format!("trace.{site}.{stage}");
+                let input = &tensors[&format!("{key}.input")];
+                // Safetensors stores contiguous bytes; restore the actual
+                // spatial projection's B,HW,C view before invoking Linear.
+                let restored = if stage == "projection" {
+                    input.transpose(1, 2)?.contiguous()?.transpose(1, 2)?
+                } else {
+                    input.clone()
+                };
+                let input = &restored;
+                let expected_stride: Vec<usize> =
+                    serde_json::from_value(metadata["trace_layouts"][&key]["stride"].clone())?;
+                assert_eq!(input.stride(), expected_stride);
+                let expected = &tensors[&format!("{key}.output")];
+                let weights = HashMap::from([
+                    ("weight".into(), tensors[&format!("{key}.weight")].clone()),
+                    ("bias".into(), tensors[&format!("{key}.bias")].clone()),
+                ]);
+                let vb = VarBuilder::from_tensors(weights, input.dtype(), &device);
+                let actual = match stage {
+                    "groupnorm" => {
+                        mold_candle::stable_diffusion::normalization::DiffusersGroupNorm::new(
+                            vb,
+                            32,
+                            input.dim(1)?,
+                            1e-6,
+                        )?
+                        .forward(input)?
+                    }
+                    "projection" => projected(
+                        &linear(
+                            vb,
+                            input.dim(candle_core::D::Minus1)?,
+                            expected.dim(candle_core::D::Minus1)?,
+                            true,
+                        )?,
+                        input,
+                    )?,
+                    "layernorm" => {
+                        normalized(&norm(vb, input.dim(candle_core::D::Minus1)?)?, input)?
+                    }
+                    _ => unreachable!(),
+                };
+                candle_core::safetensors::save(
+                    &HashMap::from([("actual", actual.clone())]),
+                    output.join(format!("{key}.safetensors")),
+                )?;
+                let delta = (actual.to_dtype(DType::F32)? - expected.to_dtype(DType::F32)?)?;
+                let max = delta.abs()?.max_all()?.to_scalar::<f32>()?;
+                let rms = delta.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                eprintln!("{key}: max={max} rms={rms}");
+                // Tighter than the complete network's .02/.002 gate: replay
+                // each layer on the oracle's exact input to localize drift.
+                passed &= max < 0.002 && rms < 0.0003;
+            }
+        }
+        anyhow::ensure!(passed, "spatial stage replay diverges; tensors retained");
+        Ok(())
+    }
     #[test]
     fn rejects_nonfinite_reference_scales_before_computation() -> Result<()> {
         let device = Device::Cpu;

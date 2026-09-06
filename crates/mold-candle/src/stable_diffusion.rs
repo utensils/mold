@@ -8,6 +8,7 @@
 pub use candle_transformers::models::stable_diffusion::{
     build_clip_transformer, clip, schedulers, unet_2d, StableDiffusionConfig,
 };
+pub mod linear;
 pub mod normalization;
 pub mod vae;
 

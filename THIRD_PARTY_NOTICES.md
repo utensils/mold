@@ -1,7 +1,8 @@
 # Third-Party Notices
 
 The opt-in paint VAE numerical blocks derive from Diffusers v0.30.0 and follow
-PyTorch v2.5.1 CUDA normalization/activation semantics. Attribution and full
+PyTorch v2.5.1 CUDA normalization/activation semantics and layout-dependent
+linear bias rounding. Attribution and full
 license locations are recorded in `crates/mold-candle/THIRD_PARTY_NOTICES.md`.
 
 ## Candle shared Stable Diffusion VAE

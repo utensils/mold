@@ -59,11 +59,13 @@ impl Spatial {
         cache: &mut HashMap<String, Tensor>,
     ) -> Result<Tensor> {
         let (batch, width, height, columns) = x.dims4()?;
-        let hidden = self.norm.forward(x)?.permute((0, 2, 3, 1))?.reshape((
-            batch,
-            height * columns,
-            width,
-        ))?;
+        // Preserve Torch's non-contiguous B,HW,C view. Candle reshape after
+        // permute would copy it contiguous and incorrectly select fused bias.
+        let hidden = self
+            .norm
+            .forward(x)?
+            .reshape((batch, width, height * columns))?
+            .transpose(1, 2)?;
         let hidden = projected(&self.input, &hidden)?;
         let condition = condition
             .map(|c| -> Result<_> {

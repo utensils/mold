@@ -161,6 +161,12 @@ the model controls, and the length slider. A sequence is now something you scrip
   select the accumulation dtype. Qualification must check the actual cuDNN
   dispatch counter; merely enabling the feature can still run im2col at every
   layer because of the fork's size threshold.
+- **Paint Linear rounding depends on the incoming layout.**
+  `mold_candle::stable_diffusion::linear::forward` is shared by the opt-in paint
+  VAE and paint UNet. Torch fuses bias for 2D or contiguous ND inputs; a
+  non-contiguous ND input rounds the matrix product before adding bias. Spatial
+  inputs must keep BCHW -> B,C,HW -> transpose strides: Candle reshape after
+  permute copies contiguous, silently selecting the wrong rounding boundary.
 - **A paint conditioning cache belongs to its loaded denoiser and request.**
   `paint_denoiser::PreparedPaint` borrows its owning model and retains the reference
   network, projected DINO and position tables once per request. Guidance repeats

@@ -650,3 +650,58 @@ it is not a completion checklist with assumed passes.
   decoder tensors remain retained in `paint-vae-cudnn-f32accum-real512-candle-v1/`.
   The pinned build passes 194 Hunyuan tests with fourteen hardware/oracle tests
   ignored (`candle-cudnn-pin-hunyuan-tests-v1.log`).
+
+
+## Spatial projection bias-rounding correction
+
+- CPU review of the full guided run localizes all over-bound cache errors to
+  spatial borders (`paint-guided-cache-review-v1/`). The new reference-trace
+  capture retains each failing site's GroupNorm, input projection and norm1
+  inputs, outputs and weights, plus original input strides in metadata.
+  `paint-reference-spatial-trace-cuda-v1.log` replays identical inputs and fails
+  only projections (maximum .015625, .25, .03125); both normalization stages
+  pass. Float64 CPU calculations confirm a bias boundary mismatch rather than
+  float32 summation error (`paint-projection-review-v1/`).
+- Torch 2.5.1 `ATen/native/Linear.cpp:94-120` uses fused addmm for 2D or
+  contiguous ND, but matmul followed by bias addition for non-contiguous ND.
+  The spatial B,HW,C input is the latter. The retained minimal CPU/CUDA oracle
+  `paint-projection-bias-oracle-v1.json` returns 452.25 for strided3D and 452.0
+  for contiguous3D or strided2D using identical values. Both Rust regression
+  tests fail first (`paint-projection-bias-red-v1.log`), then pass
+  (`paint-projection-bias-green-v1.log`).
+- `stable_diffusion::linear::forward` now shares that dtype/layout policy between
+  paint UNet and opt-in VAE; existing SD numerics remain separate. The spatial
+  UNet reshapes before transposing, preserving the non-contiguous layout that
+  Candle's previous permute/reshape sequence copied away. Native half matmul
+  and a separate half bias addition reproduce **all three captured projections
+  bit-for-bit** (`paint-reference-spatial-trace-cuda-v2.log`). Their GroupNorm
+  and norm1 replays also pass the unchanged .002 maximum / .0003 RMS bounds.
+- Full six-view installed UNet replay still **fails** two cache maxima:
+  `up_1_2_0` .056640625 and `up_2_0_0` .048828125. The third previously failing
+  cache now passes at .01940918. Individual model outputs continue to pass
+  (`paint-projection-unet-cuda-v1.log`). The exact-input projection defect is
+  corrected, but inherited network drift remains a separate gate.
+- The VAE had the same fused-only assumption and forced its Q/K/V view
+  contiguous, contrary to Diffusers 0.30 `AttnProcessor2_0:2188`. Its wrapper
+  regression fails before correction (`paint-vae-linear-bias-red-v1.log`). With
+  the shared policy and original transpose layout, seven shared SD/VAE tests
+  pass, including the old default behavior (`paint-vae-linear-bias-green-v1.log`).
+  Real installed VAE parity is rerun separately and is not inferred from these
+  focused tests.
+
+- After sharing the projection policy, the Hunyuan CUDA suite passes 196 tests
+  with fifteen explicit hardware/oracle tests ignored
+  (`paint-projection-all-hunyuan-v1.log`). The installed F32 fifteen-step
+  denoiser still passes unchanged bounds, final maximum .000008225441 / RMS
+  .0000016663199 (`paint-projection-denoiser-f32-cuda-v1.log`).
+- The real512 half VAE maximum remains **over bound**: im2col .034179688 / RMS
+  .0008929751412068291 (`paint-vae-linear-bias-real512-cuda-v1.log`); corrected
+  cuDNN .029296875 / RMS .0008084002150359077 with 72 dispatches
+  (`paint-vae-linear-bias-cudnn-real512-cuda-v1.log`). This correction reproduces
+  the missing operation boundary but does not close the full VAE gate. Both
+  encoder/decoder traces are retained. Independent review confirms the shared
+  helper is confined to paint UNet and the VAE's opt-in Diffusers path.
+- CUDA warnings-denied Clippy for both inference and shared model libraries
+  passes after removing the import made unused by extraction
+  (`paint-projection-shared-clippy-v2.log`); the initial lint failure remains
+  retained in v1. Rust formatting checks pass.

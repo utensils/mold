@@ -254,11 +254,7 @@ impl Mid {
 struct AttentionLinear(nn::Linear);
 impl Module for AttentionLinear {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        // PyTorch Linear's addmm adds bias before rounding its half output.
-        // Public Candle operations reproduce that boundary with F32 opmath.
-        self.0
-            .forward(&xs.to_dtype(DType::F32)?)?
-            .to_dtype(xs.dtype())
+        crate::stable_diffusion::linear::forward(&self.0, xs)
     }
 }
 fn attention_linear(vb: nn::VarBuilder, channels: usize) -> Result<AttentionLinear> {
@@ -281,8 +277,9 @@ impl Module for Mid {
             .norm
             .forward(&xs)?
             .reshape((batch, channels, height * width))?
-            .transpose(1, 2)?
-            .contiguous()?;
+            // Diffusers AttnProcessor2_0:2188 preserves this non-contiguous
+            // view, so Q/K/V use matmul then a separate half bias addition.
+            .transpose(1, 2)?;
         let query = self.query.forward(&hidden)?.to_dtype(DType::F32)?;
         let key = self
             .key
@@ -315,6 +312,26 @@ impl Module for Mid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn noncontiguous_vae_attention_linear_rounds_product_before_bias() -> Result<()> {
+        let device = candle::Device::Cpu;
+        let x = Tensor::new(&[[[1f32 + 1. / 1024., 1. + 1. / 1024.], [0., 0.]]], &device)?
+            .to_dtype(DType::F16)?
+            .transpose(1, 2)?;
+        let layer = AttentionLinear(nn::Linear::new(
+            Tensor::new(&[[450.25f32, 0.]], &device)?,
+            Some(Tensor::new(&[1f32 + 427. / 1024.], &device)?),
+        ));
+        assert_eq!(
+            layer
+                .forward(&x)?
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            vec![452.25, 452.25]
+        );
+        Ok(())
+    }
     #[test]
     fn unet_normalization_uses_its_own_epsilon() -> Result<()> {
         let device = candle::Device::Cpu;

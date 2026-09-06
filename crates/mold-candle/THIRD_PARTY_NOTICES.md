@@ -15,7 +15,9 @@ the full text is retained in `LICENSE-APACHE-2.0`.
 
 Shared `src/stable_diffusion/normalization.rs` and its CUDA implementation
 follow PyTorch v2.5.1's CUDA `group_norm_kernel.cu` rounding
-boundaries; SiLU follows `ActivationSiluKernel.cu` opmath precision. PyTorch's
+boundaries; SiLU follows `ActivationSiluKernel.cu` opmath precision. Shared
+`src/stable_diffusion/linear.rs` follows `aten/src/ATen/native/Linear.cpp`'s
+layout-dependent fused versus separate bias-rounding boundary. PyTorch's
 copyright notices and BSD license terms are retained in `LICENSE-PYTORCH`.
 The implementation uses public Candle tensor operations and ships no PyTorch
 or Python runtime. Existing SD callers retain Candle's numerical policy.
