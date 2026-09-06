@@ -2,15 +2,12 @@
 
 The web Create composer shows an advisory peak-VRAM estimate for the selected
 machine before you submit. Video models expose their supported camera-motion
-controls under Advanced, and a durable sequence remains attached after a page
-reload so its server-side progress does not disappear from the workspace.
-Setting **Output** to **Sequence** filters the model picker to compatible
-installed video checkpoints and selects one when possible, remembering your
-one-shot model for the way back. If none are installed, **Browse video models**
-opens Models → Discover with the Video and Models filters already applied.
-Every LTX-2 checkpoint renders multi-clip sequences, two-stage dev checkpoints
-included; a dev checkpoint renders each clip through the two-stage pipeline,
-so expect roughly twice the wall time per clip as a distilled one.
+controls under Advanced, and a long clip remains attached after a page reload
+so its server-side progress does not disappear from the workspace. A clip
+longer than one render is split into clips on the machine and stitched back
+into one video; a two-stage dev checkpoint renders each of those clips through
+the two-stage pipeline, so expect roughly twice the wall time per clip as a
+distilled one.
 
 On phone-sized web views, Create keeps every interactive target at least 44px
 high and editable fields at a zoom-safe 16px.
@@ -129,36 +126,19 @@ On a phone, Create follows one vertical workflow: prompt and style, model and
 core controls, Generate, the developing/result canvas, then recent prints.
 Advanced options remain in the mobile sheet so the primary flow stays compact.
 
-For a multi-prompt video, set **Output** (the control beside Model in the
-Create settings column) from **One shot** to **Sequence**. Multi-clip video is
-a setting, not a separate page: the composer becomes a clip rail. Mold starts
-with two clips, requires a description for each, and joins them with seam pills
-that name each transition in words; **Smooth**, **Cut**, or **Fade 8f**, with
-LTX-Video's zero-overlap joins reading **Join**. Clicking a seam pill
-opens the seam editor with its three teaching rows and the fade-length stepper.
-New clips take their frame count from the selected model's own advertised
-default rather than a fixed constant, and the summary shows the stitched
-duration before you generate. Switching Output back to One shot keeps clip 1 as
-the prompt and parks the rest; nothing is erased. **Sequence tools** contains
-TOML import/export and other script-oriented controls. On a multi-machine web
-setup, the durable job and its live progress stay on the machine selected by
-**Run on**.
+A clip longer than the checkpoint renders in one pass is not something you
+compose: ask for the duration you want and the machine splits the work, carries
+the motion across each seam, and stitches the result. It arrives as one video,
+one Library entry, and one row in the activity strip, whose progress line names
+the part it is on. On a multi-machine web setup the whole render stays on the
+machine selected by **Run on**.
 
-Sequences queue in the same activity strip as ordinary prints, with watch,
-cancel, and resume. Once one settles it leaves the strip: the video lands in the
-Create canvas with **Edit sequence** and **Show in library**, its print is in the
-Library, and its job record is in **Library ▸ History ▸ Sequences**, which is
-also where the host-scoped **Clear inactive** and **Clean up disk** actions live.
-
-A finished sequence can be edited in place. Its clips reload onto the rail and
-each pill shows whether that clip is cached (✓) or will re-render (↻) as you
-edit; **Update sequence** re-renders only from the earliest changed clip.
-Changing a transition type or a fade length re-renders nothing at all; those
-are applied when the video is stitched. From a sequence print in the Library,
-**Edit sequence** is the primary action and re-enters the original job on the
-machine that produced it so rendered clips stay cached. **Duplicate as new**
-starts a fresh sequence from the recorded clips, telling you how many it
-restored and naming anything a print does not record.
+To direct a clip scene by scene, script it — see
+[Multi-prompt scripts](/guide/video#multi-prompt-scripts-v2) for the
+`mold.chain.v1` TOML form and the `mold run --script` CLI. Clips made by an
+older build's scene composer keep their per-scene provenance in the Library,
+and **Reuse settings** on one restores a plain clip built from its first
+scene's prompt.
 
 ### Shape and Size
 
@@ -637,10 +617,9 @@ such as `/generate` and `/catalog` render Page Not Found:
 - img2img works via upload or the From Gallery picker; installed models are
   grouped by family in the picker and frames are clamped to 8n+1 automatically.
 - Library's print viewer keeps media bound to its owning host, restores the
-  saved model family on **Reuse settings** (a print a sequence produced reloads
-  its clips onto the Create clip rail instead, with **Edit sequence** offered
-  when its durable job still exists on the machine that made it), and shows the
-  recorded steps,
+  saved model family on **Reuse settings** (a print made scene by scene by an
+  older build restores a plain clip built from its first scene's prompt), and
+  shows the recorded steps,
   guidance, scheduler, LoRAs, prompts, file details, and copyable prompt/seed.
   **Upscale...** returns the print to Create with the installed default
   upscaler selected.
@@ -672,8 +651,8 @@ such as `/generate` and `/catalog` render Page Not Found:
   ) the collection whose name matches the title, offering None, every merged
   collection, and an inline **New collection…**. A line beneath previews the
   filename the print will land as. The choice rides one shots, every batch
-  sibling, every prepared variation, and the single print a sequence stitches,
-  and **Reuse settings** restores what a print was actually filed under.
+  sibling, and every prepared variation, and **Reuse settings** restores what a
+  print was actually filed under.
   **Settings ▸ Library ▸ Tag new prints with their title** (stored in this
   browser) turns the title chip off.
 - Shortcuts: **⌘K** / **Ctrl+K** opens the command palette from anywhere;

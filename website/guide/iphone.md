@@ -63,8 +63,7 @@ more connected machines are reachable it also offers:
 An optional **Title** above the prompt names the print: it is embedded in the
 saved metadata, folded into the output filename as a slug, and shown across
 every Library. Batch siblings and prepared variations inherit it, and **Use as
-prompt** restores it from a print. A sequence keeps the field too; it names
-the single stitched print the sequence lands in the Library.
+prompt** restores it from a print.
 
 Directly beneath it, **File under** files the print as you make it, as two
 rows:
@@ -86,9 +85,8 @@ Under either policy the model list is the union of every reachable machine's
 installed models, and a model that is not on all of them is tagged with the
 machine that has it. Mold ranks the reachable machines from their cached
 model, queue, and GPU telemetry and freezes the winner before queueing, so
-recovery, prepared expansion, and durable sequences all stay on the exact
-machine that ran the work. Only a sequence asks each candidate machine for a
-placement plan first. If no machine can run the print, nothing is queued and the message
+recovery and prepared expansion both stay on the exact machine that ran the
+work. If no machine can run the print, nothing is queued and the message
 names each machine. Your choice is remembered; it falls back to the browsed
 machine while only one is reachable.
 
@@ -117,8 +115,6 @@ The mobile composer includes:
   advertise it, including capable Wan checkpoints; resolution and fps stay
   locked to the source clip), LTX-2 pipeline/spatial/temporal controls, and
   optional STG, CFG-rescale, modality-scale, and guidance-skip overrides;
-- an **Output** field (One shot | Sequence) above the model field that turns
-  the composer into a multi-clip sequence, and
 - a host-aware memory estimate before submission.
 
 For video-only LTX-2 community checkpoints, **Generate audio** is disabled with
@@ -337,12 +333,10 @@ and Mold's wording never promises recoverability there.
 
 Reusing settings switches to the print's host and restores the model when it is
 installed there. If the original model is unavailable, Mold clearly identifies
-the compatible fallback and removes non-portable adapter/component choices. On
-a print a sequence produced, **Use as prompt** instead reloads its recorded
-clips onto the Create clip rail as a new sequence (saying how many it restored
-and naming anything a print does not record) and substitutes a
-sequence-capable model when needed. Re-entering the original durable job
-(**Edit sequence**) is a desktop and web action.
+the compatible fallback and removes non-portable adapter/component choices. On a
+print made scene by scene by an older build, **Use as prompt** restores a plain
+one-shot clip built from the first scene's prompt; the per-scene provenance
+stays on the print.
 
 Authenticated hosts issue a short-lived read-only media ticket for the selected
 file. The app never puts a long-lived API key in a video URL or buffers an
@@ -452,32 +446,16 @@ mobile `index.html`, Mold icon catalog, native archive, App Store Connect
 processing, and internal tester access before it is considered complete.
 
 The iPhone app focuses on remote Create, Library, Models, Machines, and
-appearance settings. Multi-clip video is a setting inside Create, not a
-separate screen: set **Output** to **Sequence** and the composer becomes a clip
-list, narrowed to compatible installed video models and sharing one set of
-size, FPS, steps, guidance, and seed fields with One shot. Start with two
-clips, describe each shot, choose the duration, and generate while Mold keeps
-progress and cancellation attached to the exact host; sequences share one
-queue list with single prints. Between clips, a seam control opens a sheet
-naming the transition in words (**Smooth**, **Cut**, **Fade**) with the
-fade-length stepper. New clips take their frame count from the selected model's
-own advertised default, and clip durations stop at that model's own clip size
-(the clip one generation renders), never at the family's longer single-request
-budget. An optional opening image; with its source strength and fit controls;
-is a disclosure in the primary Create stack, beside the other source media,
-rather than inside the Advanced sheet; the primary **↺ Reset** clears it while
-**Reset advanced** leaves it alone. An interrupted sequence can reconnect after relaunch
-without storing the host API key outside the Keychain; if the saved server
-identity cannot be verified, Mold discards the recovery record instead of
-attaching to an unproven machine. LTX-Video joins independent clips without a
-motion tail and labels its seams **Join**, while LTX-2 offers only
-durations longer than its continuation overlap. Wan checkpoints sequence too:
-clip durations snap to Wan's 4n+1 frame grid, image-conditioned checkpoints
-(A14B I2V, TI2V-5B) continue motion across the seam from a single carried
-frame, and text-to-video Wan checkpoints join independent clips like
-LTX-Video. Use desktop or the CLI for a
-local engine, in-place sequence editing and the Sequences history tab, the TOML
-chain editor and full jobs-administration workspace, RunPod provisioning,
+appearance settings. Video is a setting inside Create, not a separate screen:
+pick a clip style, describe the shot, choose the duration, and generate while
+Mold keeps progress and cancellation attached to the exact host. Ask for a clip
+longer than one render and the machine splits, carries, and stitches the work
+for you — it arrives as one video in one queue row. An optional opening image,
+with its source strength and fit controls, is a disclosure in the primary
+Create stack beside the other source media rather than inside the Advanced
+sheet; the primary **↺ Reset** clears it while **Reset advanced** leaves it
+alone. Use desktop or the CLI for a local engine, scene-by-scene scripted
+sequences and the full jobs-administration workspace, RunPod provisioning,
 engine configuration, and desktop Stable/Nightly self-update controls.
 
 For server networking and deployment options, continue with

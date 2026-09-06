@@ -67,13 +67,13 @@ pushed screen opened from the header.
   is the union of every reachable machine's installed models, tagged with the
   machine that has one when they differ. Machines are ranked from their cached
   model and queue telemetry, so Develop does not block on a placement round
-  trip before durable admission; the placement preview remains the sequence
+  trip before durable admission; the placement preview remains the placement
   planner. Auto
   chooses the least-busy model owner; Most capable uses the machine's reported
   `gpu_info.backend`, then VRAM and queue depth. The winner is frozen into the same immutable route record
   a pinned machine uses (host id, URL, Keychain key, instance id), so prepared
-  and quick expansion keep their own machine, durable sequences restore on the
-  exact machine that ran them, and a fleet split across incompatible major Mold
+  and quick expansion keep their own machine, and a fleet split across
+  incompatible major Mold
   versions stops automatic routing with the shared profile-conflict message
   instead of guessing. Nothing is queued when no machine can run the print; the
   failure names each machine. Create also supports model-aware image and video
@@ -100,8 +100,7 @@ pushed screen opened from the header.
   prepared Batch N inherit it), an over-long or control-character title is
   refused inline before anything queues, and **Use as prompt** restores the
   print's saved title (a later Library rename wins over the metadata stamp).
-  Title is a field of the whole Create stack, One shot and Sequence alike —
-  a sequence's stitched print carries it on the chain wire.
+  Title is a field of the whole Create stack.
   Below it, a capability-gated **File under** group
   (`desktop/src/mobile/MobileFileUnder.vue`) files the print as it is made:
   a **Tags** row with a dashed, removable `{slug} · from title` ghost chip and
@@ -175,8 +174,7 @@ pushed screen opened from the header.
   with a source image, and Hunyuan3D until the GUI release reads the profile's
   `ignored` prompt mode — still requires a prompt here. This follows the shared
   `@studio/lib/promptRequirement` rule and its shared copy, so iPhone, desktop,
-  and web cannot set different expectations; `MobileSequenceComposer` applies
-  the same rule to clip rails through `SequenceLimits.promptOptional`. Legacy
+  and web cannot set different expectations. Legacy
   `ltx-video` remains prompt-required and rejects image conditioning because
   Mold's legacy engine is text-to-video only. A blank
   prompt saves no VRAM and usually renders near-static motion — never imply
@@ -283,11 +281,10 @@ pushed screen opened from the header.
   followed by a single **Export as STL** (or **Export turntable…**) button —
   and it never lists the stored GLB, which a browser fetches directly. A `.glb` tile carries the
   same ◈ mesh badge as video and audio prints; the iPhone Library has no kind
-  filter, so the badge is how a mesh is told apart. On a print a sequence produced, **Use
-  as prompt** reloads that sequence's recorded clips onto the Create clip rail
-  as a new draft (raising any clip duration the selected model's motion tail no
-  longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
-  a desktop/web action until mobile has a chain-detail recovery route.
+  filter, so the badge is how a mesh is told apart. On a print made scene by
+  scene by an older build, **Use as prompt** restores a plain one-shot clip
+  built from the first scene's prompt; the per-scene provenance stays on the
+  print.
   Generated media opens the same viewer on tap, with the same **Use as
   source** action as a Library print — offered only for a still on a model
   that conditions on one, and only while the machine that rendered it is
@@ -542,11 +539,10 @@ while successful prints remain. Library shows the sibling
 position and source prompt when those optional metadata fields are present.
 
 iOS begins a finite `UIApplication` background task after Create validates a
-one-shot or sequence submission. That assertion covers source preprocessing,
-automatic placement fan-out, reference upload, and the request reaching the
-remote host even if the user switches apps. One-shot batches release it after
-every sibling either opens its generation response or fails admission;
-sequences release it as soon as `POST /api/chain-jobs` returns. UIKit's
+submission. That assertion covers source preprocessing, automatic placement
+fan-out, reference upload, and the request reaching the remote host even if the
+user switches apps. Batches release it after every sibling either opens its
+generation response or fails admission. UIKit's
 expiration handler always ends an exhausted assertion. Mold does not declare a
 continuous background mode: after acceptance, the remote host owns the work,
 and the existing foreground recovery path reconnects to its queue/result.
@@ -577,62 +573,31 @@ never answers produces no verdict: the row stays flagged as an interruption so
 a later resume can try again, and only a host that answers "no such job, no
 such print" settles it as a failure.
 
-**Output** (One shot | Sequence) is a segmented field in the Create form
-stack, directly above the model field — sequences are a setting of Create,
-not a separate place, so there is no mode pair pinned above the form. The
-clip list lives in the shared `@studio` sequence draft, which survives tab
-switches and relaunches and carries the prompt across an Output switch (One
-shot → Sequence seeds the opening clip; back again returns clip 1's prompt).
-Sequence output narrows the model picker to chain-capable video models
-through `modelsForOutput`, auto-picks one, and restores the previous single
-pick on the way back; when the host reports `supports_sequence: false` its
-`sequence_unsupported_reason` is shown inline rather than silently hiding the
-model. With no chain-capable checkpoint installed, **Browse video models**
-lands on Discover with the Video + Models filters already applied.
+There is no Output mode pair and no clip bench: scene-by-scene authoring is
+retired from every app, so Create makes one print at a time. The model picker
+lists every installed video checkpoint without narrowing, and the prompt, size,
+frame rate, steps, guidance, and seed fields are the only ones a clip needs.
 
-Clips are full-width cards with a 44pt **seam pill** between consecutive
-cards. Tapping a seam opens a bottom sheet hosting the shared `SeamEditor` at
-touch size — the iPhone's only fade-length control, clamped to the host's
-`fade_frames_max` (32 when unknown). Seam wording always comes from
-`transitionLabel()`, so LTX-Video's zero motion tail reads **Join**
-rather than Smooth. New clip durations come from the model's own
-server-advertised default, and duration choices stay strictly longer than the
-active motion tail. Size, frame rate, steps, guidance, and seed are the SAME
-form fields One shot uses, lent to the bench through its Sequence settings
-disclosure and read live at submit time — there are no private copies to
-drift.
+A clip longer than the checkpoint renders in one pass is still honoured: the
+host splits the work into clips, carries the motion across each seam, and
+stitches them, so the request arrives as ONE print and ONE queue row whose
+progress line names the part it is on. Those auto-chained videos use the host
+activity authority — a server restart leaves them visible as paused with
+completed clips and source media intact, and Resume continues the durable job.
 
-The **Opening sequence image** — the still clip 1 is conditioned on, with its
-source strength and fit-to-video-frame controls — is a primary-stack
-disclosure, the seat One shot gives its own source media, not an Advanced
-control; it is hidden entirely for a checkpoint whose `source_image` contract
-is `unsupported`.
-**Advanced sequence controls** therefore hosts only the active clip's negative
-prompt and camera motion, and its Reset clears exactly those two — the staged
-opening image, strength, and fit survive it, exactly as One shot's staged
-media survives the Advanced sheet's Reset. The primary **↺ Reset** is the one
-that discards the opening image, alongside every other generation setting.
+The **Opening image** — the still the clip is conditioned on, with its source
+strength and fit-to-video-frame controls — is a primary-stack disclosure, the
+seat One shot gives its own source media, not an Advanced control; it is
+hidden entirely for a checkpoint whose `source_image` contract is
+`unsupported`. Advanced therefore hosts the negative prompt and camera motion,
+and its Reset clears exactly those — the staged opening image, strength, and
+fit survive it. The primary **↺ Reset** is the one that discards the opening
+image, alongside every other generation setting.
 
-**Validate plan** sends that live draft to the selected Keychain-authenticated
-host's read-only `/api/generate/chain/validate` endpoint. The result names each
-clip's normalized input/output frames, transition, conditioning inputs,
-warnings, and VRAM estimate when available. It never creates a durable job or
-starts downloads/inference, and any draft, shared-setting, model, or host edit
-clears the result and fences an in-flight response.
-
-Durable sequences stream over `/api/chain-jobs/:id/events` (SSE) with a 5s
-snapshot-poll fallback when the stream fails and a forced re-sync when iOS
-wakes the webview, and they appear in the SAME queue list as single prints:
-Cancel while live, Resume and Dismiss once settled. Submission, watching,
-cancellation, and relaunch recovery stay pinned to one immutable host ID,
-URL, instance ID, and Keychain-supplied API key. Local storage retains only
-the non-secret route identity and durable job ID. Auto-chained one-shot videos
-use the same host activity authority: a server restart leaves them visible as
-paused with completed clips and source media intact, and Resume continues the
-durable job. The initial mobile scope
-does not include a local engine, the desktop TOML chain editor and full
-durable-jobs administration workspace, RunPod provisioning, desktop engine
-settings, or desktop self-update channels.
+Scene-by-scene sequences are scripted with `mold run --script` or the
+`/api/chain-jobs` API. The initial mobile scope does not include a local
+engine, the full durable-jobs administration workspace, RunPod provisioning,
+desktop engine settings, or desktop self-update channels.
 
 ## Persistence and security
 
@@ -640,13 +605,6 @@ WebView local storage contains non-secret mobile state:
 
 - `mold.mobile.hosts.v1` — host metadata with API keys removed
 - `mold.mobile.selected-host.v1` — selected generation host
-- `mold.sequence.draft.v1` — the shared Output mode, clip list, audio choice,
-  and remembered single-print model (base64 clip source payloads are stripped
-  before writing). Replaces the retired `mold.mobile.create-mode.v1`, which
-  migrates into this draft once and is then removed
-- `mold.mobile.sequence-job.v1` — non-secret exact-host identity and active
-  durable sequence job ID for relaunch recovery; a saved instance UUID must
-  exactly match the current host identity before Mold reattaches
 - `mold.mobile.settings.v1` — appearance, color family, Photos auto-save, and
   the "tag new prints with their title" preference (absent on installs saved
   before File under; it migrates to the on default)

@@ -1679,8 +1679,7 @@ stitched print, with full per-clip provenance. What differs:
 - graceful shutdown parks it as `paused` with its manifest, source media,
   completed clips, and tail cache intact; `resume` requeues it explicitly;
 - its working directory is swept only after the job settles;
-- **its print records no `chain_job_id`**, so "Reuse settings" restores a
-  one-shot rather than opening the clip rail for a job that no longer exists.
+- **its print records no `chain_job_id`**, marking it as work nobody authored.
 
 Chain jobs accept every video `output_format`. Stitching and its audio mux are
 MP4-native, so the job's own artifact is always MP4 (amend and retake decode
@@ -1712,8 +1711,8 @@ cannot safely run while the job is active.
 ### `POST /api/chain-jobs/:id/amend`
 
 Edits a settled or queued sequence in place instead of creating a new job, so
-clips that did not change are never re-rendered. This is what the Studio
-surfaces call behind **Update sequence**.
+clips that did not change are never re-rendered. It is an API-only route: the
+apps do not author sequences.
 
 The body maps to `mold_core::chain_job::AmendRequest`. `stages` is the
 **complete** edited stage list in canonical order (not a patch); the same
@@ -2412,9 +2411,10 @@ when known. The top-level `prompt` of a multi-clip row holds every distinct
 clip prompt joined one per line, so gallery search matches any clip. The CLI's
 local chain saves write the same `chain` block without a `chain_job_id`.
 
-Studio clients read this block to reload a finished sequence's clips onto the
-Create clip rail (**Reuse settings**); `chain_job_id` is what lets **Edit
-sequence** re-enter the original durable job with its cached clips.
+The apps read this block as provenance only — scene-by-scene authoring is
+retired there, so **Reuse settings** on a stitched print restores a plain
+one-shot built from the first stage's prompt rather than reopening a timeline.
+`chain_job_id` still names the durable job an API client can amend or retake.
 
 ## Image Output
 
