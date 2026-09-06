@@ -11,6 +11,311 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-06
+
+- **Restore uncached Wan 1.3B and dense 14B rendering.** Refuse residual caching
+  on both unqualified execution graphs, including explicit thresholds, to
+  prevent noise-only or blurred output while preserving the qualified A14B pair
+  ([#1559](https://github.com/utensils/mold/issues/1559)).
+- **Carry offload requests to GPU hosts.** Preserve `--offload` through HTTP,
+  frozen admission, worker validation, and durable sequence stages
+  ([#1462](https://github.com/utensils/mold/issues/1462)).
+- **Count retained Wan CUDA context memory once.** After releasing a completed
+  Wan engine, certify its retained context separately from live allocations,
+  refresh that certificate as lazy CUDA libraries grow it on later runs,
+  release device-owned GGUF scratch buffers, and apply the baseline consistently
+  to admission and worker memory checks
+  ([#1481](https://github.com/utensils/mold/issues/1481)).
+- **Exercise the complete H3 CUDA server library suite.** Isolate test settings
+  from the host and run relevant PRs through the existing CUDA toolkit job
+  ([#1361](https://github.com/utensils/mold/issues/1361)).
+- **Keep Wan full denoising correct by default.** Wan step-cache reuse is now
+  explicit after a controlled Metal 1.3B run reproduced saturated output with
+  the former automatic cache while the same request rendered correctly with
+  full denoising ([#1059](https://github.com/utensils/mold/issues/1059)).
+- **Label APNG outputs as clips.** The desktop Library now gives APNG animations the same clip badge and media handling as other generated videos.
+- **Legacy LTX-Video no longer auto-splits into repeated clips.** One-shot
+  requests stay one render up to the engine ceiling, manually submitted
+  context-free ephemeral chains are refused, custom legacy models reject
+  unsupported source images instead of ignoring them, and the guidance points
+  image-conditioned work to LTX-2.3 or LTX-2.5
+  ([#1575](https://github.com/utensils/mold/issues/1575)).
+- **Z-Image Metal VAE recovery.** Bounded Candle convolution workspaces replace
+  the proactive tiling cap for whole 1024-pixel decoding. Memory errors can
+  retry with tiles, and a repeated OOM during cleanup no longer prevents the
+  eager CPU fallback. CPU and CUDA decode ordering is unchanged
+  ([#1040](https://github.com/utensils/mold/issues/1040)).
+- Fixed next-version release PR creation after crates.io retirement by deriving all workspace versions from the shared Git release tag.
+- **Accurate unobserved-generation logs.** A failed or cancelled background generation is no
+  longer reported as a successfully saved output; failures now retain their terminal error in
+  the server log.
+- **Bound H3 Metal attention and INT8 memory.** Complete each attention query chunk and portable INT8 row chunk, assembling results into preallocated outputs to prevent queued temporaries and oversized pooled buffers from accumulating. CUDA native dispatch is unchanged; a guarded reduced-size FL2VA video with stereo audio now completes on a 48 GiB Mac, while default-resolution qualification remains open ([#1164](https://github.com/utensils/mold/issues/1164), [#1542](https://github.com/utensils/mold/issues/1542)).
+- Fixed MiniMax H3 forced-local FL2VA execution stopping at incomplete factory authority by preparing and consuming one owned request through the server's validated runtime boundary. Local H3 batches and chains are now refused before preparation; Ref2VA reference uploads continue to use the server.
+- **A trashed print shows its own pixels everywhere.** The gallery media
+  routes take `?view=trash`, so a Trash row on any machine reads the trashed
+  file even after a new print took the same name
+  ([#1597](https://github.com/utensils/mold/issues/1597)).
+- **Licence rows say what they unlock.** Settings ▸ Style licences leads each
+  row with the styles the licence gates, in plain words, over the licence's
+  name; the id moves to the tooltip.
+- **The compact MiniMax H3 recipe offers Draft / Good / Best.** Its
+  `steps.recommended` ladder now has three rungs like every other adjustable
+  recipe (private UAT feature).
+- **Rent this GPU says what it costs.** The GPU list and the "billing begins
+  now" confirm state RunPod's own hourly rate for the chosen cloud, and
+  `mold runpod gpus` gains `$/hr` columns.
+- **A machine's Storage card says what the pictures take.** `/api/status`
+  carries the gallery's bytes and print count, live and trashed, summed from
+  the host's own records.
+- **Save every result can be switched off.** With the new inspector toggle
+  off, each print is published and then moved straight to the trash on the
+  host, so a throwaway never clutters My images yet stays recoverable until
+  the trash empties. Not offered for a sequence; a requested Framewise
+  upscale still runs, and its own result still saves.
+- **Avoid repeated model integrity scans.** Avoid full model integrity scans when queueing, preparing, switching, or reloading complete installed models, including legacy installations and server restarts. Verify new downloads and derived outputs once; retain explicit `mold info MODEL --verify` checks.
+- **Prints remember how long they took.** The render time is embedded in every
+  new print's metadata and read back for older ones from the gallery, so the
+  canvas caption, the Recent tab, and the Lightbox's new **Took** line say
+  `4.0s` (or `1m 12s`) instead of nothing — and never `0.0s` when a print does
+  not know ([#1597](https://github.com/utensils/mold/issues/1597)).
+- **Styles shows each style's typical speed.** A new **Speed** column reads
+  `~20s` off the median of your most recent prints with that style; a style
+  you have not timed yet shows nothing rather than a guess.
+- **Simple | Scenes has a row of its own.** How a clip gets made now sits in a
+  strip under the New image toolbar, with a sentence saying what the chosen way
+  does, so the Still picture | Short clip | 3-D object control no longer jumps
+  left when Short clip is chosen.
+- **Styles filters by the same three kinds Create offers.** The kind filter
+  reads All · Still picture · Short clip · 3-D object instead of Pictures ·
+  Clips, gains the missing 3-D kind, and Browse more from the 3-D section lands
+  on it already filtered.
+- **Each section remembers its style.** Still picture, Short clip and 3-D object
+  each keep the style they were last used with, across switches and across a
+  restart: a section door reopens on the style you were using there, and the
+  app launches on the style and section you left once the machine that has it
+  has reported in.
+- **Make a short clip opens the Short clip door.** The ⌘K palette's row and
+  File → New Clip now open Short clip the way its toolbar segment does — on the
+  way and the style you last used — and work when New image is already open,
+  instead of deep-linking Scenes and doing nothing from inside the view.
+- **Scene validation speaks desktop's word.** The clip's plan checks say
+  "Describe scene 2 before generating." on desktop; web keeps "clip".
+- **The desktop app is redesigned, and it speaks plain English.** Every door is
+  named for what is behind it — New image, Queue, My images, Styles, Machines —
+  with the technical truth beside each label in mono rather than instead of it:
+  "Detail · 28 passes", "Repeat this look · Keep | Surprise me", "Add-on looks",
+  "Stick to my words", "How much to change it". Finished work says where it
+  went ("Generated — saved to My images"), and the queue says what is happening
+  in a sentence a first-timer can act on.
+- **Six themes, each a complete look.** Mocha (the default), Safelight,
+  Graphite and Nebula are dark; Blueprint and Porcelain are light. Every theme
+  brings its own colours, type pairing, type scale and corner radius, with
+  bundled open-licence fonts and no flash of the wrong one at launch. Each card
+  in Settings ▸ Look shows a band of that theme's own surfaces, and **Match
+  system appearance** swaps a pick for its light or dark partner when macOS
+  changes. Each card's band paints from its own theme's colours rather than the
+  one the app is currently wearing. Appearance settings saved by earlier
+  releases migrate to the nearest theme. Text and control borders keep WCAG AA
+  contrast on all six.
+- **A new window: toolbar, sidebar, view, status bar.** The queue lives in the
+  sidebar under the machine that is making pictures, so work in progress is
+  context rather than a place you have to go. That machine's card reads its
+  memory as a whole percent with the amounts under the meter — "31.6 / 51.5 GB
+  graphics memory" — instead of a bare unrounded number. The status bar always
+  answers which machine, how deep the queue is, and how full the memory is,
+  with the
+  shortcuts you need on the right. The Queue is also its own view (⌘2) with
+  Being made, Waiting and Done today — counted from the day's pictures rather
+  than the session, so relaunching no longer resets the tally — one row per
+  job, and drag to reorder. The card for the picture being made states its
+  place in a batch. The lightbox, toasts, dialogs and right-click menus all
+  take the same anatomy.
+- **The queue can be held, and it says what it is waiting on.** Space pauses
+  and resumes the queue from anywhere outside a text field (My images keeps
+  Space for Quick Look), a waiting row's ⋯ offers Pause and Resume where the
+  machine supports holding one job, and the card for the picture being made
+  carries a pause beside its stop. A parked row reads "Paused after restart",
+  "Held", or "Getting a style ready · 42%" instead of a bare "Waiting", a
+  downloading row draws its meter in the warning tone, and where the machine
+  predicts a finish the queue says how long is left.
+- **New image reads as groups, and a finished picture offers the next step.**
+  What to make — Still picture, Short clip or 3-D object — is one control in
+  the view toolbar that holds its one row at every window width; the duplicate
+  switch in the settings panel is gone. There is now one style picker, not two:
+  the Style chip beside the words opens the list of styles in place, above the
+  composer, grouped by family with each entry's plain name, its id, its size
+  and whether it is on the graphics card. Type to narrow a long list, walk it
+  with the arrow keys, and the chip says before you press Generate when the
+  style is not on the machine you are aiming at. The settings panel no longer
+  carries a style field of its own. Quality
+  offers Draft, Good and Best built from the style's own range. Add-on looks
+  moved out of Advanced into the settings column, each look a card whose
+  strength is a meter you drag. A 3-D style's surface detail reads Rough,
+  Normal and Fine with the octree number beside it, and everything a clip needs
+  is one card. Starting points are picture cards with the manager behind Edit…,
+  and Recent lists the pictures you have made — clicking one brings back
+  everything it was made with and shows the picture on the canvas, exactly as
+  **Use these settings again** does from My images. Under a finished picture the caption names its
+  file and size and offers **Make 4 variations** (⌥↩) and **Make bigger**
+  beside Save.
+- **A short clip is a timeline you can see the whole of.** Choosing Short clip
+  raises a timeline above the composer instead of taking the composer away: the
+  words you type are the selected scene's, the button reads Make 1 clip, and ⌘↩
+  still makes the whole thing. Scenes sit in a lane that always fits the window
+  — each block as wide as the time it plays, wearing its own words and its own
+  rendered frame — and the selected one gets a handle for making that scene
+  longer. ←/→ move between scenes, ↩ opens the join before one, ⌫ removes it.
+  The timeline plays the finished clip back with a clock, a ruler in round
+  seconds and a playhead, and one line underneath says what the clip adds up to.
+  The app says "scene" throughout, where it used to say clip, sequence and
+  filmstrip in the same breath.
+- **My images puts favourites, albums and history where you look for them.**
+  Favourites is a place at the top beside Everything, Albums and Trash, each
+  with its own count, instead of a chip you had to find. A favourite wears a
+  star in the corner of its picture, and a clip, a 3-D model or a sound says so
+  in a word. Albums keep their cards in a strip above the pictures instead of
+  replacing them, and History opens as a column beside the grid you can still
+  click through, with **Use these settings** written on every past run.
+  Selecting pictures now offers **Export…** alongside Favourite, Add tag, Add
+  to album and Delete. Emptying the trash moved into the trash's own banner,
+  next to how long deleted pictures are kept, and the size slider is a plain
+  track that fits its toolbar.
+- **Styles and Machines say more in less space.** Styles opens on Ready to use
+  | Browse more with a disk-used-by-styles meter, one column header the whole
+  table lines up under, a download banner that stays put above the scrolling
+  list and reads as a sentence with the progress line beside it, and **Get it**
+  as the one acquisition verb everywhere. Machines is a list beside the
+  machine's own page — Right now tiles whose readings stay short, Loaded and
+  ready, Waiting on this machine, Storage, and Downloads here as a compact
+  readout rather than a banner inside a card — whose toolbar says the machine
+  in one plain sentence, "RTX 4090 · CUDA · on your network · up 6 days", and
+  keeps its address, version and instance id in the name's tooltip. Connect a
+  machine is one dialog, not a wizard, and Rent a GPU states its cost under
+  RunPod's own mark.
+- **Settings is one page you can search, and ⌘K knows every shortcut.**
+  Fourteen always-open sections behind a jump nav — Look, Defaults for new
+  images, Write more for me, Machines, Styles & disk, Style licences, My images
+  & trash, and the rest — with nothing hidden behind an accordion and search
+  narrowing the nav and the page together. A new **Styles & disk** section
+  holds where styles are kept, where finished pictures are written, and how
+  full that disk is, and style licences are one row apiece with their state and
+  a single action. The command palette shows each command's shortcut beside it
+  and groups rows the way the app is organized, with Generate from these words,
+  Make 4 variations, Pause the queue, Connect a machine and Download a style
+  among them.
+- **Three fixes reach web and the phone.** The img2img strength control is now
+  "How much to change it" on every surface, the machine-detail utility card
+  reads "Machine utility", and the phone-pairing panels paint
+  from the theme's own colours instead of hard-coded greys, so they follow the
+  six themes and stop failing contrast on the light ones.
+- **Every view fits its window, down to the smallest one.** The clip timeline
+  no longer pushes Generate off the bottom: the workbench reserves the canvas,
+  the drag handle and the composer before it gives the timeline any room. A
+  portrait print's Save, Make 4 variations and Make bigger step into the ⋯ menu
+  when the picture is too narrow to hold them. The My images toolbar, the
+  machine page's toolbar, Rent a GPU's console and the Storage and Downloads
+  pair all give way instead of clipping, and the composer's rewrite control is
+  one chip — Write more for me, with Remix and its source behind it — so
+  Generate stays on the first line.
+- **Controls paint what they mean.** The queue's pause button shows the queue
+  is paused, a tight or impossible memory estimate is amber or red instead of
+  grey, a developing clip's readout is live text, every slider fills up to its
+  handle, a size warning is amber, buttons show the hand, and the timeline's
+  closing time mark grows inward from the ruler's edge instead of being cut
+  off. Styles rows line up under their column header whether or not a style
+  has a description, the family is named once as the group heading, the source
+  mark sits small beside the id, the disk meter shows the four largest families
+  and one "other", and Ready to use and the title bar count the same set. A
+  rented GPU is listed once, "Downloads here" shows this device's downloads,
+  and Machines waits for its first scan before saying the network is empty.
+- **Settings keeps your values.** Tabbing through Advanced used to save every
+  row it passed, and clearing a numeric field wrote 0 to the engine; nothing is
+  written unless the value changed, and a blank or non-numeric entry is refused
+  and restored. Speed & memory shows its three scheduler settings, every
+  section is inset from its own border, the device cards no longer paint a
+  light-grey hairline on dark themes, and the engine's version and GPU lists
+  appear even when the app launches straight into Settings.
+- **Where it runs is on the toolbar.** The machine picker (Auto, Most capable,
+  or a named machine) is the last chip on the New image toolbar instead of the
+  last row of the inspector's Settings list, so it is on screen in every tab.
+  The title bar now says New image, New clip, or New 3-D object to match the
+  output you chose, and the composer's Make count sits inside its chip instead
+  of painting a second box over it.
+- **The style menu shows only what this section can make.** Still picture lists
+  picture styles, Short clip lists clip styles, and 3-D object lists 3-D styles,
+  instead of every family mixed together — so choosing a style can no longer
+  move you into another section by surprise. The menu names the section above
+  the list, says "No clip styles on this machine" rather than a blank no-match
+  line when the section is empty, and Browse more opens Styles already filtered
+  to that kind. A clip style that cannot join scenes stays listed under Short
+  clip and explains itself on the row, and switching back to Still picture now
+  restores a picture style rather than whichever style was first on the machine.
+- **Sound is on by default.** Every video model that can render audio now does
+  so unless you say otherwise, on the desktop app, the phone, the web app, the
+  terminal, the TUI, and Discord. A sequence used to come out silent while the
+  same model's single clip had sound; both now render with it. Turning **Add
+  sound** off is remembered and sent explicitly, so a silent clip stays silent,
+  and a model with no audio to give stays silent and says so.
+- **Use a face can pick from My images, and ⌘K stops correcting you.** The
+  identity well offers Choose from gallery… beside drop and pick, through the
+  same picker the source well opens, and a picked print is admitted exactly as
+  a dropped photo is. The command palette turns off macOS text replacement,
+  autocapitalization and spell-check on its query field, so typing "theme"
+  and pressing Return runs the command rather than accepting a correction.
+  The inspector tab strip lines up with the view toolbar, the Still picture |
+  Short clip | 3-D object control keeps one height and one width in every
+  theme, and the 3-D card's Simplify to field no longer clips its placeholder.
+- **Make 4 variations repeats the picture on screen, and Save works.** Variations
+  are the selected print's own recipe made again on the machine that made it,
+  even after the prompt or style has been edited since; Save and Copy image
+  read the print the host holds, so they are offered for every finished
+  picture. Draft / Good / Best now come from a real ladder the host advertises
+  (half, the recipe's default, one and a half times) instead of the one-pass
+  floor and hundred-pass ceiling, and a machine running an older mold gets the
+  same three rungs. The Generate button says Update clip while a finished clip
+  is being amended, and a style preset saved in a pre-redesign template no
+  longer rewrites prompts invisibly.
+- **Short clip opens the simple way.** Choosing Short clip gives one prompt, a
+  clip style and a Length chip beside Shape; a Simple | Scenes control on the
+  view toolbar switches to the scene-by-scene timeline, seeding scene 1 from
+  the words and length already on the composer, and Edit the clip scene by
+  scene is in the palette. Delete on a scene never leaves the page: at the
+  two-scene floor it says why, and a bare Backspace outside a field is never
+  read as Back.
+- **The queue and the shell tell the truth.** The picture count, Done today and
+  Recent are loaded at launch rather than after the first visit to My images;
+  Space pauses only on a machine that can pause; the rail's active card pauses
+  the machine the picture is on; Stop everything asks first, from the rail,
+  the Queue and ⌘K alike, and names the pictures and machines it will stop;
+  Settings sections load as you scroll to them; a hand-typed machine can be
+  named when it is connected.
+- **My images filters do what they show.** The chips narrow the Trash and the
+  Albums shelf too, hidden albums stay hidden until one is opened, the
+  Favourites count no longer changes with the scope you stand in, Escape in
+  the History search stays in the field, export reports its progress, and a
+  print in the Trash cannot be reused until it is restored.
+- **Dialogs stack, and the shared kit holds on web and the phone.** Only the
+  topmost dialog answers Escape, so a confirm over the Lightbox no longer
+  closes both; dialogs paint above the clip timeline's chrome; the compact
+  segmented control, the modal ground and the thumbnail slider's touch target
+  render correctly on web and the phone; the strength slider's ends read the
+  right way round for every style (LTX-2 keeps more of the photo as it
+  rises), and the phone regains reduced motion, scroll containment and
+  text-selection rules. Settings ▸ Style licences shows each licence's name
+  with its pinned and project terms as real links.
+- **A remote clip's sound is the host's call.** `mold run --script` and the
+  prompt sugar no longer stamp this binary's own mp4 support onto a chain sent
+  to another machine; the host resolves the recipe's default, and a dry run or
+  `mold chain validate` says "decided by the host" for an unset choice.
+- **Respect macOS Metal memory limits.** GPU admission and memory planning use
+  Metal's working-set recommendation, an explicit `iogpu.wired_limit_mb` limit,
+  and live host headroom while preserving installed RAM in hardware inventory.
+  Device telemetry exposes the effective budget separately from system RAM.
+- **Explicit local Metal administration.** `mold system metal-memory` inspects,
+  sets or resets this Mac's wired limit with verified readback; optional
+  `--persist` installs or removes Mold's owned boot policy without elevating
+  the inference server.
+
 ## [0.27.1] - 2026-09-05
 
 - **Account for unified memory in Metal server admission.** Queues and placement
@@ -4262,7 +4567,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/utensils/mold/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/utensils/mold/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/utensils/mold/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/utensils/mold/compare/v0.25.0...v0.26.0
