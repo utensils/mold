@@ -244,15 +244,12 @@ the phone keep Create / Library / Models until their own redesign.
   organization simply hide these controls and keep the previous delete
   wording.
 - **History** (a column inside My images, `?panel=history`): a fast,
-  searchable list of past prompts from every ready machine, with **Runs**,
-  **Prompts** and **Clips** as tabs in the column body; ↩ refills the
-  composer, while Up/Down recalls the same merged history inline. It opens
-  beside the grid rather than over it, so the pictures stay clickable. The
-  **Clips** tab is the one place durable clip jobs are listed: open,
-  edit, resume, or delete a job, jump to the print it produced, and run the
-  machine-scoped **Clear inactive** and **Clean up disk** maintenance. It
-  renders the 200 newest jobs and says so when
-  there are more. Web has the same panel at `?panel=history`.
+  searchable list of past prompts from every ready machine, with **Runs** and
+  **Prompts** as tabs in the column body; ↩ refills the composer, while
+  Up/Down recalls the same merged history inline. It opens beside the grid
+  rather than over it, so the pictures stay clickable. It renders the 200
+  newest entries and says so when there are more. This column is desktop-only;
+  the web app has no History panel.
 - **Styles** (⌘4): one searchable styles workspace whose view toolbar carries
   **Ready to use | Browse more**, the kind filter (**All / Pictures / Clips**)
   and **Filter…**. Ready to use opens with a disk-used-by-styles meter — one
@@ -587,13 +584,10 @@ wire types as the CLI and web UI:
   this app submitted that the machine parked. A job that has only just been
   accepted may not show its settings yet (the machine lists it before it loads
   the request) and the panel says so rather than pretending they are missing.
-- **History (a column in My images)** (three lenses: **Runs** (every finished
-  generation with its thumbnail, style, size, seed, and clock) click to reuse
-  the full settings including the seed), **Prompts** (the raw prompt log,
-  searchable, for prompts whose outputs are gone), and **Clips** (every
-  durable clip job on every connected machine, with open / edit / resume /
-  delete, a jump to the print it produced, and the machine-scoped **Clear
-  inactive** and **Clean up disk** maintenance). The tab is in the URL, so
+- **History (a column in My images)** (two lenses: **Runs**, every finished
+  generation with its thumbnail, style, size, seed, and clock — click to reuse
+  the full settings including the seed — and **Prompts**, the raw prompt log,
+  searchable, for prompts whose outputs are gone). The tab is in the URL, so
   `?panel=history` opens straight onto it.
 - **Remote prints saved locally**: generations from remote machines and RunPod
   are also written into this Mac's output directory (Settings → Look → "Save
