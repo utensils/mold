@@ -187,7 +187,9 @@ mod tests {
                     .collect())
             };
             let normals: Vec<[f32; 3]> = floats("normal")?
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|v| [v[0], v[1], v[2]])
                 .collect();
             let mask = super::ReliabilityMask::from_geometry(
@@ -295,7 +297,9 @@ mod tests {
                     .collect())
             };
             let normal: Vec<[f32; 3]> = floats("normal")?
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|v| [v[0], v[1], v[2]])
                 .collect();
             let start = std::time::Instant::now();

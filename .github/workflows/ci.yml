@@ -845,9 +845,9 @@ jobs:
         # out to `protoc`.
         run: brew install protobuf
       - name: Clippy Metal forced-local and server paths
-        run: cargo clippy -p mold-ai --features h3,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
+        run: cargo clippy -p mold-ai --features h3,mesh-texture,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
       - name: Check reviewed H3 Metal server recipe
-        run: cargo check -p mold-ai-server --features h3,metal,expand,mdns,metrics,mp4,pulid,webp
+        run: cargo check -p mold-ai-server --features h3,mesh-texture,metal,expand,mdns,metrics,mp4,pulid,webp
 
   # Codecov remains a main-branch reporting signal. It is intentionally not a
   # required PR check: the protected Rust job already runs the same tests, and

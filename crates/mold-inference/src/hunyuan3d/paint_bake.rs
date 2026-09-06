@@ -213,7 +213,9 @@ mod tests {
                 let mut baker = TextureBaker::new(10, &mut || Ok(()))?;
                 for index in 0..count {
                     let colors: Vec<[f32; 3]> = colors[index * 300..(index + 1) * 300]
-                        .chunks_exact(3)
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
                         .map(|c| [c[0], c[1], c[2]])
                         .collect();
                     baker.add_view(

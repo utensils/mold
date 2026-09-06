@@ -240,20 +240,26 @@ mod tests {
             vertices: fixture["vertices"]
                 .flatten_all()?
                 .to_vec1::<f32>()?
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|v| [v[0], v[1], v[2]])
                 .collect(),
             faces: fixture["faces"]
                 .flatten_all()?
                 .to_vec1::<i32>()?
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|v| [v[0] as u32, v[1] as u32, v[2] as u32])
                 .collect(),
             uvs: Some(
                 fixture["uv"]
                     .flatten_all()?
                     .to_vec1::<f32>()?
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|v| [v[0], v[1]])
                     .collect(),
             ),
