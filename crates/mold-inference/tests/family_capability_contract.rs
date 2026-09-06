@@ -87,10 +87,10 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
         .unwrap();
     assert_eq!(wan.backends.cuda, BackendQualification::Supported);
     assert_eq!(wan.backends.cpu, BackendQualification::CorrectnessOnly);
-    // The Metal correctness path (#800): promoted from `Unsupported` with the
-    // folded VAE reductions, Metal-chunked math attention, family-scoped BF16,
-    // and the named fp8 refusal. `Supported` waits on perf UAT.
-    assert_eq!(wan.backends.metal, BackendQualification::CorrectnessOnly);
+    // Metal promoted to `Supported` (#1059, #1094): checkpoint-backed UAT on
+    // Apple Silicon covers BF16 1.3B T2V plus Q8 and dense FP16 5B video at
+    // 832x480 and 1280x704, including cold and sustained warm runs.
+    assert_eq!(wan.backends.metal, BackendQualification::Supported);
 
     let hunyuan3d = capabilities
         .iter()
