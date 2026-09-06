@@ -103,13 +103,33 @@ loader without replacing network or rendering computations.
 - The retained real-mesh unwrap exposed xatlas's intentional uncharted slivers
   (`xatlas.cpp:9688–9701`, `atlasIndex = -1`, zero UVs). The bridge now preserves
   them just as xatlas-python does. `uv-sliver-red-v1.log` reproduces the refusal;
-  `uv-sliver-green-v1.log` passes all six UV tests. The full-mesh repeat is pending.
+  `uv-sliver-green-v1.log` passes all six UV tests. The full-mesh repeat succeeds:
+  `uv-realmesh-comparison-v2.json` records exact equality with the retained
+  upstream arrays for all 192,906 vertices/UVs and 250,396 triangles. CPU unwrap
+  took 351.576 seconds (`uv-realmesh-v2.json` preserves the complete result).
 - `capture-20260906T044756Z-08905857bcb7` produced 4096-pixel albedo/MR maps and
   `textured.glb`, but remains FAILED: its final Blender version query inherited
   incompatible library paths and prevented measurement metadata publication.
   Export itself succeeded with a clean environment. Both native invocations now
   share that environment, and the version probe runs before model loading.
-  The repeat is `capture-20260906T045720Z-89be259ea074`; no success is assumed.
+  The repeat, `capture-20260906T045720Z-89be259ea074`, PASSED with process exit 0
+  and no missing outputs: 4096-pixel material maps, 512-pixel views, 2048 render
+  resolution, six views, remesh disabled. Wall time 489.318 s, PyTorch peak
+  allocated 14,398,047,744 bytes, reserved 21,936,209,920 bytes. Sampled board
+  maximum 21,481 MiB is reported separately. All prior failures remain retained.
+- The geometry-only OBJ reader preserves independent position/UV/normal indices,
+  resolves negative references at each face, ear-clips concave polygons and bounds
+  input/corner counts. It never opens referenced material libraries.
+  `obj-red-v1.log` reproduces the missing implementation; `obj-green-v2.log` passes
+  seven tests. `obj-realmesh-v1.log` imports the retained Tencent OBJ with 192,906
+  vertices and 250,396 triangles; `obj-import-poster-v1.png` was visually inspected.
+- The paint view selector matches an executable Tencent policy fixture for
+  limits 6/7/10/30, preserving the mandatory first six, earliest-candidate ties,
+  overlapping coverage and strict one-percent cutoff. Fixture generation uses
+  the unchanged upstream method with synthetic renderer visibility only.
+  `paint-views-red-v1.log` reproduces the missing selector;
+  `paint-views-green-v1.log` passes 162 Hunyuan3D tests (one hardware test ignored).
+  Camera/raster parity is still a separate open gate.
 
 ## Remaining gates
 

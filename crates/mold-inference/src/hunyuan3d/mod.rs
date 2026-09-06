@@ -27,6 +27,8 @@ pub mod dino2;
 pub mod engine;
 pub mod glb;
 pub mod mesh;
+pub mod obj;
+pub mod paint_views;
 pub mod poster;
 pub mod raster;
 pub mod sampler;
