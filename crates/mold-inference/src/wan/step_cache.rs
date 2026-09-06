@@ -158,18 +158,12 @@ pub(crate) fn parse_threshold(raw: &str) -> Result<Option<f64>> {
 
 /// Resolve the policy from the process environment.
 ///
-/// **Unset means `auto`, not `off`.** The two guards in
-/// [`WanStepCachePolicy::resolve`] are what make that safe: the configurations
-/// where reuse cannot help — a distilled adapter, or a schedule under
-/// [`MIN_CACHEABLE_STEPS`] — refuse themselves and say so, so the default only
-/// ever engages on the long non-distilled schedules it was measured on
-/// (`wan22-t2v-a14b:q8`, 33f at 832x480, 20 steps: 605.6 s -> 327.4 s, a
-/// **1.85x** speedup with no visible artifacting).
-///
-/// Defaulting to `off` made the feature effectively unreachable: it shipped,
-/// was measured, and then every production render paid full price because
-/// nothing set the variable. `MOLD_WAN_STEP_CACHE=off` is the escape hatch,
-/// and is bit-identical to denoising every block.
+/// Unset means `off`: full denoising is the correctness-preserving default.
+/// `auto` remains an explicit opt-in to the measured threshold for workloads
+/// where its output has been inspected. A real Metal 1.3B A/B produced a
+/// coherent scene with the cache off and saturated fields with it on, so a
+/// CUDA A14B measurement cannot justify approximate reuse across every Wan
+/// tier and backend.
 pub fn requested_threshold() -> Result<Option<f64>> {
     threshold_for_env(crate::runtime_env::value("MOLD_WAN_STEP_CACHE").as_deref())
 }
@@ -179,19 +173,7 @@ pub fn requested_threshold() -> Result<Option<f64>> {
 pub(crate) fn threshold_for_env(raw: Option<&str>) -> Result<Option<f64>> {
     match raw {
         Some(raw) => parse_threshold(raw),
-        // `auto`, now that `device::wan_step_cache_bytes` charges what
-        // engaging the cache holds (#1482).
-        //
-        // This default could not land while the charge was missing: the cache
-        // retains token-shaped tensors per trajectory, and the block-offload
-        // policy reads the same estimate admission does, so a near-capacity
-        // plan parked too few blocks and OOM'd on memory nothing told it
-        // about. The charge is exact rather than fitted — a nameable
-        // allocation like the attention score tile — and keys on the step
-        // count and the distill adapter through the same
-        // [`WanStepCachePolicy::resolve`] the engine calls, so the estimate
-        // cannot claim the cache engages where the engine refuses it.
-        None => Ok(Some(AUTO_THRESHOLD)),
+        None => Ok(None),
     }
 }
 
@@ -318,16 +300,12 @@ impl WanStepCache {
 mod tests {
     use super::*;
 
-    /// An unset `MOLD_WAN_STEP_CACHE` engages the cache, now that
-    /// `device::wan_step_cache_bytes` charges what engaging it holds (#1482).
-    ///
-    /// The pairing is the whole point: this default is only safe while the
-    /// estimate both admission and the block-offload policy read knows about
-    /// the retained tensors. If the charge is ever removed, this must go back
-    /// to `None` in the same change.
+    /// An unset `MOLD_WAN_STEP_CACHE` preserves full denoising. A real Metal
+    /// 1.3B A/B produced a coherent scene with `off` and saturated fields with
+    /// the former implicit `auto`, so approximate reuse must be explicit.
     #[test]
-    fn an_unset_env_engages_the_charged_cache() {
-        assert_eq!(threshold_for_env(None).unwrap(), Some(AUTO_THRESHOLD));
+    fn an_unset_env_preserves_full_denoising_after_correctness_failure() {
+        assert_eq!(threshold_for_env(None).unwrap(), None);
     }
 
     /// `off` is still the escape hatch, and still means off.

@@ -791,11 +791,11 @@ a per-tier judgement, not a universal one — on TI2V-5B at 121f/1280x704 the sa
 threshold buys 1.68x but visibly softens fine detail, so a shape far from where
 it was tuned is worth an A/B against `off` before trusting it.
 
-`auto` is the default. It can be, because the memory engaging the cache holds —
-the retained residuals per trajectory, and the transients around the distance
-check — is charged against the same activation estimate that admission and the
-block-offload policy both read. An uncharged cache is what kept this off: the
-policy would park too few blocks and OOM on memory nothing declared.
+`off` is the default. Approximate reuse must be selected explicitly with `auto`
+or a numeric threshold: a controlled Metal 1.3B qualification produced a
+coherent scene with full denoising and saturated fields with the cache enabled.
+The cache's retained residuals and distance-check transients are still charged
+against the activation estimate whenever it is enabled.
 
 ### Long clips and `--frames`
 
