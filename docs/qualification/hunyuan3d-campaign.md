@@ -1231,3 +1231,35 @@ it is not a completion checklist with assumed passes.
   All-target CUDA/cuDNN Clippy with warnings denied passes
   (`ns-fill-clippy-v3.log`). Read-only follow-up review confirms the arithmetic,
   attribution and coverage findings resolved with no remaining actionable issue.
+
+
+### P7 composed texture fill on the retained chair
+
+- `paint_fill::fill_texture` composes vertex propagation, F32 multiplication by
+  255, truncating byte conversion and RGB Navier–Stokes. It accepts normalized
+  finite colors, preserves material channels without gamma transforms, releases
+  propagated floats before pixel filling and returns no partial image on error.
+  The missing-composition test fails (`texture-fill-red-v1.log`), then the
+  0.5→127 / 0.1→25 conversion regression passes (`texture-fill-green-v1.log`).
+- `capture-hunyuan3d-texture-fill.py` invokes Tencent's compiled vertex smoother
+  and OpenCV 4.10.0 using the retained chair's 192,906 vertices / 250,396 faces.
+  Its explicit input is the retained baked PNG decoded to F32/255, with bilinear
+  color and nearest-mask resize at smaller sizes. This is not a recapture of
+  the original pre-PNG bake floats and does not establish full neural/bake parity.
+  Every input, propagated float map, updated trust mask, pre-NS bytes and final
+  image is retained under `texture-fill-oracle-{1024,2048,4096}-v1`.
+- All six Rust composition runs match final pixels exactly:
+  `texture-fill-rust-{1024,2048,4096}-v1`. Per-map execution is 0.66–0.68 seconds
+  at 1024, 2.49–2.53 seconds at 2048 and 12.41–13.36 seconds at 4096, including
+  vertex propagation and pixel filling, excluding fixture loading and PNG export.
+- Read-only review confirmed conversion and ownership fidelity and identified
+  an oracle comparison guard gap. The test now requires exact final tensor shape
+  and byte count before comparison; it also sweeps every composed checkpoint
+  for cancellation. Bake-to-fill integration and final PBR publication remain
+  active requirements.
+- Final shape-guarded reruns again match all six maps byte-for-byte
+  (`texture-fill-rust-{1024,2048,4096}-v2`). The composed truncation and
+  every-checkpoint cancellation test passes (`texture-fill-green-v2.log`),
+  and all-target CUDA/cuDNN Clippy passes with warnings denied
+  (`texture-fill-clippy-v2.log`). Follow-up peer review confirms the oracle
+  guard and composed cancellation findings resolved.

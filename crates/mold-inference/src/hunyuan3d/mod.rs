@@ -36,6 +36,7 @@ pub mod paint_camera;
 pub mod paint_conv;
 pub mod paint_denoiser;
 pub mod paint_edges;
+pub mod paint_fill;
 pub mod paint_guidance;
 pub mod paint_images;
 pub mod paint_ns_fill;
