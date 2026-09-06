@@ -325,7 +325,15 @@ pub(crate) fn checkpoint_geometry_cached(paths: &ModelPaths) -> Option<WanActiva
     cache
         .get(&identity)
         .filter(|(cached, _)| cached == &key)
-        .map(|(_, geometry)| *geometry)
+        .map(|(_, geometry)| WanActivationGeometry {
+            // The parsed dimensions belong to the primary transformer, but
+            // pair membership belongs to the current model configuration.
+            // A model-path refresh can add or remove the low-noise expert
+            // without changing that primary file, so this fact must never be
+            // inherited from the cached entry.
+            expert_pair: paths.low_noise_transformer.is_some(),
+            ..*geometry
+        })
 }
 
 /// Parse and cache one checkpoint's geometry.
@@ -841,6 +849,43 @@ mod tests {
         assert_eq!(
             mold_inference::wan::pipeline::transformer_files(&dit_paths(&missing, &[])),
             vec![missing],
+        );
+    }
+
+    #[test]
+    fn a_cached_geometry_reads_expert_pair_from_the_current_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("transformer.safetensors");
+        let low_noise = dir.path().join("low-noise.safetensors");
+        std::fs::write(&primary, b"primary").unwrap();
+        std::fs::write(&low_noise, b"low-noise").unwrap();
+
+        let dense_paths = dit_paths(&primary, &[]);
+        let identity = cache_identity(&dense_paths);
+        let key = cache_key(&identity).unwrap();
+        facts_cache()
+            .write()
+            .unwrap()
+            .insert(identity.clone(), (key, WanActivationGeometry::t2v_14b()));
+
+        let mut pair_paths = dense_paths.clone();
+        pair_paths.low_noise_transformer = Some(low_noise);
+        assert!(
+            checkpoint_geometry_cached(&pair_paths)
+                .expect("the primary-transformer geometry should still be cached")
+                .expert_pair,
+            "a current expert pair must not inherit the cached dense classification",
+        );
+
+        facts_cache()
+            .write()
+            .unwrap()
+            .insert(identity, (key, WanActivationGeometry::a14b()));
+        assert!(
+            !checkpoint_geometry_cached(&dense_paths)
+                .expect("the primary-transformer geometry should still be cached")
+                .expert_pair,
+            "a current dense graph must not inherit the cached pair classification",
         );
     }
 }
