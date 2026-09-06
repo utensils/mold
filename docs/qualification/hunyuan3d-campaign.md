@@ -1263,3 +1263,37 @@ it is not a completion checklist with assumed passes.
   and all-target CUDA/cuDNN Clippy passes with warnings denied
   (`texture-fill-clippy-v2.log`). Follow-up peer review confirms the oracle
   guard and composed cancellation findings resolved.
+
+
+### P7 full projection/bake/fill integration
+
+- `paint_materials` shares each camera/reliability/UV projection across the two
+  ordered material accumulators, then passes unquantized baked floats through
+  `paint_fill`. Hole-fill geometry mirrors `get_mesh(normalize=True)`: invert
+  axes to (-x,-z,y), restore UV V with F32(1-v), retain normalized scale and
+  center. Input-view refusal, inverse-coordinate and all-checkpoint two-stream
+  cancellation tests pass (`material-bake-contract-v2.log`); all-target
+  CUDA/cuDNN Clippy passes (`material-bake-clippy-v2.log`).
+- The full native oracle uses the twelve qualified upscaler PNGs as view inputs,
+  actual `bake_from_multiview` and `uv_inpaint`, retaining pre-PNG bake floats.
+  Canonical captures exist at 1024/2048/4096 (`material-bake-oracle-*-v1`). The
+  richer 1024 v2 capture additionally pins OpenCV 4.10.0, native/source hashes,
+  fill geometry, propagated float maps and pre-NS pixels.
+- The first full Rust 1024 comparison **fails** (`material-bake-rust-1024-v1`):
+  masks match exactly, float maxima are 3.24249e-5 albedo / 2.62856e-5 MR,
+  final byte maxima 162 / 153. No gate is relaxed. Read-only analysis
+  (`material-fill-drift-review-v1`) finds that truncation already changes
+  4,836 albedo / 2,196 MR channels by one byte. Trusted final pixels retain
+  exactly these differences; large final errors occur only in untrusted areas.
+- A deliberately diagnostic `--diagnostic-bake-input` replay gives Tencent
+  Rust's baked maps. Both final outputs then match Rust byte-for-byte
+  (`material-bake-common-input-comparison-v1`). This isolates the observed
+  large error to amplification of incoming bake differences, rather than a
+  fill-composition defect for this fixture. The full qualification test refuses
+  diagnostic substitutions.
+- The UV reduction-order hypothesis was ruled out, not shipped. A trial using
+  0+2+1 increases float error to 4.79e-5 / 4.87e-5 and still fails final pixels
+  (`material-bake-rust-1024-v2`). A direct CUDA probe using the actual RGB
+  reduction layout [1048576,3,3] proves it sums 0+1+2 exactly
+  (`uv-reduction-order-v1.json`), unlike the separately qualified scalar depth
+  layout. The trial change is removed; projection/bake drift remains open.

@@ -39,6 +39,7 @@ pub mod paint_edges;
 pub mod paint_fill;
 pub mod paint_guidance;
 pub mod paint_images;
+pub mod paint_materials;
 pub mod paint_ns_fill;
 pub mod paint_pipeline;
 pub mod paint_pixels;
