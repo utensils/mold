@@ -231,10 +231,6 @@ describe("dedupe by instance id", () => {
     });
     const ip = addHost({ url: "100.123.198.98:7681", name: "hal9000 IP" });
     localStorage.setItem(
-      "mold.create.tracked-sequences.v1",
-      JSON.stringify([{ hostId: hostname.id, jobId: "chain-1" }]),
-    );
-    localStorage.setItem(
       "mold.generate.jobs",
       JSON.stringify({ version: 1, jobs: [{ hostId: hostname.id }] }),
     );
@@ -252,9 +248,6 @@ describe("dedupe by instance id", () => {
     });
     expect(listStoredHosts()).toHaveLength(1);
     expect(getGenerateTargetId()).toBe(ip.id);
-    expect(localStorage.getItem("mold.create.tracked-sequences.v1")).toContain(
-      ip.id,
-    );
     expect(localStorage.getItem("mold.generate.jobs")).toContain(ip.id);
     expect(
       localStorage.getItem("mold.generate.jobs.recovery.batch-1"),

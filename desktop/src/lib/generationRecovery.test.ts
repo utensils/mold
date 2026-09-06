@@ -1510,6 +1510,52 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(opts.refreshResultUrl).toHaveBeenCalledWith(7);
   });
 
+  /**
+   * Graceful shutdown parks a long clip's chain job as `paused`, keeping its
+   * manifest, completed clips, and tail cache so it can be resumed. Recovery
+   * must HOLD such a job — naming the parking — rather than settling it as
+   * failed or interrupted, which would abandon work the host still has.
+   */
+  it("holds a chain the host parked at shutdown instead of failing it", async () => {
+    const job = makeJob({ id: "chain-5" });
+    let chainCalls = 0;
+    // What the job looked like at the top of each poll — the parked label is
+    // written between polls, so sampling here is what proves it was held
+    // rather than settled.
+    const seen: Array<{ stage: string | null; status: string; error?: string | null }> = [];
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/chain-jobs/chain-5") {
+        chainCalls += 1;
+        seen.push({ stage: job.stage ?? null, status: job.status, error: job.error });
+        return Promise.resolve(
+          chainCalls <= 2
+            ? { id: "chain-5", state: "paused", finalizes: [] }
+            : {
+                id: "chain-5",
+                state: "completed",
+                finalizes: [{ output: "parked clip.mp4", at_unix_ms: 1, stage_seeds: [] }],
+              },
+        );
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const opts = options({ chain: true });
+    await reconcileInterruptedGenerationJobs([job], opts);
+
+    // Parked for two polls: still live, never failed, and named as parked.
+    expect(chainCalls).toBe(3);
+    expect(seen[1]?.stage).toContain("Paused after restart");
+    expect(seen[2]?.stage).toContain("Paused after restart");
+    for (const sample of seen) {
+      expect(sample.status).not.toBe("error");
+      expect(sample.error).toBeFalsy();
+    }
+    // And it still settles on the print the host was holding for it.
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("parked clip.mp4");
+  });
+
   it("finds only the id-less one-shot shim created with the interrupted submission", async () => {
     const submittedAtUnixMs = 1_700_000_000_000;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {

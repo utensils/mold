@@ -66,6 +66,12 @@ export const router = createRouter({
     { path: "/generate", redirect: "/create" },
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
     { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
+    // Scene-by-scene authoring is retired, but a persisted last-route or an
+    // old deep link still points here. Land on Create — the one way a clip is
+    // made now — rather than leaving a returning user on a blank unmatched
+    // route.
+    { path: "/create/chain", redirect: "/create" },
+    { path: "/chains", redirect: "/create" },
     { path: "/jobs", redirect: "/queue" },
     { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
     { path: "/runpod", redirect: "/machines/runpod" },

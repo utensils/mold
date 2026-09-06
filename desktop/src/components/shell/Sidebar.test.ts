@@ -691,12 +691,27 @@ describe("Sidebar queue", () => {
   });
 
   // A clip has ONE way of being made, so the rail has one kind of row for
-  // this client's own work: a print. A long clip the host had to chain and
-  // stitch is still exactly that print, carrying its stage counter.
-  it("renders no sequence row of its own", async () => {
+  // this client's own work: a print. A long clip the host had to split into
+  // clips and stitch is still exactly that ONE print row — the retired
+  // Scenes rail is not replaced by anything, and the auto-chain must not
+  // gain a second row of its own.
+  it("shows an auto-chained long clip as one ordinary print row", async () => {
     const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      {
+        clientId: 11,
+        model: "ltx-2.5-22b-distilled:bf16-conv",
+        prompt: "a long tracking shot",
+        status: "running",
+        stage: "Developing clip 2 of 3",
+        chain: { jobId: "chain-9", stageCount: 3, currentStage: 2 },
+      } as never,
+    ];
     await flushPromises();
 
+    const rows = wrapper.findAll("[data-test='queue-row-print']");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.text()).toContain("a long tracking shot");
     expect(wrapper.find("[data-test='queue-row-sequence']").exists()).toBe(false);
   });
 });

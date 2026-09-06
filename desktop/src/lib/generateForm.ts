@@ -1393,7 +1393,7 @@ function loraNameFromPath(path: string): string {
  * auto-chained one-shot every clip carries the same prompt anyway, so this is
  * exactly what the person typed.
  */
-function restoredPrompt(metadata: OutputMetadata): string {
+export function restoredPrompt(metadata: OutputMetadata): string {
   const firstClip = metadata.chain?.stages?.[0]?.prompt?.trim();
   if (firstClip) return firstClip;
   return metadata.prompt ?? "";

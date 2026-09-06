@@ -22,10 +22,18 @@ vi.mock("../lib/api/client", () => ({
   },
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {}, inTauri: () => false }));
+// `useQueueCommands` reaches a named machine through the shared client, not
+// the desktop connection wrapper, so the shared module is the one to intercept.
+vi.mock("@studio/api/client", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  apiFetchTo: vi.fn(() => Promise.resolve(new Response(null, { status: 200 }))),
+}));
 
 import { __resetQueueCommandState, useQueueCommands, type QueueCommands } from "./useQueueCommands";
 import { useConnectionStore } from "../stores/connection";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useHostsStore } from "../stores/hosts";
+import { useLiveActivityStore } from "../stores/liveActivity";
 import { useJobsStore } from "../stores/jobs";
 
 function commands(): QueueCommands {
@@ -340,5 +348,100 @@ describe("useQueueCommands — dragging a waiting row", () => {
     expect(api.canReorder(printRow("a"))).toBe(true);
     // A row with no server id (still connecting) is never draggable.
     expect(api.canReorder(printRow(""))).toBe(false);
+  });
+});
+
+/**
+ * A clip longer than the checkpoint can denoise in one pass runs as a chain
+ * job. Graceful shutdown parks it as `paused` with its manifest, source media,
+ * completed clips, and tail cache preserved — CLAUDE.md's contract is that it
+ * "allows explicit resume after restart". The server answers `can_cancel:
+ * false` while parked, so Stop is correctly absent, and the chain lives in its
+ * own id space so the generation queue's per-job pause has no row for it.
+ * Retiring the Scenes UI took away the composer that used to carry the only
+ * Resume button; the queue row's menu is where it belongs now.
+ */
+describe("useQueueCommands — resuming an auto-chain parked by a restart", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    readyLocalHost();
+  });
+
+  function pausedChainRow(over: Record<string, unknown> = {}) {
+    return {
+      kind: "shared",
+      shared: {
+        kind: "generation",
+        execution: "chain",
+        phase: "paused",
+        id: "chain-7",
+        key: "local:generation:chain-7",
+        hostId: "local",
+        routeUrl: "http://127.0.0.1:7680",
+        instanceId: "i-1",
+        can_cancel: false,
+        stale: false,
+        ...over,
+      },
+    } as never;
+  }
+
+  /** What `liveActivity` would hold for the machine running that chain. The
+   *  fence compares the row, the activity snapshot, and the host's live
+   *  identity, so all three have to agree on the URL and the instance. */
+  function liveHost() {
+    useHostsStore().telemetry["local"] = { instanceId: "i-1" } as never;
+    useLiveActivityStore().hosts["local"] = {
+      hostId: "local",
+      routeUrl: "http://127.0.0.1:7680",
+      instanceId: "i-1",
+      stale: false,
+      target: { baseUrl: "http://127.0.0.1:7680", apiKey: "k" },
+      items: [],
+      unavailableKinds: [],
+      error: null,
+    } as never;
+  }
+
+  function labels(entries: readonly MenuEntry[]): string[] {
+    return entries.map((entry) => ("label" in entry ? entry.label : "—"));
+  }
+
+  it("offers Resume on a parked chain row and posts to its own route", async () => {
+    liveHost();
+    const live = useLiveActivityStore();
+    vi.spyOn(live, "refresh").mockResolvedValue(undefined as never);
+    const api = commands();
+    const menu = useContextMenuStore();
+    const event = { clientX: 10, clientY: 10, preventDefault() {}, stopPropagation() {} } as never;
+
+    api.contextMenu(event, pausedChainRow());
+    expect(labels(menu.entries)).toContain("Resume");
+
+    const resume = menu.entries.find((entry) => "label" in entry && entry.label === "Resume");
+    (resume as { action: () => void }).action();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const { apiFetchTo } = await import("@studio/api/client");
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "k" },
+      "/api/chain-jobs/chain-7/resume",
+      { method: "POST" },
+    );
+  });
+
+  it("does not offer Resume on a running chain or an ordinary queue row", () => {
+    liveHost();
+    const api = commands();
+    const menu = useContextMenuStore();
+    const event = { clientX: 10, clientY: 10, preventDefault() {}, stopPropagation() {} } as never;
+
+    api.contextMenu(event, pausedChainRow({ phase: "running", can_cancel: true }));
+    expect(labels(menu.entries)).not.toContain("Resume");
+
+    api.contextMenu(event, pausedChainRow({ execution: null, phase: "paused" }));
+    expect(labels(menu.entries)).not.toContain("Resume");
   });
 });

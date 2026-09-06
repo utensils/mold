@@ -11,13 +11,21 @@ import { toast } from "../lib/toasts";
  * Opens server-owned work in the web surface that can inspect or resume it.
  *
  * A server-side chain row (a long video another client is auto-chaining, or a
- * `mold run --script` job) has no web surface any more: it falls through to
- * its machine's page rather than pretending Create can reattach to it.
+ * `mold run --script` job) has no Create surface any more: it goes to its
+ * machine's page rather than pretending Create can reattach to it. The guard
+ * has to come FIRST, because such a row is `kind: "generation"` carrying
+ * `execution: "chain"` — falling into the generation arm below would search
+ * `/api/queue` for an id that only exists under `/api/chain-jobs` and dead-end
+ * on "cannot restore settings".
  */
 export function useOpenLiveWork(routing: HostRouting) {
   const router = useRouter();
 
   return async (row: FleetActiveWork) => {
+    if (row.kind === "sequence" || row.execution === "chain") {
+      await router.push(`/machines/${row.hostId}`);
+      return;
+    }
     if (row.kind === "generation") {
       const host = routing.hosts.value.find(
         (candidate) => candidate.id === row.hostId,

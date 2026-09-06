@@ -36,11 +36,15 @@ describe("router — five-destination IA", () => {
     expect(router.currentRoute.value.path).toBe("/create");
   });
 
-  it("keeps no route for the retired scene-by-scene composer", () => {
-    // A clip has ONE way of being made, so there is nothing left for these to
-    // deep-link into: they must not resolve to a named destination.
+  it("lands the retired scene-composer deep links on Create", async () => {
+    // A clip has ONE way of being made, so there is nothing left to author
+    // here — but a persisted last route or an old link still points at these,
+    // and every other legacy path stays a permanent redirect. Dropping them
+    // outright put a returning user on a blank unmatched route.
     for (const retired of ["/create/chain", "/chains"]) {
-      expect(router.resolve(retired).matched).toHaveLength(0);
+      await router.push(retired);
+      expect(router.currentRoute.value.path).toBe("/create");
+      expect(router.currentRoute.value.query).toEqual({});
     }
   });
 

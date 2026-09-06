@@ -13,3 +13,7 @@
   `--prompt`, `--frames-per-clip`, `mold chain validate`, `mold jobs`, and the
   `/api/chain-jobs` endpoints all still work for anyone driving sequences from
   the CLI or the API.
+- **Reclaimed the space the retired composer was holding.** Removing it left
+  every saved scene draft — and the clip and opening images they referenced,
+  which can run to megabytes — stranded in browser storage with nothing left
+  that could read or free them. Both apps now clear that on launch.

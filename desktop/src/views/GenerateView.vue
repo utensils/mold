@@ -136,6 +136,7 @@ import {
   MAX_BATCH_SIZE,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
+  restoredPrompt,
 } from "../lib/generateForm";
 import { emptyMeshForm } from "@studio/lib/meshControls";
 import { videoFramesError, type VideoFrameContract } from "@studio/lib/videoDuration";
@@ -3839,7 +3840,10 @@ function showRestoredPrint(print: GalleryPrintOnCanvas): void {
     request = buildRequest(form);
   } catch {
     request = {
-      prompt: print.metadata.prompt,
+      // `metadata.prompt` on a stitched print is every clip newline-joined.
+      // The form already holds the honest first-clip degradation, so the
+      // fallback has to reach for the same rule rather than the raw blob.
+      prompt: restoredPrompt(print.metadata),
       model: print.metadata.model,
       width: print.metadata.width,
       height: print.metadata.height,

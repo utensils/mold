@@ -160,8 +160,13 @@ export function useQueueCommands(): QueueCommands {
     }
   }
 
-  async function cancelShared(row: FleetActiveWork) {
-    if (cancellingShared.value.includes(row.key)) return;
+  /**
+   * The live route to a shared row's machine, or null when this client's view
+   * of that machine has moved on. Acting on a stale snapshot would send the
+   * request to whatever now answers on that URL, so both Stop and Resume ask
+   * the same question before they touch the network.
+   */
+  function sharedRowTarget(row: FleetActiveWork) {
     const snapshot = liveActivity.hosts[row.hostId];
     const host = hosts.all.find((candidate) => candidate.id === row.hostId);
     if (
@@ -174,12 +179,54 @@ export function useQueueCommands(): QueueCommands {
     ) {
       toasts.push("This machine changed. Refresh its jobs and try again.", "error");
       void liveActivity.refresh();
-      return;
+      return null;
     }
+    return snapshot.target;
+  }
+
+  /**
+   * Whether this row is an auto-chained video the host parked at shutdown.
+   *
+   * A clip longer than the checkpoint can denoise in one pass runs as a chain
+   * job. Graceful shutdown parks it as `paused` with its manifest, source
+   * media, completed clips, and tail cache preserved precisely so it can be
+   * resumed — the server answers `can_cancel: false` while parked, so Stop is
+   * correctly absent and Resume is the only thing left to offer.
+   */
+  function canResumeChain(row: QueueRow): boolean {
+    return (
+      row.kind === "shared" && row.shared.execution === "chain" && row.shared.phase === "paused"
+    );
+  }
+
+  /**
+   * Resume a parked chain job on its own route. It lives in the chain-job id
+   * space, so the generation queue's per-job pause has no row to act on and
+   * `pauseEntries` stays empty for it.
+   */
+  async function resumeSharedChain(row: FleetActiveWork) {
+    const target = sharedRowTarget(row);
+    if (!target) return;
+    try {
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/resume`, {
+        method: "POST",
+      });
+      toasts.push("Resumed");
+    } catch (error) {
+      report(error);
+    } finally {
+      await liveActivity.refresh();
+    }
+  }
+
+  async function cancelShared(row: FleetActiveWork) {
+    if (cancellingShared.value.includes(row.key)) return;
+    const target = sharedRowTarget(row);
+    if (!target) return;
     cancellingShared.value = [...cancellingShared.value, row.key];
     try {
       if (row.execution === "chain") {
-        await apiFetchTo(snapshot.target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
+        await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
           method: "POST",
         });
       } else {
@@ -425,6 +472,9 @@ export function useQueueCommands(): QueueCommands {
       return [
         ...reorderEntries(row),
         ...pauseEntries(row),
+        ...(canResumeChain(row)
+          ? [{ label: "Resume", action: () => void resumeSharedChain(row.shared) }]
+          : []),
         { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
       ];
     }

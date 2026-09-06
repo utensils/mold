@@ -364,7 +364,7 @@ export function decideGenerateRequestRouting(
   const determiner = unsupported.length === 1 ? "that option" : "those options";
   return {
     kind: "reject",
-    reason: `${frameCount} frames exceeds the ${singleShotCap ?? 97}-frame single-shot limit at ${fps} fps, and automatic chaining can’t preserve ${options}. Reduce Frames, remove ${determiner}, or author a Sequence with compatible per-clip settings.`,
+    reason: `${frameCount} frames exceeds the ${singleShotCap ?? 97}-frame single-shot limit at ${fps} fps, and automatic chaining can’t preserve ${options}. Reduce Frames, remove ${determiner}, or script the clips yourself with mold run --script.`,
   };
 }
 
