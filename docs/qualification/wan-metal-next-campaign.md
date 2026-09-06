@@ -1,8 +1,10 @@
 # Wan Metal: correctness, admission and performance campaign
 
-**Prepared on 2026-09-05; all GPU work and UAT are on user hold.** This is a
-runbook, not qualification evidence. Do not execute its device tests, reference
-models, server renders or pressure helper until the user releases that hold.
+**Prepared on 2026-09-05; Wan is queued behind #1040's exclusive GPU slot.**
+The user released the UAT hold, but this lane must wait for the root task's
+explicit slot handoff after verified cleanup. This is a runbook, not qualification
+evidence. Do not execute device tests, reference models, server renders or the
+pressure helper before that handoff.
 Issues [#1059](https://github.com/utensils/mold/issues/1059) and
 [#1094](https://github.com/utensils/mold/issues/1094) remain open.
 
@@ -18,6 +20,24 @@ the same visual failure. Its 27.091 GiB minimum is not a cold-load measurement.
 Transformer/VAE manifest hashes and the retained encoder download hash match.
 Both renders used zero artificial pressure. Independent review verified all 54
 raw evidence hashes. The final acceptance item is still unchecked.
+
+The subsequent authorized tiny synthesized Wan 2.1 VAE comparison used separate
+Candle baseline `744ae3b` and candidate `bedc2874` copies, both guarded at 512 MiB.
+F32 passed (maximum error 4.70877e-6, relative L2 2.18116e-6). BF16 failed its
+predeclared maximum-error criterion on both revisions (0.0476115 > 0.02;
+relative L2 0.0222306 < 0.03). Raw outputs were byte-identical across revisions
+for each dtype. No thresholds were relaxed, no real weights were loaded, and no
+candidate fix or visual pass is established. Precision-matched reference
+isolation remains open. Raw evidence and report live under the external
+`mold-1059-qualification/tiny-campaign/` directory.
+
+Both earlier failed videos have since been imported through the supported
+gallery API into `/Volumes/ExternalStorage/mold2/output`, with
+`~uat1059-failed-visual` appended to their original stems. Media hashes match the
+originals. APNG import uses its immutable embedded metadata; its fuller original
+DB provenance (including later-added job ID, negative prompt and duration) is
+preserved in a `.source-provenance.json` sidecar beside it, not represented as
+embedded fields. Both full source records and all originals are retained.
 
 Raw records, requests, outputs, contact sheets and the reviewed report are at
 `/Volumes/ExternalStorage/mold-1059-qualification/resumed-20260905/` on the
@@ -56,7 +76,17 @@ Metal.
    A candidate and control must differ only in the change being investigated.
 2. Acquire the shared exclusive reservation atomically. Confirm no other task
    is running local inference before starting anything; never stop another
-   task's processes. Use a fresh scratch home and loopback-only server.
+   task's processes. Use a loopback-only server and the user's external library:
+   `MOLD_HOME=/Volumes/ExternalStorage/mold2`,
+   `MOLD_MODELS_DIR=/Volumes/ExternalStorage/mold2/models`, and
+   `MOLD_OUTPUT_DIR=/Volumes/ExternalStorage/mold2/output`. Read-only verification
+   found the external config/database and both directories present; that config
+   sets the model directory explicitly and output defaults to its home's
+   `output/`. The shell has no MOLD path overrides; ordinary `~/.mold` is a
+   separate local home, so do not rely on implicit CLI defaults. Recheck these
+   paths and existing library service/queue ownership at handoff before starting
+   a second process against the same home. Preserve existing jobs and preferences.
+   Diagnostic logs and raw tensors stay in external qualification storage.
 3. Keep automatic wired limits and existing safety policy unchanged. Record
    temperature/thermal state, native free+inactive, swap, compression, Metal
    allocations and recommended/headroom policy. Filesystem cache purge is an
@@ -80,7 +110,7 @@ Use the previous small request unchanged before increasing its shape:
   "prompt": "Medium wide shot in soft morning light. A red fox walks slowly through fresh snow in a quiet pine forest. Its paws lift small puffs of powder. The camera remains steady, showing the fox in profile against dark green trees.",
   "width": 512, "height": 288, "frames": 17, "fps": 16,
   "steps": 30, "guidance": 6.0, "seed": 1059,
-  "output_format": "apng", "expand": false
+  "output_format": "apng", "expand": false, "save_to_gallery": true
 }
 ```
 
@@ -113,6 +143,12 @@ Require a recognizable, coherent lossless scene and correct 17-frame geometry,
 then repeat MP4 and decode every frame. Numerical parity and visual inspection
 are complementary. If any stage fails, retain the smallest failing evidence,
 stop escalation and keep both issues open.
+All downloaded components must live in the external model store. Every generated
+image/video, including a failed UAT result, must remain in the external library
+with its generation provenance; do not leave the only copy under a scratch home.
+Visually inspect each image and representative video frames/contact sheets,
+plus motion and transitions where relevant, against the prompt/source/oracle.
+File existence, decoding and numerical parity alone never establish visual UAT.
 
 ## Gate 2: #1059 admission margin and chain reservations
 
@@ -188,6 +224,6 @@ and capability tests changed together. CUDA behavior stays unchanged.
 Hash raw evidence and outputs; independently review conclusions against them.
 Update issue checkboxes only for satisfied acceptance, with source/build IDs and
 remaining gaps. Any fix PR waits for its promised validation and final review;
-no draft PR or capability promotion under the hold. At the end, stop only owned
+no draft PR or capability promotion before qualification. At the end, stop only owned
 children, verify their exit and scratch-port closure, sample recovered memory,
 and release the reservation before another local task starts inference.
