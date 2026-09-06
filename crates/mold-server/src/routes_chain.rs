@@ -616,7 +616,7 @@ pub async fn validate_chain(
     // The same authority submission uses. Reading `state.config` directly
     // left an installed `cv:` / `hf:` wan checkpoint with an empty family,
     // which skipped the wan tail normalization, the family cap, the grid
-    // check, and the sequence-support check — so "Validate plan" and the
+    // check, and the sequence-support check — so `mold chain validate` and the
     // submission that follows it disagreed about exactly the models the
     // sequence work targets (#783).
     let authority = resolve_chain_model_authority(&state, &req.model).await?;

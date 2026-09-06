@@ -6,7 +6,7 @@
  * would extend a scrollable ancestor's overflow, so merely OPENING it could
  * grow a scrollbar (the Create bench did exactly that). Fixed boxes under
  * <body> contribute overflow to nothing and overlay everything. First
- * shared extraction of the pattern HostChip / File tools / Templates each
+ * shared extraction of the pattern HostChip / Templates each
  * hand-rolled.
  */
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
