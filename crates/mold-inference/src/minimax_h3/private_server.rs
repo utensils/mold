@@ -7923,9 +7923,15 @@ mod tests {
         for (index, shape) in shapes.iter().enumerate() {
             use crate::h3_factory::{H3FactoryReferenceInput, H3FactoryReferenceKind};
             let kind = match &references[index] {
-                mold_core::GenerationReference::Image { .. } => H3FactoryReferenceKind::Image,
+                mold_core::GenerationReference::Image { .. }
+                | mold_core::GenerationReference::NamedImage { .. } => {
+                    H3FactoryReferenceKind::Image
+                }
                 mold_core::GenerationReference::Video { .. } => H3FactoryReferenceKind::Video,
                 mold_core::GenerationReference::Audio { .. } => H3FactoryReferenceKind::Audio,
+                mold_core::GenerationReference::Mesh { .. } => {
+                    panic!("a mesh is not a MiniMax H3 Ref2VA reference")
+                }
             };
             let charges = crate::h3_factory::expected_h3_factory_reference_charges(
                 &H3FactoryReferenceInput {
