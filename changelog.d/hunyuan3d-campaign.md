@@ -1,4 +1,5 @@
 - **Hunyuan3D 2.1 shape.** Image-to-mesh generation with the MoE shape transformer, DINOv2-large conditioner and separate 2.1 licence gate.
+- **Hunyuan3D PBR paint.** Generate UV-unwrapped GLB meshes with embedded base-color and metallic/roughness textures from the same appearance image, with durable per-stage progress across local and remote clients.
 - **Mesh admission.** Price the selected checkpoint’s latent set and encoder size, including canvasless mini requests.
 - **Mesh geometry.** Read all static GLB scene primitives with their transforms and interleaved attributes, and reject accessors that escape their declared buffers.
 - **CUDA half-precision convolutions.** Use float32 accumulation for cuDNN Conv1D and Conv2D with float16 tensors, reducing accumulated numerical error while preserving float16 storage.

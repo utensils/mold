@@ -73,6 +73,8 @@ describe("generation settings selection", () => {
       step: 4,
       total: 20,
       stage: "Denoising",
+      stage_current: null,
+      stage_total: null,
       queue_position: null,
     });
     stop();
@@ -111,6 +113,45 @@ describe("generation settings selection", () => {
       step: 6,
       total: 20,
       stage: "Denoising",
+      stage_current: null,
+      stage_total: null,
+      queue_position: null,
+    });
+    stop();
+  });
+
+  it("publishes bounded progress for a named paint stage", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              stage: "Generating PBR views",
+              stage_current: 7,
+              stage_total: 15,
+              updated_at_ms: 1,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const onPreview = vi.fn();
+    const stop = watchSelectedQueuePreview(
+      { baseUrl: "https://gpu.example", apiKey: null },
+      "paint-job",
+      onPreview,
+      500,
+    );
+    await vi.runOnlyPendingTimersAsync();
+    expect(onPreview).toHaveBeenCalledWith({
+      preview_image: null,
+      step: null,
+      total: null,
+      stage: "Generating PBR views",
+      stage_current: 7,
+      stage_total: 15,
       queue_position: null,
     });
     stop();

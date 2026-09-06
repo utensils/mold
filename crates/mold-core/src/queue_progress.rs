@@ -62,6 +62,14 @@ pub struct QueueJobProgress {
     /// wait, cache hit, or info event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Completed work inside the current named stage. This stays separate
+    /// from denoise `step` because setup, paint, and export stages also have
+    /// bounded progress and must round-trip through durable polling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_current: Option<usize>,
+    /// Total work inside the current named stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_total: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight_load: Option<QueueJobWeightLoad>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,11 +103,27 @@ impl QueueJobProgress {
                 self.step = Some(*step);
                 self.total = Some(*total);
             }
-            SseProgressEvent::StageStart { name } => self.stage = Some(name.clone()),
-            SseProgressEvent::StageProgress { name, .. } => self.stage = Some(name.clone()),
+            SseProgressEvent::StageStart { name } => {
+                self.stage = Some(name.clone());
+                self.step = None;
+                self.total = None;
+                self.stage_current = None;
+                self.stage_total = None;
+            }
+            SseProgressEvent::StageProgress {
+                name,
+                current,
+                total,
+            } => {
+                self.stage = Some(name.clone());
+                self.stage_current = Some(*current);
+                self.stage_total = Some(*total);
+            }
             SseProgressEvent::StageDone { name, .. } => {
                 if self.stage.as_deref() == Some(name.as_str()) {
                     self.stage = None;
+                    self.stage_current = None;
+                    self.stage_total = None;
                 }
             }
             SseProgressEvent::DependencyWait { dependency, reason } => {
@@ -181,6 +205,19 @@ impl QueueJobProgress {
         if self.stage != previous.and_then(|p| p.stage.clone()) {
             if let Some(name) = self.stage.clone() {
                 events.push(SseProgressEvent::StageStart { name });
+            }
+        }
+        let stage_progress_changed = self.stage_current != previous.and_then(|p| p.stage_current)
+            || self.stage_total != previous.and_then(|p| p.stage_total);
+        if stage_progress_changed {
+            if let (Some(name), Some(current), Some(total)) =
+                (self.stage.clone(), self.stage_current, self.stage_total)
+            {
+                events.push(SseProgressEvent::StageProgress {
+                    name,
+                    current,
+                    total,
+                });
             }
         }
         if self.weight_load != previous.and_then(|p| p.weight_load.clone()) {
@@ -298,6 +335,34 @@ mod tests {
         assert_eq!(progress.total, Some(20));
         assert_eq!(progress.preview_image, None);
         assert_eq!(progress.updated_at_ms, 1_000);
+    }
+
+    #[test]
+    fn a_named_stage_keeps_and_unfolds_its_own_counter() {
+        let start = folded(&[SseProgressEvent::StageStart {
+            name: "Generating PBR views".into(),
+        }]);
+        let current = folded(&[
+            SseProgressEvent::StageStart {
+                name: "Generating PBR views".into(),
+            },
+            SseProgressEvent::StageProgress {
+                name: "Generating PBR views".into(),
+                current: 7,
+                total: 15,
+            },
+        ]);
+
+        assert_eq!(current.stage_current, Some(7));
+        assert_eq!(current.stage_total, Some(15));
+        assert!(matches!(
+            current.events_since(Some(&start)).as_slice(),
+            [SseProgressEvent::StageProgress {
+                name,
+                current: 7,
+                total: 15,
+            }] if name == "Generating PBR views"
+        ));
     }
 
     #[test]

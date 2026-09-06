@@ -1418,5 +1418,56 @@ it is not a completion checklist with assumed passes.
   `paint-runtime-e2e-v3/blender/chair-blender.png`.
 
 This proves the real-weight native paint engine and its container output. The
-campaign remains open: public CLI/durable-server execution, interruption and
-replay, every client surface, and P8-P15 still require their own evidence.
+campaign remains open for public-path evidence below, interruption and replay,
+the remaining P8-P15 features, and every client surface.
+
+### Public CLI and isolated durable-server execution
+
+- The exact committed CUDA binary at `9e97146f` passes the public forced-local
+  command in `capture-20260906T171142Z-8369f4c6cd68`. Its executable SHA-256 is
+  `5aac69ca689ed1d32dec4b4738eee100594a83bc83e73905c0cb7c2a297f586d`.
+  The 758.7-second run wrote a 10,197,552-byte textured GLB with 159,066
+  vertices, 204,018 triangles and SHA-256
+  `aa0c376e764b354d13b9efa79096e76a94b31b7b83b6c8ee58730383daf0f721`.
+  Shape residency fell from approximately 7.9 GiB to 623 MiB before paint
+  activation. Khronos validation has zero findings; Blender 5.0.1 imports the
+  two 1024-pixel maps as sRGB base color and Non-Color metallic/roughness.
+  The first direct-binary launcher attempt remains retained as a failure because
+  it escaped the Nix library environment; the repeated Nix invocation passed.
+- `server-durable-v1` uses loopback port 17681, its own Mold home, DB, output
+  directory, queue owner and persistent 2.1 acceptance record while sharing
+  only `/storage/mold/models`. Startup reported zero restored, held, or
+  unclaimed-owner jobs, proving it did not adopt production work. Its stable
+  instance ID is `f8128cf5-51c9-45ba-be1d-bba1205e5625`.
+- Durable job `74afee69-bd06-434b-a70c-eddd5ca8336e` pinned the uploaded source
+  under media set `d006a2221265fcdd8728b53c6ef28296`, completed once in 756.9
+  seconds, and settled out of `generation_queue`. Server publication and the
+  remote CLI download are byte-identical: 9,462,828 bytes, SHA-256
+  `51e845abd64d65836331c918271dfd441a288352e443e909fb06ff275147771d`.
+  Gallery metadata retains the seed, texture controls, source digest and job ID;
+  the media binding transfers the exact source-media obligation to the print.
+- After a clean server restart, the instance ID is unchanged, the queue remains
+  empty, retained-media reconciliation reports one retained pin, and the same
+  gallery file remains present with the same digest. Khronos validation again
+  reports zero errors, warnings, infos or hints. Blender 5.0.1 independently
+  imports and renders the remote artifact with the expected two color spaces.
+  This proves successful settlement and restart reconciliation. Interruption
+  during an active heterogeneous workflow remains a separate P2 gate.
+
+### Durable named-stage progress correction
+
+- The public server run exposed that paint emitted starts and numeric updates
+  without completion events, and the durable progress snapshot discarded the
+  numeric counter for `StageProgress`. Activity could therefore show a current
+  paint stage beside the stale completed shape counter `30/30`.
+- `paint-runtime-progress-red-v1.log` and `queue-stage-progress-red-v1.log`
+  retain the failing contracts. Paint boundaries now retain their start times,
+  emit progress plus one completion event, and name CPU unwrap/preparation,
+  neural encode/denoise/decode, upscale, bake, fill and GLB publication stages.
+  `QueueJobProgress` stores a named stage's counter separately from denoise
+  steps and unfolds it back into the same wire event for polling clients.
+- The focused Rust regressions and 18 Studio progress/detail tests pass. Studio's
+  shared queue detail renders, for example, `Generating PBR views 7 of 15`, so
+  web, desktop and iPhone shells using that component receive the same state.
+  A rebuilt-server live capture is still required before this correction is a
+  qualified runtime milestone.

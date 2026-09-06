@@ -6,6 +6,7 @@ use image::{Rgb, RgbImage, RgbaImage};
 use mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths;
 use rand::{rngs::StdRng, SeedableRng};
 use rand_distr::{Distribution, StandardNormal};
+use std::time::Instant;
 
 use super::{
     mesh::Mesh,
@@ -162,15 +163,50 @@ fn stage_name(stage: PaintStage) -> &'static str {
     }
 }
 
-fn report(progress: &ProgressReporter, event: PaintEvent<'_>) -> Result<()> {
-    progress.checkpoint()?;
-    let name = stage_name(event.stage);
-    if event.step == 0 {
-        progress.stage_start(name);
-    } else {
-        progress.stage_progress(name, event.step, event.total);
+struct PaintProgress<'a> {
+    reporter: &'a ProgressReporter,
+    started: [Option<Instant>; 6],
+}
+
+impl<'a> PaintProgress<'a> {
+    fn new(reporter: &'a ProgressReporter) -> Self {
+        Self {
+            reporter,
+            started: [None; 6],
+        }
     }
-    Ok(())
+
+    fn report(&mut self, event: PaintEvent<'_>) -> Result<()> {
+        self.reporter.checkpoint()?;
+        let slot = event.stage as usize;
+        let name = stage_name(event.stage);
+        if event.step == 0 {
+            self.started[slot] = Some(Instant::now());
+            self.reporter.stage_start(name);
+        } else {
+            self.reporter.stage_progress(name, event.step, event.total);
+            if event.step == event.total {
+                let elapsed = self.started[slot]
+                    .take()
+                    .map_or(std::time::Duration::ZERO, |start| start.elapsed());
+                self.reporter.stage_done(name, elapsed);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn report_display_stage<T>(
+    progress: &ProgressReporter,
+    name: &str,
+    run: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    progress.checkpoint()?;
+    progress.stage_start(name);
+    let started = Instant::now();
+    let result = run()?;
+    progress.stage_done(name, started.elapsed());
+    Ok(result)
 }
 
 impl PaintRuntime<'_> {
@@ -194,31 +230,39 @@ impl PaintRuntime<'_> {
             "Hunyuan3D Paint requires an accelerator"
         );
         let token = progress.cancellation_token();
-        progress.stage_start("Unwrapping mesh");
-        let unwrapped = uv::unwrap(source, token.flag()).context("unwrap the generated mesh")?;
-        let prepared = prepare_mesh(&unwrapped)?;
-        progress.stage_start("Selecting paint views");
+        let unwrapped = report_display_stage(progress, "Unwrapping mesh", || {
+            uv::unwrap(source, token.flag()).context("unwrap the generated mesh")
+        })?;
+        let prepared = report_display_stage(progress, "Preparing paint mesh", || {
+            prepare_mesh(&unwrapped)
+        })?;
         let mut checkpoint = || -> Result<()> { Ok(progress.checkpoint()?) };
-        let views = selected_views(&prepared, &mut checkpoint)?;
-        let (normals, positions) = condition_images(&prepared, &views, &mut checkpoint)?;
-        let images = PaintImages::prepare(
-            appearance,
-            &normals,
-            &positions,
-            VIEW_SIZE,
-            DType::F16,
-            &mut checkpoint,
-        )?;
+        let (views, images) = report_display_stage(progress, "Preparing paint views", || {
+            let views = selected_views(&prepared, &mut checkpoint)?;
+            let (normals, positions) = condition_images(&prepared, &views, &mut checkpoint)?;
+            let images = PaintImages::prepare(
+                appearance,
+                &normals,
+                &positions,
+                VIEW_SIZE,
+                DType::F16,
+                &mut checkpoint,
+            )?;
+            Ok((views, images))
+        })?;
         let input = request(images, views.len(), seed)?;
         let _scope = crate::conv_policy::ConvScope::apply(crate::conv_policy::resolve_for(
             crate::conv_policy::ConvPolicy::Paint,
         ));
+        let mut paint_progress = PaintProgress::new(progress);
         let materials = PaintCheckpoints {
             dino: &assets.dino,
             vae: &assets.vae,
             unet: &assets.unet,
         }
-        .run(&input, DType::F16, device, |event| report(progress, event))?;
+        .run(&input, DType::F16, device, |event| {
+            paint_progress.report(event)
+        })?;
         let placement = ExactUpscalePlacement::Device {
             backend: if device.is_cuda() {
                 mold_core::GpuBackend::Cuda
@@ -234,19 +278,25 @@ impl PaintRuntime<'_> {
             placement,
         )?
         .for_paint_materials()?;
-        let materials =
-            upscale_materials(upscale, &materials, token, || Ok(progress.checkpoint()?))?;
-        progress.stage_start("Baking PBR textures");
-        let baked = bake_materials(
-            &prepared,
-            &materials,
-            &views,
-            texture_size,
-            device,
-            &mut checkpoint,
-        )?;
-        let textures = finish_materials(&prepared, baked, &mut checkpoint)?;
-        let (mesh, glb) = encode_textured_glb(&prepared, &textures, None, &mut checkpoint)?;
+        let materials = report_display_stage(progress, "Upscaling PBR views", || {
+            upscale_materials(upscale, &materials, token, || Ok(progress.checkpoint()?))
+        })?;
+        let baked = report_display_stage(progress, "Baking PBR textures", || {
+            bake_materials(
+                &prepared,
+                &materials,
+                &views,
+                texture_size,
+                device,
+                &mut checkpoint,
+            )
+        })?;
+        let textures = report_display_stage(progress, "Filling PBR textures", || {
+            finish_materials(&prepared, baked, &mut checkpoint)
+        })?;
+        let (mesh, glb) = report_display_stage(progress, "Writing textured GLB", || {
+            encode_textured_glb(&prepared, &textures, None, &mut checkpoint)
+        })?;
         Ok(TexturedMesh { mesh, glb })
     }
 }
@@ -254,6 +304,46 @@ impl PaintRuntime<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn completed_paint_boundary_emits_stage_done() -> Result<()> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let mut progress = ProgressReporter::default();
+        progress.set_callback(Box::new(move |event| sink.lock().unwrap().push(event)));
+        let mut paint_progress = PaintProgress::new(&progress);
+
+        paint_progress.report(PaintEvent {
+            stage: PaintStage::Appearance,
+            step: 0,
+            total: 1,
+            tensor: None,
+        })?;
+        paint_progress.report(PaintEvent {
+            stage: PaintStage::Appearance,
+            step: 1,
+            total: 1,
+            tensor: None,
+        })?;
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                crate::progress::ProgressEvent::StageStart { name: start },
+                crate::progress::ProgressEvent::StageProgress {
+                    name: update,
+                    current: 1,
+                    total: 1,
+                },
+                crate::progress::ProgressEvent::StageDone { name: done, .. },
+            ] if start == "Encoding paint appearance"
+                && update == start
+                && done == start
+        ));
+        Ok(())
+    }
 
     #[test]
     fn four_noise_draws_share_one_deterministic_stream() -> Result<()> {

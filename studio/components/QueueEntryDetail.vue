@@ -21,6 +21,9 @@ const props = withDefaults(
       preview_image: string | null;
       step: number | null;
       total: number | null;
+      stage?: string | null;
+      stage_current?: number | null;
+      stage_total?: number | null;
     } | null;
     cancelling?: boolean;
     retrying?: boolean;
@@ -99,7 +102,12 @@ async function copyDetail(): Promise<void> {
 
     <div class="qed__body">
       <figure
-        v-if="preview && (preview.preview_image || preview.step !== null)"
+        v-if="
+          preview &&
+          (preview.preview_image ||
+            preview.step !== null ||
+            preview.stage_current != null)
+        "
         class="qed__preview"
         data-test="queue-detail-preview"
       >
@@ -110,6 +118,14 @@ async function copyDetail(): Promise<void> {
         />
         <figcaption v-if="preview.step !== null && preview.total !== null">
           Step {{ preview.step }} of {{ preview.total }}
+        </figcaption>
+        <figcaption
+          v-else-if="
+            preview.stage_current != null && preview.stage_total != null
+          "
+        >
+          {{ preview.stage || "Stage" }} {{ preview.stage_current }} of
+          {{ preview.stage_total }}
         </figcaption>
       </figure>
 
