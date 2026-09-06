@@ -750,3 +750,12 @@ it is not a completion checklist with assumed passes.
   is not a parity pass regardless of its eventual material output. All stages
   continue for diagnostic comparison; the test reports failure after saving
   its material outputs and comparison table.
+
+- Follow-up read-only review confirms oracle hooks preserve returned values and
+  posterior draw order. Its remaining scope caveats are explicit: prepared
+  tensors bypass PIL/DINO image preprocessing, and the first integration run
+  records but does not gate final PNGs. The follow-up test now compares upstream
+  decoded pixels converted by Rust against all twelve actual Tencent PNGs,
+  and measures generated PNG errors with bounds propagated from the unchanged
+  decoder limits. That follow-up compiles under all-target warnings-denied
+  Clippy (`paint-pipeline-clippy-v2.log`); execution remains a separate gate.

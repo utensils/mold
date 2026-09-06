@@ -342,12 +342,49 @@ mod tests {
                 Ok(())
             },
         )?;
-        for (role, images) in [
-            ("albedo", materials.albedo),
-            ("mr", materials.metallic_roughness),
+        let expected_materials =
+            materials_from_pixels(&fixture["expected.decode"], input.normal.dim(1)?)?;
+        for (role, images, expected_images) in [
+            ("albedo", materials.albedo, expected_materials.albedo),
+            (
+                "mr",
+                materials.metallic_roughness,
+                expected_materials.metallic_roughness,
+            ),
         ] {
             for (index, image) in images.iter().enumerate() {
                 image.save(output.join(format!("{role}-{index:02}.png")))?;
+                let expected =
+                    image::open(oracle.join(format!("{role}-{index:02}.png")))?.to_rgb8();
+                // Check production-size conversion and material ordering against
+                // the actual upstream PIL files, independently of tensor error.
+                ensure!(
+                    expected_images[index] == expected,
+                    "upstream material conversion differs for {role}-{index}"
+                );
+                ensure!(
+                    image.dimensions() == expected.dimensions(),
+                    "material dimensions differ"
+                );
+                let differences: Vec<f64> = image
+                    .as_raw()
+                    .iter()
+                    .zip(expected.as_raw())
+                    .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                    .collect();
+                let max = differences.iter().copied().fold(0f64, f64::max);
+                let rms = (differences.iter().map(|v| v * v).sum::<f64>()
+                    / differences.len() as f64)
+                    .sqrt();
+                // Propagate the existing decode limits through x/2+.5 and
+                // scaling by255, with at most two bytes for half/uint8 rounding.
+                let max_bound = 0.05 * 127.5 + 2.;
+                let rms_bound = 0.005 * 127.5 + 2.;
+                let name = format!("{role}-{index:02}.png");
+                if max > max_bound || rms > rms_bound {
+                    failures.push(name.clone());
+                }
+                measurements.push(serde_json::json!({"name":name,"max":max,"rms":rms,"max_bound":max_bound,"rms_bound":rms_bound}));
             }
         }
         std::fs::write(
