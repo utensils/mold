@@ -149,9 +149,9 @@ path = "src/bin/h3_transformer_capture.rs"
 required-features = ["dev-bins", "h3-private-uat"]
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.27.1" }
-mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.27.1" }
-mold-candle = { path = "../mold-candle", package = "mold-ai-candle", version = "0.27.1" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.28.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.28.0" }
+mold-candle = { path = "../mold-candle", package = "mold-ai-candle", version = "0.28.0" }
 anyhow = "1"
 candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
 candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
