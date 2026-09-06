@@ -222,3 +222,13 @@ this machine; status is read-only, set/reset require explicit root invocation.
 user path. Shared DevicePanel reads optional host telemetry; remote clients have
 no kernel mutation control. See `website/guide/metal-memory.md` and the reviewed
 `docs/metal-memory-policy-plan.md` for contracts and validation limits.
+
+## Public website analytics
+
+`website/.vitepress/theme/analytics.mjs` owns the consent-gated GA4 integration
+(`G-RG6PPTGX2T`), restricted to `https://utensils.io/mold/`. Never import it into
+Studio or the apps. The layout component owns the visitor choice and sends one
+explicit page view after VitePress navigation. Keep GA enhanced-measurement
+browser-history page views OFF to avoid duplicates; search, form, and video
+measurement are also off. `bun run verify` in `website/` runs consent and
+navigation tests. Update `website/privacy.md` when this behavior changes.
