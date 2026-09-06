@@ -36,7 +36,7 @@ scripts/tui-uat.sh env              # Print MOLD_HOME / MOLD_DB_PATH
 # Screen I/O
 scripts/tui-uat.sh capture          # Print current screen (plain text)
 scripts/tui-uat.sh screenshot [output.png]
-scripts/tui-uat.sh view <1-5|name>  # 1=Create 2=Library 3=Models 4=Machines 5=Settings; 'chain' opens the Create chain composer
+scripts/tui-uat.sh view <1-5|name>  # 1=Create 2=Library 3=Models 4=Machines 5=Settings
 scripts/tui-uat.sh send <key>...
 scripts/tui-uat.sh wait-for <pattern> [timeout]
 scripts/tui-uat.sh assert <pattern>
@@ -88,7 +88,6 @@ scripts/tui-uat.sh view library    # or: view 2 (legacy alias: gallery)
 scripts/tui-uat.sh view models     # or: view 3
 scripts/tui-uat.sh view machines   # or: view 4 (legacy alias: queue)
 scripts/tui-uat.sh view settings   # or: view 5
-scripts/tui-uat.sh view chain      # Create sub-mode: navigates to Create and presses c
 ```
 
 The `view` command handles the Create prompt-focus quirk automatically — it detects prompt focus and uses Tab + Escape to reach Nav mode before sending the view key.
@@ -148,7 +147,6 @@ at the top of this section).
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
 | Machines | 4 | `┌ Machines` | Host rows (local first) + telemetry/queue detail pane; connect flow on `c` |
 | Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme cards + Preferences + config values |
-| Chain | c (from Create) | `┌ Stages` | Chain composer — a Create sub-mode, Esc returns to compose |
 
 ## Key Bindings Reference
 
@@ -156,7 +154,7 @@ at the top of this section).
 
 **Create (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = randomize seed, Ctrl+E = expand prompt, Ctrl+Shift+E = remix prompt, Ctrl+S = save image, Ctrl+T = retry held prints, Ctrl+P / Ctrl+N = previous / next prompt in history, Alt+N = open Advanced → Negative → focus inline editor (every Ctrl binding works from any Create focus)
 
-**Create (nav mode):** 1-5 = switch workspace, c = chain composer, A = toggle Advanced, q = quit, Enter = focus prompt
+**Create (nav mode):** 1-5 = switch workspace, A = toggle Advanced, q = quit, Enter = focus prompt
 
 **Create (Parameters focus):** j/k = flat row traversal (essentials → `▸ Advanced` header → section rows → `↺ Reset`), +/- or ←/→ = adjust a field / expand-collapse a section, Enter = activate (Model picker, Size `WxH` popup, Seed value popup, section expand, Negative inline editor focus), A = toggle the accordion. Essentials order: Model (first row — `model <name>` relies on this), Size, Detail, Prompt strength, Seed, Batch; a video model inserts `Predict duration` (only when the checkpoint advertises `supports_duration_prediction`) and `Duration` between Prompt strength and Seed, so it has 7–8 essentials. Accordion landmarks: `▸ Advanced` collapsed / `▾ Advanced` open with section rows (`Scheduler & sampling`, `Negative prompt`, `Source image`, `Identity photo` on identity-capable checkpoints, `LoRA`, `Upscale after generate`, `Output format`, `Video` on video models, `File under`). Persisted keys for `db-get`: `tui.advanced_open` (`true`/`false`), `tui.advanced_section` (section slug or empty).
 

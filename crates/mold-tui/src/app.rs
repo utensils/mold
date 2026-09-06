@@ -251,18 +251,6 @@ pub enum BackgroundEvent {
     /// message so the UI can surface it and re-sync the local list with
     /// whatever state remains on the server.
     GalleryDeleteFailed(String),
-    /// Chain progress update from server SSE.
-    ChainProgress(mold_core::ChainProgressEvent),
-    /// The durable sequence job settled successfully. Carries only what the
-    /// view renders: the compatibility endpoint that returned a whole
-    /// `ChainResponse` is gone, and the stitched print now lands in the
-    /// host's gallery rather than in this event.
-    ChainComplete {
-        stage_count: u32,
-        request_warnings: Vec<String>,
-    },
-    /// Chain generation failed.
-    ChainError(String),
     /// Per-host `/api/status` poll result for the Machines workspace.
     /// `None` marks the row Offline — it stays listed and self-heals.
     HostStatusUpdate {
@@ -522,20 +510,6 @@ impl ProgressState {
         self.download_eta_secs =
             Some(self.download_batch_total.saturating_sub(position) as f64 / rate);
     }
-}
-
-/// Which sub-mode the Create view is in.
-///
-/// The chain composer is nested under Create (mirroring the graphical
-/// surfaces, where Sequence is an Output setting of Create) rather than
-/// being a tab of its own. Switching workspaces does not reset the mode —
-/// a chain in progress survives a round-trip through Library and back;
-/// only [`Action::ChainExit`] returns to Compose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CreateMode {
-    #[default]
-    Compose,
-    Chain,
 }
 
 /// Which panel is focused in the Generate view.
@@ -2457,8 +2431,6 @@ pub enum ConfirmAction {
     /// Delete a gallery image by index.
     DeleteGalleryImage,
     RemoveModel(String),
-    /// Delete the currently selected script stage.
-    DeleteScriptStage,
     /// Forget a registered machine (also deletes its saved API key).
     ForgetHost(String),
     /// Cancel a queued job on a registered machine.
@@ -2471,8 +2443,6 @@ pub enum ConfirmAction {
 /// The root application state.
 pub struct App {
     pub active_view: View,
-    /// Compose vs chain-composer sub-mode of the Create view.
-    pub create_mode: CreateMode,
     pub generate: GenerateState,
     pub gallery: GalleryState,
     pub models: ModelsState,
@@ -2485,7 +2455,6 @@ pub struct App {
     /// DB-backed user preferences (Settings → Preferences), loaded once
     /// at boot and persisted per-key on toggle.
     pub prefs: crate::prefs::TuiPrefs,
-    pub script: crate::ui::script_composer::ScriptComposerState,
     pub config: Config,
     pub server_url: Option<String>,
     pub picker: Picker,
@@ -2916,7 +2885,6 @@ impl App {
         });
         let mut app = Self {
             active_view: View::Create,
-            create_mode: CreateMode::default(),
             generate: GenerateState {
                 prompt,
                 negative_prompt,
@@ -2974,7 +2942,6 @@ impl App {
                 }
             },
             prefs,
-            script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url,
             motion: crate::motion::MotionState::from_env_and_prefs(),
@@ -5308,19 +5275,6 @@ impl App {
                 let i = self.active_view.index();
                 self.set_active_view(View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()]);
             }
-            Action::ChainEnter => {
-                let switched =
-                    self.active_view != View::Create || self.create_mode != CreateMode::Chain;
-                self.active_view = View::Create;
-                self.create_mode = CreateMode::Chain;
-                if switched {
-                    self.motion
-                        .trigger_workspace_fade(self.layout.content, self.theme.bg);
-                }
-            }
-            Action::ChainExit => {
-                self.create_mode = CreateMode::Compose;
-            }
             Action::ToggleAdvanced => {
                 self.generate.advanced.open = !self.generate.advanced.open;
                 self.generate.advanced.save();
@@ -6018,87 +5972,6 @@ impl App {
                                 ));
                         }
                     }
-                }
-            }
-            Action::ScriptMoveDown => self.script.move_down(),
-            Action::ScriptMoveUp => self.script.move_up(),
-            Action::ScriptReorderDown => self.script.reorder_down(),
-            Action::ScriptReorderUp => self.script.reorder_up(),
-            Action::ScriptAddAfter => self.script.add_stage_after(),
-            Action::ScriptAddBefore => self.script.add_stage_before(),
-            Action::ScriptDelete if self.script.script.stages.len() > 1 => {
-                self.request_confirm(
-                    format!("Delete stage {}?", self.script.selected + 1),
-                    ConfirmAction::DeleteScriptStage,
-                );
-            }
-            Action::ScriptCycleTransition => self.script.cycle_transition(),
-            Action::ScriptSave => self.script.open_save_dialog(),
-            Action::ScriptLoad => self.script.open_load_dialog(),
-            Action::ScriptSubmit if !self.generate.generating => {
-                let req = self.script.build_chain_request();
-                self.generate.generating = true;
-                self.generate.error_message = None;
-                // An advisory describes the print that produced it.
-                self.generate.warning_message = None;
-                self.generate.progress.clear();
-                self.generate.progress.mark_generation_start();
-                self.generate.preview_image = None;
-                self.generate.image_state = None;
-                self.generate.animation = None;
-
-                let tx = self.bg_tx.clone();
-                let server_url = self.server_url.clone();
-
-                self.tokio_handle.spawn(async move {
-                    crate::backend::run_chain_generation(server_url, req, tx).await;
-                });
-            }
-            Action::ScriptOpenPromptEditor => self.script.open_prompt_editor(),
-            Action::ScriptOpenFramesEditor => self.script.open_frames_editor(),
-            Action::ScriptModalSubmit => {
-                use crate::ui::script_composer::ScriptModal;
-                match self.script.modal {
-                    ScriptModal::PromptEdit { .. } => self.script.commit_prompt(),
-                    ScriptModal::FramesEdit { .. } => self.script.commit_frames(),
-                    ScriptModal::SavePath { .. } => self.script.save_to_path(),
-                    ScriptModal::LoadPath { .. } => self.script.load_from_path(),
-                    ScriptModal::Closed => {}
-                }
-            }
-            Action::ScriptModalCancel => self.script.cancel_modal(),
-            Action::ScriptModalChar(c) => {
-                use crate::ui::script_composer::ScriptModal;
-                match &mut self.script.modal {
-                    ScriptModal::PromptEdit { buffer } => buffer.push(c),
-                    ScriptModal::FramesEdit { buffer, error }
-                    | ScriptModal::SavePath { buffer, error }
-                    | ScriptModal::LoadPath { buffer, error } => {
-                        buffer.push(c);
-                        *error = None;
-                    }
-                    ScriptModal::Closed => {}
-                }
-            }
-            Action::ScriptModalBackspace => {
-                use crate::ui::script_composer::ScriptModal;
-                match &mut self.script.modal {
-                    ScriptModal::PromptEdit { buffer } => {
-                        buffer.pop();
-                    }
-                    ScriptModal::FramesEdit { buffer, error }
-                    | ScriptModal::SavePath { buffer, error }
-                    | ScriptModal::LoadPath { buffer, error } => {
-                        buffer.pop();
-                        *error = None;
-                    }
-                    ScriptModal::Closed => {}
-                }
-            }
-            Action::ScriptModalNewline => {
-                use crate::ui::script_composer::ScriptModal;
-                if let ScriptModal::PromptEdit { buffer } = &mut self.script.modal {
-                    buffer.push('\n');
                 }
             }
             _ => {}
@@ -7361,9 +7234,6 @@ impl App {
                 self.tokio_handle.spawn_blocking(move || {
                     crate::backend::remove_model(model_name, tx);
                 });
-            }
-            ConfirmAction::DeleteScriptStage => {
-                self.script.delete_stage();
             }
             ConfirmAction::ForgetHost(id) => {
                 self.machines.forget(&id);
@@ -10683,68 +10553,6 @@ impl App {
                     }
                     self.sync_generate_capabilities();
                 }
-                BackgroundEvent::ChainProgress(event) => {
-                    use mold_core::ChainProgressEvent;
-                    let msg = match &event {
-                        ChainProgressEvent::ChainStart {
-                            stage_count,
-                            estimated_total_frames,
-                        } => {
-                            format!("Chain: {stage_count} stages, ~{estimated_total_frames} frames")
-                        }
-                        ChainProgressEvent::StageStart { stage_idx } => {
-                            format!(
-                                "Stage {}/{} started",
-                                stage_idx + 1,
-                                self.script.script.stages.len()
-                            )
-                        }
-                        ChainProgressEvent::DenoiseStep {
-                            stage_idx,
-                            step,
-                            total,
-                        } => {
-                            format!("Stage {} step {}/{}", stage_idx + 1, step, total)
-                        }
-                        ChainProgressEvent::StageDone {
-                            stage_idx,
-                            frames_emitted,
-                        } => {
-                            format!("Stage {} done ({} frames)", stage_idx + 1, frames_emitted)
-                        }
-                        ChainProgressEvent::Stitching { total_frames } => {
-                            format!("Stitching {total_frames} frames...")
-                        }
-                    };
-                    self.generate.progress.push_log(ProgressLogEntry {
-                        message: msg,
-                        style: ProgressStyle::Info,
-                    });
-                }
-                BackgroundEvent::ChainComplete {
-                    stage_count,
-                    request_warnings,
-                } => {
-                    self.generate.generating = false;
-                    self.generate.clear_live_preview();
-                    self.generate.progress.generation_started_at = None;
-                    self.generate.progress.stage_started_at = None;
-                    self.generate.progress.push_log(ProgressLogEntry {
-                        message: format!("Chain complete: {stage_count} stages"),
-                        style: ProgressStyle::Done,
-                    });
-                    // A sequence's filing is stamped on the stitched print, so
-                    // a host that could not apply it reports it here exactly
-                    // as it does for a one-shot.
-                    self.surface_request_advisories(&request_warnings);
-                }
-                BackgroundEvent::ChainError(msg) => {
-                    self.generate.generating = false;
-                    self.generate.clear_live_preview();
-                    self.generate.progress.generation_started_at = None;
-                    self.generate.progress.stage_started_at = None;
-                    self.generate.error_message = Some(msg);
-                }
                 BackgroundEvent::GalleryDeleteFailed(msg) => {
                     self.apply_delete_failure(&msg);
                 }
@@ -12261,7 +12069,6 @@ mod tests {
 
         App {
             active_view: View::Settings,
-            create_mode: CreateMode::default(),
             generate: GenerateState {
                 prompt: TextArea::default(),
                 negative_prompt: TextArea::default(),
@@ -12310,7 +12117,6 @@ mod tests {
                 ..Default::default()
             },
             prefs: crate::prefs::TuiPrefs::default(),
-            script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url: None,
             motion: crate::motion::MotionState::new(false),
@@ -12458,25 +12264,6 @@ mod tests {
         assert_eq!(View::ALL.len(), 5);
         assert_eq!(View::ALL[3], View::Machines);
         assert_eq!(View::ALL[4], View::Settings);
-    }
-
-    #[tokio::test]
-    async fn chain_is_a_create_submode_not_a_tab() {
-        // The chain composer must never reappear as a sixth tab — it nests
-        // under Create like the desktop's /create/chain route.
-        assert_eq!(View::ALL.len(), 5);
-        let mut app = make_settings_test_app();
-        app.active_view = View::Settings;
-        app.dispatch_action(Action::ChainEnter);
-        assert_eq!(app.active_view, View::Create);
-        assert_eq!(app.create_mode, CreateMode::Chain);
-        // Leaving Create and coming back keeps the chain in progress.
-        app.dispatch_action(Action::SwitchView(View::Library));
-        app.dispatch_action(Action::SwitchView(View::Create));
-        assert_eq!(app.create_mode, CreateMode::Chain);
-        // ChainExit is the only way back to compose.
-        app.dispatch_action(Action::ChainExit);
-        assert_eq!(app.create_mode, CreateMode::Compose);
     }
 
     #[tokio::test]
@@ -14441,32 +14228,35 @@ mod tests {
     #[serial_test::serial(mold_env)]
     async fn confirm_on_opens_popup_without_dispatching() {
         let mut app = make_settings_test_app();
-        app.script.add_stage_after();
-        assert_eq!(app.script.script.stages.len(), 2);
         assert!(app.needs_confirm(), "confirmations default to on");
-        app.dispatch_action(Action::ScriptDelete);
+        app.gallery.dirty = false;
+        app.request_confirm(
+            "Forget machine?".to_string(),
+            ConfirmAction::ForgetHost("uat-host".to_string()),
+        );
         assert!(
             matches!(app.popup, Some(Popup::Confirm { .. })),
             "confirm popup must open when the preference is on"
         );
-        assert_eq!(app.script.script.stages.len(), 2, "nothing dispatched yet");
+        assert!(!app.gallery.dirty, "nothing dispatched yet");
     }
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
     async fn confirm_off_skips_popup_and_dispatches() {
         let mut app = make_settings_test_app();
-        app.script.add_stage_after();
-        assert_eq!(app.script.script.stages.len(), 2);
         app.prefs.confirm_destructive = false;
-        app.dispatch_action(Action::ScriptDelete);
+        app.gallery.dirty = false;
+        app.request_confirm(
+            "Forget machine?".to_string(),
+            ConfirmAction::ForgetHost("uat-host".to_string()),
+        );
         assert!(
             app.popup.is_none(),
             "confirm-off must not open the Confirm popup"
         );
-        assert_eq!(
-            app.script.script.stages.len(),
-            1,
+        assert!(
+            app.gallery.dirty,
             "the destructive action must dispatch immediately"
         );
     }
@@ -17698,93 +17488,6 @@ mod tests {
                     && matches!(entry.style, ProgressStyle::Warning)),
             "the advisory belongs in the per-generation record too"
         );
-    }
-
-    /// A sequence carries a filing too — stamped on the stitched print —
-    /// so a host that could not apply it must say so on the same slot as a
-    /// one-shot. `ChainResponse` carries the identical `request_warnings`.
-    #[tokio::test]
-    async fn a_completed_chain_surfaces_its_advisories_too() {
-        let mut app = make_settings_test_app();
-        let advisory =
-            "tags and collection were not applied; the print was generated and saved normally";
-        app.bg_tx
-            .send(BackgroundEvent::ChainComplete {
-                stage_count: 2,
-                request_warnings: vec![advisory.to_string()],
-            })
-            .unwrap();
-        app.process_background_events();
-
-        assert_eq!(
-            app.generate.warning_message.as_deref(),
-            Some(advisory),
-            "a stitched print's dropped filing must not be silent"
-        );
-        assert_eq!(app.generate.error_message, None, "the chain succeeded");
-        assert!(app
-            .generate
-            .progress
-            .log
-            .iter()
-            .any(|entry| entry.message.contains("were not applied")
-                && matches!(entry.style, ProgressStyle::Warning)));
-    }
-
-    #[tokio::test]
-    async fn an_unwarned_chain_leaves_the_advisory_slot_empty() {
-        let mut app = make_settings_test_app();
-        app.bg_tx
-            .send(BackgroundEvent::ChainComplete {
-                stage_count: 2,
-                request_warnings: Vec::new(),
-            })
-            .unwrap();
-        app.process_background_events();
-
-        assert_eq!(app.generate.warning_message, None);
-    }
-
-    /// Submitting a sequence clears a previous print's advisory, exactly as
-    /// starting a one-shot does.
-    #[tokio::test]
-    async fn submitting_a_chain_clears_a_previous_advisory() {
-        let mut app = make_settings_test_app();
-        app.generate.warning_message = Some("a stale advisory".to_string());
-
-        app.dispatch_action(Action::ScriptSubmit);
-
-        assert_eq!(app.generate.warning_message, None);
-    }
-
-    fn chain_response_with_advisories(warnings: Vec<String>) -> mold_core::ChainResponse {
-        mold_core::ChainResponse {
-            request_warnings: warnings,
-            video: mold_core::VideoData {
-                video_only: None,
-                attention_path: None,
-                int8_arm: None,
-                data: vec![0u8; 4],
-                format: OutputFormat::Mp4,
-                width: 64,
-                height: 64,
-                frames: 8,
-                fps: 8,
-                gif_preview: Vec::new(),
-                thumbnail: Vec::new(),
-                pipeline: None,
-                source_preprocessing: None,
-                pipeline_provenance_sha256: None,
-                has_audio: false,
-                duration_ms: None,
-                audio_sample_rate: None,
-                audio_channels: None,
-            },
-            stage_count: 2,
-            gpu: None,
-            script: Default::default(),
-            vram_estimate: None,
-        }
     }
 
     // ── File under (creation-time filing) ──────────────────────

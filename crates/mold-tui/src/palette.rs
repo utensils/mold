@@ -20,7 +20,6 @@ pub enum CommandId {
     GoModels,
     GoMachines,
     GoSettings,
-    ComposeChain,
     ToggleAdvanced,
     ConnectMachine,
     RandomizeSeed,
@@ -53,7 +52,6 @@ pub fn all_commands() -> Vec<PaletteCommand> {
         cmd(CommandId::GoModels, "◈", "Go to Models".into(), "3"),
         cmd(CommandId::GoMachines, "⊟", "Go to Machines".into(), "4"),
         cmd(CommandId::GoSettings, "⚙", "Open Settings".into(), "5"),
-        cmd(CommandId::ComposeChain, "▸", "Compose a chain".into(), "c"),
         cmd(
             CommandId::ToggleAdvanced,
             "▸",
@@ -128,7 +126,6 @@ pub fn command_action(id: CommandId) -> Action {
         CommandId::GoModels => Action::SwitchView(View::Models),
         CommandId::GoMachines => Action::SwitchView(View::Machines),
         CommandId::GoSettings => Action::SwitchView(View::Settings),
-        CommandId::ComposeChain => Action::ChainEnter,
         CommandId::ToggleAdvanced => Action::ToggleAdvanced,
         CommandId::ConnectMachine => Action::MachinesConnect,
         CommandId::RandomizeSeed => Action::RandomizeSeed,
@@ -151,7 +148,7 @@ mod tests {
         let all = all_commands();
         let filtered = filter_commands("");
         assert_eq!(all.len(), filtered.len());
-        assert_eq!(all.len(), 15 + ThemePreset::ALL.len());
+        assert_eq!(all.len(), 14 + ThemePreset::ALL.len());
         for (a, b) in all.iter().zip(filtered.iter()) {
             assert_eq!(a.id, b.id);
         }
@@ -188,21 +185,34 @@ mod tests {
         assert_eq!(theme_cmds.len(), ThemePreset::ALL.len());
     }
 
+    /// Every palette command that advertises a chord, in registry order.
+    /// Asserting the whole table (not a sample) is what makes a re-added
+    /// command — the retired chain composer's `c`, say — fail here instead
+    /// of quietly claiming a key.
     #[test]
-    fn nav_hints_match_bound_keys() {
-        for (id, hint) in [
-            (CommandId::GoCreate, "1"),
-            (CommandId::GoLibrary, "2"),
-            (CommandId::GoModels, "3"),
-            (CommandId::GoMachines, "4"),
-            (CommandId::GoSettings, "5"),
-            (CommandId::ComposeChain, "c"),
-            (CommandId::ToggleAdvanced, "A"),
-        ] {
-            let all = all_commands();
-            let c = all.iter().find(|c| c.id == id).unwrap();
-            assert_eq!(c.hint, hint, "{id:?}");
-        }
+    fn hinted_commands_match_their_bound_keys() {
+        let hinted: Vec<(CommandId, &'static str)> = all_commands()
+            .into_iter()
+            .filter(|c| !c.hint.is_empty())
+            .map(|c| (c.id, c.hint))
+            .collect();
+        assert_eq!(
+            hinted,
+            vec![
+                (CommandId::GoCreate, "1"),
+                (CommandId::GoLibrary, "2"),
+                (CommandId::GoModels, "3"),
+                (CommandId::GoMachines, "4"),
+                (CommandId::GoSettings, "5"),
+                (CommandId::ToggleAdvanced, "A"),
+                (CommandId::RandomizeSeed, "^R"),
+                (CommandId::ExpandPrompt, "^E"),
+                (CommandId::RetryHeldPrints, "^T"),
+                (CommandId::SearchHistory, "/"),
+                (CommandId::OpenHelp, "?"),
+                (CommandId::Quit, "q"),
+            ]
+        );
     }
 
     #[test]

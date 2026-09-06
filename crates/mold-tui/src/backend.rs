@@ -3,10 +3,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use mold_core::ServerCapabilities;
 use mold_core::{
-    classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
-    GenerateResponse, GenerateServerAction, GenerationBatchChildState, LoraWeight, MoldClient,
-    PromptExpander, PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant,
-    SseProgressEvent,
+    classify_generate_error, download::DownloadProgressEvent, GenerateRequest, GenerateResponse,
+    GenerateServerAction, GenerationBatchChildState, LoraWeight, MoldClient, PromptExpander,
+    PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant, SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
@@ -419,68 +418,6 @@ pub async fn run_generation(
             }
         }
     }
-}
-
-/// Run a chain generation request via the server's `/api/generate/chain/stream`
-/// endpoint. Chain generation is server-only — there is no local fallback.
-pub async fn run_chain_generation(
-    server_url: Option<String>,
-    req: ChainRequest,
-    tx: mpsc::UnboundedSender<BackgroundEvent>,
-) {
-    let Some(url) = server_url else {
-        let _ = tx.send(BackgroundEvent::ChainError(
-            "chain generation requires a running mold server".into(),
-        ));
-        return;
-    };
-
-    let client = MoldClient::new(&url);
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-
-    let bg_tx = tx.clone();
-    let forward_handle = tokio::spawn(async move {
-        while let Some(event) = progress_rx.recv().await {
-            let _ = bg_tx.send(BackgroundEvent::ChainProgress(event));
-        }
-    });
-
-    // A sequence is a durable chain job: create it, then follow its event
-    // stream. The compatibility endpoint that ran one as a hidden ephemeral
-    // job is gone, so a TUI that loses its connection leaves a job the host
-    // finishes rather than a render nobody owns.
-    let stage_count = req.stages.len() as u32;
-    match client.create_chain_job(&req).await {
-        Ok(created) => {
-            match client
-                .stream_chain_job_events(&created.job_id, progress_tx)
-                .await
-            {
-                Ok(outcome) if outcome.state == mold_core::chain_job::ChainJobState::Completed => {
-                    let _ = tx.send(BackgroundEvent::ChainComplete {
-                        stage_count,
-                        // The host's advisories about the request it accepted
-                        // — a filing it could not apply — surface on the
-                        // sequence exactly as they do on a one-shot.
-                        request_warnings: created.request_warnings,
-                    });
-                }
-                Ok(outcome) => {
-                    let _ = tx.send(BackgroundEvent::ChainError(outcome.error.unwrap_or_else(
-                        || format!("sequence job ended as {:?}", outcome.state),
-                    )));
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundEvent::ChainError(format!("{e:#}")));
-                }
-            }
-        }
-        Err(e) => {
-            let _ = tx.send(BackgroundEvent::ChainError(format!("{e:#}")));
-        }
-    }
-
-    forward_handle.abort();
 }
 
 /// Run a single local generation and send the result via `tx`.
