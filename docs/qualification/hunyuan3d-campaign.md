@@ -498,6 +498,58 @@ retained as `main-sync-{prompting,profiles,validation,chain,hunyuan}-v1.log`.
   fix and found no further defect for finite maps. End-to-end sampling and the
   unresolved VAE/UNet half gates remain required.
 
+## Paint UniPC trajectories and three-branch guidance
+
+- `paint_sampler.rs` ports the pinned Diffusers VP v-prediction/order-two/bh2
+  recipe, scaled-linear betas rescaled to zero terminal SNR, trailing timesteps,
+  zero final sigma, warmup and lower-order-final. State commits only after a
+  successful step; x0 conversion precedes correction. This does not reuse or
+  change the Wan flow sampler.
+- CPU and CUDA upstream captures cover 1, 2, 3, 15, 30 and 48 steps, retaining
+  model outputs, every resulting sample, x0 history and corrected sample.
+  The initial CPU capture failed on shared tensor storage; v2 clones tensors
+  only for serialization. All failures and captures remain retained.
+- Initial RED is `paint-sampler-red-v1.log`. F32 trajectories pass with worst
+  max 0.00000059604645. CPU F16 trajectories are bit-identical after reproducing
+  left-scalar operand semantics (`paint-sampler-green-v3.log`). CUDA F16 is
+  bit-identical through 30 steps; at 48 steps max is 0.00012207031 and RMS
+  0.000011143445 (`paint-sampler-cuda-v2.log`). Original bounds remain F32
+  max 5e-5/RMS 1e-5 and F16 max .005/RMS .002.
+- Review exposed two precision details. NumPy arange computes its actual
+  increment from the first rounded addition, rather than the nominal ratio;
+  48-step and 242-step regressions were RED before the fix. The corrected
+  formula matches all 1..1000 step counts in the retained NumPy sweep.
+  PyTorch CPU `F32_scalar * half_array` rounds the coefficient to half, while
+  CUDA's CPU-scalar fastpath preserves F32; reversing the CPU operands changes
+  that behavior. CUDA scalar division instead multiplies by an F32 reciprocal.
+  Direct probes, ATen source and actual corrector-rho captures are retained in
+  `paint-scalar-device-review-v1/`. CPU/CUDA rho solves round to identical F16
+  coefficients, ruling out that hypothesis.
+- Some upstream arange schedules contain both timestep0 and -1, which
+  interpolate to identical sigma. An exact upstream 769-step replay returns
+  all NaNs at the final corrector in both dtypes; 15 and 242 remain finite
+  (`paint-sampler-degenerate-review-v1/results.json`). Mold deliberately refuses
+  nondecreasing sigma schedules in `PaintUniPc::new`, before generation;
+  `PaintSchedule` still exposes the exact arrays for inspection. Its regression
+  was RED in `paint-sampler-degenerate-red-v1.log` before the refusal was added.
+- `paint_guidance.rs` implements the two separate guidance updates, material/view
+  ordering and optional azimuth weighting. The normal upstream call does not
+  forward azimuths and uses weight1 for every view. Fixtures execute the
+  original pinned pipeline statements, extracted without arithmetic changes.
+  Initial RED: `paint-guidance-red-v1.log`; CPU and CUDA then pass all F32/F16
+  1/2/6-view default/azimuth cases (`paint-guidance-green-v1.log`,
+  `paint-guidance-cuda-v1.log`). Peer review found no guidance discrepancy.
+- Combined CPU qualification passes 187 Hunyuan tests (two external tests
+  ignored), including timestep/shape refusal without state advancement,
+  training beta/cumulative-alpha arrays, sigma arrays and degenerate-schedule
+  refusal (`paint-sampler-all-cpu-v1.log`). CPU and CUDA all-target Clippy pass
+  with warnings denied (`paint-sampler-clippy-v1.log`,
+  `paint-sampler-cuda-clippy-v1.log`). Read-only review verified the numerical
+  fixes and guidance path.
+- These are sampler/guidance component qualifications. A complete paint render,
+  its VAE/UNet half gates, decoding, texture bake and client integration remain
+  required; component passes do not close those gates.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification
