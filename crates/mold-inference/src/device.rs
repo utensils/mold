@@ -1247,6 +1247,11 @@ pub struct WanActivationGeometry {
     /// (`wan/conditioning.rs:331-360`), which turns every block's modulation
     /// table from one broadcast row into a full `[1, T, 6, dim]` F32 tensor.
     pub per_token_timesteps: bool,
+    /// Whether denoising switches between a high- and low-noise expert.
+    /// Dense Wan 2.1 14B shares A14B's tensor geometry, so this execution
+    /// property is required to keep their independently qualified cache
+    /// policies distinct.
+    pub expert_pair: bool,
 }
 
 impl WanActivationGeometry {
@@ -1260,10 +1265,11 @@ impl WanActivationGeometry {
             vae: WanVaeGeneration::V21,
             patch_spatial: 2,
             per_token_timesteps: false,
+            expert_pair: false,
         }
     }
 
-    /// Wan 2.1 T2V-14B and both Wan 2.2 A14B experts.
+    /// Both Wan 2.2 A14B experts.
     pub const fn a14b() -> Self {
         Self {
             dim: 5120,
@@ -1273,6 +1279,15 @@ impl WanActivationGeometry {
             vae: WanVaeGeneration::V21,
             patch_spatial: 2,
             per_token_timesteps: false,
+            expert_pair: true,
+        }
+    }
+
+    /// Dense Wan 2.1 T2V-14B.
+    pub const fn t2v_14b() -> Self {
+        Self {
+            expert_pair: false,
+            ..Self::a14b()
         }
     }
 
@@ -1286,6 +1301,7 @@ impl WanActivationGeometry {
             vae: WanVaeGeneration::V22,
             patch_spatial: 2,
             per_token_timesteps: true,
+            expert_pair: false,
         }
     }
 }
@@ -1663,7 +1679,13 @@ pub fn wan_step_cache_bytes_for(
 ) -> u64 {
     use crate::wan::step_cache::{WanStepCachePolicy, WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS};
 
-    let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
+    let (policy, _) = WanStepCachePolicy::resolve(
+        requested,
+        steps,
+        distilled,
+        geometry.dim,
+        geometry.expert_pair,
+    );
     if !policy.is_on() {
         return 0;
     }
@@ -3578,7 +3600,13 @@ mod tests {
 
         for steps in [4u32, 11, 12, 20, 50] {
             for distilled in [false, true] {
-                let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
+                let (policy, _) = WanStepCachePolicy::resolve(
+                    requested,
+                    steps,
+                    distilled,
+                    a14b.dim,
+                    a14b.expert_pair,
+                );
                 let charged = wan_step_cache_bytes(832, 480, 53, a14b, true, steps, distilled) > 0;
                 assert_eq!(
                     charged,
@@ -3587,6 +3615,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn wan_1_3b_does_not_charge_the_cache_that_corrupts_its_default_render() {
+        for threshold in [
+            None,
+            Some(crate::wan::step_cache::AUTO_THRESHOLD),
+            Some(0.05),
+        ] {
+            assert_eq!(
+                wan_step_cache_bytes_for(
+                    832,
+                    480,
+                    81,
+                    WanActivationGeometry::t2v_1_3b(),
+                    true,
+                    30,
+                    false,
+                    threshold,
+                ),
+                0,
+                "1.3B cache must stay disabled until its output is qualified"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_14b_does_not_charge_the_cache_that_corrupts_its_default_render() {
+        let dense = WanActivationGeometry::t2v_14b();
+        let pair = WanActivationGeometry::a14b();
+        let requested = Some(crate::wan::step_cache::AUTO_THRESHOLD);
+
+        assert_eq!(
+            wan_step_cache_bytes_for(832, 480, 33, dense, true, 30, false, requested),
+            0
+        );
+        assert!(wan_step_cache_bytes_for(832, 480, 33, pair, true, 20, false, requested) > 0);
     }
 
     /// Flash must always price BELOW math at the same shape, and the gap must

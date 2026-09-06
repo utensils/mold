@@ -1197,6 +1197,15 @@ pub(crate) async fn require_server_generation_request_activation(
     mold_core::require_generate_request_model_activation(request, Some(&models_root), family)
         .map_err(ApiError::model_activation)?;
 
+    // The legacy CPU dispatcher derives its loading policy from the process.
+    // Refuse an override before durable admission rather than letting its
+    // memory guard and the request-aware engine use different policies.
+    if request.offload.is_some() && state.gpu_pool.worker_count() == 0 {
+        return Err(ApiError::validation(
+            "request-scoped offload requires a GPU worker on the host",
+        ));
+    }
+
     if let Some(control_model) = request.control_model.as_deref() {
         require_server_model_activation(state, control_model).await?;
     }
@@ -13639,6 +13648,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_offload_requires_a_gpu_worker_before_admission() {
+        let state = AppState::for_tests();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat", "model": "flux-schnell:q8", "width": 512,
+            "height": 512, "steps": 4, "guidance": 0.0, "batch_size": 1
+        }))
+        .unwrap();
+        for offload in [Some(true), Some(false)] {
+            request.offload = offload;
+            let error =
+                require_server_generation_request_activation(&state, &request, Some("flux"))
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(error.error.contains("offload"));
+        }
+        request.offload = None;
+        require_server_generation_request_activation(&state, &request, Some("flux"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn generation_preflight_gates_nested_models_and_root_relative_artifacts() {
         let state = AppState::for_tests();
         let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
@@ -13674,11 +13706,16 @@ mod tests {
 
             expert: None,
         });
-        let error =
-            require_server_generation_request_activation(&state, &nested_lora, Some("flux"))
-                .await
-                .unwrap_err();
-        assert_eq!(error.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let result =
+            require_server_generation_request_activation(&state, &nested_lora, Some("flux")).await;
+        if cfg!(feature = "h3") {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err().status,
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+            );
+        }
 
         for (control_model, upscale_model) in [
             (Some("MiniMax-H3-FL2VA"), None),

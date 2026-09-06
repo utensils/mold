@@ -128,6 +128,15 @@ pub struct FrozenRuntimeEnvironment {
 }
 
 impl FrozenRuntimeEnvironment {
+    pub fn with_offload(mut self, offload: Option<bool>) -> Self {
+        if let Some(offload) = offload {
+            self.values.insert(
+                "MOLD_OFFLOAD".into(),
+                Some(if offload { "1" } else { "0" }.into()),
+            );
+        }
+        self
+    }
     fn capture() -> Self {
         Self {
             values: ENGINE_SHAPING_VARIABLES

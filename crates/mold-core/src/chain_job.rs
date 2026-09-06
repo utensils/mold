@@ -875,6 +875,7 @@ mod tests {
 
     fn sample_request() -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -1398,6 +1399,7 @@ request_json = "{}"
 
     fn event_detail_fixture() -> ChainJobDetail {
         let request = crate::chain::ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,

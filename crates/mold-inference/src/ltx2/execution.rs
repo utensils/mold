@@ -238,6 +238,7 @@ mod tests {
 
     fn req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

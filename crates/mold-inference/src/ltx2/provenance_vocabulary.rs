@@ -22,7 +22,7 @@
 //! - `ltx2 int8 arm=native-w8a8|dequant-cuda|dequant-metal|dequant-host`
 //! - `ltx2 linear kind=qmatmul|dequant` (GGUF tiers)
 //! - `ltx2 audio branch=run|skipped`
-//! - `attention backend selected backend=Math|Flash` — the shared dispatcher's
+//! - `attention backend policy resolved requested=Some(Math)|Some(Flash)` — the shared dispatcher's
 //!   existing line (`crate::attention::AttentionBackend::resolve`), emitted
 //!   once per process.
 
@@ -53,9 +53,11 @@ pub(crate) const LINEAR_KIND_DEQUANT: &str = "ltx2 linear kind=dequant";
 pub(crate) const AUDIO_BRANCH_RUN: &str = "ltx2 audio branch=run";
 pub(crate) const AUDIO_BRANCH_SKIPPED: &str = "ltx2 audio branch=skipped";
 
-/// The shared attention dispatcher's own selection line.
-pub(crate) const DISPATCHER_BACKEND_MATH: &str = "attention backend selected backend=Math";
-pub(crate) const DISPATCHER_BACKEND_FLASH: &str = "attention backend selected backend=Flash";
+/// The shared attention policy's explicit request line; the per-render path proves execution.
+pub(crate) const DISPATCHER_BACKEND_MATH: &str =
+    "attention backend policy resolved requested=Some(Math)";
+pub(crate) const DISPATCHER_BACKEND_FLASH: &str =
+    "attention backend policy resolved requested=Some(Flash)";
 
 /// Every log line a matrix row may expect, verbatim.
 pub(crate) const KNOWN_PROVENANCE_LINES: &[&str] = &[
@@ -286,7 +288,7 @@ mod tests {
         for line in KNOWN_PROVENANCE_LINES {
             assert!(seen.insert(*line), "duplicate provenance line {line:?}");
             assert!(
-                line.starts_with("ltx2 ") || line.starts_with("attention backend selected "),
+                line.starts_with("ltx2 ") || line.starts_with("attention backend policy resolved "),
                 "{line:?} is not an ltx2 or dispatcher line"
             );
             assert!(line.contains('='), "{line:?} carries no key=value decision");

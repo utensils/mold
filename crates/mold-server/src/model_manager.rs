@@ -1165,8 +1165,9 @@ pub(crate) async fn estimate_generation_memory(
         .map(|(_, capacity, ordinal, backend)| (*capacity, *ordinal, *backend))
         .max_by_key(|(capacity, ordinal, _)| (*capacity, std::cmp::Reverse(*ordinal)));
     let available = roomiest.map(|(available, _, _)| available);
+    let runtime = mold_inference::runtime_env::snapshot().with_offload(req.offload);
     let forced_offload = matches!(
-        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        runtime.value("MOLD_OFFLOAD"),
         Some("1") | Some("true") | Some("yes")
     );
     let estimate = estimate_generation_memory_for_request(
@@ -1180,8 +1181,8 @@ pub(crate) async fn estimate_generation_memory(
                 |(_, _, backend)| {
                     mold_inference::wan::block_offload::AdmissionPolicy::from_values(
                         backend,
-                        mold_inference::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS").as_deref(),
-                        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+                        runtime.value("MOLD_WAN_OFFLOAD_BLOCKS"),
+                        runtime.value("MOLD_OFFLOAD"),
                     )
                 },
             ),
@@ -1201,8 +1202,8 @@ pub(crate) async fn estimate_generation_memory(
                 forced_offload,
                 mold_inference::wan::block_offload::AdmissionPolicy::from_values(
                     backend,
-                    mold_inference::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS").as_deref(),
-                    mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+                    runtime.value("MOLD_WAN_OFFLOAD_BLOCKS"),
+                    runtime.value("MOLD_OFFLOAD"),
                 ),
             ),
             Some(capacity),
@@ -1901,7 +1902,8 @@ pub(crate) async fn ensure_model_ready(
                 )?;
             } else {
                 #[cfg(feature = "cuda")]
-                mold_inference::device::post_drop_free_vram_bytes(0)
+                state
+                    .post_drop_free_vram_bytes()
                     .map_err(|error| ApiError::insufficient_memory(error.to_string()))?;
             }
             let load_strategy = match cached_paths.as_ref() {
@@ -2146,7 +2148,7 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 crate::metrics::record_gpu_memory(0);
             }
             drop(cache);
-            let free_after_drop = mold_inference::device::post_drop_free_vram_bytes(0);
+            let free_after_drop = state.post_drop_free_vram_bytes();
             tracing::info!(
                 free_vram_bytes = ?free_after_drop,
                 "legacy model unloaded; sampled post-drop VRAM"
@@ -2480,8 +2482,9 @@ mod tests {
     fn cached_catalog_intent_cannot_hide_h3_in_paths_or_companions() {
         let mut path_intent = neutral_catalog_intent();
         path_intent.primary_recipe_path = PathBuf::from("ordinary/MiniMaxH3.safetensors");
-        assert!(
-            require_catalog_intent_activation("cv:42", &path_intent, Path::new("/models")).is_err()
+        assert_eq!(
+            require_catalog_intent_activation("cv:42", &path_intent, Path::new("/models")).is_ok(),
+            cfg!(feature = "h3"),
         );
 
         let mut companion_intent = neutral_catalog_intent();
@@ -2508,7 +2511,10 @@ mod tests {
             .expect("the configured models root must not taint ordinary cached intent paths");
 
         intent.primary_recipe_path = artifact_root.join("MiniMax-H3/weights.safetensors");
-        assert!(require_catalog_intent_activation("cv:42", &intent, artifact_root).is_err());
+        assert_eq!(
+            require_catalog_intent_activation("cv:42", &intent, artifact_root).is_ok(),
+            cfg!(feature = "h3")
+        );
     }
 
     #[tokio::test]
@@ -3050,6 +3056,15 @@ mod tests {
         let state = AppState::for_tests();
         *state.config.write().await = config.clone();
 
+        if cfg!(feature = "h3") {
+            let inventory = installed_catalog_models(&state, &config, root.path(), None, false);
+            assert_eq!(inventory.len(), 1);
+            assert_eq!(inventory[0].info.name, id);
+            model_component_status_existing_only(&state, id)
+                .await
+                .unwrap();
+            return;
+        }
         assert!(installed_catalog_models(&state, &config, root.path(), None, false).is_empty());
         let error = model_component_status_existing_only(&state, id)
             .await
@@ -5260,6 +5275,7 @@ mod tests {
     #[test]
     fn activation_hint_from_request_classifies_correctly() {
         let mut req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

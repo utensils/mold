@@ -69,6 +69,7 @@ impl PipelineKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Ltx2GeneratePlan {
+    pub(crate) offload: Option<bool>,
     /// Directory for the EXR sidecar, when the request asked for one. The
     /// decode has to know before it runs: the 8-bit conversion is lossy, so
     /// HDR cannot be recovered from the frames afterwards.

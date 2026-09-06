@@ -284,6 +284,7 @@ impl ScriptComposerState {
     /// submission to the server's `/api/generate/chain/stream` endpoint.
     pub fn build_chain_request(&self) -> mold_core::ChainRequest {
         mold_core::ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,

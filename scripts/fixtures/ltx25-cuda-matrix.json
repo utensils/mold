@@ -17,18 +17,23 @@
       "{models_dir}": "MOLD_MODELS_DIR"
     },
     "profiles": {
-      "default": {},
+      "default": {
+        "MOLD_ATTN": "math"
+      },
       "attn_f32": {
-        "MOLD_LTX2_ATTN_F32": "1"
+        "MOLD_LTX2_ATTN_F32": "1",
+        "MOLD_ATTN": "math"
       },
       "flash": {
         "MOLD_ATTN": "flash"
       },
       "int8_dequant": {
-        "MOLD_LTX2_INT8": "dequant"
+        "MOLD_LTX2_INT8": "dequant",
+        "MOLD_ATTN": "math"
       },
       "qmatmul": {
-        "MOLD_LTX2_QMATMUL": "1"
+        "MOLD_LTX2_QMATMUL": "1",
+        "MOLD_ATTN": "math"
       }
     },
     "kinds": {
@@ -76,7 +81,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -120,7 +125,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -168,7 +173,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -215,7 +220,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -266,7 +271,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -323,7 +328,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -372,14 +377,14 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
           "int8_arm": "native-w8a8"
         }
       },
-      "notes": "Temporal x2 buys resolution, not duration: output frames = requested. 17 halves to 9 for stage 1 (on the 8k+1 grid); a 9-frame request halved to 5 is off-grid and, per engine finding #1 (engine-findings.md), silently snaps to a 1-frame render instead of refusing — this row is moved off that degenerate size rather than exercising it."
+      "notes": "Temporal x2 buys resolution, not duration: output frames = requested. 17 halves to 9 for stage 1 (on the 8k+1 grid); a 9-frame request halved to 5 is off-grid and, per engine finding #1 (engine-findings.md), silently snaps to a 1-frame render instead of refusing \u2014 this row is moved off that degenerate size rather than exercising it."
     },
     {
       "id": "ltx-2.5-22b-distilled-int8-conv--residency_adaptive",
@@ -417,7 +422,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 residency mode=adaptive",
           "ltx2 int8 arm=native-w8a8",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -507,7 +512,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-f32-chunked",
           "ltx2 int8 arm=native-w8a8",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-f32-chunked",
@@ -551,7 +556,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-flash",
           "ltx2 int8 arm=native-w8a8",
-          "attention backend selected backend=Flash"
+          "attention backend policy resolved requested=Some(Flash)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-flash",
@@ -595,7 +600,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=dequant-cuda",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -665,7 +670,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -723,7 +728,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -765,7 +770,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -811,7 +816,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -854,7 +859,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 residency mode=adaptive",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -898,7 +903,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 residency mode=streaming",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -941,7 +946,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -983,7 +988,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1029,7 +1034,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1072,7 +1077,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 residency mode=adaptive",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1115,7 +1120,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1159,7 +1164,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -1203,7 +1208,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -1251,7 +1256,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 int8 arm=native-w8a8",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
@@ -1295,7 +1300,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1337,7 +1342,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1383,7 +1388,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1426,7 +1431,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1468,7 +1473,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1514,7 +1519,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1557,7 +1562,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 residency mode=adaptive",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1600,7 +1605,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1641,7 +1646,7 @@
         "audio": false,
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1683,7 +1688,7 @@
         "audio_sample_rate": 24000,
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1725,7 +1730,7 @@
         "audio": false,
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1766,7 +1771,7 @@
         "audio": true,
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1809,7 +1814,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1852,7 +1857,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1897,7 +1902,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -1944,7 +1949,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2032,7 +2037,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2076,7 +2081,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=qmatmul",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2115,7 +2120,7 @@
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2160,7 +2165,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2203,7 +2208,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2246,7 +2251,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2289,7 +2294,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2332,7 +2337,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"
@@ -2376,7 +2381,7 @@
           "ltx2 attention path=ltx2-bf16-math",
           "ltx2 linear kind=dequant",
           "ltx2 audio branch=run",
-          "attention backend selected backend=Math"
+          "attention backend policy resolved requested=Some(Math)"
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math"

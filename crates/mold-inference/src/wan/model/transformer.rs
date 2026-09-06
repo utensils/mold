@@ -1521,7 +1521,7 @@ impl WanTransformer {
         device: &Device,
         loras: &crate::wan::lora::WanLoraRegistry,
     ) -> Result<Self> {
-        Self::from_gguf_with_offload(path, config, device, loras, None)
+        Self::from_gguf_with_offload(path, config, device, loras, None, None)
     }
 
     /// [`Self::from_gguf_with_loras`] that may park blocks to fit this render.
@@ -1537,6 +1537,7 @@ impl WanTransformer {
         device: &Device,
         loras: &crate::wan::lora::WanLoraRegistry,
         activation_bytes: Option<u64>,
+        offload: Option<bool>,
     ) -> Result<Self> {
         let vb = mold_candle::quantized::VarBuilder::from_gguf(path, device)?;
         if !loras.is_empty() {
@@ -1553,7 +1554,7 @@ impl WanTransformer {
             &WanWeights::quantized_with_loras(vb, Arc::clone(&registry)),
             config,
         )?;
-        model.apply_offload_policy(device, registry, &tensors, activation_bytes)?;
+        model.apply_offload_policy(device, registry, &tensors, activation_bytes, offload)?;
         Ok(model)
     }
 
@@ -1573,6 +1574,7 @@ impl WanTransformer {
         loras: Arc<crate::wan::lora::WanLoraRegistry>,
         tensors: &std::collections::HashMap<String, Arc<candle_core::quantized::QTensor>>,
         activation_bytes: Option<u64>,
+        offload: Option<bool>,
     ) -> Result<()> {
         use crate::wan::block_offload::{plan_offload, WanOffloadPlan};
 
@@ -1581,7 +1583,7 @@ impl WanTransformer {
             return Ok(());
         }
 
-        let forced = crate::wan::block_offload::forced_block_count();
+        let forced = crate::wan::block_offload::forced_block_count_for_request(offload);
         // What still has to fit is the activation budget: the weights are
         // already resident by the time this runs, so free VRAM measured here
         // is exactly what the denoise has left to work in.

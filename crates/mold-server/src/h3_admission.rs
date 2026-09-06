@@ -3670,9 +3670,13 @@ mod tests {
             plan.execution_fingerprint
         );
         assert_eq!(plan.shape.reference_fingerprint, reference_fingerprint);
-        assert!(!minimax_h3::capabilities(minimax_h3::Task::Ref2va).runtime_available);
-        assert!(
-            minimax_h3::runnable_capability_contract_for_model(minimax_h3::REF2VA_COMFY).is_none()
+        assert_eq!(
+            minimax_h3::capabilities(minimax_h3::Task::Ref2va).runtime_available,
+            minimax_h3::engine_is_built()
+        );
+        assert_eq!(
+            minimax_h3::runnable_capability_contract_for_model(minimax_h3::REF2VA_COMFY).is_some(),
+            minimax_h3::engine_is_built(),
         );
     }
 

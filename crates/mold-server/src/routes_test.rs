@@ -645,6 +645,7 @@ mod tests {
 
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -885,6 +886,9 @@ mod tests {
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(crate::gpu_pool::GpuWorker {
+            cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: Some(Ok(24_000_000_000)),
             owner_epoch: 1,
             gpu: mold_inference::device::DiscoveredGpu {
                 ordinal,
@@ -5612,6 +5616,7 @@ mod tests {
         let gallery = durable_gallery_dir(root);
         std::fs::create_dir_all(&gallery).unwrap();
         let (mut state, rx) = AppState::with_engine_and_queue(engine);
+        state.mock_device_memory = Some(Ok(24_000_000_000));
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
@@ -11941,7 +11946,11 @@ mod tests {
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        // Durable admission and feeder scheduling are setup for the contract
+        // below, not the latency being measured. Give them the same bounded
+        // window as the other blocking-generation fixtures under a loaded CI
+        // runner; the 200 ms status request remains the non-blocking assertion.
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !blocker.entered.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -12706,7 +12715,11 @@ mod tests {
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        // Durable admission and feeder scheduling are setup for the contract
+        // below, not the latency being measured. Give them the same bounded
+        // window as the other blocking-generation fixtures under a loaded CI
+        // runner; the 200 ms models request remains the non-blocking assertion.
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !blocker.entered.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -13778,6 +13791,8 @@ mod tests {
         assert!(downloads.queued.is_empty());
     }
 
+    // The public H3 feature lifts the filename-based artifact gate.
+    #[cfg(not(feature = "h3"))]
     #[tokio::test]
     async fn configured_h3_artifact_path_is_rejected_before_queueing() {
         let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());

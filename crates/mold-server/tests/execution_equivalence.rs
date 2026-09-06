@@ -79,6 +79,7 @@ fn path(root: &Path, name: &str) -> String {
 
 fn device(id: &str, backend: GpuBackend, architecture: Option<(u16, u16)>) -> DeviceFact {
     DeviceFact {
+        cuda_peak_baseline: None,
         id: id.into(),
         ordinal: id.bytes().last().unwrap_or(b'0').saturating_sub(b'0') as usize,
         backend,

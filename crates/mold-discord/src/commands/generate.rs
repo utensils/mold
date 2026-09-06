@@ -590,6 +590,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     };
 
     GenerateRequest {
+        offload: None,
         mesh: None,
         video_only: None,
         collection: None,

@@ -1239,7 +1239,9 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
-    use mold_core::chain::{ChainStage, LoraSpec, TransitionMode};
+    #[cfg(not(feature = "h3"))]
+    use mold_core::chain::LoraSpec;
+    use mold_core::chain::{ChainStage, TransitionMode};
     use mold_core::GenerateRequest;
     use mold_core::OutputFormat;
     use mold_inference::chain::ChainTail;
@@ -1248,6 +1250,7 @@ mod tests {
 
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -1606,6 +1609,8 @@ mod tests {
             .is_empty());
     }
 
+    // The public H3 feature lifts the filename-based artifact gate.
+    #[cfg(not(feature = "h3"))]
     #[tokio::test]
     async fn create_chain_job_rejects_every_nested_h3_artifact_before_persisting() {
         for case in [
@@ -2232,6 +2237,8 @@ mod tests {
         assert_eq!(wire["stage_count"].as_u64(), Some(2));
     }
 
+    // The public H3 feature lifts the filename-based artifact gate.
+    #[cfg(not(feature = "h3"))]
     #[tokio::test]
     async fn amend_rejects_new_h3_stage_lora_without_mutating_or_requeueing() {
         let home = tempfile::tempdir().unwrap();
@@ -2539,6 +2546,8 @@ mod tests {
         );
     }
 
+    // The public H3 feature lifts the filename-based artifact gate.
+    #[cfg(not(feature = "h3"))]
     #[tokio::test]
     async fn resume_rejects_nested_persisted_h3_artifacts_without_mutation() {
         let home = tempfile::tempdir().unwrap();

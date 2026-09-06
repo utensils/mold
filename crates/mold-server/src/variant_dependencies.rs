@@ -535,6 +535,7 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
                 worker.gpu.total_vram_bytes,
             );
             Some(DeviceFact {
+                cuda_peak_baseline: worker.wan_context_baseline(),
                 id: device.id,
                 ordinal: device.ordinal,
                 backend: device.backend,
@@ -573,6 +574,7 @@ fn worker_device_facts_from_startup_sample(state: &AppState) -> Vec<DeviceFact> 
         .workers
         .iter()
         .map(|worker| DeviceFact {
+            cuda_peak_baseline: None,
             id: worker_device_id(&worker),
             ordinal: worker.gpu.ordinal,
             backend: worker.gpu.backend,
@@ -1378,7 +1380,7 @@ pub(crate) async fn prepare_inputs_for_devices(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let base = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    let base = mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     let authority_fingerprint =
         crate::execution_plan::preparation_authority_fingerprint(config, request, &paths, &base);
     let devices = crate::execution_plan::eligible_devices_for_request(config, request, &devices)
@@ -2416,7 +2418,7 @@ async fn prepare_h3_private_inputs_for_devices(
     let mut admissions = BTreeMap::new();
     for (device_id, (device, evidence)) in evidence_by_device {
         let mut frozen =
-            mold_inference::FrozenEngineConfig::resolve(&resolved_request.model, config);
+            mold_inference::FrozenEngineConfig::resolve_for_request(&resolved_request, config);
         frozen.family = mold_core::minimax_h3::FAMILY.to_string();
         frozen.h3_factory_authority = Some(evidence.base_factory_authority().clone());
         frozen.attention_backend = evidence.attention().generic_backend;
@@ -3677,6 +3679,7 @@ mod tests {
             &request,
             &config,
             vec![DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -3706,6 +3709,7 @@ mod tests {
             &config,
             &request,
             &[DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -3749,6 +3753,7 @@ mod tests {
             &config,
             &request,
             &[DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -3868,6 +3873,7 @@ mod tests {
             &config,
             &request,
             vec![DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -3932,6 +3938,7 @@ mod tests {
             &request,
             vec![
                 DeviceFact {
+                    cuda_peak_baseline: None,
                     id: "cuda:0".to_string(),
                     ordinal: 0,
                     backend: mold_core::GpuBackend::Cuda,
@@ -3939,6 +3946,7 @@ mod tests {
                     available_vram_bytes: 4_000_000_000,
                 },
                 DeviceFact {
+                    cuda_peak_baseline: None,
                     id: "cuda:1".to_string(),
                     ordinal: 1,
                     backend: mold_core::GpuBackend::Cuda,
@@ -3970,6 +3978,7 @@ mod tests {
         config.qwen3_variant = Some("bf16".to_string());
         let low_facts = (0..8)
             .map(|ordinal| DeviceFact {
+                cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
                 backend: mold_core::GpuBackend::Cuda,
@@ -3997,6 +4006,7 @@ mod tests {
             &request,
             &(0..8)
                 .map(|ordinal| DeviceFact {
+                    cuda_peak_baseline: None,
                     id: format!("cuda:{ordinal}"),
                     ordinal,
                     backend: mold_core::GpuBackend::Cuda,
@@ -4025,6 +4035,7 @@ mod tests {
             &request,
             (0..8)
                 .map(|ordinal| DeviceFact {
+                    cuda_peak_baseline: None,
                     id: format!("cuda:{ordinal}"),
                     ordinal,
                     backend: mold_core::GpuBackend::Cuda,
@@ -4058,6 +4069,7 @@ mod tests {
             &request,
             &config,
             vec![DeviceFact {
+                cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
                 backend: mold_core::GpuBackend::Cuda,
@@ -4490,6 +4502,7 @@ mod tests {
     fn auto_quantized_download_choice_is_bounded_for_arbitrary_device_count() {
         let devices = (0..64)
             .map(|ordinal| DeviceFact {
+                cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
                 backend: mold_core::GpuBackend::Cuda,
@@ -4522,6 +4535,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let devices = vec![DeviceFact {
+            cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
             backend: mold_core::GpuBackend::Cuda,
@@ -4552,6 +4566,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let pressured = vec![DeviceFact {
+            cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
             backend: mold_core::GpuBackend::Cuda,
@@ -4591,6 +4606,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let pressured = vec![DeviceFact {
+            cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
             backend: mold_core::GpuBackend::Cuda,

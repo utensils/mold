@@ -1577,6 +1577,11 @@ pub struct GenerateRequest {
     pub output_format: Option<OutputFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_metadata: Option<bool>,
+    /// Override the host's forced block-offload preference for this request.
+    /// False retains adaptive offload when memory requires it; absent inherits
+    /// the host preference. Applies to local and remote generation alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload: Option<bool>,
     /// Scheduler override for UNet-based models (SD1.5, SDXL).
     /// Ignored by flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6629,6 +6634,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -6882,6 +6888,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -6963,6 +6970,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -7247,6 +7255,7 @@ mod tests {
     /// A plain text-to-image request every metadata test can start from.
     fn text_to_image_request() -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -7579,6 +7588,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -7827,6 +7837,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -7905,6 +7916,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -7986,6 +7998,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -8785,6 +8798,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -8869,6 +8883,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -8966,6 +8981,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -9048,6 +9064,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -9151,6 +9168,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -12841,6 +12859,18 @@ mod server_event_tests {
         assert_eq!(metadata.title.as_deref(), Some("Smurf village"));
         let wire = serde_json::to_value(&metadata).unwrap();
         assert_eq!(wire["title"], "Smurf village");
+    }
+
+    #[test]
+    fn generate_request_offload_survives_http_round_trip() {
+        let base = serde_json::json!({"prompt":"a cat","model":"flux-dev:q4","width":1024,"height":1024,"steps":4});
+        assert!(base.get("offload").is_none());
+        for requested in [true, false] {
+            let mut wire = base.clone();
+            wire["offload"] = serde_json::json!(requested);
+            let parsed: GenerateRequest = serde_json::from_value(wire).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap()["offload"], requested);
+        }
     }
 
     /// `tags` / `collection` are additive on both halves of the wire: an

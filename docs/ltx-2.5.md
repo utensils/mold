@@ -206,6 +206,18 @@ ComfyUI CUDA oracle for those rows, and
 under the gitignored `tmp/`. Like the Metal capture, these are UAT tooling: they
 ship nothing and delete no models or renders.
 
+Both CUDA capture scripts require an explicit existing `MOLD_HOME` and
+`MOLD_MODELS_DIR`; the model store may live under `MOLD_HOME/models`. Set
+`LTX25_GPU_INDEX` to the physical GPU to observe (default 0), and start the
+scratch mold server with `CUDA_VISIBLE_DEVICES` set to that GPU's full UUID.
+The runner verifies this binding; the ComfyUI capture sets it for its own
+process. Keep the production service separate from this scratch server.
+The ComfyUI preflight requires 50% **or** 64 GiB available host memory and
+aborts below both 20% and 16 GiB, while retaining its 48 GiB process RSS and
+one-hour runtime limits. Test gates clear `MOLD_*` settings and isolate the
+configuration directory. Reports accept filesystem-identical bind-mount
+aliases and still verify every retained checksum.
+
 The compact-checkpoint reference row is Mold versus ComfyUI on MPS. On the
 qualification host, ComfyUI loaded the exact INT8 ConvRot weights and reached
 the official sampler, but PyTorch sent `aten::_int_mm` to CPU and the run
@@ -216,3 +228,33 @@ because neither directly loads the Comfy INT8 ConvRot checkpoint. CUDA
 qualification is performed on its dedicated host. BF16 remains available and
 retained, but a stopped BF16 runtime run is recorded as operator-deferred, not
 misreported as passing.
+
+
+### CUDA follow-up oracle (2026-09-05)
+
+The pinned ComfyUI GGUF Q4 reference completed its 8-step first pass and
+3-step spatial refinement on one L40S. Its retained manifest is
+`/storage/mold/uat-cuda-reliability/oracle-home/output/verification/ltx-2.5/cuda/comfyui/reference-20260905T234810Z/manifest.json`.
+The inspected frame contains brass automata on a wet reflective surface,
+consistent with the subject and setting of the fixture prompt. This establishes
+an executable reference, not pixel parity with Mold. ComfyUI stayed pinned at
+`a1079ba16f2674734b065eb036fbfdddaa321a4d`, with ComfyUI-GGUF at
+`6ea2651e7df66d7585f6ffee804b20e92fb38b8a`.
+
+For this NixOS scratch environment, Triton needed
+`TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` and `C_INCLUDE_PATH` pointing to
+the venv interpreter's real Python include directory. The torch wheel's
+`site-packages/nvidia/*/lib` directories preceded the devshell libraries in
+`LD_LIBRARY_PATH`, so cuDNN loaded its matching sublibraries. Earlier failed
+attempts remain beside the successful capture.
+
+
+The CUDA matrix's `default` profile is the historical **math qualification
+baseline**, pinned with `MOLD_ATTN=math`; it is not the shipping video default,
+which can select FlashAttention when compiled. The F32, INT8-dequant and QMatMul
+profiles also pin math, and the Flash profile pins flash. Captures verify these
+values against the running server, including absence of other profile knobs.
+The startup `attention backend policy resolved requested=Some(...)` event
+records that input; each render must still supply its actual `ltx2 attention
+path=...` event and matching gallery metadata. A policy event alone is never
+proof of the executed path.

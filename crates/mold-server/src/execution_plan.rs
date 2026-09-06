@@ -636,6 +636,8 @@ impl ExecutionSemanticConfig {
             // the selected encoder artifacts above.
             identity_assets: _,
             h3_factory_authority,
+            // The resolved override is already represented in runtime_environment.
+            request_offload: _,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -1033,6 +1035,7 @@ pub struct ResolvedExecutionPlan {
     pub engine_load_strategy: mold_inference::LoadStrategy,
     pub offload_mode: OffloadMode,
     pub predicted_vram_peak_bytes: u64,
+    pub cuda_peak_baseline: Option<crate::cuda_peak::CertifiedBaseline>,
     /// Exact effective capacity against which this candidate was admitted:
     /// current sampled free VRAM plus only owner-reclaimable resident bytes.
     pub admitted_available_vram_bytes: u64,
@@ -1101,6 +1104,18 @@ impl ResolvedExecutionPlan {
     /// a device placement would use) and the denoise peak — plus whatever
     /// host charge genuinely coexists with the peak (#1038).
     pub fn admission_vram_demand_bytes(&self) -> u64 {
+        self.incremental_vram_demand(self.total_vram_demand_bytes())
+    }
+
+    pub fn incremental_vram_demand(&self, total: u64) -> u64 {
+        if self.device_backend != GpuBackend::Cuda || self.model_family != "wan" {
+            return total;
+        }
+        self.cuda_peak_baseline
+            .map_or(total, |baseline| baseline.incremental_peak(total))
+    }
+
+    pub fn total_vram_demand_bytes(&self) -> u64 {
         match self.device_backend {
             GpuBackend::Metal => {
                 let disjoint = self.predicted_phase_disjoint_host_bytes();
@@ -1158,6 +1173,7 @@ pub struct DeviceFact {
     pub backend: GpuBackend,
     pub compute_capability: Option<(u16, u16)>,
     pub available_vram_bytes: u64,
+    pub cuda_peak_baseline: Option<crate::cuda_peak::CertifiedBaseline>,
 }
 
 /// The one identity a batch parent's siblings share, filled by whichever of
@@ -1534,7 +1550,7 @@ pub fn eligible_devices_for_request(
         }
     })?;
     let capabilities = capabilities_for_family(&family);
-    let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    let engine_config = mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
         return Err(ExecutionPlanError::UnresolvableLora { alias });
     }
@@ -1708,6 +1724,7 @@ fn resolve_execution_plans_with_policy(
     {
         return resolve_private_h3_execution_plans(config, request, devices, prepared, projection);
     }
+    let offload_requested = request.offload.unwrap_or(offload_requested);
     let overlaid_config = prepared_config_overlay(config, request, prepared);
     let config = overlaid_config.as_ref().unwrap_or(config);
     let family = config
@@ -1735,7 +1752,7 @@ fn resolve_execution_plans_with_policy(
     }
     let effective_loras = effective_loras(config, request);
     let admission_engine_config =
-        mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+        mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if let Some(prepared) = prepared {
         let current_authority =
             preparation_authority_fingerprint(config, request, &paths, &admission_engine_config);
@@ -1916,7 +1933,7 @@ fn resolve_private_h3_execution_plans(
             ))
         })?;
         let mut expected_engine_config =
-            mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+            mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
         expected_engine_config.family = mold_core::minimax_h3::FAMILY.to_string();
         expected_engine_config.h3_factory_authority =
             Some(evidence.base_factory_authority().clone());
@@ -1932,6 +1949,13 @@ fn resolve_private_h3_execution_plans(
             mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
             mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
         };
+        // H3's qualified factory authority pins the load mode. A request
+        // cannot force a mode absent from that exact qualified route.
+        if request.offload == Some(true) && !evidence.base_factory_authority().block_offload() {
+            return Err(ExecutionPlanError::UnsupportedOffload {
+                family: mold_core::minimax_h3::FAMILY.to_string(),
+            });
+        }
         let offload_mode = if evidence.base_factory_authority().block_offload() {
             OffloadMode::Block
         } else {
@@ -1960,6 +1984,7 @@ fn resolve_private_h3_execution_plans(
         )?;
         let execution_equivalence_fingerprint = execution_environment.fingerprint();
         plans.push(ResolvedExecutionPlan {
+            cuda_peak_baseline: None,
             device_id: device.id,
             device_ordinal: device.ordinal,
             device_backend: device.backend,
@@ -2279,7 +2304,8 @@ pub fn validate_before_cuda(
         ExecutionPlanError::PlanInvalidated("model paths are no longer resolvable".into())
     })?;
     let current_loras = effective_loras(config, request);
-    let current_engine_config = mold_inference::FrozenEngineConfig::resolve(model, config);
+    let current_engine_config =
+        mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if current_paths != plan.admission_paths
         || current_engine_config != plan.admission_engine_config
         || current_loras != plan.effective_loras
@@ -2357,7 +2383,7 @@ fn validate_private_h3_before_cuda(
         ))
     })?;
     let mut expected_engine_config =
-        mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+        mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     expected_engine_config.family = mold_core::minimax_h3::FAMILY.to_string();
     expected_engine_config.h3_factory_authority = Some(evidence.base_factory_authority().clone());
     expected_engine_config.attention_backend = evidence.attention().generic_backend;
@@ -2889,6 +2915,13 @@ fn build_plan(
         grant.min(device.available_vram_bytes)
     });
     let recent_oom_reduced_budget = device_budget < device.available_vram_bytes;
+    let cuda_peak_baseline = (context.family == "wan"
+        && device.backend == GpuBackend::Cuda
+        && !recent_oom_reduced_budget)
+        .then_some(device.cuda_peak_baseline)
+        .flatten();
+    let total_peak_budget =
+        device_budget.saturating_add(cuda_peak_baseline.map_or(0, |baseline| baseline.bytes));
     let initial_memory =
         crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
             context.request,
@@ -2898,7 +2931,7 @@ fn build_plan(
                 context.offload_requested,
                 wan_block_offload_policy,
             ),
-            Some(device_budget),
+            Some(total_peak_budget),
             request_has_lora,
             gemma_competes,
             context.projection,
@@ -2966,7 +2999,7 @@ fn build_plan(
                 initial_memory.block_offload && !transformer_on_cpu,
                 wan_block_offload_policy,
             ),
-            Some(device_budget),
+            Some(total_peak_budget),
             request_has_lora,
             gemma_competes,
             context.projection,
@@ -2990,7 +3023,7 @@ fn build_plan(
                 initial_memory.block_offload && !transformer_on_cpu,
                 wan_block_offload_policy,
             ),
-            Some(device_budget),
+            Some(total_peak_budget),
             request_has_lora,
             gemma_competes,
             context.projection,
@@ -3007,7 +3040,9 @@ fn build_plan(
         }
         rejections.push(DeviceInfeasibility {
             device_id: device.id.clone(),
-            predicted_peak_bytes: memory.peak_memory_bytes,
+            predicted_peak_bytes: cuda_peak_baseline.map_or(memory.peak_memory_bytes, |baseline| {
+                baseline.incremental_peak(memory.peak_memory_bytes)
+            }),
             available_bytes: device_budget,
             advice,
         });
@@ -3220,6 +3255,7 @@ fn build_plan(
     };
     let execution_equivalence_fingerprint = execution_environment.fingerprint();
     Some(Ok(ResolvedExecutionPlan {
+        cuda_peak_baseline,
         device_id: device.id.clone(),
         device_ordinal: device.ordinal,
         device_backend: device.backend,
@@ -4783,6 +4819,8 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_umt5_path,
             identity_assets,
             h3_factory_authority,
+            // The resolved override is already represented in runtime_environment.
+            request_offload: _,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -4986,6 +5024,55 @@ mod tests {
     }
 
     #[test]
+    fn wan_resolver_uses_incremental_context_demand_without_changing_raw_totals() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(root.path(), "wan", None);
+        let transformer = root.path().join("Wan2.1-T2V-1.3B.safetensors");
+        sparse_file(&transformer, 3 * GIB);
+        sparse_file(&root.path().join("vae.safetensors"), GIB / 2);
+        sparse_file(&root.path().join("t5.safetensors"), GIB / 2);
+        config.models.get_mut("test:q4").unwrap().transformer =
+            Some(transformer.display().to_string());
+        let mut request = request(None);
+        request.width = 832;
+        request.height = 480;
+        request.frames = Some(81);
+        request.offload = Some(true);
+        let cold = resolve_execution_plans(&config, &request, &devices(&[64 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        let total = cold.predicted_vram_peak_bytes;
+        let mut repeat = devices(&[total - 2 * GIB]);
+        assert!(resolve_execution_plans(&config, &request, &repeat, false).is_err());
+        repeat[0].cuda_peak_baseline = Some(crate::cuda_peak::CertifiedBaseline {
+            owner_epoch: 7,
+            bytes: 2 * GIB,
+        });
+        let warm = resolve_execution_plans(&config, &request, &repeat, false)
+            .unwrap()
+            .remove(0);
+        assert_eq!(warm.predicted_vram_peak_bytes, total);
+        assert_eq!(warm.total_vram_demand_bytes(), total);
+        assert_eq!(warm.admission_vram_demand_bytes(), total - 2 * GIB);
+        assert_eq!(warm.incremental_vram_demand(total + GIB), total - GIB);
+        assert_eq!(warm.admitted_available_vram_bytes, total - 2 * GIB);
+        repeat[0].available_vram_bytes -= GIB;
+        assert!(
+            resolve_execution_plans(&config, &request, &repeat, false).is_err(),
+            "new external pressure must refuse the repeated render"
+        );
+        let mut other = warm;
+        other.model_family = "flux2".into();
+        assert_eq!(other.admission_vram_demand_bytes(), total);
+        other.model_family = "wan".into();
+        other.device_backend = GpuBackend::Metal;
+        assert_eq!(
+            other.admission_vram_demand_bytes(),
+            other.total_vram_demand_bytes()
+        );
+    }
+
+    #[test]
     fn h3_activation_gate_precedes_artifact_resolution_in_normal_planning() {
         let root = TempDir::new().unwrap();
         let config = config(root.path(), "minimax-h3", None);
@@ -5123,6 +5210,7 @@ mod tests {
         free.iter()
             .enumerate()
             .map(|(ordinal, bytes)| DeviceFact {
+                cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
                 backend: GpuBackend::Cuda,
@@ -5136,6 +5224,7 @@ mod tests {
         free.iter()
             .enumerate()
             .map(|(ordinal, bytes)| DeviceFact {
+                cuda_peak_baseline: None,
                 id: format!("metal:{ordinal}"),
                 ordinal,
                 backend: GpuBackend::Metal,
@@ -6160,6 +6249,23 @@ mod tests {
     fn missing_artifact_metadata_keeps_a_conservative_host_charge() {
         let missing = PathBuf::from("/definitely/missing/mold-artifact.safetensors");
         assert_eq!(artifact_size(&missing), 64 * MIB);
+    }
+
+    #[test]
+    fn request_offload_survives_owner_revalidation() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), vec![0_u8; 1024]).unwrap();
+        }
+        let config = config(root.path(), "flux2", None);
+        for offload in [None, Some(false), Some(true)] {
+            let mut request = request(None);
+            request.offload = offload;
+            let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+                .unwrap()
+                .remove(0);
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None).unwrap();
+        }
     }
 
     #[test]
@@ -7350,6 +7456,7 @@ mod tests {
         let rebuild = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>| {
             execution_environment_descriptor(
                 &DeviceFact {
+                    cuda_peak_baseline: None,
                     id: plan.device_id.clone(),
                     ordinal: plan.device_ordinal,
                     backend: plan.execution_environment.backend,
@@ -7379,27 +7486,23 @@ mod tests {
         );
     }
 
-    /// The equivalence identity is a real content hash, so a same-size in-place
-    /// overwrite with a restored mtime genuinely does change it. What made this
-    /// racy was the fact cache in front of it: entries are keyed on the metadata
-    /// identity, and when both writes land in one coarse `ctime` tick the second
-    /// lookup is served the first write's cached hash. Evicting between the two
-    /// snapshots keeps the assertion about the content identity — which is what
-    /// the test is named for — instead of about cache-invalidation timing.
+    /// Local-installation equivalence is a metadata identity: normal artifact
+    /// acquisition replaces the file atomically, so the new inode must change
+    /// that identity even when the replacement has the same size and mtime.
+    /// Same-size in-place corruption is deliberately outside this contract;
+    /// `mold info --verify` is the explicit byte-integrity check.
     #[test]
-    fn same_size_in_place_overwrite_changes_equivalence_content_identity() {
+    fn same_size_replacement_changes_equivalence_content_identity() {
         use filetime::{set_file_mtime, FileTime};
 
         let root = TempDir::new().unwrap();
         let path = root.path().join("weights.safetensors");
         std::fs::write(&path, b"aaaa").unwrap();
         let original_mtime = FileTime::from_last_modification_time(&path.metadata().unwrap());
-        artifact_fact_cache().lock().unwrap().remove_path(&path);
         let before = equivalence_fingerprint_path(&path);
 
-        std::fs::write(&path, b"bbbb").unwrap();
+        replace_artifact_bytes(&path, b"bbbb");
         set_file_mtime(&path, original_mtime).unwrap();
-        artifact_fact_cache().lock().unwrap().remove_path(&path);
 
         assert_ne!(before, equivalence_fingerprint_path(&path));
     }
@@ -7801,6 +7904,7 @@ mod tests {
     #[test]
     fn exact_execution_fingerprint_matches_rejected_candidate_contract() {
         let device = DeviceFact {
+            cuda_peak_baseline: None,
             id: "cuda:stable-device".into(),
             ordinal: 2,
             backend: GpuBackend::Cuda,
@@ -7828,6 +7932,7 @@ mod tests {
             },
         )]);
         let engine_config = mold_inference::FrozenEngineConfig {
+            request_offload: None,
             family: "flux2".into(),
             artifact_root: PathBuf::from("/models"),
             is_schnell: Some(false),

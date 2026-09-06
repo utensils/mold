@@ -7087,7 +7087,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
     vram_budget_override: Option<u64>,
     progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
-    let force_streaming = ltx2_force_streaming_enabled();
+    let force_streaming = ltx2_force_streaming_enabled(plan.offload);
     let force_eager = crate::runtime_env::value("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry_for_checkpoint(
@@ -7655,10 +7655,12 @@ fn ltx2_force_streaming_from_values(force_streaming: Option<&str>, offload: Opti
     truthy(force_streaming) || truthy(offload)
 }
 
-fn ltx2_force_streaming_enabled() -> bool {
+fn ltx2_force_streaming_enabled(offload: Option<bool>) -> bool {
     ltx2_force_streaming_from_values(
         crate::runtime_env::value("MOLD_LTX2_FORCE_STREAMING").as_deref(),
-        crate::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        offload
+            .map(|value| if value { "1" } else { "0" })
+            .or(crate::runtime_env::value("MOLD_OFFLOAD").as_deref()),
     )
 }
 
@@ -8782,6 +8784,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,
@@ -9070,6 +9073,7 @@ mod tests {
             loras.len(),
         );
         Ltx2GeneratePlan {
+            offload: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             hdr_exr_window: None,

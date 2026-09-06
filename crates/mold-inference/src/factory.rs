@@ -87,6 +87,9 @@ pub struct FrozenEngineConfig {
     /// Exact contract-only MiniMax H3 admission/factory authority. This is
     /// `None` for every runnable family and cannot activate H3 by itself.
     pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
+    /// Request authority for the one override supported by the HTTP contract.
+    /// The resolved value is also captured in `runtime_environment`.
+    pub request_offload: Option<bool>,
     pub runtime_environment: crate::runtime_env::FrozenRuntimeEnvironment,
     pub attention_backend: crate::attention::AttentionBackend,
     pub attention_chunk: crate::attention::AttentionChunkPolicy,
@@ -95,11 +98,18 @@ pub struct FrozenEngineConfig {
 }
 
 impl FrozenEngineConfig {
+    pub fn resolve_for_request(request: &mold_core::GenerateRequest, config: &Config) -> Self {
+        let mut frozen = Self::resolve(&request.model, config);
+        frozen.request_offload = request.offload;
+        frozen.runtime_environment = frozen.runtime_environment.with_offload(request.offload);
+        frozen
+    }
     pub fn resolve(model_name: &str, config: &Config) -> Self {
         let model_cfg = config.resolved_model_config(model_name);
         let runtime_environment = crate::runtime_env::snapshot();
         let family = resolve_family(model_name, config);
         Self {
+            request_offload: None,
             family: family.clone(),
             artifact_root: config.resolved_models_dir(),
             is_schnell: model_cfg.is_schnell,
@@ -569,7 +579,8 @@ where
     let current_chunk = crate::attention::resolved_chunk_policy();
     let current_vae_tiling = crate::vae_tiling::resolve_mode();
     let current_vae_dtype = crate::device::resolved_vae_dtype_policy();
-    let current_runtime_environment = crate::runtime_env::snapshot();
+    let current_runtime_environment =
+        crate::runtime_env::snapshot().with_offload(frozen.request_offload);
     if frozen.attention_backend != current_attention
         || frozen.attention_chunk != current_chunk
         || frozen.vae_tiling != current_vae_tiling
@@ -1039,6 +1050,36 @@ mod tests {
                     "{family}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn frozen_factory_honors_request_offload_before_artifact_check() {
+        let config = Config::default();
+        for offload in [true, false] {
+            let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+                "model": "flux-dev:q4", "prompt": "test", "width": 512, "height": 512,
+                "steps": 4, "guidance": 1.0, "offload": offload
+            }))
+            .unwrap();
+            let mut frozen = FrozenEngineConfig::resolve_for_request(&request, &config);
+            let missing = tempfile::tempdir().unwrap();
+            frozen.selected_t5_path = Some(missing.path().join("missing.safetensors"));
+            let error = create_engine_with_frozen_config(
+                request.model,
+                dummy_paths(),
+                &frozen,
+                LoadStrategy::Sequential,
+                0,
+                offload,
+                None,
+            )
+            .err()
+            .expect("missing prepared artifact must refuse without CUDA work");
+            assert!(
+                error.to_string().contains("prepared engine artifact"),
+                "{error}"
+            );
         }
     }
 

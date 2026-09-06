@@ -2630,6 +2630,7 @@ pub(crate) fn preserved_stage_prefix(old: &ChainRequest, new: &ChainRequest) -> 
     let old_audio = old.enable_audio.unwrap_or(false);
     let new_audio = new.enable_audio.unwrap_or(false);
     if old.seed != new.seed
+        || old.offload != new.offload
         || old.steps != new.steps
         || old.guidance != new.guidance
         || (old.strength != new.strength
@@ -2963,6 +2964,7 @@ impl ProductionStageExecutor {
                     && !worker.fatal_cuda_error.load(Ordering::SeqCst)
             })
             .map(|worker| crate::execution_plan::DeviceFact {
+                cuda_peak_baseline: None,
                 id: crate::scheduler::worker_device_id(&worker),
                 ordinal: worker.gpu.ordinal,
                 backend: worker.gpu.backend,
@@ -3568,6 +3570,7 @@ pub(crate) fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        offload: chain.offload,
         mesh: None,
         video_only: None,
         collection: None,
@@ -4155,6 +4158,9 @@ mod tests {
                 let (job_tx, _job_rx) =
                     std::sync::mpsc::sync_channel::<crate::gpu_pool::GpuWorkerCommand>(1);
                 Arc::new(GpuWorker {
+                    cuda_peak: Default::default(),
+                    #[cfg(test)]
+                    mock_device_memory: None,
                     owner_epoch: 1,
                     gpu: mold_inference::device::DiscoveredGpu {
                         ordinal,
@@ -4346,6 +4352,7 @@ mod tests {
 
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
+            offload: None,
             collection: None,
             tags: None,
             title: None,
@@ -6369,6 +6376,25 @@ mod tests {
         let mut new = base.clone();
         new.enable_audio = Some(true);
         assert_eq!(preserved_stage_prefix(&base, &new), 0, "audio off→on");
+    }
+
+    #[test]
+    fn changing_chain_offload_invalidates_completed_stages() {
+        let old = request(vec![TransitionMode::Smooth]);
+        let mut new = old.clone();
+        new.offload = Some(true);
+        assert_eq!(preserved_stage_prefix(&old, &new), 0);
+        assert_eq!(preserved_stage_prefix(&new, &new), 1);
+    }
+
+    #[test]
+    fn durable_stage_request_preserves_offload_policy() {
+        for offload in [None, Some(false), Some(true)] {
+            let mut chain = request(vec![TransitionMode::Smooth]);
+            chain.offload = offload;
+            let stage = build_stage_generate_request(&chain.stages[0], &chain, 42, 0);
+            assert_eq!(stage.offload, offload);
+        }
     }
 
     #[test]

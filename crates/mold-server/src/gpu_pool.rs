@@ -1,7 +1,7 @@
 use crate::model_cache::{ModelCache, ModelResidency};
 use mold_core::types::{DevicePlacement, DeviceRef, GpuWorkerState, GpuWorkerStatus};
 use mold_db::MetadataDb;
-use mold_inference::device::DiscoveredGpu;
+use mold_inference::device::{self, DiscoveredGpu};
 use mold_inference::shared_pool::SharedPool;
 use mold_scheduler::WorkKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -364,6 +364,11 @@ pub(crate) fn resident_model_display_name(cache_key: &str) -> &str {
 
 /// Per-GPU worker state. Each GPU gets its own model cache, load lock, and health tracking.
 pub struct GpuWorker {
+    pub(crate) cuda_peak: crate::cuda_peak::OwnerContext,
+    /// Opt-in for workers that own only fake engines. Never falls back from a
+    /// failed real device probe; production and hardware fixtures use `None`.
+    #[cfg(test)]
+    pub(crate) mock_device_memory: Option<Result<u64, device::DeviceMemoryError>>,
     pub owner_epoch: u64,
     pub gpu: DiscoveredGpu,
     pub model_cache: Arc<Mutex<ModelCache>>,
@@ -829,6 +834,14 @@ pub enum GpuWorkerCommand {
 }
 
 impl GpuWorker {
+    pub(crate) fn post_drop_free_vram_bytes(&self) -> Result<u64, device::DeviceMemoryError> {
+        #[cfg(test)]
+        if let Some(sample) = &self.mock_device_memory {
+            return sample.clone();
+        }
+        device::post_drop_free_vram_bytes(self.gpu.ordinal)
+    }
+
     pub(crate) fn reserve_legacy_transport(&self) {
         self.legacy_pending.fetch_add(1, Ordering::SeqCst);
     }
@@ -1605,6 +1618,9 @@ impl WorkerSet {
 
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: None,
             owner_epoch,
             gpu,
             model_cache: Arc::new(Mutex::new(ModelCache::new(factory.max_cached))),
@@ -2105,6 +2121,48 @@ impl crate::durable_generation_settlement::IntoSettlementChannels for PostGenera
     }
 }
 
+impl GpuWorker {
+    pub(crate) fn wan_context_baseline(&self) -> Option<crate::cuda_peak::CertifiedBaseline> {
+        if self.poisoned.load(Ordering::SeqCst) || self.in_flight.load(Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let active = self.model_cache.try_lock().ok()?.active_vram_bytes();
+        self.cuda_peak.snapshot(
+            self.owner_epoch,
+            crate::resources::current_process_vram_bytes(&self.gpu),
+            active,
+        )
+    }
+
+    pub(crate) fn incremental_wan_peak(
+        &self,
+        total: u64,
+        admitted: Option<crate::cuda_peak::CertifiedBaseline>,
+        active_credit: u64,
+    ) -> u64 {
+        let Some(admitted) = admitted else {
+            return total;
+        };
+        if self.poisoned.load(Ordering::SeqCst) {
+            return total;
+        }
+        self.cuda_peak
+            .snapshot(
+                self.owner_epoch,
+                crate::resources::current_process_vram_bytes(&self.gpu),
+                active_credit,
+            )
+            .filter(|fresh| fresh.owner_epoch == admitted.owner_epoch)
+            .map_or(total, |fresh| {
+                crate::cuda_peak::CertifiedBaseline {
+                    bytes: fresh.bytes.min(admitted.bytes),
+                    ..fresh
+                }
+                .incremental_peak(total)
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2123,6 +2181,9 @@ mod tests {
     ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(2);
         let worker = Arc::new(GpuWorker {
+            cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: None,
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,

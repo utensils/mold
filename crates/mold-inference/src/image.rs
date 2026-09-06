@@ -481,6 +481,7 @@ mod tests {
     #[test]
     fn test_build_output_metadata_respects_opt_out() {
         let req = GenerateRequest {
+            offload: None,
             mesh: None,
             video_only: None,
             collection: None,

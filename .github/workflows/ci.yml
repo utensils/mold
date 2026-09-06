@@ -42,6 +42,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       rust_format: ${{ steps.filter.outputs.rust_format }}
       gpu: ${{ steps.filter.outputs.gpu }}
+      h3_cuda_server: ${{ steps.filter.outputs.h3_cuda_server }}
       website: ${{ steps.filter.outputs.website }}
       web: ${{ steps.filter.outputs.web }}
       nix: ${{ steps.filter.outputs.nix }}
@@ -59,6 +60,19 @@ jobs:
         id: filter
         with:
           filters: |
+            h3_cuda_server:
+              - 'crates/mold-server/**'
+              - 'crates/mold-core/**'
+              - 'crates/mold-catalog/**'
+              - 'crates/mold-inference/**'
+              - 'crates/mold-candle/**'
+              - 'crates/mold-scheduler/**'
+              - 'crates/mold-db/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'scripts/test-h3-cuda-server.sh'
+              - 'scripts/tests/h3-cuda-server-tests.sh'
+              - '.github/workflows/ci.yml'
             rust:
               - 'crates/**'
               - 'Cargo.toml'
@@ -213,6 +227,8 @@ jobs:
               - 'scripts/capture-ltx25-cuda-verification.sh'
               - 'scripts/capture-ltx25-comfy-cuda-reference.sh'
               - 'scripts/validate-ltx25-cuda-report.py'
+              - 'scripts/validate-ltx25-server-profile.py'
+              - 'scripts/tests/ltx25-server-profile.py'
               - 'scripts/ltx25-metal-ab.py'
               - 'scripts/fixtures/ltx25-assets.json'
               - 'scripts/fixtures/ltx25-cuda-matrix.json'
@@ -220,6 +236,7 @@ jobs:
               - 'scripts/fixtures/ltx25-comfy-cuda-gguf-q4-api-prompt.json'
               - 'scripts/tests/ltx25-comfy-cuda-reference.sh'
               - 'scripts/tests/ltx25-cuda-verification.sh'
+              - 'scripts/tests/ltx25-evidence-paths.py'
               - 'scripts/provision-ltx25-comfy-oracle.sh'
               - 'scripts/tests/ltx25-comfy-oracle-provision.sh'
               - 'scripts/capture-hunyuan3d-metal-uat.sh'
@@ -490,6 +507,7 @@ jobs:
           bash scripts/tests/ltx25-metal-verification.sh
           bash scripts/tests/ltx25-comfy-cuda-reference.sh
           bash scripts/tests/ltx25-cuda-verification.sh
+          bash scripts/tests/h3-cuda-server-tests.sh
           bash scripts/tests/ltx25-comfy-oracle-provision.sh
           bash scripts/tests/hunyuan3d-metal-uat.sh
       - name: Test MiniMax H3 private-UAT release contract
@@ -691,17 +709,17 @@ jobs:
   # included in any release artifact, so it never consumes the PR critical
   # path or read-only PR cache generations.
   #
-  # Being push-only means a PR cannot see this job go red: #1399 landed a
+  # Before PR coverage, #1399 landed a
   # duplicate `candle-core` in the CUDA graph and broke four consecutive main
   # merges before anyone read the result. The cheap half of that coverage —
   # every candle crate resolving to ONE package identity — is now
   # `scripts/tests/candle-single-identity.sh` on the release-contract route,
   # which does run on PRs. Keep dependency-shape assertions there; this job
-  # stays the compile-the-kernels backstop.
+  # also runs the full H3 server suite for affected PRs.
   flash-attn-check:
-    name: FlashAttention feature typecheck
+    name: CUDA feature checks and H3 server tests
     needs: changes
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || needs.changes.outputs.h3_cuda_server == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     env:
@@ -759,14 +777,19 @@ jobs:
       # to name the inference crate directly to cover its `#[cfg(test)]` code.
       # `dev-bins` pulls in `attention_bench`, which no other gate compiles.
       - name: Clippy the flash-attn inference lib, tests and dev-bins
+        if: github.event_name == 'push'
         run: cargo clippy -p mold-ai-inference --features flash-attn,dev-bins --all-targets -- -D warnings
       - name: Clippy the flash-attn binary wiring
+        if: github.event_name == 'push'
         run: cargo clippy -p mold-ai --features flash-attn -- -D warnings
       - name: Clippy the isolated MiniMax H3 release-candidate kernel
+        if: github.event_name == 'push'
         run: cargo clippy -p mold-ai-candle --features h3-flash-attn-rc --all-targets -- -D warnings
       - name: Clippy the synthetic MiniMax H3 qualification probe
+        if: github.event_name == 'push'
         run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings
       - name: Clippy the synthetic MiniMax H3 packed-row benchmark
+        if: github.event_name == 'push'
         run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_benchmark -- -D warnings
       # #1350: nothing else compiles mold-server's `h3-private-uat` edge. The
       # `rust` job's H3 steps only reach mold-inference's forwarding feature,
@@ -780,7 +803,16 @@ jobs:
       # building the very RC kernel the feature forwards. `--all-targets` is
       # load-bearing: both red tests #1350 fixed live in `#[cfg(test)]` code.
       - name: Check the private MiniMax H3 UAT server build
+        if: github.event_name == 'push'
         run: cargo check -p mold-ai-server --features h3-private-uat --all-targets
+      # No GPU is attached to this hosted runner. These are hermetic library
+      # contracts; live GPU qualification is retained separately. The driver
+      # stub supplies link symbols without presenting a usable CUDA device.
+      - name: Run the complete hermetic H3 CUDA server library suite
+        run: |
+          mkdir -p "$RUNNER_TEMP/cuda-driver-stub"
+          ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-driver-stub/libcuda.so.1"
+          LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-driver-stub:${LD_LIBRARY_PATH:-}" bash scripts/test-h3-cuda-server.sh
 
   metal-check:
     name: Metal forced-local typecheck

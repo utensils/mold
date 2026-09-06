@@ -37,7 +37,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-mold_home="${MOLD_HOME:-/mnt/storage20tb/AI/mold}"
+mold_home="${MOLD_HOME:-}"
+gpu_index="${LTX25_GPU_INDEX:-0}"
 models_dir="${MOLD_MODELS_DIR:-}"
 references_root="${LTX25_REFERENCES_ROOT:-$repo_root/tmp}"
 campaign="${LTX25_CAMPAIGN:-current}"
@@ -85,17 +86,16 @@ else
     || fail "injected host JSON requires LTX25_CONTRACT_TEST=1"
   [[ "$runtime_env_source" == "$repo_root/crates/mold-inference/src/runtime_env.rs" ]] \
     || fail "an injected engine-shaping registry requires LTX25_CONTRACT_TEST=1"
-  [[ "$mold_home" == /mnt/storage20tb/AI/mold ]] \
-    || fail "MOLD_HOME must be /mnt/storage20tb/AI/mold"
+  [[ "$mold_home" == /* && -d "$mold_home" ]] \
+    || fail "MOLD_HOME must name an existing absolute directory"
   [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] \
     || fail "runtime capture is restricted to Linux x86_64 CUDA"
   [[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=normal)" ]] \
     || fail "qualification requires a clean source tree; commit the exact code before capture"
 fi
-[[ -n "$models_dir" ]] || fail "MOLD_MODELS_DIR is required: the model store is separate from MOLD_HOME"
+[[ "$gpu_index" =~ ^[0-9]+$ ]] || fail "LTX25_GPU_INDEX must be a physical GPU index"
+[[ -n "$models_dir" ]] || fail "MOLD_MODELS_DIR is required: name the installed model store"
 [[ -d "$models_dir" ]] || fail "MOLD_MODELS_DIR does not exist: $models_dir"
-[[ "${models_dir%/}" != "${mold_home%/}/models" ]] \
-  || fail "MOLD_MODELS_DIR must not be MOLD_HOME/models; the production store is a separate dataset"
 [[ -s "$matrix" ]] || fail "missing matrix fixture: $matrix"
 [[ -s "$assets_fixture" ]] || fail "missing asset fixture: $assets_fixture"
 jq -e '.schema_version == "mold.ltx25.cuda.matrix.v1"' "$matrix" >/dev/null \
@@ -156,7 +156,7 @@ host='{}'
 if [[ -n "${LTX25_HOST_JSON:-}" ]]; then
   host="$(jq -c --argjson build "$build" '. + {build: $build}' <<<"$LTX25_HOST_JSON")"
 else
-  gpus_csv="$(nvidia-smi --query-gpu=uuid,name,compute_cap,driver_version,memory.total \
+  gpus_csv="$(nvidia-smi -i "$gpu_index" --query-gpu=uuid,name,compute_cap,driver_version,memory.total \
     --format=csv,noheader,nounits)" || fail "failed to inspect CUDA devices"
   gpus="$(jq -Rn '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
@@ -354,7 +354,7 @@ generator_commit_of() {
 # full server log is unhashed and mutable. Prints the observed list as JSON.
 #
 # Sources for the "logged once" claim (never taken on faith — grep it):
-#   - `attention backend selected backend=...` (mold_inference::attention):
+#   - `attention backend policy resolved requested=...` (mold_inference::attention):
 #     a process-wide OnceLock, one line for the life of the server.
 #   - `ltx2 int8 arm=...` (ltx2/convrot.rs `log_int8_arm_once`): "Log one
 #     INT8-arm literal at INFO, once per process per literal."
@@ -368,24 +368,27 @@ generator_commit_of() {
 # documented as once-per-render and stay slice-only.
 process_scoped_provenance_prefixes() {
   printf '%s\n' \
-    'attention backend selected backend=' \
+    'attention backend policy resolved requested=' \
     'ltx2 int8 arm=' \
     'ltx2 linear kind=' \
     'ltx2 residency mode='
 }
 
-# The shared attention dispatcher emits its line with `backend` as a
-# STRUCTURED tracing field ("message":"attention backend selected",
-# "backend":"Math"), so a JSON log never contains the flat pinned spelling;
+# The shared attention dispatcher emits its line with `requested` as a
+# STRUCTURED tracing field ("message":"attention backend policy resolved",
+# "requested":"Some(Math)"), so a JSON log never contains the flat pinned spelling;
 # this regex matches both forms. The other process-scoped lines above are
 # logged as one `tracing::info!` message with the literal already baked in
 # (`"message":"ltx2 int8 arm=native-w8a8"`), so a plain fixed-string match
 # against the JSON line already works for those and needs no regex.
 dispatcher_line_regex() {
-  local line="$1"
-  local backend="${line##*backend=}"
-  printf '"message":"attention backend selected".*"backend":"%s"|attention backend selected backend=%s' \
-    "$backend" "$backend"
+  python3 - "$1" <<'PY_REGEX'
+import re, sys
+line = sys.argv[1]
+requested = line.split("requested=", 1)[1]
+print('"message":"attention backend policy resolved".*"requested":"'
+      + re.escape(requested) + '"|' + re.escape(line).replace(r'\ ', ' '))
+PY_REGEX
 }
 
 observe_provenance() {
@@ -400,7 +403,7 @@ observe_provenance() {
       break
     done < <(process_scoped_provenance_prefixes)
     if [[ "$process_scoped" == 1 ]]; then
-      if [[ "$line" == "attention backend selected backend="* ]]; then
+      if [[ "$line" == "attention backend policy resolved requested="* ]]; then
         regex="$(dispatcher_line_regex "$line")"
         if grep -Eq -- "$regex" "$slice"; then
           scope=slice
@@ -491,11 +494,16 @@ run_mode() {
     || fail "could not read $host_url/api/models"
   curl --fail --silent --show-error -H "x-api-key: $MOLD_API_KEY" "$host_url/api/status" \
     >"$evidence_dir/status-$profile.json" || fail "could not read $host_url/api/status"
-  jq -c --arg profile "$profile" --argjson env "$profile_env" \
+  jq -nc --arg profile "$profile" --argjson env "$profile_env" \
     '{profile: $profile, env: $env}' >"$evidence_dir/profile-$profile.json"
 
   local gpu_uuid
   gpu_uuid="$(jq -r '.gpus[0].uuid' <<<"$host")"
+  # Observation and execution must name the same physical device. CUDA maps
+  # the isolated UUID to ordinal zero inside the scratch server.
+  python3 "$repo_root/scripts/validate-ltx25-server-profile.py" \
+    "$server_pid" "$gpu_uuid" "$matrix" "$profile" \
+    || fail "scratch server does not match the selected GPU and qualification profile"
 
   local row_ids
   if [[ -n "${LTX25_ROWS:-}" ]]; then
@@ -610,12 +618,12 @@ sample_gpu_and_host() {
   while kill -0 "$watched_pid" 2>/dev/null; do
     local now sample hwm apps
     now="$(utc_now)"
-    sample="$(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null \
+    sample="$(nvidia-smi -i "$gpu_index" --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits 2>/dev/null \
       | head -1 | tr -d ' ' || true)"
     [[ -z "$sample" ]] || printf '%s,%s\n' "$now" "$sample" >>"$dir/vram.csv"
     hwm="$(awk '/^VmHWM:/ {print $2}' "/proc/$server_pid/status" 2>/dev/null || true)"
     [[ -z "$hwm" ]] || printf '%s,%s\n' "$now" "$hwm" >>"$dir/host.csv"
-    apps="$(nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader,nounits 2>/dev/null || true)"
+    apps="$(nvidia-smi -i "$gpu_index" --query-compute-apps=pid,gpu_uuid --format=csv,noheader,nounits 2>/dev/null || true)"
     while IFS= read -r line; do
       [[ -n "$line" ]] || continue
       local pid="${line%%,*}" uuid="${line#*,}"
@@ -864,7 +872,7 @@ run_cancellation_row() {
   # earlier rows legitimately leave persistent allocations (cached engines,
   # CUDA context), so a startup-time baseline would fail a correct cancel.
   local baseline_mib
-  baseline_mib="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d '[:space:]')"
+  baseline_mib="$(nvidia-smi -i "$gpu_index" --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d '[:space:]')"
   local started started_epoch offset
   started="$(utc_now)"
   started_epoch="$(date +%s)"
@@ -908,7 +916,7 @@ run_cancellation_row() {
       | jq -e --arg id "$job_id" '.entries[]? | select(.id == $id)' >/dev/null; then
       queue_clear=true
     fi
-    used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d '[:space:]')"
+    used="$(nvidia-smi -i "$gpu_index" --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d '[:space:]')"
     if ((used <= baseline_mib + 1024)); then
       memory_back=true
     fi
@@ -1132,9 +1140,9 @@ seal_mode() {
     local name="$1" expected="$2" path actual
     path="$references_root/$name"
     [[ -d "$path/.git" ]] || fail "missing pinned reference clone: $path"
-    actual="$(git -C "$path" rev-parse HEAD)"
+    actual="$(git -c safe.directory="$path" -C "$path" rev-parse HEAD)"
     [[ "$actual" == "$expected" ]] || fail "$name is at $actual, expected $expected"
-    [[ -z "$(git -C "$path" status --porcelain)" ]] \
+    [[ -z "$(git -c safe.directory="$path" -C "$path" status --porcelain)" ]] \
       || fail "$name reference clone has uncommitted or untracked changes"
     references="$(jq -c --arg name "$name" --arg path "$path" --arg commit "$actual" \
       '. + [{name: $name, path: $path, commit: $commit, status: "pinned_clean"}]' <<<"$references")"
@@ -1165,7 +1173,16 @@ seal_mode() {
       : >"$log"
     else
       set +e
-      (cd "$repo_root" && "$@") >"$log" 2>&1
+      (
+        gate_config="$(mktemp -d)" || exit 1
+        trap 'rm -rf "$gate_config"' EXIT
+        unset_args=()
+        while IFS= read -r name; do
+          [[ "$name" == MOLD_* ]] && unset_args+=(-u "$name")
+        done < <(compgen -e)
+        cd "$repo_root" || exit 1
+        env "${unset_args[@]}" XDG_CONFIG_HOME="$gate_config" "$@" </dev/null
+      ) >"$log" 2>&1
       exit_code=$?
       set -e
       [[ "$exit_code" -eq 0 ]] || status=failed

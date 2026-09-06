@@ -42,12 +42,20 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def inside(path: Path, root: Path) -> bool:
+def same_path(left: Path, right: Path) -> bool:
+    if left.resolve() == right.resolve():
+        return True
     try:
-        path.resolve().relative_to(root.resolve())
-    except ValueError:
+        return left.samefile(right)
+    except OSError:
         return False
-    return True
+
+
+def inside(path: Path, root: Path) -> bool:
+    # realpath resolves symlinks but cannot canonicalize a bind-mount alias.
+    # Walk resolved ancestors and compare filesystem identity at the boundary.
+    resolved = path.resolve()
+    return any(same_path(parent, root) for parent in (resolved, *resolved.parents))
 
 
 def bind_hash_pairs(node: Any, label: str, root: Path | None) -> None:
@@ -91,7 +99,7 @@ def validate_row(row: dict[str, Any], evidence_dir: Path, matrix_ids: set[str]) 
         raise ValidationFailure(f"{label}: unknown status")
     manifest_path = Path(row["manifest_path"])
     expected_manifest = evidence_dir / "rows" / row_id / "manifest.json"
-    if manifest_path.resolve() != expected_manifest.resolve():
+    if not same_path(manifest_path, expected_manifest):
         raise ValidationFailure(f"{label}: manifest_path is not {expected_manifest}")
     if not manifest_path.is_file():
         raise ValidationFailure(f"{label}: row manifest is missing")
@@ -145,14 +153,14 @@ def validate_row(row: dict[str, Any], evidence_dir: Path, matrix_ids: set[str]) 
         def line_present(line: str, corpus: str) -> bool:
             if line in corpus:
                 return True
-            # The dispatcher logs `backend` as a structured tracing field, so
+            # The dispatcher logs `requested` as a structured tracing field, so
             # a JSON-formatted log carries the two halves separately.
-            prefix = "attention backend selected backend="
+            prefix = "attention backend policy resolved requested="
             if line.startswith(prefix):
-                backend = line[len(prefix):]
-                needle = '"message":"attention backend selected"'
+                requested = line[len(prefix):]
+                needle = '"message":"attention backend policy resolved"'
                 return any(
-                    needle in candidate and f'"backend":"{backend}"' in candidate
+                    needle in candidate and f'"requested":"{requested}"' in candidate
                     for candidate in corpus.splitlines()
                 )
             return False

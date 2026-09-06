@@ -369,6 +369,10 @@ pub struct AppState {
     /// remain authoritative in production, while mock-generation fixtures
     /// must never inherit any process-level `MOLD_OUTPUT_DIR`.
     pub output_disabled_override: bool,
+    /// Explicit fake-engine probe for legacy queue fixtures; never a fallback
+    /// when a real CUDA device is unavailable.
+    #[cfg(test)]
+    pub(crate) mock_device_memory: Option<Result<u64, mold_inference::device::DeviceMemoryError>>,
     /// Test-only opt-in for cases that deliberately exercise config reloads.
     /// Ordinary fixtures keep their in-memory recipe authority isolated from
     /// process-global Mold home state.
@@ -640,6 +644,16 @@ pub fn resolve_max_cached_models() -> usize {
 }
 
 impl AppState {
+    pub(crate) fn post_drop_free_vram_bytes(
+        &self,
+    ) -> Result<u64, mold_inference::device::DeviceMemoryError> {
+        #[cfg(test)]
+        if let Some(sample) = &self.mock_device_memory {
+            return sample.clone();
+        }
+        mold_inference::device::post_drop_free_vram_bytes(0)
+    }
+
     /// Test states must never inherit the production gallery fallback.
     ///
     /// `Config::default()` intentionally resolves output to
@@ -694,6 +708,8 @@ impl AppState {
             config: Arc::new(tokio::sync::RwLock::new(config)),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
+            #[cfg(test)]
+            mock_device_memory: None,
             reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -767,6 +783,8 @@ impl AppState {
             config: Arc::new(tokio::sync::RwLock::new(config)),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
+            #[cfg(test)]
+            mock_device_memory: None,
             reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -853,6 +871,8 @@ impl AppState {
             ))),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            #[cfg(test)]
+            mock_device_memory: None,
             reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -906,6 +926,8 @@ impl AppState {
             ))),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            #[cfg(test)]
+            mock_device_memory: None,
             reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
@@ -956,6 +978,8 @@ impl AppState {
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
+            #[cfg(test)]
+            mock_device_memory: None,
             reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),

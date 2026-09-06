@@ -401,6 +401,7 @@ mod tests {
 
     fn device() -> DeviceFact {
         DeviceFact {
+            cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
             backend: mold_core::GpuBackend::Cuda,
@@ -1045,6 +1046,7 @@ mod tests {
     /// A second device, so the fan-out cases below are genuinely multi-device.
     fn second_device() -> DeviceFact {
         DeviceFact {
+            cuda_peak_baseline: None,
             id: "cuda:1".to_string(),
             ordinal: 1,
             backend: mold_core::GpuBackend::Cuda,

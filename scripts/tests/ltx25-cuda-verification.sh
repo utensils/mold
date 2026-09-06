@@ -17,6 +17,8 @@ fail() {
 
 bash -n "$runner"
 python3 -m py_compile "$validator"
+python3 "$repo_root/scripts/tests/ltx25-evidence-paths.py"
+python3 "$repo_root/scripts/tests/ltx25-server-profile.py"
 [[ -x "$validator" ]] || fail "validator is not executable"
 jq -e '
   .properties.schema_version.const == "mold.ltx25.cuda.verification.v1"
@@ -64,6 +66,10 @@ real_git="$(command -v git)"
 cat >"$tmp/bin/git" <<FAKE
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "\$1" == -c && "\$2" == safe.directory=* ]]; then
+  [[ "\$2" == "safe.directory=\$4" ]] || exit 1
+  shift 2
+fi
 if [[ "\$1" == -C && "\$2" == "$refs/"* ]]; then
   if [[ "\$3" == status && "\$4" == --porcelain ]]; then
     exit 0
@@ -95,6 +101,8 @@ FAKE
 cat >"$tmp/bin/nvidia-smi" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${1:-}" == -i && "${2:-}" == 2 ]] || { echo "unscoped GPU probe" >&2; exit 1; }
+shift 2
 case "${1:-}" in
   --query-gpu=*)
     echo 'GPU-11111111-2222-3333-4444-555555555555, NVIDIA GeForce RTX 4090, 8.9, 580.142, 24564' ;;
@@ -176,9 +184,9 @@ printf 'Generated in 12.0s\n' >"$passed_dir/stdout.log"
 # once-per-process line lives only in the profile's full server log, so the
 # seal must resolve it through the process scope.
 jq -r --arg id "$passed_id" '.rows[] | select(.id == $id) | .expect.provenance[]
-  | select(startswith("attention backend selected") | not)' "$matrix" \
+  | select(startswith("attention backend policy resolved") | not)' "$matrix" \
   | sed 's/^/INFO mold::ltx2: /' >"$passed_dir/server.log"
-echo "INFO mold_inference::attention: attention backend selected backend=Math" >"$evidence/server-default.log"
+echo "INFO mold_inference::attention: attention backend policy resolved requested=Some(Math)" >"$evidence/server-default.log"
 jq -n '{model:"ltx-2.5-22b-distilled:int8-conv", args:["--width","256"]}' >"$passed_dir/request.json"
 printf 'polled_at_utc,memory_used_mib,utilization_gpu\n2026-08-28T00:00:00Z,20000,97\n' >"$passed_dir/vram.csv"
 printf 'polled_at_utc,vmhwm_kib\n2026-08-28T00:00:00Z,1234567\n' >"$passed_dir/host.csv"
@@ -316,7 +324,7 @@ run_seal() {
     MOLD_HOME="$mold_home" MOLD_MODELS_DIR="${MODELS_DIR_OVERRIDE-$models_dir}" \
     MOLD_DB_PATH="$mold_home/mold.db" \
     LTX25_METAL_REFERENCE_ROOT="${METAL_REF_OVERRIDE-$metal_ref}" \
-    LTX25_ALLOW_TEST_HOME=1 LTX25_CONTRACT_TEST=1 LTX25_SKIP_GATES=1 \
+    LTX25_GPU_INDEX=2 LTX25_ALLOW_TEST_HOME=1 LTX25_CONTRACT_TEST=1 LTX25_SKIP_GATES=1 \
     LTX25_REFERENCES_ROOT="$refs" LTX25_CAMPAIGN="$campaign" \
     LTX25_MOLD_BIN="${MOLD_BIN_OVERRIDE-$tmp/bin/mold}" LTX25_BUILD_JSON="$build_json" \
     LTX25_COMFY_INT8_MANIFEST="$comfy_int8" LTX25_COMFY_GGUF_MANIFEST="$comfy_gguf" \
@@ -343,7 +351,7 @@ jq -e --argjson rows "$matrix_rows" --arg mold_home "$mold_home" --arg models_di
   and (.rows[] | select(.id == "ltx-2.5-22b-distilled-int8-conv--smoke_silent_apng")
     | .status == "passed" and .generation.backend == "cuda"
       and .provenance_observed == (.provenance_expected | map({line: .,
-        scope: (if startswith("attention backend selected") then "process" else "slice" end)}))
+        scope: (if startswith("attention backend policy resolved") then "process" else "slice" end)}))
       and any(.provenance_observed[]; .scope == "process")
       and .media.sha256 != null
       and .metal_ab.reference_file == ($metal_ref + "/verification/ltx25-fixture-int8-metal-silent-seed-25025.apng")
@@ -389,7 +397,7 @@ cp "$tmp/full.bak" "$evidence/server-default.log"
 run_seal --seal >/dev/null
 
 # The process-scoped dispatcher evidence is retained per row and hash-bound.
-grep -Fq 'attention backend selected backend=Math' "$passed_dir/server-process.log" \
+grep -Fq 'attention backend policy resolved requested=Some(Math)' "$passed_dir/server-process.log" \
   || fail "seal did not retain the process-scoped line in server-process.log"
 jq -e '.server_process_log_sha256 | test("^[0-9a-f]{64}$")' "$passed_dir/manifest.json" >/dev/null \
   || fail "row manifest does not hash-bind server-process.log"
@@ -404,6 +412,16 @@ fi
 cp "$tmp/process.bak" "$passed_dir/server-process.log"
 run_seal --seal >/dev/null
 "$validator" "$report" >/dev/null || fail "restored server-process.log did not seal"
+
+# The current policy event also arrives as structured JSON from --log-format json.
+cp "$evidence/server-default.log" "$tmp/policy-text.bak"
+printf '%s\n' '{"fields":{"message":"attention backend policy resolved","requested":"Some(Math)","image_default":"Math","video_default":"Flash"}}' >"$evidence/server-default.log"
+run_seal --seal >/dev/null
+"$validator" "$report" >/dev/null || fail "structured policy provenance did not validate"
+grep -Fq '"requested":"Some(Math)"' "$passed_dir/server-process.log" \
+  || fail "structured policy event was not retained"
+cp "$tmp/policy-text.bak" "$evidence/server-default.log"
+run_seal --seal >/dev/null
 
 # Without a Metal reference root the block is null, never a failure.
 METAL_REF_OVERRIDE="$tmp/no-such-reference" run_seal --seal >/dev/null
@@ -481,10 +499,9 @@ if PATH="$tmp/bin:$PATH" MOLD_HOME="$mold_home" MOLD_MODELS_DIR="" MOLD_DB_PATH=
   "$runner" --seal >/dev/null 2>&1; then
   fail "runner ran without MOLD_MODELS_DIR"
 fi
-mkdir -p "$mold_home/models"
-if MODELS_DIR_OVERRIDE="$mold_home/models" run_seal --seal >/dev/null 2>&1; then
-  fail "runner accepted MOLD_MODELS_DIR colliding with MOLD_HOME/models"
-fi
+ln -s "$models_dir" "$mold_home/models"
+MODELS_DIR_OVERRIDE="$mold_home/models" run_seal --seal >/dev/null \
+  || fail "runner refused a valid model store under MOLD_HOME/models"
 
 cat >"$tmp/bin/mold-wrong" <<'FAKE'
 #!/usr/bin/env bash
@@ -516,7 +533,7 @@ sed -i '/MOLD_LTX2_QMATMUL/d' "$registry"
 if run_preflight qmatmul >/dev/null 2>&1; then
   fail "runner accepted a profile whose variable is not in ENGINE_SHAPING_VARIABLES"
 fi
-run_preflight default >/dev/null || fail "the default profile needs no registration"
+run_preflight default >/dev/null || fail "the math baseline profile is registered"
 if run_preflight nonesuch >/dev/null 2>&1; then
   fail "runner accepted an undefined server profile"
 fi

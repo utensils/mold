@@ -117,6 +117,7 @@ fn advanced_placement_defaults_to_auto_pair() {
 fn generate_request_placement_round_trips() {
     use super::GenerateRequest;
     let req = GenerateRequest {
+        offload: None,
         mesh: None,
         video_only: None,
         collection: None,

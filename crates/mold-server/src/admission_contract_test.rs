@@ -323,6 +323,7 @@ fn ltx25_gguf_row_replayed_from_journal_is_admitted_at_deferred_preparation() {
         .expect("GGUF activation is admitted since the quantized runtime landed");
 
     let devices = vec![DeviceFact {
+        cuda_peak_baseline: None,
         id: "cuda:0".to_string(),
         ordinal: 0,
         backend: mold_core::GpuBackend::Cuda,

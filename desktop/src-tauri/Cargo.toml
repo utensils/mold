@@ -164,7 +164,7 @@ mold-inference = { path = "../../crates/mold-inference", package = "mold-ai-infe
 # TEMPORARY: mirror the root workspace's same-name compatibility patch because
 # this standalone Cargo root owns an independent dependency graph.
 [patch.crates-io]
-candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "bedc287458e0d890dd6ed1c298c99e991e066fe1" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "bedc287458e0d890dd6ed1c298c99e991e066fe1" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "bedc287458e0d890dd6ed1c298c99e991e066fe1" }
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
 cudarc = { git = "https://github.com/utensils/cudarc", rev = "9b3b1bc276bc27c3e99343ee82db7f99705b9ed5" }
