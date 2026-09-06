@@ -1542,6 +1542,7 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         ModelComponent::DistilledLora | ModelComponent::LowNoiseDistilledLora => "distilled_lora",
         ModelComponent::T5Encoder | ModelComponent::TextEncoder => "text_encoder",
         ModelComponent::ClipEncoder | ModelComponent::ClipEncoder2 => "clip",
+        ModelComponent::VisionEncoder => "vision_encoder",
         ModelComponent::T5Tokenizer
         | ModelComponent::ClipTokenizer
         | ModelComponent::ClipTokenizer2
@@ -1580,6 +1581,7 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::LowNoiseDistilledLora => "low-noise distilled lora",
         ModelComponent::T5Encoder => "t5 encoder",
         ModelComponent::ClipEncoder => "clip encoder",
+        ModelComponent::VisionEncoder => "vision encoder",
         ModelComponent::T5Tokenizer => "t5 tokenizer",
         ModelComponent::ClipTokenizer => "clip tokenizer",
         ModelComponent::ClipEncoder2 => "clip-g encoder",

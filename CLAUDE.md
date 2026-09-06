@@ -123,6 +123,61 @@ the model controls, and the length slider. A sequence is now something you scrip
 
 ## 3-D generation
 
+- **Paint shares the SD VAE implementation.** `mold_candle::stable_diffusion::vae`
+  owns the VAE used by SD1.5, SDXL, SD3 and Hunyuan3D paint. The original posterior
+  API preserves SD behavior; paint opts into Diffusers' log-variance bounds and
+  supplies its own posterior noise. Paint's published `.bin` weights are parsed
+  in Rust and the loader requires every checkpoint tensor to be consumed. The
+  campaign qualification ledger distinguishes component parity from completed
+  end-to-end paint support.
+  `VaeNumerics::Diffusers` is paint's explicit numerical policy: PyTorch's
+  normalization/statistics and SiLU rounding boundaries, with a public Candle
+  CUDA GroupNorm operation for half precision. `AutoEncoderKL::new` keeps
+  `VaeNumerics::Candle` for existing SD callers. Neither compilation nor a paint
+  render changes a process-global arithmetic switch.
+  `stable_diffusion::normalization::DiffusersGroupNorm` is shared by paint VAE
+  and UNet components; epsilon belongs to the layer (VAE and spatial attention
+  `1e-6`, UNet residual blocks `1e-5`), including the half-rounded CUDA epsilon.
+
+- **Paint spatial caches follow Tencent's dtype boundaries.** `paint_unet` captures
+  reference norm1 at sixteen sites and consumes twelve skips newest-first as
+  `[hidden, skip]`. `paint_positions` quantizes in half even for F32 inference;
+  F16 maps retain zeroed invalid pixels between scales, whereas F32 maps are
+  converted afresh. Integer valid counts round to half before division, and
+  final coordinates use ties-to-even. Never replace this with a dtype-neutral
+  average or mutate caller-owned maps. Full float32 network parity does not
+  close the separate half-precision or full texture-generation gates.
+- **Paint UniPC is the VP v-prediction recipe, not Wan's flow solver.**
+  `paint_sampler` preserves the sample dtype at every tensor operation, zero-SNR
+  beta rescaling, trailing NumPy timesteps, and conversion before correction.
+  Its left scalar products deliberately follow PyTorch's different CPU/CUDA
+  half rounding. `paint_guidance` keeps both guidance updates separate; folding
+  the reference branch algebraically changes half output. The upstream default
+  call supplies no camera azimuths, so view weights are all one despite the
+  renderer's different camera angles.
+- **Half cuDNN convolutions accumulate in float.** The Candle fork uses F16
+  tensor/filter/output storage with an F32 convolution compute descriptor for
+  both Conv1D and Conv2D, matching Torch. Tensor-op math mode alone does not
+  select the accumulation dtype. Qualification must check the actual cuDNN
+  dispatch counter; merely enabling the feature can still run im2col at every
+  layer because of the fork's size threshold.
+- **Paint Linear rounding depends on the incoming layout.**
+  `mold_candle::stable_diffusion::linear::forward` is shared by the opt-in paint
+  VAE and paint UNet. Torch fuses bias for 2D or contiguous ND inputs; a
+  non-contiguous ND input rounds the matrix product before adding bias. Spatial
+  inputs must keep BCHW -> B,C,HW -> transpose strides: Candle reshape after
+  permute copies contiguous, silently selecting the wrong rounding boundary.
+- **A paint conditioning cache belongs to its loaded denoiser and request.**
+  `paint_denoiser::PreparedPaint` borrows its owning model and retains the reference
+  network, projected DINO and position tables once per request. Guidance repeats
+  geometry across three branches, zeros only the first two DINO inputs, and uses
+  reference scales `[0,1,1]`. The fifteen-step driver receives explicit initial
+  noise and calls cancellation before conditioning and after every sampler step.
+  Cancellation never leaves a reusable cache on the model.
+- **UV unwrapping is the narrow native exception.** `mesh-texture` builds vendored xatlas `f700c779`, exactly the version in the 2.1 oracle’s xatlas-python 0.0.9. The Rust wrapper validates geometry, preserves every seam-corner attribute and polls cancellation across native threads. Inference, samplers and texture baking remain Rust/Candle. Enabling the build feature alone does not advertise a paint engine.
+
+- **2.1 shape is a separate architecture.** `hunyuan3d-2.1:fp16` uses the MoE transformer, DINOv2-large and 4,096 latents; it requires the 2.1 licence independently of 2.0. Checkpoint headers select the engine architecture. Pre-load admission reads `manifest::hunyuan3d_shape_geometry`, including canvasless mini requests. The synthetic complete-forward oracle fixture runs unmodified Tencent CUDA code; full campaign evidence lives in `docs/qualification/hunyuan3d-campaign.md`.
+
 - **The generation profile is the single authority for the prompt, strength, and the mesh controls.** `capabilities.prompt` (`Required` | `Optional` | `Ignored`, `#[serde(default)]` Required so older JSON parses) is emitted from ONE core function, `generation_profile::prompt_requirement_for_family`, which `validation::prompt_required_with_conditioning` also calls — so admission, the CLI, and every client necessarily agree and nobody carries a family allowlist. The advertised mode answers for a CONDITIONED request, because that is the only case that can differ; a client resolves it against the request it is building. `hunyuan3d` is `Ignored` (no text encoder anywhere in the family), LTX with visual conditioning is `Optional`, everything else `Required`. `capabilities.supports_strength` and `capabilities.mesh` (octree allowlist + default, iso-threshold `FloatControl`, face bounds, `texture` feature control, built from the `validation::MESH_*` constants) follow the same rule: advertised once, validated against the same block by `validate_request_against_recipe`, and refused outright on a recipe with no `mesh` block. Discord is the one client that keeps a family pin: its request builder pins GLB for `hunyuan3d` (`is_mesh` in `mold-discord/src/commands/generate.rs`) because the bot builds requests from a model cache that is empty until the first refresh and a manifest fallback that carries no profile; the server's own `pin_output_format_for_family` is what makes that pin safe rather than a second authority.
 - **A format the recipe does not advertise is a 422 at durable admission, not a Hold** — `validate_output_format_against_generation_profile` runs in `queue_media_admission` for every non-private request carrying an explicit format, so a client learns at submit time instead of watching a job hold and fail. Formats are PINNED, not refused, where the family has exactly one deliverable container: `GenerateRequest::pin_output_format_for_family` coerces a raster format to `Glb` for the mesh family at both doors, mirroring the CLI's own `default_output_format`, so an older client that always sends `png` still renders. That is the whole exception; everywhere else an unavailable format is a real client mistake.
 - **Mesh exports are derived from the stored GLB, never generation targets.** GLB stays the only stored form (one file carrying geometry, UVs, normals and textures); `POST /api/gallery/export/:filename` reads it back through `hunyuan3d::glb::read_glb` and either TRANSCODES it to OBJ, STL, or PLY or RENDERS an animated GIF/APNG/WebP turntable from it (a render, not a transcode — it rasterizes the mesh, bounded at the rasterizer's 2048 `max_dimension`), and the same conversions are on `mold library export` and the `export_mesh` MCP tool. `MeshExportFormat` is its own enum rather than more `OutputFormat` variants precisely so a request can never name one as a generation target; `capabilities.mesh.export_formats` advertises the list, with the stored `glb` listed first so a client can see what it holds.

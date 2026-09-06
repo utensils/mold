@@ -82,6 +82,20 @@ export type PromptCapabilitiesProfile = { mode: PromptRequirement,
  */
 reason?: string | null, };
 
+export type GenerationImageReferenceRole = "front" | "left" | "back" | "right";
+
+export type MeshReferenceFormat = "glb" | "obj";
+
+export type MeshUpAxis = "y" | "z";
+
+export type MeshReferenceCoordinates = { up_axis: MeshUpAxis, meters_per_unit: number, };
+
+export type NamedViewsProfile = { mode: ControlMode, roles: Array<GenerationImageReferenceRole>, min_count: number, max_count: number, reason?: string | null, };
+
+export type MeshInputProfile = { mode: ControlMode, formats: Array<MeshReferenceFormat>, max_count: number, max_bytes: number, up_axes: Array<MeshUpAxis>, meters_per_unit_min: number, meters_per_unit_max: number, reason?: string | null, };
+
+export type MeshWorkflowMode = "image_to_mesh" | "multiview_to_mesh" | "mesh_texture" | "text_to_mesh";
+
 export type MeshCapabilitiesProfile = {
 /**
  * Query-grid resolutions this recipe admits. An ALLOWLIST, because the
@@ -96,7 +110,29 @@ threshold: FloatControl, target_faces_min: number, target_faces_max: number,
  * The PBR texture stage. `Hidden` in every build that ships without the
  * paint bundle, with the reason a client shows instead of the control.
  */
-texture: FeatureControlProfile, };
+texture: FeatureControlProfile,
+/**
+ * Semantic camera slots accepted by a multiview shape checkpoint.
+ * `None` means an older server; current servers always emit a block.
+ */
+named_views?: NamedViewsProfile | null,
+/**
+ * A user-supplied mesh accepted by a texture-only workflow.
+ * `None` means an older server; current servers always emit a block.
+ */
+mesh_input?: MeshInputProfile | null,
+/**
+ * Texture atlas sizes admitted by the same request validator.
+ */
+texture_resolutions?: Array<number>, texture_default_resolution?: number | null,
+/**
+ * Number of raster views used by the paint stage.
+ */
+texture_view_count?: IntegerControl | null, matting?: FeatureControlProfile | null, delight?: FeatureControlProfile | null,
+/**
+ * Complete workflows executable by this recipe in this build.
+ */
+workflow_modes?: Array<MeshWorkflowMode>, };
 
 export type SourceImageCapability = "unsupported" | "optional" | "required";
 

@@ -1,0 +1,17 @@
+{
+  "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+  "source_sha256": "0ce6e0cab54e1f73ef3b606c7b66a12b59207e80df1dfedce4c34ebb5ebef8f5",
+  "first_line": 663,
+  "last_line": 688,
+  "torch": "2.5.1+cu124",
+  "device": "cpu",
+  "guidance_scale": 3.0,
+  "azimuths": [
+    0,
+    45,
+    90,
+    300,
+    330,
+    359
+  ]
+}

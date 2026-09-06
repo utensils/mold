@@ -180,10 +180,10 @@ fn license_covers_manifest_file(
     // documents with two release dates.
     if license.id == TENCENT_HUNYUAN3D_2_0.id {
         return manifest_name.starts_with("hunyuan3d")
-            && !manifest_name.starts_with("hunyuan3d-paint");
+            && !crate::manifest::hunyuan3d_uses_21_license(manifest_name);
     }
     if license.id == TENCENT_HUNYUAN3D_2_1.id {
-        return manifest_name.starts_with("hunyuan3d-paint");
+        return crate::manifest::hunyuan3d_uses_21_license(manifest_name);
     }
 
     false
@@ -582,6 +582,11 @@ mod tests {
 
     #[test]
     fn hunyuan3d_checkpoints_are_gated_and_each_release_carries_its_own_terms() {
+        assert_eq!(
+            licenses_for_manifest_file("hunyuan3d-2.1:fp16", "hunyuan_3d_v2.1.safetensors")
+                .collect::<Vec<_>>(),
+            vec![&TENCENT_HUNYUAN3D_2_1],
+        );
         // Hunyuan3D gates the WHOLE manifest by name, unlike antelopev2 which
         // gates two files inside a bundle. Every shipped shape checkpoint is
         // covered and the file name is irrelevant.

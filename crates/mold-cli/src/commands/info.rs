@@ -39,6 +39,7 @@ fn resolve_file_path(
         ModelComponent::Decoder => mcfg.decoder.clone(),
         ModelComponent::TransformerShard
         | ModelComponent::TextEncoder
+        | ModelComponent::VisionEncoder
         | ModelComponent::AudioVae
         | ModelComponent::DurationHead
         | ModelComponent::Processor
@@ -85,6 +86,7 @@ fn resolve_verify_path(
             // Shards, text encoder files, and upscaler weights; fall through to config
             ModelComponent::TransformerShard
             | ModelComponent::TextEncoder
+            | ModelComponent::VisionEncoder
             | ModelComponent::AudioVae
             | ModelComponent::DurationHead
             | ModelComponent::Processor
@@ -126,6 +128,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::LowNoiseDistilledLora => "Low-Noise Distilled LoRA",
         ModelComponent::T5Encoder => "T5 Encoder",
         ModelComponent::ClipEncoder => "CLIP-L Encoder",
+        ModelComponent::VisionEncoder => "Vision Encoder",
         ModelComponent::T5Tokenizer => "T5 Tokenizer",
         ModelComponent::ClipTokenizer => "CLIP-L Tokenizer",
         ModelComponent::ClipEncoder2 => "CLIP-G Encoder",

@@ -1,0 +1,21 @@
+{
+  "opencv": "4.10.0",
+  "revision": "71d3237a093b60a27601c20e9ee6c3e52154e8b1",
+  "thresholds": [
+    30,
+    80
+  ],
+  "aperture": 3,
+  "l2_gradient": false,
+  "cases": [
+    "single",
+    "row",
+    "column",
+    "noise",
+    "weak",
+    "directions",
+    "ties",
+    "bridge"
+  ],
+  "reference": "Hunyuan3D-2.1/hy3dpaint/DifferentiableRenderer/MeshRender.py:1105-1107"
+}

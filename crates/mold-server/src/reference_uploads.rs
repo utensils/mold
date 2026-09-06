@@ -1597,6 +1597,21 @@ fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReferen
             width: *width,
             height: *height,
         },
+        GenerationReference::NamedImage {
+            role,
+            provenance,
+            mime_type,
+            width,
+            height,
+            ..
+        } => GenerationReference::NamedImage {
+            role: *role,
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: provenance.clone(),
+            mime_type: mime_type.clone(),
+            width: *width,
+            height: *height,
+        },
         GenerationReference::Video {
             provenance,
             mime_type,
@@ -1643,6 +1658,21 @@ fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReferen
             channels: *channels,
             sample_count: *sample_count,
         },
+        GenerationReference::Mesh {
+            provenance,
+            mime_type,
+            format,
+            byte_length,
+            coordinates,
+            ..
+        } => GenerationReference::Mesh {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: provenance.clone(),
+            mime_type: mime_type.clone(),
+            format: *format,
+            byte_length: *byte_length,
+            coordinates: *coordinates,
+        },
     }
 }
 
@@ -1653,12 +1683,22 @@ fn reference_from_metadata(metadata: &GenerationReferenceMetadata) -> Generation
         crop: metadata.crop.clone(),
     };
     match metadata.kind {
-        mold_core::GenerationReferenceKind::Image => GenerationReference::Image {
-            media: GenerationReferenceAuthority::Descriptor,
-            provenance,
-            mime_type: metadata.mime_type.clone(),
-            width: metadata.width.unwrap_or_default(),
-            height: metadata.height.unwrap_or_default(),
+        mold_core::GenerationReferenceKind::Image => match metadata.image_role {
+            Some(role) => GenerationReference::NamedImage {
+                role,
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance,
+                mime_type: metadata.mime_type.clone(),
+                width: metadata.width.unwrap_or_default(),
+                height: metadata.height.unwrap_or_default(),
+            },
+            None => GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance,
+                mime_type: metadata.mime_type.clone(),
+                width: metadata.width.unwrap_or_default(),
+                height: metadata.height.unwrap_or_default(),
+            },
         },
         mold_core::GenerationReferenceKind::Video => GenerationReference::Video {
             media: GenerationReferenceAuthority::Descriptor,
@@ -1683,6 +1723,21 @@ fn reference_from_metadata(metadata: &GenerationReferenceMetadata) -> Generation
             sample_rate: metadata.sample_rate.unwrap_or_default(),
             channels: metadata.channels.unwrap_or_default(),
             sample_count: metadata.sample_count,
+        },
+        mold_core::GenerationReferenceKind::Mesh => GenerationReference::Mesh {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance,
+            mime_type: metadata.mime_type.clone(),
+            format: metadata
+                .mesh_format
+                .unwrap_or(mold_core::MeshReferenceFormat::Glb),
+            byte_length: metadata.byte_length.unwrap_or_default(),
+            coordinates: metadata
+                .coordinates
+                .unwrap_or(mold_core::MeshReferenceCoordinates {
+                    up_axis: mold_core::MeshUpAxis::Y,
+                    meters_per_unit: 1.0,
+                }),
         },
     }
 }
@@ -1826,6 +1881,12 @@ fn probe_reference(
             width,
             height,
             ..
+        }
+        | GenerationReference::NamedImage {
+            mime_type,
+            width,
+            height,
+            ..
         } => {
             let file =
                 crate::batch_transaction::open_regular_file_no_follow(path).map_err(|error| {
@@ -1851,12 +1912,22 @@ fn probe_reference(
                 require_equal(reference, "width", *width, observed_width)?;
                 require_equal(reference, "height", *height, observed_height)?;
             }
-            GenerationReference::Image {
-                media: GenerationReferenceAuthority::Descriptor,
-                provenance,
-                mime_type: observed_mime.to_string(),
-                width: observed_width,
-                height: observed_height,
+            match expected.image_role() {
+                Some(role) => GenerationReference::NamedImage {
+                    role,
+                    media: GenerationReferenceAuthority::Descriptor,
+                    provenance,
+                    mime_type: observed_mime.to_string(),
+                    width: observed_width,
+                    height: observed_height,
+                },
+                None => GenerationReference::Image {
+                    media: GenerationReferenceAuthority::Descriptor,
+                    provenance,
+                    mime_type: observed_mime.to_string(),
+                    width: observed_width,
+                    height: observed_height,
+                },
             }
         }
         GenerationReference::Video {
@@ -2029,8 +2100,53 @@ fn probe_reference(
                 sample_count: Some(wav.sample_count),
             }
         }
+        GenerationReference::Mesh {
+            mime_type,
+            format,
+            byte_length,
+            coordinates,
+            ..
+        } => {
+            let bytes = std::fs::read(path).map_err(|error| {
+                ApiError::validation(format!("failed to safely read mesh reference: {error}"))
+            })?;
+            let observed_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if policy == ReferenceProbePolicy::Strict {
+                require_equal(reference, "byte_length", *byte_length, observed_length)?;
+            }
+            let observed_mime = match format {
+                mold_core::MeshReferenceFormat::Glb => {
+                    mold_inference::hunyuan3d::glb::read_glb(&bytes)
+                        .map_err(|error| unsupported_media(reference, error))?;
+                    "model/gltf-binary"
+                }
+                mold_core::MeshReferenceFormat::Obj => {
+                    let text = std::str::from_utf8(&bytes)
+                        .map_err(|error| unsupported_media(reference, error))?;
+                    mold_inference::hunyuan3d::obj::read_obj(text)
+                        .map_err(|error| unsupported_media(reference, error))?;
+                    "model/obj"
+                }
+            };
+            require_equal(reference, "mime_type", mime_type.as_str(), observed_mime)?;
+            GenerationReference::Mesh {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance,
+                mime_type: observed_mime.to_string(),
+                format: *format,
+                byte_length: observed_length,
+                coordinates: *coordinates,
+            }
+        }
     };
-    minimax_h3::reference_prepared_shape(&canonical).map_err(ApiError::reference)?;
+    if matches!(
+        &canonical,
+        GenerationReference::Image { .. }
+            | GenerationReference::Video { .. }
+            | GenerationReference::Audio { .. }
+    ) {
+        minimax_h3::reference_prepared_shape(&canonical).map_err(ApiError::reference)?;
+    }
     canonical
         .redacted_metadata(reference.saturating_sub(1) as usize)
         .ok_or_else(|| ApiError::internal("validated reference metadata lost its digest"))
@@ -2258,8 +2374,10 @@ fn unix_time_ms() -> u64 {
 fn reference_mime_type(reference: &GenerationReference) -> &str {
     match reference {
         GenerationReference::Image { mime_type, .. }
+        | GenerationReference::NamedImage { mime_type, .. }
         | GenerationReference::Video { mime_type, .. }
-        | GenerationReference::Audio { mime_type, .. } => mime_type,
+        | GenerationReference::Audio { mime_type, .. }
+        | GenerationReference::Mesh { mime_type, .. } => mime_type,
     }
 }
 
@@ -2659,6 +2777,97 @@ mod tests {
         assert_eq!(metadata.height, Some(96));
     }
 
+    #[test]
+    fn reference_probe_preserves_a_named_view_role() {
+        let bytes = png_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("left.png");
+        std::fs::write(&path, &bytes).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let expected = GenerationReference::NamedImage {
+            role: mold_core::GenerationImageReferenceRole::Left,
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("left.png".to_string()),
+                sha256: Some(digest.clone()),
+                crop: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 2,
+            height: 2,
+        };
+        let metadata =
+            probe_reference(&path, &expected, 1, &digest, ReferenceProbePolicy::Strict).unwrap();
+        assert_eq!(
+            metadata.image_role,
+            Some(mold_core::GenerationImageReferenceRole::Left)
+        );
+    }
+
+    #[test]
+    fn reference_probe_parses_a_mesh_before_canonicalizing_it() {
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let bytes = mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mesh.glb");
+        std::fs::write(&path, &bytes).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let coordinates = mold_core::MeshReferenceCoordinates {
+            up_axis: mold_core::MeshUpAxis::Y,
+            meters_per_unit: 1.0,
+        };
+        let expected = GenerationReference::Mesh {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("mesh.glb".to_string()),
+                sha256: Some(digest.clone()),
+                crop: None,
+            },
+            mime_type: "model/gltf-binary".to_string(),
+            format: mold_core::MeshReferenceFormat::Glb,
+            byte_length: bytes.len() as u64,
+            coordinates,
+        };
+        let metadata =
+            probe_reference(&path, &expected, 1, &digest, ReferenceProbePolicy::Strict).unwrap();
+        assert_eq!(
+            metadata.mesh_format,
+            Some(mold_core::MeshReferenceFormat::Glb)
+        );
+        assert_eq!(metadata.byte_length, Some(bytes.len() as u64));
+        assert_eq!(metadata.coordinates, Some(coordinates));
+
+        std::fs::write(&path, b"not a glb").unwrap();
+        let corrupt_digest = format!("{:x}", Sha256::digest(b"not a glb"));
+        let mut corrupt = expected.clone();
+        if let GenerationReference::Mesh {
+            provenance,
+            byte_length,
+            ..
+        } = &mut corrupt
+        {
+            provenance.sha256 = Some(corrupt_digest.clone());
+            *byte_length = 9;
+        }
+        assert!(probe_reference(
+            &path,
+            &corrupt,
+            1,
+            &corrupt_digest,
+            ReferenceProbePolicy::Strict,
+        )
+        .is_err());
+    }
+
     fn wav_bytes(sample_rate: u32, channels: u16, sample_count: u32) -> Vec<u8> {
         let block_align = channels * 2;
         let data_bytes = sample_count * u32::from(block_align);
@@ -2729,8 +2938,10 @@ mod tests {
     ) -> GenerationReference {
         match &mut reference {
             GenerationReference::Image { media, .. }
+            | GenerationReference::NamedImage { media, .. }
             | GenerationReference::Video { media, .. }
-            | GenerationReference::Audio { media, .. } => *media = authority,
+            | GenerationReference::Audio { media, .. }
+            | GenerationReference::Mesh { media, .. } => *media = authority,
         }
         reference
     }

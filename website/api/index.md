@@ -231,9 +231,13 @@ can differ: a client resolves it against the request it is building, so an
 
 `mesh` carries `octree_resolutions` (an allowlist), `octree_default`,
 `threshold` (a float control), `target_faces_min` / `target_faces_max`, and a
-`texture` feature control. A client renders those instead of a resolution
-picker; a mesh recipe advertises `resolution.domain: "none"` and zero
-default width and height, exactly as an audio-only recipe does.
+`texture` feature control. Current profiles also advertise named-view slots,
+mesh-input formats and coordinate bounds, texture atlas sizes and view count,
+matting/delight availability, and the complete `workflow_modes` executable by
+that build. Additive blocks are absent on older servers. A client renders these
+controls instead of a resolution picker; a mesh recipe advertises
+`resolution.domain: "none"` and zero default width and height, exactly as an
+audio-only recipe does.
 `capabilities.mesh.export_formats` on `GET /api/capabilities` says which
 containers `POST /api/gallery/export/:name` can turn a stored mesh into: the
 geometry transcodes (`glb`, `obj`, `stl`, `ply`) and the turntable renders

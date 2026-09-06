@@ -11,6 +11,36 @@ use std::sync::LazyLock;
 /// image encoder in one file, so it takes the same standalone-VAE exemption
 /// `ltx2` does.
 pub const HUNYUAN3D_FAMILY: &str = "hunyuan3d";
+pub const HUNYUAN3D_21_MODEL: &str = "hunyuan3d-2.1:fp16";
+
+/// Recipe geometry needed before loading the checkpoint. This is shared by
+/// admission callers so a canvasless request still prices its actual encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hunyuan3dShapeGeometry {
+    pub conditioning_size: u32,
+    pub num_latents: u64,
+    pub vision_heads: u64,
+}
+
+pub fn hunyuan3d_shape_geometry(model: &str) -> Hunyuan3dShapeGeometry {
+    let canonical = resolve_model_name(model);
+    let base = canonical.split(':').next().unwrap_or(&canonical);
+    Hunyuan3dShapeGeometry {
+        conditioning_size: if base == "hunyuan3d-mini-turbo" {
+            1022
+        } else {
+            512
+        },
+        num_latents: if base == "hunyuan3d-2.1" { 4096 } else { 3072 },
+        vision_heads: if base == "hunyuan3d-2.1" { 16 } else { 24 },
+    }
+}
+
+pub fn hunyuan3d_uses_21_license(model: &str) -> bool {
+    model.starts_with("hunyuan3d-paint")
+        || model.split(':').next() == Some("hunyuan3d-2.1")
+        || model.starts_with("hunyuan3d-2.1-")
+}
 /// The Hunyuan3D 2.1 PBR paint bundle: auxiliary, hidden, files-only.
 ///
 /// Separate from [`HUNYUAN3D_FAMILY`] because it is a different upstream
@@ -18,6 +48,8 @@ pub const HUNYUAN3D_FAMILY: &str = "hunyuan3d";
 /// textures a mesh rather than generating one.
 pub const HUNYUAN3D_PAINT_FAMILY: &str = "hunyuan3d-paint";
 pub const HUNYUAN3D_PAINT_MANIFEST: &str = "hunyuan3d-paint";
+/// Untiled 4x upscaler required between paint diffusion and material baking.
+pub const HUNYUAN3D_PAINT_UPSCALER_MANIFEST: &str = "real-esrgan-x4plus:fp16";
 
 /// The tier a surface picks when the caller names no 3-D model.
 ///
@@ -66,6 +98,8 @@ pub enum ModelComponent {
     LowNoiseDistilledLora,
     T5Encoder,
     ClipEncoder,
+    /// A non-CLIP vision tower used for image conditioning.
+    VisionEncoder,
     T5Tokenizer,
     ClipTokenizer,
     ClipEncoder2,   // CLIP-G / OpenCLIP (SDXL)
@@ -413,6 +447,18 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
         manifest.name.as_str()
     };
     let sanitized_name = storage_name.replace(':', "-");
+
+    // Paint uses facebook/dinov2-giant in addition to the CLIP tower shipped
+    // inside Tencent's bundle. Give the external tower an unambiguous path:
+    // both repositories publish a file named `model.safetensors`, and the
+    // runtime must never silently substitute CLIP's 1280-wide tensors for
+    // DINO's 1536-wide tensors.
+    if manifest.name == HUNYUAN3D_PAINT_MANIFEST && file.hf_repo == "facebook/dinov2-giant" {
+        return PathBuf::from("shared")
+            .join(HUNYUAN3D_PAINT_FAMILY)
+            .join("dinov2-giant")
+            .join(&file.hf_filename);
+    }
 
     // H3's official and Comfy transformers use the same task architecture
     // config. Keep one copy per task across layouts while the task-specific
@@ -5034,16 +5080,28 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
             defaults: defaults(30, 5.0, 512),
             hidden: false,
         },
+        // 2.1 is a separate MoE architecture with a DINOv2-large conditioner.
+        // HF revision f9ca54c4da6c1f521f944ae345a74ad6feb12a4d, LFS verified.
+        ModelManifest {
+            name: HUNYUAN3D_21_MODEL.to_string(),
+            family: HUNYUAN3D_FAMILY.to_string(),
+            description: "Hunyuan3D 2.1 — image-to-3D mesh with the 3.3B MoE shape model"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Comfy-Org/hunyuan3D_2.1_repackaged".to_string(),
+                hf_filename: "hunyuan_3d_v2.1.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 7_365_943_290,
+                gated: false,
+                sha256: Some("5f21e98a6cb99b13b5e224abaee33929570fff7af2b6a0060001559a04ba9d72"),
+            }],
+            defaults: defaults(30, 5.0, 512),
+            hidden: false,
+        },
         // The 2.1 PBR paint bundle. Auxiliary, hidden and files-only: it
         // textures a mesh rather than generating one, so it is never a
         // checkpoint, never a default model, and never resolves to a
         // `ModelPaths`. Same shape as the PuLID bundles.
-        //
-        // NOTE: the paint ENGINE is not implemented. These weights install and
-        // satisfy the 2.1 licence gate, but nothing renders with them yet. The
-        // manifest exists now because the 2.1 terms are a SEPARATE document
-        // from the 2.0 shape terms, and a licence no manifest requires can be
-        // read on every surface and accepted on none.
         //
         // Upstream ships a diffusers layout. The three `unet/*.py` modules and
         // `README.md` are deliberately NOT declared: mold never executes
@@ -5051,9 +5109,8 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: HUNYUAN3D_PAINT_MANIFEST.to_string(),
             family: HUNYUAN3D_PAINT_FAMILY.to_string(),
-            description:
-                "Hunyuan3D 2.1 PBR paint — albedo + metallic-roughness texturing weights (no engine yet)"
-                    .to_string(),
+            description: "Hunyuan3D 2.1 PBR paint — albedo + metallic-roughness texturing weights"
+                .to_string(),
             files: hunyuan3d_paint_files(),
             defaults: hunyuan3d_paint_defaults(),
             hidden: true,
@@ -5095,7 +5152,7 @@ fn hunyuan3d_paint_files() -> Vec<ModelFile> {
                 sha256,
             }
         };
-    vec![
+    let mut files = vec![
         file("model_index.json", ModelComponent::ModelConfig, 617, None),
         // Multiview diffusion UNet — 12 input channels, 6 views at 512.
         file(
@@ -5173,7 +5230,21 @@ fn hunyuan3d_paint_files() -> Vec<ModelFile> {
             342,
             None,
         ),
-    ]
+    ];
+    // Hunyuan Paint's active reference conditioning comes from this external
+    // DINOv2 Giant tower (`multiview_utils.py`), not from the 1280-wide CLIP
+    // image encoder bundled in the diffusers directory above. Keep both: the
+    // Tencent directory remains complete, while the runtime dependency is
+    // explicit and independently integrity-pinned.
+    files.push(ModelFile {
+        hf_repo: "facebook/dinov2-giant".to_string(),
+        hf_filename: "model.safetensors".to_string(),
+        component: ModelComponent::VisionEncoder,
+        size_bytes: 4_546_005_432,
+        gated: false,
+        sha256: Some("917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f"),
+    });
+    files
 }
 
 fn ltx_video_manifests() -> Vec<ModelManifest> {
@@ -5771,6 +5842,17 @@ pub fn auxiliary_manifests_for_request_with_family(
     family_hint: Option<&str>,
 ) -> Vec<&'static str> {
     let mut manifests = Vec::new();
+    let family = family_hint
+        .or_else(|| find_manifest(&request.model).map(|manifest| manifest.family.as_str()));
+    if request
+        .mesh
+        .as_ref()
+        .is_some_and(|mesh| mesh.texture == Some(true))
+        && family == Some(HUNYUAN3D_FAMILY)
+    {
+        manifests.push(HUNYUAN3D_PAINT_MANIFEST);
+        manifests.push(HUNYUAN3D_PAINT_UPSCALER_MANIFEST);
+    }
     if crate::identity::request_mentions_identity(request)
         && crate::identity::effective_id_weight(request) > 0.0
     {
@@ -7725,6 +7807,24 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hunyuan3d21_is_a_pinned_undistilled_shape_recipe() {
+        let model = super::find_manifest("hunyuan3d-2.1:fp16").expect("2.1 shape recipe");
+        assert_eq!(model.family, super::HUNYUAN3D_FAMILY);
+        assert_eq!(model.defaults.steps, 30);
+        assert_eq!(model.defaults.guidance, 5.0);
+        assert_eq!(model.files.len(), 1);
+        assert_eq!(model.files[0].size_bytes, 7_365_943_290);
+        assert_eq!(
+            model.files[0].sha256,
+            Some("5f21e98a6cb99b13b5e224abaee33929570fff7af2b6a0060001559a04ba9d72")
+        );
+        let shape = super::hunyuan3d_shape_geometry(&model.name);
+        assert_eq!(shape.num_latents, 4096);
+        assert_eq!(shape.vision_heads, 16);
+        assert_eq!(shape.conditioning_size, 512);
+    }
+
     use super::*;
 
     #[test]
@@ -7750,6 +7850,29 @@ mod tests {
         request.id_image = None;
         request.id_weight = None;
         assert!(auxiliary_manifests_for_request(&request).is_empty());
+    }
+
+    #[test]
+    fn textured_mesh_request_names_both_paint_dependencies() {
+        let mut request = crate::test_support::minimal_generate_request("hunyuan3d-2.1:fp16");
+        request.mesh = Some(crate::types::MeshRequestOptions {
+            texture: Some(true),
+            texture_resolution: Some(2048),
+            ..Default::default()
+        });
+        assert_eq!(
+            auxiliary_manifests_for_request(&request),
+            vec![HUNYUAN3D_PAINT_MANIFEST, HUNYUAN3D_PAINT_UPSCALER_MANIFEST]
+        );
+        request.mesh.as_mut().unwrap().texture = Some(false);
+        assert!(auxiliary_manifests_for_request(&request).is_empty());
+
+        request.mesh.as_mut().unwrap().texture = Some(true);
+        request.model = "hf:owner/custom-shape".into();
+        assert_eq!(
+            auxiliary_manifests_for_request_with_family(&request, Some(HUNYUAN3D_FAMILY)),
+            vec![HUNYUAN3D_PAINT_MANIFEST, HUNYUAN3D_PAINT_UPSCALER_MANIFEST]
+        );
     }
 
     /// The bundle follows the checkpoint's family: an SDXL identity request
@@ -9008,7 +9131,8 @@ mod tests {
         // applied to the 2.2 TI2V-5B, one unsharded FastVideo transformer on
         // the shared UMT5 and the 2.2 VAE the other 5B tiers already pull, so
         // it too is exactly one manifest.
-        assert_eq!(known_manifests().len(), 202);
+        // Hunyuan3D 2.1 shape: one additional self-contained checkpoint.
+        assert_eq!(known_manifests().len(), 203);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

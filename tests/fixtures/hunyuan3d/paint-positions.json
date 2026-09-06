@@ -1,0 +1,21 @@
+{
+  "latent_size": 8,
+  "sources": {
+    "f32": {
+      "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+      "sources": {
+        "modules.py": "664983290a63849503c64714948d97444400bd95f24ad67e3a5dc557ba5a7a68",
+        "attn_processor.py": "a41bf0f79864691bc831cc2de9714f6d25baf73463ad3fdcb224dc09fe2e6705"
+      },
+      "sha256": "9c620256f557ae1058ad90b7094c009583e180678c4769c4ec0c1aafccda1b48"
+    },
+    "f16": {
+      "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+      "sources": {
+        "modules.py": "664983290a63849503c64714948d97444400bd95f24ad67e3a5dc557ba5a7a68",
+        "attn_processor.py": "a41bf0f79864691bc831cc2de9714f6d25baf73463ad3fdcb224dc09fe2e6705"
+      },
+      "sha256": "34bb2274c5dd26a0c15cc386511fb34e50c967ace077210b4130229771049949"
+    }
+  }
+}

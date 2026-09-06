@@ -202,6 +202,26 @@ describe("QueueEntryDetail", () => {
     ).toBe(false);
   });
 
+  it("renders progress within a named paint stage", () => {
+    const wrapper = mount(QueueEntryDetail, {
+      props: {
+        model: model({ state: "running" }),
+        preview: {
+          preview_image: null,
+          step: null,
+          total: null,
+          stage: "Generating PBR views",
+          stage_current: 7,
+          stage_total: 15,
+        },
+      },
+    });
+
+    expect(wrapper.get('[data-test="queue-detail-preview"]').text()).toContain(
+      "Generating PBR views 7 of 15",
+    );
+  });
+
   it("shows an action failure inline instead of leaving it to a toast", () => {
     const wrapper = mount(QueueEntryDetail, {
       props: { model: model(), error: "plato refused the cancellation" },

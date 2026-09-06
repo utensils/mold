@@ -473,6 +473,10 @@ mod tests {
             sample_count: None,
             prepared_shape: None,
             crop: None,
+            image_role: None,
+            mesh_format: None,
+            byte_length: None,
+            coordinates: None,
         };
         let opened = staged.reopen().unwrap();
         let binding = GenerationReferenceBinding::from_opened_file(

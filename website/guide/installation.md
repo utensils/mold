@@ -256,6 +256,10 @@ Optional features can be added to the same build, for example
 `--features metal,preview,expand,discord,tui` if you also want terminal preview,
 local prompt expansion, the Discord bot, or the interactive TUI.
 
+`mesh-texture` builds the pinned xatlas CPU UV unwrapper. Nix CLI and desktop
+recipes include it; source builds need a C++11 compiler. It does not by itself
+enable a texture engine or bypass the recipe’s advertised capabilities.
+
 `pulid` ([face identity](/guide/identity)) is one of those features, and it is
 the only one with a build-time dependency of its own: `protoc` must be on `PATH`,
 because `candle-onnx`'s build script drives `prost-build`. It is in the `nix

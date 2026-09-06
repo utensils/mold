@@ -221,6 +221,10 @@ pub struct GBuffers {
     pub normal: Vec<[f32; 3]>,
     /// Interpolated world-space surface point.
     pub position: Vec<[f32; 3]>,
+    /// Source triangle index; u32::MAX for uncovered pixels.
+    pub face_ids: Vec<u32>,
+    /// Perspective-correct corner weights in the source triangle’s order.
+    pub barycentric: Vec<[f32; 3]>,
     pub mask: Vec<bool>,
     pub width: u32,
     pub height: u32,
@@ -235,6 +239,8 @@ impl GBuffers {
             depth: vec![f32::INFINITY; n],
             normal: vec![[0.0; 3]; n],
             position: vec![[0.0; 3]; n],
+            face_ids: vec![u32::MAX; n],
+            barycentric: vec![[0.0; 3]; n],
             mask: vec![false; n],
             width,
             height,
@@ -281,14 +287,51 @@ pub fn camera_ring(count: usize, elevation_deg: f32) -> Vec<Camera> {
 /// (degenerate area, non-finite coordinate, out-of-range index) are skipped
 /// while the rest of the mesh still renders.
 pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -> GBuffers {
-    let mut gb = GBuffers::unset(width, height);
     if width == 0 || height == 0 || mesh.vertices.is_empty() || mesh.faces.is_empty() {
-        return gb;
+        return GBuffers::unset(width, height);
     }
 
     let Some(screen) = project(mesh, camera, width, height) else {
-        return gb;
+        return GBuffers::unset(width, height);
     };
+
+    render_projected(mesh, &screen, camera.culling, width, height, false)
+}
+
+/// Shared triangle traversal; paint provides its upstream clip-space projection.
+pub(super) fn render_projected(
+    mesh: &Mesh,
+    screen: &[ScreenVertex],
+    culling: Culling,
+    width: u32,
+    height: u32,
+    quantize_depth: bool,
+) -> GBuffers {
+    render_projected_with_checkpoint(
+        mesh,
+        screen,
+        culling,
+        [width, height],
+        quantize_depth,
+        &mut || Ok(()),
+    )
+    .expect("infallible raster checkpoint")
+}
+
+pub(super) fn render_projected_with_checkpoint(
+    mesh: &Mesh,
+    screen: &[ScreenVertex],
+    culling: Culling,
+    dimensions: [u32; 2],
+    quantize_depth: bool,
+    checkpoint: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<GBuffers> {
+    let [width, height] = dimensions;
+    checkpoint()?;
+    let mut gb = GBuffers::unset(width, height);
+    if screen.len() != mesh.vertices.len() {
+        return Ok(gb);
+    }
 
     let normals = mesh
         .normals
@@ -299,7 +342,11 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
     let h = height as i64;
     let vcount = mesh.vertices.len();
 
-    for face in &mesh.faces {
+    for (face_index, face) in mesh.faces.iter().enumerate() {
+        checkpoint()?;
+        if face_index >= u32::MAX as usize {
+            break;
+        }
         let (i0, i1, i2) = (face[0] as usize, face[1] as usize, face[2] as usize);
         if i0 >= vcount || i1 >= vcount || i2 >= vcount {
             continue;
@@ -312,11 +359,17 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
         // Signed screen area (twice the triangle area). Zero means the triangle
         // projects to a line or a point and has no interior to shade; it is
         // also the divisor for the barycentrics, so it must be tested first.
-        let area2 = (s1.x - s0.x) * (s2.y - s0.y) - (s2.x - s0.x) * (s1.y - s0.y);
+        let area2 = if quantize_depth {
+            // The early degeneracy check must share paint's fused arithmetic:
+            // rounded products can cancel even when the fused area is nonzero.
+            -(s2.x - s0.x).mul_add(s1.y - s0.y, -((s1.x - s0.x) * (s2.y - s0.y)))
+        } else {
+            (s1.x - s0.x) * (s2.y - s0.y) - (s2.x - s0.x) * (s1.y - s0.y)
+        };
         if area2 == 0.0 || !area2.is_finite() {
             continue;
         }
-        match camera.culling {
+        match culling {
             Culling::None => {}
             // Negative area == front-facing; see the module docs.
             Culling::Back if area2 > 0.0 => continue,
@@ -342,7 +395,9 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
         };
 
         let inv_area = 1.0 / area2;
+        let paint_inverse = (1.0f64 / -f64::from(area2)) as f32;
         for py in min_y..=max_y {
+            checkpoint()?;
             let sy = py as f32 + 0.5;
             let row = py as usize * width as usize;
             for px in min_x..=max_x {
@@ -355,10 +410,44 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
                 let e0 = (s2.x - s1.x) * (sy - s1.y) - (s2.y - s1.y) * (sx - s1.x);
                 let e1 = (s0.x - s2.x) * (sy - s2.y) - (s0.y - s2.y) * (sx - s2.x);
                 let e2 = (s1.x - s0.x) * (sy - s0.y) - (s1.y - s0.y) * (sx - s0.x);
-                let l0 = e0 * inv_area;
-                let l1 = e1 * inv_area;
-                let l2 = e2 * inv_area;
-                if l0 < 0.0 || l1 < 0.0 || l2 < 0.0 {
+                let ([l0, l1, l2], paint_depth) = if quantize_depth {
+                    // Tencent custom_rasterizer rasterizer.h:16-42 derives
+                    // alpha from beta/gamma, then checks BOTH bounds. Three
+                    // independent edge weights change coverage at UV seams.
+                    // The unsuffixed C++ 1.0 promotes reciprocal/subtraction
+                    // to double; CUDA contracts each area multiply-subtract.
+                    let area = |a: ScreenVertex, b: ScreenVertex, c: ScreenVertex| {
+                        (c.x - a.x).mul_add(b.y - a.y, -((b.x - a.x) * (c.y - a.y)))
+                    };
+                    let p = ScreenVertex { x: sx, y: sy, ..s0 };
+                    let inverse = paint_inverse;
+                    let beta = area(s0, p, s2) * inverse;
+                    // The CUDA loop hoists dx*bdy outside its Y traversal,
+                    // contracting gamma's second product (confirmed in the
+                    // retained native module's rasterizeImagecoords SASS).
+                    let gamma =
+                        (-(s1.x - s0.x)).mul_add(sy - s0.y, (sx - s0.x) * (s1.y - s0.y)) * inverse;
+                    let alpha = (1.0f64 - beta as f64 - gamma as f64) as f32;
+                    if ![alpha, beta, gamma].iter().all(|v| (0. ..=1.).contains(v)) {
+                        continue;
+                    }
+                    // Installed Tencent CUDA rasterizer: FMUL beta*z1,
+                    // FFMA z0*alpha + tmp, then FFMA z2*gamma + tmp.
+                    let depth = s2
+                        .depth
+                        .mul_add(gamma, s0.depth.mul_add(alpha, beta * s1.depth));
+                    if depth < 0. {
+                        continue;
+                    }
+                    // Upstream recomputes interpolation in a separate kernel;
+                    // without the loop hoist, gamma contracts its first term.
+                    let gamma = area(s0, s1, p) * inverse;
+                    let alpha = (1.0f64 - beta as f64 - gamma as f64) as f32;
+                    ([alpha, beta, gamma], Some(depth))
+                } else {
+                    ([e0 * inv_area, e1 * inv_area, e2 * inv_area], None)
+                };
+                if !quantize_depth && (l0 < 0.0 || l1 < 0.0 || l2 < 0.0) {
                     continue;
                 }
 
@@ -374,7 +463,15 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
                 let b1 = l1 * s1.inv_w * inv_denom;
                 let b2 = l2 * s2.inv_w * inv_denom;
 
-                let depth = b0 * s0.depth + b1 * s1.depth + b2 * s2.depth;
+                let depth = paint_depth.unwrap_or(b0 * s0.depth + b1 * s1.depth + b2 * s2.depth);
+                // Tencent custom_rasterizer's depth token uses 18 bits plus
+                // the face index as its deterministic tie breaker. Iteration
+                // visits faces in that same ascending index order.
+                let depth = if quantize_depth {
+                    (depth * 262144.).trunc()
+                } else {
+                    depth
+                };
                 if !depth.is_finite() {
                     continue;
                 }
@@ -401,23 +498,26 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
                     b0 * p0[1] + b1 * p1[1] + b2 * p2[1],
                     b0 * p0[2] + b1 * p1[2] + b2 * p2[2],
                 ];
+                gb.face_ids[idx] = face_index as u32;
+                gb.barycentric[idx] = [b0, b1, b2];
                 gb.mask[idx] = true;
             }
         }
     }
 
-    gb
+    checkpoint()?;
+    Ok(gb)
 }
 
 /// A projected vertex, precomputed once so the triangle loop allocates nothing.
 #[derive(Debug, Clone, Copy)]
-struct ScreenVertex {
-    x: f32,
-    y: f32,
+pub(super) struct ScreenVertex {
+    pub x: f32,
+    pub y: f32,
     /// Eye-space depth, increasing away from the eye.
-    depth: f32,
+    pub depth: f32,
     /// `1/depth` under perspective, `1` under orthographic.
-    inv_w: f32,
+    pub inv_w: f32,
 }
 
 impl ScreenVertex {
@@ -713,6 +813,56 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paint_retains_nonzero_fused_area_at_vertex() {
+        let mesh = super::Mesh {
+            vertices: vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let epsilon = f32::EPSILON;
+        let screen = [[0.5, 0.5], [1.5, 1.5 + epsilon], [1.5 - epsilon, 1.5]].map(|[x, y]| {
+            super::ScreenVertex {
+                x,
+                y,
+                depth: 0.5,
+                inv_w: 1.,
+            }
+        });
+        let paint = super::render_projected(&mesh, &screen, super::Culling::None, 2, 2, true);
+        assert!(paint.mask[0], "upstream fused area is -2^-46, not zero");
+        let gallery = super::render_projected(&mesh, &screen, super::Culling::None, 2, 2, false);
+        assert!(
+            !gallery.mask[0],
+            "preserve ordinary raster's existing arithmetic"
+        );
+    }
+
+    #[test]
+    fn paint_uv_edge_matches_tencent_4096_mesh() {
+        // Retained Tencent 4096 atlas, face 174626: texel (211, 1974)
+        // is outside by alpha = -2.9802322e-8, not a covered edge.
+        let mesh = super::Mesh {
+            vertices: vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let screen = [
+            [209.27348, 1985.4447],
+            [214.7664, 1976.4323],
+            [207.7237, 1972.2661],
+        ]
+        .map(|[x, y]| super::ScreenVertex {
+            x,
+            y,
+            depth: 0.00001,
+            inv_w: 1.,
+        });
+        let buffers =
+            super::render_projected(&mesh, &screen, super::Culling::None, 212, 1975, true);
+        assert!(!buffers.mask[1974 * 212 + 211]);
+    }
+
     use super::*;
 
     /// Axis-aligned cube spanning `[-half, half]` on every axis, wound
@@ -759,6 +909,35 @@ mod tests {
             ],
             [[0, 1, 2], [0, 2, 3]],
         )
+    }
+
+    #[test]
+    fn face_ids_and_barycentrics_reconstruct_the_visible_surface() {
+        let mesh = cube(1.0);
+        for camera in [
+            Camera::orthographic(25., 15.),
+            Camera::perspective(25., 15., 2.5),
+        ] {
+            let gb = render_gbuffers(&mesh, &camera, 64, 64);
+            assert!(gb.covered_pixels() > 0);
+            for i in 0..gb.len() {
+                if !gb.mask[i] {
+                    assert_eq!(gb.face_ids[i], u32::MAX);
+                    continue;
+                }
+                let face = mesh.faces[gb.face_ids[i] as usize];
+                let weights = gb.barycentric[i];
+                assert!((weights.iter().sum::<f32>() - 1.).abs() < 1e-5);
+                for axis in 0..3 {
+                    let position: f32 = face
+                        .iter()
+                        .zip(weights)
+                        .map(|(&vertex, weight)| mesh.vertices[vertex as usize][axis] * weight)
+                        .sum();
+                    assert!((position - gb.position[i][axis]).abs() < 1e-6);
+                }
+            }
+        }
     }
 
     #[test]

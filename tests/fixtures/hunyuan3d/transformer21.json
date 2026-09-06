@@ -1,0 +1,24 @@
+{
+  "upstream": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+  "config": {
+    "in_channels": 4,
+    "hidden_size": 32,
+    "context_dim": 16,
+    "depth": 3,
+    "num_heads": 2,
+    "num_moe_layers": 1,
+    "num_experts": 3,
+    "moe_top_k": 2,
+    "qk_norm": true,
+    "qkv_bias": false,
+    "use_attention_pooling": false,
+    "use_pos_emb": false,
+    "with_decoupled_ca": false
+  },
+  "seed": 15111496,
+  "torch": "2.5.1+cu124",
+  "device": "NVIDIA L40S",
+  "dtype": "float32",
+  "atol": 5e-05,
+  "note": "Random synthetic weights; not a pretrained checkpoint. Tencent CUDA attention unmodified."
+}

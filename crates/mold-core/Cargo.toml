@@ -27,6 +27,9 @@ h3-private-uat = []
 # control the binary cannot execute. Request validation is deliberately
 # feature-independent, because the wire shape does not change with the build.
 pulid = []
+# Advertise and admit the native Hunyuan3D PBR paint runtime. Runtime crates
+# forward this only when the xatlas/native paint path is compiled.
+mesh-texture = []
 
 [dependencies]
 anyhow = "1"

@@ -28,6 +28,12 @@ function formFor(family: string): GenerateForm {
   return reactive({ ...newGenerateForm(), family, model: "m" });
 }
 
+function openMaskEditor(wrapper: ReturnType<typeof mount<typeof SourceImageWell>>) {
+  const exposed = wrapper.vm as unknown as { openMaskEditor: () => void };
+  expect(exposed.openMaskEditor).toBeTypeOf("function");
+  exposed.openMaskEditor();
+}
+
 describe("SourceImageWell", () => {
   beforeEach(() => setActivePinia(createPinia()));
   afterEach(() => (document.body.innerHTML = ""));
@@ -65,7 +71,7 @@ describe("SourceImageWell", () => {
     // asking for the editor anyway does nothing.
     expect(wrapper.vm.maskAvailable).toBe(false);
     expect(wrapper.find("[data-test='mask-well']").exists()).toBe(false);
-    wrapper.vm.openMaskEditor();
+    openMaskEditor(wrapper);
     await flushPromises();
     expect(wrapper.findComponent(MaskEditorModal).props("open")).toBe(false);
 
@@ -73,7 +79,7 @@ describe("SourceImageWell", () => {
     await flushPromises();
     expect(wrapper.vm.maskAvailable).toBe(true);
     expect(wrapper.find("[data-test='mask-well']").exists()).toBe(true);
-    wrapper.vm.openMaskEditor();
+    openMaskEditor(wrapper);
     await flushPromises();
     wrapper.findComponent(MaskEditorModal).vm.$emit("apply", "MASKB64");
     await flushPromises();

@@ -54,6 +54,10 @@ const HOST_FLOOR_BYTES: u64 = 64_000_000;
 pub struct Hunyuan3dShape {
     /// Edge length the source image is letterboxed to before DINOv2.
     pub conditioning_size: u32,
+    /// Latent sequence length of the selected shape checkpoint.
+    pub num_latents: u64,
+    /// Attention heads in the selected vision encoder.
+    pub vision_heads: u64,
     /// Query-grid resolution.
     pub octree_resolution: u32,
     /// Query points per decode chunk.
@@ -64,6 +68,8 @@ impl Default for Hunyuan3dShape {
     fn default() -> Self {
         Self {
             conditioning_size: 512,
+            num_latents: NUM_LATENTS,
+            vision_heads: VISION_HEADS,
             octree_resolution: 256,
             // Upstream's `num_chunks` and the engine's CUDA/CPU default. The
             // Metal engine defaults to 32,000 (measured: 19% off the decode
@@ -77,19 +83,23 @@ impl Default for Hunyuan3dShape {
 }
 
 impl Hunyuan3dShape {
-    /// Read the shape from a request, falling back to the family defaults.
+    /// Read the shape from a request, falling back to the selected recipe.
     ///
     /// `conditioning_size` is taken from the request's `width` because that is
-    /// where the manifest records it — see `hunyuan3d_manifests`. It is not an
+    /// where legacy clients record it. Canvasless requests use the manifest
+    /// geometry, including the larger mini encoder and 2.1 latent set. It is not an
     /// output canvas and is never treated as one.
     pub fn from_request(req: &mold_core::GenerateRequest) -> Self {
         let defaults = Self::default();
+        let geometry = mold_core::manifest::hunyuan3d_shape_geometry(&req.model);
         Self {
             conditioning_size: if req.width > 0 {
                 req.width
             } else {
-                defaults.conditioning_size
+                geometry.conditioning_size
             },
+            num_latents: geometry.num_latents,
+            vision_heads: geometry.vision_heads,
             octree_resolution: req
                 .mesh
                 .as_ref()
@@ -132,17 +142,17 @@ pub fn activation_peak_bytes(shape: Hunyuan3dShape) -> u64 {
     // projections are linear in the token count and vanish beside it.
     let vision = vision_tokens
         .saturating_mul(vision_tokens)
-        .saturating_mul(VISION_HEADS)
+        .saturating_mul(shape.vision_heads)
         .saturating_mul(ACTIVATION_BYTES);
 
-    let dit_tokens = NUM_LATENTS.saturating_add(vision_tokens);
+    let dit_tokens = shape.num_latents.saturating_add(vision_tokens);
     let dit = dit_tokens
         .saturating_mul(dit_tokens)
         .saturating_mul(DIT_HEADS)
         .saturating_mul(ACTIVATION_BYTES);
 
     let decode = (shape.decode_chunk as u64)
-        .saturating_mul(NUM_LATENTS)
+        .saturating_mul(shape.num_latents)
         .saturating_mul(DIT_HEADS)
         .saturating_mul(ACTIVATION_BYTES);
 
@@ -254,6 +264,7 @@ mod tests {
             conditioning_size: 14,
             octree_resolution: 16,
             decode_chunk: 1,
+            ..Hunyuan3dShape::default()
         };
         assert!(activation_peak_bytes(tiny) >= FLOOR_BYTES);
         assert!(host_peak_bytes(tiny) >= HOST_FLOOR_BYTES);
@@ -285,6 +296,16 @@ mod tests {
         // No `mesh` block and no canvas: the family defaults stand rather
         // than a zero reaching the estimate and collapsing it to the floor.
         let fallback = Hunyuan3dShape::from_request(&request(0, serde_json::Value::Null));
-        assert_eq!(fallback, Hunyuan3dShape::default());
+        assert_eq!(fallback.conditioning_size, 1022);
+    }
+
+    #[test]
+    fn shape21_prices_its_4096_latents_and_large_vision_tower() {
+        let mut req = request(0, serde_json::Value::Null);
+        req.model = "hunyuan3d-2.1:fp16".into();
+        let shape = Hunyuan3dShape::from_request(&req);
+        assert_eq!(shape.num_latents, 4096);
+        assert_eq!(shape.vision_heads, 16);
+        assert!(activation_peak_bytes(shape) > activation_peak_bytes(Hunyuan3dShape::default()));
     }
 }

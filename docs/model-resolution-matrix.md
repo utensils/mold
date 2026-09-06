@@ -368,9 +368,24 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ## `hunyuan3d`
 
+### `hunyuan3d-2.1:fp16`
+
+Schema 1 · hash `99867a82d07c732151d2f116bcaa9cdb0659a91ddec5e968b4da2e541da0e71e` · default recipe `default`
+
+Models: `hunyuan3d-2.1:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 30 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### `hunyuan3d-mini-turbo:fp16`
 
-Schema 1 · hash `431b417ede7d5a584d16478a77f7221d8acc54741ab7b0bcf78060d41f2ddfbd` · default recipe `default`
+Schema 1 · hash `a6da2e96a5d4eed10d4b7413a2fe2df1c2c7684ea4eecd0e0d5bb644738a44cf` · default recipe `default`
 
 Models: `hunyuan3d-mini-turbo:fp16`.
 
@@ -385,7 +400,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d-turbo:fp16`
 
-Schema 1 · hash `35c9bf56a171d530f75fae2836fa35ce9ea72ef8b7c8ebcb8bd91cd8ab006f4e` · default recipe `default`
+Schema 1 · hash `e897a60183089be42d59bf29d5d1fcfd6c192fe135cf31e8199c32479bde2acf` · default recipe `default`
 
 Models: `hunyuan3d-turbo:fp16`.
 
@@ -400,7 +415,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `hunyuan3d:fp16`
 
-Schema 1 · hash `85e7b7e50221a327b372d3bfe8277884f20e8baaab1f7633d13fb74845e5ec7a` · default recipe `default`
+Schema 1 · hash `97e8e0cfed26640c9699747514662253171f43427bf0102f30c55f4592a905a8` · default recipe `default`
 
 Models: `hunyuan3d:fp16`.
 

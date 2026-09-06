@@ -18,6 +18,7 @@ pub mod format;
 pub mod generation_profile;
 pub mod gguf_probe;
 pub mod glb_summary;
+pub mod hunyuan3d_paint_assets;
 pub mod identity;
 pub mod install_error;
 pub mod lambda;

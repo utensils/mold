@@ -19,21 +19,22 @@ Iso threshold, Target faces) takes their place. See
 
 - **Developer**:
   [Tencent Hunyuan](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
-- **License**: Tencent Hunyuan 3D 2.0 Community License — see
+- **License**: separate Tencent Hunyuan 3D 2.0 and 2.1 terms — see
   [Licence](#licence) below, because it has real restrictions
 - **HuggingFace**: [tencent/Hunyuan3D-2](https://huggingface.co/tencent/Hunyuan3D-2),
   [tencent/Hunyuan3D-2mini](https://huggingface.co/tencent/Hunyuan3D-2mini)
 
 ## Variants
 
-| Model                       | Steps | Size    | VRAM  | Notes                                   |
-| --------------------------- | ----- | ------- | ----- | --------------------------------------- |
-| `hunyuan3d-mini-turbo:fp16` | 5     | 3.6 GiB | ~5 GB | 0.6B, step-distilled. **The default.**  |
-| `hunyuan3d-turbo:fp16`      | 5     | 4.6 GiB | ~6 GB | 1.1B, step-distilled                    |
-| `hunyuan3d:fp16`            | 30    | 4.6 GiB | ~6 GB | 1.1B, undistilled — best shape fidelity |
+| Model                       | Steps | Size    | VRAM                      | Notes                                            |
+| --------------------------- | ----- | ------- | ------------------------- | ------------------------------------------------ |
+| `hunyuan3d-mini-turbo:fp16` | 5     | 3.6 GiB | ~5 GB                     | 0.6B, step-distilled. **The default.**           |
+| `hunyuan3d-turbo:fp16`      | 5     | 4.6 GiB | ~6 GB                     | 1.1B, step-distilled                             |
+| `hunyuan3d:fp16`            | 30    | 4.6 GiB | ~6 GB                     | 1.1B, undistilled                                |
+| `hunyuan3d-2.1:fp16`        | 30    | 6.9 GiB | qualification in progress | 3.3B MoE shape transformer; separate 2.1 licence |
 
 Each is ONE self-contained file carrying the shape transformer, the shape VAE
-and a DINOv2-giant image encoder, which is why a "0.6B" model is still 3.6 GiB
+and an image encoder (DINOv2-large for 2.1, giant for 2.0), which is why a "0.6B" model is still 3.6 GiB
 — the vision tower is 1.1B parameters on its own.
 
 No quantized (GGUF or FP8) variants exist for this family upstream.
@@ -57,6 +58,18 @@ is slower than PyTorch here: the volume decode (over 90 % of the wall time) runs
 through candle's chunked math attention on Metal rather than a fused kernel,
 and the tile size has already been swept — 512-row tiles are the fastest. CUDA
 has not been measured yet.
+
+## Hunyuan3D 2.1 shape
+
+```bash
+mold pull hunyuan3d-2.1 --accept-license tencent-hunyuan3d-2.1
+mold run hunyuan3d-2.1 --image chair.png -o chair.glb
+```
+
+The 2.1 checkpoint uses a different transformer with sparse experts and 4,096
+shape latents. Accepting the 2.0 terms does not accept the 2.1 terms. The default
+remains mini-turbo. CUDA component and full-render validation is recorded in the
+campaign qualification ledger; broader parity qualification is still running.
 
 ## Getting good results
 
@@ -174,12 +187,14 @@ This is the same gate the InsightFace face models use. It exists so a
 server-side auto-pull can never quietly acquire restricted weights on your
 behalf.
 
-## Not yet supported
+## PBR painting
 
-Texture and PBR material generation, the 2.1 shape model, multi-view input and
-text-to-3D are tracked in
-[#1496](https://github.com/utensils/mold/issues/1496). Today's output is
-geometry only.
+CUDA builds with `mesh-texture` can run Hunyuan3D Paint after shape generation
+and embed base color, metallic/roughness and normal textures in the stored GLB.
+Use `--texture [--texture-resolution 1024|2048|4096]` on the CLI, or enable
+**PBR materials** in the desktop Create inspector. Multi-view input,
+text-to-3D, matting, delight and supplied-mesh retexturing remain tracked in
+[#1496](https://github.com/utensils/mold/issues/1496).
 
 ## Accepting the licence from the apps
 
@@ -190,6 +205,5 @@ so it is stored on the host that will fetch the weights — on desktop, pick tha
 machine in **Settings → Model licenses**, and on mobile it is whichever host you
 have selected.
 
-Texturing weights (`hunyuan3d-paint`) are covered by a _separate_ Tencent 2.1
-agreement and must be accepted on their own. They install today, but the PBR
-paint engine is not implemented yet, so they satisfy the gate without rendering.
+The 2.1 shape model and texturing weights (`hunyuan3d-paint`) share a _separate_
+Tencent 2.1 agreement and must be accepted on their own before PBR painting.

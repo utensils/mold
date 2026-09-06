@@ -19,17 +19,17 @@
 //!   re-rendered for its content, and cuDNN is worth a measured **4.4x** on
 //!   the convolutions of a Wan VAE decode (845 ms -> 192 ms per latent frame,
 //!   `wan22-t2v-a14b:q5` 832x480 on an RTX 4090; see `website/models/wan.md`).
+//! * [`ConvPolicy::Paint`] — the new material-paint stage uses its qualified
+//!   cuDNN recipe where available. Existing shape generation keeps Image.
 //!
 //! `MOLD_CONV={cudnn,im2col}` overrides both directions. It shapes output, so
 //! it is registered in [`crate::runtime_env::ENGINE_SHAPING_VARIABLES`].
 //!
 //! # Why a scope guard and not a per-call argument
 //!
-//! candle's switch is one process-global flag, because a convolution deep
-//! inside a VAE has no idea which model family invoked it. That is sound here
-//! for a reason mold already relies on elsewhere: at most one engine is
-//! GPU-resident and generation is serialised behind `AppState.model_cache`
-//! (CLAUDE.md decision 4), so exactly one family is convolving at a time.
+//! candle's switch is thread-local, because a convolution deep inside a VAE
+//! has no model-family argument. Each GPU worker can therefore apply its own
+//! policy without changing another worker's execution.
 //! [`ConvScope`] makes that explicit — it applies the policy for a render and
 //! restores the previous value on drop, so a panic or an early return cannot
 //! leave the next family running on the wrong backend.
@@ -49,6 +49,8 @@ pub enum ConvPolicy {
     Image,
     /// Clips. cuDNN wherever the feature is compiled in.
     Video,
+    /// New material painting. cuDNN wherever the feature is compiled in.
+    Paint,
 }
 
 /// The resolved convolution backend for a render.
@@ -117,13 +119,20 @@ pub fn parse_backend_env(raw: Option<&str>) -> Option<ConvBackend> {
 /// the request is not silently honoured, because there is nothing to honour it
 /// with.
 pub fn resolve_for(policy: ConvPolicy) -> ConvBackend {
-    let requested = requested_backend_env();
+    resolve_with_request(policy, requested_backend_env(), cudnn_compiled())
+}
+
+fn resolve_with_request(
+    policy: ConvPolicy,
+    requested: Option<ConvBackend>,
+    compiled: bool,
+) -> ConvBackend {
     let wanted = requested.unwrap_or(match policy {
         ConvPolicy::Image => ConvBackend::Im2Col,
-        ConvPolicy::Video => ConvBackend::Cudnn,
+        ConvPolicy::Video | ConvPolicy::Paint => ConvBackend::Cudnn,
     });
     match wanted {
-        ConvBackend::Cudnn if cudnn_compiled() => ConvBackend::Cudnn,
+        ConvBackend::Cudnn if compiled => ConvBackend::Cudnn,
         _ => ConvBackend::Im2Col,
     }
 }
@@ -205,10 +214,36 @@ impl Drop for ConvScope {
 mod tests {
     use super::*;
 
-    /// The switch these tests assert on is one process-global flag, so they
-    /// have to run one at a time or they read each other's writes. That is not
-    /// a flaw in the design — production has the same single global, and the
-    /// serialisation there is the scheduler running one engine at a time.
+    #[test]
+    fn paint_default_is_scoped_and_respects_operator_and_build() {
+        assert_eq!(policy_for_family("hunyuan3d"), ConvPolicy::Image);
+        assert_eq!(
+            resolve_with_request(ConvPolicy::Image, None, true),
+            ConvBackend::Im2Col
+        );
+        assert_eq!(
+            resolve_with_request(ConvPolicy::Paint, None, true),
+            ConvBackend::Cudnn
+        );
+        assert_eq!(
+            resolve_with_request(ConvPolicy::Paint, None, false),
+            ConvBackend::Im2Col
+        );
+        assert_eq!(
+            resolve_with_request(ConvPolicy::Paint, Some(ConvBackend::Im2Col), true),
+            ConvBackend::Im2Col
+        );
+        assert_eq!(
+            resolve_with_request(ConvPolicy::Paint, Some(ConvBackend::Cudnn), true),
+            ConvBackend::Cudnn
+        );
+        assert_eq!(
+            resolve_with_request(ConvPolicy::Paint, Some(ConvBackend::Cudnn), false),
+            ConvBackend::Im2Col
+        );
+    }
+
+    /// Serialize scope tests; the production backend switch is thread-local.
     static GLOBAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn serially<T>(f: impl FnOnce() -> T) -> T {

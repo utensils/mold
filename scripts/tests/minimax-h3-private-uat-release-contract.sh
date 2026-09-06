@@ -118,7 +118,7 @@ require_text crates/mold-candle/Cargo.toml \
   'h3-private-uat = []' \
   "mold-candle does not keep the private H3 runtime behind its own feature"
 require_text crates/mold-candle/Cargo.toml \
-  'license = "MIT AND Apache-2.0"' \
+  'license = "MIT AND Apache-2.0 AND BSD-3-Clause"' \
   "mold-candle does not declare the combined license of its packaged sources"
 require_text crates/mold-candle/THIRD_PARTY_NOTICES.md \
   'comfy-kitchen INT8 CUDA reference' \

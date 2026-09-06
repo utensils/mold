@@ -5,7 +5,7 @@
 //! remapped to the candle stable_diffusion VAE convention.
 
 use anyhow::Result;
-use candle_transformers::models::stable_diffusion::vae;
+use mold_candle::stable_diffusion::vae;
 
 /// Build the SD3 VAE autoencoder with the correct config.
 pub fn build_sd3_vae_autoencoder(vb: candle_nn::VarBuilder) -> Result<vae::AutoEncoderKL> {

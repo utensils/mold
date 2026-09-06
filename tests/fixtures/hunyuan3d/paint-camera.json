@@ -1,0 +1,75 @@
+{
+  "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+  "source_sha256": "5f008d9149c0dcac2ac5ffa7d2e797657b21515878d9b5804f6bf95c08135cce",
+  "torch": "2.5.1+cu124",
+  "size": 64,
+  "radius": 0,
+  "views": [
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      90
+    ],
+    [
+      0,
+      180
+    ],
+    [
+      0,
+      270
+    ],
+    [
+      90,
+      0
+    ],
+    [
+      -90,
+      180
+    ]
+  ],
+  "mesh": "/storage/mold/output/verification/hunyuan3d/campaign-1511-1496/paint-camera-input-v1/mesh.npz",
+  "mesh_sha256": "812c1fc3ad02951eb01db0f9b92fa2ce08bfd68509183ee5adbd371c1180acf8",
+  "device": "NVIDIA L40S",
+  "results": [
+    {
+      "index": 0,
+      "seconds": 0.12233194000145886,
+      "visible": 711,
+      "reliable": 711
+    },
+    {
+      "index": 1,
+      "seconds": 0.0026975300061167218,
+      "visible": 542,
+      "reliable": 542
+    },
+    {
+      "index": 2,
+      "seconds": 0.0021532229948206805,
+      "visible": 711,
+      "reliable": 711
+    },
+    {
+      "index": 3,
+      "seconds": 0.0020004540056106634,
+      "visible": 542,
+      "reliable": 542
+    },
+    {
+      "index": 4,
+      "seconds": 0.0019304259985801764,
+      "visible": 369,
+      "reliable": 369
+    },
+    {
+      "index": 5,
+      "seconds": 0.0019588150025811046,
+      "visible": 369,
+      "reliable": 369
+    }
+  ],
+  "peak_cuda_allocated": 9152512
+}

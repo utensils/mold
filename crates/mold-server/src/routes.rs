@@ -6452,7 +6452,7 @@ fn enrich_queue_plan_runtime(
             continue;
         };
         let progress = progress.unwrap_or_default();
-        let running = progress.step.is_some();
+        let running = progress.step.is_some() || progress.stage_current.is_some();
         work.runtime_phase = Some(if running { "running" } else { "loading" }.to_string());
         work.runtime_stage = progress.stage.clone().or_else(|| {
             progress
@@ -6460,7 +6460,12 @@ fn enrich_queue_plan_runtime(
                 .as_ref()
                 .map(|load| format!("Loading {}", load.component))
         });
-        let (current, total) = if running {
+        let (current, total) = if progress.stage_current.is_some() {
+            (
+                progress.stage_current.map(|value| value as u64),
+                progress.stage_total.map(|value| value as u64),
+            )
+        } else if running {
             (
                 progress.step.map(|value| value as u64),
                 progress.total.map(|value| value as u64),

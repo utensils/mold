@@ -1,0 +1,5 @@
+{
+  "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+  "torch": "2.5.1+cu124",
+  "source_sha256": "5f008d9149c0dcac2ac5ffa7d2e797657b21515878d9b5804f6bf95c08135cce"
+}

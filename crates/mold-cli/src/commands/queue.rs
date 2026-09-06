@@ -447,7 +447,10 @@ fn now_secs() -> u64 {
 pub(crate) fn state_label(row: &QueueRow) -> String {
     if row.entry.state == STATE_RUNNING {
         return match row.progress.as_ref() {
-            Some(progress) => match (progress.step, progress.total) {
+            Some(progress) => match (
+                progress.stage_current.or(progress.step),
+                progress.stage_total.or(progress.total),
+            ) {
                 (Some(step), Some(total)) => format!("Running {step}/{total}"),
                 _ => match progress.stage.as_deref() {
                     Some(stage) if !stage.is_empty() => format!("Running · {stage}"),

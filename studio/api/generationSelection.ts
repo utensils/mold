@@ -51,6 +51,8 @@ export interface QueueJobProgress {
   step: number | null;
   total: number | null;
   stage: string | null;
+  stage_current?: number | null;
+  stage_total?: number | null;
   queue_position: number | null;
   preview_image: string | null;
 }
@@ -67,6 +69,8 @@ function parseQueueJobProgress(value: unknown): QueueJobProgress | null {
     step: finiteOrNull(row.step),
     total: total !== null && total > 0 ? total : null,
     stage: typeof row.stage === "string" && row.stage ? row.stage : null,
+    stage_current: finiteOrNull(row.stage_current),
+    stage_total: finiteOrNull(row.stage_total),
     queue_position: finiteOrNull(row.queue_position),
     preview_image:
       typeof row.preview_image === "string" && row.preview_image

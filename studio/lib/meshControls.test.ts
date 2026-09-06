@@ -66,6 +66,27 @@ describe("meshRequestFromForm", () => {
     };
     expect(meshRequestFromForm(form, caps())).toEqual({ threshold: 0.4 });
   });
+
+  it("carries the selected PBR texture stage and advertised atlas size", () => {
+    const textureCaps = {
+      ...caps(),
+      texture: { mode: "adjustable" as const, required: false },
+      texture_resolutions: [1024, 2048, 4096],
+      texture_default_resolution: 2048,
+    };
+    expect(
+      meshRequestFromForm(
+        { ...emptyMeshForm(), texture: true, textureResolution: null },
+        textureCaps,
+      ),
+    ).toEqual({ texture: true, texture_resolution: 2048 });
+    expect(
+      meshRequestFromForm(
+        { ...emptyMeshForm(), texture: true, textureResolution: 4096 },
+        textureCaps,
+      ),
+    ).toEqual({ texture: true, texture_resolution: 4096 });
+  });
 });
 
 describe("meshFormFromMetadata", () => {
@@ -75,8 +96,16 @@ describe("meshFormFromMetadata", () => {
         octree_resolution: 320,
         threshold: 0.55,
         target_faces: 40_000,
+        texture: true,
+        texture_resolution: 4096,
       }),
-    ).toEqual({ octreeResolution: 320, threshold: 0.55, targetFaces: 40_000 });
+    ).toEqual({
+      octreeResolution: 320,
+      threshold: 0.55,
+      targetFaces: 40_000,
+      texture: true,
+      textureResolution: 4096,
+    });
   });
 
   it("reads absent, null, and non-mesh metadata as an empty form", () => {

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    validation, GuidanceCapabilities, Ltx2PipelineMode, OutputFormat, Scheduler,
-    SourceImageCapability,
+    validation, GenerationImageReferenceRole, GuidanceCapabilities, Ltx2PipelineMode,
+    MeshReferenceFormat, MeshUpAxis, OutputFormat, Scheduler, SourceImageCapability,
 };
 
 pub const GENERATION_PROFILE_SCHEMA_VERSION: u32 = 1;
@@ -300,6 +300,64 @@ pub struct MeshCapabilitiesProfile {
     /// The PBR texture stage. `Hidden` in every build that ships without the
     /// paint bundle, with the reason a client shows instead of the control.
     pub texture: FeatureControlProfile,
+    /// Semantic camera slots accepted by a multiview shape checkpoint.
+    /// `None` means an older server; current servers always emit a block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_views: Option<NamedViewsProfile>,
+    /// A user-supplied mesh accepted by a texture-only workflow.
+    /// `None` means an older server; current servers always emit a block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_input: Option<MeshInputProfile>,
+    /// Texture atlas sizes admitted by the same request validator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texture_resolutions: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_default_resolution: Option<u32>,
+    /// Number of raster views used by the paint stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_view_count: Option<IntegerControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matting: Option<FeatureControlProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delight: Option<FeatureControlProfile>,
+    /// Complete workflows executable by this recipe in this build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_modes: Vec<MeshWorkflowMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct NamedViewsProfile {
+    pub mode: ControlMode,
+    pub roles: Vec<GenerationImageReferenceRole>,
+    pub min_count: u32,
+    pub max_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct MeshInputProfile {
+    pub mode: ControlMode,
+    pub formats: Vec<MeshReferenceFormat>,
+    pub max_count: u32,
+    #[ts(type = "number")]
+    pub max_bytes: u64,
+    pub up_axes: Vec<MeshUpAxis>,
+    pub meters_per_unit_min: f64,
+    pub meters_per_unit_max: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshWorkflowMode {
+    ImageToMesh,
+    MultiviewToMesh,
+    MeshTexture,
+    TextToMesh,
 }
 
 /// A repeatable adapter input and its immutable stack limit.
@@ -2135,7 +2193,7 @@ fn recipe(
                 reason: prompt_reason(prompt_mode),
             },
             supports_strength,
-            mesh: mesh_only.then(mesh_capabilities_profile),
+            mesh: mesh_only.then(|| mesh_capabilities_profile(&normalized_model)),
         },
         provenance: provenance(family),
     }
@@ -2144,7 +2202,17 @@ fn recipe(
 /// The 3-D control block, built from the SAME constants
 /// `validation::validate_mesh_request` enforces, so a client that stays inside
 /// the advertised bounds can never be refused by the door it was reading.
-fn mesh_capabilities_profile() -> MeshCapabilitiesProfile {
+fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
+    let multiview = matches!(
+        model.split(':').next().unwrap_or(model),
+        "hunyuan3d-2mv" | "hunyuan3d-2mv-turbo"
+    );
+    let paint_available = cfg!(feature = "mesh-texture");
+    let unavailable = |reason: &str| FeatureControlProfile {
+        mode: ControlMode::Hidden,
+        required: false,
+        reason: Some(reason.to_string()),
+    };
     MeshCapabilitiesProfile {
         octree_resolutions: validation::MESH_OCTREE_RESOLUTIONS.to_vec(),
         octree_default: validation::MESH_DEFAULT_OCTREE_RESOLUTION,
@@ -2158,17 +2226,63 @@ fn mesh_capabilities_profile() -> MeshCapabilitiesProfile {
         },
         target_faces_min: validation::MESH_MIN_TARGET_FACES,
         target_faces_max: validation::MESH_MAX_TARGET_FACES,
-        // Geometry only until the paint bundle ships. Advertised as `Hidden`
-        // with its reason rather than omitted, so a client shows why the
-        // control is missing instead of leaving a silent gap.
         texture: FeatureControlProfile {
-            mode: ControlMode::Hidden,
+            mode: if paint_available {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            },
             required: false,
-            reason: Some(
-                "PBR texture generation is not available in this build; \
-                 omit mesh.texture to render geometry only"
-                    .to_string(),
-            ),
+            reason: (!paint_available).then(|| {
+                "PBR texture generation requires the mesh-texture build feature".to_string()
+            }),
+        },
+        named_views: Some(NamedViewsProfile {
+            mode: if multiview {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            },
+            roles: vec![
+                GenerationImageReferenceRole::Front,
+                GenerationImageReferenceRole::Left,
+                GenerationImageReferenceRole::Back,
+                GenerationImageReferenceRole::Right,
+            ],
+            min_count: if multiview { 1 } else { 0 },
+            max_count: if multiview { 4 } else { 0 },
+            reason: (!multiview)
+                .then(|| "Named camera views require a Hunyuan3D 2mv checkpoint".to_string()),
+        }),
+        mesh_input: Some(MeshInputProfile {
+            mode: ControlMode::Hidden,
+            formats: vec![MeshReferenceFormat::Glb, MeshReferenceFormat::Obj],
+            max_count: 0,
+            max_bytes: validation::MESH_REFERENCE_MAX_BYTES,
+            up_axes: vec![MeshUpAxis::Y, MeshUpAxis::Z],
+            meters_per_unit_min: 1.0e-6,
+            meters_per_unit_max: 1.0e6,
+            reason: Some("Supplied-mesh texturing is not executable by this build".to_string()),
+        }),
+        texture_resolutions: validation::MESH_TEXTURE_RESOLUTIONS.to_vec(),
+        texture_default_resolution: Some(2048),
+        texture_view_count: Some(IntegerControl {
+            default: 6,
+            min: 6,
+            max: 6,
+            step: 1,
+            recommended: Vec::new(),
+            mode: ControlMode::Fixed,
+            note: Some("Hunyuan3D Paint renders six canonical views".to_string()),
+        }),
+        matting: Some(unavailable(
+            "Background matting is not executable by this build",
+        )),
+        delight: Some(unavailable("Delighting is not executable by this build")),
+        workflow_modes: if multiview {
+            vec![MeshWorkflowMode::MultiviewToMesh]
+        } else {
+            vec![MeshWorkflowMode::ImageToMesh]
         },
     }
 }
@@ -2892,7 +3006,64 @@ mod tests {
             mesh_caps.target_faces_max,
             validation::MESH_MAX_TARGET_FACES
         );
-        assert_eq!(mesh_caps.texture.mode, ControlMode::Hidden);
+        assert_eq!(
+            mesh_caps.texture.mode,
+            if cfg!(feature = "mesh-texture") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            }
+        );
+        let named = mesh_caps.named_views.as_ref().expect("current profile");
+        assert_eq!(named.mode, ControlMode::Hidden);
+        assert_eq!(named.max_count, 0);
+        assert_eq!(
+            mesh_caps.texture_resolutions,
+            validation::MESH_TEXTURE_RESOLUTIONS
+        );
+        assert_eq!(mesh_caps.texture_default_resolution, Some(2048));
+        assert_eq!(
+            mesh_caps
+                .texture_view_count
+                .as_ref()
+                .map(|value| value.default),
+            Some(6)
+        );
+        assert_eq!(
+            mesh_caps.workflow_modes,
+            vec![MeshWorkflowMode::ImageToMesh]
+        );
+        assert_eq!(
+            mesh_caps.mesh_input.as_ref().map(|input| input.mode),
+            Some(ControlMode::Hidden)
+        );
+    }
+
+    #[test]
+    fn hunyuan3d_2mv_profile_names_every_view_slot() {
+        let mut mesh = input("hunyuan3d-2mv:fp16", "hunyuan3d");
+        mesh.source_image = Some(SourceImageCapability::Required);
+        let profile = resolve_generation_profile(mesh);
+        let mesh = profile
+            .default_recipe()
+            .unwrap()
+            .capabilities
+            .mesh
+            .as_ref()
+            .unwrap();
+        let named = mesh.named_views.as_ref().unwrap();
+        assert_eq!(named.mode, ControlMode::Adjustable);
+        assert_eq!((named.min_count, named.max_count), (1, 4));
+        assert_eq!(
+            named.roles,
+            vec![
+                GenerationImageReferenceRole::Front,
+                GenerationImageReferenceRole::Left,
+                GenerationImageReferenceRole::Back,
+                GenerationImageReferenceRole::Right,
+            ]
+        );
+        assert_eq!(mesh.workflow_modes, vec![MeshWorkflowMode::MultiviewToMesh]);
     }
 
     /// Every raster and video recipe stays exactly as it was: no mesh block,
@@ -2976,18 +3147,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("mesh.target_faces"), "{error}");
-        let error = validate_request_against_generation_profile(
+        let textured = validate_request_against_generation_profile(
             &profile,
             &base(crate::types::MeshRequestOptions {
                 texture: Some(true),
                 ..Default::default()
             }),
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("texture generation is not available"),
-            "{error}"
         );
+        if cfg!(feature = "mesh-texture") {
+            textured.unwrap();
+        } else {
+            assert!(textured.unwrap_err().contains("mesh-texture build feature"));
+        }
     }
 
     /// An unadvertised format is refused by the ONE extracted check durable

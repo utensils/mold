@@ -1,5 +1,22 @@
 # Third-Party Notices
 
+## Diffusers paint UNet
+
+`src/hunyuan3d/paint_conv.rs`, `src/hunyuan3d/paint_unet.rs` and
+`src/hunyuan3d/paint_sampler.rs` adapt Hugging Face Diffusers v0.30.0,
+commit `8a79d8ec3973e78065f13638eefc0dc7d4dc6009`, specifically
+`models/resnet.py`, `models/downsampling.py`, `models/upsampling.py`,
+`models/unets/unet_2d_condition.py`, `models/embeddings.py` and
+`models/transformers/transformer_2d.py` and
+`schedulers/scheduling_unipc_multistep.py`.
+The Rust port implements the fixed inference recipe, explicit timestep
+conditioning and bounded output-size validation; training branches are omitted.
+
+    Copyright 2024 The HuggingFace Team. All rights reserved.
+
+Diffusers is Apache-2.0; the full license is retained in `LICENSE-APACHE-2.0`.
+No Python or PyTorch runtime ships with this implementation.
+
 ## FerrisMind/candle-video (LTX-Video port)
 
 Mold's legacy LTX-Video transformer, 3D causal video VAE, and flow-match Euler
@@ -30,3 +47,48 @@ latent upsampler, and the rest of the LTX-2 runtime are original work.
 
 The complete repository-wide list lives in `THIRD_PARTY_NOTICES.md` at the
 mold repository root.
+
+## xatlas (optional mesh UV unwrapping)
+
+The `mesh-texture` feature builds unmodified xatlas at revision
+`f700c7790aaa030e794b52ba7791a05c085faf0c`, the version used by the
+Hunyuan3D 2.1 reference's xatlas-python 0.0.9. Copyright (c) 2018–2020
+Jonathan Young, MIT licence. Sources and complete licence are retained in
+`crates/mold-inference/vendor/xatlas/`. The C ABI bridge is mold-owned code.
+No Python runtime is linked or invoked by mold.
+
+## OpenCV Navier–Stokes texture fill
+
+`crates/mold-inference/src/hunyuan3d/paint_ns_fill.rs` ports the RGB radius-three
+branch of OpenCV 4.10.0 `modules/photo/src/inpaint.cpp`, revision
+`71d3237a093b60a27601c20e9ee6c3e52154e8b1`. It preserves fill ordering and
+rounding and adds bounds validation and cancellation. The original notice is:
+
+    For Open Source Computer Vision Library
+
+    Copyright (C) 2000, Intel Corporation, all rights reserved.
+    Third party copyrights are property of their respective icvers.
+
+    Redistribution and use in source and binary forms, with or without modification,
+    are permitted provided that the following conditions are met:
+
+    * Redistribution's of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+
+    * Redistribution's in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+    * The name of Intel Corporation may not be used to endorse or promote products
+    derived from this software without specific prior written permission.
+
+    This software is provided by the copyright holders and contributors "as is" and
+    any express or implied warranties, including, but not limited to, the implied
+    warranties of merchantability and fitness for a particular purpose are disclaimed.
+    In no event shall the Intel Corporation or contributors be liable for any direct,
+    indirect, incidental, special, exemplary, or consequential damages
+    (including, but not limited to, procurement of substitute goods or services;
+    loss of use, data, or profits; or business interruption) however caused
+    and on any theory of liability, whether in contract, strict liability,
+    or tort (including negligence or otherwise) arising in any way out of
+    the use of this software, even if advised of the possibility of such damage.

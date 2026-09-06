@@ -6,14 +6,16 @@ use mold_core::generation_profile::{
     resolution_qualification_record, AdapterControlProfile, AspectGroup, ControlMode,
     FeatureControlProfile, FloatControl, FpsControl, GenerationCapabilitiesProfile,
     GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile, IntegerControl,
-    MeshCapabilitiesProfile, OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance,
-    PromptCapabilitiesProfile, PromptRequirement, ProvenanceKind, RecipeSelector,
-    ReferenceImagesProfile, ReferenceSourceRelation, ResolutionDomain, ResolutionPreset,
-    ResolutionProfile, TemporalProfile, WanRecipeCapabilitiesProfile,
+    MeshCapabilitiesProfile, MeshInputProfile, MeshWorkflowMode, NamedViewsProfile,
+    OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance, PromptCapabilitiesProfile,
+    PromptRequirement, ProvenanceKind, RecipeSelector, ReferenceImagesProfile,
+    ReferenceSourceRelation, ResolutionDomain, ResolutionPreset, ResolutionProfile,
+    TemporalProfile, WanRecipeCapabilitiesProfile,
 };
 use mold_core::manifest::known_manifests;
 use mold_core::{
-    GuidanceCapabilities, Ltx2PipelineMode, OutputFormat, Scheduler, SourceImageCapability,
+    GenerationImageReferenceRole, GuidanceCapabilities, Ltx2PipelineMode, MeshReferenceCoordinates,
+    MeshReferenceFormat, MeshUpAxis, OutputFormat, Scheduler, SourceImageCapability,
 };
 use serde::Serialize;
 use ts_rs::TS;
@@ -115,6 +117,13 @@ fn render_typescript_contract() -> String {
     declaration!(GuidanceCapabilities);
     declaration!(PromptRequirement);
     declaration!(PromptCapabilitiesProfile);
+    declaration!(GenerationImageReferenceRole);
+    declaration!(MeshReferenceFormat);
+    declaration!(MeshUpAxis);
+    declaration!(MeshReferenceCoordinates);
+    declaration!(NamedViewsProfile);
+    declaration!(MeshInputProfile);
+    declaration!(MeshWorkflowMode);
     declaration!(MeshCapabilitiesProfile);
     declaration!(SourceImageCapability);
     declaration!(ReferenceSourceRelation);

@@ -485,12 +485,13 @@ class VisualCaptureContract(unittest.TestCase):
 
     def test_checked_tree_contains_no_model_or_capture_payload(self) -> None:
         # Model checkpoints and capture recordings are megabytes to gigabytes;
-        # golden parity fixtures under a crate's testdata/ are kilobytes.
-        # Exempt small tracked testdata fixtures (e.g. the PuLID goldens) so
-        # the contract keeps catching real payloads without banning parity
-        # tests from using the formats the code under test actually reads.
+        # golden parity fixtures under a crate's testdata/ or the repository's
+        # tests/fixtures/ tree are bounded synthetic tensors. Exempt only those
+        # two established fixture roots so the contract keeps catching real
+        # payloads without banning parity tests from using the formats the code
+        # under test actually reads.
         forbidden_suffixes = {".safetensors", ".ckpt", ".pt", ".pth", ".mp4", ".mov"}
-        testdata_fixture_ceiling_bytes = 1 << 20
+        synthetic_fixture_ceiling_bytes = 2 << 20
         tracked = producer.subprocess.run(
             ["git", "ls-files", "-co", "--exclude-standard"],
             cwd=REPO_ROOT,
@@ -501,10 +502,11 @@ class VisualCaptureContract(unittest.TestCase):
 
         def is_exempt_fixture(path: str) -> bool:
             parts = pathlib.PurePosixPath(path).parts
-            if "testdata" not in parts:
+            in_fixture_root = "testdata" in parts or parts[:2] == ("tests", "fixtures")
+            if not in_fixture_root:
                 return False
             full = REPO_ROOT / path
-            return full.is_file() and full.stat().st_size <= testdata_fixture_ceiling_bytes
+            return full.is_file() and full.stat().st_size <= synthetic_fixture_ceiling_bytes
 
         offenders = [
             path

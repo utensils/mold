@@ -804,6 +804,9 @@ fn validate_decoded_reference(
                 samples_per_channel: metadata.sample_count.unwrap_or_default(),
             })
         }
+        GenerationReferenceKind::Mesh => {
+            bail!("MiniMax H3 Ref2VA cannot decode mesh references")
+        }
     };
     if decoded.audio != expected_audio {
         bail!("MiniMax H3 decoded audio facts differ from the frozen descriptor");
@@ -912,6 +915,9 @@ fn reference_layout_spec(reference: &H3PreparedReference) -> Result<H3ReferenceL
     let shape = &reference.shape;
     let visual = match reference.metadata.kind {
         GenerationReferenceKind::Audio => None,
+        GenerationReferenceKind::Mesh => {
+            bail!("MiniMax H3 Ref2VA cannot lay out mesh references")
+        }
         GenerationReferenceKind::Image | GenerationReferenceKind::Video => {
             let width = usize::try_from(
                 shape
@@ -965,6 +971,9 @@ fn reference_layout_spec(reference: &H3PreparedReference) -> Result<H3ReferenceL
         GenerationReferenceKind::Image => false,
         GenerationReferenceKind::Video => reference.metadata.has_audio,
         GenerationReferenceKind::Audio => true,
+        GenerationReferenceKind::Mesh => {
+            bail!("MiniMax H3 Ref2VA cannot lay out mesh references")
+        }
     };
     if !shape.audio_rows.is_multiple_of(u64::from(AUDIO_CHANNELS))
         || (audio_latents_per_channel > 0) != expected_audio
@@ -1120,6 +1129,9 @@ fn build_packed_sequence(
                     sequential_span += temporal_span(frame);
                 }
                 rotary_time += (reference.audio_latents_per_channel as f64).max(sequential_span);
+            }
+            GenerationReferenceKind::Mesh => {
+                bail!("MiniMax H3 Ref2VA cannot position mesh references")
             }
         }
     }
@@ -1309,6 +1321,7 @@ fn reference_provenance(reference: &H3PreparedReference) -> H3ReferenceProvenanc
         GenerationReferenceKind::Video => metadata.audio_sample_count,
         GenerationReferenceKind::Audio => metadata.sample_count,
         GenerationReferenceKind::Image => None,
+        GenerationReferenceKind::Mesh => None,
     };
     let used_samples_per_channel = reference.shape.audio_samples_per_channel;
     let used_duration_ms = match metadata.kind {
@@ -1319,6 +1332,7 @@ fn reference_provenance(reference: &H3PreparedReference) -> H3ReferenceProvenanc
             .map(|frames| u64::from(frames).saturating_mul(1_000) / u64::from(FIXED_FPS)),
         GenerationReferenceKind::Audio => used_samples_per_channel
             .map(|samples| samples.saturating_mul(1_000) / u64::from(AUDIO_SAMPLE_RATE_HZ)),
+        GenerationReferenceKind::Mesh => None,
     };
     H3ReferenceProvenance {
         index: metadata.index,
@@ -1823,6 +1837,9 @@ mod tests {
                     channels: metadata.channels.unwrap(),
                     samples_per_channel: metadata.sample_count.unwrap(),
                 }),
+                GenerationReferenceKind::Mesh => {
+                    bail!("MiniMax H3 Ref2VA cannot decode mesh references")
+                }
             };
             Ok(H3DecodedReferenceFacts {
                 index: metadata.index,
@@ -1874,6 +1891,9 @@ mod tests {
                         },
                         has_audio: reference.metadata.has_audio,
                     }
+                }
+                GenerationReferenceKind::Mesh => {
+                    bail!("MiniMax H3 Ref2VA cannot preprocess mesh references")
                 }
             };
             Ok(H3ReferencePresentation {

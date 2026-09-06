@@ -192,6 +192,9 @@ impl H3ReferenceMediaAdapter {
                 };
                 (facts, DecodedReference::Audio(decoded))
             }
+            GenerationReferenceKind::Mesh => {
+                bail!("MiniMax H3 Ref2VA cannot decode mesh references")
+            }
         };
         self.decoded.insert(
             index,
@@ -537,6 +540,10 @@ mod tests {
             sample_count: None,
             prepared_shape: None,
             crop: None,
+            image_role: None,
+            mesh_format: None,
+            byte_length: None,
+            coordinates: None,
         }
     }
 

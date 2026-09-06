@@ -5,7 +5,12 @@
 //! loading, so these factories keep that application policy local rather than
 //! requiring accessors in the framework.
 
-use candle_transformers::models::stable_diffusion::{unet_2d, vae};
+pub use candle_transformers::models::stable_diffusion::{
+    build_clip_transformer, clip, schedulers, unet_2d, StableDiffusionConfig,
+};
+pub mod linear;
+pub mod normalization;
+pub mod vae;
 
 pub fn sd15_unet() -> unet_2d::UNet2DConditionModelConfig {
     let block = |out_channels, use_cross_attn, attention_head_dim| unet_2d::BlockConfig {

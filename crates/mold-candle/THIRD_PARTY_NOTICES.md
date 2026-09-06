@@ -1,5 +1,29 @@
 # Third-Party Notices
 
+## Diffusers VAE numerical path and PyTorch CUDA normalization
+
+The opt-in VAE blocks in `src/stable_diffusion/vae/precision.rs` follow
+Hugging Face Diffusers v0.30.0, commit
+`8a79d8ec3973e78065f13638eefc0dc7d4dc6009`, specifically `models/resnet.py`,
+`models/unets/unet_2d_blocks.py` and `models/attention_processor.py`.
+
+    Copyright 2024 The HuggingFace Team. All rights reserved.
+
+The Rust adaptation omits training and time conditioning, bounds attention
+allocations, and makes numerical policy explicit. Diffusers is Apache-2.0;
+the full text is retained in `LICENSE-APACHE-2.0`.
+
+Shared `src/stable_diffusion/normalization.rs` and its CUDA implementation
+follow PyTorch v2.5.1's CUDA `group_norm_kernel.cu` rounding
+boundaries; SiLU follows `ActivationSiluKernel.cu` opmath precision. Shared
+`src/stable_diffusion/linear.rs` follows `aten/src/ATen/native/Linear.cpp`'s
+layout-dependent fused versus separate bias-rounding boundary. PyTorch's
+copyright notices and BSD license terms are retained in `LICENSE-PYTORCH`.
+The implementation uses public Candle tensor operations and ships no PyTorch
+or Python runtime. Existing SD callers retain Candle's numerical policy.
+The shared normalization accepts the layer epsilon explicitly so the VAE's
+`1e-6` and paint UNet residual blocks' `1e-5` use the same implementation.
+
 ## FerrisMind/candle-video (LTX-Video port)
 
 Mold's legacy LTX-Video transformer, 3D causal video VAE, and flow-match Euler

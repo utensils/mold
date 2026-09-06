@@ -43,6 +43,7 @@ use super::mesh::{Mesh, MeshAlgorithm, OccupancyGrid};
 use super::sampler::{self, SamplingPlan};
 use super::shape_vae::{ShapeVae, ShapeVaeConfig};
 use super::transformer::{Config as DitConfig, Hunyuan3dDit};
+use super::transformer21::{Config as Dit21Config, Hunyuan3dDit21};
 
 /// Prefixes the three networks live under inside the single checkpoint.
 const DIT_PREFIX: &str = "model";
@@ -99,8 +100,42 @@ struct Conditioning {
     encoder: u32,
 }
 
+enum ShapeDit {
+    V20(Box<Hunyuan3dDit>),
+    V21(Box<Hunyuan3dDit21>),
+}
+
+impl ShapeDit {
+    fn guidance_embed(&self) -> bool {
+        match self {
+            Self::V20(dit) => dit.config().guidance_embed,
+            Self::V21(_) => false,
+        }
+    }
+
+    fn channels(&self) -> usize {
+        match self {
+            Self::V20(dit) => dit.config().in_channels,
+            Self::V21(dit) => dit.in_channels(),
+        }
+    }
+
+    fn forward(
+        &self,
+        x: &Tensor,
+        t: &Tensor,
+        context: &Tensor,
+        guidance: Option<&Tensor>,
+    ) -> candle_core::Result<Tensor> {
+        match self {
+            Self::V20(dit) => dit.forward(x, t, context, guidance),
+            Self::V21(dit) => dit.forward(x, t, context),
+        }
+    }
+}
+
 struct Loaded {
-    dit: Hunyuan3dDit,
+    dit: ShapeDit,
     vae: ShapeVae,
     vision: Dinov2Model,
     device: Device,
@@ -115,6 +150,7 @@ struct Loaded {
 
 pub struct Hunyuan3dEngine {
     base: EngineBase<Loaded>,
+    paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
 }
 
 impl Hunyuan3dEngine {
@@ -126,7 +162,16 @@ impl Hunyuan3dEngine {
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            paint_assets: None,
         }
+    }
+
+    pub fn with_paint_assets(
+        mut self,
+        assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
+    ) -> Self {
+        self.paint_assets = assets;
+        self
     }
 
     /// Query points per decode chunk, honouring the env override.
@@ -155,9 +200,28 @@ impl Hunyuan3dEngine {
         // here instead of producing garbage.
         let header = mold_core::safetensors_probe::read_safetensors_header(&checkpoint)
             .with_context(|| format!("read safetensors header at {}", checkpoint.display()))?;
-        let dit_cfg = detect_dit_config(&header)?;
-        let vae_cfg = detect_vae_config(&dit_cfg);
-        let conditioning = conditioning_for(&dit_cfg);
+        let dit21_cfg = detect_shape21_config(&header)?;
+        let dit20_cfg = if dit21_cfg.is_none() {
+            Some(detect_dit_config(&header)?)
+        } else {
+            None
+        };
+        let (vae_cfg, conditioning, vision_cfg) = if let Some(dit) = &dit20_cfg {
+            (
+                detect_vae_config(dit),
+                conditioning_for(dit),
+                Dinov2Config::giant(),
+            )
+        } else {
+            (
+                ShapeVaeConfig::v2_1(),
+                Conditioning {
+                    letterbox: 512,
+                    encoder: 518,
+                },
+                Dinov2Config::large(),
+            )
+        };
 
         let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         // F16 on every accelerator, not the crate's usual BF16-on-CUDA. See
@@ -173,11 +237,20 @@ impl Hunyuan3dEngine {
             &self.base.progress,
         )?;
 
-        let dit = Hunyuan3dDit::new(&dit_cfg, vb.pp(DIT_PREFIX))
-            .context("build the Hunyuan3D shape transformer")?;
+        let dit = match (dit20_cfg, dit21_cfg) {
+            (Some(cfg), None) => ShapeDit::V20(Box::new(
+                Hunyuan3dDit::new(&cfg, vb.pp(DIT_PREFIX))
+                    .context("build the Hunyuan3D 2.0 shape transformer")?,
+            )),
+            (None, Some(cfg)) => ShapeDit::V21(Box::new(
+                Hunyuan3dDit21::new(&cfg, vb.pp(DIT_PREFIX))
+                    .context("build the Hunyuan3D 2.1 shape transformer")?,
+            )),
+            _ => bail!("ambiguous Hunyuan3D shape architecture"),
+        };
         let vae =
             ShapeVae::new(&vae_cfg, vb.pp(VAE_PREFIX)).context("build the Hunyuan3D shape VAE")?;
-        let vision = Dinov2Model::new(&Dinov2Config::giant(), vb.pp(VISION_PREFIX))
+        let vision = Dinov2Model::new(&vision_cfg, vb.pp(VISION_PREFIX))
             .context("build the Hunyuan3D image conditioner")?;
 
         Ok(Loaded {
@@ -209,16 +282,9 @@ impl Hunyuan3dEngine {
             .map(|value| value as usize)
             .unwrap_or(DEFAULT_OCTREE_RESOLUTION);
         let threshold = options.threshold.unwrap_or(DEFAULT_THRESHOLD);
+        #[cfg(not(feature = "mesh-texture"))]
         if options.texture == Some(true) {
-            // Defence in depth. `validation::validate_mesh_request` already
-            // refuses this at admission, which is the only place that can do
-            // so before a multi-gigabyte checkpoint is mapped; this guard
-            // exists so a caller that bypasses admission still cannot get
-            // bare geometry back from a request that asked for materials.
-            bail!(
-                "PBR texture generation is not available in this build; \
-                 omit --texture to render geometry only"
-            );
+            bail!("PBR texture generation requires the mesh-texture build feature");
         }
 
         // ── Conditioning ────────────────────────────────────────────────
@@ -235,10 +301,9 @@ impl Hunyuan3dEngine {
         // the input the docs recommend as the best one — indistinguishable
         // from a full opaque frame and condition DINOv2 on the whole canvas,
         // black transparent pixels included.
-        let image = image::DynamicImage::ImageRgba8(
-            crate::img_utils::decode_oriented_srgb_rgba(source)
-                .context("decode the source image")?,
-        );
+        let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
+            .context("decode the source image")?;
+        let image = image::DynamicImage::ImageRgba8(source_rgba.clone());
         let pixels = super::dino2::preprocess(
             &image,
             loaded.conditioning.letterbox,
@@ -258,7 +323,7 @@ impl Hunyuan3dEngine {
             req.steps as usize,
             sampler::DEFAULT_SHIFT,
             req.guidance,
-            loaded.dit.config().guidance_embed,
+            loaded.dit.guidance_embed(),
         );
         let seed = req.seed.unwrap_or_else(rand_seed);
         // Named as its own stage. Without it the log jumped from a 0.1 s
@@ -277,6 +342,54 @@ impl Hunyuan3dEngine {
         // ── Surface, normals, GLB, poster (CPU) ─────────────────────────
         let mesh = self.extract_surface(&grid, threshold, options.target_faces)?;
         drop(grid);
+        #[cfg(feature = "mesh-texture")]
+        if options.texture == Some(true) {
+            let assets = self
+                .paint_assets
+                .clone()
+                .context("Hunyuan3D Paint assets were not frozen before execution")?;
+            // Shape and paint are disjoint residency phases. Release the
+            // checkpoint carrying DiT, shape VAE, and DINO before opening the
+            // first paint network; keeping it here exceeds a 24 GB device.
+            let shape = self.base.loaded.take();
+            drop(shape);
+            let _ = crate::device::post_drop_free_vram_bytes(self.base.gpu_ordinal);
+            self.base.progress.checkpoint()?;
+            let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+            let texture_size = options.texture_resolution.unwrap_or(2048);
+            let textured = super::paint_runtime::PaintRuntime {
+                assets: &assets,
+                device: &device,
+                gpu_ordinal: self.base.gpu_ordinal,
+                progress: &self.base.progress,
+            }
+            .generate(&mesh, &source_rgba, texture_size, seed)?;
+            let (bounds_min, bounds_max) = textured.mesh.bounds();
+            let poster = super::poster::render_poster(&textured.mesh, POSTER_SIZE)
+                .context("render the gallery poster")?;
+            return Ok(GenerateResponse {
+                images: Vec::new(),
+                video: None,
+                audio: None,
+                mesh: Some(MeshData {
+                    data: textured.glb,
+                    format: OutputFormat::Glb,
+                    vertex_count: textured.mesh.vertex_count() as u32,
+                    face_count: textured.mesh.face_count() as u32,
+                    bounds_min,
+                    bounds_max,
+                    textured: true,
+                    poster,
+                    poster_width: POSTER_SIZE,
+                    poster_height: POSTER_SIZE,
+                }),
+                generation_time_ms: started.elapsed().as_millis() as u64,
+                model: self.base.model_name.clone(),
+                seed_used: seed,
+                gpu: Some(self.base.gpu_ordinal),
+                request_warnings: Vec::new(),
+            });
+        }
         let (bounds_min, bounds_max) = mesh.bounds();
 
         self.base.progress.stage_start("Writing mesh");
@@ -320,7 +433,7 @@ impl Hunyuan3dEngine {
         plan: &SamplingPlan,
         seed: u64,
     ) -> Result<Tensor> {
-        let channels = loaded.dit.config().in_channels;
+        let channels = loaded.dit.channels();
         // `seeded_randn` is the shared implementation of the family
         // capability's `SeedContract::CpuSeededNoiseTransferredToExecutionDevice`.
         // Calling candle's own `set_seed` + `randn` instead would produce a
@@ -502,6 +615,68 @@ impl Hunyuan3dEngine {
 }
 
 /// Recover the DiT geometry from a checkpoint header.
+/// The 2.1 architecture is identified from its own tensor inventory, never
+/// the model name. ComfyUI model_detection.py:800-811 uses the same embedder.
+fn detect_shape21_config(
+    header: &mold_core::safetensors_probe::SafetensorsHeader,
+) -> Result<Option<Dit21Config>> {
+    let Some(embed) = header.tensor_shapes.get("model.x_embedder.weight") else {
+        return Ok(None);
+    };
+    if header.tensor_shapes.contains_key("model.latent_in.weight") {
+        bail!("checkpoint mixes Hunyuan3D 2.0 and 2.1 transformers");
+    }
+    if embed.len() != 2 || embed[0] == 0 || !embed[0].is_multiple_of(16) || embed[1] == 0 {
+        bail!("invalid Hunyuan3D 2.1 x_embedder shape");
+    }
+    let context = header
+        .tensor_shapes
+        .get("model.blocks.0.attn2.to_k.weight")
+        .filter(|shape| shape.len() == 2 && shape[0] == embed[0] && shape[1] == 1024)
+        .context("Hunyuan3D 2.1 requires a 1024-wide image context")?;
+    let mut blocks = std::collections::BTreeSet::new();
+    let mut moe_blocks = std::collections::BTreeSet::new();
+    for name in &header.tensor_names {
+        if let Some(suffix) = name.strip_prefix("model.blocks.") {
+            if let Some((index, parameter)) = suffix.split_once('.') {
+                if let Ok(index) = index.parse::<usize>() {
+                    blocks.insert(index);
+                    if parameter == "moe.gate.weight" {
+                        moe_blocks.insert(index);
+                    }
+                }
+            }
+        }
+    }
+    let depth = blocks.len();
+    if depth == 0 || depth.is_multiple_of(2) || blocks.iter().copied().ne(0..depth) {
+        bail!("Hunyuan3D 2.1 requires contiguous odd-depth transformer blocks");
+    }
+    if moe_blocks.is_empty()
+        || moe_blocks
+            .iter()
+            .copied()
+            .ne(depth - moe_blocks.len()..depth)
+    {
+        bail!("Hunyuan3D 2.1 MoE blocks must occupy the end of the transformer");
+    }
+    let gate = header
+        .tensor_shapes
+        .get(&format!("model.blocks.{}.moe.gate.weight", depth - 1))
+        .filter(|shape| shape.len() == 2 && shape[0] >= 2 && shape[1] == embed[0])
+        .context("invalid Hunyuan3D 2.1 expert router shape")?;
+    Ok(Some(Dit21Config {
+        in_channels: embed[1],
+        hidden_size: embed[0],
+        context_dim: context[1],
+        depth,
+        num_heads: 16,
+        num_moe_layers: moe_blocks.len(),
+        num_experts: gate[0],
+        top_k: 2,
+    }))
+}
+
 fn detect_dit_config(
     header: &mold_core::safetensors_probe::SafetensorsHeader,
 ) -> Result<DitConfig> {
@@ -702,6 +877,48 @@ mod tests {
     use super::*;
     use mold_core::safetensors_probe::SafetensorsHeader;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn shape21_uses_large_vision_and_4096_latents_from_its_architecture() {
+        let mut header = header(0, 0, false);
+        header.tensor_names.clear();
+        header.tensor_shapes.clear();
+        for (name, shape) in [
+            ("model.x_embedder.weight", vec![2048, 64]),
+            ("model.blocks.0.attn2.to_k.weight", vec![2048, 1024]),
+            ("model.blocks.20.moe.gate.weight", vec![8, 2048]),
+        ] {
+            header.tensor_names.push(name.into());
+            header.tensor_shapes.insert(name.into(), shape);
+        }
+        for i in 0..21 {
+            header
+                .tensor_names
+                .push(format!("model.blocks.{i}.norm1.weight"));
+        }
+        for i in 15..21 {
+            header
+                .tensor_names
+                .push(format!("model.blocks.{i}.moe.gate.weight"));
+        }
+        let config = detect_shape21_config(&header).unwrap().unwrap();
+        assert_eq!(config.hidden_size, 2048);
+        assert_eq!(config.context_dim, 1024);
+        assert_eq!(config.depth, 21);
+        assert_eq!(config.num_moe_layers, 6);
+        assert_eq!(config.num_experts, 8);
+        assert_eq!(ShapeVaeConfig::v2_1().num_latents, 4096);
+        assert_eq!(ShapeVaeConfig::v2_1().scale_factor, 1.003_950_615_875_240_3);
+        assert_eq!(Dinov2Config::large().hidden_size, 1024);
+        assert!(!Dinov2Config::large().use_swiglu_ffn);
+    }
+
+    #[test]
+    fn legacy_shape_does_not_select_shape21() {
+        assert!(detect_shape21_config(&header(16, 32, false))
+            .unwrap()
+            .is_none());
+    }
 
     fn header(depth: usize, single: usize, guidance: bool) -> SafetensorsHeader {
         let mut shapes = BTreeMap::new();

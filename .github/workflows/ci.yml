@@ -245,6 +245,8 @@ jobs:
               - 'scripts/hunyuan3d-frame-source.py'
               - 'scripts/fixtures/hunyuan3d-comfy-metal-api-prompt.json'
               - 'scripts/tests/hunyuan3d-metal-uat.sh'
+              - 'scripts/capture-hunyuan3d-cuda.py'
+              - 'scripts/tests/hunyuan3d_cuda_capture_test.py'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
@@ -510,6 +512,7 @@ jobs:
           bash scripts/tests/h3-cuda-server-tests.sh
           bash scripts/tests/ltx25-comfy-oracle-provision.sh
           bash scripts/tests/hunyuan3d-metal-uat.sh
+          python3 scripts/tests/hunyuan3d_cuda_capture_test.py
       - name: Test MiniMax H3 private-UAT release contract
         if: needs.changes.outputs.release == 'true'
         run: bash scripts/tests/minimax-h3-private-uat-release-contract.sh
@@ -652,6 +655,12 @@ jobs:
           cargo clippy -p mold-ai-core --features pulid --all-targets -- -D warnings
           cargo clippy -p mold-ai-inference --features pulid --all-targets -- -D warnings
           cargo clippy -p mold-ai-server --features pulid --all-targets -- -D warnings
+      - name: Test CPU mesh preparation
+        if: env.RUN_RUST_SUITE == 'true'
+        run: cargo test -p mold-ai-inference --features mesh-texture --lib hunyuan3d
+      - name: Clippy CPU mesh preparation
+        if: env.RUN_RUST_SUITE == 'true'
+        run: cargo clippy -p mold-ai-inference --features mesh-texture --all-targets -- -D warnings
       - name: Test the PuLID identity stack
         if: env.RUN_RUST_SUITE == 'true'
         run: |
@@ -836,9 +845,9 @@ jobs:
         # out to `protoc`.
         run: brew install protobuf
       - name: Clippy Metal forced-local and server paths
-        run: cargo clippy -p mold-ai --features h3,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
+        run: cargo clippy -p mold-ai --features h3,mesh-texture,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
       - name: Check reviewed H3 Metal server recipe
-        run: cargo check -p mold-ai-server --features h3,metal,expand,mdns,metrics,mp4,pulid,webp
+        run: cargo check -p mold-ai-server --features h3,mesh-texture,metal,expand,mdns,metrics,mp4,pulid,webp
 
   # Codecov remains a main-branch reporting signal. It is intentionally not a
   # required PR check: the protected Rust job already runs the same tests, and

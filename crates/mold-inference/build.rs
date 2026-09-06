@@ -4,6 +4,21 @@ mod h3_runtime_code_identity;
 use std::path::PathBuf;
 
 fn main() {
+    #[cfg(feature = "mesh-texture")]
+    {
+        for file in ["xatlas.cpp", "xatlas.h", "bridge.cpp"] {
+            println!("cargo:rerun-if-changed=vendor/xatlas/{file}");
+        }
+        cc::Build::new()
+            .cpp(true)
+            .std("c++11")
+            .opt_level(3)
+            .file("vendor/xatlas/xatlas.cpp")
+            .file("vendor/xatlas/bridge.cpp")
+            .include("vendor/xatlas")
+            .warnings(false)
+            .compile("mold_xatlas");
+    }
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_H3");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_H3_PRIVATE_UAT");
     if std::env::var_os("CARGO_FEATURE_H3").is_none()

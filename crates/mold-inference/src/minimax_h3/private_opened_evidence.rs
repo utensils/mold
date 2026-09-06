@@ -798,6 +798,9 @@ fn ref2va_factory_references(
                 GenerationReferenceKind::Image => H3FactoryReferenceKind::Image,
                 GenerationReferenceKind::Video => H3FactoryReferenceKind::Video,
                 GenerationReferenceKind::Audio => H3FactoryReferenceKind::Audio,
+                GenerationReferenceKind::Mesh => {
+                    bail!("MiniMax H3 Ref2VA cannot prepare mesh references")
+                }
             };
             let mut input = H3FactoryReferenceInput {
                 index: reference.metadata.index,

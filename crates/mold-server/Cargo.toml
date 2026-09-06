@@ -22,6 +22,7 @@ name = "mold-server"
 path = "src/main.rs"
 
 [features]
+mesh-texture = ["mold-inference/mesh-texture"]
 default = []
 cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]
 cudnn = ["cuda", "mold-inference/cudnn"]
