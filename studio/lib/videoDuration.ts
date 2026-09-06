@@ -1,3 +1,4 @@
+import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 import { maxFramesForFamilyAtFps } from "./videoBudget";
 import {
   MINIMAX_H3_FIXED_FPS,
@@ -10,6 +11,26 @@ import {
   textOnlyAutoChainSingleClipCeiling,
   type GenerateRoutingRequest,
 } from "./chainRouting";
+
+/** Frame rate used when nothing else is known — older servers and image
+ * models omit the additive `/api/models.default_fps`. */
+export const DEFAULT_VIDEO_FPS = FALLBACK_VIDEO_FPS;
+
+/**
+ * Frame rate for a selected video model: the model's own server-advertised
+ * default (`/api/models.default_fps` — LTX-Video ships 30, LTX-2 24), then
+ * whatever the form already holds, then the 24-fps fallback.
+ *
+ * Every surface applies this on model selection exactly as it applies
+ * `default_steps` / `default_guidance`, so the Advanced video summary and the
+ * submitted request agree with the model.
+ */
+export function defaultVideoFps(
+  model: { default_fps?: number | null } | null | undefined,
+  current?: number | null,
+): number {
+  return model?.default_fps ?? current ?? DEFAULT_VIDEO_FPS;
+}
 
 /** Additive `/api/models` fields that describe a model's requestable video grid. */
 export interface VideoFrameContract {
