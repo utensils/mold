@@ -7486,27 +7486,23 @@ mod tests {
         );
     }
 
-    /// The equivalence identity is a real content hash, so a same-size in-place
-    /// overwrite with a restored mtime genuinely does change it. What made this
-    /// racy was the fact cache in front of it: entries are keyed on the metadata
-    /// identity, and when both writes land in one coarse `ctime` tick the second
-    /// lookup is served the first write's cached hash. Evicting between the two
-    /// snapshots keeps the assertion about the content identity — which is what
-    /// the test is named for — instead of about cache-invalidation timing.
+    /// Local-installation equivalence is a metadata identity: normal artifact
+    /// acquisition replaces the file atomically, so the new inode must change
+    /// that identity even when the replacement has the same size and mtime.
+    /// Same-size in-place corruption is deliberately outside this contract;
+    /// `mold info --verify` is the explicit byte-integrity check.
     #[test]
-    fn same_size_in_place_overwrite_changes_equivalence_content_identity() {
+    fn same_size_replacement_changes_equivalence_content_identity() {
         use filetime::{set_file_mtime, FileTime};
 
         let root = TempDir::new().unwrap();
         let path = root.path().join("weights.safetensors");
         std::fs::write(&path, b"aaaa").unwrap();
         let original_mtime = FileTime::from_last_modification_time(&path.metadata().unwrap());
-        artifact_fact_cache().lock().unwrap().remove_path(&path);
         let before = equivalence_fingerprint_path(&path);
 
-        std::fs::write(&path, b"bbbb").unwrap();
+        replace_artifact_bytes(&path, b"bbbb");
         set_file_mtime(&path, original_mtime).unwrap();
-        artifact_fact_cache().lock().unwrap().remove_path(&path);
 
         assert_ne!(before, equivalence_fingerprint_path(&path));
     }
