@@ -49,6 +49,7 @@ pub mod paint_unet;
 pub mod paint_upscale;
 pub mod paint_uv;
 pub mod paint_vae;
+pub mod paint_vertex_fill;
 pub mod paint_views;
 mod paint_weights;
 pub mod poster;

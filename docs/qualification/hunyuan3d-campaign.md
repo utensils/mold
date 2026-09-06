@@ -1173,3 +1173,30 @@ it is not a completion checklist with assumed passes.
   The rebuilt real adapter still matches both material streams exactly with
   no backend override (`paint-budget-adapter-v1`). Read-only follow-up review
   reports both findings resolved and no additional actionable findings.
+
+
+### P7 mesh vertex propagation
+
+- `capture-hunyuan3d-vertex-fill.py` invokes Tencent's compiled
+  `mesh_inpaint_processor.meshVerticeInpaint` with its unchanged default smooth
+  method at upstream revision 82920d6. The retained `vertex-fill-oracle-v1`
+  records source and extension hashes. Four checked-in cases cover empty/full
+  trust, split seams, coincident positions and disconnected mesh components.
+- `paint_vertex_fill::fill_vertices` ports directed face edges, repeated unseen
+  corners, in-place inverse-distance smoothing and final face-order UV writes.
+  The U coordinate multiplies in F32 while the inverted V coordinate uses F64,
+  matching C++ promotion. No graph deduplication or synchronous smoothing is
+  substituted. The initial missing implementation fails in
+  `vertex-fill-red-v1.log`; the first four-case parity run passes within 1e-7
+  with exact masks (`vertex-fill-green-v1.log`).
+- Read-only review identified unpolled validation/neighbor scans and possible
+  weighted-color overflow from extreme finite inputs. Chunked cancellation and
+  nonfinite-result rejection address these; the parity assertion also rejects
+  nonfinite actual values explicitly. This component does not yet establish
+  complete texture filling: actual-mesh scale qualification and the subsequent
+  OpenCV Navier–Stokes port remain required.
+- Final tests pass all four oracle comparisons and every-checkpoint cancellation
+  sweep, plus the duplicate-edge cancellation/overflow regression
+  (`vertex-fill-green-v2.log`). All-target CUDA/cuDNN Clippy with warnings
+  denied passes (`vertex-fill-clippy-v2.log`). Follow-up read-only review
+  confirms both findings resolved with no additional actionable issue.
