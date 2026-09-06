@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--image", type=Path, action="append", default=[])
     parser.add_argument("--size", type=int, choices=[64,128,256,512], default=64)
     parser.add_argument("--attention-backend", choices=["default","math"], default="default")
+    parser.add_argument("--convolution-backend", choices=["cudnn", "native"], default="cudnn",
+                        help="native disables cuDNN for a diagnostic capture; production reference remains cudnn")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     import torch
@@ -39,6 +41,7 @@ def main():
         parser.error("at most six conditioning images per capture")
     torch.backends.cuda.matmul.allow_tf32 = args.allow_tf32
     torch.backends.cudnn.allow_tf32 = args.allow_tf32
+    torch.backends.cudnn.enabled = args.convolution_backend == "cudnn"
     dtype = torch.float32 if args.dtype == "f32" else torch.float16
     # Isolate CUDA GroupNorm saved-statistics rounding and SiLU opmath from
     # convolution/attention backend differences in the complete VAE.
@@ -118,7 +121,8 @@ def main():
         checkpoint=str(args.checkpoint.resolve()),checkpoint_files=checkpoint_files,
         encoder_trace=args.encoder_trace,seed=25026,scaling_factor=.18215,
         images=[{"path":str(p.resolve()),"sha256":sha256(p)} for p in args.image],
-        size=args.size,attention_backend=args.attention_backend,measurements=measurements),indent=2)+"\n")
+        size=args.size,attention_backend=args.attention_backend,convolution_backend=args.convolution_backend,
+        measurements=measurements),indent=2)+"\n")
 
 
 if __name__ == "__main__":

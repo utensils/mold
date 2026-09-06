@@ -348,6 +348,21 @@ loader without replacing network or rendering computations.
   sizes, UNet convolution/resampling, scheduling and end-to-end paint remain
   separate open gates.
 
+## Paint VAE convolution diagnostic
+
+- The existing float16 encoder traces show a small first-convolution difference
+  (maximum .0009765625 / RMS .000003527837) that grows through later stages;
+  `paint-vae-encoder-diagnostic-v5.json` records the per-stage comparison. This
+  observation alone does not establish the cause of the final discrepancy.
+- The capture harness can now disable cuDNN explicitly for a **diagnostic**
+  Torch-native convolution run. The default production reference remains cuDNN.
+  `paint-vae-native-conv-oracle-v1/` records the selected backend and checkpoint
+  hashes. It does not improve parity: `paint-vae-native-conv-cuda-v1.log` fails
+  the unchanged latent maximum bound with maximum .021972656 / RMS .003787731.
+  Its first-convolution RMS is worse (.000155045), and the full stage comparison
+  is retained in `paint-vae-native-conv-stage-comparison-v1.json`. No production
+  backend or qualification tolerance was changed.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification
