@@ -136,6 +136,7 @@ impl OwnerContext {
     }
 }
 
+#[cfg(any(feature = "cuda", test))]
 fn install_certificate(state: &mut OwnerState, epoch: u64, bytes: u64) -> bool {
     if state.disabled || bytes == 0 {
         return false;
