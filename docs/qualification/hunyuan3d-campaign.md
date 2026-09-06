@@ -1003,3 +1003,34 @@ it is not a completion checklist with assumed passes.
   (`paint-upscaler-clippy-v2.log`). The first Clippy log is retained; its only
   findings were exact dyadic decimal literals in the scalar regression,
   now annotated to preserve the oracle values verbatim.
+
+### P7 RealESRGAN network comparisons (qualification remains open)
+
+- The RRDB observer exposes the same nine boundaries captured from Torch,
+  including convolution outputs before in-place activation. The ignored
+  `pretrained_paint_upscaler_matches_tencent` comparison requires every oracle
+  stage and F16 dtype, saves each actual stage plus PNG and comparison JSON,
+  rejects nonfinite tensors, and checks raw maximum error 0.01 and final byte
+  maximum 8. Read-only review caught the initial missing-stage skip; the final
+  test requires all stages and checks the comparison count.
+- The 16-to-64 crop passes (`paint-upscaler-small-candle-v1`): final raw max
+  0.000732421875, final PNG max 1 byte, largest intermediate max 0.0040283203125.
+- Full actual albedo view 00 is retained at
+  `capture-20260906T121551Z-05b48acb8c19/upscaler`: final raw max
+  0.00927734375, RMS 0.00039832581, PNG max 2 bytes. Full MR view 00 is at
+  `capture-20260906T121552Z-1825b9e2a101/upscaler`: final raw max 0.009765625,
+  RMS 0.00035947499, PNG max 3 bytes. Both final outputs pass those limits,
+  but both tests correctly **FAIL** intermediate limits: error grows after
+  body 11, reaching 0.14621 albedo / 0.15576 MR at the pre-activation HR
+  convolution. These failures are retained and not waived.
+- Both isolated GPU captures sampled 7,175 MiB board use. Runtime including
+  observer copies, comparisons and artifact writes is 19.67 / 19.51 seconds;
+  this is not uninstrumented inference timing. Each capture records the test
+  binary hash, exact checkpoint, oracle stage file and command. The production
+  GPU was not used. Rust is fed the captured normalized half input here, so
+  these results do not yet qualify the paint adapter's image preprocessing.
+- The observer preserves all 28 existing upscaler tests
+  (`paint-upscaler-observer-unit-v1.log`); all-target CUDA/cuDNN Clippy passes
+  (`paint-upscaler-parity-clippy-v1.log`). All six views in both streams,
+  intermediate-error diagnosis, cancellation and engine integration remain
+  active requirements.

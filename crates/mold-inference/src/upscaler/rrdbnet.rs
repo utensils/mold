@@ -187,29 +187,47 @@ impl RRDBNet {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_with_observer(xs, |_, _| Ok(()))
+    }
+
+    fn forward_with_observer(
+        &self,
+        xs: &Tensor,
+        mut observe: impl FnMut(&str, &Tensor) -> Result<()>,
+    ) -> Result<Tensor> {
         let feat = self.conv_first.forward(xs)?;
+        observe("conv_first", &feat)?;
         let mut body_feat = feat.clone();
-        for rrdb in &self.body {
+        for (index, rrdb) in self.body.iter().enumerate() {
             body_feat = rrdb.forward(&body_feat)?;
+            observe(&format!("body.{index}"), &body_feat)?;
         }
         body_feat = self.conv_body.forward(&body_feat)?;
+        observe("conv_body", &body_feat)?;
         let feat = (feat + body_feat)?;
 
         // Upsample
         let (_, _, h, w) = feat.dims4()?;
         let feat = feat.upsample_nearest2d(h * 2, w * 2)?;
-        let feat = leaky_relu(&self.conv_up1.forward(&feat)?)?;
+        let feat = self.conv_up1.forward(&feat)?;
+        observe("conv_up1", &feat)?;
+        let feat = leaky_relu(&feat)?;
 
         let feat = if let Some(ref conv_up2) = self.conv_up2 {
             let (_, _, h2, w2) = feat.dims4()?;
             let feat = feat.upsample_nearest2d(h2 * 2, w2 * 2)?;
-            leaky_relu(&conv_up2.forward(&feat)?)?
+            let feat = conv_up2.forward(&feat)?;
+            observe("conv_up2", &feat)?;
+            leaky_relu(&feat)?
         } else {
             feat
         };
 
-        let out = leaky_relu(&self.conv_hr.forward(&feat)?)?;
+        let out = self.conv_hr.forward(&feat)?;
+        observe("conv_hr", &out)?;
+        let out = leaky_relu(&out)?;
         let out = self.conv_last.forward(&out)?;
+        observe("conv_last", &out)?;
         Ok(out)
     }
 
@@ -224,6 +242,133 @@ mod tests {
     use super::*;
     use candle_core::{DType, Device};
     use candle_nn::VarMap;
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "requires CUDA, installed RRDB weights and retained Tencent oracle"]
+    fn pretrained_paint_upscaler_matches_tencent() -> Result<()> {
+        use std::{collections::HashMap, path::PathBuf};
+        let fixture = PathBuf::from(std::env::var("MOLD_PAINT_UPSCALER_ORACLE")?);
+        let output = PathBuf::from(std::env::var("MOLD_PAINT_UPSCALER_OUTPUT")?);
+        let weights = PathBuf::from(std::env::var("MOLD_PAINT_UPSCALER_WEIGHTS")?);
+        std::fs::create_dir(&output)?;
+        let _scope = crate::conv_policy::ConvScope::for_family("hunyuan3d");
+        let device = Device::new_cuda(0)?;
+        let oracle =
+            candle_core::safetensors::load(fixture.join("stages.safetensors"), &Device::Cpu)?;
+        let required = [
+            "conv_first",
+            "body.0",
+            "body.11",
+            "body.22",
+            "conv_body",
+            "conv_up1",
+            "conv_up2",
+            "conv_hr",
+            "conv_last",
+        ];
+        for name in std::iter::once("input").chain(required) {
+            anyhow::ensure!(oracle.contains_key(name), "missing oracle stage: {name}");
+            anyhow::ensure!(
+                oracle[name].dtype() == DType::F16,
+                "oracle stage must be half: {name}"
+            );
+        }
+        // SAFETY: the installed checkpoint is retained, immutable model storage.
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], DType::F16, &device)? };
+        let model = RRDBNet::load(&vb, 64, 32, 23, 4)?;
+        let input = oracle["input"].to_device(&device)?;
+        let mut comparisons = serde_json::Map::new();
+        let mut failed = Vec::new();
+        let start = std::time::Instant::now();
+        let result = model.forward_with_observer(&input, |name, actual| {
+            let Some(expected) = oracle.get(name) else {
+                return Ok(());
+            };
+            anyhow::ensure!(actual.dims() == expected.dims(), "stage shape: {name}");
+            let actual = actual.to_device(&Device::Cpu)?;
+            candle_core::safetensors::save(
+                &HashMap::from([("value".to_string(), actual.clone())]),
+                output.join(format!("{name}.safetensors")),
+            )?;
+            let a = actual
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let b = expected
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let mut max = 0.0f64;
+            let mut sum = 0.0f64;
+            let mut nonfinite = 0usize;
+            for (a, b) in a.iter().zip(&b) {
+                let delta = f64::from(*a) - f64::from(*b);
+                if !delta.is_finite() {
+                    nonfinite += 1;
+                }
+                max = max.max(delta.abs());
+                sum += delta * delta;
+            }
+            let rms = (sum / a.len() as f64).sqrt();
+            eprintln!("{name}: max={max}, rms={rms}, nonfinite={nonfinite}");
+            comparisons.insert(
+                name.to_string(),
+                serde_json::json!({"max":max,"rms":rms,"nonfinite":nonfinite}),
+            );
+            if max > 0.01 || nonfinite != 0 {
+                failed.push(name.to_string());
+            }
+            Ok(())
+        })?;
+        anyhow::ensure!(
+            comparisons.len() == required.len(),
+            "not all oracle stages were compared"
+        );
+        let seconds = start.elapsed().as_secs_f64();
+        let (_, _, height, width) = result.dims4()?;
+        let values = result
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?
+            .squeeze(0)?
+            .permute((1, 2, 0))?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let mut rgb = Vec::with_capacity(values.len());
+        for pixel in values.chunks_exact(3) {
+            for channel in pixel.iter().rev() {
+                rgb.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+        }
+        let image = image::RgbImage::from_raw(width as u32, height as u32, rgb).unwrap();
+        image.save(output.join("actual.png"))?;
+        let expected = image::open(fixture.join("expected.png"))?.to_rgb8();
+        anyhow::ensure!(
+            image.dimensions() == expected.dimensions(),
+            "image dimensions differ"
+        );
+        let max_byte = image
+            .as_raw()
+            .iter()
+            .zip(expected.as_raw())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        comparisons.insert(
+            "image".into(),
+            serde_json::json!({"max_byte":max_byte,"seconds_with_observation":seconds}),
+        );
+        std::fs::write(
+            output.join("comparison.json"),
+            serde_json::to_vec_pretty(&comparisons)?,
+        )?;
+        anyhow::ensure!(
+            failed.is_empty() && max_byte <= 8,
+            "upscaler parity failures: {failed:?}; image max byte={max_byte}"
+        );
+        Ok(())
+    }
 
     #[test]
     #[allow(clippy::excessive_precision)] // Exact dyadic values from the half oracle.
