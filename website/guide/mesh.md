@@ -242,6 +242,10 @@ now — not only the CLI, TUI, and Discord.
    advertised bounds — leave it blank to keep the raw surface. The request
    sent to the server carries only the values that differ from the
    advertised defaults.
+   On desktop, a CUDA host that advertises Hunyuan3D Paint also offers
+   **PBR materials** and the host's 1024/2048/4096 texture atlas choices.
+   Enabling it paints base color, metallic/roughness and normal detail into
+   the stored GLB after geometry completes.
 4. **Generate.** The result renders in the same WebGL viewer the Library
    uses, right in the Create result area: it auto-rotates until you touch
    it, honours `prefers-reduced-motion` (and parks or resumes the moment
@@ -340,7 +344,7 @@ draw glTF bytes as a picture.
 
 ## What is not supported yet
 
-Texture and PBR material generation, multi-view
-input, and text-to-3D are tracked in
-[#1496](https://github.com/utensils/mold/issues/1496). Today's output is
-geometry only — a clean white mesh.
+Multi-view input, text-to-3D, matting, delight and supplied-mesh retexturing
+are tracked in [#1496](https://github.com/utensils/mold/issues/1496). PBR
+painting is available from the CLI, server API and desktop app on CUDA builds
+that include `mesh-texture`.

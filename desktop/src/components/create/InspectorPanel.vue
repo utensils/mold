@@ -303,6 +303,24 @@ const thresholdValue = computed(
   () => props.form.mesh.threshold ?? thresholdControl.value?.default ?? 0,
 );
 const thresholdNote = computed(() => controlNote(thresholdControl.value));
+const textureControl = computed(() => meshProfile.value?.texture ?? null);
+const textureAvailable = computed(
+  () => textureControl.value !== null && textureControl.value.mode !== "hidden",
+);
+const textureEnabled = computed(() => props.form.mesh.texture === true);
+const textureResolutionValue = computed(
+  () => props.form.mesh.textureResolution ?? meshProfile.value?.texture_default_resolution ?? 0,
+);
+const textureResolutionOptions = computed(() =>
+  (meshProfile.value?.texture_resolutions ?? []).map((resolution) => ({
+    value: resolution,
+    label: `${resolution}px`,
+  })),
+);
+function setTexture(enabled: boolean) {
+  props.form.mesh.texture = enabled ? true : null;
+  if (!enabled) props.form.mesh.textureResolution = null;
+}
 function setTargetFaces(raw: string) {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -851,6 +869,28 @@ function resetSettings() {
         >
           {{ targetFacesError }}
         </p>
+        <div v-if="textureAvailable" class="ms-card__row" data-test="mesh-texture-controls">
+          <div class="ms-field--row">
+            <div>
+              <span class="ms-field__label ms-field__label--inline">PBR materials</span>
+              <p class="ms-field__hint">Paint color, metal, roughness, and surface detail</p>
+            </div>
+            <SwitchToggle
+              :model-value="textureEnabled"
+              label="Generate PBR materials"
+              data-test="mesh-texture-toggle"
+              @update:model-value="setTexture"
+            />
+          </div>
+          <SegmentedControl
+            v-if="textureEnabled && textureResolutionOptions.length > 0"
+            :model-value="textureResolutionValue"
+            :options="textureResolutionOptions"
+            label="Texture resolution"
+            data-test="mesh-texture-resolution"
+            @update:model-value="form.mesh.textureResolution = $event"
+          />
+        </div>
         <p class="ms-field__hint">
           Start from a photo of one object. You'll get a turntable preview and can export .obj or
           .glb. Leave the face budget blank to keep every detail —

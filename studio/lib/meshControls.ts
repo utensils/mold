@@ -27,6 +27,9 @@ export interface MeshFormState {
   octreeResolution: number | null;
   threshold: number | null;
   targetFaces: number | null;
+  /** Additive fields: older persisted drafts omit them. */
+  texture?: boolean | null;
+  textureResolution?: number | null;
 }
 
 export function emptyMeshForm(): MeshFormState {
@@ -47,7 +50,14 @@ function explicit(value: number | null | undefined): number | null {
 export function meshRequestFromForm(
   form: MeshFormState,
   caps:
-    | Pick<MeshCapabilitiesProfile, "octree_default" | "threshold">
+    | Pick<
+        MeshCapabilitiesProfile,
+        | "octree_default"
+        | "threshold"
+        | "texture"
+        | "texture_resolutions"
+        | "texture_default_resolution"
+      >
     | null
     | undefined,
 ): MeshRequestOptions | undefined {
@@ -62,6 +72,19 @@ export function meshRequestFromForm(
   }
   const faces = explicit(form.targetFaces);
   if (faces !== null) request.target_faces = faces;
+  if (form.texture === true && caps?.texture.mode !== "hidden") {
+    request.texture = true;
+    const selected = explicit(form.textureResolution);
+    const fallback = explicit(caps?.texture_default_resolution);
+    const resolution = selected ?? fallback;
+    if (
+      resolution !== null &&
+      (!caps?.texture_resolutions?.length ||
+        caps.texture_resolutions.includes(resolution))
+    ) {
+      request.texture_resolution = resolution;
+    }
+  }
   return Object.keys(request).length > 0 ? request : undefined;
 }
 
@@ -69,10 +92,14 @@ export function meshRequestFromForm(
 export function meshFormFromMetadata(
   mesh: MeshRequestOptions | null | undefined,
 ): MeshFormState {
+  const texture = mesh?.texture === true;
+  const textureResolution = explicit(mesh?.texture_resolution);
   return {
     octreeResolution: explicit(mesh?.octree_resolution),
     threshold: explicit(mesh?.threshold),
     targetFaces: explicit(mesh?.target_faces),
+    ...(texture ? { texture: true } : {}),
+    ...(textureResolution !== null ? { textureResolution } : {}),
   };
 }
 

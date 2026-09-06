@@ -15,7 +15,12 @@ import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
 import type { GenerationRecipeProfile } from "@studio/lib/generationProfile";
-import { applyModelDefaults, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import {
+  applyModelDefaults,
+  buildRequest,
+  newGenerateForm,
+  type GenerateForm,
+} from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -57,6 +62,15 @@ function modelWith(name: string, family: string, recipe: GenerationRecipeProfile
 }
 
 const meshModel = () => modelWith("hunyuan3d-mini-turbo:fp16", "hunyuan3d", hunyuan3dRecipe());
+const texturedMeshModel = () => {
+  const recipe = hunyuan3dRecipe();
+  const mesh = recipe.capabilities.mesh!;
+  mesh.texture = { mode: "adjustable", required: false };
+  mesh.texture_resolutions = [1024, 2048, 4096];
+  mesh.texture_default_resolution = 2048;
+  mesh.workflow_modes = ["image_to_mesh", "mesh_texture"];
+  return modelWith("hunyuan3d-2.1:fp16", "hunyuan3d", recipe);
+};
 const rasterModel = () => modelWith("sdxl-base:fp16", "sdxl", sdxlRecipe());
 
 function mountFor(model: ModelEntry) {
@@ -164,6 +178,30 @@ describe("InspectorPanel — canvasless recipes", () => {
     await flushPromises();
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
+  });
+
+  it("submits PBR painting and the selected advertised texture size", async () => {
+    const { form, wrapper } = mountFor(texturedMeshModel());
+    form.sourceImage = "c291cmNl";
+    form.sourceImageName = "chair.png";
+    await flushPromises();
+    const toggle = wrapper.get("[data-test='mesh-texture-toggle']");
+    await toggle.trigger("click");
+    expect(form.mesh.texture).toBe(true);
+    expect(buildRequest(form).mesh).toEqual({
+      texture: true,
+      texture_resolution: 2048,
+    });
+
+    const resolution = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-texture-resolution")!;
+    resolution.vm.$emit("update:modelValue", 4096);
+    await flushPromises();
+    expect(buildRequest(form).mesh).toEqual({
+      texture: true,
+      texture_resolution: 4096,
+    });
   });
 });
 

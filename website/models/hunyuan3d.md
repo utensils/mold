@@ -187,12 +187,14 @@ This is the same gate the InsightFace face models use. It exists so a
 server-side auto-pull can never quietly acquire restricted weights on your
 behalf.
 
-## Not yet supported
+## PBR painting
 
-Texture and PBR material generation, multi-view input and
-text-to-3D are tracked in
-[#1496](https://github.com/utensils/mold/issues/1496). Today's output is
-geometry only.
+CUDA builds with `mesh-texture` can run Hunyuan3D Paint after shape generation
+and embed base color, metallic/roughness and normal textures in the stored GLB.
+Use `--texture [--texture-resolution 1024|2048|4096]` on the CLI, or enable
+**PBR materials** in the desktop Create inspector. Multi-view input,
+text-to-3D, matting, delight and supplied-mesh retexturing remain tracked in
+[#1496](https://github.com/utensils/mold/issues/1496).
 
 ## Accepting the licence from the apps
 
@@ -203,6 +205,5 @@ so it is stored on the host that will fetch the weights — on desktop, pick tha
 machine in **Settings → Model licenses**, and on mobile it is whichever host you
 have selected.
 
-The 2.1 shape model and texturing weights (`hunyuan3d-paint`) share a _separate_ Tencent 2.1
-agreement and must be accepted on their own. They install today, but the PBR
-paint engine is not implemented yet, so they satisfy the gate without rendering.
+The 2.1 shape model and texturing weights (`hunyuan3d-paint`) share a _separate_
+Tencent 2.1 agreement and must be accepted on their own before PBR painting.
