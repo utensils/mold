@@ -714,7 +714,7 @@ or `:q8` for image-to-video on this checkpoint.
 Measured on an NVIDIA L40S (CUDA, math attention, no flash-attn), 1280x704 x
 121 frames at 24 fps, one prompt and seed, the base tier run with
 `MOLD_WAN_STEP_CACHE=off` (a 20-step 5B run engages the same auto cache that
-collapsed the 1.3B base, see #1559):
+collapsed the 1.3B base when `auto` is selected explicitly, see #1559):
 
 | Tier                  | Forwards | Pipeline total | Of which denoise |
 | --------------------- | -------- | -------------- | ---------------- |

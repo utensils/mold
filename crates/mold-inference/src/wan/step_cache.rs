@@ -332,8 +332,8 @@ mod tests {
 
     /// `auto` must never engage where the measurement says it cannot help: a
     /// distilled adapter, or a schedule under `MIN_CACHEABLE_STEPS`. That
-    /// refusal is what will make a default safe once the allocation is
-    /// charged.
+    /// refusal keeps an explicit opt-in from silently adding work where reuse
+    /// cannot help.
     #[test]
     fn auto_refuses_itself_on_distilled_and_short_schedules() {
         let requested = threshold_for_env(Some("auto")).expect("auto is valid");
