@@ -245,6 +245,8 @@ jobs:
               - 'scripts/hunyuan3d-frame-source.py'
               - 'scripts/fixtures/hunyuan3d-comfy-metal-api-prompt.json'
               - 'scripts/tests/hunyuan3d-metal-uat.sh'
+              - 'scripts/capture-hunyuan3d-cuda.py'
+              - 'scripts/tests/hunyuan3d_cuda_capture_test.py'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
@@ -510,6 +512,7 @@ jobs:
           bash scripts/tests/h3-cuda-server-tests.sh
           bash scripts/tests/ltx25-comfy-oracle-provision.sh
           bash scripts/tests/hunyuan3d-metal-uat.sh
+          python3 scripts/tests/hunyuan3d_cuda_capture_test.py
       - name: Test MiniMax H3 private-UAT release contract
         if: needs.changes.outputs.release == 'true'
         run: bash scripts/tests/minimax-h3-private-uat-release-contract.sh

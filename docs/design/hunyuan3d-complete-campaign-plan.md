@@ -1,6 +1,6 @@
 # Hunyuan3D complete campaign: #1511 and #1496
 
-Status: researched implementation plan; implementation and render qualification have not started.
+Status: implementation in progress; see `docs/qualification/hunyuan3d-campaign.md`.
 Research date: 2026-09-06 UTC (2026-09-05 America/Phoenix).
 Base: `origin/main` at `3fb527e1`.
 Branch: `work/issues-1511-1496`.
@@ -11,8 +11,8 @@ Worktree: `/home/jamesbrink/Projects/mold-1511-1496`.
 Implement the complete paint engine in [#1511](https://github.com/utensils/mold/issues/1511)
 and all eight follow-on areas in [#1496](https://github.com/utensils/mold/issues/1496)
 on this single long-running branch. Commit and push coherent checkpoints regularly;
-do not open a PR until the user requests one. The present `/plan` request produces
-the researched plan and a pushed planning checkpoint, not a claim of completed implementation.
+do not open a PR until the user requests one. The user has authorized full
+implementation with no deferred work, including mesh-to-latent support below.
 Feature completion requires executable upstream comparisons, real-weight CUDA runs,
 durability and scheduling evidence, and all affected client/documentation surfaces.
 
@@ -324,9 +324,8 @@ These are commit boundaries, not separate PRs. No subagents were launched for th
 - Test HTTP uploads, inline/retained media, CLI files, resumed jobs, cross-host reuse
   and explicit refusal of unsupported mesh forms. Show source mesh and appearance
   image as distinct controls on clients.
-- The issue's optional shape-VAE encoder/mesh-to-latent round-trip is not required
-  for mesh-agnostic paint. Keep it as an explicit optional extension after this
-  gate, not a hidden dependency or an implied completed feature. If added, port
+- The shape-VAE encoder/mesh-to-latent round-trip is included in this campaign
+  under the user's no-deferred-work instruction. After mesh-input paint, port
   point/sharp-edge sampling, farthest-point sampling and PointCrossAttention with
   separate oracle fixtures and loss/geometry validation.
 - Exit: prompt → final GLB and supplied mesh → textured GLB both resume durably;
@@ -358,8 +357,8 @@ These are commit boundaries, not separate PRs. No subagents were launched for th
   tolerances before inspecting candidate quant results. Do not hide failure with
   a silent full-model dense fallback.
 - Exit: at least the 2.1 Q8 path is measured and usable through a documented local
-  conversion workflow. Qualify 2.0 separately; advertise only passing tiers. FP8
-  and lower-bit variants remain optional research, not required invented variants.
+  conversion workflow. Qualify 2.0 separately; advertise only passing tiers. Qualify
+  FP8 and lower-bit policies against the dense baseline before advertising them.
 
 ### P14 — Generation assets, exports and complete surfaces (#1496.8)
 

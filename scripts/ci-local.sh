@@ -297,6 +297,7 @@ if wants contracts; then
     fi
   done
   step "contracts: CUDA PTX parser" python3 scripts/tests/cuda-ptx-parser-contract.py
+  step "contracts: Hunyuan3D CUDA capture" python3 scripts/tests/hunyuan3d_cuda_capture_test.py
   step "contracts: local multi-GPU qualification" \
     bash scripts/tests/local-multi-gpu-qualification-contract.sh
   step "contracts: H3 private-UAT release" \
