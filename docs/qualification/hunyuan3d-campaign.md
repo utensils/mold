@@ -1112,3 +1112,40 @@ it is not a completion checklist with assumed passes.
   paint publication remain active requirements.
 - All-target CUDA/cuDNN Clippy passes with warnings denied after the fork pin
   and qualification guards (`paint-upscaler-explicit-first-clippy-v1.log`).
+
+
+### P7 ordered material adapter
+
+- The remaining ten full views now pass: `paint-upscaler-remaining-views-v1/completed.json`
+  records zero error at all nine captured stages and identical final pixels for
+  albedo 01–05 and MR 01–05. Together with view 00, all twelve material views
+  match the canonical unsubstituted oracle. The retained test binary and its
+  SHA are recorded in `paint-upscaler-explicit-first-proof-v1/run.json`.
+- `paint_upscale::upscale_materials` uses one exact-plan engine, runs ordered
+  albedo then MR views untiled, preserves Tencent's channel reversals, and
+  unloads before returning. It rejects malformed dimensions, unexpected
+  response identity/scale/format and cancellation; partial results never escape.
+  The missing-adapter red test and three green contract tests are retained in
+  `paint-upscale-adapter-red-v1.log` and `paint-upscale-adapter-green-v1.log`.
+- The installed image adapter matches albedo/MR view 00 exactly with explicit
+  cuDNN (`paint-upscale-adapter-cuda-v1`). Read-only peer review caught that
+  using the shape family policy disabled cuDNN by default. The unset-override
+  failure is retained in `paint-upscale-adapter-default-red-v1`. A scoped Paint
+  policy fixes it: `paint-upscale-adapter-default-green-v1` reports zero byte
+  error for both streams, 10.89 seconds including load and both upscales.
+  Explicit operator overrides and shape-family defaults remain unchanged.
+- This establishes adapter parity, not completed paint generation. Admission
+  memory calibration, baking/filling, P6 neural parity and complete publication
+  remain active requirements; the existing generic 2 GiB upscaler activation
+  allowance does not substantiate the observed untiled paint memory demand.
+- A fresh real-adapter process on GPU 0 passes again with no override
+  (`paint-adapter-memory-v1`), while 50 ms sampling observes 8,257 MiB peak
+  board usage from a 3 MiB baseline across the two sequential views. Runtime
+  is 10.84 seconds. This is observed board demand, not an allocator maximum
+  or a proof of the complete pipeline fitting a particular device budget.
+- Eight convolution-policy tests and three adapter contract tests pass
+  (`paint-adapter-policy-tests-v1.log`, `paint-adapter-contract-tests-v1.log`).
+  The real GPU tests run separately above. All-target CUDA/cuDNN Clippy with
+  warnings denied passes (`paint-adapter-clippy-v1.log`), as does rustfmt.
+  Read-only peer review confirms the scoped backend lifetime and preserved
+  overrides; its stale thread-local documentation comment was corrected.

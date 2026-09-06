@@ -46,6 +46,7 @@ pub mod paint_raster;
 pub mod paint_reliability;
 pub mod paint_sampler;
 pub mod paint_unet;
+pub mod paint_upscale;
 pub mod paint_uv;
 pub mod paint_vae;
 pub mod paint_views;
