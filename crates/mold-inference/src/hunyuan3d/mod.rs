@@ -28,6 +28,7 @@ pub mod engine;
 pub mod glb;
 pub mod mesh;
 pub mod obj;
+pub mod paint_attention;
 pub mod paint_projector;
 pub mod paint_raster;
 pub mod paint_vae;

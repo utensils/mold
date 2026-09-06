@@ -292,6 +292,33 @@ loader without replacing network or rendering computations.
   `paint-projector-candle-v1/`. This qualifies the projector component, not the
   complete paint UNet or its integration into generation.
 
+## Paint attention checkpoint
+
+- `paint_attention.rs` ports Tencent's material self-attention, reference value
+  packing, ordinary cross-attention and multiview rotary positions from
+  `hy3dpaint/hunyuanpaintpbr/unet/attn_processor.py` at the pinned 2.1 revision.
+  Reference values concatenate before head reshape and split after attention;
+  independent review's conventional per-material counterexample differs by
+  maximum .29798 / RMS .05650 (`paint-attention-review-v1/`). The implementation
+  retains float32 arithmetic and the half output boundaries. Query chunks bound
+  each score allocation to 64 MiB while retaining every key.
+- `paint-attention-red-v1.log` records the initial failing executable-oracle
+  comparison. `paint-attention-green-v2.log` passes four tests: all five processor
+  kinds in both dtypes, rotary XYZ tables and material repetition, query chunking,
+  and allocation rejection before copying indices. The latter was a peer-review
+  finding with its own failing test in `paint-attention-bound-red-v1.log`.
+  Warnings-denied Clippy passes (`paint-attention-clippy-v2.log`).
+- The synthetic CUDA comparison passes (`paint-attention-cuda-v1.log`). The
+  installed first down-block's weights also pass all five processors in both
+  dtypes at production head width 64 (`paint-attention-pretrained-cuda-v1.log`),
+  using two batches, six views with 64 spatial tokens each, 256 reference tokens
+  and 1,028 DINO tokens. Predeclared installed bounds are float32 maximum 1e-4 /
+  RMS 1e-5 and float16 maximum .01 / RMS .001. The original checkpoint hash,
+  upstream hash, tensors and every Rust result are retained in
+  `paint-attention-pretrained-oracle-v1/` and
+  `paint-attention-pretrained-candle-v1/`. This does not yet qualify the complete
+  transformer block, full spatial attention sizes or whole denoiser.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

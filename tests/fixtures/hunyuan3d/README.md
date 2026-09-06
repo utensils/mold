@@ -37,3 +37,16 @@ parser silently omits the latter; the paint reader must reject the checkpoint.
 a signed storage offset of -1. It must return an error before Candle's offset
 arithmetic. Peer-review reproducers and original bytes are retained under
 `paint-pth-review-v1/` and `paint-pth-review-v2/` in the campaign evidence root.
+
+`paint-projector-tiny.safetensors` contains synthetic Tencent image-projector
+weights and pooled/token inputs and outputs. Regenerate with
+`scripts/capture-hunyuan3d-paint-projector.py` without checkpoint arguments.
+
+`paint-attention.safetensors` contains synthetic Tencent material self-attention,
+reference attention, rotary multiview attention and plain/cross-attention weights
+and outputs in float32/float16, plus position tables. Regenerate with
+`scripts/capture-hunyuan3d-paint-attention.py` without `--checkpoint`. Five heads,
+two batches, two materials and three views expose the reference processor's
+concatenate-values-before-head-reshape ordering. Its script also captures installed
+weights at production dimensions; those larger files stay in the campaign
+evidence directory and are never checked in as synthetic fixtures.
