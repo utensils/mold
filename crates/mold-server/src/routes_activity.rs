@@ -24,7 +24,13 @@ fn scheduler_phase(
 ) -> &'static str {
     match work.activity_phase {
         QueueActivityPhase::Cpu => "running",
-        QueueActivityPhase::Active if progress.and_then(|value| value.step).is_some() => "running",
+        QueueActivityPhase::Active
+            if progress
+                .and_then(|value| value.stage_current.or(value.step))
+                .is_some() =>
+        {
+            "running"
+        }
         // Only registry-backed generations have a model-loading progress
         // record. Scheduler-owned GPU work (chain stages, upscales, utilities)
         // is already executing once its lease is Active and must not inherit
@@ -122,13 +128,15 @@ fn scheduler_activity(state: &AppState) -> SchedulerActivityIndex {
         });
         let runtime_current = runtime_progress.as_ref().and_then(|progress| {
             progress
-                .step
+                .stage_current
+                .or(progress.step)
                 .map(|value| value.try_into().unwrap_or(u64::MAX))
                 .or_else(|| progress.weight_load.as_ref().map(|load| load.bytes_loaded))
         });
         let runtime_total = runtime_progress.as_ref().and_then(|progress| {
             progress
-                .total
+                .stage_total
+                .or(progress.total)
                 .map(|value| value.try_into().unwrap_or(u64::MAX))
                 .or_else(|| progress.weight_load.as_ref().map(|load| load.bytes_total))
         });

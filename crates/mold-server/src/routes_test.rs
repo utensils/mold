@@ -3437,7 +3437,15 @@ mod tests {
         state.job_registry.record_progress(
             "running-b",
             &mold_core::types::SseProgressEvent::StageStart {
-                name: "Loading Flux.2 transformer".into(),
+                name: "Generating PBR views".into(),
+            },
+        );
+        state.job_registry.record_progress(
+            "running-b",
+            &mold_core::types::SseProgressEvent::StageProgress {
+                name: "Generating PBR views".into(),
+                current: 7,
+                total: 15,
             },
         );
         state.job_registry.register("denoising-e", "sdxl:q8");
@@ -3547,8 +3555,10 @@ mod tests {
         assert_eq!(item("queued-a")["kind"], "generation");
         assert_eq!(item("queued-a")["phase"], "queued");
         assert_eq!(item("queued-a")["can_cancel"], true);
-        assert_eq!(item("running-b")["phase"], "loading");
-        assert_eq!(item("running-b")["stage"], "Loading Flux.2 transformer");
+        assert_eq!(item("running-b")["phase"], "running");
+        assert_eq!(item("running-b")["stage"], "Generating PBR views");
+        assert_eq!(item("running-b")["current"], 7);
+        assert_eq!(item("running-b")["total"], 15);
         assert_eq!(item("running-b")["can_cancel"], true);
         assert_eq!(item("denoising-e")["phase"], "running");
         assert_eq!(item("denoising-e")["current"], 2);
@@ -3591,11 +3601,13 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(queue_body["work_item"]["runtime_phase"], "loading");
+        assert_eq!(queue_body["work_item"]["runtime_phase"], "running");
         assert_eq!(
             queue_body["work_item"]["runtime_stage"],
-            "Loading Flux.2 transformer"
+            "Generating PBR views"
         );
+        assert_eq!(queue_body["work_item"]["runtime_current"], 7);
+        assert_eq!(queue_body["work_item"]["runtime_total"], 15);
 
         registry.remove("queued-a");
         registry.remove("running-b");
