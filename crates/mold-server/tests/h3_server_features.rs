@@ -16,7 +16,7 @@ mod h3_server_features;
 
 use h3_server_features::validate_canonical_h3_server_feature_keys as validate;
 
-/// `mold-ai`'s `h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid`
+/// `mold-ai`'s `h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture`
 /// as it reaches `mold-ai-server`. Features `mold-ai` does not forward to the
 /// server (`preview`, `discord`, `tui`) are deliberately absent.
 fn shipping_sm89_recipe() -> Vec<String> {
@@ -27,6 +27,7 @@ fn shipping_sm89_recipe() -> Vec<String> {
         "CARGO_FEATURE_H3_CUDA",
         "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
         "CARGO_FEATURE_MDNS",
+        "CARGO_FEATURE_MESH_TEXTURE",
         "CARGO_FEATURE_METRICS",
         "CARGO_FEATURE_MP4",
         "CARGO_FEATURE_NVML",
@@ -47,6 +48,7 @@ fn shipping_metal_recipe() -> Vec<String> {
         "CARGO_FEATURE_MDNS",
         "CARGO_FEATURE_METAL",
         "CARGO_FEATURE_METRICS",
+        "CARGO_FEATURE_MESH_TEXTURE",
         "CARGO_FEATURE_MP4",
         "CARGO_FEATURE_PULID",
         "CARGO_FEATURE_WEBP",
@@ -88,4 +90,13 @@ fn dropping_the_required_h3_cuda_edge_is_still_rejected() {
         .filter(|key| key != "CARGO_FEATURE_H3_CUDA")
         .collect();
     validate(&recipe).expect_err("h3-cuda is required, not merely allowed");
+}
+
+#[test]
+fn dropping_mesh_texture_cannot_ship_a_geometry_only_h3_backend() {
+    let recipe: Vec<String> = shipping_sm89_recipe()
+        .into_iter()
+        .filter(|key| key != "CARGO_FEATURE_MESH_TEXTURE")
+        .collect();
+    validate(&recipe).expect_err("the public H3 backend must include PBR texture baking");
 }
