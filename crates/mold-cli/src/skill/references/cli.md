@@ -185,6 +185,10 @@ is simulated until hardware-qualified.
 
 ## macOS Metal memory
 
+Wan is performance-qualified on Apple Metal for the 1.3B BF16 and 5B Q8/FP16
+paths. Prefer the 5B Q8 tier for sustained 720p work; dense FP16 is supported
+but can slow as unified-memory pressure and VAE decode cost accumulate.
+
 `mold system metal-memory status [--json]` inspects this machine, ignoring
 `MOLD_HOST`. Explicit root-only `set <MiB> [--persist]` and `reset [--persist]`
 administer its system-wide limit; never run the server as root. Use

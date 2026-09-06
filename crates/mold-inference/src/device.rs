@@ -751,6 +751,18 @@ pub fn t5_vram_threshold(model_size_bytes: u64) -> u64 {
     model_size_bytes + T5_ACTIVATION_HEADROOM
 }
 
+/// Metal residency threshold for a GGUF T5/UMT5 encoder.
+///
+/// The quantized file remains resident while Metal materializes its execution
+/// buffers. #1059 measured 12,840,812,544 allocated bytes for the 6,043,068,256
+/// byte UMT5 Q8 encoder; two file-sized terms plus 1 GiB retain 319 MiB above
+/// that observation.
+pub fn t5_metal_gguf_vram_threshold(model_size_bytes: u64) -> u64 {
+    model_size_bytes
+        .saturating_mul(2)
+        .saturating_add(1024 * 1024 * 1024)
+}
+
 /// Minimum free VRAM (bytes) required to place FP16 T5-XXL on GPU.
 /// Kept for backward compatibility — equivalent to `t5_vram_threshold(9_200_000_000)`.
 pub const T5_VRAM_THRESHOLD: u64 = 16_000_000_000;
@@ -3220,17 +3232,19 @@ pub(crate) fn fits_in_memory(
 
 // ── Memory budget ────────────────────────────────────────────────────────────
 
-/// Estimate peak memory usage for a model given its component file sizes and loading strategy.
-///
-/// For Eager: sum of all component files + headroom.
-/// For Sequential: max(encoder_total, transformer + VAE) + headroom.
-///
 /// **Single-file convention.** The catalog bridge sets
 /// `paths.transformer == paths.vae` to a single `.safetensors` (transformer
 /// and VAE keys both extracted from the same file at runtime — see
 /// `crates/mold-cli/src/catalog_bridge.rs:196`). Naive `transformer + vae`
 /// double-counts that file. We detect and elide it.
-pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
+/// Stored weight bytes in the two phases of a sequential engine.
+///
+/// The first value is all text encoders after path deduplication. The second
+/// is the larger resident transformer expert plus a separate VAE. Runtime
+/// activation and allocator workspace are intentionally absent so a
+/// family-specific estimator can price each phase without adding one phase's
+/// work to the other phase's weights.
+pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64, u64) {
     let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let same_file = |a: &std::path::Path, b: &std::path::Path| -> bool {
         a == b
@@ -3325,12 +3339,19 @@ pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrateg
 
     let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
 
+    (encoder_total, transformer_size + vae_size)
+}
+
+/// Estimate peak memory usage for a model given its component file sizes and loading strategy.
+///
+/// For Eager: sum of all component files + headroom.
+/// For Sequential: max(encoder_total, transformer + VAE) + headroom.
+pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
+    let (encoder_weights, inference_weights) = estimate_sequential_phase_weights(paths);
     match strategy {
-        LoadStrategy::Eager => transformer_size + vae_size + encoder_total + MEMORY_BUDGET_HEADROOM,
+        LoadStrategy::Eager => encoder_weights + inference_weights + MEMORY_BUDGET_HEADROOM,
         LoadStrategy::Sequential => {
-            let peak_encoder = encoder_total;
-            let peak_inference = transformer_size + vae_size;
-            std::cmp::max(peak_encoder, peak_inference) + MEMORY_BUDGET_HEADROOM
+            std::cmp::max(encoder_weights, inference_weights) + MEMORY_BUDGET_HEADROOM
         }
     }
 }
@@ -4261,6 +4282,14 @@ mod tests {
         assert_eq!(threshold, 7_060_000_000);
         assert!(should_use_gpu(true, false, 17_000_000_000, threshold));
         assert!(should_use_gpu(true, false, 12_000_000_000, threshold));
+    }
+
+    #[test]
+    fn metal_gguf_t5_threshold_covers_the_measured_q8_encoder_peak() {
+        let threshold = t5_metal_gguf_vram_threshold(6_043_068_256);
+        assert_eq!(threshold, 13_159_878_336);
+        assert!(threshold > 12_840_812_544);
+        assert!(threshold - 12_840_812_544 >= 256 * 1024 * 1024);
     }
 
     #[test]

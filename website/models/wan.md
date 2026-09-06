@@ -14,7 +14,7 @@ the family natively in Rust.
 > via `--format`. Frame count must be 4n+1 (77, 81, 121, ...) due to the
 > VAE's 4x temporal compression. Width and height must be multiples of 16 —
 > except `wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32. Wan is
-> performance-qualified on CUDA; Apple Metal and CPU runs are
+> performance-qualified on CUDA and Apple Metal; CPU runs are
 > correctness-only. fp8-scaled checkpoints stay CUDA-only — Metal has no
 > fp8 widening kernel; use the bf16 or GGUF tier there.
 
@@ -366,6 +366,28 @@ AppImage. macOS and Windows do not: cuDNN is CUDA-only.
 ### When the VAE decode does not fit
 
 The full decode is attempted first. Only an out-of-memory failure falls back to a spatially tiled decode — 256x256 pixel tiles with a quarter-tile overlap and a linearly ramped blend, the same geometry ComfyUI's own `decode_tiled_3d` uses. Wan's decoder already streams the temporal axis one latent frame at a time, so tiling bounds the one thing that was left unbounded: the spatial working set at full output resolution. A render that fits keeps the untiled path, which is faster and free of any seam approximation.
+
+### Apple Metal qualification
+
+Wan is performance-qualified on a 48 GB M4 Max with full denoising and the
+default automatic Metal memory limit. Each row used 17 frames and includes one
+cold plus three consecutive warm renders; every output decoded completely and
+passed frame-by-frame visual inspection.
+
+| Workload               | Steps |    Cold |     Warm range | Median denoise step | VAE decode range |
+| ---------------------- | ----: | ------: | -------------: | ------------------: | ---------------: |
+| 1.3B BF16 T2V, 832x480 |    30 | 437.7 s |  444.5–454.9 s |          9.8–10.7 s |      64.5–65.8 s |
+| 5B Q8 T2V, 1280x704    |    20 | 549.3 s |  667.3–762.5 s |         12.9–21.1 s |    161.8–182.1 s |
+| 5B FP16 I2V, 1280x704  |    20 | 839.7 s | 920.1–1190.3 s |         21.8–29.7 s |    193.8–357.3 s |
+
+The FP16 row reached macOS warning pressure during the sustained campaign and
+used about 709 MiB of additional swap, while retaining at least 3.26 GiB of
+sampled available memory. The completed, visually stable runs qualify the path,
+but the warm slowdown is real: Q8 is the practical 5B Metal tier when dense
+FP16 is not required. Wan's sequential encoder/transformer
+placement already addresses the relevant unified-memory phase split; the
+host-side FP8 widening optimization used by LTX-2 does not apply to Wan's BF16
+and Q8 compute paths.
 
 ### FlashAttention on Wan
 

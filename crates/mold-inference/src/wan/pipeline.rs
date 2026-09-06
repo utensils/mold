@@ -1407,16 +1407,19 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
 /// and a CPU-parked UMT5 has to widen to F32 (candle has no CPU BF16 matmul),
 /// costing ~22.7 GB of host RAM and minutes per encode.
 ///
-/// So when the variant resolver has *just measured* that the selected encoder
-/// fits in free VRAM right now, that measurement wins over the placement. This
-/// is not overriding the scheduler's grant: the grant covers the denoise peak,
-/// which is unchanged, and the encoder is released before that peak is
-/// reached. Placement still decides when the encoder genuinely does not fit.
+/// On CUDA, when the variant resolver has *just measured* that the selected
+/// encoder fits in free VRAM, that measurement may promote a conservative CPU
+/// placement because the encoder is released before denoise. Metal must keep
+/// the concrete placement: its process-local free-memory probe does not know
+/// the system wired-memory ceiling used by admission, so promoting there can
+/// allocate past the scheduler's frozen grant (#1059).
 fn encode_device(placement: Device, execution: &Device, fits_on_gpu: bool) -> Device {
     match (fits_on_gpu, placement.is_cpu(), execution.is_cpu()) {
         // Placement parked it, but it fits and there is a real device to run
-        // it on — promote to the execution device.
-        (true, true, false) => execution.clone(),
+        // it on — promote to the execution device on CUDA. Metal's materialized
+        // placement is the authority because its local probe cannot see the
+        // admission-time wired limit.
+        (true, true, false) if !execution.is_metal() => execution.clone(),
         // It does not fit: CPU regardless of what placement said.
         (false, _, _) => Device::Cpu,
         _ => placement,
@@ -1570,6 +1573,7 @@ impl WanEngine {
                 device,
                 crate::device::usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0),
                 std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+                crate::wan::experts::is_gguf(path),
             );
             progress.info(&format!(
                 "Using prepared UMT5 encoder {} on {}",
@@ -2809,7 +2813,14 @@ impl crate::chain::ChainStageRenderer for WanEngine {
         // Same approach as the ltx-video stage renderer.
         stage_req.output_format = Some(mold_core::OutputFormat::Apng);
         stage_req.gif_preview = false;
-        let response = self.generate_inner(&stage_req)?;
+        // `render_stage` deliberately enters below `InferenceEngine::generate`,
+        // so mirror that entry point's placement scope. Without this, an
+        // admitted CPU UMT5 placement becomes Auto and Metal can allocate past
+        // the exact wired-memory grant (#1059).
+        self.pending_placement = stage_req.placement.clone();
+        let response = self.generate_inner(&stage_req);
+        self.pending_placement = None;
+        let response = response?;
         let generation_time_ms = start.elapsed().as_millis() as u64;
         let video = response
             .video
@@ -2848,6 +2859,30 @@ impl crate::chain::ChainStageRenderer for WanEngine {
 
 #[cfg(test)]
 mod tests {
+    /// Chain rendering bypasses `InferenceEngine::generate`, so it must carry
+    /// the scheduler's materialized component placement into `generate_inner`
+    /// itself. Losing it promotes a CPU-planned UMT5 back onto Metal.
+    #[test]
+    fn chain_stage_applies_and_clears_the_request_placement() {
+        let source = include_str!("pipeline.rs");
+        let chain = source
+            .split("impl crate::chain::ChainStageRenderer for WanEngine")
+            .nth(1)
+            .expect("Wan chain renderer")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("Wan chain renderer body");
+        let apply = chain
+            .find("self.pending_placement = stage_req.placement.clone();")
+            .expect("chain stage applies the admitted placement");
+        let generate = chain
+            .find("self.generate_inner(&stage_req)")
+            .expect("chain stage invokes the inner generator");
+        let clear = chain
+            .find("self.pending_placement = None;")
+            .expect("chain stage clears placement after generation");
+        assert!(apply < generate && generate < clear);
+    }
 
     /// The prompt-encoding cache must miss on every field that changes the
     /// tensors. A false hit is not a slow render, it is a render conditioned
@@ -3015,16 +3050,17 @@ mod tests {
         assert!(error.contains("must be 1, not 17"), "got: {error}");
     }
 
-    /// A CPU placement is not the last word when the encoder measurably fits.
+    /// CUDA may refine a conservative CPU placement when the encoder fits.
     ///
     /// Placement is shaped for families where the encoder and the transformer
     /// coexist. Wan releases the encoder before the DiT is built, so honouring
     /// a CPU park it does not need costs an F32 widening (~22.7 GB host RAM)
     /// and a CPU encode of a 5.7B-parameter model. The measurement the variant
-    /// resolver just took is the better authority — but only in that one
-    /// direction: it must never move an encoder onto a device it does not fit.
+    /// resolver just took is the better authority there. Metal instead keeps
+    /// the scheduler's frozen choice because its local measurement cannot see
+    /// the wired limit that bounded admission.
     #[test]
-    fn a_fitting_encoder_beats_a_cpu_placement_but_never_the_reverse() {
+    fn cuda_may_promote_a_fitting_encoder_while_metal_keeps_frozen_placement() {
         let cuda = Device::new_cuda(0).ok();
         let execution = cuda.clone().unwrap_or(Device::Cpu);
 
@@ -3045,6 +3081,15 @@ mod tests {
             encode_device(execution.clone(), &execution, true).is_cpu(),
             execution.is_cpu()
         );
+
+        #[cfg(feature = "metal")]
+        {
+            let metal = crate::device::metal_device(0).expect("Metal test device");
+            assert!(
+                encode_device(Device::Cpu, &metal, true).is_cpu(),
+                "Metal must obey the scheduler's frozen CPU placement"
+            );
+        }
     }
 
     /// The defect this exists for: a HIGH/LOW pair applied to both experts.

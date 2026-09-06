@@ -457,11 +457,11 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         aliases: &[],
         backends: BackendApplicability {
             cuda: BackendQualification::Supported,
-            // Correctness path (#800): family-scoped BF16, folded VAE
-            // reductions, chunked math attention, fp8 refused by name.
-            // `Supported` waits on checkpoint-backed perf UAT, per the LTX-2
-            // precedent.
-            metal: BackendQualification::CorrectnessOnly,
+            // Performance-qualified on Apple Silicon (#1094): family-scoped
+            // BF16, folded VAE reductions, chunked math attention, and Q8
+            // GGUF. fp8 remains refused by name because Metal has no fp8
+            // widening kernel.
+            metal: BackendQualification::Supported,
             cpu: BackendQualification::CorrectnessOnly,
         },
         placement: ComponentPlacementCapability {
@@ -630,6 +630,12 @@ pub fn validate_runtime_batch_capability(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn wan_metal_is_performance_qualified() {
+        let wan = production_family_capability_for_family("wan").unwrap();
+        assert_eq!(wan.backends.metal, BackendQualification::Supported);
+    }
 
     #[test]
     fn production_family_batch_registry_is_explicit_valid_and_singleton_only() {
