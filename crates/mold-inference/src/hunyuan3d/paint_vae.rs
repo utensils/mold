@@ -80,9 +80,16 @@ mod tests {
         let model = PaintVae::load(Path::new(&checkpoint), dtype, &device)?;
         let latents = model.encode_with_noise(&tensors["pixels"], &tensors["noise"])?;
         let decoded = model.decode(&latents)?;
-        let posterior = DiagonalGaussianDistribution::new_clamped(
-            &model.model.encode_moments(&tensors["pixels"])?,
-        )?;
+        let mut stages = std::collections::HashMap::new();
+        let moments =
+            model
+                .model
+                .encode_moments_with_observer(&tensors["pixels"], |name, value| {
+                    stages.insert(name.to_string(), value.clone());
+                    Ok(())
+                })?;
+        candle_core::safetensors::save(&stages, output.join("encoder.safetensors"))?;
+        let posterior = DiagonalGaussianDistribution::new_clamped(&moments)?;
         let decoded_reference_latents = model.decode(&tensors["sampled"])?;
         candle_core::safetensors::save(
             &std::collections::HashMap::from([

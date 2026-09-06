@@ -10,9 +10,10 @@ Worktree: `/home/jamesbrink/Projects/mold-1511-1496`.
 
 Implement the complete paint engine in [#1511](https://github.com/utensils/mold/issues/1511)
 and all eight follow-on areas in [#1496](https://github.com/utensils/mold/issues/1496)
-on this single long-running branch. Commit and push coherent checkpoints regularly;
-do not open a PR until the user requests one. The user has authorized full
-implementation with no deferred work, including mesh-to-latent support below.
+on this single long-running branch. Commit and push coherent checkpoints regularly.
+The user has now authorized opening the PR only after complete implementation,
+feature proof across every affected surface, and subagent peer review. The full
+scope has no deferred work, including mesh-to-latent support below.
 Feature completion requires executable upstream comparisons, real-weight CUDA runs,
 durability and scheduling evidence, and all affected client/documentation surfaces.
 
@@ -129,7 +130,8 @@ Shape extensions P8/P9 and matting P10 need P0/P1 and can be implemented as late
 independent commits on the same branch. P11 depends on P2/P10 and a shape path;
 P12 reuses the paint SD components; P13 follows dense 2.1 qualification; P14
 finishes asset distribution and client parity; P15 is the campaign completion gate.
-These are commit boundaries, not separate PRs. No subagents were launched for this research.
+These are commit boundaries, not separate PRs. Research was performed without
+subagents; the user subsequently requested subagent peer review before the final PR.
 
 ### P0 — Reproducible baseline and executable oracles
 

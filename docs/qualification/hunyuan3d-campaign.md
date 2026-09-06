@@ -200,6 +200,37 @@ loader without replacing network or rendering computations.
   probe does not reproduce the Rust tensor, so it is evidence of sensitivity,
   not a confirmed root cause or an accepted substitute reference.
 
+## VAE checkpoint peer review and follow-up
+
+- The independent `review_vae` subagent found that Candle's lenient pickle
+  inventory skipped unsupported tensors, weakening the claimed exact-loading
+  contract. `paint-pth-review-v1/` reproduces this with an unexpected int32 tensor.
+  Strict raw-dictionary validation now rejects skipped/non-tensor entries and
+  duplicate names, permitting only PyTorch's defined module-version metadata.
+- Follow-up review reproduced a negative-offset panic in Candle's conversion
+  arithmetic (`paint-pth-review-v2/`). Offset, dimension, stride and storage-size
+  checks now run before conversion. `paint-pth-strict-green-v3.log` passes all
+  three loader tests; `paint-pth-strict-clippy-v1.log` passes warnings-denied
+  Clippy. The review's installed inventory probe accepts 248 VAE tensors and
+  1,747 UNet tensors; this is loader compatibility, not UNet inference proof.
+  The final `paint-pth-review-v3/probe.log` rechecks the current parser against
+  both installed checkpoints and confirms the negative offset returns an error
+  without a panic; the reviewer marks that finding resolved.
+- Encoder observation preserves the existing output bit-for-bit and propagates
+  observer errors (`paint-vae-observer-green-v1.log`). The fresh installed-weight
+  run with strict loading still passes float32 parity
+  (`paint-vae-cuda-strict-f32-v1.log`, sampled max .000027447939 / RMS .0000054838;
+  decoded max .000026494265 / RMS .0000030068).
+- `paint-vae-encoder-comparison-v1.json` records float16 error growth across
+  encoder boundaries, with the largest increase at the mid block. Scratch probes
+  under `paint-vae-half-diagnostic-v2/` establish sensitivity to half-rounded
+  normalization and SiLU; they do not fully reproduce the discrepancy or close
+  the original gate. No acceptance tolerance was changed.
+- The oracle now records checkpoint/config sizes and SHA-256 digests; the fresh
+  `paint-vae-oracle-f32-v3/` capture includes these plus encoder tensors. Earlier
+  captures and failures remain retained. Production-size/batched conditioning,
+  pipeline RNG sequencing and the full paint network remain separate open gates.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

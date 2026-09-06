@@ -15,3 +15,18 @@ A component pass does not establish pretrained or full-pipeline qualification.
 `uv-tetrahedron.json` is xatlas-python 0.0.9's exact `parametrize` result for a
 synthetic tetrahedron. Regenerate with `scripts/capture-hunyuan3d-uv-reference.py`.
 The native xatlas revision is recorded in the fixture and vendored-source README.
+
+`paint-vae-tiny-weights.safetensors`, `paint-vae-tiny.bin` and
+`paint-vae-tiny.safetensors` are synthetic Diffusers 0.30 VAE weights plus input,
+posterior and decode tensors. Regenerate using
+`scripts/capture-hunyuan3d-paint-vae.py --tiny-only`; strict float32 captures disable
+TF32. No pretrained weights are checked in. Retain each original capture and
+metadata in the campaign evidence directory before copying fixtures.
+
+`paint-pth-unexpected-int32.bin` contains one float32 tensor named `expected` and
+an int32 tensor named `unexpected`, generated with PyTorch 2.5.1. Candle's lenient
+parser silently omits the latter; the paint reader must reject the checkpoint.
+`paint-pth-negative-offset.bin` modifies a one-tensor PyTorch checkpoint to carry
+a signed storage offset of -1. It must return an error before Candle's offset
+arithmetic. Peer-review reproducers and original bytes are retained under
+`paint-pth-review-v1/` and `paint-pth-review-v2/` in the campaign evidence root.

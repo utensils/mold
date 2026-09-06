@@ -4122,6 +4122,7 @@ dependencies = [
  "tracing",
  "webp-animation",
  "zeroize",
+ "zip 8.6.0",
 ]
 
 [[package]]

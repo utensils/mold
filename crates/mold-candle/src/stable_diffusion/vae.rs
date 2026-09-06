@@ -132,16 +132,24 @@ impl Encoder {
 }
 
 impl Encoder {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward_with_observer(
+        &self,
+        xs: &Tensor,
+        observe: &mut impl FnMut(&str, &Tensor) -> Result<()>,
+    ) -> Result<Tensor> {
         let mut xs = xs.apply(&self.conv_in)?;
-        for down_block in self.down_blocks.iter() {
-            xs = xs.apply(down_block)?
+        observe("encoder.conv_in", &xs)?;
+        for (index, down_block) in self.down_blocks.iter().enumerate() {
+            xs = xs.apply(down_block)?;
+            observe(&format!("encoder.down_blocks.{index}"), &xs)?;
         }
-        let xs = self
-            .mid_block
-            .forward(&xs, None)?
-            .apply(&self.conv_norm_out)?;
-        nn::ops::silu(&xs)?.apply(&self.conv_out)
+        let xs = self.mid_block.forward(&xs, None)?;
+        observe("encoder.mid_block", &xs)?;
+        let xs = xs.apply(&self.conv_norm_out)?;
+        observe("encoder.conv_norm_out", &xs)?;
+        let xs = nn::ops::silu(&xs)?.apply(&self.conv_out)?;
+        observe("encoder.conv_out", &xs)?;
+        Ok(xs)
     }
 }
 
@@ -399,10 +407,24 @@ impl AutoEncoderKL {
 
     /// Raw mean/logvar channels for pipelines with an explicit posterior policy.
     pub fn encode_moments(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = self.encoder.forward(xs)?;
+        self.encode_moments_with_observer(xs, |_, _| Ok(()))
+    }
+
+    /// Observe encoder boundaries without retaining tensors or changing arithmetic.
+    /// An observer error stops execution, allowing callers to cancel capture.
+    pub fn encode_moments_with_observer(
+        &self,
+        xs: &Tensor,
+        mut observe: impl FnMut(&str, &Tensor) -> Result<()>,
+    ) -> Result<Tensor> {
+        let xs = self.encoder.forward_with_observer(xs, &mut observe)?;
         match &self.quant_conv {
             None => Ok(xs),
-            Some(quant_conv) => quant_conv.forward(&xs),
+            Some(quant_conv) => {
+                let xs = quant_conv.forward(&xs)?;
+                observe("quant_conv", &xs)?;
+                Ok(xs)
+            }
         }
     }
 
@@ -465,6 +487,28 @@ mod tests {
             )
             .unwrap();
             let moments = model.encode_moments(&tensors["pixels"]).unwrap();
+            let mut stages = Vec::new();
+            let traced = model
+                .encode_moments_with_observer(&tensors["pixels"], |name, value| {
+                    stages.push((name.to_string(), value.dims().to_vec()));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(max_error(&moments, &traced), 0.);
+            assert_eq!(stages.first().unwrap().0, "encoder.conv_in");
+            assert_eq!(
+                stages.last().unwrap().0,
+                if quant {
+                    "quant_conv"
+                } else {
+                    "encoder.conv_out"
+                }
+            );
+            assert!(model
+                .encode_moments_with_observer(&tensors["pixels"], |_, _| {
+                    candle::bail!("observer cancelled")
+                })
+                .is_err());
             let mean = model.encode(&tensors["pixels"]).unwrap().mode().unwrap();
             assert_eq!(
                 max_error(

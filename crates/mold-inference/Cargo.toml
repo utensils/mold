@@ -156,6 +156,7 @@ mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.28.0
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.28.0" }
 mold-candle = { path = "../mold-candle", package = "mold-ai-candle", version = "0.28.0" }
 anyhow = "1"
+zip = { version = "8.6", default-features = false }
 candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
 candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
 candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8" }
