@@ -139,38 +139,32 @@ describe("what each section says about itself", () => {
 });
 
 describe("outputKindFor — the view's own kind", () => {
-  it("lets an authored sequence outrank the style's family", () => {
-    expect(outputKindFor("sequence", "flux")).toBe("clip");
-    expect(outputKindFor("sequence", "hunyuan3d")).toBe("clip");
-  });
-
-  it("reads a one-shot from the style's family", () => {
-    expect(outputKindFor("single", "hunyuan3d")).toBe("mesh");
-    expect(outputKindFor("single", "flux")).toBe("still");
+  it("reads the kind from the style's family", () => {
+    expect(outputKindFor("hunyuan3d")).toBe("mesh");
+    expect(outputKindFor("flux")).toBe("still");
   });
 
   /*
-   * The Simple sub-mode: a one-shot on a clip style. It renders a clip, so
-   * the toolbar shows Short clip and the title bar says New clip. The old
-   * rule — only `sequence` authors a clip — put that view under a Still
-   * picture label and offered it nothing but picture styles.
+   * A clip has ONE way of being made, so the STYLE is the whole decision: a
+   * render on a clip style shows Short clip in the toolbar and New clip in
+   * the title bar. Nothing outranks the family any more.
    */
-  it("calls a one-shot on a clip style a clip", () => {
-    expect(outputKindFor("single", "ltx-video")).toBe("clip");
-    expect(outputKindFor("single", "ltx2")).toBe("clip");
-    expect(outputKindFor("single", "wan")).toBe("clip");
-    expect(outputKindFor("single", "minimax-h3")).toBe("clip");
+  it("calls a render on a clip style a clip", () => {
+    expect(outputKindFor("ltx-video")).toBe("clip");
+    expect(outputKindFor("ltx2")).toBe("clip");
+    expect(outputKindFor("wan")).toBe("clip");
+    expect(outputKindFor("minimax-h3")).toBe("clip");
   });
 
   it("answers the same question the picker's partition does", () => {
     for (const family of ["flux", "ltx-video", "hunyuan3d", "some-future-family"]) {
-      expect(outputKindFor("single", family), family).toBe(outputKindForModel(style(family)));
+      expect(outputKindFor(family), family).toBe(outputKindForModel(style(family)));
     }
   });
 
   it("reads an empty or absent family as a still picture", () => {
-    expect(outputKindFor("single", "")).toBe("still");
-    expect(outputKindFor("single", null)).toBe("still");
-    expect(outputKindFor("single", undefined)).toBe("still");
+    expect(outputKindFor("")).toBe("still");
+    expect(outputKindFor(null)).toBe("still");
+    expect(outputKindFor(undefined)).toBe("still");
   });
 });

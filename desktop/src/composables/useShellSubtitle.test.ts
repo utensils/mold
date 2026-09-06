@@ -3,7 +3,7 @@ import { defineComponent, type ComputedRef } from "vue";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+
 import { useShellSubtitle, useShellTitle } from "./useShellSubtitle";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
@@ -77,17 +77,16 @@ async function titleAt(path: string): Promise<ComputedRef<string>> {
 describe("useShellTitle", () => {
   it("names all three of Create's output kinds in the title, 3-D included", async () => {
     // The bar says what is being made, not the door that was clicked: the
-    // output kind moved from the subtitle into the title.
+    // output kind moved from the subtitle into the title. A clip has ONE way
+    // of being made, so the STYLE is the whole decision.
     const title = await titleAt("/create");
-    const draft = useSequenceDraftStore();
     const form = useGenerateFormStore();
     expect(title.value).toBe("New image");
 
     form.form.family = "hunyuan3d";
     expect(title.value).toBe("New 3-D object");
 
-    // A clip is the authored output kind, so it outranks the style's family.
-    draft.output = "sequence";
+    form.form.family = "ltx2";
     expect(title.value).toBe("New clip");
   });
 
@@ -100,7 +99,7 @@ describe("useShellSubtitle", () => {
   it("counts the queue on Create without repeating the title's output kind", async () => {
     const subtitle = await subtitleAt("/create");
     expect(subtitle.value).toBe("0 waiting");
-    useSequenceDraftStore().output = "sequence";
+    useGenerateFormStore().form.family = "ltx2";
     expect(subtitle.value).toBe("0 waiting");
   });
 });

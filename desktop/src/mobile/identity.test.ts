@@ -115,12 +115,11 @@ describe("mobileIdentityNeedsReattach", () => {
 });
 
 describe("showMobileIdentityWell", () => {
-  it("renders only on positive capability, and never for a sequence", () => {
-    expect(showMobileIdentityWell(form({ identitySupported: true }), false)).toBe(true);
-    expect(showMobileIdentityWell(form({ identitySupported: true }), true)).toBe(false);
-    expect(showMobileIdentityWell(form({ identitySupported: false }), false)).toBe(false);
+  it("renders only on positive capability", () => {
+    expect(showMobileIdentityWell(form({ identitySupported: true }))).toBe(true);
+    expect(showMobileIdentityWell(form({ identitySupported: false }))).toBe(false);
     // Unread capability is not evidence of support.
-    expect(showMobileIdentityWell(form({ identitySupported: null }), false)).toBe(false);
+    expect(showMobileIdentityWell(form({ identitySupported: null }))).toBe(false);
   });
 
   it("keeps a parked photo hidden rather than rendering a dead control", () => {
@@ -128,7 +127,7 @@ describe("showMobileIdentityWell", () => {
       identitySupported: false,
       identityImage: { filename: "face.png", base64: PNG_1X1 },
     });
-    expect(showMobileIdentityWell(parked, false)).toBe(false);
+    expect(showMobileIdentityWell(parked)).toBe(false);
   });
 });
 

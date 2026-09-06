@@ -41,21 +41,3 @@ export function previewPrintFilename(input: PrintFilenameInput): string {
   const named = slug ? `${stem}~${slug}` : stem;
   return ext ? `${named}.${ext}` : named;
 }
-
-/** Stand-in for the job-id digest a durable sequence's name is built from —
- * it does not exist until the job is created, and inventing one would be a
- * promise the preview cannot keep. */
-export const SEQUENCE_DIGEST_PLACEHOLDER = "…";
-
-/**
- * A durable sequence's stitched print lands under a different grammar:
- * `mold-chain-{sha256(job_id)}-take-{n}[~{slug}].mp4`
- * (`chain_job_runner::chain_gallery_filename`), deliberately free of a wall
- * clock so a replay publishes the same name. Only the title slug is knowable
- * before the job exists, so the digest is elided.
- */
-export function previewSequenceFilename(title?: string | null): string {
-  const stem = `mold-chain-${SEQUENCE_DIGEST_PLACEHOLDER}-take-0`;
-  const slug = title?.trim() ? titleSlug(title.trim()) : null;
-  return slug ? `${stem}~${slug}.mp4` : `${stem}.mp4`;
-}

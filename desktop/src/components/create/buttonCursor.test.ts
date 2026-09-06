@@ -3,16 +3,15 @@ import { readFileSync } from "node:fs";
 import createHeaderSource from "./CreateHeader.vue?raw";
 import inspectorSource from "./InspectorPanel.vue?raw";
 import modelPickerSource from "./ModelPicker.vue?raw";
-import sequenceComposerSource from "./SequenceComposer.vue?raw";
 import viewSource from "../../views/GenerateView.vue?raw";
 
 /*
  * Tailwind v4's preflight sets `appearance: button` on <button> and nothing
  * else — there is no `button { cursor: pointer }` anywhere in the emitted
  * stylesheet. So a button whose own rule omits it shows the ARROW cursor, and
- * on this view that was almost every control: Add a scene, File tools, Check
- * the plan, Clear the clip, Write more for me, both header doors, all four
- * caption actions, the seed reroll and lock, and the whole style picker.
+ * on this view that was almost every control: Write more for me, both header
+ * doors, all four caption actions, the seed reroll and lock, and the whole
+ * style picker.
  */
 
 // Vitest stubs `?raw` on a .css import (its own CSS handling is off), so the
@@ -47,10 +46,5 @@ describe("clickable controls show the hand cursor", () => {
     const declarations = block(source, selector);
     expect(declarations).not.toBe("");
     expect(declarations).toContain("cursor: pointer");
-  });
-
-  it("gives the timeline's bare-Tailwind help button the utility", () => {
-    const tag = sequenceComposerSource.match(/<[^>]*data-test="timeline-help"[^>]*>/s)?.[0] ?? "";
-    expect(tag).toContain("cursor-pointer");
   });
 });

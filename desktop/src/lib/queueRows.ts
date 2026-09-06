@@ -9,7 +9,7 @@ import { queueWaitLabel, resolveQueueWait, type QueueStatus } from "@studio/lib/
 import { formatEta } from "./format";
 import { isCancelledError, type Job } from "./generationJob";
 import { modelDisplayNameForId, type DisplayableModel } from "./models";
-import type { QueueRow, SequenceVM } from "../composables/useQueueActivity";
+import type { QueueRow } from "../composables/useQueueActivity";
 
 /**
  * What the host says about a row beyond the job itself. Absent means its
@@ -32,8 +32,6 @@ export function rowTitle(row: QueueRow, models: readonly DisplayableModel[] = []
   switch (row.kind) {
     case "print":
       return row.print.prompt.trim() || name(row.print.model);
-    case "sequence":
-      return `${row.sequence.stageCount}-scene clip · ${name(row.sequence.model)}`;
     case "shared":
       return row.shared.model ? name(row.shared.model) : row.shared.kind;
   }
@@ -96,21 +94,11 @@ function printStatus(job: Job, context?: QueueRowContext): string {
   return "";
 }
 
-function sequenceStatus(vm: SequenceVM): string {
-  const scene = Math.min(vm.currentStage + 1, vm.stageCount);
-  if (vm.state === "paused") return `Paused after restart — scene ${scene} of ${vm.stageCount}`;
-  if (vm.phase === "queued") return `Waiting — scene ${scene} of ${vm.stageCount}`;
-  if (vm.phase === "finalizing") return "Joining the scenes";
-  return `Making scene ${scene} of ${vm.stageCount}`;
-}
-
 /** One sentence of status, present tense. */
 export function rowStatusLine(row: QueueRow, context?: QueueRowContext): string {
   switch (row.kind) {
     case "print":
       return printStatus(row.print, context);
-    case "sequence":
-      return sequenceStatus(row.sequence);
     case "shared":
       return activeWorkPhaseLabel(row.shared);
   }
@@ -161,9 +149,6 @@ export function rowGlyph(row: QueueRow): string {
     if (job.status === "loading" && job.stage?.toLowerCase().includes("download")) return "↓";
     return "⠂";
   }
-  if (row.kind === "sequence") {
-    return row.sequence.phase === "queued" || row.sequence.state === "paused" ? "·" : "⠂";
-  }
   return row.shared.kind === "download" ? "↓" : "⠂";
 }
 
@@ -177,11 +162,6 @@ export function rowTone(row: QueueRow): string {
       return job.outcomeUnknown ? "text-state-waiting" : "text-state-failed";
     if (job.status === "queued") return "text-state-waiting";
     return "text-state-active";
-  }
-  if (row.kind === "sequence") {
-    return row.sequence.phase === "queued" || row.sequence.state === "paused"
-      ? "text-state-waiting"
-      : "text-state-active";
   }
   return row.shared.kind === "download" ? "text-state-blocked" : "text-state-active";
 }

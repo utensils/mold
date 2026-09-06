@@ -259,6 +259,33 @@ describe("event routing", () => {
     events.apply({ type: "job_ended", id: "j" });
   });
 
+  /*
+   * Scene-by-scene authoring is retired on this client, but the SERVER still
+   * publishes `chain_job_*` for the jobs the CLI creates (and for a long clip
+   * it had to split and stitch). Those frames must fall through the way any
+   * unknown type does — no throw, no dead handler — or one CLI `mold run
+   * --script` on the same machine would break this app's whole event stream.
+   */
+  it("ignores a chain job's lifecycle frames without erroring", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
+    const events = useEventsStore();
+    await events.subscribe();
+    const options = vi.mocked(sseStream).mock.calls[0]![1]!;
+
+    for (const frame of [
+      { type: "chain_job_queued", id: "c1", model: "ltx2", stage_count: 3 },
+      { type: "chain_job_started", id: "c1", model: "ltx2" },
+      { type: "chain_job_ended", id: "c1", state: "completed" },
+    ]) {
+      expect(() => options.onEvent?.("message", JSON.stringify(frame))).not.toThrow();
+      expect(() => events.apply(frame as never)).not.toThrow();
+    }
+
+    // The stream is still the live one; nothing tore it down.
+    expect(events.live).toBe(true);
+  });
+
   it("mirrors queue pause broadcasts onto the primary host's jobs snapshot", async () => {
     const { useConnectionStore } = await import("./connection");
     const { useJobsStore } = await import("./jobs");

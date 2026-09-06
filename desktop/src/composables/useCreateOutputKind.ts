@@ -1,7 +1,5 @@
 import { computed, type ComputedRef } from "vue";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
-import type { OutputMode } from "@studio/lib/sequence";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { isVideoFamily } from "../lib/capabilities";
 import { useGenerateFormStore } from "../stores/generateForm";
 
@@ -9,18 +7,17 @@ import { useGenerateFormStore } from "../stores/generateForm";
  * The three-way output kind the New image view is in — the one decision
  * behind the toolbar's Still picture | Short clip | 3-D object control, the
  * title bar's "New image" / "New clip" / "New 3-D object", and the print
- * title's placeholder. An authored sequence is always a clip; otherwise the
- * chosen style says which kind this is.
+ * title's placeholder. The chosen style says which kind this is.
  */
 export type OutputKind = "still" | "clip" | "mesh";
 
-export function outputKindFor(output: OutputMode, family: string | null | undefined): OutputKind {
-  // A sequence is a clip whatever style is loaded (a moment mid-swap can hold
-  // a picture style). Everywhere else the STYLE decides, by the same partition
-  // the picker sorts its rows with — a one-shot on a clip style IS a clip, the
-  // Simple sub-mode, and calling that view "Still picture" is the mislabelling
-  // this one authority exists to end.
-  if (output === "sequence") return "clip";
+/**
+ * A clip has ONE way of being made, so the STYLE is the whole decision — by
+ * the same partition the picker sorts its rows with. A render on a clip style
+ * IS a clip, and calling that view "Still picture" is the mislabelling this
+ * one authority exists to end.
+ */
+export function outputKindFor(family: string | null | undefined): OutputKind {
   return outputKindForModel({ family: family ?? "" });
 }
 
@@ -65,12 +62,10 @@ export interface SectionModel {
  * existing helper (`isVideoFamily` → the shared `supportsVideo`), never a
  * second family list.
  *
- * A clip style that cannot author a multi-scene sequence — MiniMax H3
- * advertises `supports_sequence: false` — still belongs to **clip**: what it
- * makes is a clip, and that is where a person looks for it. Sorting it into
- * Still picture is exactly the mislabelling this narrowing exists to end, and
- * dropping it from every section would hide a working style. Its inability to
- * chain is a refusal the picker spells out on the row itself.
+ * EVERY clip style belongs to **clip** and is offered there — MiniMax H3
+ * included. `supports_sequence` is not a client gate any more, so nothing
+ * sorts a working clip style into Still picture (the mislabelling this
+ * narrowing exists to end) or drops it from every section.
  */
 export function outputKindForModel(model: SectionModel): OutputKind {
   if (isMeshFamily(model.family)) return "mesh";
@@ -110,9 +105,8 @@ export const OUTPUT_KIND_BROWSE_TARGET: Readonly<Record<OutputKind, string>> = {
   mesh: "/models?type=mesh",
 };
 
-/** The live output kind, read from the sequence draft and the form store. */
+/** The live output kind, read from the form store. */
 export function useCreateOutputKind(): ComputedRef<OutputKind> {
-  const draft = useSequenceDraftStore();
   const generateForm = useGenerateFormStore();
-  return computed(() => outputKindFor(draft.output, generateForm.form.family));
+  return computed(() => outputKindFor(generateForm.form.family));
 }

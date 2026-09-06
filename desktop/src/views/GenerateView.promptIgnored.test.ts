@@ -110,7 +110,6 @@ function mountView() {
     attachTo: document.body,
     global: {
       stubs: {
-        SequenceComposer: true,
         ComposerCard: false,
         ExpandControl: false,
         EstimateBadge: true,

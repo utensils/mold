@@ -2061,12 +2061,12 @@ export const useGenerationStore = defineStore("generation", {
         aborts.delete(job.clientId);
         return;
       }
-      // A sequence is a durable chain job: created through
-      // `POST /api/chain-jobs` with additive `ephemeral: true` — the machine
-      // stitches it, records the print with stage seeds but no chain job id,
-      // and deletes the job's artifacts — then followed on its OWN event
-      // stream. `chainJobs.watch` is a singleton driving the sequence rail and
-      // must not be taken over by an auto-chained one-shot.
+      // A clip longer than the checkpoint's single-pass size is a durable
+      // chain job: created through `POST /api/chain-jobs` with additive
+      // `ephemeral: true` — the machine stitches it, records the print with
+      // stage seeds but no chain job id, and deletes the job's artifacts —
+      // then followed on its OWN event stream. That is machinery, not a mode:
+      // it stays ONE print row carrying its stage counter.
       job.streamStarted = true;
       const body = { ...buildAutoChainRequest(req, chainRoute), ephemeral: true };
       // Freeze the exact host this job is created on. Submit already snapshots

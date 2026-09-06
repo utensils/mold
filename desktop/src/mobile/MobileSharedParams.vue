@@ -1,13 +1,12 @@
 <script setup lang="ts">
 /*
- * The generation params BOTH outputs read: size, frame rate, steps, guidance,
- * and seed. Extracted so One shot and Sequence render the identical controls
- * over the identical `GenerateForm` — the sequence bench borrows them through
- * its settings disclosure instead of keeping the private copies that used to
- * drift from what the user could see.
+ * The generation params the Create stack reads: size, steps, guidance, and
+ * seed. Extracted so the primary form and the Advanced sheet render the
+ * identical controls over the identical `GenerateForm` instead of keeping
+ * private copies that drift from what the user can see.
  */
 import { computed } from "vue";
-import { fpsValidationError, meshTargetFacesError } from "../lib/generateValidation";
+import { meshTargetFacesError } from "../lib/generateValidation";
 import { buildRequest, type GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
@@ -17,7 +16,6 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { emptyMeshForm } from "@studio/lib/meshControls";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import type { CanvasIntent } from "@studio/lib/outputShape";
 
@@ -29,15 +27,12 @@ const props = withDefaults(
     durationModel?: ModelEntry | null;
     lastSeed: number | null;
     disabled?: boolean;
-    /** Sequence output surfaces frame rate outside the Advanced sheet. */
-    showFps?: boolean;
     stepsError?: string | null;
     guidanceError?: string | null;
     canvasIntent?: CanvasIntent;
   }>(),
   {
     disabled: false,
-    showFps: false,
     stepsError: null,
     guidanceError: null,
     model: null,
@@ -52,7 +47,6 @@ const emit = defineEmits<{
   "canvas-intent": [intent: CanvasIntent];
 }>();
 
-const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
 const supportsVideo = computed(
   () =>
     generationCapabilitiesForFamily(
@@ -67,7 +61,6 @@ const supportsVideo = computed(
 const durationCapabilityModel = computed(() => props.durationModel ?? props.model);
 const canPredictDuration = computed(
   () =>
-    !props.showFps &&
     durationCapabilityModel.value?.supports_duration_prediction === true &&
     durationCapabilityModel.value.runtime_ready !== false,
 );
@@ -89,7 +82,6 @@ const guidanceControl = computed(() => recipe.value?.guidance);
  * pinned, and an older host simply sends no note. */
 const stepsNote = computed(() => controlNote(stepsControl.value));
 const guidanceNote = computed(() => controlNote(guidanceControl.value));
-const fpsControl = computed(() => recipe.value?.temporal?.fps);
 /**
  * The 3-D controls, exactly as the recipe advertises them. The phone carries
  * no octree ladder, threshold range or face budget of its own: an absent
@@ -151,19 +143,14 @@ const targetFacesError = computed(() =>
   meshTargetFacesError(meshForm.value.targetFaces, meshCaps.value),
 );
 
-const draft = useSequenceDraftStore();
-const sourceDimensions = computed(() => {
-  if (props.showFps) {
-    const { width, height } = draft.openingImage ?? {};
-    return width && height ? { width, height } : null;
-  }
-  return props.form.sourceImageWidth && props.form.sourceImageHeight
+const sourceDimensions = computed(() =>
+  props.form.sourceImageWidth && props.form.sourceImageHeight
     ? {
         width: props.form.sourceImageWidth,
         height: props.form.sourceImageHeight,
       }
-    : null;
-});
+    : null,
+);
 </script>
 
 <template>
@@ -192,7 +179,7 @@ const sourceDimensions = computed(() => {
     />
   </div>
   <VideoDurationSlider
-    v-if="supportsVideo && !showFps && !form.predictDuration"
+    v-if="supportsVideo && !form.predictDuration"
     class="mobile-duration-field"
     :frames="form.frames"
     :fps="form.fps"
@@ -208,33 +195,11 @@ const sourceDimensions = computed(() => {
     @update:frames="form.frames = $event"
   />
   <p
-    v-else-if="supportsVideo && !showFps && form.predictDuration"
+    v-else-if="supportsVideo && form.predictDuration"
     class="field-hint"
     data-test="mobile-predicted-duration-hint"
   >
     The host will choose 1–20 seconds from the prompt.
-  </p>
-  <label v-if="showFps" class="field" data-test="mobile-sequence-fps">
-    <span>FPS</span>
-    <input
-      v-model.number="form.fps"
-      class="control"
-      type="number"
-      inputmode="numeric"
-      :min="fpsControl?.mode === 'adjustable' ? fpsControl.min : 1"
-      :max="fpsControl?.mode === 'adjustable' ? fpsControl.max : 60"
-      :step="fpsControl?.mode === 'adjustable' ? fpsControl.step : 1"
-      :disabled="fpsControl?.mode === 'fixed'"
-      :aria-invalid="fpsError ? 'true' : undefined"
-    />
-  </label>
-  <p
-    v-if="fpsError"
-    class="mobile-generate-validation"
-    role="alert"
-    data-test="mobile-sequence-fps-error"
-  >
-    {{ fpsError }}
   </p>
   <div class="field-grid">
     <label class="field" :class="{ 'field--with-note': stepsNote }">

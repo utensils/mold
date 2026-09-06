@@ -4,13 +4,7 @@ export type CatalogLayout = "grid" | "table";
 
 /** The intents New image owns. Every raiser routes to `/create`. */
 export type CreateIntent =
-  | "newGeneration"
-  | "generate"
-  | "makeVariations"
-  | "expand"
-  | "randomizeSeed"
-  | "clipScenes"
-  | "shortClip";
+  "newGeneration" | "generate" | "makeVariations" | "expand" | "randomizeSeed" | "shortClip";
 
 const INTENT_TICK = {
   newGeneration: "newGenerationTick",
@@ -18,7 +12,6 @@ const INTENT_TICK = {
   makeVariations: "makeVariationsTick",
   expand: "expandTick",
   randomizeSeed: "randomizeSeedTick",
-  clipScenes: "clipScenesTick",
   shortClip: "shortClipTick",
 } as const satisfies Record<CreateIntent, string>;
 
@@ -44,7 +37,6 @@ export const useUiStore = defineStore("ui", {
     makeVariationsTick: 0,
     expandTick: 0,
     randomizeSeedTick: 0,
-    clipScenesTick: 0,
     shortClipTick: 0,
     copySeedTick: 0,
     consumedTicks: {
@@ -53,10 +45,17 @@ export const useUiStore = defineStore("ui", {
       makeVariations: 0,
       expand: 0,
       randomizeSeed: 0,
-      clipScenes: 0,
       shortClip: 0,
     } as Record<CreateIntent, number>,
     catalogLayout: "table" as CatalogLayout,
+    /**
+     * The picture style parked while a clip or 3-D style holds the Create
+     * form, so the Still picture door restores what was on screen rather than
+     * the first row on the machine. Leaving New image unmounts the toolbar,
+     * so a component-local ref took the parked style with it; this used to
+     * live on the retired sequence draft store for the same reason.
+     */
+    parkedStillModel: null as string | null,
   }),
   actions: {
     togglePalette() {
@@ -89,10 +88,6 @@ export const useUiStore = defineStore("ui", {
     },
     randomizeSeed() {
       this.randomizeSeedTick++;
-    },
-    /** Take the clip apart into scenes — the palette's door to the timeline. */
-    clipScenes() {
-      this.clipScenesTick++;
     },
     /** Open the Short clip door — the palette's Make a short clip and File ▸
      *  New Clip — onto its remembered way, exactly as the toolbar's segment. */

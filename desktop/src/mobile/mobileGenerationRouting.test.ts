@@ -119,21 +119,19 @@ function options(candidates: ReturnType<typeof candidate>[]) {
     request: { model: "test-model" },
     chain: false,
     copies: 1,
-    subject: "print" as const,
     requireAuthoritative: false,
     settleMs: 0,
   };
 }
 
-/** The placement comparator is a SEQUENCE concern now: a print is answered
- * from each machine's captured queue/GPU snapshot without a probe. */
-function sequenceOptions(candidates: ReturnType<typeof candidate>[]) {
+/** The placement comparator is an AUTO-CHAIN concern now: an ordinary print is
+ * answered from each machine's captured queue/GPU snapshot without a probe. */
+function autoChainOptions(candidates: ReturnType<typeof candidate>[]) {
   return {
     ...options(candidates),
     routeForHost: canonicalRouteForHost,
     request: { model: "ltx-2", stages: [] },
     chain: true,
-    subject: "sequence" as const,
   };
 }
 
@@ -155,7 +153,7 @@ describe("mobile automatic generation routing", () => {
     );
 
     const result = await routeAutomaticMobileGeneration(
-      sequenceOptions([candidate(studio), candidate(render)]),
+      autoChainOptions([candidate(studio), candidate(render)]),
     );
 
     expect(result).toMatchObject({
@@ -177,7 +175,7 @@ describe("mobile automatic generation routing", () => {
     );
 
     const result = await routeAutomaticMobileGeneration({
-      ...sequenceOptions([
+      ...autoChainOptions([
         candidate(studio, { backend: "metal", vramTotalMb: 128_000 }),
         candidate(render, { backend: "cuda", vramTotalMb: 24_000 }),
       ]),
@@ -253,7 +251,7 @@ describe("mobile automatic generation routing", () => {
     const studio = host("studio");
     previewChainPlacement.mockResolvedValue(nonAuthoritative());
 
-    const result = await routeAutomaticMobileGeneration(sequenceOptions([candidate(studio)]));
+    const result = await routeAutomaticMobileGeneration(autoChainOptions([candidate(studio)]));
 
     expect(result).toMatchObject({
       kind: "route",
@@ -267,7 +265,7 @@ describe("mobile automatic generation routing", () => {
     previewChainPlacement.mockResolvedValue(nonAuthoritative());
 
     const result = await routeAutomaticMobileGeneration({
-      ...sequenceOptions([candidate(studio)]),
+      ...autoChainOptions([candidate(studio)]),
       request: { model: "ltx-2", stages: [], id_image: "face-bytes" },
     });
 
@@ -278,7 +276,7 @@ describe("mobile automatic generation routing", () => {
     const studio = host("studio");
     previewChainPlacement.mockRejectedValue(new ApiError("not found", 404));
 
-    const result = await routeAutomaticMobileGeneration(sequenceOptions([candidate(studio)]));
+    const result = await routeAutomaticMobileGeneration(autoChainOptions([candidate(studio)]));
 
     expect(result.kind).toBe("error");
   });
@@ -316,7 +314,7 @@ describe("mobile automatic generation routing", () => {
     );
 
     const routing = routeAutomaticMobileGeneration({
-      ...sequenceOptions([candidate(studio), candidate(render)]),
+      ...autoChainOptions([candidate(studio), candidate(render)]),
       settleMs: 25,
     });
     await vi.advanceTimersByTimeAsync(25);
@@ -338,12 +336,11 @@ describe("mobile pinned generation placement", () => {
       request: { model: "test-model" },
       chain: false,
       copies: 1,
-      subject: "print" as const,
       requireAuthoritative: false,
     };
   }
 
-  it("accepts a planned placement on the frozen route for a sequence", async () => {
+  it("accepts a planned placement on the frozen route for an auto-chained video", async () => {
     previewChainPlacement.mockResolvedValue(planned(100));
 
     await expect(
@@ -352,7 +349,6 @@ describe("mobile pinned generation placement", () => {
         route: canonicalRouteForHost(host("studio")),
         request: { model: "ltx-2", stages: [] },
         chain: true,
-        subject: "sequence" as const,
       }),
     ).resolves.toMatchObject({
       kind: "placement",
@@ -360,7 +356,7 @@ describe("mobile pinned generation placement", () => {
     });
   });
 
-  it("reports a sequence probe that could not answer instead of routing anyway", async () => {
+  it("reports an auto-chain probe that could not answer instead of routing anyway", async () => {
     previewChainPlacement.mockRejectedValue(new ApiError("missing", 404));
 
     const result = await previewPinnedMobileGeneration({
@@ -368,7 +364,6 @@ describe("mobile pinned generation placement", () => {
       route: canonicalRouteForHost(host("studio")),
       request: { model: "ltx-2", stages: [] },
       chain: true,
-      subject: "sequence" as const,
     });
 
     expect(result.kind).toBe("error");
@@ -408,7 +403,7 @@ describe("mobile pinned generation placement", () => {
     expect(previewGenerationPlacement).not.toHaveBeenCalled();
   });
 
-  it("keeps pinned sequences on the placement contract", async () => {
+  it("keeps pinned auto-chained videos on the placement contract", async () => {
     previewChainPlacement.mockResolvedValue(planned(100));
     await expect(
       previewPinnedMobileGeneration({
@@ -421,7 +416,7 @@ describe("mobile pinned generation placement", () => {
     expect(previewChainPlacement).toHaveBeenCalledOnce();
   });
 
-  it("refuses a non-authoritative sequence plan when authority is required", async () => {
+  it("refuses a non-authoritative auto-chain plan when authority is required", async () => {
     previewChainPlacement.mockResolvedValue(nonAuthoritative());
 
     const result = await previewPinnedMobileGeneration({
@@ -429,7 +424,6 @@ describe("mobile pinned generation placement", () => {
       route: canonicalRouteForHost(host("studio")),
       request: { model: "ltx-2", stages: [], id_image: "face" },
       chain: true,
-      subject: "sequence" as const,
       requireAuthoritative: true,
     });
 

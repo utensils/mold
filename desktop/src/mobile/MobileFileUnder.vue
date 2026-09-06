@@ -32,7 +32,7 @@ import {
 } from "@studio/lib/fileUnder";
 import { collectionSlug } from "@studio/lib/libraryOrganization";
 import type { TagCount } from "../lib/api/types";
-import { previewPrintFilename, previewSequenceFilename } from "../lib/gallery/printFilename";
+import { previewPrintFilename } from "../lib/gallery/printFilename";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
 
 const props = defineProps<{
@@ -52,9 +52,6 @@ const props = defineProps<{
   extension: string;
   /** Batch size, so a multi-print batch previews its `-{index}` segment. */
   batchSize?: number;
-  /** A sequence's stitched print lands under the chain grammar, not the
-   * one-shot one — the preview has to say so. */
-  outputKind?: "print" | "sequence";
 }>();
 
 const emit = defineEmits<{ "update:state": [state: FileUnderState] }>();
@@ -202,16 +199,14 @@ function closeSheet(): void {
 // the print lands, so one wall clock read at mount is honest enough.
 const previewStamp = Date.now();
 const filenamePreview = computed(() =>
-  props.outputKind === "sequence"
-    ? previewSequenceFilename(props.title)
-    : previewPrintFilename({
-        model: props.model,
-        timestamp: previewStamp,
-        ext: props.extension,
-        title: props.title,
-        batchSize: props.batchSize ?? 1,
-        index: 0,
-      }),
+  previewPrintFilename({
+    model: props.model,
+    timestamp: previewStamp,
+    ext: props.extension,
+    title: props.title,
+    batchSize: props.batchSize ?? 1,
+    index: 0,
+  }),
 );
 const previewSlug = computed(() => {
   const marker = filenamePreview.value.lastIndexOf("~");

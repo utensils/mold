@@ -1,13 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewPrintFilename, previewSequenceFilename } from "./printFilename";
-
-describe("previewSequenceFilename", () => {
-  it("uses the chain grammar and elides the job digest", () => {
-    expect(previewSequenceFilename("Smurfs")).toBe("mold-chain-…-take-0~smurfs.mp4");
-    expect(previewSequenceFilename(null)).toBe("mold-chain-…-take-0.mp4");
-    expect(previewSequenceFilename("日本語")).toBe("mold-chain-…-take-0.mp4");
-  });
-});
+import { previewPrintFilename } from "./printFilename";
 
 describe("previewPrintFilename", () => {
   it("mirrors the server's untitled grammar", () => {

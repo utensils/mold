@@ -2,7 +2,7 @@
 /*
  * Library bottom sheet — the iPhone home for the Library's editors (tag
  * editor, collection checklist, new/rename collection, the "More tags" list,
- * and the viewer's print info). Follows MobileSeamSheet / MobileAdvancedSheet
+ * and the viewer's print info). Follows MobileAdvancedSheet
  * rather than @ui/SheetPanel: a fixed overlay whose body owns its scroll and
  * every safe-area inset, with the head row rendered in the body so it can
  * never vanish the way SheetPanel's `full` variant drops its #header slot.

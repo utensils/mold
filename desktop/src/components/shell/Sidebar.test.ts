@@ -9,7 +9,6 @@ import { useHostsStore } from "../../stores/hosts";
 import { useHostStatusStore } from "../../stores/hostStatus";
 import { useGalleryStore } from "../../stores/gallery";
 import { useGenerationStore } from "../../stores/generation";
-import { useChainJobsStore } from "../../stores/chainJobs";
 import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useComposerStore } from "../../stores/composer";
 import { isSeparator, useContextMenuStore } from "../../stores/contextMenu";
@@ -691,59 +690,14 @@ describe("Sidebar queue", () => {
     expect(thumbnail.attributes("alt")).toBe("a finished clip");
   });
 
-  // G14 hole: the rail only ever read `generation.jobs`, so a running sequence
-  // rendered on the canvas while the sidebar showed nothing.
-  it("shows a running sequence with its scene counter", async () => {
+  // A clip has ONE way of being made, so the rail has one kind of row for
+  // this client's own work: a print. A long clip the host had to chain and
+  // stitch is still exactly that print, carrying its stage counter.
+  it("renders no sequence row of its own", async () => {
     const wrapper = await mountAt("/create");
-    const chains = useChainJobsStore();
-    chains.byHost["hal9000-7680"] = {
-      jobs: [
-        {
-          id: "job-1",
-          state: "running",
-          model: "ltx-2.3-22b-distilled:fp8",
-          stage_count: 5,
-          current_stage: 2,
-          created_at_unix_ms: Date.now(),
-          updated_at_unix_ms: Date.now(),
-          error: null,
-        },
-      ],
-      error: null,
-    };
     await flushPromises();
 
-    const rail = wrapper.get("[data-test='queue-rail']");
-    expect(rail.text()).toContain("Making scene 3 of 5");
-    expect(rail.text()).toContain("5-scene clip");
-    expect(wrapper.get("[data-test='queue-count']").text()).toBe("1");
-  });
-
-  // Settled sequences have two homes already (the print in My images, the job
-  // in History) — rebuilding the pile one route away is the thing we removed.
-  it("keeps settled sequences out of the queue", async () => {
-    const wrapper = await mountAt("/create");
-    const chains = useChainJobsStore();
-    chains.byHost.local = {
-      jobs: [
-        {
-          id: "job-done",
-          state: "completed",
-          model: "ltx-video",
-          stage_count: 3,
-          current_stage: 2,
-          created_at_unix_ms: Date.now(),
-          updated_at_unix_ms: Date.now(),
-          error: null,
-        },
-      ],
-      error: null,
-    };
-    await flushPromises();
-
-    expect(wrapper.find("[data-test='queue-active']").exists()).toBe(false);
     expect(wrapper.find("[data-test='queue-row-sequence']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='queue-count']").exists()).toBe(false);
   });
 });
 

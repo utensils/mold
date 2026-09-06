@@ -50,10 +50,8 @@ import { useHostsStore } from "../../stores/hosts";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore } from "../../stores/contextMenu";
 import { useGenerateFormStore } from "../../stores/generateForm";
-import { useChainJobsStore } from "../../stores/chainJobs";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { GalleryImage } from "../../lib/api/types";
-import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
 import { HISTORY_JOBS_RENDER_CAP } from "@studio/lib/activity";
 
 const stub = { template: "<div />" };
@@ -120,19 +118,6 @@ async function mountDrawer({ extra = false, at = "/library" } = {}) {
       loaded: true,
     };
   }
-  // Durable sequence actions are network calls; the drawer's own wiring is
-  // what these tests exercise, so every store action is a spy from mount.
-  const chains = useChainJobsStore();
-  vi.spyOn(chains, "fetchAll").mockResolvedValue(undefined);
-  vi.spyOn(chains, "resume").mockResolvedValue(undefined);
-  vi.spyOn(chains, "remove").mockResolvedValue(undefined);
-  vi.spyOn(chains, "watch").mockReturnValue(undefined);
-  vi.spyOn(chains, "clearInactive").mockResolvedValue({ cleared: 2, failed: 0 });
-  vi.spyOn(chains, "gc").mockResolvedValue({
-    swept_ephemeral_jobs: 0,
-    pruned_artifact_dirs: 0,
-  });
-
   const wrapper = mount(HistoryDrawer, {
     props: { open: true },
     attachTo: document.body,
@@ -456,201 +441,30 @@ describe("HistoryDrawer multi-host", () => {
   });
 });
 
-// ── Sequences: the one place durable sequence jobs are enumerated ──────────
+// ── Two lenses, and no third ───────────────────────────────────────────────
+// Scene-by-scene authoring is retired, so the drawer holds Runs and Prompts
+// and nothing else. A bookmarked `?tab=sequences` from the retired log must
+// land on Runs rather than render an empty column.
 
-function chainJob(overrides: Partial<ChainJobSummary> = {}): ChainJobSummary {
-  return {
-    id: "job-1",
-    state: "completed",
-    model: "ltx-2.3-22b-distilled:fp8",
-    stage_count: 5,
-    current_stage: 4,
-    created_at_unix_ms: 1_700_000_000_000,
-    updated_at_unix_ms: 1_700_000_060_000,
-    error: null,
-    ...overrides,
-  };
-}
-
-describe("HistoryDrawer sequences", () => {
-  it("lists jobs from every host with active work first", async () => {
-    const wrapper = await mountDrawer({ extra: true });
-    const chains = useChainJobsStore();
-    chains.byHost.local = { jobs: [chainJob()], error: null };
-    chains.byHost["okra-7680"] = {
-      jobs: [chainJob({ id: "job-live", state: "running", created_at_unix_ms: 1_600_000_000_000 })],
-      error: null,
-    };
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-
-    const rows = wrapper.findAll("[data-test='sequence-job-row']");
-    expect(rows).toHaveLength(2);
-    // Older, but running — the shared merge floats it.
-    expect(rows[0]!.text()).toContain("running");
-    expect(rows[0]!.text()).toContain("okra");
-    expect(rows[1]!.text()).toContain("completed");
-    expect(rows[1]!.text()).toContain("5 clips");
-  });
-
-  it("loads a selected sequence into Create without granting edit authority", async () => {
+describe("HistoryDrawer tabs", () => {
+  it("offers exactly two tabs", async () => {
     const wrapper = await mountDrawer();
-    const chains = useChainJobsStore();
-    chains.byHost.local = { jobs: [chainJob()], error: null };
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-
-    await wrapper.get("[data-test='sequence-job-row']").trigger("click");
-    await flushPromises();
-    expect(useComposerStore().pendingSequence).toEqual({
-      kind: "inspect",
-      hostId: "local",
-      jobId: "job-1",
-    });
-    expect(router.currentRoute.value.path).toBe("/create");
+    const tabs = wrapper.findAll("[data-test^='tab-']");
+    expect(tabs.map((t) => t.text())).toEqual(["Runs", "Prompts"]);
+    expect(wrapper.find("[data-test='tab-sequences']").exists()).toBe(false);
   });
 
-  it("opens on the tab named in the URL and writes the tab back on switch", async () => {
+  it("normalizes a retired sequence tab to Runs", async () => {
     const wrapper = await mountDrawer({ at: "/library?panel=history&tab=sequences" });
-    expect(wrapper.get("[data-test='tab-sequences']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-test='tab-runs']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.findAll('[data-test="run-row"]').length).toBeGreaterThan(0);
+  });
+
+  it("writes the tab back on switch", async () => {
+    const wrapper = await mountDrawer({ at: "/library?panel=history&tab=prompts" });
+    expect(wrapper.get("[data-test='tab-prompts']").attributes("aria-pressed")).toBe("true");
     await wrapper.get("[data-test='tab-runs']").trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.query.tab).toBe("runs");
-  });
-
-  it("fetches the durable listing once when the drawer opens", async () => {
-    const wrapper = await mountDrawer({ at: "/library?panel=history&tab=sequences" });
-    const chains = useChainJobsStore();
-    // Chain polling stops when nothing is active, so a settled list goes
-    // stale unless the drawer refetches on open.
-    expect(chains.fetchAll).toHaveBeenCalledTimes(1);
-    await wrapper.get("[data-test='tab-runs']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-    expect(chains.fetchAll).toHaveBeenCalledTimes(2);
-  });
-
-  it("routes row actions to the owning host", async () => {
-    const wrapper = await mountDrawer({ extra: true });
-    const chains = useChainJobsStore();
-    chains.byHost["okra-7680"] = {
-      jobs: [chainJob({ state: "failed", error: "boom" })],
-      error: null,
-    };
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='seq-resume']").trigger("click");
-    expect(chains.resume).toHaveBeenCalledWith("okra-7680", "job-1");
-    // Delete drops cached clips on that host — never a one-click verb.
-    await wrapper.get("[data-test='seq-delete']").trigger("click");
-    expect(chains.remove).not.toHaveBeenCalled();
-    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
-    expect(chains.remove).toHaveBeenCalledWith("okra-7680", "job-1");
-  });
-
-  it("shows the print only when that host's gallery carries the job id", async () => {
-    const wrapper = await mountDrawer();
-    const gallery = useGalleryStore();
-    const chains = useChainJobsStore();
-    chains.byHost.local = { jobs: [chainJob(), chainJob({ id: "job-2" })], error: null };
-    gallery.buckets["local"]!.items.push({
-      filename: "sequence.mp4",
-      timestamp: 1_700_000_060,
-      metadata: {
-        prompt: "five clips",
-        model: "ltx-2.3-22b-distilled:fp8",
-        seed: 7,
-        steps: 8,
-        guidance: 1,
-        width: 1536,
-        height: 640,
-        chain_job_id: "job-1",
-      },
-    });
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-
-    const rows = wrapper.findAll("[data-test='sequence-row']");
-    expect(rows).toHaveLength(2);
-    const withPrint = rows.filter((r) => r.find("[data-test='seq-show-print']").exists());
-    expect(withPrint).toHaveLength(1);
-
-    await withPrint[0]!.get("[data-test='seq-show-print']").trigger("click");
-    await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/library");
-    expect(router.currentRoute.value.query.print).toBe("sequence.mp4");
-  });
-
-  it("scopes Clear inactive to the chip-selected host behind a two-press confirm", async () => {
-    const wrapper = await mountDrawer({ extra: true });
-    const gallery = useGalleryStore();
-    const chains = useChainJobsStore();
-    chains.byHost["okra-7680"] = {
-      jobs: [chainJob(), chainJob({ id: "job-2" })],
-      error: null,
-    };
-    gallery.filter = "okra-7680";
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-
-    await wrapper.get("[data-test='seq-clear-inactive']").trigger("click");
-    expect(chains.clearInactive).not.toHaveBeenCalled();
-    expect(wrapper.get("[data-test='seq-clear-inactive']").text()).toBe(
-      "Delete 2 inactive clips on okra?",
-    );
-    await wrapper.get("[data-test='seq-clear-inactive']").trigger("click");
-    await flushPromises();
-    expect(chains.clearInactive).toHaveBeenCalledWith("okra-7680");
-  });
-
-  it("warns before discarding scene playback and edit caches", async () => {
-    const wrapper = await mountDrawer({ extra: true });
-    const chains = useChainJobsStore();
-    chains.byHost.local = { jobs: [chainJob()], error: null };
-    chains.byHost["okra-7680"] = {
-      jobs: [chainJob({ id: "job-2" })],
-      error: null,
-    };
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-
-    await wrapper.get("[data-test='seq-cleanup-disk']").trigger("click");
-    expect(chains.gc).not.toHaveBeenCalled();
-    const dialog = document.querySelector("[data-test='confirm-dialog']") as HTMLElement;
-    expect(dialog.textContent).toContain("the cached scenes used for playback and editing");
-    expect(dialog.textContent).toContain("Finished clips in My images stay.");
-
-    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
-    await flushPromises();
-    expect(chains.gc).toHaveBeenCalledTimes(2);
-  });
-
-  it("caps the rendered list and says how much it is holding back", async () => {
-    const wrapper = await mountDrawer();
-    const chains = useChainJobsStore();
-    chains.byHost.local = {
-      jobs: Array.from({ length: 431 }, (_, i) =>
-        chainJob({ id: `job-${i}`, created_at_unix_ms: 1_700_000_000_000 + i }),
-      ),
-      error: null,
-    };
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-    expect(wrapper.findAll("[data-test='sequence-row']")).toHaveLength(200);
-    expect(wrapper.get("[data-test='sequence-cap-note']").text()).toBe("showing 200 of 431");
-  });
-
-  it("offers exactly one action when there are no sequences", async () => {
-    const wrapper = await mountDrawer();
-    await wrapper.get("[data-test='tab-sequences']").trigger("click");
-    await flushPromises();
-    const empty = wrapper.get("[data-test='sequences-empty']");
-    expect(empty.text()).toContain("No clips yet");
-    const buttons = empty.findAll("button");
-    expect(buttons).toHaveLength(1);
-    await buttons[0]!.trigger("click");
-    await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/create");
   });
 });

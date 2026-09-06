@@ -9,7 +9,6 @@ import {
   useQueueCommands,
   type QueueCommands,
 } from "../composables/useQueueCommands";
-import { useChainJobsStore } from "../stores/chainJobs";
 import { useConnectionStore } from "../stores/connection";
 import { isSeparator, useContextMenuStore } from "../stores/contextMenu";
 import { useGalleryStore } from "../stores/gallery";
@@ -136,31 +135,19 @@ describe("QueueView", () => {
     expect(retry).toHaveBeenCalledWith(2);
   });
 
-  it("stops a running clip from its row and from Stop everything", async () => {
+  // A long clip the host chains and stitches is ONE print row, never a row
+  // of its own — so Stop everything reaches it exactly as it reaches a still.
+  it("stops a running clip from Stop everything, as one print row", async () => {
     const wrapper = await mountView();
-    const chains = useChainJobsStore();
-    chains.byHost.local = {
-      jobs: [
-        {
-          id: "job-1",
-          state: "running",
-          model: "ltx-video",
-          stage_count: 3,
-          current_stage: 1,
-          created_at_unix_ms: Date.now(),
-          updated_at_unix_ms: Date.now(),
-          error: null,
-        },
-      ],
-      error: null,
-    };
-    const cancel = vi.spyOn(chains, "cancel").mockResolvedValue(undefined as never);
+    const generation = useGenerationStore();
+    generation.jobs = [
+      { clientId: 1, id: "job-1", model: "ltx-video", prompt: "a long clip", status: "denoising" },
+    ] as never;
+    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     await flushPromises();
 
-    const row = wrapper.get("[data-test='queue-row-sequence']");
-    expect(row.text()).toContain("Making scene 2 of 3");
-    await row.get("[data-test='queue-row-menu']").trigger("click");
-    expect(menuLabels()).toEqual(["Open", "Stop"]);
+    expect(wrapper.find("[data-test='queue-row-sequence']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='queue-row-print']").text()).toContain("a long clip");
 
     // Stop everything is the widest destructive action in the app: it asks
     // first, from every door, and the one dialog lives in the shell.
@@ -173,29 +160,17 @@ describe("QueueView", () => {
 
     await commands.confirmStopEverything();
     await flushPromises();
-    expect(cancel).toHaveBeenCalledWith("local", "job-1");
+    expect(cancel).toHaveBeenCalledWith(1);
     expect(commands.stopEverythingOpen.value).toBe(false);
   });
 
   it("closes the Stop everything confirm without stopping anything", async () => {
     const wrapper = await mountView();
-    const chains = useChainJobsStore();
-    chains.byHost.local = {
-      jobs: [
-        {
-          id: "job-1",
-          state: "running",
-          model: "ltx-video",
-          stage_count: 3,
-          current_stage: 1,
-          created_at_unix_ms: Date.now(),
-          updated_at_unix_ms: Date.now(),
-          error: null,
-        },
-      ],
-      error: null,
-    };
-    const cancel = vi.spyOn(chains, "cancel").mockResolvedValue(undefined as never);
+    const generation = useGenerationStore();
+    generation.jobs = [
+      { clientId: 1, id: "job-1", model: "ltx-video", prompt: "a long clip", status: "denoising" },
+    ] as never;
+    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     await flushPromises();
 
     await wrapper.get("[data-test='queue-stop-all']").trigger("click");

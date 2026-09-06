@@ -38,10 +38,9 @@ export const MOBILE_IDENTITY_FALLBACK_FILENAME = "identity photo";
  * checkpoint that lost the capability PARKS the staged photo — the well
  * disappears, `buildRequest` keeps the partition off the wire, and Develop
  * stays enabled. Selecting a qualified model again brings both back.
- * Sequence clips have no identity slot on any surface.
  */
-export function showMobileIdentityWell(form: GenerateForm, isSequence: boolean): boolean {
-  return !isSequence && form.identitySupported === true;
+export function showMobileIdentityWell(form: GenerateForm): boolean {
+  return form.identitySupported === true;
 }
 
 /**

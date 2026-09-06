@@ -1313,34 +1313,6 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
 }
 
 /**
- * Title and creation-time filing for a SEQUENCE, which carries them on the
- * `POST /api/chain-jobs` body rather than a `GenerateRequest`.
- *
- * They apply to the stitched print only — an intermediate clip is a working
- * artifact inside the job dir and never reaches the gallery — so this is one
- * timeline's filing, not one per clip. Same validation and same absent-when-
- * empty shape as `buildRequest`, because it is the same wire contract.
- */
-export function chainFilingFields(form: GenerateForm): {
-  title?: string;
-  tags?: string[];
-  collection?: { name: string };
-} {
-  const fields: { title?: string; tags?: string[]; collection?: { name: string } } = {};
-  const title = validatePrintTitle(form.title ?? "");
-  if (title.ok && title.value) fields.title = title.value;
-  return Object.assign(
-    fields,
-    buildFileUnderRequestFields(
-      form.fileUnder,
-      form.title,
-      form.fileUnderAutoTag,
-      form.fileUnderMatch ? [form.fileUnderMatch] : [],
-    ),
-  );
-}
-
-/**
  * Rebuild the "File under" draft from a print's recorded filing (Reuse
  * settings, or restoring an exact queued request).
  *
@@ -1410,6 +1382,24 @@ function loraNameFromPath(path: string): string {
 }
 
 /**
+ * The words to restore from a print's metadata.
+ *
+ * A print stitched from several clips — an authored sequence made before
+ * scene-by-scene authoring was retired, or a long clip the host had to chain
+ * and stitch — records `metadata.prompt` as EVERY clip newline-joined. That
+ * blob is a record of what ran, never a prompt to hand back: pasted into the
+ * composer it reads as one absurd run-on and renders nothing like the print.
+ * The first clip's own words are the honest degradation, and for an
+ * auto-chained one-shot every clip carries the same prompt anyway, so this is
+ * exactly what the person typed.
+ */
+function restoredPrompt(metadata: OutputMetadata): string {
+  const firstClip = metadata.chain?.stages?.[0]?.prompt?.trim();
+  if (firstClip) return firstClip;
+  return metadata.prompt ?? "";
+}
+
+/**
  * Full-fidelity "Reuse settings": restore every serialized generation knob a
  * gallery item's embedded metadata carries (port of the web SPA's
  * `applyMetadataToForm`). Static-seed semantics recreate the print exact-ish;
@@ -1434,7 +1424,7 @@ export function applyMetadataToForm(
     form.recipeCapabilities = null;
   }
 
-  form.prompt = metadata.prompt ?? "";
+  form.prompt = restoredPrompt(metadata);
   form.originalPrompt = metadata.original_prompt ?? null;
   form.title = metadata.title ?? "";
   form.fileUnder = restoredFileUnderState(

@@ -1,12 +1,10 @@
 import { computed, type ComputedRef } from "vue";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
-import { modelSupportsSequence } from "@studio/lib/sequence";
 import {
   isModelRuntimeUnavailable,
   modelRuntimeNotice,
   RUNTIME_UNAVAILABLE_BADGE,
 } from "@studio/lib/modelRuntimeAvailability";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
 import { mergeInstalledModels } from "../lib/generateModels";
@@ -60,7 +58,6 @@ export interface StylePicker {
 }
 
 export function useStylePicker(form: () => GenerateForm): StylePicker {
-  const draft = useSequenceDraftStore();
   const models = useModelStore();
   const hostModels = useHostModelsStore();
   const hosts = useHostsStore();
@@ -164,7 +161,7 @@ export function useStylePicker(form: () => GenerateForm): StylePicker {
   /** The section the view is in — the toolbar's Still picture | Short clip |
    * 3-D object control, read from the one authority both it and the title bar
    * read. */
-  const outputKind = computed<OutputKind>(() => outputKindFor(draft.output, form().family));
+  const outputKind = computed<OutputKind>(() => outputKindFor(form().family));
 
   /**
    * The rows the menu offers: this section's styles, so nothing is listed that
@@ -185,13 +182,9 @@ export function useStylePicker(form: () => GenerateForm): StylePicker {
         modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
       return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;
     }
-    // A clip style that cannot join scenes is still a clip style, so it stays
-    // in the Short clip section rather than vanishing from every one. What it
-    // cannot do is author the sequence this draft IS, and saying so on the row
-    // beats hiding the style or letting the timeline refuse after the fact.
-    if (draft.output === "sequence" && !modelSupportsSequence(model)) {
-      return "Makes one clip at a time — it cannot join scenes.";
-    }
+    // `supports_sequence` is deliberately NOT consulted: a clip has one way
+    // of being made, so every clip style is pickable in the Short clip
+    // section. Only a style no selected machine can RUN refuses here.
     if (installedModels.value.some((candidate) => candidate.name === model.name)) return null;
     const reason = modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
     return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;

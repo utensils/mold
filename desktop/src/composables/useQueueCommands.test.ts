@@ -151,9 +151,6 @@ describe("useQueueCommands — pausing the row's own machine", () => {
     twoHosts();
     const api = commands();
     expect(api.hostIdFor({ kind: "print", print: { hostId: "plato" } } as never)).toBe("plato");
-    expect(api.hostIdFor({ kind: "sequence", sequence: { hostId: "plato" } } as never)).toBe(
-      "plato",
-    );
     expect(api.hostIdFor({ kind: "shared", shared: { hostId: "plato" } } as never)).toBe("plato");
   });
 

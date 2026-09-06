@@ -104,7 +104,7 @@ const inventoryKnown = useInventoryKnown();
 const GROUPS: readonly (readonly [prefix: string, group: string])[] = [
   ["nav-runpod", "machines"],
   ["nav-create", "make"],
-  ["nav-sequence", "make"],
+  ["nav-clip", "make"],
   ["nav-", "go"],
   ["act-add-host", "machines"],
   ["act-engine-restart", "machines"],
@@ -290,12 +290,12 @@ const staticCommands = computed<Command[]>(() => {
       run: () => go("/machines"),
     },
     {
-      id: "nav-sequence",
+      id: "nav-clip",
       title: "Make a short clip",
-      keywords: ["sequence", "clips", "video", "scenes"],
-      // The Short clip door, not a `?output=sequence` deep link: that landed
-      // in Scenes when the door opens onto Simple, and did nothing at all
-      // from inside New image, where the query is consumed only on mount.
+      keywords: ["clip", "clips", "video", "movie"],
+      // The Short clip door, raised as an intent rather than a deep link: a
+      // query is consumed only on mount, so from inside New image a link did
+      // nothing at all.
       run: () => {
         ui.shortClip();
         go("/create");
@@ -336,15 +336,6 @@ const staticCommands = computed<Command[]>(() => {
       key: shortcutLabel("↩"),
       run: () => {
         ui.generate();
-        go("/create");
-      },
-    },
-    {
-      id: "act-clip-scenes",
-      title: "Edit the clip scene by scene",
-      keywords: ["scenes", "clip", "sequence", "story", "shots"],
-      run: () => {
-        ui.clipScenes();
         go("/create");
       },
     },

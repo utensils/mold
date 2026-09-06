@@ -5,18 +5,14 @@ import sidebarSource from "../components/shell/Sidebar.vue?raw";
 import paletteSource from "../components/shell/CommandPalette.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import createHeaderSource from "../components/create/CreateHeader.vue?raw";
-import clipModeStripSource from "../components/create/ClipModeStrip.vue?raw";
 import modelsViewSource from "../views/ModelsView.vue?raw";
 import outputKindDoorSource from "../composables/useOutputKindDoor?raw";
 import appSource from "../App.vue?raw";
-import chainJobsSource from "../stores/chainJobs.ts?raw";
 import expandSource from "../components/generate/ExpandControl.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import loraSource from "../components/generate/LoraStack.vue?raw";
 import generateViewSource from "../views/GenerateView.vue?raw";
 import strengthSource from "@studio/lib/strengthSemantics.ts?raw";
-import sequenceOpeningWellSource from "../components/create/SequenceOpeningImageWell.vue?raw";
-import mobileSequenceOpeningSource from "../mobile/MobileSequenceOpeningImage.vue?raw";
 import sourceImageWellSource from "../components/generate/SourceImageWell.vue?raw";
 import mobileSourceControlsSource from "../mobile/MobileSourceControls.vue?raw";
 import { ENGINE_KEY_SCHEMAS, SECTIONS } from "./settingsSchema";
@@ -140,19 +136,12 @@ describe("lexicon — finished work is saved to My images", () => {
     expect(appSource).toContain('"Generated — saved to My images"');
   });
 
-  it("says so in the clip toast, and calls it a clip", () => {
-    expect(chainJobsSource).toContain('"Clip ready — saved to My images"');
-    expect(chainJobsSource).toContain('"Clip failed"');
-  });
-
-  it("keeps Library and Sequence out of both files' user text", () => {
-    for (const source of [appSource, chainJobsSource]) {
-      for (const old of ["Library", "Sequence"]) {
-        expect(
-          quoted(source).some((s) => s.includes(old)),
-          old,
-        ).toBe(false);
-      }
+  it("keeps Library and Sequence out of the shell's user text", () => {
+    for (const old of ["Library", "Sequence"]) {
+      expect(
+        quoted(appSource).some((s) => s.includes(old)),
+        old,
+      ).toBe(false);
     }
   });
 });
@@ -262,17 +251,11 @@ describe("lexicon — the composer", () => {
 });
 
 /*
- * The clip's two ways of working are Simple and Scenes — plain words for what
- * a person is choosing, never the tool's own vocabulary. "Editor", "timeline",
- * and "mode" are exactly the jargon this lexicon exists to keep out.
+ * A clip has ONE way of being made, so the only words left here are the three
+ * kinds themselves. "Editor", "timeline", and "mode" are exactly the jargon
+ * this lexicon exists to keep out.
  */
 describe("lexicon — how the clip gets made", () => {
-  it("names the two ways Simple and Scenes, on a control that says what it picks", () => {
-    expect(clipModeStripSource).toContain('label: "Simple"');
-    expect(clipModeStripSource).toContain('label: "Scenes"');
-    expect(clipModeStripSource).toContain('label="How to make the clip"');
-  });
-
   it("filters Styles by the kinds Create offers, in the same words", () => {
     // Styles said Pictures · Clips against Create's Still picture | Short
     // clip, and had no 3-D kind. Both read `OUTPUT_KIND_LABEL` now.
@@ -287,7 +270,6 @@ describe("lexicon — how the clip gets made", () => {
   it("keeps the tool's own words off every surface", () => {
     const surfaces: [string, string][] = [
       ["CreateHeader", templateText(createHeaderSource)],
-      ["ClipModeStrip", templateText(clipModeStripSource)],
       ["CommandPalette", quoted(paletteSource).join(" ")],
     ];
     for (const [name, text] of surfaces) {
@@ -297,8 +279,12 @@ describe("lexicon — how the clip gets made", () => {
     }
   });
 
-  it("says the palette's door in plain words", () => {
-    expect(paletteSource).toContain('"Edit the clip scene by scene"');
+  it("leaves the palette one clip door, and no scene-by-scene one", () => {
+    expect(paletteSource).toContain('id: "nav-clip"');
+    expect(paletteSource).toContain('"Make a short clip"');
+    for (const retired of ["Edit the clip scene by scene", "nav-sequence", "act-clip-scenes"]) {
+      expect(paletteSource, retired).not.toContain(retired);
+    }
   });
 
   it("invites the words a clip is described with", () => {
@@ -323,13 +309,7 @@ describe("lexicon — how much to change it", () => {
    */
   const wells: [string, string][] = [
     ["SourceImageWell", sourceImageWellSource],
-    ["SequenceOpeningImageWell", sequenceOpeningWellSource],
-    ["MobileSequenceOpeningImage", mobileSequenceOpeningSource],
     ["MobileSourceControls", mobileSourceControlsSource],
-    [
-      "SequenceOpeningImagePanel (web)",
-      readFileSync("../web/src/components/create/SequenceOpeningImagePanel.vue", "utf8"),
-    ],
   ];
 
   it.each(wells.map(([name]) => name))("%s never spells the label itself", (name) => {
@@ -402,8 +382,6 @@ describe("lexicon — view copy and assistive labels", () => {
   const starterCards = read("../components/generate/StarterCards.vue");
   const modelPicker = read("../components/create/ModelPicker.vue");
   const stylePicker = read("../components/create/StylePicker.vue");
-  const sequenceComposer = read("../components/create/SequenceComposer.vue");
-  const sequenceTimeline = read("./sequenceTimeline.ts");
   const librarySource = read("../views/LibraryView.vue");
   const lightbox = read("../components/gallery/Lightbox.vue");
   const history = read("../components/library/HistoryDrawer.vue");
@@ -451,37 +429,27 @@ describe("lexicon — view copy and assistive labels", () => {
     }
   });
 
-  it("hands the shared validator desktop's own words", () => {
-    // The validator is studio's, shared with web and the phone, and said
-    // "Describe clip 1 before generating." under a lane labelled scenes.
-    expect(sequenceComposer).toContain("wording: DESKTOP_SEQUENCE_WORDING");
-  });
-
-  it("refuses a clip in the words of a style, on both sides of the seam", () => {
-    expect(sequenceTimeline).toContain('"Pick a video style first."');
-    expect(sequenceComposer).toContain("This style can't make a clip.");
-    expect(sequenceComposer).not.toContain("Pick a video model first.");
-    expect(sequenceComposer).not.toContain("This model can't render a clip sequence.");
-    expect(generateViewSource).toContain("Browse video styles");
+  it("refuses a clip in the words of a style", () => {
     expect(generateViewSource).toContain('"Choose a style first."');
-    expect(generateViewSource).not.toContain("Browse video models");
     expect(generateViewSource).not.toContain("Choose an installed model before generating.");
   });
 
-  it("names My images and a clip in every menu that acts on a print", () => {
+  it("names My images in every menu that acts on a print", () => {
     expect(librarySource).toContain('"Show in My images" : "Hide from My images"');
-    expect(librarySource).toContain('label: "Edit clip"');
     expect(librarySource).toContain('title="Rename picture"');
-    expect(lightbox).toContain('"Edit clip"');
+    // A clip has one way of being made, so no print re-enters an authoring
+    // surface: every row keeps the ordinary reuse door.
     for (const source of [librarySource, lightbox]) {
-      expect(source).not.toContain("Edit sequence");
+      for (const retired of ["Edit sequence", "Edit clip", "Duplicate as new"]) {
+        expect(source, retired).not.toContain(retired);
+      }
     }
   });
 
-  it("calls the History column's third tab Clips", () => {
+  it("leaves the History column no clips tab", () => {
     const text = templateText(history);
-    expect(text).toContain("Clips");
     expect(text).not.toMatch(/\bSequences\b/);
+    expect(text).not.toMatch(/\bClips\b/);
     expect(history).toContain('label: "Show in My images"');
     expect(history).not.toContain('"Show in library"');
   });

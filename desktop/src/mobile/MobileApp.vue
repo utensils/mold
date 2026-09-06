@@ -1,14 +1,5 @@
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  reactive,
-  ref,
-  shallowRef,
-  watch,
-} from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   cancel as cancelBarcodeScanner,
@@ -28,7 +19,6 @@ import { remixPrompt } from "../lib/api/remix";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
-import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import {
@@ -95,13 +85,6 @@ import {
   removeGalleryMutation,
   updateGalleryMutationFailure,
 } from "@studio/lib/galleryMutationOutbox";
-import {
-  defaultClipFrames,
-  modelSupportsSequence,
-  modelsForOutput,
-  sequenceMotionTailFrames,
-  type OutputMode,
-} from "@studio/lib/sequence";
 import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
@@ -113,11 +96,7 @@ import {
   setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
 import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
-import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import {
-  classifyMissingModel,
-  classifyPlacementPreview,
-  previewChainPlacement,
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
@@ -148,7 +127,6 @@ import {
   activityAnnouncement,
   activityCountLabel,
   mergeActivity,
-  sequenceToVM,
   withLiveQueueStatus,
   type ActivityJobVM,
   type PrintActivityVM,
@@ -202,17 +180,7 @@ import {
   watchSelectedQueuePreview,
   type QueueJobProgress,
 } from "@studio/api/generationSelection";
-import { buildChainRequest } from "@studio/lib/sequenceForm";
-import { chainScriptToClips } from "@studio/lib/sequenceForm";
-import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
-import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceReuse";
-import {
-  firstLastFrameRestoreNotice,
-  parseSourceImageCapability,
-} from "@studio/lib/sourceImageCapability";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
-import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
@@ -225,9 +193,7 @@ import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/
 import { conditioningForRequest, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
-  ChainCreateRequest,
   CompleteEvent,
-  CreateChainJobResponse,
   DownloadJob,
   ExpandCapabilities,
   GalleryImage,
@@ -259,7 +225,6 @@ import {
   applyModelDefaults,
   applyRequestToForm,
   buildRequest,
-  chainFilingFields,
   cloneGenerateForm,
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
@@ -321,17 +286,10 @@ import {
   type PreparedExpansionInputs,
   type QuickExpansionSnapshot,
 } from "../lib/preparedExpansion";
-import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
-import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import {
-  coerceSourceFitForMaskless,
-  defaultSourceFitPolicy,
-  parseSourceFitPolicy,
-} from "@studio/lib/sourceFit";
-import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
+import { defaultSourceFitPolicy, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
@@ -473,7 +431,6 @@ import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixReview.vue";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
-import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSharedParams from "./MobileSharedParams.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
@@ -516,7 +473,6 @@ import {
   type MobileExpansionRecoveryRecord,
 } from "./mobileExpansionRecovery";
 import { reconcileInterruptedGenerationJobs } from "../lib/generationRecovery";
-import { watchChainJob, type SequenceWatchHandle } from "./sequenceWatch";
 import {
   buildMobileDurableHostStatusRequest,
   claimMobileDurableTerminalEffect,
@@ -539,7 +495,6 @@ import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mob
 import { beginMobileBackgroundTask } from "./backgroundTask";
 import {
   mobileGenerationSubmissionPolicy,
-  mobilePlacementFailure,
   previewPinnedMobileGeneration,
   routeAutomaticMobileGeneration,
 } from "./mobileGenerationRouting";
@@ -562,28 +517,19 @@ type RefreshableMobileView = { refresh(): Promise<void> };
 
 /** Deep-link payload for the Discover shelf; `token` re-fires the intent even
  *  when the (KeepAlive-cached) catalog is asked for the same filters twice. */
-interface CatalogFilterIntent {
-  mediaType: "all" | "image" | "video";
-  kind: "checkpoint" | "";
-  token: number;
+/** One queue row, already resolved to the print it renders. */
+interface ActivityRow {
+  key: string;
+  print: Job;
+  /** Live dispatch order from `/api/queue`; absent on older hosts. */
+  queuePosition: number | null;
+  /** Effective lifecycle after applying the host-wide queue pause. */
+  queueState: string | null;
+  blockedReason: string | null;
+  preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
+  /** Matching fresh `/api/activity` lifecycle, when the host has one. */
+  live: FleetActiveWork | null;
 }
-
-/** One queue row, already resolved to the print or sequence it renders. */
-type ActivityRow =
-  | {
-      key: string;
-      print: Job;
-      /** Live dispatch order from `/api/queue`; absent on older hosts. */
-      queuePosition: number | null;
-      /** Effective lifecycle after applying the host-wide queue pause. */
-      queueState: string | null;
-      blockedReason: string | null;
-      preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
-      /** Matching fresh `/api/activity` lifecycle, when the host has one. */
-      live: FleetActiveWork | null;
-      sequence: null;
-    }
-  | { key: string; print: null; sequence: Extract<ActivityJobVM, { kind: "sequence" }> };
 
 interface DiscoveredHost {
   name: string;
@@ -692,7 +638,6 @@ const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
 const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
-const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const GALLERY_TAGS_KEY = "mold.mobile.gallery-tags.v1";
@@ -708,18 +653,9 @@ const GALLERY_THUMBNAIL_RETRY_MAX_MS = 30_000;
 const MOBILE_LIBRARY_SCROLL_KEY = "mobile:library";
 const MOBILE_MACHINES_SCROLL_KEY = "mobile:machines";
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
-const OUTPUT_OPTIONS = [
-  { value: "single" as const, label: "One shot" },
-  { value: "sequence" as const, label: "Sequence" },
-];
 const androidNativeRuntime = isNativeAndroidRuntime();
 const tab = ref<Tab>("generate");
-// Output is a setting of Create, not a place. The store hydrates here (before
-// first paint) so the legacy `mold.mobile.create-mode.v1` key migrates into
-// the shared draft and existing installs land back in Sequence.
-const draft = useSequenceDraftStore();
 const licenseAcceptance = useLicenseAcceptance();
-draft.hydrate();
 const mobileContent = ref<HTMLElement | null>(null);
 const catalogView = ref<RefreshableMobileView | null>(null);
 const hostDetailView = ref<RefreshableMobileView | null>(null);
@@ -759,8 +695,6 @@ let liveActivityRefreshing = false;
 const connectedHosts = computed(() => hosts.value.filter((host) => host.connected !== false));
 const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? connectedHosts.value[0]?.id ?? "");
 const catalogHostId = ref(selectedHostId.value || connectedHosts.value[0]?.id || "");
-const catalogFilterIntent = ref<CatalogFilterIntent | null>(null);
-let catalogIntentToken = 0;
 const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
@@ -784,24 +718,6 @@ const modelSnapshotIdentities = ref<Record<string, ModelSnapshotIdentity>>({});
 const generateTargetPolicy = ref(loadMobileGenerateTarget());
 const loadingModels = ref(false);
 const modelLoadError = ref("");
-const sequenceJob = ref<ChainJobDetail | null>(null);
-const sequenceStarting = ref(false);
-let sequenceCancellationRequest: (() => Promise<unknown>) | null = null;
-const sequenceError = ref("");
-const sequenceProgress = ref<{ step: number; total: number } | null>(null);
-const chainLimits = ref<ChainLimits | null>(null);
-/**
- * The frozen route the durable job was created on. Identity IS the staleness
- * guard, so this must be a `shallowRef`: a plain `ref` hands back a reactive
- * proxy and every `sequenceRoute.value !== route` check would fire against a
- * live watch, silently dropping its own events.
- */
-const sequenceRoute = shallowRef<{
-  hostId: string;
-  target: ApiTarget;
-  instanceId: string;
-} | null>(null);
-let sequenceWatch: SequenceWatchHandle | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const serverCapabilities = reactive<Record<string, ServerCapabilities | null | undefined>>({});
 interface SavedGalleryCapability {
@@ -998,17 +914,6 @@ function resetCreateSettings(): void {
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   canvasIntent.value = "model-default";
-  // Sequence output keeps its source media in the primary stack too, so the
-  // primary Reset owns the opening image exactly as it owns the one-shot
-  // wells `resetFormToModelDefaults` just discarded. `clearOpeningImage` is
-  // the narrow store write: clips stay, and the persisted blob is reclaimed.
-  if (isSequence.value) {
-    // Reset restores the MODEL's answer, not a flat off: audio is on
-    // wherever the chain renders sound, so resetting to false handed back a
-    // silent draft the user never chose.
-    draft.enableAudio = chainLimits.value?.supports_audio === true;
-    draft.clearOpeningImage();
-  }
 }
 
 /** Match the desktop Advanced reset: restore model-owned generation controls
@@ -1042,7 +947,6 @@ const quickExpansionNegative = ref<{ before: string; baked: string } | null>(nul
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionAttempts = new MobileSubmissionAttempts();
-const sequenceSubmissionGuard = new PreparationRequestGuard();
 let expansionPullRequestId = 0;
 let expansionRecoveryId = 0;
 let submissionUiId = 0;
@@ -1175,8 +1079,8 @@ const librarySheetBusy = ref(false);
  *
  * A proxy over `form.title` rather than a ref of its own: "File under" derives
  * its ghost tag and its collection match from the SAME title the shared
- * `buildRequest` / `chainFilingFields` read, so a second copy would let the
- * chip on screen and the tag on the wire disagree.
+ * `buildRequest` reads, so a second copy would let the chip on screen and the
+ * tag on the wire disagree.
  */
 const printTitle = computed({
   get: () => form.title,
@@ -1272,8 +1176,8 @@ const knownHostReachability = new Set<string>();
 const generation = useGenerationStore();
 /**
  * Every print is admitted through the durable batch endpoint. The Pinia
- * generation store now serves only auto-chained SEQUENCES, which keep their
- * own held chain stream. Keeping the durable runtime local to MobileApp
+ * generation store now serves only auto-chained long videos, which keep
+ * their own held chain stream. Keeping the durable runtime local to MobileApp
  * prevents the desktop shell from silently inheriting phone recovery or
  * native-credential policy.
  */
@@ -1578,9 +1482,6 @@ watch(
           );
           form.cameraControl = null;
         }
-        for (const clip of draft.clips) {
-          if (!compatible(clip.cameraControl)) clip.cameraControl = null;
-        }
       })
       .catch(() => {
         if (epoch !== controlAdaptersEpoch) return;
@@ -1857,20 +1758,8 @@ function modelAvailabilityTag(name: string): string | null {
   if (!automaticRouting.value) return null;
   return mobileModelAvailabilityTag(modelHostIds(name), connectedHosts.value);
 }
-const isSequence = computed(() => draft.output === "sequence");
-const sequenceModels = computed(() => modelsForOutput(generationModels.value, "sequence"));
-const selectedModelCanSequence = computed(() =>
-  modelSupportsSequence(selectedGenerationModel.value ?? { name: form.model, family: form.family }),
-);
-/** Sequence output narrows the picker to chain-capable video models. */
-const pickerModels = computed(() => modelsForOutput(generationModels.value, draft.output));
-const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedGenerationModel.value));
-const sequenceDefaultFrames = computed(() =>
-  defaultClipFrames(selectedGenerationModel.value, chainLimits.value, sequenceMotionTail.value),
-);
-const sequenceSettingsSummary = computed(
-  () => `${form.width}×${form.height} · ${form.fps}fps · ${form.steps} steps`,
-);
+/** Every downloaded generation model is offered; Create has one output. */
+const pickerModels = computed(() => generationModels.value);
 const modelLabel = (name: string) => modelDisplayNameForId(name, generationModels.value);
 const upscalers = computed(() =>
   models.value.filter((model) => model.family === "upscaler" || model.family === "real-esrgan"),
@@ -1934,9 +1823,6 @@ function generationProfileHashForHost(hostId: string, model: string): string | n
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
 let previousStillAutomaticResolution: SourceDimensions | null = null;
-let previousOpeningSource = "";
-let previousOpeningResolution: SourceResolutionResult | null = null;
-let previousOpeningAutomaticResolution: SourceDimensions | null = null;
 const canvasIntent = ref<CanvasIntent>("model-default");
 let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
@@ -2056,7 +1942,6 @@ watch(
         .join("|") ?? "",
   ],
   ([base64]) => {
-    if (isSequence.value) return;
     const replaced = Boolean(base64 && base64 !== previousStillSource);
     const next = applyMobileSourceResolution(
       base64,
@@ -2080,43 +1965,6 @@ watch(
   { immediate: true },
 );
 
-watch(
-  [
-    () => draft.openingImage?.base64 ?? null,
-    () => selectedGenerationModel.value?.name ?? form.model,
-    () => form.pipeline ?? null,
-    () => selectedGenerationModel.value?.generation_profile?.profile_hash ?? null,
-    () => selectedGenerationModel.value?.max_pixels ?? null,
-    () => selectedGenerationModel.value?.max_axis_pixels ?? null,
-    () => selectedGenerationModel.value?.dimension_alignment ?? null,
-    () =>
-      selectedGenerationModel.value?.recommended_dimensions
-        ?.map(({ width, height }) => `${width}x${height}`)
-        .join("|") ?? "",
-  ],
-  ([base64]) => {
-    if (!isSequence.value) return;
-    const next = applyMobileSourceResolution(
-      base64,
-      {
-        base64: previousOpeningSource,
-        resolution: previousOpeningResolution,
-        automaticResolution: previousOpeningAutomaticResolution,
-      },
-      (width, height) => {
-        if (!draft.openingImage) return;
-        if (width === null) delete draft.openingImage.width;
-        else draft.openingImage.width = width;
-        if (height === null) delete draft.openingImage.height;
-        else draft.openingImage.height = height;
-      },
-    );
-    previousOpeningSource = next.base64;
-    previousOpeningResolution = next.resolution;
-    previousOpeningAutomaticResolution = next.automaticResolution;
-  },
-  { immediate: true },
-);
 const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
 /**
  * The per-model source-image contract (#772) and wan's first/last-frame
@@ -2132,7 +1980,7 @@ const sourceConditioningError = computed(() => sourceConditioningValidationError
  * moment a qualified checkpoint is selected again. Nothing about a parked
  * partition blocks Develop.
  */
-const showIdentity = computed(() => showMobileIdentityWell(form, isSequence.value));
+const showIdentity = computed(() => showMobileIdentityWell(form));
 /** Why the identity partition would be refused, repeated beside Develop so a
  * disabled button is never a dead end. */
 const identityError = computed(() => identityConditioningValidationError(form));
@@ -2584,28 +2432,16 @@ const printActivity = computed<ActivityJobVM[]>(() => {
     return withLiveQueueStatus(vm, queueStatusIndex.value, job.id);
   });
 });
-const sequenceActivity = computed<ActivityJobVM[]>(() => {
-  const route = sequenceRoute.value;
-  const job = sequenceJob.value;
-  if (!route || !job) return [];
-  return [
-    sequenceToVM(
-      job,
-      { hostId: route.hostId, hostLabel: sequenceHostName(route.hostId) },
-      sequenceProgress.value,
-    ),
-  ];
-});
-/** ONE queue: single prints and durable sequences in the same list. */
 const activityRows = computed<ActivityRow[]>(() =>
-  mergeActivity(printActivity.value, sequenceActivity.value).flatMap((vm): ActivityRow[] => {
-    if (vm.kind === "sequence") return [{ key: vm.key, sequence: vm, print: null }];
+  mergeActivity(printActivity.value, []).flatMap((vm): ActivityRow[] => {
+    // `printActivity` only ever produces print rows; the merge still returns
+    // the shared union, so narrow before reading the queue fields.
+    if (vm.kind !== "print") return [];
     const print = printJobsByKey.value.get(vm.key);
     return print
       ? [
           {
             key: vm.key,
-            sequence: null,
             print,
             queuePosition: vm.queuePosition ?? null,
             queueState: vm.queueState ?? null,
@@ -2622,19 +2458,16 @@ const queueControlHostIds = ref(new Set<string>());
 const pausedQueueJobIds = ref(new Set<string>());
 
 function activityRowHostId(row: ActivityRow): string {
-  return row.print?.hostId ?? row.sequence?.hostId ?? selectedHostId.value;
+  return row.print.hostId ?? selectedHostId.value;
 }
 
 function activityRowIsQueued(row: ActivityRow): boolean {
-  return row.print
-    ? mobilePrintPhase(row.print, row.live) === "queued"
-    : row.sequence?.state === "queued";
+  return mobilePrintPhase(row.print, row.live) === "queued";
 }
 
 function canPauseActivityRow(row: ActivityRow): boolean {
   const hostId = activityRowHostId(row);
   return (
-    row.print !== null &&
     activityRowJobId(row) !== null &&
     (row.queueState === "queued" || row.queueState === "paused" || activityRowIsQueued(row)) &&
     serverCapabilities[hostId]?.queue?.can_pause_job === true &&
@@ -2644,13 +2477,10 @@ function canPauseActivityRow(row: ActivityRow): boolean {
 
 function activityRowQueuePaused(row: ActivityRow): boolean {
   const jobId = activityRowJobId(row);
-  return (
-    !!row.print && (row.queueState === "paused" || (!!jobId && pausedQueueJobIds.value.has(jobId)))
-  );
+  return row.queueState === "paused" || (!!jobId && pausedQueueJobIds.value.has(jobId));
 }
 
 function activityRowJobId(row: ActivityRow): string | null {
-  if (!row.print) return null;
   const durable = durableRecoveryForJob(row.print);
   const durableId = durable
     ? mobileDurableJobs(durable.recovery)[durable.childIndex]?.authority.jobId
@@ -2668,20 +2498,13 @@ function activityRowQueueAuthority(row: ActivityRow): MobileQueueControlAuthorit
   const hostId = activityRowHostId(row);
   const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
   if (!host) return null;
-  if (row.sequence && sequenceRoute.value?.hostId === hostId) {
-    const expectedInstanceId = sequenceRoute.value.instanceId;
-    if (!expectedInstanceId) return null;
-    return { host, target: sequenceRoute.value.target, expectedInstanceId };
-  }
-  if (row.print) {
-    const durable = durableRecoveryForJob(row.print);
-    if (durable) {
-      return {
-        host,
-        target: mobileHostTarget(host),
-        expectedInstanceId: durable.recovery.tracker.expectedInstanceId,
-      };
-    }
+  const durable = durableRecoveryForJob(row.print);
+  if (durable) {
+    return {
+      host,
+      target: mobileHostTarget(host),
+      expectedInstanceId: durable.recovery.tracker.expectedInstanceId,
+    };
   }
   const snapshot = liveActivityHosts.value[hostId];
   const expectedInstanceId = snapshot?.instanceId?.trim() ?? "";
@@ -2792,7 +2615,6 @@ function fleetQueueControlLabel(row: FleetActiveWork): string {
  * way and only the casing is local.
  */
 function activityRowStatus(row: ActivityRow): string {
-  if (!row.print) return "";
   if (row.live && row.live.phase !== "queued" && row.live.phase !== "paused") {
     return activeWorkPhaseLabel(row.live).toLocaleUpperCase();
   }
@@ -2815,9 +2637,6 @@ const sharedMobileActivity = computed(() => {
       job.id ? [`${job.hostId ?? selectedHostId.value}:generation:${job.id}`] : [],
     ),
   );
-  if (sequenceJob.value && sequenceRoute.value) {
-    local.add(`${sequenceRoute.value.hostId}:sequence:${sequenceJob.value.id}`);
-  }
   return mergeFleetActivity(Object.values(liveActivityHosts.value)).filter(
     (row) => !local.has(row.key),
   );
@@ -2833,7 +2652,7 @@ const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
   [
     ...activityRows.value.map((local): MobileActivityDisplayRow => ({
       key: `local:${local.key}`,
-      createdAtMs: local.print?.submittedAtUnixMs ?? local.sequence?.createdAtMs ?? 0,
+      createdAtMs: local.print.submittedAtUnixMs,
       kind: "local",
       local,
     })),
@@ -2845,15 +2664,6 @@ const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
     })),
   ].sort(compareNewestSubmitted),
 );
-const expandedQueueFailures = ref(new Set<string>());
-
-function toggleQueueFailure(key: string): void {
-  const next = new Set(expandedQueueFailures.value);
-  if (next.has(key)) next.delete(key);
-  else next.add(key);
-  expandedQueueFailures.value = next;
-}
-
 let mobilePrintSelectionEpoch = 0;
 const selectedQueueRender = ref<{
   hostId: string;
@@ -2914,8 +2724,6 @@ async function selectMobilePrint(job: Job): Promise<void> {
     applyRequestToForm(form, request, generationModels.value);
     void restoreRunningJobSource(request, epoch);
   }
-  draft.stopEditing();
-  draft.output = "single";
   latestResultClientId.value = job.status === "complete" ? job.clientId : null;
   revealRestoredMobileGeneration();
   if (
@@ -2985,50 +2793,13 @@ async function restoreRunningJobSource(request: GenerateRequest, epoch: number):
   if (fit) form.sourceFit = fit;
 }
 
-function selectCurrentMobileSequence(): void {
-  const route = sequenceRoute.value;
-  const detail = sequenceJob.value;
-  if (!route || !detail) return;
-  loadMobileSequenceIntoCreate(detail);
-}
-
-function loadMobileSequenceIntoCreate(detail: ChainJobDetail): void {
-  const script = normalizeServerChainScript(detail.script);
-  if (script) {
-    const loaded = chainScriptToClips(script);
-    const shared = loaded.shared;
-    if (shared.model) {
-      const model = generationModels.value.find((entry) => entry.name === shared.model);
-      if (model) applyModelDefaults(form, model);
-      else form.model = shared.model;
-    }
-    if (shared.width != null) form.width = shared.width;
-    if (shared.height != null) form.height = shared.height;
-    if (shared.fps != null) form.fps = shared.fps;
-    if (shared.steps != null) form.steps = shared.steps;
-    if (shared.guidance != null) form.guidance = shared.guidance;
-    if (shared.strength != null) form.strength = shared.strength;
-    if (loaded.openingImage?.base64) {
-      preserveRestoredSourceCanvas(loaded.openingImage.base64);
-    }
-    form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
-    form.seed = shared.seed ?? "";
-    draft.stopEditing();
-    draft.output = "sequence";
-    draft.clips.splice(0, draft.clips.length, ...loaded.clips);
-    draft.activeClipId = loaded.clips[0]?.id ?? null;
-    draft.enableAudio = loaded.enableAudio;
-    draft.openingImage = loaded.openingImage;
-  }
-  tab.value = "generate";
-}
-
 let mobileLiveWorkSelectionEpoch = 0;
 
 /** Restore server-owned work through its exact Keychain-authenticated route.
  *  This mirrors desktop's live-work selection while keeping iPhone remote-only:
- *  generation settings come from the authoritative queue row, and durable
- *  sequences come from their server-side script. */
+ *  generation settings come from the authoritative queue row. Work the host
+ *  runs as a chain has no client-restorable request, so it opens its machine
+ *  instead of pretending to reload settings it never carried. */
 async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
   const epoch = ++mobileLiveWorkSelectionEpoch;
   const host = connectedHosts.value.find((candidate) => candidate.id === row.hostId);
@@ -3068,12 +2839,7 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       }
       await selectHost(host.id);
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      const reuse = applyMobileGalleryMetadata(form, selection.metadata, generationModels.value);
-      if (reuse.sequenceUnsupportedReason) {
-        throw new Error(reuse.sequenceUnsupportedReason);
-      }
-      draft.stopEditing();
-      draft.output = "single";
+      applyMobileGalleryMetadata(form, selection.metadata, generationModels.value);
       clearSelectedQueueRender();
       if (selection.running) {
         selectedQueueRender.value = {
@@ -3109,24 +2875,6 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       return;
     }
 
-    if (row.kind === "sequence" || row.execution === "chain") {
-      const detail = await apiJsonTo<ChainJobDetail>(
-        target,
-        `/api/chain-jobs/${encodeURIComponent(row.id)}`,
-      );
-      if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      await verifyAuthority();
-      if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      await selectHost(host.id);
-      if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      if (!normalizeServerChainScript(detail.script)) {
-        throw new Error("This sequence job has no restorable script.");
-      }
-      loadMobileSequenceIntoCreate(detail);
-      setGenerationStatus("Sequence settings restored");
-      return;
-    }
-
     if (row.kind === "download") {
       openCatalog(host.id);
       return;
@@ -3139,35 +2887,22 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
   }
 }
 /**
- * Running and waiting are counted apart. A settled sequence keeps its row (for
- * Resume / Dismiss) but is neither, and a queued print is NOT active work —
+ * Running and waiting are counted apart: a queued print is NOT active work —
  * counting rows on screen is what made one rendering job plus four waiting
  * ones read "5 ACTIVE".
  */
 const runningRowCount = computed(
   () =>
-    activityRows.value.filter((row) =>
-      row.print
-        ? mobilePrintPhase(row.print, row.live) === "running"
-        : row.sequence.state === "running",
-    ).length,
+    activityRows.value.filter((row) => mobilePrintPhase(row.print, row.live) === "running").length,
 );
 const waitingRowCount = computed(
   () =>
-    activityRows.value.filter((row) =>
-      row.print
-        ? mobilePrintPhase(row.print, row.live) !== "running"
-        : row.sequence.state === "queued",
-    ).length,
+    activityRows.value.filter((row) => mobilePrintPhase(row.print, row.live) !== "running").length,
 );
 const activityCounts = computed(() => ({
   running: runningRowCount.value,
   waiting: waitingRowCount.value,
 }));
-const sequenceRowProgress = computed(() => {
-  const progress = sequenceProgress.value;
-  return progress && progress.total > 0 ? Math.round((progress.step / progress.total) * 100) : null;
-});
 const activeGeneration = computed(() => {
   if (selectedQueueRender.value) return null;
   if (selectedDurableGenerationClientId !== null) {
@@ -4055,14 +3790,6 @@ function loadHosts(): MobileHost[] {
         }
         localStorage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify(durable));
 
-        const sequence = JSON.parse(localStorage.getItem(SEQUENCE_RECOVERY_KEY) ?? "null") as {
-          hostId?: string;
-        } | null;
-        if (sequence?.hostId === loser) {
-          sequence.hostId = survivor;
-          localStorage.setItem(SEQUENCE_RECOVERY_KEY, JSON.stringify(sequence));
-        }
-
         const activity = JSON.parse(localStorage.getItem(LIVE_ACTIVITY_KEY) ?? "{}") as Record<
           string,
           unknown
@@ -4643,20 +4370,13 @@ function selectCatalogHost(id: string): void {
   if (connectedHosts.value.some((host) => host.id === id)) catalogHostId.value = id;
 }
 
-function openCatalog(id?: string, intent?: Omit<CatalogFilterIntent, "token">): void {
+function openCatalog(id?: string): void {
   if (id && connectedHosts.value.some((host) => host.id === id)) catalogHostId.value = id;
   else if (!connectedHosts.value.some((host) => host.id === catalogHostId.value)) {
     catalogHostId.value = selectedHostId.value || connectedHosts.value[0]?.id || "";
   }
   hostDetailId.value = "";
-  if (intent) catalogFilterIntent.value = { ...intent, token: ++catalogIntentToken };
   tab.value = "catalog";
-}
-
-/** The sequence empty state must LAND on the filtered Discover shelf — a bare
- *  tab switch left the user to rediscover the Video + Models filters. */
-function browseSequenceModels(): void {
-  openCatalog(selectedHost.value?.id, { mediaType: "video", kind: "checkpoint" });
 }
 
 function catalogModelsChanged(hostId: string): void {
@@ -4860,113 +4580,6 @@ async function selectGenerateTarget(value: string): Promise<void> {
   await selectHost(value);
 }
 
-/** Retire the transport but KEEP the row: a settled job still offers Resume
- *  and Dismiss, and a settled job has nothing left to stream. */
-function stopSequenceTransport(): void {
-  sequenceWatch?.stop();
-  sequenceWatch = null;
-}
-
-function clearSequenceRecovery(): void {
-  try {
-    localStorage.removeItem(SEQUENCE_RECOVERY_KEY);
-  } catch {
-    // Recovery persistence is best effort; the live job remains authoritative.
-  }
-}
-
-function persistSequenceRecovery(host: MobileHost, jobId: string): void {
-  try {
-    localStorage.setItem(
-      SEQUENCE_RECOVERY_KEY,
-      JSON.stringify({
-        hostId: host.id,
-        baseUrl: host.baseUrl,
-        instanceId: host.instanceId ?? null,
-        jobId,
-      }),
-    );
-  } catch {
-    // A storage failure must never turn an accepted durable job into an error.
-  }
-}
-
-function sequenceHostName(hostId: string): string {
-  return hosts.value.find((host) => host.id === hostId)?.name ?? "sequence host";
-}
-
-/** Optimistic row so an accepted job is visible before the first frame lands. */
-function pendingSequenceJob(jobId: string, model: string, stageCount: number): ChainJobDetail {
-  const now = Date.now();
-  return {
-    id: jobId,
-    state: "queued",
-    model,
-    stage_count: stageCount,
-    current_stage: 0,
-    created_at_unix_ms: now,
-    updated_at_unix_ms: now,
-    error: null,
-    ephemeral: false,
-    stages: [],
-  };
-}
-
-/**
- * Attach to a durable job on ONE immutable route. SSE is primary; the watcher
- * itself owns the 5s poll fallback and the wake re-sync (see sequenceWatch).
- */
-function watchSequenceJob(
-  hostId: string,
-  target: ApiTarget,
-  jobId: string,
-  seed?: { model: string; stageCount: number },
-  expectedInstanceId?: string | null,
-): void {
-  stopSequenceTransport();
-  const instanceId =
-    expectedInstanceId?.trim() ||
-    connectedHosts.value.find((candidate) => candidate.id === hostId)?.instanceId?.trim() ||
-    "";
-  const route = { hostId, target: { ...target }, instanceId };
-  sequenceRoute.value = route;
-  sequenceProgress.value = null;
-  sequenceJob.value = pendingSequenceJob(jobId, seed?.model ?? "", seed?.stageCount ?? 0);
-  sequenceWatch = watchChainJob({
-    target: route.target,
-    jobId,
-    onUpdate: (live) => {
-      if (sequenceRoute.value !== route) return;
-      if (live.detail) sequenceJob.value = live.detail;
-      const active = live.activeStage;
-      sequenceProgress.value = active !== null ? (live.progress[active] ?? null) : null;
-      sequenceError.value = "";
-    },
-    onError: (error) => {
-      if (sequenceRoute.value !== route) return;
-      sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
-    },
-  });
-}
-
-// A settled durable job has nothing left to stream: drop the transport and the
-// recovery record, but keep the row so Resume / Dismiss stay reachable.
-watch(
-  () => sequenceJob.value?.state,
-  (state, previous) => {
-    const route = sequenceRoute.value;
-    if (!state || state === previous || !route) return;
-    if (state === "queued" || state === "running") return;
-    stopSequenceTransport();
-    clearSequenceRecovery();
-    generationAnnouncement.value =
-      state === "completed"
-        ? `Sequence completed on ${sequenceHostName(route.hostId)}.`
-        : `Sequence ${state}. ${sequenceJob.value?.error ?? ""}`.trim();
-    if (state === "completed" && tab.value === "gallery") void refreshGallery();
-  },
-);
-
 /**
  * The machines an automatic policy may dispatch to: reachable, allowed to run
  * the model, and — when any of them already holds it — narrowed to the owners,
@@ -5078,7 +4691,6 @@ async function routeAutomaticGeneration(options: {
   copies: number;
   model: string;
   family: string;
-  subject: "print" | "sequence";
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
   signal?: AbortSignal;
@@ -5303,408 +4915,6 @@ async function pullMissingGenerationModel(): Promise<void> {
     missingGenerationModelBusy.value = false;
   }
 }
-
-async function submitMobileSequence(): Promise<void> {
-  if (sequenceStarting.value) {
-    cancelMobileSequenceSubmission();
-    return;
-  }
-  clearSelectedQueueRender();
-  fileUnderDropNotice.value = "";
-  const automatic = automaticRouting.value;
-  // Under an automatic policy the machine is provisional until shared routing
-  // freezes either the canonical telemetry choice or the legacy preview winner;
-  // source fitting only ever uses it for an optional upscale, so the built
-  // request stays machine-independent.
-  const initialHost = automatic
-    ? provisionalAutomaticHost(form.model, form.family)
-    : selectedHost.value;
-  const restriction =
-    initialHost && !automatic
-      ? modelAccessRestrictionFor(serverCapabilities[initialHost.id], {
-          model: form.model,
-          family: form.family,
-          generation_profile_sha256: generationProfileHashForHost(initialHost.id, form.model),
-        })
-      : null;
-  if (restriction) {
-    sequenceError.value = restriction.message;
-    return;
-  }
-  const entry = selectedGenerationModel.value;
-  if (!initialHost || !form.model.trim()) return;
-  if (
-    !automatic &&
-    modelPresenceOnHost(
-      initialHost.id,
-      modelHostIds(form.model),
-      Object.prototype.hasOwnProperty.call(modelsByHost.value, initialHost.id),
-    ) === "missing"
-  ) {
-    promptForMissingGenerationModel(form.model, initialHost, routeForMobileHost(initialHost));
-    return;
-  }
-  // Same contract as the one-shot path: a title the server would reject is an
-  // inline refusal, never a silently dropped name.
-  const titleCheck = requestTitle(printTitle.value);
-  if (!titleCheck.ok) {
-    sequenceError.value = titleCheck.reason;
-    return;
-  }
-  let host: MobileHost = initialHost;
-  let target = { ...mobileHostTarget(host) };
-  let frozenRoute: HostRoute = {
-    hostId: host.id,
-    label: host.name,
-    kind: "remote",
-    target,
-    instanceId: host.instanceId ?? null,
-  };
-  // Freeze all request-affecting values at the tap boundary. Source fitting
-  // and routing are asynchronous; edits during either await belong to the next
-  // submission.
-  const requestForm = applyFileUnderPolicy(cloneGenerateForm(form));
-  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  // The opening image obeys the checkpoint's own source-image contract: a
-  // checkpoint that reads none shows no well, so a retained image is parked
-  // out of the request rather than shipped as conditioning admission refuses.
-  const openingImageSupported =
-    parseSourceImageCapability(entry?.source_image ?? form.sourceImageCapability) !== "unsupported";
-  const openingSnapshot =
-    openingImageSupported && draft.openingImage ? { ...draft.openingImage } : null;
-  const enableAudio = draft.enableAudio;
-  const motionTailFrames = sequenceMotionTail.value;
-  sequenceStarting.value = true;
-  sequenceCancellationRequest = null;
-  const token = sequenceSubmissionGuard.begin();
-  const signal = sequenceSubmissionGuard.signalFor(token);
-  const isCurrent = () => sequenceSubmissionGuard.isCurrent(token) && !signal.aborted;
-  sequenceError.value = "";
-  const backgroundTask = await beginMobileBackgroundTask("Preparing remote sequence");
-  try {
-    // Stale limits would mis-gate audio and frame caps for the routed host.
-    if (entry && (!chainLimits.value || chainLimits.value.model !== requestForm.model)) {
-      await loadChainLimits();
-    }
-    if (!isCurrent()) return;
-    requestForm.sourceImage = openingSnapshot?.base64 ?? null;
-    requestForm.maskImage = null;
-    if (requestForm.sourceImage) {
-      const result = await applySourceFitPreprocess(
-        {
-          source: requestForm.sourceImage,
-          mask: null,
-          policy: coerceSourceFitForMaskless(requestForm.sourceFit),
-          target: { width: requestForm.width, height: requestForm.height },
-        },
-        {
-          ops: domCanvasOps,
-          cache: sourceFitCache,
-          upscale: (image, model) => upscaleImage({ image, model, target, signal }),
-          onStatus: setGenerationStatus,
-        },
-      );
-      if (!isCurrent()) return;
-      requestForm.sourceImage = result.source;
-    }
-    const openingImage = openingSnapshot
-      ? { ...openingSnapshot, base64: requestForm.sourceImage }
-      : null;
-    // The stitched print is the only artifact a sequence puts in the gallery,
-    // so it is what carries the Create title and the File under choice; an
-    // intermediate clip never reaches the Library and is never filed.
-    // Reassigned once an automatic route freezes its winner, which may not
-    // be able to file what this body carries.
-    let request: ChainCreateRequest = {
-      ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
-        motionTailFrames,
-        enableAudio,
-        openingImage,
-      }),
-      ...chainFilingFields(requestForm),
-    };
-    let preview: GenerationPlacementPreview | null = null;
-    if (automatic) {
-      const routed = await routeAutomaticGeneration({
-        request: request as unknown as Record<string, unknown>,
-        chain: true,
-        copies: 1,
-        model: requestForm.model,
-        family: form.family,
-        subject: "sequence",
-        requireAuthoritative: false,
-        isCurrent,
-        signal,
-      });
-      if (routed.kind === "abandoned") return;
-      if (routed.kind === "error") throw new Error(routed.message);
-      if (routed.kind === "missing_model") {
-        promptForMissingGenerationModel(routed.model, routed.host, routed.route);
-        return;
-      }
-      // Freeze the machine the fan-out chose: this exact route is what the
-      // durable sequence is recovered against.
-      host = routed.host;
-      target = { ...mobileHostTarget(host) };
-      frozenRoute = routed.route;
-      preview = routed.placement;
-    } else {
-      preview = await previewChainPlacement(
-        target,
-        request as unknown as Record<string, unknown>,
-        1,
-        { signal },
-      );
-    }
-    const classification: string = classifyPlacementPreview(preview);
-    if (!isCurrent()) return;
-    const missingModel = classifyMissingModel(preview, requestForm.model);
-    if (missingModel) {
-      promptForMissingGenerationModel(missingModel.model, host, frozenRoute);
-      return;
-    }
-    if (classification !== "unsupported" && classification !== "planned") {
-      throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
-    }
-    const fenceHost = automatic
-      ? hosts.value.find((candidate) => candidate.id === frozenRoute.hostId)
-      : selectedHost.value;
-    if (!sameFrozenHost(frozenRoute, fenceHost)) {
-      throw new Error("The selected host changed while checking this sequence.");
-    }
-    // `frozenRoute` is final for both paths here — the fan-out's winner or the
-    // browsed machine — so this is where the stitched print's filing is
-    // measured against the machine that will actually publish it.
-    request = fileUnderForFrozenRoute(request, frozenRoute);
-    const operationId = createUuid();
-    sequenceCancellationRequest = () =>
-      apiFetchTo(
-        target,
-        `/api/chain-jobs/${encodeURIComponent(operationId)}/operations/${encodeURIComponent(operationId)}/cancel`,
-        { method: "POST", keepalive: true },
-      );
-    requestAdvisories.value = [];
-    const chainResponse = await apiFetchTo(target, "/api/chain-jobs", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-mold-operation-id": operationId,
-      },
-      body: JSON.stringify(request),
-    });
-    requestAdvisories.value = requestWarningsFromHeaders(chainResponse.headers);
-    const response = (await chainResponse.json()) as CreateChainJobResponse;
-    if (!isCurrent()) {
-      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(response.job_id)}/cancel`, {
-        method: "POST",
-      }).catch(() => {});
-      return;
-    }
-    persistSequenceRecovery(host, response.job_id);
-    watchSequenceJob(
-      host.id,
-      target,
-      response.job_id,
-      {
-        model: requestForm.model,
-        stageCount: clips.length,
-      },
-      frozenRoute.instanceId,
-    );
-  } catch (error) {
-    if (!isCurrent()) return;
-    sequenceError.value = describeTransportError(error, host.name);
-  } finally {
-    await backgroundTask.release();
-    if (sequenceSubmissionGuard.isCurrent(token)) {
-      sequenceStarting.value = false;
-      sequenceCancellationRequest = null;
-    }
-  }
-}
-
-function cancelMobileSequenceSubmission(): void {
-  if (!sequenceStarting.value) return;
-  sequenceSubmissionGuard.invalidate();
-  const cancellation = sequenceCancellationRequest;
-  sequenceCancellationRequest = null;
-  sequenceStarting.value = false;
-  sequenceError.value = "";
-  if (!cancellation) {
-    setGenerationStatus("Sequence preparation cancelled — nothing was queued");
-    return;
-  }
-  setGenerationStatus("Cancelling sequence creation…");
-  void confirmCancellation(cancellation)
-    .then(() => setGenerationStatus("Sequence creation cancelled — nothing was queued"))
-    .catch(() => {
-      sequenceError.value = "Cancellation could not be confirmed. Check the queue before retrying.";
-      setGenerationStatus(sequenceError.value);
-    });
-}
-
-async function cancelMobileSequence(): Promise<void> {
-  const route = sequenceRoute.value;
-  const job = sequenceJob.value;
-  if (!route || !job) return;
-  sequenceError.value = "";
-  try {
-    await apiFetchTo(route.target, `/api/chain-jobs/${encodeURIComponent(job.id)}/cancel`, {
-      method: "POST",
-    });
-    await sequenceWatch?.refresh();
-  } catch (error) {
-    sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
-  }
-}
-
-async function resumeMobileSequence(): Promise<void> {
-  const route = sequenceRoute.value;
-  const job = sequenceJob.value;
-  if (!route || !job) return;
-  sequenceError.value = "";
-  try {
-    await apiFetchTo(route.target, `/api/chain-jobs/${encodeURIComponent(job.id)}/resume`, {
-      method: "POST",
-    });
-    const host = hosts.value.find((candidate) => candidate.id === route.hostId);
-    if (host) persistSequenceRecovery(host, job.id);
-    watchSequenceJob(
-      route.hostId,
-      route.target,
-      job.id,
-      {
-        model: job.model,
-        stageCount: job.stage_count,
-      },
-      route.instanceId,
-    );
-  } catch (error) {
-    sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
-  }
-}
-
-function dismissMobileSequence(): void {
-  stopSequenceTransport();
-  clearSequenceRecovery();
-  sequenceRoute.value = null;
-  sequenceJob.value = null;
-  sequenceProgress.value = null;
-  sequenceError.value = "";
-}
-
-function recoverMobileSequence(): void {
-  let saved: {
-    hostId?: string;
-    baseUrl?: string;
-    instanceId?: string | null;
-    jobId?: string;
-  } | null = null;
-  try {
-    saved = JSON.parse(localStorage.getItem(SEQUENCE_RECOVERY_KEY) ?? "null") as {
-      hostId?: string;
-      baseUrl?: string;
-      instanceId?: string | null;
-      jobId?: string;
-    } | null;
-  } catch {
-    clearSequenceRecovery();
-    return;
-  }
-  if (!saved?.hostId || !saved.jobId) return;
-  const host = hosts.value.find((candidate) => candidate.id === saved!.hostId);
-  if (host?.connected === false) {
-    sequenceError.value = `Reconnect ${host.name} in Machines to resume this saved sequence.`;
-    return;
-  }
-  if (
-    !host ||
-    host.baseUrl !== saved.baseUrl ||
-    (saved.instanceId != null && saved.instanceId !== host.instanceId)
-  ) {
-    clearSequenceRecovery();
-    sequenceError.value = "The exact machine for this saved sequence is no longer available.";
-    return;
-  }
-  watchSequenceJob(host.id, mobileHostTarget(host), saved.jobId, undefined, saved.instanceId);
-}
-
-/**
- * Output switching. A non-chain-capable pick is remembered and swapped for
- * the first capable model; switching back restores it. Clips are PARKED in
- * both directions — the draft store never erases them.
- */
-function setOutputMode(mode: string | number): void {
-  const next: OutputMode = mode === "sequence" ? "sequence" : "single";
-  if (next === draft.output) return;
-  if (next === "sequence") {
-    const current = selectedGenerationModel.value;
-    if (!current || !sequenceModels.value.some((entry) => entry.name === current.name)) {
-      draft.lastSingleModel = form.model || null;
-      const pick = sequenceModels.value[0];
-      if (pick) applyModelDefaults(form, pick);
-    }
-  } else if (draft.lastSingleModel) {
-    const restored = generationModels.value.find((entry) => entry.name === draft.lastSingleModel);
-    if (restored) applyModelDefaults(form, restored);
-    draft.lastSingleModel = null;
-  }
-  draft.setOutput(
-    next,
-    { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-    sequenceDefaultFrames.value,
-  );
-}
-
-let chainLimitsFetch = 0;
-async function loadChainLimits(): Promise<void> {
-  const version = ++chainLimitsFetch;
-  const host = generationTargetHost.value;
-  const entry = selectedGenerationModel.value;
-  if (!host || !entry) {
-    chainLimits.value = null;
-    return;
-  }
-  try {
-    const limits = await apiJsonTo<ChainLimits>(
-      mobileHostTarget(host),
-      `/api/capabilities/chain-limits?model=${encodeURIComponent(entry.name)}&fps=${encodeURIComponent(Math.max(1, Math.floor(form.fps)))}`,
-    );
-    if (version !== chainLimitsFetch) return;
-    chainLimits.value = limits;
-    if (!limits.supports_audio) draft.enableAudio = false;
-    if (!draft.editing) {
-      const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
-      // A model switch adopts that model's audio answer — on wherever the
-      // chain renders sound, matching a one-shot of the same model. A
-      // re-fetch for the SAME model returns false from `adoptSequenceModel`
-      // and leaves the user's own choice alone.
-      draft.adoptSequenceModel(entry.name, frames, limits.supports_audio);
-    }
-  } catch {
-    if (version === chainLimitsFetch) chainLimits.value = null;
-  }
-}
-
-// Chain limits are per model AND per host — refetch when either moves, and
-// keep the two-clip floor stocked once Sequence is the active output.
-watch(
-  () => form.model,
-  (next, previous) => {
-    if (isSequence.value && previous && next !== previous) {
-      if (draft.editing) draft.stopEditing();
-    }
-  },
-);
-watch(
-  [isSequence, () => form.model, () => form.fps, selectedHostId],
-  () => {
-    if (!isSequence.value) return;
-    draft.ensureClips(sequenceDefaultFrames.value);
-    if (form.model) void loadChainLimits();
-  },
-  { immediate: true },
-);
 
 function changeModel(): void {
   const model = generationModels.value.find((entry) => entry.name === form.model);
@@ -7206,7 +6416,6 @@ async function generate(): Promise<void> {
       copies: batchSize,
       model: request.model,
       family: draft.family,
-      subject: "print",
       requireAuthoritative: requireAuthoritativePlacement,
       isCurrent: () => submissionAttempt.isCurrent(),
       signal: submitSignal,
@@ -7236,7 +6445,6 @@ async function generate(): Promise<void> {
       request: previewRequest,
       chain: chainRouting.kind === "chain",
       copies: batchSize,
-      subject: "print",
       requireAuthoritative: requireAuthoritativePlacement,
       isCurrent: () => submissionAttempt.isCurrent(),
       signal: submitSignal,
@@ -8303,10 +7511,6 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     const reuse = applyMobileGalleryMetadata(form, print.metadata, reuseModels);
     await nextTick();
     authoritativeReuseApply = false;
-    if (reuse.sequenceUnsupportedReason) {
-      reusePrintError.value = reuse.sequenceUnsupportedReason;
-      return;
-    }
     // The print's own saved title comes back with its settings; the Library
     // title (a later rename) wins over the metadata stamp when it exists.
     printTitle.value = organizationOf(print)?.title ?? reuse.title;
@@ -8319,14 +7523,12 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       print.metadata.tags,
       print.metadata.collection,
     );
-    const sourceRestoreNotice = !reuse.sequence
-      ? await restoreOrdinaryReusedSource(
-          print,
-          controller.signal,
-          () => !cancelledReuse(epoch, controller),
-          retainedVersion,
-        )
-      : null;
+    const sourceRestoreNotice = await restoreOrdinaryReusedSource(
+      print,
+      controller.signal,
+      () => !cancelledReuse(epoch, controller),
+      retainedVersion,
+    );
     if (cancelledReuse(epoch, controller)) return;
     // Independent of the source restore above: identity is its own partition,
     // and a print may carry a face photo on a checkpoint that takes no source
@@ -8337,32 +7539,6 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       retainedVersion,
     );
     if (cancelledReuse(epoch, controller)) return;
-    if (reuse.sequence) {
-      // A sequence print reloads the clip rail as a NEW draft: no edit
-      // session, nothing cached (iPhone has no chain-detail recovery route,
-      // so Edit sequence stays a desktop/web action for now).
-      draft.stopEditing();
-      draft.output = "sequence";
-      draft.clips.splice(0, draft.clips.length, ...reuse.sequence.clips);
-      draft.activeClipId = reuse.sequence.clips[0]?.id ?? null;
-      draft.enableAudio = print.metadata.enable_audio === true;
-      draft.bindSequenceModel(form.model);
-    } else {
-      // Reuse follows the mode the print was authored in. In particular, a
-      // One shot may carry internal chain provenance after automatic long-
-      // video routing; that must never strand iPhone in its persisted
-      // Sequence mode.
-      draft.setOutput(
-        "single",
-        {
-          getPrompt: () => form.prompt,
-          setPrompt: (prompt) => (form.prompt = prompt),
-        },
-        25,
-      );
-      draft.stopEditing();
-      draft.lastSingleModel = null;
-    }
     const notes: string[] = [];
     if (usedCachedPresentationAt !== null) {
       const ageMinutes = Math.max(0, Math.floor((Date.now() - usedCachedPresentationAt) / 60_000));
@@ -8377,12 +7553,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
         `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`,
       );
     }
-    if (reuse.sequence) {
-      notes.push(sequenceReuseNote(reuse.sequence.clips.length, reuse.sequence.lossy));
-      if (reuse.sequence.raised > 0) {
-        notes.push(sequenceReuseClampNote(modelDisplayNameForId(form.model, reuseModels)));
-      }
-    } else if (notes.length === 0) {
+    if (notes.length === 0) {
       notes.push("Prompt settings restored");
     }
     if (sourceRestoreNotice) notes.push(sourceRestoreNotice);
@@ -11622,7 +10793,6 @@ onMounted(async () => {
     }
   }
   if (unmounted) return;
-  recoverMobileSequence();
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
   hostProbeTimer = setInterval(probeHosts, 10_000);
@@ -11662,12 +10832,6 @@ onBeforeUnmount(() => {
   }
   preparationGuard.invalidate();
   submissionAttempts.invalidate();
-  sequenceSubmissionGuard.invalidate();
-  const sequenceCancellation = sequenceCancellationRequest;
-  sequenceCancellationRequest = null;
-  if (sequenceCancellation) {
-    void confirmCancellation(sequenceCancellation).catch(() => {});
-  }
   submissionUiId += 1;
   recoveryRetryId += 1;
   expansionPullRequestId += 1;
@@ -11725,7 +10889,6 @@ onBeforeUnmount(() => {
   galleryGridResizeObserver = null;
   if (galleryWindowFrame !== null) cancelAnimationFrame(galleryWindowFrame);
   galleryWindowFrame = null;
-  stopSequenceTransport();
   for (const watch of durableGenerationWatches.values()) watch.stop();
   durableGenerationWatches.clear();
   durableGenerationWatchRoutes.clear();
@@ -11749,23 +10912,10 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
       label: activityRowQueuePaused(row) ? "Resume" : "Pause",
     });
   }
-  if (row.print) {
-    if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
-      actions.push({ id: "retry", label: "Retry" });
-    }
-    if (!row.print.cancelling) {
-      actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
-    }
-    return actions;
+  if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
+    actions.push({ id: "retry", label: "Retry" });
   }
-  if (!row.sequence) return actions;
-  if (row.sequence.actions.includes("resume")) {
-    actions.push({ id: "resume", label: "Resume" });
-  }
-  if (row.sequence.actions.includes("delete")) {
-    actions.push({ id: "dismiss", label: "Dismiss" });
-  }
-  if (row.sequence.actions.includes("cancel")) {
+  if (!row.print.cancelling) {
     actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
   }
   return actions;
@@ -11776,15 +10926,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     void setActivityJobPaused(row, action === "queue-pause");
     return;
   }
-  if (row.print) {
-    if (action === "retry") void retryHeldGeneration(row.print);
-    if (action === "cancel") void cancelGeneration(row.print);
-    return;
-  }
-  if (!row.sequence) return;
-  if (action === "cancel") void cancelMobileSequence();
-  if (action === "resume") void resumeMobileSequence();
-  if (action === "dismiss") void dismissMobileSequence();
+  if (action === "retry") void retryHeldGeneration(row.print);
+  if (action === "cancel") void cancelGeneration(row.print);
 }
 </script>
 
@@ -11956,25 +11099,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ routingHint }}
           </p>
-          <!-- Output is a FIELD of the Create form, not a mode pair pinned
-               above it: One shot and Sequence share this whole stack. -->
-          <div class="mobile-output-mode" data-test="mobile-output-mode">
-            <span class="mobile-output-mode-label">Output</span>
-            <SegmentedControl
-              :model-value="draft.output"
-              :options="OUTPUT_OPTIONS"
-              label="Output"
-              @update:model-value="setOutputMode"
-            />
-            <p v-if="isSequence" class="mobile-output-mode-hint">a sequence renders one timeline</p>
-          </div>
           <label class="field">
-            <span>{{ isSequence ? "Video model" : "Model" }}</span>
-            <!-- Keyed on the output: the option universe changes wholesale
-                 between One shot and Sequence, and a patched-in-place select
-                 can keep the previous mode's selection highlighted. -->
+            <span>Model</span>
             <select
-              :key="`model-${draft.output}`"
               v-model="form.model"
               class="control"
               :disabled="loadingModels || pickerModels.length === 0"
@@ -12022,9 +11149,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             </button>
           </div>
 
-          <!-- Title and File under sit ABOVE the One shot / Sequence branch:
-               both outputs land exactly one gallery print, and a sequence's
-               stitched print carries the same name and the same filing. -->
           <label class="field">
             <span>Title</span>
             <input
@@ -12055,7 +11179,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             :model="form.model"
             :extension="form.outputFormat"
             :batch-size="effectiveBatchSize"
-            :output-kind="isSequence ? 'sequence' : 'print'"
           />
           <!-- Persistent inline, never a toast: iPhone has no transient
                chrome, and an outcome the user did not choose has to stay
@@ -12091,542 +11214,482 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             </button>
           </div>
 
-          <template v-if="isSequence">
-            <div
-              v-if="sequenceModels.length === 0 && !selectedModelCanSequence"
-              class="mobile-sequence-empty"
-              data-test="mobile-sequence-empty"
-            >
-              <strong>Sequences need a video model</strong>
-              <p>
-                Pull a chain-capable LTX Video or distilled LTX-2 checkpoint on
-                {{ modelScopeLabel }}.
+          <label class="field">
+            <span>Prompt</span>
+            <textarea
+              id="mobile-prompt"
+              v-model="form.prompt"
+              class="control"
+              :placeholder="promptFieldPlaceholder"
+              @input="onPromptAuthored(($event.target as HTMLTextAreaElement).value)"
+            />
+          </label>
+          <MobileStyleChips v-model="form.stylePreset" />
+          <MobilePromptTools
+            v-if="selectedTarget"
+            :form="form"
+            :model="selectedGenerationModel"
+            :target="selectedTarget"
+            :running="expansionRunning"
+            :can-undo="quickExpansionOriginal !== null || remixUndo !== null"
+            :blocked="!!preparedBatch || !!remixReview"
+            :models="generationModels"
+            :remix-source="remixSource"
+            :remix-dimensions="remixDimensions"
+            :task="currentExpansionTask"
+            :blocked-reason="promptTransformBlocked"
+            @expand="expandForCurrentBatch()"
+            @remix="remixCurrent()"
+            @undo="undoPromptPreparation"
+            @update:remix-source="remixSource = $event"
+            @update:remix-dimensions="remixDimensions = $event"
+          />
+          <div
+            v-if="quickStaleReasons.length"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-quick-expansion-stale"
+          >
+            <div class="mobile-generate-validation-copy">
+              <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
+              <p v-if="promptTransformBlocked" data-test="mobile-quick-transform-blocked">
+                {{ promptTransformBlocked }}
               </p>
               <button
-                class="secondary-button"
+                class="mobile-error-copy"
                 type="button"
-                data-test="mobile-sequence-browse"
-                @click="browseSequenceModels"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyQuickExpansionError"
               >
-                Browse video models
+                <svg
+                  width="17"
+                  height="17"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="8" y="8" width="11" height="11" rx="2" />
+                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                </svg>
               </button>
             </div>
-            <MobileSequenceComposer
-              v-else
-              :selected-model="selectedGenerationModel"
+            <div class="mobile-generate-validation-actions">
+              <button
+                class="primary-button mobile-touch-action"
+                type="button"
+                data-test="mobile-reexpand-and-develop"
+                :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
+                @click="recoverQuickPromptTransform"
+              >
+                {{ appliedRemix ? "Re-remix" : "Re-expand and Develop" }}
+              </button>
+              <button
+                class="secondary-button mobile-touch-action"
+                type="button"
+                data-test="mobile-develop-expanded-anyway"
+                :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
+                @click="developExpandedAnyway"
+              >
+                Develop anyway
+              </button>
+              <button
+                class="secondary-button mobile-touch-action"
+                type="button"
+                @click="undoPromptPreparation"
+              >
+                Restore original
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="expansionError && !expansionMissingModel && !preparedBatch && !remixReview"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-expansion-error"
+          >
+            <div class="mobile-generate-validation-copy">
+              <p>{{ expansionError }}</p>
+              <button
+                class="mobile-error-copy"
+                type="button"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyMobileError(expansionError)"
+              >
+                <svg
+                  width="17"
+                  height="17"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="8" y="8" width="11" height="11" rx="2" />
+                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <MobileExpansionPullStatus
+            v-if="expansionMissingModel && expansionPullStatus"
+            :model="expansionMissingModel.model"
+            :host-label="expansionMissingModel.route.label"
+            :error="expansionError"
+            :status="expansionPullStatus"
+            :eta-seconds="expansionPullEtaSeconds"
+            :models="generationModels"
+            @pull="pullExpansionModel"
+            @retry-expansion="retryExpansionAfterPull"
+          />
+          <MobileRemixReview
+            v-if="remixReview"
+            :source-kind="remixReview.sourceKind"
+            :source-prompt="remixReview.sourcePrompt"
+            :variants="remixReview.variants"
+            :host-label="remixReview.route.label"
+            :stale-reasons="remixStaleReasons"
+            :running="expansionRunning"
+            :error="expansionMissingModel ? '' : expansionError"
+            :blocked-reason="promptTransformBlocked"
+            @toggle="toggleRemixVariant"
+            @edit="editRemixVariant"
+            @reremix="remixCurrent()"
+            @apply="applyRemixSelection"
+            @restore="restoreRemixSource"
+            @discard="discardRemixReview"
+          />
+          <MobilePreparedExpansionBatch
+            v-if="preparedBatch"
+            :batch="preparedBatch"
+            :stale-reasons="preparedStaleReasons"
+            :preparing="expansionRunning"
+            :error="expansionMissingModel ? '' : expansionError"
+            :submitting="preparedSubmitting"
+            :blocked-reason="promptTransformBlocked"
+            @edit="editPreparedPrompt"
+            @remove="removePreparedPrompt"
+            @collapse="collapsePreparedBatch"
+            @regenerate="replacePreparedPrompts(true)"
+            @refresh="replacePreparedPrompts(false)"
+            @discard="discardPreparedBatch"
+            @generate="generate"
+            @cancel="cancelGenerationSubmission"
+          />
+          <p
+            v-if="mobileMediaBudgetError"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-media-budget-error"
+          >
+            {{ mobileMediaBudgetError }}
+          </p>
+          <p
+            v-if="sourceConditioningError"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-source-conditioning-gate"
+          >
+            {{ sourceConditioningError }}
+          </p>
+          <p
+            v-if="h3AuthoringError"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-h3-authoring-error"
+          >
+            {{ h3AuthoringError }}
+          </p>
+
+          <!-- Source media in the primary form: the model dictates whether
+               (and how) it renders, exactly like resolutions. H3 FL2VA
+               boundaries render through the same component. -->
+          <details
+            v-if="form.model && showSourceMedia"
+            class="mobile-native-disclosure"
+            :open="
+              !!(
+                form.sourceImage ||
+                form.endFrame ||
+                form.controlImage ||
+                form.imageAttachments.length
+              ) ||
+              caps.requiresSourceImage ||
+              caps.sourceImageMode !== 'single'
+            "
+            data-test="mobile-source-disclosure"
+          >
+            <summary>
+              <span>{{ sourceSectionTitle }}</span>
+              <small>{{ sourceSectionSummary }}</small>
+            </summary>
+            <MobileSourceControls
               :form="form"
-              :upscalers="upscalers"
-              :chain-limits="chainLimits"
+              :model="selectedGenerationModel"
               :target="generationTarget"
               :gallery-sources="sourceGalleryHosts"
-              :shared="sequenceParams(form, selectedGenerationModel)"
-              :fps="form.fps"
-              :submitting="sequenceStarting"
-              :error="sequenceError"
-              :settings-summary="sequenceSettingsSummary"
+              :control-models="controlModels"
+              :upscalers="upscalers"
+              @validity-change="sourceValid = $event"
+            />
+          </details>
+
+          <!-- Identity photo: its own conditioning partition, not source
+               media, so it sits beside the source wells rather than inside
+               them and is never fitted to the canvas. Mounted only for a
+               checkpoint that advertises identity support; a photo staged on
+               a checkpoint that loses it is parked, not discarded. -->
+          <MobileIdentityWell v-if="showIdentity" :form="form" />
+
+          <MobileSharedParams
+            :form="form"
+            :model="selectedGenerationModel"
+            :duration-model="selectedGenerationModel"
+            :last-seed="generation.lastSeedUsed"
+            :disabled="loadingModels"
+            :steps-error="stepsError"
+            :guidance-error="guidanceError"
+            :canvas-intent="canvasIntent"
+            @resolution-validity="resolutionValid = $event"
+            @seed-validity="seedValid = $event"
+            @canvas-intent="setCanvasIntent"
+          />
+
+          <MobileBatchControl :form="form" :selected-model="selectedGenerationModel" />
+
+          <label
+            v-if="caps.offersAudioControl"
+            class="mobile-generate-toggle-row"
+            data-test="mobile-generate-audio-control"
+          >
+            <span>
+              <strong>Generate audio</strong>
+              <small>Include a synchronized soundtrack when the model supports it.</small>
+            </span>
+            <input
+              v-model="form.enableAudio"
+              type="checkbox"
+              :disabled="!generatedAudioSupported"
+              data-test="mobile-enable-audio"
+            />
+          </label>
+          <p v-if="generatedAudioUnavailableReason" class="mobile-generate-validation">
+            {{ generatedAudioUnavailableReason }}
+          </p>
+
+          <div class="mobile-advanced-row">
+            <button
+              class="mobile-advanced-trigger"
+              type="button"
+              data-test="mobile-open-advanced"
+              @click="openAdvancedSheet"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+              <span>Advanced (sampler, LoRA, format)</span>
+              <span
+                v-if="advancedActiveCount > 0"
+                class="mobile-advanced-trigger-badge"
+                data-test="mobile-advanced-trigger-count"
+                >{{ advancedActiveCount }}</span
+              >
+            </button>
+          </div>
+
+          <MobileAdvancedSheet
+            :open="advancedSheetOpen"
+            :count="advancedActiveCount"
+            @close="closeAdvancedSheet"
+            @reset="resetAdvancedSettings"
+          >
+            <MobileGenerateParameters
+              :form="form"
+              :target="generationTarget"
+              :upscalers="upscalers"
+              :selected-model="selectedGenerationModel"
+              :control-adapters="controlAdapters"
               :camera-controls="cameraControls"
               :camera-controls-loaded="cameraControlsLoaded"
               :camera-unsupported-reason="cameraUnsupportedReason"
-              @submit="submitMobileSequence"
-              @cancel="cancelMobileSequenceSubmission"
-            >
-              <template #settings>
-                <MobileSharedParams
-                  :form="form"
-                  :model="selectedGenerationModel"
-                  :last-seed="generation.lastSeedUsed"
-                  :disabled="loadingModels"
-                  show-fps
-                  :steps-error="stepsError"
-                  :guidance-error="guidanceError"
-                  :canvas-intent="canvasIntent"
-                  @resolution-validity="resolutionValid = $event"
-                  @seed-validity="seedValid = $event"
-                  @canvas-intent="setCanvasIntent"
-                />
-              </template>
-            </MobileSequenceComposer>
-          </template>
-          <template v-else>
-            <label class="field">
-              <span>Prompt</span>
-              <textarea
-                id="mobile-prompt"
-                v-model="form.prompt"
-                class="control"
-                :placeholder="promptFieldPlaceholder"
-                @input="onPromptAuthored(($event.target as HTMLTextAreaElement).value)"
-              />
-            </label>
-            <MobileStyleChips v-model="form.stylePreset" />
-            <MobilePromptTools
-              v-if="selectedTarget"
-              :form="form"
-              :model="selectedGenerationModel"
-              :target="selectedTarget"
-              :running="expansionRunning"
-              :can-undo="quickExpansionOriginal !== null || remixUndo !== null"
-              :blocked="!!preparedBatch || !!remixReview"
-              :models="generationModels"
-              :remix-source="remixSource"
-              :remix-dimensions="remixDimensions"
-              :task="currentExpansionTask"
-              :blocked-reason="promptTransformBlocked"
-              @expand="expandForCurrentBatch()"
-              @remix="remixCurrent()"
-              @undo="undoPromptPreparation"
-              @update:remix-source="remixSource = $event"
-              @update:remix-dimensions="remixDimensions = $event"
+              @validity-change="parameterValid = $event"
             />
-            <div
-              v-if="quickStaleReasons.length"
-              class="mobile-generate-validation"
-              role="alert"
-              data-test="mobile-quick-expansion-stale"
-            >
-              <div class="mobile-generate-validation-copy">
-                <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
-                <p v-if="promptTransformBlocked" data-test="mobile-quick-transform-blocked">
-                  {{ promptTransformBlocked }}
-                </p>
-                <button
-                  class="mobile-error-copy"
-                  type="button"
-                  aria-label="Copy error message"
-                  title="Copy error message"
-                  @click="copyQuickExpansionError"
-                >
-                  <svg
-                    width="17"
-                    height="17"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.7"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <rect x="8" y="8" width="11" height="11" rx="2" />
-                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
-                  </svg>
-                </button>
-              </div>
-              <div class="mobile-generate-validation-actions">
-                <button
-                  class="primary-button mobile-touch-action"
-                  type="button"
-                  data-test="mobile-reexpand-and-develop"
-                  :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
-                  @click="recoverQuickPromptTransform"
-                >
-                  {{ appliedRemix ? "Re-remix" : "Re-expand and Develop" }}
-                </button>
-                <button
-                  class="secondary-button mobile-touch-action"
-                  type="button"
-                  data-test="mobile-develop-expanded-anyway"
-                  :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
-                  @click="developExpandedAnyway"
-                >
-                  Develop anyway
-                </button>
-                <button
-                  class="secondary-button mobile-touch-action"
-                  type="button"
-                  @click="undoPromptPreparation"
-                >
-                  Restore original
-                </button>
-              </div>
-            </div>
-            <div
-              v-if="expansionError && !expansionMissingModel && !preparedBatch && !remixReview"
-              class="mobile-generate-validation"
-              role="alert"
-              data-test="mobile-expansion-error"
-            >
-              <div class="mobile-generate-validation-copy">
-                <p>{{ expansionError }}</p>
-                <button
-                  class="mobile-error-copy"
-                  type="button"
-                  aria-label="Copy error message"
-                  title="Copy error message"
-                  @click="copyMobileError(expansionError)"
-                >
-                  <svg
-                    width="17"
-                    height="17"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.7"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <rect x="8" y="8" width="11" height="11" rx="2" />
-                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <MobileExpansionPullStatus
-              v-if="expansionMissingModel && expansionPullStatus"
-              :model="expansionMissingModel.model"
-              :host-label="expansionMissingModel.route.label"
-              :error="expansionError"
-              :status="expansionPullStatus"
-              :eta-seconds="expansionPullEtaSeconds"
-              :models="generationModels"
-              @pull="pullExpansionModel"
-              @retry-expansion="retryExpansionAfterPull"
-            />
-            <MobileRemixReview
-              v-if="remixReview"
-              :source-kind="remixReview.sourceKind"
-              :source-prompt="remixReview.sourcePrompt"
-              :variants="remixReview.variants"
-              :host-label="remixReview.route.label"
-              :stale-reasons="remixStaleReasons"
-              :running="expansionRunning"
-              :error="expansionMissingModel ? '' : expansionError"
-              :blocked-reason="promptTransformBlocked"
-              @toggle="toggleRemixVariant"
-              @edit="editRemixVariant"
-              @reremix="remixCurrent()"
-              @apply="applyRemixSelection"
-              @restore="restoreRemixSource"
-              @discard="discardRemixReview"
-            />
-            <MobilePreparedExpansionBatch
-              v-if="preparedBatch"
-              :batch="preparedBatch"
-              :stale-reasons="preparedStaleReasons"
-              :preparing="expansionRunning"
-              :error="expansionMissingModel ? '' : expansionError"
-              :submitting="preparedSubmitting"
-              :blocked-reason="promptTransformBlocked"
-              @edit="editPreparedPrompt"
-              @remove="removePreparedPrompt"
-              @collapse="collapsePreparedBatch"
-              @regenerate="replacePreparedPrompts(true)"
-              @refresh="replacePreparedPrompts(false)"
-              @discard="discardPreparedBatch"
-              @generate="generate"
-              @cancel="cancelGenerationSubmission"
-            />
-            <p
-              v-if="mobileMediaBudgetError"
-              class="mobile-generate-validation"
-              role="alert"
-              data-test="mobile-media-budget-error"
-            >
-              {{ mobileMediaBudgetError }}
-            </p>
-            <p
-              v-if="sourceConditioningError"
-              class="mobile-generate-validation"
-              role="alert"
-              data-test="mobile-source-conditioning-gate"
-            >
-              {{ sourceConditioningError }}
-            </p>
-            <p
-              v-if="h3AuthoringError"
-              class="mobile-generate-validation"
-              role="alert"
-              data-test="mobile-h3-authoring-error"
-            >
-              {{ h3AuthoringError }}
-            </p>
-
-            <!-- Source media in the primary form: the model dictates whether
-                 (and how) it renders, exactly like resolutions. H3 FL2VA
-                 boundaries render through the same component. -->
-            <details
-              v-if="form.model && showSourceMedia"
-              class="mobile-native-disclosure"
-              :open="
-                !!(
-                  form.sourceImage ||
-                  form.endFrame ||
-                  form.controlImage ||
-                  form.imageAttachments.length
-                ) ||
-                caps.requiresSourceImage ||
-                caps.sourceImageMode !== 'single'
-              "
-              data-test="mobile-source-disclosure"
-            >
-              <summary>
-                <span>{{ sourceSectionTitle }}</span>
-                <small>{{ sourceSectionSummary }}</small>
-              </summary>
-              <MobileSourceControls
-                :form="form"
-                :model="selectedGenerationModel"
-                :target="generationTarget"
-                :gallery-sources="sourceGalleryHosts"
-                :control-models="controlModels"
-                :upscalers="upscalers"
-                @validity-change="sourceValid = $event"
-              />
-            </details>
-
-            <!-- Identity photo: its own conditioning partition, not source
-                 media, so it sits beside the source wells rather than inside
-                 them and is never fitted to the canvas. Mounted only for a
-                 checkpoint that advertises identity support; a photo staged on
-                 a checkpoint that loses it is parked, not discarded. -->
-            <MobileIdentityWell v-if="showIdentity" :form="form" />
-
-            <MobileSharedParams
-              :form="form"
-              :model="selectedGenerationModel"
-              :duration-model="selectedGenerationModel"
-              :last-seed="generation.lastSeedUsed"
-              :disabled="loadingModels"
-              :steps-error="stepsError"
-              :guidance-error="guidanceError"
-              :canvas-intent="canvasIntent"
-              @resolution-validity="resolutionValid = $event"
-              @seed-validity="seedValid = $event"
-              @canvas-intent="setCanvasIntent"
-            />
-
-            <MobileBatchControl :form="form" :selected-model="selectedGenerationModel" />
-
             <label
-              v-if="caps.offersAudioControl"
-              class="mobile-generate-toggle-row"
-              data-test="mobile-generate-audio-control"
+              v-if="form.model && (caps.supportsNegativePrompt || form.negativePrompt.trim())"
+              class="field"
             >
-              <span>
-                <strong>Generate audio</strong>
-                <small>Include a synchronized soundtrack when the model supports it.</small>
-              </span>
+              <span>Negative prompt</span>
               <input
-                v-model="form.enableAudio"
-                type="checkbox"
-                :disabled="!generatedAudioSupported"
-                data-test="mobile-enable-audio"
+                v-model="form.negativePrompt"
+                class="control"
+                placeholder="Optional"
+                :disabled="!caps.supportsNegativePrompt"
               />
+              <small
+                v-if="!caps.supportsNegativePrompt"
+                data-test="mobile-negative-unavailable-hint"
+              >
+                Saved for reuse, but this distilled recipe fixes CFG and does not use
+                negative-prompt guidance. Choose a Dev checkpoint with Auto or a guided pipeline to
+                enable it.
+              </small>
             </label>
-            <p v-if="generatedAudioUnavailableReason" class="mobile-generate-validation">
-              {{ generatedAudioUnavailableReason }}
-            </p>
-
-            <div class="mobile-advanced-row">
-              <button
-                class="mobile-advanced-trigger"
-                type="button"
-                data-test="mobile-open-advanced"
-                @click="openAdvancedSheet"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
-                <span>Advanced (sampler, LoRA, format)</span>
-                <span
-                  v-if="advancedActiveCount > 0"
-                  class="mobile-advanced-trigger-badge"
-                  data-test="mobile-advanced-trigger-count"
-                  >{{ advancedActiveCount }}</span
-                >
-              </button>
-            </div>
-
-            <MobileAdvancedSheet
-              :open="advancedSheetOpen"
-              :count="advancedActiveCount"
-              @close="closeAdvancedSheet"
-              @reset="resetAdvancedSettings"
-            >
-              <MobileGenerateParameters
-                :form="form"
-                :target="generationTarget"
-                :upscalers="upscalers"
-                :selected-model="selectedGenerationModel"
-                :control-adapters="controlAdapters"
-                :camera-controls="cameraControls"
-                :camera-controls-loaded="cameraControlsLoaded"
-                :camera-unsupported-reason="cameraUnsupportedReason"
-                @validity-change="parameterValid = $event"
-              />
-              <label
-                v-if="form.model && (caps.supportsNegativePrompt || form.negativePrompt.trim())"
-                class="field"
-              >
-                <span>Negative prompt</span>
-                <input
-                  v-model="form.negativePrompt"
-                  class="control"
-                  placeholder="Optional"
-                  :disabled="!caps.supportsNegativePrompt"
-                />
-                <small
-                  v-if="!caps.supportsNegativePrompt"
-                  data-test="mobile-negative-unavailable-hint"
-                >
-                  Saved for reuse, but this distilled recipe fixes CFG and does not use
-                  negative-prompt guidance. Choose a Dev checkpoint with Auto or a guided pipeline
-                  to enable it.
-                </small>
-              </label>
-              <MobileLoraControls
-                v-if="generationTarget"
-                :form="form"
-                :target="generationTarget"
-                :model="selectedGenerationModel"
-                @append-word="appendPromptWord"
-              />
-              <label class="field"
-                ><span>Format</span
-                ><select v-model="form.outputFormat" class="control">
-                  <option v-for="format in outputFormats" :key="format" :value="format">
-                    {{ format.toUpperCase() }}
-                  </option>
-                </select></label
-              >
-            </MobileAdvancedSheet>
-
-            <MobileTemplates
+            <MobileLoraControls
+              v-if="generationTarget"
               :form="form"
-              :host-id="selectedHost.id"
-              :models="generationModels"
-              @load="loadTemplate"
+              :target="generationTarget"
+              :model="selectedGenerationModel"
+              @append-word="appendPromptWord"
             />
+            <label class="field"
+              ><span>Format</span
+              ><select v-model="form.outputFormat" class="control">
+                <option v-for="format in outputFormats" :key="format" :value="format">
+                  {{ format.toUpperCase() }}
+                </option>
+              </select></label
+            >
+          </MobileAdvancedSheet>
 
-            <!-- Live develop bed: once the host streams latent previews the
-               active print literally forms here — the preview's blur tightens
-               with denoise progress while the Develop grain thins over it.
-               Without previews the status line below stands alone, and the
-               grain's rAF loop stays parked (nothing mounts), which keeps the
-               WebKit compositor free during model load. -->
-            <div
-              v-if="
-                selectedQueueRender?.preview || (activeGeneration && activeGeneration.previewUrl)
-              "
-              class="mobile-develop-bed"
-              data-test="mobile-develop-bed"
-              aria-hidden="true"
+          <MobileTemplates
+            :form="form"
+            :host-id="selectedHost.id"
+            :models="generationModels"
+            @load="loadTemplate"
+          />
+
+          <!-- Live develop bed: once the host streams latent previews the
+             active print literally forms here — the preview's blur tightens
+             with denoise progress while the Develop grain thins over it.
+             Without previews the status line below stands alone, and the
+             grain's rAF loop stays parked (nothing mounts), which keeps the
+             WebKit compositor free during model load. -->
+          <div
+            v-if="selectedQueueRender?.preview || (activeGeneration && activeGeneration.previewUrl)"
+            class="mobile-develop-bed"
+            data-test="mobile-develop-bed"
+            aria-hidden="true"
+            :style="{
+              aspectRatio: `${selectedQueueRender?.width ?? activeGeneration?.width ?? 1} / ${selectedQueueRender?.height ?? activeGeneration?.height ?? 1}`,
+              // The 55vh height cap rides the width axis (see mobile.css) so a
+              // portrait bed shrinks instead of distorting its layered media.
+              '--bed-ar': `${(selectedQueueRender?.width ?? activeGeneration?.width ?? 1) / Math.max(1, selectedQueueRender?.height ?? activeGeneration?.height ?? 1)}`,
+            }"
+          >
+            <img
+              class="mobile-develop-preview"
+              data-test="mobile-develop-preview"
+              :src="selectedQueuePreviewSrc ?? activeGeneration?.previewUrl ?? ''"
+              alt=""
               :style="{
-                aspectRatio: `${selectedQueueRender?.width ?? activeGeneration?.width ?? 1} / ${selectedQueueRender?.height ?? activeGeneration?.height ?? 1}`,
-                // The 55vh height cap rides the width axis (see mobile.css) so a
-                // portrait bed shrinks instead of distorting its layered media.
-                '--bed-ar': `${(selectedQueueRender?.width ?? activeGeneration?.width ?? 1) / Math.max(1, selectedQueueRender?.height ?? activeGeneration?.height ?? 1)}`,
+                filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,
               }"
-            >
-              <img
-                class="mobile-develop-preview"
-                data-test="mobile-develop-preview"
-                :src="selectedQueuePreviewSrc ?? activeGeneration?.previewUrl ?? ''"
-                alt=""
-                :style="{
-                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,
-                }"
-              />
-              <DevelopCanvas
-                :seed="activeGeneration?.visualSeed ?? 0"
-                :progress="
-                  selectedQueuePreviewFraction ??
-                  (activeGeneration ? jobProgress(activeGeneration) : 0)
-                "
-                :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
-                class="mobile-develop-grain"
-                :style="{
-                  opacity: String(
-                    Math.max(
-                      0.18,
-                      1 -
-                        (selectedQueuePreviewFraction ??
-                          (activeGeneration ? jobProgress(activeGeneration) : 0)) *
-                          0.9,
-                    ),
+            />
+            <DevelopCanvas
+              :seed="activeGeneration?.visualSeed ?? 0"
+              :progress="
+                selectedQueuePreviewFraction ??
+                (activeGeneration ? jobProgress(activeGeneration) : 0)
+              "
+              :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
+              class="mobile-develop-grain"
+              :style="{
+                opacity: String(
+                  Math.max(
+                    0.18,
+                    1 -
+                      (selectedQueuePreviewFraction ??
+                        (activeGeneration ? jobProgress(activeGeneration) : 0)) *
+                        0.9,
                   ),
-                }"
-              />
-            </div>
-            <div v-if="generationStatusIsError" data-test="mobile-generation-summary">
-              <ErrorNotice :message="generationStatus" data-test="mobile-generation-error" />
-            </div>
-            <div v-else class="status-line" data-test="mobile-generation-summary">
-              {{ generationStatus }}
-            </div>
-            <ErrorNotice
-              v-if="resultPreviewError"
-              class="result-preview-error"
-              :message="resultPreviewError"
+                ),
+              }"
+            />
+          </div>
+          <div v-if="generationStatusIsError" data-test="mobile-generation-summary">
+            <ErrorNotice :message="generationStatus" data-test="mobile-generation-error" />
+          </div>
+          <div v-else class="status-line" data-test="mobile-generation-summary">
+            {{ generationStatus }}
+          </div>
+          <ErrorNotice
+            v-if="resultPreviewError"
+            class="result-preview-error"
+            :message="resultPreviewError"
+          >
+            <template #actions>
+              <button class="secondary-button" type="button" @click="retryGeneratedPreview">
+                Try preview again
+              </button>
+            </template>
+          </ErrorNotice>
+          <!-- 3-D lands first: a mesh carries neither frames nor samples,
+               so any wider arm above it would draw glTF into an <img>. -->
+          <figure
+            v-if="resultIsMesh && resultMeshSrc"
+            class="result-mesh"
+            data-test="mobile-generated-mesh"
+          >
+            <MeshViewer
+              :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+              class="result-media"
+              :src="resultMeshSrc"
+              :poster="resultPoster"
+              :alt="latestResultJob?.prompt || 'Generated 3-D print'"
+              auto-rotate
+              expandable
+              @ready="generatedMediaReady"
+              @fail="recoverGeneratedMedia"
+            />
+            <figcaption
+              v-if="resultMeshStats"
+              class="status-line"
+              data-test="mobile-generated-mesh-stats"
             >
-              <template #actions>
-                <button class="secondary-button" type="button" @click="retryGeneratedPreview">
-                  Try preview again
-                </button>
-              </template>
-            </ErrorNotice>
-            <!-- 3-D lands first: a mesh carries neither frames nor samples,
-                 so any wider arm above it would draw glTF into an <img>. -->
-            <figure
-              v-if="resultIsMesh && resultMeshSrc"
-              class="result-mesh"
-              data-test="mobile-generated-mesh"
-            >
-              <MeshViewer
-                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-                class="result-media"
-                :src="resultMeshSrc"
-                :poster="resultPoster"
-                :alt="latestResultJob?.prompt || 'Generated 3-D print'"
-                auto-rotate
-                expandable
-                @ready="generatedMediaReady"
-                @fail="recoverGeneratedMedia"
-              />
-              <figcaption
-                v-if="resultMeshStats"
-                class="status-line"
-                data-test="mobile-generated-mesh-stats"
-              >
-                {{ resultMeshStats }}
-              </figcaption>
-            </figure>
-            <video
-              v-else-if="resultUrl && resultIsVideo"
+              {{ resultMeshStats }}
+            </figcaption>
+          </figure>
+          <video
+            v-else-if="resultUrl && resultIsVideo"
+            :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+            class="result-media"
+            :src="resultUrl"
+            controls
+            playsinline
+            preload="metadata"
+            @play="renewGeneratedResult(false)"
+            @loadedmetadata="generatedMediaReady"
+            @error="recoverGeneratedMedia"
+          />
+          <button
+            v-else-if="resultUrl"
+            class="result-media-button"
+            type="button"
+            data-test="mobile-generated-result"
+            aria-label="Expand generated print"
+            @click="generatedViewerOpen = true"
+          >
+            <img
               :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
               class="result-media"
               :src="resultUrl"
-              controls
-              playsinline
-              preload="metadata"
-              @play="renewGeneratedResult(false)"
-              @loadedmetadata="generatedMediaReady"
+              alt="Generated print"
+              draggable="false"
+              @load="generatedMediaReady"
               @error="recoverGeneratedMedia"
+              @contextmenu.prevent
             />
-            <button
-              v-else-if="resultUrl"
-              class="result-media-button"
-              type="button"
-              data-test="mobile-generated-result"
-              aria-label="Expand generated print"
-              @click="generatedViewerOpen = true"
-            >
-              <img
-                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-                class="result-media"
-                :src="resultUrl"
-                alt="Generated print"
-                draggable="false"
-                @load="generatedMediaReady"
-                @error="recoverGeneratedMedia"
-                @contextmenu.prevent
-              />
-            </button>
-          </template>
+          </button>
 
-          <!-- ONE queue for both outputs: single prints and durable sequences
-               land in the same list (mockup 1c). -->
+          <!-- ONE queue: this session's prints and the machines' own live
+               work land in the same list (mockup 1c). -->
           <section
             v-if="mobileActivityRows.length"
             class="mobile-generation-queue"
@@ -12642,20 +11705,15 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 <div v-if="entry.kind === 'local'" class="mobile-generation-row">
                   <SwipeActionRow
                     :actions="mobileQueueRowActions(entry.local)"
-                    :label="
-                      entry.local.print
-                        ? entry.local.print.prompt
-                        : modelLabel(entry.local.sequence?.model ?? '')
-                    "
+                    :label="entry.local.print.prompt"
                     :disabled="
-                      entry.local.print?.cancelling === true ||
+                      entry.local.print.cancelling === true ||
                       queueControlHostIds.has(activityRowHostId(entry.local))
                     "
-                    :data-test="entry.local.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
+                    data-test="mobile-generation-job"
                     @act="onMobileQueueRowAction(entry.local, $event)"
                   >
                     <MobileGenerationQueueCard
-                      v-if="entry.local.print"
                       :title="entry.local.print.prompt"
                       :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
                       :status="activityRowStatus(entry.local)"
@@ -12664,56 +11722,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       :aria-label="entry.local.print.prompt"
                       @activate="selectMobilePrint(entry.local.print)"
                     />
-                    <div
-                      v-if="entry.local.sequence"
-                      class="mobile-generation-job"
-                      role="button"
-                      tabindex="0"
-                      @click="selectCurrentMobileSequence()"
-                      @keydown.enter.prevent="selectCurrentMobileSequence()"
-                    >
-                      <div class="mobile-generation-job-copy">
-                        <p>
-                          {{ modelLabel(entry.local.sequence.model) || "Sequence" }} ·
-                          {{ entry.local.sequence.stageCount }} clips
-                        </p>
-                        <span>
-                          {{ entry.local.sequence.phase ?? entry.local.sequence.state }} · clip
-                          {{
-                            Math.min(
-                              entry.local.sequence.currentStage + 1,
-                              entry.local.sequence.stageCount,
-                            )
-                          }}/{{ entry.local.sequence.stageCount }}
-                          <template v-if="sequenceRowProgress !== null">
-                            · {{ sequenceRowProgress }}%
-                          </template>
-                        </span>
-                        <button
-                          v-if="entry.local.sequence.error"
-                          type="button"
-                          class="mobile-sequence-row-error"
-                          :class="{
-                            'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
-                              entry.local.key,
-                            ),
-                          }"
-                          data-test="mobile-sequence-error-disclosure"
-                          :aria-expanded="expandedQueueFailures.has(entry.local.key)"
-                          @click.stop="toggleQueueFailure(entry.local.key)"
-                        >
-                          <span>{{ entry.local.sequence.error }}</span>
-                          <span aria-hidden="true">
-                            {{ expandedQueueFailures.has(entry.local.key) ? "Less" : "Details" }}
-                          </span>
-                        </button>
-                      </div>
-                      <div class="mobile-generation-job-action">
-                        <span data-test="mobile-sequence-status">
-                          {{ entry.local.sequence.hostLabel }}
-                        </span>
-                      </div>
-                    </div>
                   </SwipeActionRow>
                 </div>
                 <LiveActivityList
@@ -12739,14 +11747,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               </template>
             </div>
           </section>
-          <p
-            v-if="sequenceError && sequenceRoute && !isSequence"
-            class="status-line error-text"
-            role="alert"
-            data-test="mobile-sequence-route-error"
-          >
-            {{ sequenceError }}
-          </p>
         </template>
       </template>
 
@@ -13712,7 +12712,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           ref="catalogView"
           :hosts="connectedHosts"
           :selected-host-id="catalogHostId"
-          :filter-intent="catalogFilterIntent"
           @select-host="selectCatalogHost"
           @models-changed="catalogModelsChanged"
         />
@@ -13720,7 +12719,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     </section>
 
     <div
-      v-if="!settingsOpen && tab === 'generate' && selectedHost && !isSequence && !preparedBatch"
+      v-if="!settingsOpen && tab === 'generate' && selectedHost && !preparedBatch"
       class="mobile-create-action"
       data-test="mobile-create-action"
     >

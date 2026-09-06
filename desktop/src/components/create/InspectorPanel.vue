@@ -10,14 +10,6 @@ import Stepper from "@ui/components/Stepper.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
-import {
-  defaultClipFrames,
-  modelSupportsSequence,
-  sequenceMotionTailFrames,
-} from "@studio/lib/sequence";
-import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import {
   buildRequest,
@@ -33,7 +25,6 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
-import { findInstalledModel } from "../../lib/generateModels";
 import { normalizeTargetHost } from "../../lib/hosts";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
@@ -65,9 +56,7 @@ import {
   resolutionValidationWarning,
 } from "../../lib/generateValidation";
 import { randomSeed } from "../../stores/generation";
-import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
-import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
@@ -76,10 +65,7 @@ import { fileUnderAvailable, matchCollection, type FileUnderState } from "@studi
 import FileUnderGroup from "./FileUnderGroup.vue";
 import { dragWidth } from "../../lib/panelResize";
 import { useStylePicker } from "../../composables/useStylePicker";
-import { modelsForOutputKind } from "../../composables/useCreateOutputKind";
 import AdvancedSettings from "./AdvancedSettings.vue";
-import SequenceAdvancedSettings from "./SequenceAdvancedSettings.vue";
-import SequenceOpeningImageWell from "./SequenceOpeningImageWell.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
 const props = withDefaults(
@@ -90,9 +76,6 @@ const props = withDefaults(
     recent?: MergedPrint[];
     /** Seed of the most recent finished print — powers "lock last seed". */
     lastSeed?: number | null;
-    /** Per-model chain caps for the selected model, when Create has them —
-     * sizes new clips' default frames on the Output switch. */
-    chainLimits?: ChainLimits | null;
     /** Why the canvas holds its current size — the shape resolver's authority. */
     canvasIntent?: CanvasIntent;
   }>(),
@@ -100,7 +83,6 @@ const props = withDefaults(
     tab: "settings",
     recent: () => [],
     lastSeed: null,
-    chainLimits: null,
     canvasIntent: "model-default",
   },
 );
@@ -117,9 +99,7 @@ const emit = defineEmits<{
 }>();
 const durationRoutingRequest = computed(() => buildRequest(props.form));
 
-const formStore = useGenerateFormStore();
 const models = useModelStore();
-const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
 const gallery = useGalleryStore();
@@ -200,9 +180,6 @@ watch(
           );
           props.form.cameraControl = null;
         }
-        for (const clip of draft.clips) {
-          if (!compatible(clip.cameraControl)) clip.cameraControl = null;
-        }
       })
       .catch(() => {
         if (epoch !== controlAdaptersEpoch) return;
@@ -254,20 +231,17 @@ const caps = computed(() =>
 /** The model's image-attachment shape — one shared policy, never a local
  * heuristic. Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
-const sequenceSourceImagesSupported = computed(
-  () => (contractModel.value?.source_image ?? props.form.sourceImageCapability) !== "unsupported",
-);
-const showSourceMedia = computed(() => !isSequence.value && sourcePlan.value.kind !== "none");
+const showSourceMedia = computed(() => sourcePlan.value.kind !== "none");
 /** Identity is capability-gated on positive knowledge only: an unread or
  * absent `supports_identity` renders nothing at all rather than a control for
- * a feature this host does not have. Sequence clips carry no identity slot.
+ * a feature this host does not have.
  *
  * A staged photo PARKS rather than blocking: `buildRequest` keeps it off the
  * wire, `identityConditioningValidationError` reports nothing for a checkpoint
  * that cannot take it, and selecting a qualified model again brings the well
  * back with the photo still in it — the same treatment staged LTX-2 media
  * gets. Web applies the same rule. */
-const showIdentity = computed(() => !isSequence.value && props.form.identitySupported === true);
+const showIdentity = computed(() => props.form.identitySupported === true);
 /* The two doors under the strength slider. Painting a mask belongs to the
  * source well, which alone knows whether this recipe and this attachment can
  * take one, so the well answers and the group only renders the button. */
@@ -343,41 +317,23 @@ function setTargetFaces(raw: string) {
 const targetFacesError = computed(() =>
   meshTargetFacesError(props.form.mesh.targetFaces, meshProfile.value),
 );
-// The sequence opening image is primary-form source media, so — exactly like
-// the one-shot source well — it never contributes to the Advanced badge.
-const advancedCount = computed(() =>
-  isSequence.value
-    ? Number(
-        caps.value.supportsNegativePrompt && draft.clips.some((clip) => clip.negativePrompt.trim()),
-      ) + Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
-    : advancedActiveCount(props.form),
-);
+const advancedCount = computed(() => advancedActiveCount(props.form));
 const showGenerateAudio = computed(() => caps.value.offersAudioControl);
-const generateAudio = computed(() =>
-  isSequence.value ? draft.enableAudio : props.form.enableAudio,
-);
-const audioOutputSupported = computed(() =>
-  isSequence.value
-    ? props.chainLimits?.supports_audio === true
-    : caps.value.supportsAudio && selectedModel.value?.supports_audio !== false,
+const generateAudio = computed(() => props.form.enableAudio);
+const audioOutputSupported = computed(
+  () => caps.value.supportsAudio && selectedModel.value?.supports_audio !== false,
 );
 const audioOutputUnavailableReason = computed(() => {
   if (!showGenerateAudio.value || audioOutputSupported.value) return null;
-  if (isSequence.value) {
-    return props.chainLimits?.supports_audio === false
-      ? "Generated audio is unavailable for this sequence on the selected host."
-      : null;
-  }
   if (selectedModel.value?.supports_audio === false) {
     return "Audio assets are not included with this checkpoint. Video generation remains available.";
   }
   return caps.value.outputDeliveryReason ?? "Generated audio is unavailable for this recipe.";
 });
 function setGenerateAudio(value: boolean) {
-  if (isSequence.value) draft.enableAudio = value;
-  else props.form.enableAudio = value;
+  props.form.enableAudio = value;
 }
-const showLoras = computed(() => caps.value.supportsLora && !isSequence.value);
+const showLoras = computed(() => caps.value.supportsLora);
 /** One card for every clip control the mock groups together. */
 const showClipCard = computed(() => caps.value.supportsVideo);
 const advancedExpanded = ref(false);
@@ -386,18 +342,14 @@ const managingStarters = ref(false);
 
 // ── Style rows (the ONE style picker lives on the composer's chip) ──────────
 // The Settings tab has no style field: the mock puts the picker on the
-// composer and nowhere else. These rows are still read here for the Output
-// switch, the quality presets, the canvas, and the mesh block.
-const { installedModels, stickyTarget, selectedModel, contractModel, targetModels } =
-  useStylePicker(() => props.form);
+// composer and nowhere else. These rows are still read here for the quality
+// presets, the canvas, and the mesh block.
+const { installedModels, stickyTarget, selectedModel, contractModel } = useStylePicker(
+  () => props.form,
+);
 
-// ── Output (One shot | Sequence) — a setting, not a place ────────────────────
-const draft = useSequenceDraftStore();
-const lastUsed = useLastUsedStylesStore();
-const isSequence = computed(() => draft.output === "sequence");
 const canPredictDuration = computed(
   () =>
-    !isSequence.value &&
     selectedModel.value?.supports_duration_prediction === true &&
     selectedModel.value.runtime_ready !== false,
 );
@@ -407,83 +359,8 @@ function setPredictDuration(value: boolean) {
     props.form.frames = selectedModel.value?.default_frames ?? 25;
   }
 }
-/**
- * The clip styles that can author a sequence, read from the target's WHOLE
- * inventory rather than the picker's rows: the picker is narrowed to the
- * section the view is currently in, which while the user is still looking at
- * Still picture contains no clip style at all.
- */
-const sequenceCapableModels = computed(() =>
-  stickyTarget.value &&
-  stickyTarget.value !== "capable" &&
-  (hostModels.byHost[stickyTarget.value]?.fetchedAt ?? 0) === 0
-    ? []
-    : modelsForOutputKind(targetModels.value, "clip").filter(modelSupportsSequence),
-);
-/** The styles Still picture can make, for the way back out of a clip draft. */
-const stillModels = computed(() => modelsForOutputKind(targetModels.value, "still"));
-const defaultFrames = computed(() =>
-  defaultClipFrames(
-    selectedModel.value,
-    props.chainLimits ?? null,
-    sequenceMotionTailFrames(selectedModel.value),
-  ),
-);
-
-function setOutputMode(mode: string | number) {
-  const next = mode === "sequence" ? "sequence" : "single";
-  if (next === draft.output) return;
-  if (next === "sequence") {
-    // A non-capable selection is remembered and swapped for the first
-    // capable model; switching back restores it.
-    const current = selectedModel.value;
-    if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
-      draft.lastSingleModel = props.form.model || null;
-      const pick = lastUsed.pick("clip", sequenceCapableModels.value);
-      if (pick) formStore.applyModel(pick);
-      else {
-        props.form.model = "";
-        props.form.family = "";
-      }
-    }
-  } else {
-    // Back to Still picture, which must be left holding a style that section
-    // can make: the parked one when it is still a picture style, otherwise the
-    // first installed one. A machine with no picture style at all keeps what
-    // the form has rather than clearing it.
-    const parked = draft.lastSingleModel
-      ? findInstalledModel(stillModels.value, draft.lastSingleModel)
-      : null;
-    const current = selectedModel.value;
-    const restored =
-      parked ??
-      (current && stillModels.value.some((m) => m.name === current.name)
-        ? null
-        : lastUsed.pick("still", stillModels.value));
-    if (restored) formStore.applyModel(restored);
-    draft.lastSingleModel = null;
-  }
-  draft.setOutput(
-    next,
-    {
-      getPrompt: () => props.form.prompt,
-      setPrompt: (value) => (props.form.prompt = value),
-    },
-    defaultFrames.value,
-  );
-}
-
 // ── Shape + resolution projection ────────────────────────────────────────────
 const sourceDimensions = computed(() => {
-  if (isSequence.value) {
-    // Sequence stage images predate the additive per-model field, so absence
-    // stays compatible. Only an explicit unsupported contract parks them.
-    if (!sequenceSourceImagesSupported.value) {
-      return null;
-    }
-    const { width, height } = draft.openingImage ?? {};
-    return width && height ? { width, height } : null;
-  }
   if (!caps.value.supportsSourceImage) return null;
   // Keep a parked image and its dimensions intact across model switches, but
   // do not let them project Source shape/resolution controls for a checkpoint
@@ -671,18 +548,7 @@ function resetSettings() {
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   emit("canvas-intent", "model-default");
-  if (isSequence.value) {
-    // Reset restores the MODEL's answer, not a flat off: sound is on wherever
-    // the clip renders it, so resetting to false handed back a silent draft
-    // the user never chose.
-    draft.enableAudio = props.chainLimits?.supports_audio === true;
-    // `resetFormToModelDefaults` discards one-shot source media wholesale; the
-    // sequence's opening image is the same primary-form media, so it goes with
-    // it. (`form.strength` / `form.sourceFit` are already reset above.)
-    draft.clearOpeningImage();
-  }
 }
-defineExpose({ setOutputMode });
 </script>
 
 <template>
@@ -797,16 +663,6 @@ defineExpose({ setOutputMode });
 
       <div v-if="identityWellOpen" class="ms-field" data-test="inspector-identity">
         <IdentityWell :form="form" />
-      </div>
-
-      <!-- The sequence's opening image sits in the same primary slot: staged
-           source media is an authoring decision, never an Advanced knob. -->
-      <div
-        v-if="isSequence && sequenceSourceImagesSupported"
-        class="ms-field"
-        data-test="inspector-sequence-opening-image"
-      >
-        <SequenceOpeningImageWell :form="form" :upscalers="models.upscalers" />
       </div>
 
       <!-- Quality — three rungs of the recipe's own steps range, driving the
@@ -1007,33 +863,31 @@ defineExpose({ setOutputMode });
            human-facing control; exact frames stay in Advanced. -->
       <div v-if="showClipCard" class="ms-field ms-card" data-test="clip-card">
         <div class="ms-group-label uppercase">Clip</div>
-        <template v-if="!isSequence">
-          <div v-if="canPredictDuration" class="ms-field--row" data-test="predict-duration-control">
-            <span class="ms-field__label ms-field__label--inline">Predict duration</span>
-            <SwitchToggle
-              :model-value="form.predictDuration"
-              label="Predict duration from prompt"
-              @update:model-value="setPredictDuration"
-            />
-          </div>
-          <VideoDurationSlider
-            v-if="!form.predictDuration"
-            :frames="form.frames"
-            :fps="form.fps"
-            :model="contractModel"
-            :family="form.family"
-            :model-name="form.model"
-            :source-image-capability="contractModel?.source_image ?? form.sourceImageCapability"
-            :routing-request="durationRoutingRequest"
-            @update:frames="form.frames = $event"
+        <div v-if="canPredictDuration" class="ms-field--row" data-test="predict-duration-control">
+          <span class="ms-field__label ms-field__label--inline">Predict duration</span>
+          <SwitchToggle
+            :model-value="form.predictDuration"
+            label="Predict duration from prompt"
+            @update:model-value="setPredictDuration"
           />
-          <p v-else class="ms-field__hint" data-test="predicted-duration-hint">
-            The host will choose 1–20 seconds from the prompt.
-          </p>
-        </template>
+        </div>
+        <VideoDurationSlider
+          v-if="!form.predictDuration"
+          :frames="form.frames"
+          :fps="form.fps"
+          :model="contractModel"
+          :family="form.family"
+          :model-name="form.model"
+          :source-image-capability="contractModel?.source_image ?? form.sourceImageCapability"
+          :routing-request="durationRoutingRequest"
+          @update:frames="form.frames = $event"
+        />
+        <p v-else class="ms-field__hint" data-test="predicted-duration-hint">
+          The host will choose 1–20 seconds from the prompt.
+        </p>
 
-        <!-- Smoothness — sequence output surfaces it outside Advanced -->
-        <div v-if="isSequence" class="ms-field--row" data-test="sequence-fps">
+        <!-- Smoothness rides the Clip card: Short clip · Length · Smoothness -->
+        <div class="ms-field--row" data-test="clip-fps">
           <span class="ms-field__label ms-field__label--inline">Smoothness</span>
           <Stepper
             :model-value="form.fps"
@@ -1124,8 +978,7 @@ defineExpose({ setOutputMode });
           Keeping this number reproduces the same look when you tweak the words.
         </p>
         <p v-else class="ms-field__hint">
-          New seed every print<template v-if="lastSeed !== null && !isSequence">
-            <!-- lock-last is coupled to single prints; hidden for sequences -->
+          New seed every print<template v-if="lastSeed !== null">
             ·
             <button
               type="button"
@@ -1141,9 +994,8 @@ defineExpose({ setOutputMode });
 
       <!-- Save every result — off, the host publishes the print and moves it
            straight to the trash, so a throwaway never clutters My images yet
-           stays recoverable until the trash empties. Hidden for a sequence,
-           whose stitched clip is the durable job's whole deliverable. -->
-      <div v-if="!isSequence" class="ms-field" data-test="save-result-field">
+           stays recoverable until the trash empties. -->
+      <div class="ms-field" data-test="save-result-field">
         <div class="ms-field__head">
           <span class="ms-field__label ms-field__label--inline">Save every result</span>
           <ToggleControl
@@ -1172,8 +1024,7 @@ defineExpose({ setOutputMode });
         :collections="fileUnderCollections"
         :model="form.model"
         :extension="fileUnderExtension"
-        :batch-size="isSequence ? 1 : form.batchSize"
-        :output-kind="isSequence ? 'sequence' : 'print'"
+        :batch-size="form.batchSize"
         @update:state="setFileUnder"
       />
 
@@ -1197,17 +1048,8 @@ defineExpose({ setOutputMode });
           <Icon :name="advancedExpanded ? 'chevron-up' : 'chevron-down'" :size="15" />
         </span>
       </button>
-      <SequenceAdvancedSettings
-        v-if="advancedExpanded && isSequence"
-        id="desktop-inline-advanced"
-        :form="form"
-        :camera-controls-enabled="form.family === 'ltx2'"
-        :camera-controls="cameraControls"
-        :camera-controls-loaded="cameraControlsLoaded"
-        :camera-unsupported-reason="cameraUnsupportedReason"
-      />
       <AdvancedSettings
-        v-else-if="advancedExpanded"
+        v-if="advancedExpanded"
         id="desktop-inline-advanced"
         :form="form"
         :selected-model="contractModel"
