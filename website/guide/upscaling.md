@@ -2,6 +2,8 @@
 
 mold supports image upscaling using Real-ESRGAN super-resolution models. Upscale generated images or existing photos to 2x or 4x their original resolution with AI-enhanced detail.
 
+RRDB models use float32 scalar arithmetic for their half-precision residuals and activations, matching upstream Torch. This precision correction can change pixels produced by earlier mold versions.
+
 ## Quick Start
 
 ```bash

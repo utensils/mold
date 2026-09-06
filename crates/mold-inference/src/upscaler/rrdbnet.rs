@@ -16,14 +16,31 @@
 //! ```
 
 use anyhow::Result;
-use candle_core::{Module, Tensor};
+use candle_core::{DType, Module, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder};
 
 const LRELU_SLOPE: f64 = 0.2;
 const RESIDUAL_SCALE: f64 = 0.2;
 
 fn leaky_relu(xs: &Tensor) -> Result<Tensor> {
+    // Torch 2.5.1 ActivationLeakyReluKernel.cu:29-33 uses opmath_t:
+    // the slope stays F32 even when the input/output are half. Candle's
+    // half affine kernel instead rounds the scalar before multiplication.
+    if xs.dtype() == DType::F16 {
+        return Ok(candle_nn::Activation::LeakyRelu(LRELU_SLOPE)
+            .forward(&xs.to_dtype(DType::F32)?)?
+            .to_dtype(DType::F16)?);
+    }
     Ok(candle_nn::Activation::LeakyRelu(LRELU_SLOPE).forward(xs)?)
+}
+
+fn residual_scale(xs: &Tensor) -> Result<Tensor> {
+    // BasicSR v1.4.2 rrdbnet_arch.py:39,63: multiply, round to the
+    // activation dtype, THEN add the residual (not a fused multiply-add).
+    if xs.dtype() == DType::F16 {
+        return Ok((xs.to_dtype(DType::F32)? * RESIDUAL_SCALE)?.to_dtype(DType::F16)?);
+    }
+    Ok((xs * RESIDUAL_SCALE)?)
 }
 
 fn conv_cfg() -> Conv2dConfig {
@@ -66,7 +83,7 @@ impl ResidualDenseBlock {
             .conv5
             .forward(&Tensor::cat(&[xs, &x1, &x2, &x3, &x4], 1)?)?;
         // Residual scaling
-        let scaled = (x5 * RESIDUAL_SCALE)?;
+        let scaled = residual_scale(&x5)?;
         Ok((&scaled + xs)?)
     }
 }
@@ -92,7 +109,7 @@ impl RRDB {
         let out = self.rdb1.forward(xs)?;
         let out = self.rdb2.forward(&out)?;
         let out = self.rdb3.forward(&out)?;
-        let scaled = (out * RESIDUAL_SCALE)?;
+        let scaled = residual_scale(&out)?;
         Ok((&scaled + xs)?)
     }
 }
@@ -207,6 +224,55 @@ mod tests {
     use super::*;
     use candle_core::{DType, Device};
     use candle_nn::VarMap;
+
+    #[test]
+    #[allow(clippy::excessive_precision)] // Exact dyadic values from the half oracle.
+    fn half_residual_and_activation_keep_float_scalar_precision() -> Result<()> {
+        // Values selected from the exhaustive Torch CUDA scalar capture.
+        let input = Tensor::new(&[-2.00390625f32, 3.140625], &Device::Cpu)?.to_dtype(DType::F16)?;
+        assert_eq!(
+            residual_scale(&input)?
+                .to_dtype(DType::F32)?
+                .to_vec1::<f32>()?,
+            [-0.40087890625, 0.6279296875]
+        );
+        assert_eq!(
+            leaky_relu(&input)?.to_dtype(DType::F32)?.to_vec1::<f32>()?,
+            [-0.40087890625, 3.140625]
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "requires CUDA and retained Tencent upscaler scalar oracle"]
+    fn half_scalar_operations_match_torch() -> Result<()> {
+        let path = std::env::var("MOLD_PAINT_UPSCALER_SCALARS")?;
+        let device = Device::new_cuda(0)?;
+        let oracle = candle_core::safetensors::load(path, &device)?;
+        let input = &oracle["input"];
+        let mut failures = Vec::new();
+        for (name, actual) in [
+            ("scaled", residual_scale(input)?),
+            ("leaky_relu", leaky_relu(input)?),
+        ] {
+            let actual = actual.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let expected = oracle[name].to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let count = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            eprintln!(
+                "{name}: {count}/{} different finite half results",
+                actual.len()
+            );
+            if count != 0 {
+                failures.push((name, count));
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "Torch FP16 scalar mismatches: {failures:?}"
+        );
+        Ok(())
+    }
 
     fn build_test_rrdbnet(
         num_feat: usize,

@@ -963,3 +963,43 @@ it is not a completion checklist with assumed passes.
   This completes camera-to-reliability construction; RealESRGAN integration,
   complete baking/filling/export, neural parity and the remaining campaign
   deliverables continue as active work.
+
+### P7 RealESRGAN scalar arithmetic and oracle capture
+
+- `scripts/capture-hunyuan3d-paint-upscaler.py` calls the unchanged pinned
+  Tencent `imageSuperNet`, including its RGB-to-BGR wrapper behavior and
+  untiled half-precision x4 inference. It verifies all 702 `params_ema`
+  tensors against the installed safetensors, records source/artifact hashes,
+  captures pre-activation convolution and RRDB boundaries, and refuses an
+  existing output directory. Hooks clone outputs before subsequent in-place
+  LeakyReLU. Read-only peer review confirmed capture validity.
+- `paint-upscaler-oracle-small-v1` preserves a 16px crop and all 63,488 finite
+  FP16 scalar inputs. The CUDA regression first fails with 20,410 residual
+  multiplication differences and 10,205 LeakyReLU differences
+  (`paint-upscaler-scalars-red-v1.log`). Torch uses F32 scalar opmath; Candle's
+  half affine prematurely rounds 0.2 to half. The shared RRDB correction
+  widens these operations, rounds their results back to half, and leaves
+  residual addition separate. Both exhaustive comparisons now have **zero
+  differing values** (`paint-upscaler-scalars-green-v1.log`). Non-F16 paths
+  remain unchanged; the release fragment and upscaling guide disclose the
+  half-precision output correction.
+- `paint-upscaler-oracle-albedo00-v1` captures the retained actual 512px albedo
+  view through 2048px output: 1.4723 seconds, 2,350,578,688 bytes peak Torch
+  allocation. This is oracle allocation with capture hooks, not a Rust memory
+  measurement or board-level qualification. Rust stage/image parity, all
+  material views, cancellation and staged-engine integration remain open.
+- Exhaustive finite-half clamping and byte conversion finds no rounding
+  disagreement: half output multiplied by 255 is exact in F32, and its only
+  half-integer tie in the byte interval is 127.5, rounded to 128 by both
+  algorithms. Thus existing Rust final rounding needs no paint override for
+  the untiled F16 route. This conclusion does not apply to F32 CPU output or
+  blended tiles. Peer review independently confirmed the argument.
+- Peer review found no scalar correction defect. Actual 512-to-2048 Rust
+  memory must still be measured: widening LeakyReLU creates F32 temporaries,
+  particularly at the final 64-channel 2048px convolution.
+- The upscaler unit selection passes all 28 tests, with the explicit CUDA
+  oracle test separately qualified above (`paint-upscaler-unit-green-v1.log`).
+  All-target CUDA/cuDNN Clippy passes with warnings denied
+  (`paint-upscaler-clippy-v2.log`). The first Clippy log is retained; its only
+  findings were exact dyadic decimal literals in the scalar regression,
+  now annotated to preserve the oracle values verbatim.
