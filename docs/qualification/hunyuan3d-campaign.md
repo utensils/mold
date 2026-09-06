@@ -271,6 +271,27 @@ loader without replacing network or rendering computations.
   does not explain the larger VAE discrepancy. Captures, intermediate tensors
   and failed comparisons remain retained.
 
+## Paint DINO image projector checkpoint
+
+- The Rust projector follows Tencent's `ImageProjModel` at
+  `hy3dpaint/hunyuanpaintpbr/unet/modules.py:710-754`, revision
+  `82920d643c0dc2f7bfd7255f45f62d386edfe60c`: linear projection, four tokens
+  per input token and LayerNorm. Half parameters and intermediate outputs retain
+  their rounding boundaries while linear bias and normalization use float32
+  arithmetic. Rank, width, dtype and allocation bounds are checked.
+- `scripts/capture-hunyuan3d-paint-projector.py` extracts the unchanged upstream
+  class for the executable oracle. The checked-in tiny fixture covers pooled
+  and token inputs; the initial failing test is retained in
+  `paint-projector-red-v1.log`. After implementation, the Hunyuan suite passes
+  164 tests with one hardware test ignored (`paint-projector-hunyuan-tests-v1.log`).
+- The installed paint checkpoint's four projector tensors and actual DINO
+  features pass CUDA comparison in `paint-projector-cuda-v1.log`: float32
+  maximum .000005722046 / RMS .000000306899, float16 maximum .00390625 /
+  RMS .000043698633. Oracle metadata and tensors are retained in
+  `paint-projector-oracle-v1/`; Rust outputs are in
+  `paint-projector-candle-v1/`. This qualifies the projector component, not the
+  complete paint UNet or its integration into generation.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification
