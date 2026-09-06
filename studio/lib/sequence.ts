@@ -2,7 +2,6 @@ import {
   DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES,
   type SequenceTransition,
 } from "@ui/lib/seam";
-import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 
 // One owner for the wan seam size and the per-model routing clip size;
 // `./chainRouting` computes the routing that applies them, so they live there
@@ -108,13 +107,8 @@ export function sequenceMotionTailFrames(
   return DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES;
 }
 
-/**
- * The frame-count grid a family's clips must sit on.
- *
- * Wan's VAE compresses time by 4 where the LTX families compress by 8, so its
- * valid counts are `4k+1`, not `8k+1`. Offering an off-grid option sends the
- * request straight into a 422 from the validator that owns the real rule.
- */
+/** The frame-count grid a family's clips must sit on (`4k+1` for wan, `8k+1`
+ * elsewhere). Continuation keeps its own copy in `./extend`. */
 export function sequenceFrameStep(family: string | null | undefined): number {
   return family?.trim().toLowerCase() === "wan" ? 4 : 8;
 }
@@ -253,26 +247,10 @@ export function modelsForOutput<M extends SequenceModel>(
   return models.filter((model) => modelSupportsSequence(model));
 }
 
-/** Frame rate used when nothing else is known — older servers and image
- * models omit the additive `/api/models.default_fps`. */
-export const DEFAULT_VIDEO_FPS = FALLBACK_VIDEO_FPS;
-
-/**
- * Frame rate for a selected video model: the model's own server-advertised
- * default (`/api/models.default_fps` — LTX-Video ships 30, LTX-2 24), then
- * whatever the form already holds, then the 24-fps fallback.
- *
- * Every surface applies this on model selection exactly as it applies
- * `default_steps` / `default_guidance`, so the sequence composer's duration
- * note, the Advanced video summary, and the submitted request all agree with
- * the model. Governs one-shot video and sequences alike.
- */
-export function defaultVideoFps(
-  model: { default_fps?: number | null } | null | undefined,
-  current?: number | null,
-): number {
-  return model?.default_fps ?? current ?? DEFAULT_VIDEO_FPS;
-}
+// The fps helpers moved to `./videoDuration` — one-shot video needs them and
+// scene authoring is being retired. Re-exported here only until this module
+// goes; new code imports them from their new home.
+export { DEFAULT_VIDEO_FPS, defaultVideoFps } from "./videoDuration";
 
 /**
  * Largest clip a model renders as ONE generation.
