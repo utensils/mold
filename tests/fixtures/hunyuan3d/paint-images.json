@@ -1,0 +1,37 @@
+{
+  "pillow": "12.3.0",
+  "pillow_revision": "bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d",
+  "cases": {
+    "down": {
+      "source": [
+        23,
+        17
+      ],
+      "target": [
+        9,
+        7
+      ]
+    },
+    "up": {
+      "source": [
+        9,
+        7
+      ],
+      "target": [
+        23,
+        17
+      ]
+    },
+    "same": {
+      "source": [
+        11,
+        13
+      ],
+      "target": [
+        11,
+        13
+      ]
+    }
+  },
+  "reference": "Tencent 82920d643c0dc2f7bfd7255f45f62d386edfe60c hy3dpaint/textureGenPipeline.py:136-145"
+}

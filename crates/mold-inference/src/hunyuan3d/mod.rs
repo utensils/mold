@@ -33,6 +33,7 @@ pub mod paint_block;
 pub mod paint_conv;
 pub mod paint_denoiser;
 pub mod paint_guidance;
+pub mod paint_images;
 pub mod paint_pipeline;
 pub mod paint_pixels;
 pub mod paint_positions;

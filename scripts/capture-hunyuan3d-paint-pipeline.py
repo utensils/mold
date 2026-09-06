@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--appearance", type=Path, required=True)
+    parser.add_argument("--appearance-mode", choices=["preserve", "rgb", "rgba"], default="preserve")
     parser.add_argument("--conditions", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--size", type=int, choices=[64, 128, 256, 512], default=512)
@@ -130,11 +131,20 @@ def main():
         return result
 
     net.pipeline.vae.decode = decode_latents
-    appearance = Image.open(args.appearance).convert("RGB").resize((512, 512))
+    # Preserve textureGenPipeline.py:136-145 ordering for transparent sources.
+    appearance = Image.open(args.appearance)
+    if args.appearance_mode != "preserve":
+        appearance = appearance.convert(args.appearance_mode.upper())
+    appearance = appearance.resize((512, 512))
+    if appearance.mode == "RGBA":
+        background = Image.new("RGB", appearance.size, (255, 255, 255))
+        background.paste(appearance, mask=appearance.getchannel("A"))
+        appearance = background
+    appearance = appearance.convert("RGB")
     conditions = [Image.open(args.conditions / f"condition-{index:02}.png").convert("RGB")
                   for index in list(range(args.views)) + list(range(6, 6 + args.views))]
     metadata = dict(revision=revision, torch=torch.__version__, diffusers=diffusers.__version__,
-                    dtype="f16", size=args.size, views=args.views,
+                    dtype="f16", size=args.size, views=args.views, appearance_mode=args.appearance_mode,
                     source_sha256={str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                                    for path in [root / "hy3dpaint/utils/multiview_utils.py", root / "hy3dpaint/hunyuanpaintpbr/pipeline.py"]})
     (args.output / "invocation.json").write_text(json.dumps(metadata, indent=2) + "\n")

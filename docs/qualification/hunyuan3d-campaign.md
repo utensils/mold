@@ -759,3 +759,44 @@ it is not a completion checklist with assumed passes.
   and measures generated PNG errors with bounds propagated from the unchanged
   decoder limits. That follow-up compiles under all-target warnings-denied
   Clippy (`paint-pipeline-clippy-v2.log`); execution remains a separate gate.
+
+
+## Full prepared paint result and source image preparation
+
+- `capture-20260906T100514Z-368852622599` completed every inference stage and
+  retained all twelve material PNGs in 391.898 seconds, with a sampled board
+  peak of 18,507 MiB. It **fails parity**: final latent max .17724609375 / RMS
+  .0024956353; decoded max .13848877 / RMS .00082838815. The existing maximum
+  bounds and final latent RMS gate remain open. This also does not prove a
+  16 GiB execution budget.
+- Offline comparison of the actual material files is retained in
+  `paint-pipeline-image-comparison-v1/comparison.json`. PSNR spans 60.576–65.304
+  dB; channel RMS is .138–.239 bytes. Albedo view5 has six channels differing
+  by more than8 bytes (max13), and MR view2 has eighteen (max18); all other
+  views stay at max2–6. High PSNR does not waive the maximum-error gates.
+- `paint_images::PaintImages::prepare` implements the actual two appearance
+  resizes, white composition, DINO preprocessing and ordered condition image
+  conversion. RGBA premultiply/unpremultiply follows Pillow12.3 Convert.c and
+  preserves Image.py's same-size bypass; RGB geometry keeps the existing
+  bicubic resizer. Cancellation precedes work and propagates through rows and
+  resize callbacks. Two tests pass after the absent-implementation failure,
+  including exact down/up/same-size alpha fixtures (`paint-images-green-v3.log`).
+- The first real-image comparison exposed a fixture-mode mismatch, retained in
+  `paint-images-real512-v1.log`: the saved source is a palette PNG carrying
+  transparency, while the v2 neural oracle explicitly converts it to opaque
+  RGB. The preparation test now names RGB versus RGBA, and the capture script
+  can feed either mode to Tencent before its unchanged resize/composition.
+  There is no production-pixel workaround for the mismatched fixture.
+- All four prepared tensor boundaries match **bit-for-bit** on six512 views
+  for opaque RGB (`paint-images-real512-v2.log`) and full-resolution transparent
+  RGBA (`paint-images-rgba-real512-v1.log`). The latter compares against a new
+  full Tencent capture, `paint-pipeline-rgba-oracle-v1`, using the original
+  1024-pixel source converted to RGBA before Tencent's512 resize. This proves
+  the source preprocessing, not neural parity on those RGBA conditions.
+- Independent read-only review found no alpha/order/dtype defect and confirmed
+  cancellation propagation. It correctly distinguished opaque qualification
+  from alpha fixtures before the separate full RGBA capture was added.
+- The complete paint component selection now passes38 tests, with fourteen
+  explicit oracle tests ignored (`paint-images-all-paint-v1.log`); the two
+  real-image oracle tests above were run explicitly. All-target CUDA/cuDNN
+  Clippy passes with warnings denied (`paint-images-clippy-v2.log`).
