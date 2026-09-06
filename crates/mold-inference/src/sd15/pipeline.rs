@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Module, Tensor};
-use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
+use mold_candle::stable_diffusion;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -1,5 +1,15 @@
 # Third-Party Notices
 
+## Candle shared Stable Diffusion VAE
+
+`crates/mold-candle/src/stable_diffusion/vae.rs` is adapted from
+`candle-transformers/src/models/stable_diffusion/vae.rs` at utensils/candle
+revision `bedc287458e0d890dd6ed1c298c99e991e066fe1`. It retains the encoder,
+decoder and default posterior behavior and adds explicit posterior moments,
+optional variance bounds and caller-supplied noise. SD1.5, SDXL, SD3 and the
+Hunyuan3D paint port share this application-owned model. This copy uses Candle's
+MIT licence option, retained in `crates/mold-candle/LICENSE-CANDLE-MIT`.
+
 ## FerrisMind/candle-video (LTX-Video port)
 
 Mold's legacy LTX-Video transformer, 3D causal video VAE, and flow-match Euler

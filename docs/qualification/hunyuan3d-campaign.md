@@ -173,6 +173,33 @@ loader without replacing network or rendering computations.
   `/storage/mold/cache/cargo-campaign-1511-1496-cuda`, separate from the CPU target
   and other tasks' build caches.
 
+## Paint VAE qualification in progress
+
+- The application-owned shared VAE exposes posterior moments, bounded log
+  variance and caller-owned sampling noise. Existing SD1.5, SDXL and SD3 consumers
+  use that same implementation. Tiny encoder/decoder comparisons against the
+  pinned Candle implementation remain bit-identical for both quant-convolution
+  configurations; the executable Diffusers fixture also passes.
+  `paint-vae-components-v2.log`: four component tests passed;
+  `shared-vae-sd-regression-v1.log`: 201 passed, four hardware tests ignored.
+- The Rust reader loads the published PyTorch checkpoint directly and rejects
+  missing, wrong-shaped and unconsumed tensors. `paint-pth-green-v1.log` passes
+  the serialized checkpoint contract. No Python runtime is shipped.
+- `paint-vae-cuda-green-v1.log` passes the installed float32 VAE comparison:
+  sampled latent maximum error .000027447939, decoded maximum .000026494265.
+  The strict oracle disables TF32; the first oracle's default cuDNN TF32 setting
+  produced a measurable difference and both captures remain retained.
+- **Float16 qualification remains open.** `paint-vae-cuda-f16-v1.log` fails the
+  declared latent tolerance: maximum .021087646, RMS .0051730411. The tolerance
+  has not been relaxed. Follow-up captures retain posterior moments and decode
+  from reference latents to separate encoder and decoder error; a scratch oracle
+  probes the effect of half-rounded group-normalization affine operations.
+- `paint-vae-half-diagnostic-v1/candle-comparison.json` localizes most error to
+  encoding: decoding reference latents has maximum .0056152 / RMS .0008420,
+  versus maximum .0234375 / RMS .0034180 after Rust encoding. The half-affine
+  probe does not reproduce the Rust tensor, so it is evidence of sensitivity,
+  not a confirmed root cause or an accepted substitute reference.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

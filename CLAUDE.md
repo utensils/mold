@@ -123,6 +123,14 @@ the model controls, and the length slider. A sequence is now something you scrip
 
 ## 3-D generation
 
+- **Paint shares the SD VAE implementation.** `mold_candle::stable_diffusion::vae`
+  owns the VAE used by SD1.5, SDXL, SD3 and Hunyuan3D paint. The original posterior
+  API preserves SD behavior; paint opts into Diffusers' log-variance bounds and
+  supplies its own posterior noise. Paint's published `.bin` weights are parsed
+  in Rust and the loader requires every checkpoint tensor to be consumed. The
+  campaign qualification ledger distinguishes component parity from completed
+  end-to-end paint support.
+
 - **UV unwrapping is the narrow native exception.** `mesh-texture` builds vendored xatlas `f700c779`, exactly the version in the 2.1 oracle’s xatlas-python 0.0.9. The Rust wrapper validates geometry, preserves every seam-corner attribute and polls cancellation across native threads. Inference, samplers and texture baking remain Rust/Candle. Enabling the build feature alone does not advertise a paint engine.
 
 - **2.1 shape is a separate architecture.** `hunyuan3d-2.1:fp16` uses the MoE transformer, DINOv2-large and 4,096 latents; it requires the 2.1 licence independently of 2.0. Checkpoint headers select the engine architecture. Pre-load admission reads `manifest::hunyuan3d_shape_geometry`, including canvasless mini requests. The synthetic complete-forward oracle fixture runs unmodified Tencent CUDA code; full campaign evidence lives in `docs/qualification/hunyuan3d-campaign.md`.
