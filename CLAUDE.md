@@ -139,6 +139,14 @@ the model controls, and the length slider. A sequence is now something you scrip
   and UNet components; epsilon belongs to the layer (VAE and spatial attention
   `1e-6`, UNet residual blocks `1e-5`), including the half-rounded CUDA epsilon.
 
+- **Paint spatial caches follow Tencent's dtype boundaries.** `paint_unet` captures
+  reference norm1 at sixteen sites and consumes twelve skips newest-first as
+  `[hidden, skip]`. `paint_positions` quantizes in half even for F32 inference;
+  F16 maps retain zeroed invalid pixels between scales, whereas F32 maps are
+  converted afresh. Integer valid counts round to half before division, and
+  final coordinates use ties-to-even. Never replace this with a dtype-neutral
+  average or mutate caller-owned maps. Full float32 network parity does not
+  close the separate half-precision or full texture-generation gates.
 - **UV unwrapping is the narrow native exception.** `mesh-texture` builds vendored xatlas `f700c779`, exactly the version in the 2.1 oracle’s xatlas-python 0.0.9. The Rust wrapper validates geometry, preserves every seam-corner attribute and polls cancellation across native threads. Inference, samplers and texture baking remain Rust/Candle. Enabling the build feature alone does not advertise a paint engine.
 
 - **2.1 shape is a separate architecture.** `hunyuan3d-2.1:fp16` uses the MoE transformer, DINOv2-large and 4,096 latents; it requires the 2.1 licence independently of 2.0. Checkpoint headers select the engine architecture. Pre-load admission reads `manifest::hunyuan3d_shape_geometry`, including canvasless mini requests. The synthetic complete-forward oracle fixture runs unmodified Tencent CUDA code; full campaign evidence lives in `docs/qualification/hunyuan3d-campaign.md`.

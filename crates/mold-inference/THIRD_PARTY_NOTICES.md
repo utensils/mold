@@ -1,10 +1,12 @@
 # Third-Party Notices
 
-## Diffusers paint UNet convolutional stages
+## Diffusers paint UNet
 
-`src/hunyuan3d/paint_conv.rs` adapts Hugging Face Diffusers v0.30.0,
+`src/hunyuan3d/paint_conv.rs` and `src/hunyuan3d/paint_unet.rs` adapt Hugging Face Diffusers v0.30.0,
 commit `8a79d8ec3973e78065f13638eefc0dc7d4dc6009`, specifically
-`models/resnet.py`, `models/downsampling.py` and `models/upsampling.py`.
+`models/resnet.py`, `models/downsampling.py`, `models/upsampling.py`,
+`models/unets/unet_2d_condition.py`, `models/embeddings.py` and
+`models/transformers/transformer_2d.py`.
 The Rust port implements the fixed inference recipe, explicit timestep
 conditioning and bounded output-size validation; training branches are omitted.
 

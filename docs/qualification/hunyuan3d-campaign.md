@@ -427,6 +427,77 @@ loader without replacing network or rendering computations.
   once each. Both the multiple-reference shape and caching behavior are now
   executable fixtures. Assembled Rust parity remains the next open gate.
 
+## Main synchronization before denoiser assembly
+
+Fetched and merged `origin/main` through `4ec048a0` (three upstream fixes).
+The sole conflict was generated `website/guide/prompting.md`; rerunning the
+canonical prompting generator resolved it and regenerated both outputs.
+Focused merged-state checks passed: 52 generation-profile tests, 293 validation
+tests, 89 chain tests and 172 Hunyuan tests (one hardware test ignored). Logs are
+retained as `main-sync-{prompting,profiles,validation,chain,hunyuan}-v1.log`.
+
+## Complete paint spatial UNet assembly
+
+- `paint_unet.rs` now assembles all four down/up levels, twelve LIFO skips,
+  timestep embeddings, the mid block, sixteen spatial transformers, and both
+  main/reference network variants from the previously qualified components.
+- RED evidence: `paint-unet-red-v1.log`, identity output max error 1.5528353.
+- Tiny F32 complete dual-network parity passed (`paint-unet-assembled-v1.log`):
+  all sixteen reference caches and the DINO projector match; maximum denoising
+  error is 0.0000071525574 across timesteps 500 and 400.
+- Installed F32 checkpoint parity passed at 8x8 latent/two-view dimensions
+  (`paint-unet-pretrained-cuda-v2.log`). The strict PTH loader consumed the
+  entire 1747-tensor checkpoint, including both networks, all learned text
+  embeddings and the projector. Denoising max error is 0.0000023841858;
+  reference-cache worst max is 0.000013768673. Actual tensors are retained in
+  `paint-unet-pretrained-candle-v2/`. The v1 invocation failed on a test-harness
+  path expecting tiny weights; that failure is retained too.
+- Read-only peer review found no architecture mismatch; its unchecked
+  view-count multiplication finding is fixed with `checked_mul` and invalid
+  zero/overflow counts are exercised by the full-network test.
+- Tiny F16 first attempt failed the declared max 0.02 / RMS 0.002 gate at the
+  reference mid cache (max 0.017089844, RMS 0.004933512), retained in
+  `paint-unet-tiny-f16-cuda-v1.log`. No tolerance was relaxed. Subsequent runs
+  collect all cache/output errors before asserting so a failed cache cannot
+  hide downstream diagnostic tensors.
+- Rust position preparation is now integrated; installed F32 passes unchanged
+  (`paint-unet-integrated-cuda-v1.log`) with Rust positions and all overflow guards.
+  Two-reference F32 also passes (`paint-unet-multiref-cuda-v1.log`), worst final
+  max 0.000008936971. CPU and CUDA all-target Clippy pass with warnings denied
+  (`paint-unet-position-clippy-v1.log`, `paint-unet-position-cuda-clippy-v1.log`).
+- Full installed F16 production execution completed in 72.50 seconds
+  (`paint-unet-production-f16-cuda-v1.log`, actual tensors in the matching
+  `paint-unet-production-f16-candle-v1/` directory). Both denoising outputs pass
+  max 0.02 / RMS 0.002: worst max 0.0029296875, RMS 0.00044950502. However,
+  `up_1_2_0` and `up_2_0_0` reference-cache max errors are 0.041992188 and
+  0.109375; the overall half gate therefore remains FAILED.
+- Diagnostic `--attention-backend math` leaves the upstream source unchanged.
+  Tiny F16 Torch math-vs-default alone reaches reference-cache RMS 0.0044758
+  and final-output max 0.0057373. Rust-vs-math does not eliminate the discrepancy
+  (`paint-unet-math-comparison-v1.json`), so this is evidence about backend
+  sensitivity, not a parity waiver or tolerance change.
+
+## Paint position-map pyramid
+
+- `paint_positions.rs` implements all four scales, validity from all three
+  channels after half conversion, half sum/division/product boundaries,
+  F16-only between-scale mutation semantics and IEEE ties-to-even coordinates.
+  Caller maps remain unchanged. Reduction runs on the input device; the small
+  cached integer coordinate tables round on the host for backend consistency.
+- Initial RED: `paint-position-red-cuda-v1.log` (also CPU red retained).
+  F32 CPU, F16 CUDA and production three-batch/six-view CUDA captures match all
+  indices exactly (`paint-position-green-v1.log`,
+  `paint-position-half-cuda-v1.log`, `paint-position-production-cuda-v1.log`).
+- Peer review identified mixed half/int64 division rounding that those captures
+  missed. The new 2049-valid-pixel regression failed (coordinate 3 vs expected 4)
+  in `paint-position-denominator-red-v1.log`, then passed after denominator
+  conversion to half before division. Checked-in F32/F16 fixtures are extracted
+  from the retained upstream captures with source/capture SHA provenance.
+- 180 CPU Hunyuan tests pass, two external tests ignored
+  (`paint-unet-position-cpu-v1.log`). Read-only review verified the denominator
+  fix and found no further defect for finite maps. End-to-end sampling and the
+  unresolved VAE/UNet half gates remain required.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

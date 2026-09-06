@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Capture the complete unchanged Tencent paint UNet and its reusable conditions."""
 import argparse
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import json
@@ -26,6 +27,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, help="UNet directory containing config.json and .bin")
     parser.add_argument("--tiny", action="store_true")
+    parser.add_argument("--attention-backend", choices=["default", "math"], default="default", help="diagnostic SDPA backend; default preserves upstream selection")
     parser.add_argument("--dtype", choices=["f32", "f16"], default="f32")
     parser.add_argument("--latent-size", type=int, choices=[8,16,32,64], default=8)
     parser.add_argument("--views", type=int, choices=[1,2,6], default=2)
@@ -109,7 +111,9 @@ def main():
     conditions = dict(embeds_normal=normal, embeds_position=position, ref_latents=reference,
                       dino_hidden_states=dino, position_maps=positions, ref_scale=scale, mva_scale=1., cache=cache)
     torch.cuda.reset_peak_memory_stats()
-    with torch.inference_mode():
+    attention_context = (torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
+                         if args.attention_backend == "math" else nullcontext())
+    with torch.inference_mode(), attention_context:
         for timestep in (500,400):
             result = model(sample,timestep,text,**conditions)[0]
             tensors[f"expected.{timestep}"] = result.cpu().contiguous()
@@ -125,7 +129,7 @@ def main():
         raise RuntimeError(f"unexpected upstream cache invocation counts: {invocation_counts}")
     metadata = dict(revision=revision,sources={name:sha256(folder/name) for name in ("modules.py","attn_processor.py")},
                     torch=torch.__version__,diffusers=diffusers.__version__,gpu=torch.cuda.get_device_name(),
-                    seed=25026,dtype=args.dtype,tiny=args.tiny,config=config,batch=batch,materials=materials,
+                    seed=25026,dtype=args.dtype,attention_backend=args.attention_backend,tiny=args.tiny,config=config,batch=batch,materials=materials,
                     views=views,references=args.references,latent_size=size,timesteps=[500,400],reference_scale=[0,1,1],
                     invocation_counts=invocation_counts,
                     peak_allocated=torch.cuda.max_memory_allocated(),peak_reserved=torch.cuda.max_memory_reserved())
