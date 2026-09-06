@@ -30,3 +30,12 @@ latent upsampler, and the rest of the LTX-2 runtime are original work.
 
 The complete repository-wide list lives in `THIRD_PARTY_NOTICES.md` at the
 mold repository root.
+
+## xatlas (optional mesh UV unwrapping)
+
+The `mesh-texture` feature builds unmodified xatlas at revision
+`f700c7790aaa030e794b52ba7791a05c085faf0c`, the version used by the
+Hunyuan3D 2.1 reference's xatlas-python 0.0.9. Copyright (c) 2018–2020
+Jonathan Young, MIT licence. Sources and complete licence are retained in
+`crates/mold-inference/vendor/xatlas/`. The C ABI bridge is mold-owned code.
+No Python runtime is linked or invoked by mold.

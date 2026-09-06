@@ -3398,6 +3398,7 @@ dependencies = [
  "candle-nn-mold",
  "candle-onnx",
  "candle-transformers-mold",
+ "cc",
  "cudarc 0.19.8",
  "exr",
  "fdk-aac",

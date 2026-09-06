@@ -34,3 +34,6 @@ pub mod shape_vae;
 pub mod transformer;
 pub mod transformer21;
 pub mod turntable;
+
+#[cfg(feature = "mesh-texture")]
+pub mod uv;

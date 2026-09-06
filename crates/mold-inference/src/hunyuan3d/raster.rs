@@ -221,6 +221,10 @@ pub struct GBuffers {
     pub normal: Vec<[f32; 3]>,
     /// Interpolated world-space surface point.
     pub position: Vec<[f32; 3]>,
+    /// Source triangle index; u32::MAX for uncovered pixels.
+    pub face_ids: Vec<u32>,
+    /// Perspective-correct corner weights in the source triangle’s order.
+    pub barycentric: Vec<[f32; 3]>,
     pub mask: Vec<bool>,
     pub width: u32,
     pub height: u32,
@@ -235,6 +239,8 @@ impl GBuffers {
             depth: vec![f32::INFINITY; n],
             normal: vec![[0.0; 3]; n],
             position: vec![[0.0; 3]; n],
+            face_ids: vec![u32::MAX; n],
+            barycentric: vec![[0.0; 3]; n],
             mask: vec![false; n],
             width,
             height,
@@ -299,7 +305,10 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
     let h = height as i64;
     let vcount = mesh.vertices.len();
 
-    for face in &mesh.faces {
+    for (face_index, face) in mesh.faces.iter().enumerate() {
+        if face_index >= u32::MAX as usize {
+            break;
+        }
         let (i0, i1, i2) = (face[0] as usize, face[1] as usize, face[2] as usize);
         if i0 >= vcount || i1 >= vcount || i2 >= vcount {
             continue;
@@ -401,6 +410,8 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
                     b0 * p0[1] + b1 * p1[1] + b2 * p2[1],
                     b0 * p0[2] + b1 * p1[2] + b2 * p2[2],
                 ];
+                gb.face_ids[idx] = face_index as u32;
+                gb.barycentric[idx] = [b0, b1, b2];
                 gb.mask[idx] = true;
             }
         }
@@ -759,6 +770,35 @@ mod tests {
             ],
             [[0, 1, 2], [0, 2, 3]],
         )
+    }
+
+    #[test]
+    fn face_ids_and_barycentrics_reconstruct_the_visible_surface() {
+        let mesh = cube(1.0);
+        for camera in [
+            Camera::orthographic(25., 15.),
+            Camera::perspective(25., 15., 2.5),
+        ] {
+            let gb = render_gbuffers(&mesh, &camera, 64, 64);
+            assert!(gb.covered_pixels() > 0);
+            for i in 0..gb.len() {
+                if !gb.mask[i] {
+                    assert_eq!(gb.face_ids[i], u32::MAX);
+                    continue;
+                }
+                let face = mesh.faces[gb.face_ids[i] as usize];
+                let weights = gb.barycentric[i];
+                assert!((weights.iter().sum::<f32>() - 1.).abs() < 1e-5);
+                for axis in 0..3 {
+                    let position: f32 = face
+                        .iter()
+                        .zip(weights)
+                        .map(|(&vertex, weight)| mesh.vertices[vertex as usize][axis] * weight)
+                        .sum();
+                    assert!((position - gb.position[i][axis]).abs() < 1e-6);
+                }
+            }
+        }
     }
 
     #[test]

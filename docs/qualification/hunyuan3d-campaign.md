@@ -27,7 +27,9 @@ No model/render qualification is claimed by this checkpoint.
 - Nix CUDA devshell checked: Rust/Cargo 1.95, compute capability 89.
 - Oracle venv: `/storage/mold/cache/hunyuan3d-campaign/oracle-venv`.
 - Downloads/cache retained beneath `/storage/mold/cache`; no existing models or
-  outputs deleted. Builds use the existing shared Cargo target directory.
+  outputs deleted. Builds now use `/storage/mold/cache/cargo-campaign-1511-1496`;
+  another task cleaned the original shared target, so subsequent campaign builds
+  retain a dedicated cache and cannot compete for that target lock.
 - Initial branch CUDA build log:
   `/storage/mold/output/verification/hunyuan3d/campaign-1511-1496/build-initial.log`.
 
@@ -67,6 +69,25 @@ A clean-shutdown repeat is required. Peak PyTorch allocated bytes: 13,848,856,06
 reserved bytes: 20,789,067,776, at texture size 1,024. All failed loader attempts
 and logs remain retained. The adapter resolves metadata through the upstream
 loader without replacing network or rendering computations.
+
+## CPU mesh preparation checkpoint
+
+- `mesh-texture` builds pinned xatlas `f700c7790aaa030e794b52ba7791a05c085faf0c`
+  through a narrow native ABI. No Python dependency enters the binary. The feature
+  is forwarded through CLI/server/TUI/desktop and included in Nix feature recipes.
+- The Rust wrapper checks geometry before native entry, polls cancellation and
+  remaps positions, normals and colors across seam duplication. It matches the
+  executable xatlas-python 0.0.9 tetrahedron oracle at 1e-7 UV tolerance.
+- `uv-red-v2.log` records the failing tests before implementation; `uv-green-v2.log`
+  records four passing tests with the optimized native build. `uv-clippy-v1.log`
+  passes warnings-denied Clippy. The larger retained-mesh comparison is running.
+- G-buffers now retain triangle IDs and perspective-correct barycentric weights.
+  A test reconstructs every covered world-space point in both camera modes.
+  `mesh-preparation-green-v1.log`: 144 tests passed, one hardware test ignored.
+- `blender-export-v1.log`: Tencent's original export functions run successfully
+  inside native Blender 5.0.1. Two embedded-bpy attempts remain marked failed
+  after teardown crashes; the complete reference repeat uses the native exporter.
+  This is an export-environment deviation, not a change to model mathematics.
 
 ## Remaining gates
 

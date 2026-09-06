@@ -11,3 +11,7 @@ original in the campaign evidence directory before copying a new fixture here.
 The CPU Candle test compares the complete forward result, including attention
 packing, timestep convention, skip connections, sparse experts and output sign.
 A component pass does not establish pretrained or full-pipeline qualification.
+
+`uv-tetrahedron.json` is xatlas-python 0.0.9's exact `parametrize` result for a
+synthetic tetrahedron. Regenerate with `scripts/capture-hunyuan3d-uv-reference.py`.
+The native xatlas revision is recorded in the fixture and vendored-source README.

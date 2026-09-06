@@ -284,6 +284,7 @@
               (desktopFeatureFor computeCap)
               "pulid"
               "webp"
+              "mesh-texture"
             ]
             # The desktop app embeds the same server, so it takes the same
             # convolution backend on Linux CUDA (#1483).
@@ -318,16 +319,16 @@
               # `cargo check --features cuda` must not require (#1483).
               "${
                 if computeCap == "89" then "h3-cuda" else "cuda"
-              },cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
+              },cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture"
             else if gpuFeature != "" then
-              "${gpuFeature},h3,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
+              "${gpuFeature},h3,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture"
             else
-              "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
+              "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture";
 
           # Shell completion generation only needs CLI shape, not GPU linkage.
           # Keep this CUDA-free so Linux sandbox builds can generate completion
           # scripts without loading the host-only NVIDIA driver library.
-          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid";
+          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture";
 
           # Devshell defaults compile the full shipping feature set so that
           # `mold tui`, `mold discord`, WebP/MP4 output, Prometheus metrics,

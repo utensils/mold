@@ -19,6 +19,8 @@ name = "mold_inference"
 
 [features]
 default = []
+# Narrow native exception: pinned xatlas UV unwrapping, with Rust inference.
+mesh-texture = ["dep:cc"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
@@ -126,6 +128,7 @@ path = "src/bin/h3_runtime_qualification_record.rs"
 required-features = ["dev-bins", "h3-cuda"]
 
 [build-dependencies]
+cc = { version = "1", optional = true }
 sha2 = "0.10"
 
 [[bin]]
