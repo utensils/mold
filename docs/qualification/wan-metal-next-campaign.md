@@ -2,9 +2,9 @@
 
 **Prepared on 2026-09-05; execution checkpoint recorded on 2026-09-06.**
 The shared GPU slot was handed to this campaign after #1040 verified cleanup.
-The campaign is paused after its first visually valid Q8/cache-off render; the
-cache-on control, server admission work and performance matrix remain pending.
-Issues [#1059](https://github.com/utensils/mold/issues/1059) and
+The cache-on control isolated the visual failure and an exact-head default-off
+fix passed lossless and MP4 rendering. Server admission work and the performance
+matrix remain pending. Issues [#1059](https://github.com/utensils/mold/issues/1059) and
 [#1094](https://github.com/utensils/mold/issues/1094) remain open.
 
 ## 2026-09-06 execution checkpoint
@@ -56,12 +56,31 @@ Its media, per-frame hashes, contact sheet, guard samples and provenance are und
 `/Volumes/ExternalStorage/mold2/output/` and
 `/Volumes/ExternalStorage/mold-1059-qualification/full-model-20260905/`.
 
-This checkpoint proves a visually valid 1.3B Q8 render on the candidate Candle
-revision when Wan step cache is disabled. It does not yet isolate Candle from
-step-cache behavior: the exact Q8/cache-on candidate control and a current-main
-control are still required. It also does not satisfy #1059's durable server,
-pressure-boundary, authored-chain or recovery gates, or #1094's 832x480 and 5B
-cold/warm performance matrix. No capability promotion is justified yet.
+The complementary candidate run held Candle, weights, Q8 encoder, request, seed
+and scheduler constant while leaving the former default step cache enabled. It
+completed in 61.517 s, with 16.728 GiB minimum sampled native availability,
+zero swap growth and normal pressure, but all 17 frames were saturated
+black/white/red fields. The lossless cache-off control was coherent, isolating
+cache-enabled execution as the corruption trigger for this workload.
+
+Commit `992e96f1` changes an unset `MOLD_WAN_STEP_CACHE` to full denoising while
+retaining explicit `auto` and numeric opt-ins. Its regression test was written
+to fail first, then passed with all 11 step-cache unit tests and the existing
+device-side cache-charge invariants. The exact-head Q8 APNG run with the variable
+unset completed in 224.024 s, with 14.666 GiB minimum sampled native
+availability, zero swap growth and normal pressure. Its SHA-256 is
+`c1308ebf4c934420e2343bd112ed986a7cc75a2d7aa824f4c8c62448193822e2`.
+The MP4 repeat completed in 174.966 s with the same safe guard result and SHA-256
+`4a875df4fb5c9c66f3db6e514b0f8d99e3f2023fcdd2893b468ea51e46357be1`.
+Both decoded to 17 frames. Manual inspection of both complete contact sheets and
+frames 1, 9 and 17 found the coherent fox sequence without saturated fields,
+tearing or scene reset. Independent final-diff review found no blocker after two
+stale comments were corrected in `b61a30a3`.
+
+This closes the reproduced reduced-shape corruption mechanism. It does not
+satisfy #1059's durable server, pressure-boundary, authored-chain or recovery
+gates, or #1094's 832x480 and 5B cold/warm performance matrix. No capability
+promotion is justified yet.
 
 ## Starting evidence and ownership
 
