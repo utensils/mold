@@ -105,7 +105,7 @@ jobs. release-plz retains version PRs and tags with registry publishing disabled
 ## Compatibility revision lifecycle
 
 The current compatibility source is revision
-`13022a3b3d8a0f5545e439e058e9e41a290d3da4` of `utensils/candle`, which contains
+`812cbe548e2579318ba89e4752c59a8ef0dea5c8` of `utensils/candle`, which contains
 the renamed `candle-core-mold` / `candle-nn-mold` / `candle-transformers-mold`
 packages every Mold cargo root pins. No manifest names a branch — the identity
 script rejects a `branch =` source outright — so moving the compatibility source
