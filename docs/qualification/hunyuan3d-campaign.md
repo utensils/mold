@@ -1200,3 +1200,34 @@ it is not a completion checklist with assumed passes.
   (`vertex-fill-green-v2.log`). All-target CUDA/cuDNN Clippy with warnings
   denied passes (`vertex-fill-clippy-v2.log`). Follow-up read-only review
   confirms both findings resolved with no additional actionable issue.
+
+
+### P7 Navier–Stokes pixel fill
+
+- `paint_ns_fill::fill_rgb` ports OpenCV 4.10.0's three-channel radius-three
+  branch from `modules/photo/src/inpaint.cpp` at revision 71d3237. It preserves
+  row-major initial band insertion, FIFO equal-distance ties, four-neighbor
+  expansion, double fast-marching solves, gradient border indexing and final
+  double quotient/ties-even byte rounding. Tencent's trust convention is
+  inverted exactly: every value other than 255 is missing.
+- `capture-hunyuan3d-ns-fill.py` invokes installed OpenCV 4.10.0 directly and
+  records its version/source hash. `ns-fill-oracle-v1` contains seven initial
+  cases; `ns-fill-oracle-v2` adds 2x2, 2x11 and nonbinary trust. All inputs and
+  expected outputs are checked in. Missing implementation fails in
+  `ns-fill-red-v1.log`; the initial seven image comparisons pass byte-exact
+  (`ns-fill-green-v1.log`).
+- Read-only review found a precision boundary not distinguished by those first
+  images: the source's global sqrt/divide/fabs widen to double after the F32
+  product. The corrected helper is pinned by a compiled C++ source-expression
+  oracle (`ns-direction-oracle.cpp`, executable and text): r=(1,2), gradient
+  (-1,15) yields F32 bits 1063049670; the former float-only expression gives
+  1063049671. Source and distribution notices retain Intel's original license.
+- Cancellation checks run during initialization, every popped front and before
+  returning. Entry/middle/final cancellation is exercised on every image case.
+  Actual chair-mesh qualification and composition with vertex propagation remain
+  required before complete texture-fill parity is established.
+- Final validation passes all ten byte-exact image cases, their cancellation
+  checks, and the source-expression precision regression (`ns-fill-green-v3.log`).
+  All-target CUDA/cuDNN Clippy with warnings denied passes
+  (`ns-fill-clippy-v3.log`). Read-only follow-up review confirms the arithmetic,
+  attribution and coverage findings resolved with no remaining actionable issue.

@@ -38,6 +38,7 @@ pub mod paint_denoiser;
 pub mod paint_edges;
 pub mod paint_guidance;
 pub mod paint_images;
+pub mod paint_ns_fill;
 pub mod paint_pipeline;
 pub mod paint_pixels;
 pub mod paint_positions;
