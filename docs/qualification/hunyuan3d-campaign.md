@@ -800,3 +800,40 @@ it is not a completion checklist with assumed passes.
   explicit oracle tests ignored (`paint-images-all-paint-v1.log`); the two
   real-image oracle tests above were run explicitly. All-target CUDA/cuDNN
   Clippy passes with warnings denied (`paint-images-clippy-v2.log`).
+
+
+## P7 projection sampling and weighted merge
+
+- `paint_bake::TextureBaker` streams projected views into color/weight sums.
+  It mirrors `ViewProcessor.bake_from_multiview` and `MeshRender.fast_bake_texture`:
+  camera weight times cosine^4, STRICT >99% positive-weight overlap skipping,
+  positive accumulated coverage independently of final trust, and final
+  denominator clamp / trust threshold at1e-8. Neither material stream changes
+  gamma encoding. `paint-bake-oracle-v1` executes both unchanged upstream
+  methods via AST extraction. All four prefixes of overlap and tiny-weight
+  scenarios pass with exact trust masks and color error <=1e-7 after the RED
+  absent-implementation test (`paint-bake-green-v1.log`).
+- `paint_back_sample` mirrors Tencent's actual back_sample branch, including
+  resolution-based pixel coordinates, clamped endpoint interpolation, lower
+  pixel visibility/cosine/depth decisions, strict depth difference <.003 and
+  unique UV texel placement. `back-sample-oracle-v1` executes that unchanged
+  branch with image-edge, outside-frustum, occluded, invisible and near-threshold
+  cases. Rust colors match within1e-7 and cosine/boundary maps match exactly
+  (`back-sample-green-v1.log`), after the absent-function RED run.
+- Read-only peer review found no arithmetic/addressing defect but identified
+  missing mid-loop cancellation in the merger. Constructors and every long
+  validation/merge/finalize loop now poll checkpoints; cancellation during
+  accumulation invalidates the session so a partial texture cannot be reused
+  or finalized. Validation errors preserve prior state. Back-sampling keeps
+  partially computed outputs local and polls validation and sampling loops.
+  The new cancellation test fails before the callback API exists, then passes
+  (`paint-bake-cancel-green-v1.log`). Follow-up review confirms the lifecycle
+  correction and reports no remaining cancellation defect.
+- The paint component selection passes43 tests with fourteen explicit oracle
+  tests ignored (`paint-bake-all-paint-v1.log`); all-target CUDA/cuDNN Clippy
+  passes with warnings denied (`paint-bake-clippy-v1.log`).
+- These are qualified P7 primitives, not the complete bake path. Camera/UV
+  projection construction, reliability masks, RealESRGAN view integration,
+  unseen-texel propagation, Navier–Stokes fill and final PBR GLB qualification
+  remain part of the active campaign. Existing neural parity failures remain
+  unchanged; no texture capability is newly advertised by this checkpoint.

@@ -29,6 +29,8 @@ pub mod glb;
 pub mod mesh;
 pub mod obj;
 pub mod paint_attention;
+pub mod paint_back_sample;
+pub mod paint_bake;
 pub mod paint_block;
 pub mod paint_conv;
 pub mod paint_denoiser;

@@ -1,0 +1,8 @@
+{
+  "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+  "torch": "2.5.1+cu124",
+  "sources": {
+    "hy3dpaint/DifferentiableRenderer/MeshRender.py": "5f008d9149c0dcac2ac5ffa7d2e797657b21515878d9b5804f6bf95c08135cce",
+    "hy3dpaint/utils/pipeline_utils.py": "a479de70e3d90a6060cf2fd03731e9e29af988880f3adaa5fc4643dd3573bd08"
+  }
+}
