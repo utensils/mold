@@ -1,13 +1,6 @@
 import { computed, type ComputedRef } from "vue";
 import type { FleetActiveWork } from "@studio/api/activity";
-import {
-  mergeActivity,
-  partitionActivity,
-  sequenceToVM,
-  type ActivityJobVM,
-} from "@studio/lib/activity";
 import { compareNewestSubmitted } from "@studio/lib/activityOrder";
-import { useChainJobsStore } from "../stores/chainJobs";
 import {
   GENERATION_HISTORY_LIMIT,
   railOrder,
@@ -17,12 +10,16 @@ import {
 import { useHostsStore } from "../stores/hosts";
 import { useLiveActivityStore } from "../stores/liveActivity";
 
-export type SequenceVM = ActivityJobVM & { kind: "sequence" };
-
-/** One row of the queue, whichever authority it came from. */
+/**
+ * One row of the queue, whichever authority it came from.
+ *
+ * There are two, not three: this client's own prints, and the server-owned
+ * work `/api/activity` reports. Scene-by-scene authoring is retired, so no
+ * client-side sequence row exists any more — a long clip the host has to
+ * chain and stitch is still ONE print row carrying its stage counter.
+ */
 export type QueueRow =
   | { key: string; createdAtMs: number; kind: "shared"; shared: FleetActiveWork }
-  | { key: string; createdAtMs: number; kind: "sequence"; sequence: SequenceVM }
   | { key: string; createdAtMs: number; kind: "print"; print: Job };
 
 export function jobRunning(job: Job): boolean {
@@ -36,8 +33,6 @@ export function jobSettled(job: Job): boolean {
 /** Whether a row is being made right now (as opposed to waiting or done). */
 export function rowRunning(row: QueueRow): boolean {
   if (row.kind === "print") return jobRunning(row.print);
-  if (row.kind === "sequence")
-    return row.sequence.phase === "running" || row.sequence.phase === "finalizing";
   return row.shared.phase === "running" || row.shared.phase === "cancelling";
 }
 
@@ -46,8 +41,8 @@ export function rowSettled(row: QueueRow): boolean {
 }
 
 export interface QueueActivity {
-  /** Every row newest-first: recovered work, sequences, prints, then the
-   * retained finished-print history. */
+  /** Every row newest-first: recovered work, prints, then the retained
+   * finished-print history. */
   rows: ComputedRef<QueueRow[]>;
   /** The row being made now, if any (the sidebar's active card). */
   active: ComputedRef<QueueRow | null>;
@@ -59,13 +54,12 @@ export interface QueueActivity {
 
 /**
  * The queue as every shell surface sees it: it lives in the sidebar, and the
- * Queue view is the same list at full width. Merges this
- * client's prints, its sequences, and the fleet's recovered work into one
- * newest-first timeline, deduplicating rows this client already owns.
+ * Queue view is the same list at full width. Merges this client's prints and
+ * the fleet's recovered work into one newest-first timeline, deduplicating
+ * rows this client already owns.
  */
 export function useQueueActivity(): QueueActivity {
   const generation = useGenerationStore();
-  const chains = useChainJobsStore();
   const hosts = useHostsStore();
   const liveActivity = useLiveActivityStore();
 
@@ -76,24 +70,8 @@ export function useQueueActivity(): QueueActivity {
     return [...live, ...done];
   });
 
-  /** Live sequences only — settled ones already have two homes (the print in
-   * My images, the job in History ▸ Sequences). */
-  const sequences = computed(() =>
-    partitionActivity(
-      mergeActivity(
-        [],
-        chains.allJobs.map(({ hostId, job }) =>
-          sequenceToVM(job, {
-            hostId,
-            hostLabel: hosts.all.find((h) => h.id === hostId)?.label ?? hostId,
-          }),
-        ),
-      ),
-    ).active.filter((vm): vm is SequenceVM => vm.kind === "sequence"),
-  );
-
   /** Server-owned work that survives this client's restart, minus rows the
-   * local print/sequence state already renders. */
+   * local print state already renders. */
   const shared = computed(() => {
     const primaryId = hosts.primaryHost?.id ?? "local";
     const local = new Set(
@@ -101,7 +79,12 @@ export function useQueueActivity(): QueueActivity {
         job.id ? [`${job.hostId ?? primaryId}:generation:${job.id}`] : [],
       ),
     );
-    for (const { hostId, job } of chains.allJobs) local.add(`${hostId}:sequence:${job.id}`);
+    // A long clip this client submitted is a chain job on the host, so
+    // `/api/activity` reports it under the sequence key too. It is already on
+    // screen as this client's own print row.
+    for (const job of generation.jobs) {
+      if (job.id) local.add(`${job.hostId ?? primaryId}:sequence:${job.id}`);
+    }
     return liveActivity.rows.filter((row) => !local.has(row.key));
   });
 
@@ -112,12 +95,6 @@ export function useQueueActivity(): QueueActivity {
         createdAtMs: work.created_at_unix_ms,
         kind: "shared",
         shared: work,
-      })),
-      ...sequences.value.map((sequence): QueueRow => ({
-        key: sequence.key,
-        createdAtMs: sequence.createdAtMs,
-        kind: "sequence",
-        sequence,
       })),
       ...prints.value.map((print): QueueRow => ({
         key: `print:${print.clientId}`,

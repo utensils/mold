@@ -60,6 +60,27 @@ describe("mobile durable generation host watch", () => {
     expect(h.scopes.at(-1)).toBeUndefined();
   });
 
+  it("ignores a chain job's own lifecycle frames without reconciling", async () => {
+    // `chain_job_queued` / `_started` / `_ended` are still emitted for jobs
+    // the CLI authors. The phone has no sequence surface to update, and these
+    // frames are not generation-lifecycle hints, so they must fall through
+    // cleanly — not throw, and not trigger a bulk status read per frame.
+    const h = harness();
+    h.callbacks().onOpen?.();
+    await h.flush();
+    for (const type of ["chain_job_queued", "chain_job_started", "chain_job_ended"]) {
+      h.callbacks().onEvent("event", JSON.stringify({ type, id: "chain-1" }));
+    }
+    await h.flush();
+    expect(h.reasons).toEqual(["open"]);
+    expect(h.gaps).toEqual([]);
+
+    // A generation hint arriving after them still reconciles normally.
+    h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "a" }));
+    await h.flush();
+    expect(h.reasons).toEqual(["open", "event"]);
+  });
+
   it("reconciles event gaps, malformed frames, close, and wake", async () => {
     const h = harness();
     h.callbacks().onEvent(

@@ -15,11 +15,9 @@ import type { InspectorTab } from "./inspectorTabs";
  * object — the two inspector doors, Starting points and Use these settings
  * again, and last the Where it runs chip. Nothing floats over the canvas.
  *
- * Simple | Scenes — how a video gets made — is NOT on this row: it is
- * `ClipModeStrip`, the row beneath. Beside the kind control it pushed the
- * whole right-hand cluster left whenever Short clip was chosen, so the control a
- * person had just clicked jumped away from the pointer. This row holds the
- * same children in every kind, so nothing on it ever moves.
+ * There are exactly three kinds, and a clip has ONE way of being made — the
+ * retired Simple | Scenes strip is gone with the timeline it opened. This row
+ * holds the same children in every kind, so nothing on it ever moves.
  *
  * Where it runs is chrome, not a setting: at the foot of the inspector's
  * Settings list nobody found it, and which machine a print goes to is
@@ -34,17 +32,12 @@ import type { InspectorTab } from "./inspectorTabs";
 const props = defineProps<{ form: GenerateForm }>();
 const emit = defineEmits<{
   "open-tab": [tab: InspectorTab];
-  /** Still picture ↔ Short clip: the inspector owns the model swap. */
-  "set-output": [mode: "single" | "sequence"];
 }>();
 
 // The three doors are ONE decision (`useOutputKindDoor`), shared with the
 // palette's Make a short clip and File ▸ New Clip, which open the Short clip
-// door through the view rather than deep-linking Scenes.
-const { outputKind, outputOptions, setOutputKind } = useOutputKindDoor(
-  () => props.form,
-  (mode) => emit("set-output", mode),
-);
+// door through the view rather than deep-linking anything.
+const { outputKind, outputOptions, setOutputKind } = useOutputKindDoor(() => props.form);
 
 const placeholder = computed(() => OUTPUT_KIND_PLACEHOLDER[outputKind.value]);
 const title = computed(() => props.form.title?.trim() ?? "");

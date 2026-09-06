@@ -73,26 +73,17 @@ async function onDrop(row: QueueRow) {
 }
 
 function model(row: QueueRow): string {
-  const id =
-    row.kind === "print"
-      ? row.print.model
-      : row.kind === "sequence"
-        ? row.sequence.model
-        : (row.shared.model ?? "");
+  const id = row.kind === "print" ? row.print.model : (row.shared.model ?? "");
   return id ? modelDisplayNameForId(id, hostModels.unionInstalled) : "—";
 }
 function machine(row: QueueRow): string {
   if (row.kind === "print")
     return row.print.hostLabel ?? hosts.primaryHost?.label ?? "this machine";
-  if (row.kind === "sequence") return row.sequence.hostLabel;
   return hosts.all.find((h) => h.id === row.shared.hostId)?.label ?? row.shared.hostId;
 }
 function progress(row: QueueRow): number | null {
   if (row.kind === "print" && row.print.status === "denoising" && row.print.total > 0) {
     return Math.round((row.print.step / row.print.total) * 100);
-  }
-  if (row.kind === "sequence" && row.sequence.stageCount > 0 && row.sequence.phase !== "queued") {
-    return Math.round((row.sequence.currentStage / row.sequence.stageCount) * 100);
   }
   // A row waiting on its style has a meter too: the download it is waiting on.
   const preparation = rowContext.contextFor.value(row).wait?.preparation?.fraction;

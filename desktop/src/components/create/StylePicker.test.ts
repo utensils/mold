@@ -12,7 +12,6 @@ import { useConnectionStore } from "../../stores/connection";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
 import { apiJsonTo } from "../../lib/api/client";
 
@@ -179,11 +178,11 @@ describe("StylePicker — finding a style in a long list", () => {
 describe("StylePicker — what each row says", () => {
   // Moved from InspectorPanel.test.ts: the rows are the composable's, and the
   // inspector no longer renders a picker of its own.
-  it("filters to sequence-capable models while in sequence mode", async () => {
+  it("narrows to clip styles while a clip style is selected", async () => {
     useModelStore().all = [model, videoModel];
     const form = useGenerateFormStore().form;
     form.model = videoModel.name;
-    useSequenceDraftStore().output = "sequence";
+    form.family = videoModel.family;
     const wrapper = mountPicker(form);
 
     await wrapper.get('[data-test="style-chip"]').trigger("click");
@@ -238,7 +237,7 @@ describe("StylePicker — what each row says", () => {
   it("shows a remote H3 download-only install with readable labels and its refusal", async () => {
     // H3 is a clip style, so the Short clip section is where its row lives.
     // The runtime refusal below is unchanged — it outranks every other reason.
-    useSequenceDraftStore().output = "sequence";
+    useGenerateFormStore().form.family = "minimax-h3";
     const h3 = {
       ...model,
       name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
@@ -448,13 +447,14 @@ describe("StylePicker — the menu holds one section", () => {
     expect(openedIds(wrapper)).toEqual(["flux-dev:q8"]);
   });
 
-  it("offers every clip style under Short clip, one-shot-only ones included", async () => {
+  it("offers every clip style under Short clip, H3 included", async () => {
     useModelStore().all = [model, videoModel, wanModel, meshModel];
     installOnRemote([h3Model]);
-    useSequenceDraftStore().output = "sequence";
-    const wrapper = mountPicker(useGenerateFormStore().form);
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const wrapper = mountPicker(form);
     await wrapper.get('[data-test="style-chip"]').trigger("click");
-    // eslint-disable-next-line no-console
     expect(openedIds(wrapper).sort()).toEqual([
       "ltx-video",
       "minimax-h3-fl2va:comfy-pruned-nvfp4",
@@ -462,20 +462,25 @@ describe("StylePicker — the menu holds one section", () => {
     ]);
   });
 
-  it("says on the row why a one-shot-only clip style cannot make a sequence", async () => {
+  /*
+   * `supports_sequence` is not a client gate any more: a clip has ONE way of
+   * being made, so H3 is pickable rather than rendered disabled with a
+   * refusal about joining scenes.
+   */
+  it("never refuses a runnable clip style for supports_sequence", async () => {
     useModelStore().all = [videoModel];
     installOnRemote([h3Model]);
-    useSequenceDraftStore().output = "sequence";
-    const wrapper = mountPicker(useGenerateFormStore().form);
+    const form = useGenerateFormStore().form;
+    form.model = videoModel.name;
+    form.family = videoModel.family;
+    const wrapper = mountPicker(form);
     await wrapper.get('[data-test="style-chip"]').trigger("click");
 
     const disabledReason = wrapper.getComponent(ModelPicker).props("disabledReason");
     if (!disabledReason) throw new Error("ModelPicker disabledReason prop is required");
     expect(disabledReason(videoModel)).toBeNull();
-    expect(disabledReason(h3Model)).toBe("Makes one clip at a time — it cannot join scenes.");
-    expect(wrapper.get('[data-test="model-disabled-reason"]').text()).toBe(
-      "Makes one clip at a time — it cannot join scenes.",
-    );
+    expect(disabledReason(h3Model)).toBeNull();
+    expect(wrapper.find('[data-test="model-disabled-reason"]').exists()).toBe(false);
   });
 
   it("offers only 3-D styles under 3-D object", async () => {
@@ -507,15 +512,17 @@ describe("StylePicker — the menu holds one section", () => {
     await wrapper.get('[data-test="style-chip"]').trigger("click");
     expect(wrapper.get('[data-test="model-picker-kicker"]').text()).toBe("still picture styles");
 
-    useSequenceDraftStore().output = "sequence";
+    useGenerateFormStore().form.family = videoModel.family;
     await flushPromises();
     expect(wrapper.get('[data-test="model-picker-kicker"]').text()).toBe("short clip styles");
   });
 
   it("names the empty section instead of the generic no-match line", async () => {
     useModelStore().all = [model];
-    useSequenceDraftStore().output = "sequence";
-    const wrapper = mountPicker(useGenerateFormStore().form);
+    const form = useGenerateFormStore().form;
+    form.model = "";
+    form.family = videoModel.family;
+    const wrapper = mountPicker(form);
     await wrapper.get('[data-test="style-chip"]').trigger("click");
 
     expect(wrapper.get('[data-test="model-picker-empty"]').text()).toBe(
@@ -546,13 +553,12 @@ describe("StylePicker — the menu holds one section", () => {
     await wrapper.get('[data-test="browse-catalog"]').trigger("click");
     expect(routerPush).toHaveBeenLastCalledWith("/models?type=image");
 
-    useSequenceDraftStore().output = "sequence";
+    form.family = videoModel.family;
     await flushPromises();
     await wrapper.get('[data-test="style-chip"]').trigger("click");
     await wrapper.get('[data-test="browse-catalog"]').trigger("click");
     expect(routerPush).toHaveBeenLastCalledWith("/models?type=video");
 
-    useSequenceDraftStore().output = "single";
     form.model = meshModel.name;
     form.family = meshModel.family;
     await flushPromises();

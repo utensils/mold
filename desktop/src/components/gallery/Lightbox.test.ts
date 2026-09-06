@@ -104,40 +104,46 @@ describe("Lightbox reuse", () => {
     await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
 
     expect(wrapper.emitted("reuse")).toHaveLength(1);
-    expect(wrapper.emitted("reuseSequence")).toBeUndefined();
     expect(useComposerStore().prefill).toBeNull();
   });
 
-  it("makes cached editing primary and keeps duplication explicit for sequence prints", async () => {
-    const wrapper = mountLightbox(item, true, {
-      isSequence: true,
-      canEditSequence: true,
-    });
+  // A stitched print carries `metadata.chain` whether an author composed the
+  // scenes or the server auto-chained one long clip, so the Lightbox reads it
+  // as an ordinary print: one reuse door, no authoring re-entry.
+  it("treats a chain-stitched print as an ordinary print", async () => {
+    const stitched: GalleryImage = {
+      ...item,
+      filename: "clip-0001.mp4",
+      format: "mp4",
+      metadata: {
+        ...item.metadata,
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 8,
+          stages: [
+            { prompt: "a lighthouse at dusk", frames: 97, transition: "smooth", seed: "42" },
+            { prompt: "the beam sweeps the bay", frames: 97, transition: "smooth", seed: "43" },
+          ],
+        },
+      },
+    };
+    const wrapper = mountLightbox(stitched, true);
 
-    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain("Edit clip");
-    expect(wrapper.get("[data-test='lightbox-duplicate-sequence']").text()).toBe(
-      "Duplicate as new",
-    );
+    const primary = wrapper.get("[data-test='lightbox-primary-action']");
+    expect(primary.text()).toContain("Use these settings");
+    expect(primary.text()).not.toContain("Edit clip");
+    expect(wrapper.text()).not.toContain("Duplicate as new");
+    expect(wrapper.find("[data-test='lightbox-duplicate-sequence']").exists()).toBe(false);
 
-    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
-    expect(wrapper.emitted("editSequence")).toHaveLength(1);
-    expect(wrapper.emitted("reuseSequence")).toBeUndefined();
+    await primary.trigger("click");
+    expect(wrapper.emitted("reuse")).toHaveLength(1);
 
-    await wrapper.get("[data-test='lightbox-duplicate-sequence']").trigger("click");
-    expect(wrapper.emitted("reuseSequence")).toHaveLength(1);
-  });
-
-  it("labels the safe fresh-draft fallback when no durable sequence is available", async () => {
-    const wrapper = mountLightbox(item, true, {
-      isSequence: true,
-      canEditSequence: false,
-    });
-
-    expect(wrapper.get("[data-test='lightbox-primary-action']").text()).toContain(
-      "Duplicate as new",
-    );
-    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
-    expect(wrapper.emitted("reuseSequence")).toHaveLength(1);
+    // Save / Copy / Delete stay available for it.
+    expect(wrapper.find("[data-test='save-media']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='lightbox-delete']").exists()).toBe(true);
+    await wrapper.get("[data-test='lightbox-delete']").trigger("click");
+    await wrapper.get("[data-test='lightbox-delete']").trigger("click");
+    expect(wrapper.emitted("delete")).toHaveLength(1);
   });
 });
 

@@ -70,7 +70,6 @@ function sentence(text: string): string {
 export function mobilePlacementFailure(
   preview: GenerationPlacementPreview | null,
   hostLabel: string,
-  subject: "print" | "sequence",
 ): string {
   const classification = classifyPlacementPreview(preview);
   if (classification === "infeasible" && preview) {
@@ -80,8 +79,8 @@ export function mobilePlacementFailure(
     const reason =
       typeof preview.reason === "string" && preview.reason.trim()
         ? sentence(preview.reason.trim())
-        : sentence(`the server reported that this ${subject} is infeasible`);
-    return `${hostLabel} cannot run this ${subject}: ${reason}${missing.length ? ` Missing components: ${missing.join(", ")}.` : ""} Nothing was queued.`;
+        : sentence("the server reported that this print is infeasible");
+    return `${hostLabel} cannot run this print: ${reason}${missing.length ? ` Missing components: ${missing.join(", ")}.` : ""} Nothing was queued.`;
   }
   if (classification === "temporarily_unavailable") {
     const reason =
@@ -93,24 +92,18 @@ export function mobilePlacementFailure(
   return `${hostLabel} returned an invalid placement response. Nothing was queued.`;
 }
 
-function mobileFleetPlacementFailure(
-  probes: readonly MobileRoutingObservation[],
-  subject: "print" | "sequence",
-): string {
+function mobileFleetPlacementFailure(probes: readonly MobileRoutingObservation[]): string {
   if (probes.length === 1 && probes[0]!.preview) {
-    return mobilePlacementFailure(probes[0]!.preview, probes[0]!.host.name, subject);
+    return mobilePlacementFailure(probes[0]!.preview, probes[0]!.host.name);
   }
   const detail = probes
     .map((probe) =>
       probe.preview
-        ? mobilePlacementFailure(probe.preview, probe.host.name, subject).replace(
-            " Nothing was queued.",
-            "",
-          )
+        ? mobilePlacementFailure(probe.preview, probe.host.name).replace(" Nothing was queued.", "")
         : `${probe.host.name} did not answer: ${describeTransportError(probe.error, probe.host.name)}`,
     )
     .join(" ");
-  return `No connected machine could run this ${subject}. ${detail} Nothing was queued.`;
+  return `No connected machine could run this print. ${detail} Nothing was queued.`;
 }
 
 export interface RouteAutomaticMobileGenerationOptions {
@@ -120,7 +113,6 @@ export interface RouteAutomaticMobileGenerationOptions {
   request: Record<string, unknown>;
   chain: boolean;
   copies: number;
-  subject: "print" | "sequence";
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
   signal?: AbortSignal;
@@ -135,7 +127,6 @@ export interface PreviewPinnedMobileGenerationOptions {
   request: Record<string, unknown>;
   chain: boolean;
   copies: number;
-  subject: "print" | "sequence";
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
   signal?: AbortSignal;
@@ -227,7 +218,7 @@ export async function previewPinnedMobileGeneration(
   if (classification !== "unsupported" && classification !== "planned") {
     return {
       kind: "error",
-      message: mobilePlacementFailure(placement, options.route.label, options.subject),
+      message: mobilePlacementFailure(placement, options.route.label),
     };
   }
   return { kind: "placement", placement };
@@ -366,8 +357,9 @@ export async function routeAutomaticMobileGeneration(
       ? [{ host: probe.view, roundTripMs: probe.roundTripMs, probe }]
       : [],
   );
-  // A print is answered from the captured queue/GPU snapshot and a sequence
-  // from its placement plan; one fan-out is never a mix of the two.
+  // An ordinary print is answered from the captured queue/GPU snapshot and an
+  // auto-chained long video from its placement plan; one fan-out is never a
+  // mix of the two.
   const telemetryOnly = settledProbes.filter((probe) => probe.telemetryOnly);
   if (telemetryOnly.length > 0) {
     const views = telemetryOnly.map((probe) => probe.view);
@@ -447,6 +439,6 @@ export async function routeAutomaticMobileGeneration(
   }
   return {
     kind: "error",
-    message: mobileFleetPlacementFailure(settledProbes, options.subject),
+    message: mobileFleetPlacementFailure(settledProbes),
   };
 }

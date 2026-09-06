@@ -54,9 +54,6 @@ export function notifyGenerated(prompt: string, filename?: string | null): void 
 export function notifyGenerationFailed(message: string): void {
   dispatchNotification("Generation failed", message.slice(0, 80), { kind: "create" });
 }
-export function notifyChainFinished(frames: number): void {
-  dispatchNotification(`Chain finished · ${frames} frames`, undefined, { kind: "gallery" });
-}
 export function notifyPulled(model: string, action: NotificationAction = { kind: "models" }): void {
   dispatchNotification(`Pulled ${model}`, undefined, action);
 }

@@ -422,38 +422,33 @@ describe("ComposerCard — shape and style chips", () => {
   });
 });
 
-// Clip mode keeps this one composer and hands it the selected scene's words:
-// the form's own prompt must stay untouched, and Generate still answers ⌘↩.
-describe("ComposerCard — clip mode", () => {
+/*
+ * A clip has ONE way of being made, so the composer always carries the FORM's
+ * prompt. There is no second set of words behind it, which is why Make, the
+ * rewrite, and the ↑/↓ history never stand down any more.
+ */
+describe("ComposerCard — a clip is an ordinary render", () => {
   function clipMode(form: GenerateForm) {
-    return mountComposer(form, {
-      promptValue: "rain picks up",
-      placeholder: "Scene 2 — describe what happens next",
-      showCount: false,
-      showExpand: false,
-    });
+    return mountComposer(form, { placeholder: "Describe the clip" });
   }
 
-  it("carries the scene's words instead of the form's prompt", async () => {
+  it("writes the form's own prompt, under the clip's invitation", async () => {
     const form = baseForm();
     form.prompt = "a brass teapot";
     const wrapper = clipMode(form);
     const textarea = wrapper.get<HTMLTextAreaElement>("textarea[aria-label='Prompt']");
 
-    expect(textarea.element.value).toBe("rain picks up");
-    expect(textarea.attributes("placeholder")).toBe("Scene 2 — describe what happens next");
+    expect(textarea.element.value).toBe("a brass teapot");
+    expect(textarea.attributes("placeholder")).toBe("Describe the clip");
 
     await textarea.setValue("the camera drifts left");
-    expect(wrapper.emitted("update:promptValue")?.at(-1)).toEqual(["the camera drifts left"]);
-    expect(form.prompt).toBe("a brass teapot");
+    expect(form.prompt).toBe("the camera drifts left");
   });
 
-  // Replaces the old "counts one clip" assertion: a chain has no batch at
-  // all, so the chip is gone rather than showing a number nothing reads.
-  it("hides Make on a chain and offers no rewrite of a scene", () => {
+  it("keeps Make and the rewrite standing", () => {
     const wrapper = clipMode(baseForm());
-    expect(wrapper.find("[data-test='batch-chip']").exists()).toBe(false);
-    expect(wrapper.findComponent(ExpandControl).exists()).toBe(false);
+    expect(wrapper.find("[data-test='batch-chip']").exists()).toBe(true);
+    expect(wrapper.findComponent(ExpandControl).exists()).toBe(true);
   });
 
   it("still generates on ⌘↵", async () => {

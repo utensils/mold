@@ -181,20 +181,16 @@ describe("applyDesktopImageDrop routes to the well under the cursor", () => {
     expect(other.sourceImage).toBe("IMAGE_BYTES");
   });
 
-  it("reaches the sequence opening image on the draft that owns it", async () => {
+  it("has no opening-image well to route to", async () => {
+    // Scene-by-scene authoring is retired, so a hovered opening well cannot
+    // exist: the drop falls through to the plan's own default instead.
     const form = newGenerateForm();
     Object.assign(form, { model: sd15.name, family: sd15.family });
-    const draft = { openingImage: null as { filename: string; base64: string } | null };
 
-    await applyDesktopImageDrop(form, dropped(), [sd15], "opening", {
-      openingVisible: true,
-      sequenceDraft: draft,
-    });
-    expect(draft.openingImage).toEqual({
-      filename: "reference.png",
-      base64: "IMAGE_BYTES",
-    });
-    expect(form.sourceImage).toBeNull();
+    const result = await applyDesktopImageDrop(form, dropped(), [sd15], "opening");
+    expect(result.attached).toBe(true);
+    expect(result.target).toBe("source");
+    expect(form.sourceImage).toBe("IMAGE_BYTES");
   });
 
   it("writes H3 boundaries and references to h3Authoring, never imageAttachments", async () => {

@@ -18,7 +18,6 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 }));
 
 import {
-  notifyChainFinished,
   notifyGenerated,
   notifyGenerationFailed,
   notifyPulled,
@@ -81,7 +80,6 @@ describe("desktop notifications", () => {
       { kind: "gallery" },
     ],
     [() => notifyGenerationFailed("host offline"), "Generation failed", { kind: "create" }],
-    [() => notifyChainFinished(81), "Chain finished · 81 frames", { kind: "gallery" }],
     [() => notifyPulled("flux-dev:q4"), "Pulled flux-dev:q4", { kind: "models" }],
     [
       () => notifyPullFailed("flux-dev:q4", "disk full"),

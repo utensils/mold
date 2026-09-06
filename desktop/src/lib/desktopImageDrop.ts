@@ -35,15 +35,11 @@ export interface DesktopImageDropResult {
 
 /**
  * What the Create route is rendering beside the source wells. The identity
- * photo and the sequence opening image are their own wells, orthogonal to the
- * source-media plan, so the view tells the router whether they exist and hands
- * over the draft that owns the opening frame.
+ * photo is its own well, orthogonal to the source-media plan, so the view
+ * tells the router whether it exists.
  */
 export interface DesktopDropContext {
   identityVisible?: boolean;
-  /** The sequence draft store, narrowed to the slot a drop can write. */
-  sequenceDraft?: { openingImage: { filename: string; base64: string | null } | null } | null;
-  openingVisible?: boolean;
 }
 
 /**
@@ -54,7 +50,7 @@ export interface DesktopDropContext {
  * an OS drop ever gets. It used to route by MODEL CAPABILITY, which replaced
  * the whole attachment strip on every drop, wrote `imageAttachments` for H3
  * (a field its request builder never reads, so the drop visibly did nothing),
- * and left the identity, sequence-opening, end-frame and H3 wells unreachable
+ * and left the identity, end-frame and H3 wells unreachable
  * by any drag at all. It now asks the SHARED router where the drop belongs —
  * the well under the cursor when the plan renders one, the plan's default
  * otherwise — and every strip APPENDS.
@@ -90,7 +86,9 @@ export async function applyDesktopImageDrop(
     hasSource: Boolean(form.sourceImage),
     referenceCount: form.imageAttachments.length,
     identityVisible: context.identityVisible === true,
-    openingVisible: context.openingVisible === true && Boolean(context.sequenceDraft),
+    // Scene-by-scene authoring is retired, so there is no opening-image well
+    // for a drop to land in any more.
+    openingVisible: false,
     h3FirstPresent: Boolean(form.h3Authoring?.firstFrame),
     h3ReferenceCount: h3References.length,
     h3ReferenceMax: MINIMAX_H3_MAX_REFERENCES,
@@ -102,7 +100,7 @@ export async function applyDesktopImageDrop(
     return { attached: false, metadataApplied, refused: routed.refused };
   }
 
-  const applied = await applyDropToForm(form, routed, image, context);
+  const applied = await applyDropToForm(form, routed, image);
   return applied.ok
     ? { attached: true, metadataApplied, target: routed }
     : { attached: false, metadataApplied, refused: applied.error };
@@ -116,7 +114,6 @@ export async function applyDropToForm(
   form: GenerateForm,
   target: DropTarget,
   image: DesktopImageImport,
-  context: DesktopDropContext = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const picked: PickedImage = { filename: image.filename, base64: image.base64 };
   switch (target) {
@@ -149,12 +146,6 @@ export async function applyDropToForm(
     case "identity":
       form.identityImage = picked;
       return { ok: true };
-    case "opening": {
-      const draft = context.sequenceDraft;
-      if (!draft) return { ok: false, error: "This sequence has no opening-image well." };
-      draft.openingImage = picked;
-      return { ok: true };
-    }
     case "h3-first":
     case "h3-last": {
       const result = setMinimaxH3PickedImageBoundary(
@@ -198,5 +189,9 @@ export async function applyDropToForm(
       }
       return { ok: true };
     }
+    default:
+      // `resolveDropTarget` is never asked for a well this surface does not
+      // render, so reaching here means a routing target with no home.
+      return { ok: false, error: "That image has nowhere to go on this style." };
   }
 }

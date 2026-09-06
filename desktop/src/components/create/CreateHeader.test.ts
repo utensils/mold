@@ -11,7 +11,6 @@ import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useGenerateFormStore } from "../../stores/generateForm";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import type { ModelEntry } from "../../lib/api/types";
 
@@ -164,12 +163,13 @@ describe("CreateHeader — the toolbar holds one row", () => {
 });
 
 describe("CreateHeader", () => {
-  it("no longer renders the retired Single | Sequence switch", () => {
-    // Output is a setting, not a place — the header must not push a route to
-    // change modes.
+  it("renders no output switch beyond the three kinds", () => {
+    // A clip has ONE way of being made: there is no Single | Sequence switch
+    // and no Simple | Scenes strip, and the header must not push a route.
     readyLocal();
     const wrapper = mount(CreateHeader, { props: { form: form() } });
     expect(wrapper.find("[data-test='composer-mode']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='clip-mode']").exists()).toBe(false);
     expect(routerPush).not.toHaveBeenCalled();
   });
 
@@ -190,34 +190,46 @@ describe("CreateHeader", () => {
     });
 
     /*
-     * Short clip opens onto the REMEMBERED sub-mode. With no clip style on the
-     * machine there is nothing Simple could select, so the door still opens
-     * onto Scenes, which owns that empty state and says where to get one.
+     * There are exactly THREE kinds and no fourth. A clip has one way of
+     * being made, so no Scenes segment, no Sequence segment, and no
+     * Simple | Scenes strip may ever join the row again.
      */
-    it("hands Short clip to the inspector when the machine has no clip style", async () => {
+    it("offers three output kinds and nothing else, on every kind of style", () => {
       readyLocal();
-      installLocal([stillModel]);
-      const wrapper = mount(CreateHeader, { props: { form: form() } });
-      await outputSegments(wrapper)[1]!.trigger("click");
-      expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
-    });
-
-    it("hands Short clip to the inspector when Scenes is the remembered way", async () => {
-      readyLocal();
-      installLocal([stillModel, clipModel]);
-      useSequenceDraftStore().clipMode = "scenes";
-      const wrapper = mount(CreateHeader, { props: { form: form() } });
-      await outputSegments(wrapper)[1]!.trigger("click");
-      expect(wrapper.emitted("set-output")).toEqual([["sequence"]]);
+      installLocal([stillModel, clipModel, meshModel]);
+      for (const family of ["flux", clipModel.family, meshModel.family]) {
+        const wrapper = mount(CreateHeader, {
+          props: { form: { ...form(), family } },
+        });
+        const labels = outputSegments(wrapper).map((b) => b.text());
+        expect(labels, family).toEqual(["Still picture", "Short clip", "3-D object"]);
+        for (const retired of ["Scenes", "Simple", "Sequence", "One shot"]) {
+          expect(wrapper.text(), `${family}: ${retired}`).not.toContain(retired);
+        }
+      }
     });
 
     /*
-     * Simple is the plain render: the output stays one shot and the STYLE is
-     * what makes it a clip, so the header adopts one the way the 3-D door
-     * adopts a 3-D style. Handing the inspector `single` would have restored a
-     * PICTURE style, which is the opposite of what the door was asked for.
+     * With no clip style on the machine there is nothing to adopt, so the
+     * door does nothing rather than putting a picture style under a clip
+     * label.
      */
-    it("adopts a clip style in place for Simple, without an output switch", async () => {
+    it("leaves the form alone when the machine has no clip style", async () => {
+      readyLocal();
+      installLocal([stillModel]);
+      const store = useGenerateFormStore();
+      store.form.model = stillModel.name;
+      store.form.family = stillModel.family;
+      const wrapper = mount(CreateHeader, { props: { form: store.form } });
+      await outputSegments(wrapper)[1]!.trigger("click");
+      expect(store.form.model).toBe(stillModel.name);
+    });
+
+    /*
+     * A clip is the plain render: the STYLE is what makes it one, so the
+     * header adopts a clip style the way the 3-D door adopts a 3-D style.
+     */
+    it("adopts a clip style in place, without an output switch", async () => {
       readyLocal();
       installLocal([stillModel, clipModel]);
       const store = useGenerateFormStore();
@@ -227,9 +239,7 @@ describe("CreateHeader", () => {
 
       await outputSegments(wrapper)[1]!.trigger("click");
 
-      expect(wrapper.emitted("set-output")).toBeUndefined();
       expect(store.form.model).toBe(clipModel.name);
-      expect(useSequenceDraftStore().output).toBe("single");
     });
 
     it("restores the parked picture style on the way back out of a simple clip", async () => {
@@ -245,15 +255,6 @@ describe("CreateHeader", () => {
       expect(store.form.model).toBe(clipModel.name);
       await outputSegments(wrapper)[0]!.trigger("click");
       expect(store.form.model).toBe(stillModel.name);
-    });
-
-    it("returns a clip draft to one shot", async () => {
-      readyLocal();
-      installLocal([stillModel]);
-      useSequenceDraftStore().output = "sequence";
-      const wrapper = mount(CreateHeader, { props: { form: form() } });
-      await outputSegments(wrapper)[0]!.trigger("click");
-      expect(wrapper.emitted("set-output")).toEqual([["single"]]);
     });
 
     /*
@@ -396,11 +397,11 @@ describe("CreateHeader", () => {
   });
 
   /*
-   * Simple | Scenes — how the video gets made — is `ClipModeStrip`'s, the row
-   * beneath. Beside the kind control it pushed the whole right-hand cluster
-   * left whenever Short clip was chosen, so the control a person had just clicked
-   * jumped away from the pointer. The toolbar holds the same children in
-   * every kind, so nothing on it ever moves.
+   * The retired Simple | Scenes strip used to sit beside the kind control and
+   * pushed the whole right-hand cluster left whenever Short clip was chosen,
+   * so the control a person had just clicked jumped away from the pointer.
+   * The toolbar holds the same children in every kind, so nothing on it ever
+   * moves.
    */
   describe("the row never changes shape with the kind", () => {
     function children(wrapper: ReturnType<typeof mount>) {
@@ -562,10 +563,12 @@ describe("CreateHeader", () => {
       );
     });
 
-    it("uses the clip placeholder for a sequence draft", async () => {
+    it("uses the clip placeholder for a clip style", async () => {
       readyLocal();
-      useSequenceDraftStore().output = "sequence";
-      const wrapper = mount(CreateHeader, { props: { form: form() }, attachTo: document.body });
+      const wrapper = mount(CreateHeader, {
+        props: { form: { ...form(), family: clipModel.family } },
+        attachTo: document.body,
+      });
       await wrapper.get("[data-test='print-title']").trigger("click");
       expect(wrapper.get("[data-test='print-title-input']").attributes("placeholder")).toBe(
         "Untitled clip",

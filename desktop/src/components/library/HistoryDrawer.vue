@@ -1,32 +1,20 @@
 <script setup lang="ts">
 /*
- * History — the Library's Runs + Prompts + Sequences log as an INLINE column
- * beside the grid, never a modal drawer: no scrim, no `aria-modal`, and the
- * tiles reflow next to it and stay clickable. Runs are gallery-backed (every finished
+ * History — the Library's Runs + Prompts log as an INLINE column beside the
+ * grid, never a modal drawer: no scrim, no `aria-modal`, and the tiles reflow
+ * next to it and stay clickable. Runs are gallery-backed (every finished
  * generation with its print, settings, and seed); Prompts is the raw prompt log
- * fanned out over every ready host; Sequences is the one place the durable
- * server-side sequence jobs are enumerated, acted on, and cleaned up — the
- * Create strip is present tense and no longer carries settled work or its
- * maintenance buttons. All the reuse/clear actions from the old History screen
- * are preserved. Opens via ?panel=history with ?tab= selecting the lens (the
- * retired /history route, the activity digest chip, and the command palette all
- * deep-link here); Library owns the open state and closing.
+ * fanned out over every ready host. All the reuse/clear actions from the old
+ * History screen are preserved. Opens via ?panel=history with ?tab= selecting
+ * the lens (the retired /history route and the command palette both deep-link
+ * here); Library owns the open state and closing.
  */
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
-import SequenceJobRow from "@ui/components/SequenceJobRow.vue";
-import {
-  HISTORY_JOBS_RENDER_CAP,
-  mergeActivity,
-  sequenceToVM,
-  type ActivityAction,
-  type ActivityJobVM,
-} from "@studio/lib/activity";
-import { isPrintOfChainJob } from "@studio/lib/sequenceReuse";
+import { HISTORY_JOBS_RENDER_CAP } from "@studio/lib/activity";
 import EmptyState from "../shell/EmptyState.vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
-import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import HostFilterChips from "../shell/HostFilterChips.vue";
 import {
@@ -44,13 +32,10 @@ import {
   applyGalleryEntryAsSource,
   canUseGalleryEntryAsSource,
 } from "../../lib/gallery/useAsSource";
-import { modelDisplayNameForId } from "../../lib/models";
-import { useChainJobsStore } from "../../stores/chainJobs";
 import { useConnectionStore } from "../../stores/connection";
 import { useComposerStore } from "../../stores/composer";
 import { useGalleryStore } from "../../stores/gallery";
 import { useGenerateFormStore } from "../../stores/generateForm";
-import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
@@ -68,12 +53,10 @@ const emit = defineEmits<{ close: [] }>();
 
 const route = useRoute();
 const router = useRouter();
-const chains = useChainJobsStore();
 const conn = useConnectionStore();
 const composer = useComposerStore();
 const gallery = useGalleryStore();
 const generateForm = useGenerateFormStore();
-const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const models = useModelStore();
 const toasts = useToastStore();
@@ -103,16 +86,16 @@ function onDrawerReset() {
 }
 
 /**
- * Three lenses on the past: Runs (every finished generation with its print,
- * settings, and seed — the gallery DB is the source of truth), Prompts (the
- * prompt log, including prompts whose outputs are gone), and Sequences (the
- * durable chain jobs, which are the past *with actions attached*).
+ * Two lenses on the past: Runs (every finished generation with its print,
+ * settings, and seed — the gallery DB is the source of truth) and Prompts (the
+ * prompt log, including prompts whose outputs are gone).
  *
- * The tab lives in the URL so the Create activity digest can deep-link
- * straight to Sequences.
+ * The tab lives in the URL so the shell can deep-link a lens. Anything else —
+ * a bookmarked `?tab=sequences` from the retired sequence log included —
+ * normalizes to Runs rather than rendering nothing.
  */
-type HistoryTab = "runs" | "prompts" | "sequences";
-const TABS: HistoryTab[] = ["runs", "prompts", "sequences"];
+type HistoryTab = "runs" | "prompts";
+const TABS: HistoryTab[] = ["runs", "prompts"];
 
 const tab = computed<HistoryTab>(() => {
   const q = route.query.tab;
@@ -153,8 +136,8 @@ const runs = computed<MergedPrint[]>(() => {
  *  distinct rows. */
 const runKey = (e: MergedPrint) => `${e.sourceKey}\0${e.item.filename}`;
 /** The Runs list is not windowed, and every row mounts a thumbnail, so it is
- *  capped exactly like Sequences: a 1 000-print library must not mount 1 000
- *  media requests the moment the drawer opens. */
+ *  capped: a 1 000-print library must not mount 1 000 media requests the
+ *  moment the drawer opens. */
 const visibleRuns = computed(() => runs.value.slice(0, HISTORY_JOBS_RENDER_CAP));
 const runsCapNote = computed(() =>
   runs.value.length > HISTORY_JOBS_RENDER_CAP
@@ -194,7 +177,7 @@ function runMeta(img: GalleryImage): string {
  * "Use these settings" on a past run. It takes the SAME road the Lightbox and
  * the Create view's Recent tab take — `composer.set` restored the numbers and
  * dropped the photo the print was made from, because it invalidates
- * retained-source authority. Sequences keep `composer.setSequence`.
+ * retained-source authority.
  */
 function useRun(entry: MergedPrint) {
   reuseStillPrint(entry);
@@ -407,177 +390,6 @@ const timeOf = (e: HistoryEntry) =>
     hour: "2-digit",
     minute: "2-digit",
   });
-
-// ── Sequences (durable chain jobs, every host) ─────────────────────────────
-
-type SequenceVM = ActivityJobVM & { kind: "sequence" };
-
-/** `chains.syncPolling()` only runs while something is active, so a settled
- *  list goes stale the moment the last job finishes. Refetch on open and on
- *  every switch back to this tab. */
-watch(
-  [() => props.open, tab],
-  ([open, current]) => {
-    if (open && current === "sequences") void chains.fetchAll();
-  },
-  { immediate: true },
-);
-
-const sequenceModelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
-
-/** Every host's jobs through the shared merge (active first, then recency),
- *  narrowed by the same host chips the other two tabs use. */
-const sequenceRows = computed<SequenceVM[]>(() => {
-  const vms = chains.allJobs
-    .filter(({ hostId }) => gallery.filter === "all" || hostId === gallery.filter)
-    .map(({ hostId, job }) =>
-      sequenceToVM(job, {
-        hostId,
-        hostLabel: hosts.all.find((h) => h.id === hostId)?.label ?? hostId,
-      }),
-    );
-  return mergeActivity([], vms).filter((vm): vm is SequenceVM => vm.kind === "sequence");
-});
-
-const visibleSequences = computed(() => sequenceRows.value.slice(0, HISTORY_JOBS_RENDER_CAP));
-const sequenceCapNote = computed(() =>
-  sequenceRows.value.length > HISTORY_JOBS_RENDER_CAP
-    ? `showing ${HISTORY_JOBS_RENDER_CAP} of ${sequenceRows.value.length}`
-    : null,
-);
-
-const sequenceTime = (vm: SequenceVM) =>
-  new Date(vm.settledAtMs ?? vm.createdAtMs).toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-
-/** The print a job produced, on that job's OWN host only — a merged print may
- *  live on three hosts, but the other two hold auto-saved copies. */
-function printOf(vm: SequenceVM): { sourceKey: string; filename: string } | null {
-  const hit = gallery.merged.find(
-    (entry) => entry.sourceKey === vm.hostId && isPrintOfChainJob(entry.item.metadata, vm.jobId),
-  );
-  return hit ? { sourceKey: hit.sourceKey, filename: hit.item.filename } : null;
-}
-
-function showPrint(vm: SequenceVM) {
-  const print = printOf(vm);
-  if (!print) return;
-  emit("close");
-  void router.push({ path: "/library", query: { print: print.filename } });
-}
-
-const confirmDeleteSequence = ref<SequenceVM | null>(null);
-
-function onSequenceAction(action: ActivityAction, vm: SequenceVM) {
-  switch (action) {
-    case "watch":
-      // Re-enter the job: Create's canvas holds whatever it finds, running or
-      // finished. Same verb the strip uses, one route away.
-      composer.setSequence({ kind: "inspect", hostId: vm.hostId, jobId: vm.jobId });
-      emit("close");
-      void router.push("/create");
-      return;
-    case "edit":
-      composer.setSequence({ kind: "edit", hostId: vm.hostId, jobId: vm.jobId });
-      emit("close");
-      void router.push("/create");
-      return;
-    case "cancel":
-      void chains.cancel(vm.hostId, vm.jobId).catch((err) => toasts.push(String(err), "error"));
-      return;
-    case "resume":
-      void chains.resume(vm.hostId, vm.jobId).catch((err) => toasts.push(String(err), "error"));
-      return;
-    case "delete":
-      confirmDeleteSequence.value = vm;
-      return;
-    default:
-      return;
-  }
-}
-
-function selectSequence(vm: SequenceVM) {
-  composer.setSequence({ kind: "inspect", hostId: vm.hostId, jobId: vm.jobId });
-  emit("close");
-  void router.push("/create");
-}
-
-function deleteSequenceConfirmed() {
-  const vm = confirmDeleteSequence.value;
-  confirmDeleteSequence.value = null;
-  if (!vm) return;
-  void chains.remove(vm.hostId, vm.jobId).catch((err) => toasts.push(String(err), "error"));
-}
-
-// ── Maintenance (moved out of the Create composer) ─────────────────────────
-
-/** `Clear inactive` is a server DELETE, not the strip's client-side dismiss —
- *  the confirm names the host and the count so the two never blur. */
-const confirmingClearSequences = ref(false);
-const clearingSequences = ref(false);
-const confirmCleanUpDisk = ref(false);
-
-const inactiveSequenceCount = computed(
-  () => sequenceRows.value.filter((vm) => vm.settledAtMs !== null).length,
-);
-const sequenceHostScope = computed(() => (gallery.filter === "all" ? null : gallery.filter));
-const sequenceHostLabel = computed(() =>
-  sequenceHostScope.value
-    ? (hosts.all.find((h) => h.id === sequenceHostScope.value)?.label ?? sequenceHostScope.value)
-    : "every machine",
-);
-
-const clearSequencesLabel = computed(() => {
-  if (!confirmingClearSequences.value) return "Clear inactive";
-  const n = inactiveSequenceCount.value;
-  return `Delete ${n} inactive clip${n === 1 ? "" : "s"} on ${sequenceHostLabel.value}?`;
-});
-
-async function clearInactiveSequences() {
-  if (!confirmingClearSequences.value) {
-    confirmingClearSequences.value = true;
-    return;
-  }
-  confirmingClearSequences.value = false;
-  clearingSequences.value = true;
-  try {
-    const scope = sequenceHostScope.value;
-    const { cleared, failed } = scope
-      ? await chains.clearInactive(scope)
-      : await chains.clearInactive();
-    if (failed > 0) toasts.push(`Cleared ${cleared}, ${failed} could not be deleted`, "error");
-    else toasts.push(`Cleared ${cleared} clip${cleared === 1 ? "" : "s"}`);
-  } catch (err) {
-    toasts.push(String(err), "error");
-  } finally {
-    clearingSequences.value = false;
-  }
-}
-
-function cleanUpDisk() {
-  confirmCleanUpDisk.value = true;
-}
-
-async function cleanUpDiskConfirmed() {
-  confirmCleanUpDisk.value = false;
-  try {
-    const hostIds = sequenceHostScope.value
-      ? [sequenceHostScope.value]
-      : Object.keys(chains.byHost);
-    let swept = 0;
-    let pruned = 0;
-    for (const hostId of hostIds) {
-      const outcome = await chains.gc(hostId);
-      swept += outcome.swept_ephemeral_jobs;
-      pruned += outcome.pruned_artifact_dirs;
-    }
-    toasts.push(`Swept ${swept} jobs, pruned ${pruned} dirs`);
-  } catch (err) {
-    toasts.push(String(err), "error");
-  }
-}
 </script>
 
 <template>
@@ -636,19 +448,9 @@ async function cleanUpDiskConfirmed() {
         >
           Prompts
         </button>
-        <button
-          type="button"
-          data-test="tab-sequences"
-          :aria-pressed="tab === 'sequences'"
-          class="rounded-control px-2.5 py-1 text-sm transition-colors"
-          :class="tab === 'sequences' ? 'bg-bg text-fg shadow-sm' : 'text-fg-2 hover:text-fg'"
-          @click="selectTab('sequences')"
-        >
-          Clips
-        </button>
       </div>
 
-      <div v-if="tab !== 'sequences'" class="flex items-center gap-2">
+      <div class="flex items-center gap-2">
         <input
           v-model="query"
           data-selectable
@@ -751,87 +553,6 @@ async function cleanUpDiskConfirmed() {
         </p>
       </div>
 
-      <!-- Sequences: the durable chain jobs, with their maintenance -->
-      <div v-else-if="tab === 'sequences'" class="flex flex-col gap-2">
-        <EmptyState
-          v-if="sequenceRows.length === 0"
-          data-test="sequences-empty"
-          headline="No clips yet"
-          detail="A clip you make keeps its job here — watch it, edit its scenes, or clear it out."
-          action="Go to New image"
-          @action="
-            emit('close');
-            router.push('/create');
-          "
-        />
-        <template v-else>
-          <div
-            v-for="vm in visibleSequences"
-            :key="vm.key"
-            data-test="sequence-row"
-            class="rounded-control px-2 py-1.5 hover:bg-bg-deep"
-          >
-            <SequenceJobRow
-              class="min-w-0"
-              dense
-              :vm="vm"
-              :model-label="sequenceModelLabel(vm.model)"
-              :time-label="sequenceTime(vm)"
-              @action="onSequenceAction"
-              @select="selectSequence"
-            >
-              <template #actions>
-                <button
-                  v-if="printOf(vm)"
-                  type="button"
-                  data-test="seq-show-print"
-                  class="border-border-control shrink-0 rounded-control border px-2 py-0.5 text-micro text-fg-2 hover:text-fg"
-                  @click.stop="showPrint(vm)"
-                >
-                  Show the picture
-                </button>
-              </template>
-            </SequenceJobRow>
-          </div>
-          <p
-            v-if="sequenceCapNote"
-            data-test="sequence-cap-note"
-            class="font-mono text-micro text-fg-dim whitespace-nowrap mt-1"
-          >
-            {{ sequenceCapNote }}
-          </p>
-        </template>
-
-        <!-- Maintenance lives here now: destructive, host-scoped, rarely used. -->
-        <div class="border-border mt-2 flex items-center gap-2 border-t pt-2">
-          <button
-            type="button"
-            data-test="seq-clear-inactive"
-            class="border-border h-7 rounded-control border px-2.5 text-sm transition-colors duration-100"
-            :class="
-              confirmingClearSequences
-                ? 'border-error bg-error font-semibold text-on-accent'
-                : 'text-fg-2 hover:text-error'
-            "
-            :disabled="clearingSequences"
-            title="Delete every clip job that isn't running or being made"
-            @blur="confirmingClearSequences = false"
-            @click="clearInactiveSequences"
-          >
-            {{ clearSequencesLabel }}
-          </button>
-          <button
-            type="button"
-            data-test="seq-cleanup-disk"
-            class="border-border h-7 rounded-control border px-2.5 text-sm text-fg-2 transition-colors hover:text-fg"
-            title="Free the disk space cached scenes are holding"
-            @click="cleanUpDisk"
-          >
-            Clean up disk
-          </button>
-        </div>
-      </div>
-
       <!-- Prompts: the raw prompt log, merged across every ready host -->
       <div v-else>
         <EmptyState
@@ -897,25 +618,4 @@ async function cleanUpDiskConfirmed() {
       </div>
     </div>
   </aside>
-
-  <!-- Siblings of the column: it is positioned, and a dialog nested inside it
-       would size to the column instead of the frame. -->
-  <ConfirmDialog
-    :open="confirmDeleteSequence !== null"
-    title="Delete this clip?"
-    :message="`Removes the job and its cached scenes${confirmDeleteSequence ? ` from ${confirmDeleteSequence.hostLabel}` : ''}. The finished clip in My images is kept.`"
-    confirm-label="Delete"
-    danger
-    @confirm="deleteSequenceConfirmed"
-    @cancel="confirmDeleteSequence = null"
-  />
-  <ConfirmDialog
-    :open="confirmCleanUpDisk"
-    title="Clean up the clip cache?"
-    message="This discards the cached scenes used for playback and editing. Finished clips in My images stay."
-    confirm-label="Clean up"
-    danger
-    @confirm="cleanUpDiskConfirmed"
-    @cancel="confirmCleanUpDisk = false"
-  />
 </template>

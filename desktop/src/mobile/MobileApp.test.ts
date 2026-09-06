@@ -167,7 +167,6 @@ import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
 import { ApiError } from "../lib/api/client";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 
 installMemoryLocalStorage();
 
@@ -312,8 +311,8 @@ function durableApiFallback(
   if (path === "/api/generation-batches" && init?.method === "POST") {
     return Promise.resolve(durableBatchResponse(init));
   }
-  // An auto-chained sequence is created as a durable chain job before its own
-  // event stream opens.
+  // An auto-chained long video is created as a durable chain job before its
+  // own event stream opens.
   if (path === "/api/chain-jobs" && init?.method === "POST") {
     return Promise.resolve({ job_id: "chain-job-1" });
   }
@@ -768,53 +767,7 @@ afterEach(() => {
   Reflect.deleteProperty(document, "elementsFromPoint");
 });
 
-describe("MobileApp sequence generation", () => {
-  /** A machine serving one sequence-capable model, with Create already on
-   *  Sequence output — the only shape that still opens a placement probe. */
-  function serveSequence(): void {
-    const sequenceModel = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-distilled:bf16",
-      family: "ltx-video",
-      default_steps: 7,
-      default_guidance: 1,
-    };
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path === "/api/activity") {
-        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      }
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return Promise.resolve({ job_id: "sequence-job-1" });
-      }
-      if (path === "/api/chain-jobs/sequence-job-1") return new Promise(() => {});
-      return durableApiFallback(path, init, callTarget);
-    });
-  }
-
-  async function fillSequenceClips(): Promise<void> {
-    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("A responsive placement check");
-    await prompts[1]!.setValue("A second clip so the rail is valid");
-    await flushPromises();
-  }
-
+describe("MobileApp generation lifecycle", () => {
   it("enters Wan on its default duration after an H3 model", async () => {
     const h3: ModelEntry = {
       ...model,
@@ -881,98 +834,6 @@ describe("MobileApp sequence generation", () => {
     expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(true);
   });
 
-  it("lets the user cancel a sequence placement preview before anything is queued", async () => {
-    // Only a SEQUENCE is planned before it is created; a print is admitted
-    // durably and never opens a placement probe.
-    const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewChainPlacement.mockReturnValueOnce(preview.promise);
-    serveSequence();
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await fillSequenceClips();
-
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
-
-    const button = wrapper.get("[data-test='mobile-generate-sequence']");
-    expect(button.text()).toBe("Cancel · Preparing sequence…");
-    expect(button.attributes("disabled")).toBeUndefined();
-    await button.trigger("click");
-    expect(previewChainPlacement).toHaveBeenCalledTimes(1);
-
-    const previewOptions = previewChainPlacement.mock.calls[0]?.[3];
-    expect(previewOptions?.signal?.aborted).toBe(true);
-
-    preview.resolve(plannedPlacement());
-    await flushPromises();
-    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/chain-jobs")).toHaveLength(0);
-    expect(button.text()).toContain("Generate sequence");
-  });
-
-  it("releases iOS background execution exactly once after placement cancellation settles", async () => {
-    isNativeIOSRuntime.mockReturnValue(true);
-    invoke.mockImplementation((command: string) => {
-      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
-      if (command === "begin_mobile_background_task") {
-        return Promise.resolve("mobile-background-placement-cancel");
-      }
-      return Promise.resolve(null);
-    });
-    const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewChainPlacement.mockReturnValueOnce(preview.promise);
-    serveSequence();
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await fillSequenceClips();
-
-    const button = wrapper.get("[data-test='mobile-generate-sequence']");
-    await button.trigger("click");
-    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
-    await button.trigger("click");
-    preview.resolve(plannedPlacement());
-
-    await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
-        token: "mobile-background-placement-cancel",
-      }),
-    );
-    expect(
-      invoke.mock.calls.filter(([command]) => command === "end_mobile_background_task"),
-    ).toHaveLength(1);
-  });
-
-  it("holds iOS background execution through sequence placement and creation", async () => {
-    isNativeIOSRuntime.mockReturnValue(true);
-    invoke.mockImplementation((command: string) => {
-      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
-      if (command === "begin_mobile_background_task") {
-        return Promise.resolve("mobile-background-sequence");
-      }
-      return Promise.resolve(null);
-    });
-    const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewChainPlacement.mockReturnValueOnce(preview.promise);
-    serveSequence();
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await fillSequenceClips();
-
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("begin_mobile_background_task", {
-        name: "Preparing remote sequence",
-      }),
-    );
-    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
-
-    preview.resolve(plannedPlacement());
-    await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
-        token: "mobile-background-sequence",
-      }),
-    );
-  });
-
   it("holds iOS background execution across a print's durable admission", async () => {
     // A print no longer waits on a placement probe, so the assertion the
     // phone still owes is that the background task spans admission itself.
@@ -1015,31 +876,6 @@ describe("MobileApp sequence generation", () => {
         token: "mobile-background-generation",
       }),
     );
-  });
-
-  it("releases iOS background execution when sequence placement fails", async () => {
-    isNativeIOSRuntime.mockReturnValue(true);
-    invoke.mockImplementation((command: string) => {
-      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
-      if (command === "begin_mobile_background_task") {
-        return Promise.resolve("mobile-background-placement-failure");
-      }
-      return Promise.resolve(null);
-    });
-    serveSequence();
-    previewChainPlacement.mockRejectedValueOnce(new Error("placement unavailable"));
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await fillSequenceClips();
-
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-
-    await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
-        token: "mobile-background-placement-failure",
-      }),
-    );
-    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/chain-jobs")).toHaveLength(0);
   });
 
   it("cancels source preparation and releases Generate when prompt work takes authority", async () => {
@@ -1489,8 +1325,13 @@ describe("MobileApp sequence generation", () => {
     );
   });
 
-  it("routes a tapped server-owned auto-chain generation through its durable chain", async () => {
-    const pinia = createPinia();
+  /**
+   * A long video the host is rendering as clips is still auto-chaining
+   * (feature B) — but it has no client-restorable request, so tapping it
+   * opens its MACHINE rather than pretending to reload settings. It must
+   * never fetch the chain detail, and it must never touch Create's form.
+   */
+  it("opens the machine for a server-owned auto-chain instead of restoring clips", async () => {
     const priorModel: ModelEntry = {
       ...model,
       name: "flux-dev:q8",
@@ -1525,62 +1366,26 @@ describe("MobileApp sequence generation", () => {
         });
       }
       if (path === "/api/queue") return Promise.resolve({ entries: [], plan: null });
-      if (path === "/api/chain-jobs/foreign-auto-chain") {
-        return Promise.resolve({
-          id: "foreign-auto-chain",
-          state: "running",
-          model: sequenceModel.name,
-          stage_count: 2,
-          current_stage: 0,
-          created_at_unix_ms: 1,
-          updated_at_unix_ms: 9,
-          error: null,
-          ephemeral: true,
-          stages: [],
-          script: {
-            schema: "mold.chain.v1",
-            chain: {
-              model: sequenceModel.name,
-              width: 1024,
-              height: 576,
-              fps: 24,
-              steps: 18,
-              guidance: 2.5,
-            },
-            stages: [
-              { prompt: "A lighthouse wakes", frames: 25, transition: "smooth" },
-              { prompt: "The beam crosses red dunes", frames: 33, transition: "smooth" },
-            ],
-          },
-        });
-      }
       return durableApiFallback(path, init, callTarget);
     });
-    wrapper = mountMobileApp(pinia);
+    wrapper = mountMobileApp();
     await flushPromises();
     await flushPromises();
 
+    const before = (fieldControl("Model").element as HTMLSelectElement).value;
     const autoChainRow = wrapper.get(
       "[data-test='live-activity-select-studio-id:generation:foreign-auto-chain']",
     );
     await autoChainRow.trigger("click");
     await flushPromises();
 
-    const draft = useSequenceDraftStore(pinia);
-    expect(draft.output).toBe("sequence");
-    expect(draft.clips.map((clip) => clip.prompt)).toEqual([
-      "A lighthouse wakes",
-      "The beam crosses red dunes",
-    ]);
-    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(true);
-    expect(fieldControl("Video model").element).toHaveProperty("value", sequenceModel.name);
-    // The fixed-CFG sentence is the host's own control note now. This fixture
-    // advertises no generation profile, so the phone renders nothing rather
-    // than composing copy for a value it did not choose — see
-    // MobileSharedParams.test.ts for the note-bearing cases.
-    expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
-    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/chain-jobs/foreign-auto-chain");
-    expect(apiJsonTo.mock.calls.some(([, path]) => path === "/api/queue?limit=3")).toBe(false);
+    expect(
+      apiJsonTo.mock.calls.some(([, path]) => String(path).startsWith("/api/chain-jobs/")),
+    ).toBe(false);
+    expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(before);
   });
 
   it("refuses to restore a stale queue row after the server instance changes", async () => {
@@ -1627,339 +1432,16 @@ describe("MobileApp sequence generation", () => {
       queueReads,
     );
   });
-
-  it("queues a durable two-clip sequence on the selected Keychain-authenticated host", async () => {
-    const sequenceModel = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-distilled:bf16",
-      family: "ltx-video",
-      default_steps: 7,
-      default_guidance: 1,
-    };
-    isNativeIOSRuntime.mockReturnValue(true);
-    invoke.mockImplementation((command: string) => {
-      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
-      if (command === "begin_mobile_background_task") {
-        return Promise.resolve("mobile-background-sequence");
-      }
-      return Promise.resolve(null);
-    });
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return Promise.resolve({ job_id: "sequence-job-1" });
-      }
-      if (path === "/api/chain-jobs/sequence-job-1") {
-        return new Promise(() => {});
-      }
-      return durableApiFallback(path, init, callTarget);
-    });
-    apiFetchTo.mockImplementation(
-      async (requestTarget: unknown, path: string, init?: RequestInit) => {
-        if (path === "/api/chain-jobs" && init?.method === "POST") {
-          const body = await apiJsonTo(requestTarget, path, init);
-          return new Response(JSON.stringify(body), {
-            headers: {
-              "x-mold-request-warning":
-                "Reference timing was adjusted; the sequence still rendered.",
-            },
-          });
-        }
-        return { blob: () => Promise.resolve(new Blob(["thumbnail"])) } as Response;
-      },
-    );
-
-    let finishPreview!: (value: Awaited<ReturnType<typeof previewChainPlacement>>) => void;
-    previewChainPlacement.mockReturnValueOnce(
-      new Promise((resolve) => {
-        finishPreview = resolve;
-      }),
-    );
-    wrapper = mountMobileApp();
-    await flushPromises();
-    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
-    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
-    const sequenceForm = wrapper.getComponent({ name: "MobileSequenceComposer" }).props("form") as {
-      strength: number;
-    };
-    const tappedStrength = sequenceForm.strength;
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-    expect(invoke).toHaveBeenCalledWith("begin_mobile_background_task", {
-      name: "Preparing remote sequence",
-    });
-    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
-    sequenceForm.strength = 0.12;
-    await prompts[0]!.setValue("A later edit that belongs to the next submission");
-    finishPreview({
-      ...plannedPlacement(),
-      authoritative: false,
-      outcome: "unsupported",
-      candidate: null,
-    });
-    await flushPromises();
-    expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
-      token: "mobile-background-sequence",
-    });
-
-    expect(previewChainPlacement).toHaveBeenCalledWith(
-      target,
-      expect.anything(),
-      1,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
-    expect(apiJsonTo).toHaveBeenCalledWith(
-      target,
-      "/api/chain-jobs",
-      expect.objectContaining({
-        method: "POST",
-        body: expect.stringContaining("A paper boat crosses a moonlit pond"),
-      }),
-    );
-    const createCall = apiJsonTo.mock.calls.find(
-      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
-    );
-    const request = JSON.parse(String((createCall?.[2] as RequestInit)?.body));
-    expect(request.strength).toBe(tappedStrength);
-    expect(request.stages[0].prompt).toBe("A paper boat crosses a moonlit pond");
-    const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
-    expect(JSON.parse(recovery ?? "null")).toEqual({
-      hostId: "studio-id",
-      baseUrl: target.baseUrl,
-      instanceId: "studio-id",
-      jobId: "sequence-job-1",
-    });
-    expect(recovery).not.toContain(target.apiKey);
-    expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
-    const advisory = wrapper.get("[data-test='mobile-request-advisories']");
-    expect(advisory.text()).toContain(
-      "Reference timing was adjusted; the sequence still rendered.",
-    );
-    await advisory.get("[data-test='mobile-request-advisories-dismiss']").trigger("click");
-    expect(wrapper.find("[data-test='mobile-request-advisories']").exists()).toBe(false);
-  });
-
-  it("parks a retained opening image when the checkpoint reads no source image", async () => {
-    // The well is hidden for an advertised text-to-video checkpoint, so the
-    // request must not ship the image the user can no longer see or remove.
-    const sequenceModel = {
-      ...model,
-      name: "wan22-t2v-a14b:q5",
-      family: "wan",
-      default_steps: 20,
-      default_guidance: 5,
-      default_frames: 81,
-      default_fps: 16,
-      source_image: "unsupported",
-      supports_sequence: true,
-    };
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 81,
-          frames_per_clip_recommended: 81,
-          max_stages: 8,
-          max_total_frames: 648,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "q5",
-          supports_audio: false,
-          supports_sequence: true,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return Promise.resolve({ job_id: "sequence-job-2" });
-      }
-      if (path === "/api/chain-jobs/sequence-job-2") {
-        return new Promise(() => {});
-      }
-      return durableApiFallback(path, init, callTarget);
-    });
-    previewChainPlacement.mockResolvedValueOnce({
-      ...plannedPlacement(),
-      authoritative: false,
-      outcome: "unsupported",
-      candidate: null,
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-    const draft = useSequenceDraftStore();
-    draft.openingImage = { filename: "opening.png", base64: btoa("stale opening") };
-    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
-    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
-    await flushPromises();
-
-    expect(wrapper.find("[data-test='mobile-sequence-source-disclosure']").exists()).toBe(false);
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const createCall = apiJsonTo.mock.calls.find(
-      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
-    );
-    expect(createCall).toBeDefined();
-    const request = JSON.parse(String((createCall?.[2] as RequestInit)?.body));
-    expect(request.stages[0]).not.toHaveProperty("source_image");
-    expect(String((createCall?.[2] as RequestInit)?.body)).not.toContain(btoa("stale opening"));
-  });
-
-  it("cancels the exact sequence when cancellation arrives before its id", async () => {
-    const sequenceModel = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-distilled:bf16",
-      family: "ltx-video",
-      default_steps: 7,
-      default_guidance: 1,
-    };
-    isNativeIOSRuntime.mockReturnValue(true);
-    invoke.mockImplementation((command: string) => {
-      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
-      if (command === "begin_mobile_background_task") {
-        return Promise.resolve("mobile-background-sequence-cancel");
-      }
-      return Promise.resolve(null);
-    });
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    let finishCreate!: (value: { job_id: string }) => void;
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return new Promise((resolve) => (finishCreate = resolve));
-      }
-      return durableApiFallback(path, init, callTarget);
-    });
-    previewChainPlacement.mockResolvedValue({
-      ...plannedPlacement(),
-      authoritative: false,
-      outcome: "unsupported",
-      candidate: null,
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("opening");
-    await prompts[1]!.setValue("ending");
-
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await vi.waitFor(() => expect(finishCreate).toBeTypeOf("function"));
-    const create = apiJsonTo.mock.calls.find(
-      (call) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
-    );
-    expect((create?.[2] as RequestInit).signal).toBeUndefined();
-    const operationId = new Headers((create?.[2] as RequestInit).headers).get(
-      "x-mold-operation-id",
-    );
-    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
-    const cancel = wrapper.get("[data-test='mobile-generate-sequence']");
-    expect(cancel.text()).toContain("Cancel");
-    await cancel.trigger("click");
-    await vi.waitFor(() =>
-      expect(apiFetchTo).toHaveBeenCalledWith(
-        target,
-        `/api/chain-jobs/${operationId}/operations/${operationId}/cancel`,
-        { method: "POST", keepalive: true },
-      ),
-    );
-    finishCreate({ job_id: "late-sequence" });
-    await flushPromises();
-
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/late-sequence/cancel", {
-      method: "POST",
-    });
-    expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
-      token: "mobile-background-sequence-cancel",
-    });
-    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
-  });
-
-  it("refuses recovery when a saved server identity cannot be verified", async () => {
-    const sequenceModel = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-distilled:bf16",
-      family: "ltx-video",
-    };
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    localStorage.setItem(
-      "mold.mobile.sequence-job.v1",
-      JSON.stringify({
-        hostId: "studio-id",
-        baseUrl: target.baseUrl,
-        instanceId: "studio-id",
-        jobId: "saved-sequence",
-      }),
-    );
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") {
-        return Promise.resolve({ ...status, instance_id: undefined });
-      }
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "q8",
-          supports_audio: true,
-        });
-      }
-      if (path === "/api/gallery") return Promise.resolve([]);
-      return durableApiFallback(path, init, callTarget);
-    });
-
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
-    expect(wrapper.text()).toContain(
-      "The exact machine for this saved sequence is no longer available.",
-    );
-    expect(apiJsonTo).not.toHaveBeenCalledWith(expect.anything(), "/api/chain-jobs/saved-sequence");
-  });
 });
 
-describe("MobileApp Output field", () => {
+/**
+ * Create has ONE output. The One shot | Sequence segmented field, the clip
+ * rail, and the chain-capable narrowing of the model picker are retired: a
+ * long video is still rendered as clips when the checkpoint cannot do it in
+ * one pass, but that is the host's automatic chaining, never an authoring
+ * mode the user picks.
+ */
+describe("MobileApp Create output", () => {
   const sequenceModel: ModelEntry = {
     ...model,
     name: "ltx-video-0.9.8-2b-dev:bf16",
@@ -1978,61 +1460,40 @@ describe("MobileApp Output field", () => {
       if (path === "/api/models") return Promise.resolve(entries);
       if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-          supports_sequence: true,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return Promise.resolve({ job_id: "sequence-job-1" });
-      }
-      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
       return durableApiFallback(path, init, callTarget);
     });
   }
 
-  function outputSegment(label: string): DOMWrapper<Element> {
-    const button = wrapper
-      ?.get("[data-test='mobile-output-mode']")
-      .findAll("button")
-      .find((candidate) => candidate.text() === label);
-    if (!button) throw new Error(`Missing ${label} output segment`);
-    return button;
-  }
-
-  async function composeTwoClips(): Promise<void> {
-    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("a paper boat");
-    await prompts[1]!.setValue("fireflies gather");
-  }
-
-  it("replaces the Single | Sequence mode pair with an Output field above the model", async () => {
+  it("carries no Output field, no clip rail, and no chain-limits probe", async () => {
     installModels([model, sequenceModel]);
     wrapper = mountMobileApp();
     await flushPromises();
 
-    // The old radiogroup pinned above the form is gone for good.
-    expect(wrapper.find("[data-test='mobile-create-mode']").exists()).toBe(false);
-
-    const output = wrapper.get("[data-test='mobile-output-mode']");
-    const modelField = wrapper
-      .findAll("label.field")
-      .find((field) => field.find("span").text() === "Model")!;
-    expect(
-      output.element.compareDocumentPosition(modelField.element) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(output.text()).toContain("One shot");
-    expect(output.text()).toContain("Sequence");
+    expect(wrapper.find("[data-test='mobile-output-mode']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-sequence-clip']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-generate-sequence']").exists()).toBe(false);
+    expect(
+      apiJsonTo.mock.calls.some(([, path]) =>
+        String(path).startsWith("/api/capabilities/chain-limits"),
+      ),
+    ).toBe(false);
+  });
+
+  it("offers every downloaded generation model under one Model field", async () => {
+    // The picker used to narrow to chain-capable video models under Sequence;
+    // with one output there is nothing left to narrow by.
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const picker = fieldControl("Model");
+    expect(
+      [...(picker.element as HTMLSelectElement).options].map((option) => option.value),
+    ).toEqual(expect.arrayContaining([model.name, sequenceModel.name]));
+    expect(
+      wrapper.findAll("label.field").some((field) => field.find("span").text() === "Video model"),
+    ).toBe(false);
   });
 
   it("keeps the one-shot Develop action outside the scrolling form", async () => {
@@ -2045,10 +1506,6 @@ describe("MobileApp Output field", () => {
     expect(
       wrapper.get(".mobile-content").find("[data-test='mobile-develop-button']").exists(),
     ).toBe(false);
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[data-test='mobile-create-action']").exists()).toBe(false);
   });
 
   it("keeps a corrective explanation beside a disabled persistent Develop action", async () => {
@@ -2061,319 +1518,6 @@ describe("MobileApp Output field", () => {
     expect(action.get("[data-test='mobile-develop-blocker']").text()).toContain(
       "Choose a model before generating.",
     );
-  });
-
-  it("migrates the legacy create-mode key into the shared draft and retires it", async () => {
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(true);
-    expect(outputSegment("Sequence").attributes("aria-checked")).toBe("true");
-    expect(localStorage.getItem("mold.mobile.create-mode.v1")).toBeNull();
-  });
-
-  it("keeps One shot and Sequence prompts isolated while switching", async () => {
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await fieldControl("Prompt").setValue("a paper boat crosses a moonlit pond");
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-
-    const clipPrompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    expect((clipPrompts[0]!.element as HTMLTextAreaElement).value).toBe("");
-
-    await clipPrompts[0]!.setValue("a paper boat under fireflies");
-    await outputSegment("One shot").trigger("click");
-    await flushPromises();
-    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
-      "a paper boat crosses a moonlit pond",
-    );
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-    expect(
-      (
-        wrapper.findAll("[data-test='mobile-sequence-clip'] textarea")[0]!
-          .element as HTMLTextAreaElement
-      ).value,
-    ).toBe("a paper boat under fireflies");
-  });
-
-  it("narrows the picker to chain-capable models and restores the single pick on the way back", async () => {
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(model.name);
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-
-    const picker = fieldControl("Video model");
-    const options = picker.findAll("option").map((option) => option.attributes("value"));
-    expect(options).toEqual([sequenceModel.name]);
-    expect((picker.element as HTMLSelectElement).value).toBe(sequenceModel.name);
-
-    await outputSegment("One shot").trigger("click");
-    await flushPromises();
-    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(model.name);
-  });
-
-  it("guides to Video + Models in Discover when no chain-capable model is installed", async () => {
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
-      if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.reject(new Error("not a chain model"));
-      }
-      return durableApiFallback(path, init, callTarget);
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(false);
-    const empty = wrapper.get("[data-test='mobile-sequence-empty']");
-    expect(empty.text()).toContain("Sequences need a video model");
-
-    // Browsing must LAND on the filtered Discover shelf, not just switch tabs.
-    await empty.get("[data-test='mobile-sequence-browse']").trigger("click");
-    await flushPromises();
-
-    expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
-    const media = wrapper
-      .get(".mobile-catalog-media")
-      .findAll("button")
-      .find((button) => button.text() === "Video")!;
-    expect(media.attributes("aria-pressed")).toBe("true");
-    const kinds = wrapper.get("[data-test='mobile-catalog-kind-chips']");
-    const checkpoints = kinds.findAll("button").find((button) => button.text() === "Models")!;
-    expect(checkpoints.attributes("aria-pressed")).toBe("true");
-  });
-
-  it("reads the selected model's fps into the shared params, not a generic 24", async () => {
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-
-    expect(
-      (wrapper.get("[data-test='mobile-sequence-fps'] input").element as HTMLInputElement).value,
-    ).toBe("30");
-    expect(wrapper.get("[data-test='mobile-sequence-duration']").text()).toContain("@ 30fps");
-  });
-
-  it("submits the sequence with the form's live shared params, not composer copies", async () => {
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-
-    await composeTwoClips();
-    // The shared params are the ONLY copy — editing them here is exactly what
-    // the outgoing chain request must carry.
-    await fieldControl("Steps").setValue(11);
-    await fieldControl("Guidance").setValue(2.5);
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const post = apiJsonTo.mock.calls.find(
-      (call: unknown[]) => call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method,
-    );
-    const body = JSON.parse((post?.[2] as RequestInit).body as string) as Record<string, unknown>;
-    expect(body.model).toBe(sequenceModel.name);
-    expect(body.steps).toBe(11);
-    expect(body.guidance).toBe(2.5);
-    expect(body.width).toBe(sequenceModel.default_width);
-    expect(body.height).toBe(sequenceModel.default_height);
-    // The model's own fps, not the generic 24-fps form fallback.
-    expect(body.fps).toBe(sequenceModel.default_fps);
-    // LTX-Video carries no motion tail, so its seams are plain joins.
-    expect(body.motion_tail_frames).toBe(0);
-    expect(body.stages).toEqual([
-      { prompt: "a paper boat", frames: 25, transition: "smooth" },
-      { prompt: "fireflies gather", frames: 25, transition: "smooth" },
-    ]);
-
-    const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
-    expect(JSON.parse(recovery ?? "null")).toEqual({
-      hostId: "studio-id",
-      baseUrl: target.baseUrl,
-      instanceId: "studio-id",
-      jobId: "sequence-job-1",
-    });
-    expect(recovery).not.toContain(target.apiKey);
-  });
-
-  it("watches the durable job over SSE on the frozen route and shows it in the one queue", async () => {
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-    await composeTwoClips();
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const events = openStreams.find(
-      (stream) => stream.path === "/api/chain-jobs/sequence-job-1/events",
-    );
-    if (!events) throw new Error("The sequence event stream never opened");
-    expect((events.options as { target?: unknown }).target).toEqual(target);
-
-    events.options.onEvent(
-      "message",
-      JSON.stringify({
-        type: "snapshot",
-        job: {
-          id: "sequence-job-1",
-          state: "running",
-          model: sequenceModel.name,
-          stage_count: 2,
-          current_stage: 0,
-          created_at_unix_ms: 1_700_000_000_000,
-          updated_at_unix_ms: 1_700_000_000_000,
-          error: null,
-          stages: [
-            { idx: 0, state: "running" },
-            { idx: 1, state: "pending" },
-          ],
-        },
-      }),
-    );
-    events.options.onEvent(
-      "message",
-      JSON.stringify({ type: "denoise_step", stage_idx: 0, step: 4, total: 8 }),
-    );
-    await flushPromises();
-
-    const row = wrapper.get("[data-test='mobile-sequence-job']");
-    expect(row.text()).toContain("2 clips");
-    expect(row.text()).toContain("running");
-    expect(row.text()).toContain("clip 1/2");
-    expect(row.text()).toContain("50%");
-    // Sequences and prints share ONE queue list.
-    expect(wrapper.get("[data-test='mobile-generation-queue']").element.contains(row.element)).toBe(
-      true,
-    );
-
-    await row.get("[data-test='swipe-action-cancel']").trigger("click");
-    await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/sequence-job-1/cancel", {
-      method: "POST",
-    });
-  });
-
-  it("offers Resume and Dismiss once the durable job settles", async () => {
-    installModels([model, sequenceModel]);
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await outputSegment("Sequence").trigger("click");
-    await flushPromises();
-    await composeTwoClips();
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const events = openStreams.find(
-      (stream) => stream.path === "/api/chain-jobs/sequence-job-1/events",
-    )!;
-    events.options.onEvent(
-      "message",
-      JSON.stringify({
-        type: "snapshot",
-        job: {
-          id: "sequence-job-1",
-          state: "interrupted",
-          model: sequenceModel.name,
-          stage_count: 2,
-          current_stage: 1,
-          created_at_unix_ms: 1_700_000_000_000,
-          updated_at_unix_ms: 1_700_000_000_000,
-          error: "CUDA_ERROR_OUT_OF_MEMORY",
-          stages: [
-            { idx: 0, state: "completed" },
-            { idx: 1, state: "failed" },
-          ],
-        },
-      }),
-    );
-    await flushPromises();
-
-    const row = wrapper.get("[data-test='mobile-sequence-job']");
-    expect(row.text()).toContain("needs more GPU memory");
-    const failure = row.get("[data-test='mobile-sequence-error-disclosure']");
-    expect(failure.attributes("aria-expanded")).toBe("false");
-    expect(failure.attributes("aria-label")).toBeUndefined();
-    await failure.trigger("click");
-    expect(failure.attributes("aria-expanded")).toBe("true");
-    expect(failure.classes()).toContain("mobile-sequence-row-error--expanded");
-    expect(row.find("[data-test='swipe-action-cancel']").exists()).toBe(false);
-    expect(row.find("[data-test='swipe-action-dismiss']").exists()).toBe(true);
-    // The row survives for its actions, but a settled job is not active work.
-    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("0 active");
-    // A settled job has nothing left to stream.
-    expect(events.options.signal.aborted).toBe(true);
-    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
-
-    await row.get("[data-test='swipe-action-resume']").trigger("click");
-    await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/sequence-job-1/resume", {
-      method: "POST",
-    });
-    // Resuming re-attaches on the SAME frozen route and re-arms recovery.
-    const resumed = wrapper.get("[data-test='mobile-sequence-job']");
-    expect(resumed.find("[data-test='swipe-action-cancel']").exists()).toBe(true);
-    expect(JSON.parse(localStorage.getItem("mold.mobile.sequence-job.v1") ?? "null")).toEqual({
-      hostId: "studio-id",
-      baseUrl: target.baseUrl,
-      instanceId: "studio-id",
-      jobId: "sequence-job-1",
-    });
-    const resumedStream = openStreams
-      .filter((stream) => stream.path === "/api/chain-jobs/sequence-job-1/events")
-      .at(-1)!;
-    expect(resumedStream).not.toBe(events);
-    resumedStream.options.onEvent(
-      "message",
-      JSON.stringify({
-        type: "snapshot",
-        job: {
-          id: "sequence-job-1",
-          state: "cancelled",
-          model: sequenceModel.name,
-          stage_count: 2,
-          current_stage: 1,
-          created_at_unix_ms: 1_700_000_000_000,
-          updated_at_unix_ms: 1_700_000_000_100,
-          error: null,
-          stages: [
-            { idx: 0, state: "completed" },
-            { idx: 1, state: "pending" },
-          ],
-        },
-      }),
-    );
-    await flushPromises();
-
-    await wrapper
-      .get("[data-test='mobile-sequence-job'] [data-test='swipe-action-dismiss']")
-      .trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[data-test='mobile-sequence-job']").exists()).toBe(false);
   });
 });
 
@@ -2659,51 +1803,6 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-missing-model-sheet']").classes()).not.toContain(
       "is-open",
     );
-  });
-
-  it("offers the same missing-model recovery for a restored sequence", async () => {
-    const restoredSequenceModel: ModelEntry = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-dev:bf16",
-      family: "ltx-video",
-      default_frames: 25,
-      default_fps: 30,
-    };
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([]);
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      if (path === "/api/capabilities") {
-        return Promise.resolve({
-          events: { available: true },
-          ...durableQueueCapabilities,
-        });
-      }
-      if (path === "/api/activity") {
-        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
-      }
-      return durableApiFallback(path, init, callTarget);
-    });
-    const pinia = createPinia();
-    wrapper = mountMobileApp(pinia);
-    await flushPromises();
-    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
-    applyModelDefaults(liveForm, restoredSequenceModel);
-    const draft = useSequenceDraftStore(pinia);
-    draft.output = "sequence";
-    draft.ensureClips(restoredSequenceModel.default_frames ?? 97);
-    draft.clips[0]!.prompt = "opening shot";
-    draft.clips[1]!.prompt = "closing shot";
-    await flushPromises();
-
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    expect(wrapper.get("[data-test='mobile-missing-model-sheet']").classes()).toContain("is-open");
-    expect(document.body.textContent).toContain(
-      `${restoredSequenceModel.name} isn't installed on Studio`,
-    );
-    expect(previewChainPlacement).not.toHaveBeenCalled();
   });
 
   it("keeps accepting durable prints while earlier admissions are still awaiting responses", async () => {
@@ -4633,8 +3732,8 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    // A sequence is CREATED as a durable chain job and followed on its own
-    // event stream; the auto-expand body rides the create.
+    // An auto-chained long video is CREATED as a durable chain job and
+    // followed on its own event stream; the auto-expand body rides the create.
     const create = apiFetchTo.mock.calls.find((call) => call[1] === "/api/chain-jobs");
     expect(create).toBeTruthy();
     const body = JSON.parse(String((create![2] as RequestInit).body)) as Record<string, unknown>;
@@ -8131,34 +7230,6 @@ describe("MobileApp create settings reset", () => {
     await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
     await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
     expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("2");
-
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.enableAudio = true;
-    await flushPromises();
-    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
-    expect(draft.enableAudio).toBe(false);
-  });
-
-  it("discards the sequence opening image on the primary Reset", async () => {
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    // Read the live form while One shot still mounts the LoRA controls; the
-    // sequence bench renders a different subtree over the same form object.
-    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
-
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
-    liveForm.strength = 0.4;
-    await flushPromises();
-
-    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
-    await flushPromises();
-
-    expect(draft.openingImage).toBeNull();
-    expect(liveForm.strength).not.toBe(0.4);
   });
 
   it("badges and resets LTX-2 guidance overrides from the Advanced sheet", async () => {
@@ -10665,10 +9736,11 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
   });
 
-  it("reuses a sequence print as a clip rail on the Create tab", async () => {
-    // iPhone gets Reuse only: the rail reloads from `metadata.chain`, no edit
-    // session, and the composer lands on Create with clip 1's prompt (never
-    // the newline join the print records as `metadata.prompt`).
+  it("reuses a stitched print as a one shot carrying clip 1's prompt", async () => {
+    // A stitched print's `metadata.prompt` is every clip's prompt joined by
+    // newlines — a blob nobody wrote. Reuse restores the print's model, canvas
+    // and seed as an ORDINARY one shot, and takes the prompt from clip 1's own
+    // recorded stage. There is no clip rail on any surface any more.
     const sequenceModel: ModelEntry = {
       ...model,
       name: "ltx-video-0.9.8-2b-distilled:bf16",
@@ -10697,26 +9769,11 @@ describe("MobileApp gallery", () => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
       if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-        });
-      }
       if (path === "/api/gallery") return Promise.resolve([sequencePrint]);
-      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
       return durableApiFallback(path, init, callTarget);
     });
 
-    const pinia = createPinia();
-    wrapper = mountMobileApp(pinia);
+    wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
@@ -10725,32 +9782,32 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
     await flushPromises();
 
-    const draft = useSequenceDraftStore(pinia);
-    expect(draft.output).toBe("sequence");
-    expect(draft.clips.map((clip) => clip.prompt)).toEqual([
-      "a harbour at dawn",
-      "the boats leave",
-    ]);
-    expect(draft.editing).toBeNull();
     expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
       "page",
     );
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-sequence-clip']").exists()).toBe(false);
+    const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
+    expect(prompt.value).toBe("a harbour at dawn");
+    expect(prompt.value).not.toContain("the boats leave");
+    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(sequenceModel.name);
   });
 
-  it("keeps an H3 sequence snapshot in the viewer with an explicit refusal", async () => {
-    const sequenceModel: ModelEntry = {
+  it("never refuses reuse of an H3 stitched print", async () => {
+    // The old clip rail refused an H3 chain outright. With one output there is
+    // nothing to refuse: the print restores as a one shot like any other.
+    const h3Model: ModelEntry = {
       ...model,
-      name: "ltx-video-0.9.8-2b-distilled:bf16",
-      family: "ltx-video",
-      supports_sequence: true,
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
     } as ModelEntry;
     const h3Sequence: GalleryImage = {
       ...print,
       filename: "invalid-h3-sequence.mp4",
       metadata: {
         ...print.metadata,
-        model: "minimax-h3-fl2va:official-bf16",
+        model: h3Model.name,
+        prompt: "opening\nclosing",
         chain_job_id: "job-h3",
         chain: {
           stage_count: 2,
@@ -10764,13 +9821,12 @@ describe("MobileApp gallery", () => {
     };
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/models") return Promise.resolve([h3Model]);
       if (path === "/api/gallery") return Promise.resolve([h3Sequence]);
       return durableApiFallback(path, init, callTarget);
     });
 
-    const pinia = createPinia();
-    wrapper = mountMobileApp(pinia);
+    wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
@@ -10779,11 +9835,11 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
-      "cannot render a clip sequence",
+    expect(wrapper.find(".gallery-viewer-reuse-error").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
     );
-    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
-    expect(useSequenceDraftStore(pinia).output).toBe("single");
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("opening");
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {
@@ -12233,112 +11289,6 @@ describe("MobileApp automatic generation routing", () => {
   });
 });
 
-describe("MobileApp automatic sequence routing", () => {
-  const renderTarget = {
-    baseUrl: "http://render.tailnet.ts.net:7680",
-    apiKey: "render-secret",
-  };
-  const sequenceModel: ModelEntry = {
-    ...model,
-    name: "ltx-video-0.9.8-2b-distilled:bf16",
-    family: "ltx-video",
-    default_steps: 7,
-    default_guidance: 1,
-  };
-
-  it("freezes the fan-out winner as the sequence's recovery host", async () => {
-    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    localStorage.setItem(
-      "mold.mobile.hosts.v1",
-      JSON.stringify([
-        {
-          id: "studio-id",
-          name: "Studio",
-          baseUrl: target.baseUrl,
-          hostname: "studio",
-          instanceId: "studio-id",
-        },
-        {
-          id: "render-id",
-          name: "Render",
-          baseUrl: renderTarget.baseUrl,
-          hostname: "render",
-          instanceId: "render-id",
-        },
-      ]),
-    );
-    invoke.mockImplementation((command: string, args?: { hostId?: string }) =>
-      Promise.resolve(
-        command === "keychain_get_api_key"
-          ? args?.hostId === "render-id"
-            ? renderTarget.apiKey
-            : target.apiKey
-          : null,
-      ),
-    );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
-      const render = route.baseUrl === renderTarget.baseUrl;
-      if (path === "/api/status")
-        return Promise.resolve({
-          ...status,
-          hostname: render ? "render" : "studio",
-          instance_id: render ? "render-id" : "studio-id",
-        });
-      if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path === "/api/activity")
-        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST")
-        return Promise.resolve({ job_id: "sequence-job-1" });
-      if (path === "/api/chain-jobs/sequence-job-1") return new Promise(() => {});
-      return durableApiFallback(path, init, route);
-    });
-    previewChainPlacement.mockImplementation((probe: { baseUrl: string }) => {
-      const preview = plannedPlacement();
-      preview.candidate.predicted_completion_after_ms =
-        probe.baseUrl === renderTarget.baseUrl ? 100 : 9_000;
-      return Promise.resolve(preview);
-    });
-
-    wrapper = mountMobileApp();
-    await flushPromises();
-    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("A paper boat crosses a moonlit pond");
-    await prompts[1]!.setValue("Fireflies gather as the sky brightens");
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const created = apiJsonTo.mock.calls.filter(
-      (call: unknown[]) =>
-        call[1] === "/api/chain-jobs" && (call[2] as RequestInit)?.method === "POST",
-    );
-    expect(created).toHaveLength(1);
-    expect(created[0]![0]).toEqual(renderTarget);
-    const recovery = localStorage.getItem("mold.mobile.sequence-job.v1");
-    expect(JSON.parse(recovery ?? "null")).toEqual({
-      hostId: "render-id",
-      baseUrl: renderTarget.baseUrl,
-      instanceId: "render-id",
-      jobId: "sequence-job-1",
-    });
-    expect(recovery).not.toContain(renderTarget.apiKey);
-  });
-});
-
 describe("MobileApp routing target consistency", () => {
   const renderTarget = {
     baseUrl: "http://render.tailnet.ts.net:7680",
@@ -13059,77 +12009,6 @@ describe("MobileApp Create title", () => {
     expect(openStreams[1]?.options.body.title).toBeUndefined();
   });
 
-  it("keeps the Title field for Sequence output and stamps the stitched print", async () => {
-    const sequenceModel: ModelEntry = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-dev:bf16",
-      family: "ltx-video",
-      default_steps: 7,
-      default_guidance: 1,
-      default_width: 704,
-      default_height: 480,
-      default_frames: 25,
-      default_fps: 30,
-    };
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-          supports_sequence: true,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return Promise.resolve({ job_id: "sequence-job-1" });
-      }
-      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
-      if (path === "/api/activity")
-        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return durableApiFallback(path, init, callTarget);
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await fieldControl("Title").setValue("Storm study");
-    const sequenceSegment = wrapper
-      .get("[data-test='mobile-output-mode']")
-      .findAll("button")
-      .find((candidate) => candidate.text() === "Sequence");
-    await sequenceSegment!.trigger("click");
-    await flushPromises();
-
-    // The chain wire carries `title` for the STITCHED print, so the field
-    // stays visible and the old "sequences have no title" note is retired.
-    expect(
-      wrapper.findAll("label.field").some((field) => field.find("span").text() === "Title"),
-    ).toBe(true);
-    expect(wrapper.find("[data-test='mobile-sequence-title-note']").exists()).toBe(false);
-
-    const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("a paper boat");
-    await prompts[1]!.setValue("fireflies gather");
-    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const post = apiJsonTo.mock.calls.find(
-      ([, path, init]) =>
-        path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
-    );
-    expect(post).toBeTruthy();
-    expect(JSON.parse(String((post![2] as RequestInit).body)).title).toBe("Storm study");
-  });
-
   it("refuses an over-long title with an inline error instead of dropping it", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -13226,24 +12105,6 @@ describe("MobileApp Create File under", () => {
     }
   }
 
-  async function chooseSequenceOutput(): Promise<void> {
-    const sequenceSegment = wrapper!
-      .get("[data-test='mobile-output-mode']")
-      .findAll("button")
-      .find((candidate) => candidate.text() === "Sequence");
-    await sequenceSegment!.trigger("click");
-    await flushPromises();
-  }
-
-  function chainBody(): Record<string, unknown> {
-    const post = apiJsonTo.mock.calls.find(
-      ([, path, init]) =>
-        path === "/api/chain-jobs" && (init as RequestInit | undefined)?.method === "POST",
-    );
-    expect(post).toBeTruthy();
-    return JSON.parse(String((post![2] as RequestInit).body)) as Record<string, unknown>;
-  }
-
   it("hides File under and files nothing while no reachable machine can organize", async () => {
     await openCreateWithFiling(false);
 
@@ -13332,37 +12193,6 @@ describe("MobileApp Create File under", () => {
       expect(request.title).toBe("Smurfs");
       expect(request.tags).toEqual(["smurfs"]);
       expect(request.collection).toEqual({ name: "Smurfs" });
-    }
-  });
-
-  it("files a sequence's stitched print from the same draft, title included", async () => {
-    await openCreateWithFiling();
-
-    await fieldControl("Title").setValue("Smurfs");
-    await chooseSequenceOutput();
-
-    // The chain wire carries `title`/`tags`/`collection` now, so the Title
-    // field stays visible and the old "sequences have no title" note is gone.
-    expect(
-      wrapper!.findAll("label.field").some((field) => field.find("span").text() === "Title"),
-    ).toBe(true);
-    expect(wrapper!.find("[data-test='mobile-sequence-title-note']").exists()).toBe(false);
-    expect(wrapper!.find("[data-test='mobile-file-under']").exists()).toBe(true);
-
-    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("a paper boat");
-    await prompts[1]!.setValue("fireflies gather");
-    await wrapper!.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const body = chainBody();
-    expect(body.title).toBe("Smurfs");
-    expect(body.tags).toEqual(["smurfs"]);
-    expect(body.collection).toEqual({ name: "Smurfs" });
-    // Filing describes the stitched print, never an intermediate clip.
-    for (const stage of body.stages as Array<Record<string, unknown>>) {
-      expect(stage).not.toHaveProperty("tags");
-      expect(stage).not.toHaveProperty("collection");
     }
   });
 
@@ -13882,85 +12712,6 @@ describe("MobileApp Create File under", () => {
     expect(admittedRequests()).toHaveLength(2);
     expect(admittedRequests()[1]?.tags).toEqual(["smurfs"]);
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
-  });
-
-  it("drops the stitched print's filing when the sequence machine can't organize", async () => {
-    // A sequence freezes the browsed machine unless the fan-out replaces it,
-    // and its filing rides the chain body — the same silent-loss seam, one
-    // endpoint over.
-    localStorage.setItem("mold.mobile.selected-host.v1", "render-id");
-    twoMachines();
-    const sequenceModel: ModelEntry = {
-      ...model,
-      name: "ltx-video-0.9.8-2b-dev:bf16",
-      family: "ltx-video",
-      default_steps: 7,
-      default_guidance: 1,
-      default_width: 704,
-      default_height: 480,
-      default_frames: 25,
-      default_fps: 30,
-    };
-    apiJsonTo.mockImplementation((probe: { baseUrl: string }, path: string, init?: RequestInit) => {
-      const render = probe.baseUrl === filerTarget.baseUrl;
-      if (path === "/api/status")
-        return Promise.resolve({
-          ...status,
-          hostname: render ? "render" : "studio",
-          instance_id: render ? "render-id" : "studio-id",
-        });
-      if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
-      if (path === "/api/capabilities") {
-        return Promise.resolve(
-          render ? { gallery: { can_delete: true, organize: false } } : filingCapabilities,
-        );
-      }
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path === "/api/gallery/collections") return Promise.resolve([]);
-      if (path === "/api/gallery/tags") return Promise.resolve([]);
-      if (path.startsWith("/api/capabilities/chain-limits")) {
-        return Promise.resolve({
-          model: sequenceModel.name,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          max_stages: 8,
-          max_total_frames: 777,
-          fade_frames_max: 32,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "bf16",
-          supports_audio: false,
-          supports_sequence: true,
-        });
-      }
-      if (path === "/api/chain-jobs" && init?.method === "POST") {
-        return Promise.resolve({ job_id: "sequence-job-1" });
-      }
-      if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
-      if (path === "/api/activity")
-        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return durableApiFallback(path, init, target);
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await vi.waitFor(() =>
-      expect(wrapper?.find("[data-test='mobile-file-under']").exists()).toBe(true),
-    );
-    autoWinner(filerTarget.baseUrl);
-
-    await fieldControl("Title").setValue("Smurfs");
-    await chooseSequenceOutput();
-    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
-    await prompts[0]!.setValue("a paper boat");
-    await prompts[1]!.setValue("fireflies gather");
-    await wrapper!.get("[data-test='mobile-generate-sequence']").trigger("click");
-    await flushPromises();
-
-    const body = chainBody();
-    // The timeline still renders; only the filing is withheld, and said.
-    expect(body.title).toBe("Smurfs");
-    expect(body.tags).toBeUndefined();
-    expect(body.collection).toBeUndefined();
-    expect(wrapper!.get("[data-test='mobile-file-under-dropped']").text()).toContain("Render");
   });
 
   it("previews the creation-time filename with the title slug", async () => {

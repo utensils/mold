@@ -91,9 +91,6 @@ function progressPct(row: QueueRow): number | null {
   if (row.kind === "print" && row.print.status === "denoising" && row.print.total > 0) {
     return Math.round((row.print.step / row.print.total) * 100);
   }
-  if (row.kind === "sequence" && row.sequence.stageCount > 0) {
-    return Math.round((row.sequence.currentStage / row.sequence.stageCount) * 100);
-  }
   return null;
 }
 </script>

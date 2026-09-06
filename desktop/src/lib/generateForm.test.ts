@@ -6,7 +6,6 @@ import {
   applyPrefillToForm,
   applyRequestToForm,
   buildRequest,
-  chainFilingFields,
   cloneGenerateForm,
   loraHostBinding,
   newGenerateForm,
@@ -2118,6 +2117,58 @@ describe("applyMetadataToForm", () => {
     });
   });
 
+  /*
+   * A print stitched from several clips records `metadata.prompt` as EVERY
+   * clip newline-joined — a record of what ran, not a prompt to hand back.
+   * Scene-by-scene authoring is retired, so reuse degrades to a plain
+   * one-shot restore carrying the FIRST clip's own words.
+   */
+  it("restores the first clip's prompt from a stitched print, never the joined blob", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, {
+      prompt: "rain begins\nthe rain picks up\nthe storm passes",
+      model: "ltx-2-19b-distilled:fp8",
+      seed: 42,
+      steps: 25,
+      guidance: 3,
+      width: 1024,
+      height: 576,
+      fps: 24,
+      chain: {
+        stage_count: 3,
+        motion_tail_frames: 8,
+        stages: [
+          { prompt: "rain begins", frames: 97, transition: "smooth" },
+          { prompt: "the rain picks up", frames: 97, transition: "smooth" },
+          { prompt: "the storm passes", frames: 97, transition: "smooth" },
+        ],
+      },
+    } as never);
+
+    expect(form.prompt).toBe("rain begins");
+    expect(form.prompt).not.toContain("\n");
+    // Everything else is the ordinary one-shot restore.
+    expect(form.model).toBe("ltx-2-19b-distilled:fp8");
+    expect(form.width).toBe(1024);
+    expect(form.height).toBe(576);
+    expect(form.fps).toBe(24);
+    expect(form.seed).toBe("42");
+  });
+
+  it("keeps the plain prompt when a print records no per-clip provenance", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, {
+      prompt: "a brass teapot",
+      model: "flux-dev:q8",
+      seed: 1,
+      steps: 20,
+      guidance: 4,
+      width: 1024,
+      height: 1024,
+    } as never);
+    expect(form.prompt).toBe("a brass teapot");
+  });
+
   it("keeps automatic-chain reuse eligible for the same generation count and notches", () => {
     const form = newGenerateForm();
     applyMetadataToForm(
@@ -3501,23 +3552,6 @@ describe("file under", () => {
     // The filing belongs to the print, not to the model's parameters — only
     // ⌘N clears it. See "a reset never clears the print's identity" above.
     expect(form.fileUnder.manualTags).toEqual(["blue"]);
-  });
-
-  it("carries the title and the filing on the chain-create body", () => {
-    const form = newGenerateForm();
-    form.fileUnderAutoTag = true;
-    form.title = "  Smurf Village  ";
-    form.fileUnder = addTag(form.fileUnder, "blue");
-    form.fileUnderMatch = { name: "Smurf Village", slug: "smurf-village" };
-    expect(chainFilingFields(form)).toEqual({
-      title: "Smurf Village",
-      tags: ["smurf-village", "blue"],
-      collection: { name: "Smurf Village" },
-    });
-  });
-
-  it("leaves every chain filing field absent for an unfiled sequence", () => {
-    expect(chainFilingFields(newGenerateForm())).toEqual({});
   });
 
   it("keeps the mirrored auto-tag setting across an exact-request restore", () => {

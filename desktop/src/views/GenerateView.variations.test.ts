@@ -22,7 +22,6 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useUiStore } from "../stores/ui";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { GenerateRequest, ModelEntry } from "../lib/api/types";
 
 vi.mock("vue-router", () => ({
@@ -213,19 +212,23 @@ describe("GenerateView — Make 4 variations", () => {
     expect(form.batchSize).toBe(1);
   });
 
-  it("stays out of the way in clip mode, where Generate does not mean a batch", async () => {
+  /*
+   * A clip has ONE way of being made, so a clip IS a batchable print: Make 4
+   * variations reads the print's own recipe and is offered wherever that
+   * recipe can repeat. What it must never do is touch the persisted count.
+   */
+  it("never writes the persisted batch count for a clip either", async () => {
     const form = await mountWithAPrint();
-    useSequenceDraftStore().output = "sequence";
     await flushPromises();
-    const submit = vi
-      .spyOn(useGenerationStore(), "submitBatch")
-      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
+    vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
 
     useUiStore().makeVariations();
     await flushPromises();
 
     expect(form.batchSize).toBe(1);
-    expect(submit).not.toHaveBeenCalled();
   });
 });
 

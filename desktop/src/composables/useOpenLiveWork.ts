@@ -15,9 +15,11 @@ export function useOpenLiveWork() {
   const toasts = useToastStore();
 
   return async (row: FleetActiveWork) => {
+    // A chain job — a long clip the host had to split and stitch, or one the
+    // CLI authored — has no client surface to re-enter: scene-by-scene
+    // authoring is retired. Its print lands in My images like any other.
     if (row.kind === "sequence" || row.execution === "chain") {
-      composer.setSequence({ kind: "inspect", hostId: row.hostId, jobId: row.id });
-      await router.push("/create");
+      await router.push("/queue");
       return;
     }
     if (row.kind === "generation") {
