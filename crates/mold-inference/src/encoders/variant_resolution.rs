@@ -531,12 +531,22 @@ pub(crate) fn resolve_qwen2_vl_gguf_path(
 /// file and only the placement is still open. It applies the same threshold
 /// the auto policy does, so a prepared render and an unprepared one land the
 /// same encoder on the same device.
-pub(crate) fn umt5_fits_on_gpu(gpu_device: &Device, free_vram: u64, size_bytes: u64) -> bool {
+pub(crate) fn umt5_fits_on_gpu(
+    gpu_device: &Device,
+    free_vram: u64,
+    size_bytes: u64,
+    quantized: bool,
+) -> bool {
+    let threshold = if gpu_device.is_metal() && quantized {
+        crate::device::t5_metal_gguf_vram_threshold(size_bytes)
+    } else {
+        t5_vram_threshold(size_bytes)
+    };
     should_use_gpu(
         gpu_device.is_cuda(),
         gpu_device.is_metal(),
         free_vram,
-        t5_vram_threshold(size_bytes),
+        threshold,
     )
 }
 
@@ -582,12 +592,12 @@ pub(crate) fn resolve_umt5_variant(
                 )
             })?;
             let path = resolve_umt5_gguf_path(progress, variant)?;
-            let on_gpu = should_use_gpu(
-                is_cuda,
-                is_metal,
-                free_vram,
-                t5_vram_threshold(variant.size_bytes),
-            );
+            let threshold = if is_metal {
+                crate::device::t5_metal_gguf_vram_threshold(variant.size_bytes)
+            } else {
+                t5_vram_threshold(variant.size_bytes)
+            };
+            let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
             progress.info(&format!(
                 "Using UMT5 {} ({}) on {} (explicit)",
                 variant.tag,
@@ -635,12 +645,12 @@ pub(crate) fn resolve_umt5_variant(
             // encoder on CPU, where it widens to F32.
             if is_cuda || is_metal {
                 for variant in known_umt5_variants() {
-                    if fits_in_memory(
-                        is_cuda,
-                        is_metal,
-                        free_vram,
-                        t5_vram_threshold(variant.size_bytes),
-                    ) {
+                    let threshold = if is_metal {
+                        crate::device::t5_metal_gguf_vram_threshold(variant.size_bytes)
+                    } else {
+                        t5_vram_threshold(variant.size_bytes)
+                    };
+                    if fits_in_memory(is_cuda, is_metal, free_vram, threshold) {
                         let path = resolve_umt5_gguf_path(progress, variant)?;
                         progress.info(&format!(
                             "FP16 UMT5 ({}) exceeds free VRAM ({}). Using UMT5 {} ({}) on GPU.",

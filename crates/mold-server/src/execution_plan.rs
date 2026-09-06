@@ -2930,6 +2930,7 @@ fn build_plan(
             crate::memory_preflight::GenerationOffloadPolicy::new(
                 context.offload_requested,
                 wan_block_offload_policy,
+                device.backend == GpuBackend::Metal,
             ),
             Some(total_peak_budget),
             request_has_lora,
@@ -2998,6 +2999,7 @@ fn build_plan(
             crate::memory_preflight::GenerationOffloadPolicy::new(
                 initial_memory.block_offload && !transformer_on_cpu,
                 wan_block_offload_policy,
+                device.backend == GpuBackend::Metal,
             ),
             Some(total_peak_budget),
             request_has_lora,
@@ -3022,6 +3024,7 @@ fn build_plan(
             crate::memory_preflight::GenerationOffloadPolicy::new(
                 initial_memory.block_offload && !transformer_on_cpu,
                 wan_block_offload_policy,
+                device.backend == GpuBackend::Metal,
             ),
             Some(total_peak_budget),
             request_has_lora,
@@ -5257,6 +5260,45 @@ mod tests {
             GpuBackend::Metal,
             "flux2",
         ));
+    }
+
+    /// A quantized Wan encoder has a higher measured Metal fit threshold than
+    /// its file size plus the generic preparation allowance. At the #1059
+    /// middle boundary the denoise phase fit comfortably, so the generic
+    /// pressure heuristic left UMT5 on Metal even though the runtime could not
+    /// complete its command buffer under the wired-memory grant.
+    #[test]
+    fn wan_metal_parks_quantized_encoder_below_its_measured_threshold() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("wan-transformer.safetensors");
+        let vae = root.path().join("wan-vae.safetensors");
+        let encoder = root.path().join("umt5-xxl-encoder-Q8_0.gguf");
+        sparse_file(&transformer, 2_838_104_528);
+        sparse_file(&vae, 253_815_318);
+        sparse_file(&encoder, 6_043_068_256);
+        let mut config = Config::default();
+        config.models.insert(
+            "wan-case:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                family: Some("wan".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"wan-case:bf16","width":512,"height":288,"frames":17,"steps":30,"guidance":6.0}"#,
+        )
+        .unwrap();
+
+        let plan =
+            resolve_execution_plans(&config, &request, &metal_devices(&[11_811_160_064]), false)
+                .unwrap()
+                .remove(0);
+        assert!(plan.components.iter().any(|(role, component)| {
+            role.is_text_encoder() && component.placement == ResolvedComponentPlacement::Cpu
+        }));
     }
 
     /// A CPU-parked text encoder is dropped before the transformer loads, so
