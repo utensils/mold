@@ -602,3 +602,51 @@ it is not a completion checklist with assumed passes.
   input; its relationship to Torch's accumulation policy is under investigation.
   No production convolution policy or tolerance has changed. All tensors and
   failed diagnostics are retained.
+
+
+## Full six-view denoising trajectory
+
+- The unchanged installed checkpoint runs all fifteen steps at six views and
+  64x64 latents (512-pixel output resolution), with three guidance branches and
+  both materials, in `paint-denoiser-production-cuda-v1.log`. This is an im2col
+  run at Candle `bedc2874`, before the later cuDNN correction. All trajectory
+  outputs pass the original half bounds: final maximum .010253906 / RMS
+  .0013163141. Cancellation and restart within the loaded owner also pass.
+- The complete gate still **fails**: reference caches `up_1_2_0`, `up_2_0_0`, and
+  `up_2_1_0` have maxima .041870117, .072265625, and .02722168 respectively, above
+  .02. Their RMS values remain below .002. The retained tensors include every
+  cache and every trajectory sample. Total test time, including cancellation
+  runs and repeated forwards, is 520.09 seconds. Synthetic encoded conditions
+  were used; this is not yet a complete image-to-PBR qualification.
+
+## Corrected cuDNN accumulation descriptor
+
+- Source review proves the fork's old F16 compute descriptor differs from Torch
+  2.5.1 (`aten/src/ATen/cudnn/Descriptors.h:202-205` and
+  `aten/src/ATen/native/cudnn/Conv_v8.cpp:124-129`). Both Torch routes promote
+  HALF convolution compute to FLOAT while preserving HALF tensor storage.
+  Source and review are retained under `paint-cudnn-compute-review-v1/`.
+- The isolated Candle branch `work/hunyuan3d-f16-convolution` corrects Conv1D and
+  Conv2D in commit `de478c1c47281161bdd4f60d02c69915b918eefd`. Both deterministic
+  regressions fail before correction (`candle-cudnn-accumulation-red-v2.log`);
+  Conv2D relative maximum deviation is .010695187. Afterward both pass at the
+  unchanged .001 bound: Conv1D .0008271299, Conv2D .00076394196. All eleven cuDNN
+  tests pass (`candle-cudnn-accumulation-green-v1.log`), including BF16/F32,
+  striding, dilation, grouping, disabled policy and below-threshold behavior.
+  The tests assert actual cuDNN dispatch and F16 output. Independent review
+  confirmed that tensor storage and alpha/beta ABI remain unchanged.
+- All mold Candle declarations and both lockfiles now pin that one revision,
+  including H3 payload provenance. The Nix source hash is
+  `sha256-CREJfuti4jbOkCce8ywfGjtdquCGjW0QQqQr9WUpvJQ=`; the same archive-prefetch
+  method reproduced the previous pinned hash before computing this one.
+  `candle-cudnn-pin-contract-v1.log` passes the single-identity contract. The
+  independent real512 Torch VAE comparison remains required after this backend
+  correction; the numerical regression alone does not close it.
+
+- The corrected fork's actual512 VAE comparison dispatched the same 72 cuDNN
+  convolutions and improved sampled latent maximum from .168396 to .029296875,
+  RMS .0008123263517362374 (`paint-vae-cudnn-f32accum-real512-cuda-v1.log`). It
+  **still fails** the original .01 maximum bound. Its complete encoder and
+  decoder tensors remain retained in `paint-vae-cudnn-f32accum-real512-candle-v1/`.
+  The pinned build passes 194 Hunyuan tests with fourteen hardware/oracle tests
+  ignored (`candle-cudnn-pin-hunyuan-tests-v1.log`).

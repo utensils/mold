@@ -155,6 +155,12 @@ the model controls, and the length slider. A sequence is now something you scrip
   the reference branch algebraically changes half output. The upstream default
   call supplies no camera azimuths, so view weights are all one despite the
   renderer's different camera angles.
+- **Half cuDNN convolutions accumulate in float.** The Candle fork uses F16
+  tensor/filter/output storage with an F32 convolution compute descriptor for
+  both Conv1D and Conv2D, matching Torch. Tensor-op math mode alone does not
+  select the accumulation dtype. Qualification must check the actual cuDNN
+  dispatch counter; merely enabling the feature can still run im2col at every
+  layer because of the fork's size threshold.
 - **A paint conditioning cache belongs to its loaded denoiser and request.**
   `paint_denoiser::PreparedPaint` borrows its owning model and retains the reference
   network, projected DINO and position tables once per request. Guidance repeats
