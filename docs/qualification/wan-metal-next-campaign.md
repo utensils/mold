@@ -77,10 +77,52 @@ frames 1, 9 and 17 found the coherent fox sequence without saturated fields,
 tearing or scene reset. Independent final-diff review found no blocker after two
 stale comments were corrected in `b61a30a3`.
 
+The exact runtime binary then passed the durable server path on an isolated
+database with the external model and output stores. The first unpressured batch
+completed in 216.732 s at 13.362 GiB minimum native availability, normal pressure
+and zero swap growth. Its lossless output was byte-identical to the forced-local
+pass and passed another complete visual inspection.
+
+A fresh server after unload and cache purge began the baseline batch at 32.150
+GiB available and reached 14.385 GiB, an observed 17.765 GiB increment. The
+predeclared pressure formula therefore allowed only 384 MiB in 64 MiB increments.
+With the helper target set to 384 MiB and its contemporaneous reported allocation
+at 384 MiB, the authoritative preview remained planned with the same execution
+fingerprint and the durable request completed in 185.394 s at 23.230 GiB minimum
+availability. Its 17 visually inspected lossless frames were again byte-identical
+to the unpressured output. Different cold and warm residency means this proves a
+render under bounded pressure, not accepted-side admission-margin qualification.
+Refusal was not reached for this request within the cold-baseline-derived budget
+of 384 MiB in 64 MiB increments; increasing beyond that budget was not permitted.
+
+The helper target remained configured at 384 MiB for an authored two-stage cut
+chain. The scheduler exposed one stage work item at a time under the same parent
+and Metal device, with separate prompt-derived execution fingerprints and an
+empty plan after finalization. Stage 1 completed 17 frames in 187.517 s; stage 2
+completed 17 frames in 250.318 s; the stitched MP4 decoded to 34 frames with the
+hard cut at frames 17 to 18. Both complete stage contacts, the complete stitched
+contact, representative frames and the cut boundary were inspected. Both scenes
+were coherent; stage 2 had minor colored particle artifacts but no saturated
+fields or reset. The chain reached 13.211 GiB minimum availability, below the 14
+GiB planning reserve but above the 12 GiB hard stop, with normal pressure and no
+swap growth. Queue, device and SSE records support sequential stage ownership
+and eventual release; they do not prove reservation-byte identity or absence of
+double charging. Native samples did not timestamp helper allocation or RSS, so
+they do not independently prove continuous resident pressure. The row is not
+admission-margin acceptance.
+
+After pressure release, the unload endpoint reported that no model was resident
+while status retained its last-model label. The authoritative recovery preview
+classified setup as cold. Its durable render completed in 133.459 s at 21.046
+GiB minimum availability, normal pressure and zero swap growth, and all 17 frames
+passed visual inspection. The server and helper exited cleanly with no listener
+left on port 17659. Raw evidence and provenance are summarized in
+`/Volumes/ExternalStorage/mold-1059-qualification/full-model-20260905/server-margin-report.json`.
+
 This closes the reproduced reduced-shape corruption mechanism. It does not
-satisfy #1059's durable server, pressure-boundary, authored-chain or recovery
-gates, or #1094's 832x480 and 5B cold/warm performance matrix. No capability
-promotion is justified yet.
+satisfy #1059's refused-side admission boundary or chain-at-margin gate, or
+#1094's 832x480 and 5B cold/warm performance matrix. No capability promotion is
+justified yet.
 
 ## Starting evidence and ownership
 
