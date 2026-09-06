@@ -4159,6 +4159,8 @@ mod tests {
                     std::sync::mpsc::sync_channel::<crate::gpu_pool::GpuWorkerCommand>(1);
                 Arc::new(GpuWorker {
                     cuda_peak: Default::default(),
+                    #[cfg(test)]
+                    mock_device_memory: None,
                     owner_epoch: 1,
                     gpu: mold_inference::device::DiscoveredGpu {
                         ordinal,

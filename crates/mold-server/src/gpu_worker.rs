@@ -1491,6 +1491,13 @@ fn with_private_h3_cuda_preparation_attempt<T>(
 ) -> Result<T, crate::routes::ApiError> {
     use cudarc::driver::{CudaContext, CudaExecutionAttempt};
 
+    // Fake engines have no context to adopt. This explicit worker fixture is
+    // independent of driver availability, and cannot affect production.
+    #[cfg(test)]
+    if worker.mock_device_memory.is_some() {
+        return operation();
+    }
+
     let mut attempt = CudaExecutionAttempt::begin_unbound().map_err(|error| {
         quarantine_poisoned_worker(worker);
         contain_worker_cache(worker);
@@ -2429,7 +2436,7 @@ fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
         return;
     }
-    match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
+    match worker.post_drop_free_vram_bytes() {
         Ok(free_after_drop) => tracing::info!(
             gpu = worker.gpu.ordinal,
             count,
@@ -5340,7 +5347,8 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
             available_host_headroom_bytes,
         ),
     );
-    let sampled_available_device_bytes = device::post_drop_free_vram_bytes(worker.gpu.ordinal)
+    let sampled_available_device_bytes = worker
+        .post_drop_free_vram_bytes()
         .map_err(|error| private_h3_memory_sample_error(worker, error))?;
     let available_device_bytes = if worker.gpu.backend == mold_core::GpuBackend::Metal {
         device::metal_unified_capacity_with_safety_floor(sampled_available_device_bytes)
@@ -5612,7 +5620,8 @@ fn ensure_model_ready_sync_inner(
             .map_err(|e| anyhow::anyhow!(e.error))?;
         } else {
             #[cfg(feature = "cuda")]
-            device::post_drop_free_vram_bytes(worker.gpu.ordinal)
+            worker
+                .post_drop_free_vram_bytes()
                 .map_err(|error| anyhow::anyhow!(error))?;
         }
         let load_strategy = if let Some(mode) = planned_mode {
@@ -5984,7 +5993,7 @@ pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
         if worker.gpu.backend == mold_core::GpuBackend::Metal {
             device::release_pooled_metal_memory(worker.gpu.ordinal);
         }
-        match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
+        match worker.post_drop_free_vram_bytes() {
             Ok(free_after_drop) => tracing::info!(
                 gpu = worker.gpu.ordinal,
                 free_vram_bytes = free_after_drop,
@@ -6039,7 +6048,7 @@ fn evict_cached_model_blocking(
     ensure_worker_not_poisoned(worker, model_name)?;
     teardown_inference_engines_safely(worker, std::iter::once(engine), "cached admin eviction")?;
     ensure_worker_not_poisoned(worker, model_name)?;
-    match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
+    match worker.post_drop_free_vram_bytes() {
         Ok(free_after_drop) => tracing::info!(
             gpu = worker.gpu.ordinal,
             model = model_name,
@@ -8835,6 +8844,8 @@ mod tests {
         cache.insert(FakeSlowEngine::boxed(model, load_sleep), 0);
         Arc::new(GpuWorker {
             cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: Some(Ok(24_000_000_000)),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -8953,6 +8964,8 @@ mod tests {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(capacity);
         let worker = Arc::new(GpuWorker {
             cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: Some(Ok(24_000_000_000)),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
@@ -9152,6 +9165,8 @@ mod tests {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(1);
         let worker = Arc::new(GpuWorker {
             cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: Some(Ok(24_000_000_000)),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -9948,6 +9963,8 @@ mod tests {
         );
         let worker = Arc::new(GpuWorker {
             cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: Some(Ok(24_000_000_000)),
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -13345,6 +13362,34 @@ mod tests {
         assert_eq!(error.code, "INTERNAL_ERROR");
         assert!(worker.poisoned.load(Ordering::SeqCst));
         assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn private_h3_mock_device_preserves_probe_errors_and_capacity_refusal() {
+        for sample in [
+            Err(device::DeviceMemoryError::Unavailable {
+                operation: "mock post-drop probe",
+                message: "telemetry unavailable".to_string(),
+            }),
+            Err(device::DeviceMemoryError::FatalCuda {
+                operation: "mock post-drop probe",
+                message: "synthetic asynchronous fault".to_string(),
+            }),
+            Ok(0),
+        ] {
+            let fatal = sample.as_ref().is_err_and(|error| error.is_fatal_cuda());
+            let expected_message = sample.as_ref().err().map(ToString::to_string);
+            let (mut worker, _receiver) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+            Arc::get_mut(&mut worker).unwrap().mock_device_memory = Some(sample);
+            let error = prepare_private_h3_allocation_boundary(&worker, "mock-h3", 1, 0, 1)
+                .expect_err("missing telemetry and insufficient capacity must both refuse");
+            if let Some(message) = expected_message {
+                assert!(error.error.contains(&message), "{}", error.error);
+            }
+            assert_eq!(worker.poisoned.load(Ordering::SeqCst), fatal);
+            assert_eq!(worker.fatal_cuda_error.load(Ordering::SeqCst), fatal);
+        }
     }
 
     /// A regular (non-OOM) error must not trigger the OOM path.

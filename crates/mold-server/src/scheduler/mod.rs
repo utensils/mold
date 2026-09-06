@@ -8900,6 +8900,8 @@ mod tests {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(GpuWorker {
             cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: None,
             owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,

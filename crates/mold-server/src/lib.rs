@@ -492,6 +492,8 @@ pub async fn run_server(
             let (job_tx, job_rx) = std::sync::mpsc::sync_channel(per_worker_channel_size);
             let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
                 cuda_peak: Default::default(),
+                #[cfg(test)]
+                mock_device_memory: None,
                 owner_epoch: 1,
                 gpu: gpu.clone(),
                 model_cache: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2487,6 +2489,8 @@ mod tests {
         (
             Arc::new(GpuWorker {
                 cuda_peak: Default::default(),
+                #[cfg(test)]
+                mock_device_memory: None,
                 owner_epoch: 1,
                 gpu: DiscoveredGpu {
                     ordinal: 0,

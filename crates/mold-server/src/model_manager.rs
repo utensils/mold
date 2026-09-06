@@ -1902,7 +1902,8 @@ pub(crate) async fn ensure_model_ready(
                 )?;
             } else {
                 #[cfg(feature = "cuda")]
-                mold_inference::device::post_drop_free_vram_bytes(0)
+                state
+                    .post_drop_free_vram_bytes()
                     .map_err(|error| ApiError::insufficient_memory(error.to_string()))?;
             }
             let load_strategy = match cached_paths.as_ref() {
@@ -2147,7 +2148,7 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 crate::metrics::record_gpu_memory(0);
             }
             drop(cache);
-            let free_after_drop = mold_inference::device::post_drop_free_vram_bytes(0);
+            let free_after_drop = state.post_drop_free_vram_bytes();
             tracing::info!(
                 free_vram_bytes = ?free_after_drop,
                 "legacy model unloaded; sampled post-drop VRAM"

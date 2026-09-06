@@ -887,6 +887,8 @@ mod tests {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(crate::gpu_pool::GpuWorker {
             cuda_peak: Default::default(),
+            #[cfg(test)]
+            mock_device_memory: Some(Ok(24_000_000_000)),
             owner_epoch: 1,
             gpu: mold_inference::device::DiscoveredGpu {
                 ordinal,
@@ -5614,6 +5616,7 @@ mod tests {
         let gallery = durable_gallery_dir(root);
         std::fs::create_dir_all(&gallery).unwrap();
         let (mut state, rx) = AppState::with_engine_and_queue(engine);
+        state.mock_device_memory = Some(Ok(24_000_000_000));
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
