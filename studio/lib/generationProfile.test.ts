@@ -578,7 +578,9 @@ describe("prompt, strength, and mesh contract", () => {
     const badTextureDefault = structuredClone(complete);
     (caps(badTextureDefault).mesh as LooseCaps).texture_default_resolution =
       3072;
-    expect(advertisedGenerationProfile(modelWith(badTextureDefault))).toBeNull();
+    expect(
+      advertisedGenerationProfile(modelWith(badTextureDefault)),
+    ).toBeNull();
 
     const unknownWorkflow = structuredClone(complete);
     (caps(unknownWorkflow).mesh as LooseCaps).workflow_modes = ["magic_mesh"];
