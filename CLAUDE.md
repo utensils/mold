@@ -225,10 +225,10 @@ no kernel mutation control. See `website/guide/metal-memory.md` and the reviewed
 
 ## Public website analytics
 
-`website/.vitepress/theme/analytics.mjs` owns the consent-gated GA4 integration
+`website/.vitepress/theme/analytics.mjs` owns the automatic GA4 integration
 (`G-RG6PPTGX2T`), restricted to `https://utensils.io/mold/`. Never import it into
-Studio or the apps. The layout component owns the visitor choice and sends one
+Studio or the apps. The theme setup starts analytics without a popup and sends one
 explicit page view after VitePress navigation. Keep GA enhanced-measurement
 browser-history page views OFF to avoid duplicates; search, form, and video
-measurement are also off. `bun run verify` in `website/` runs consent and
+measurement are also off. `bun run verify` in `website/` runs automatic-start and
 navigation tests. Update `website/privacy.md` when this behavior changes.

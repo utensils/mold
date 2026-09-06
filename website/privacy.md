@@ -11,13 +11,10 @@ analytics service for these apps.
 
 ## Website analytics
 
-The public website at [utensils.io/mold](https://utensils.io/mold/) uses
-Google Analytics only after you select **Allow analytics**. Declining leaves
-Google Analytics unloaded. You can change your choice using **Analytics
-preferences** at the bottom of any website page. We store this preference in
-local storage in your browser.
+The public website at [utensils.io/mold](https://utensils.io/mold/) loads
+Google Analytics automatically when you visit, without a consent popup.
 
-When enabled, Google Analytics measures page visits, traffic sources, scrolls,
+Google Analytics measures page visits, traffic sources, scrolls,
 outbound link clicks, and file-download clicks, along with browser/device
 information and approximate geographic information derived from your connection.
 It uses cookies scoped to this website to distinguish visits. We use these
@@ -30,9 +27,10 @@ include the destination link URL.
 Google processes this website analytics data under
 [Google's privacy policy](https://policies.google.com/privacy). See also
 [how Google uses information from sites that use its services](https://policies.google.com/technologies/partner-sites).
-Withdrawing your choice stops future analytics collection after the page reloads;
-it does not erase data already collected. You can remove existing cookies and
-saved preferences through your browser's site-data settings.
+You can block Google Analytics with your browser's tracking protection or
+[Google's Analytics opt-out browser add-on](https://tools.google.com/dlpage/gaoptout).
+You can remove existing cookies through your browser's site-data settings;
+removing cookies does not erase analytics data already collected.
 
 This website analytics integration does not collect Mold prompts, generated
 media, server API keys, or usage of the CLI, desktop, mobile, or self-hosted

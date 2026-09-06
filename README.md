@@ -215,5 +215,5 @@ use.
 Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
 
 The [public website privacy policy](https://utensils.io/mold/privacy) describes
-optional Google Analytics on the documentation website. Analytics loads only with
-visitor consent; this integration is not included in Mold apps or servers.
+Google Analytics on the documentation website. Analytics loads automatically
+without a popup; this integration is not included in Mold apps or servers.
