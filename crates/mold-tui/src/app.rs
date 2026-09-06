@@ -1584,6 +1584,47 @@ fn restored_negative_editor_text(
     }
 }
 
+/// The words a reuse restores from a print's metadata.
+///
+/// A stitched chain print records its clips newline-joined (see
+/// `ChainRequest::synthetic_generate_request`), because gallery search must
+/// match any clip — that blob is a record of what ran, not a prompt to hand
+/// back. Scene-by-scene authoring is retired from every interactive surface,
+/// so reuse on such a print degrades to a plain One shot built from the FIRST
+/// clip's words; for an auto-chained One shot every clip carries the same
+/// prompt anyway, so the restore is exact. Mirrors `restoredPrompt` in
+/// `desktop/src/lib/generateForm.ts`, which is the same rule for the apps.
+pub(crate) fn restored_prompt(meta: &mold_core::OutputMetadata) -> &str {
+    let first_clip = meta
+        .chain
+        .as_ref()
+        .and_then(|chain| chain.stages.first())
+        .map(|stage| stage.prompt.as_str())
+        .unwrap_or_default();
+    if first_clip.trim().is_empty() {
+        &meta.prompt
+    } else {
+        first_clip
+    }
+}
+
+/// Whether the print's expansion provenance (`original_prompt` and
+/// `prompt_transform`) describes the words [`restored_prompt`] actually puts
+/// in the editor.
+///
+/// The provenance says "this prompt came from expanding/remixing that one",
+/// and it was recorded against `metadata.prompt`. It therefore travels only
+/// when the restore is that prompt: empty words carry no provenance (the
+/// pre-existing rule), and neither do the first-clip words of a sequence
+/// whose recorded prompt is every clip joined — pairing them would claim an
+/// expansion that never produced those words, and a revert would swap in the
+/// sequence's root prompt. A uniform auto-chained One shot records the single
+/// prompt it ran, so its provenance still fits.
+pub(crate) fn restored_prompt_keeps_transform_provenance(meta: &mold_core::OutputMetadata) -> bool {
+    let restored = restored_prompt(meta);
+    !restored.trim().is_empty() && restored == meta.prompt
+}
+
 /// Build the Negative editor textarea with the standard cursor and
 /// placeholder styling, from prefill text (possibly empty).
 fn negative_prompt_textarea(text: &str) -> TextArea<'static> {
@@ -6623,16 +6664,23 @@ impl App {
         // and for wan that means the tuned default conditioned the render —
         // restoring an empty editor would flip the reuse into an explicit
         // empty-uncond opt-out (#787).
-        self.generate.prompt = tui_textarea::TextArea::from(meta.prompt.lines());
-        self.generate.params.original_prompt = if meta.prompt.trim().is_empty() {
-            None
-        } else {
+        //
+        // A sequence print's recorded prompt is every clip newline-joined, so
+        // the editor takes the first clip's words instead and the expansion
+        // provenance recorded against the joined blob is dropped with it
+        // (`restored_prompt` / `restored_prompt_keeps_transform_provenance`).
+        let restored_prompt_text = restored_prompt(meta).to_string();
+        let keeps_transform_provenance = restored_prompt_keeps_transform_provenance(meta);
+        self.generate.prompt = tui_textarea::TextArea::from(restored_prompt_text.lines());
+        self.generate.params.original_prompt = if keeps_transform_provenance {
             meta.original_prompt.clone()
-        };
-        self.generate.params.prompt_transform = if meta.prompt.trim().is_empty() {
-            None
         } else {
+            None
+        };
+        self.generate.params.prompt_transform = if keeps_transform_provenance {
             meta.prompt_transform.clone()
+        } else {
+            None
         };
         self.generate.params.quick_transform_snapshot = None;
         self.generate.params.prepared_prompts.clear();
@@ -21726,5 +21774,98 @@ mod tests {
             "reviewed variation",
             "stale recovery must preserve reviewed text"
         );
+    }
+
+    /// A plain print's own words are what a reuse restores.
+    #[test]
+    fn restored_prompt_uses_metadata_prompt_without_a_chain() {
+        let meta = make_test_metadata();
+        assert!(meta.chain.is_none());
+        assert_eq!(restored_prompt(&meta), "a test prompt");
+    }
+
+    /// A stitched sequence records every clip newline-joined. Handing that
+    /// blob back would ask the model to render the whole sequence at once;
+    /// the honest degradation is the first clip's words.
+    #[test]
+    fn restored_prompt_uses_first_stage_of_a_chain_print() {
+        let mut meta = make_test_metadata();
+        meta.prompt = "kingfisher waits\nit lifts off".into();
+        meta.chain = Some(chain_metadata(vec!["kingfisher waits", "it lifts off"]));
+        assert_eq!(restored_prompt(&meta), "kingfisher waits");
+    }
+
+    /// An empty (or whitespace-only) first clip carries no words to restore,
+    /// so the print's recorded prompt stands in.
+    #[test]
+    fn restored_prompt_falls_back_when_first_stage_is_blank() {
+        let mut meta = make_test_metadata();
+        meta.prompt = "recorded blob".into();
+        meta.chain = Some(chain_metadata(vec!["   ", "second clip"]));
+        assert_eq!(restored_prompt(&meta), "recorded blob");
+    }
+
+    /// A chain block with no stages (legacy or truncated provenance) has no
+    /// first clip either.
+    #[test]
+    fn restored_prompt_falls_back_when_chain_has_no_stages() {
+        let mut meta = make_test_metadata();
+        meta.prompt = "recorded blob".into();
+        meta.chain = Some(chain_metadata(vec![]));
+        assert_eq!(restored_prompt(&meta), "recorded blob");
+    }
+
+    /// Expansion provenance describes the recorded prompt. A plain print
+    /// restores that prompt verbatim, so the provenance still fits.
+    #[test]
+    fn prompt_provenance_survives_a_plain_restore() {
+        let meta = make_test_metadata();
+        assert!(restored_prompt_keeps_transform_provenance(&meta));
+    }
+
+    /// An auto-chained One shot repeats one prompt across its clips, so the
+    /// stitched print records that single prompt and the restore is exact.
+    #[test]
+    fn prompt_provenance_survives_a_uniform_auto_chain_restore() {
+        let mut meta = make_test_metadata();
+        meta.prompt = "one prompt".into();
+        meta.chain = Some(chain_metadata(vec!["one prompt", "one prompt"]));
+        assert!(restored_prompt_keeps_transform_provenance(&meta));
+    }
+
+    /// A sequence's provenance describes the joined blob, not the first
+    /// clip's words the restore actually puts in the editor.
+    #[test]
+    fn prompt_provenance_is_dropped_when_the_restore_degrades() {
+        let mut meta = make_test_metadata();
+        meta.prompt = "kingfisher waits\nit lifts off".into();
+        meta.chain = Some(chain_metadata(vec!["kingfisher waits", "it lifts off"]));
+        assert!(!restored_prompt_keeps_transform_provenance(&meta));
+    }
+
+    /// The pre-existing rule stands: no words, no provenance.
+    #[test]
+    fn prompt_provenance_is_dropped_when_there_are_no_words() {
+        let mut meta = make_test_metadata();
+        meta.prompt = "   ".into();
+        assert!(!restored_prompt_keeps_transform_provenance(&meta));
+    }
+
+    fn chain_metadata(prompts: Vec<&str>) -> mold_core::chain::ChainOutputMetadata {
+        mold_core::chain::ChainOutputMetadata {
+            stage_count: prompts.len() as u32,
+            motion_tail_frames: 17,
+            stages: prompts
+                .into_iter()
+                .map(|prompt| mold_core::chain::ChainStageMetadata {
+                    prompt: prompt.to_string(),
+                    frames: 97,
+                    transition: mold_core::chain::TransitionMode::Smooth,
+                    fade_frames: None,
+                    seed: None,
+                    loras: vec![],
+                })
+                .collect(),
+        }
     }
 }
