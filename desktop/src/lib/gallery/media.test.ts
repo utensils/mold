@@ -9,6 +9,8 @@ import {
   fullSizeMediaUrl,
   galleryFilenameOfPath,
   galleryMediaPath,
+  isClipItem,
+  isVideoItem,
   isThumbnailPath,
   mediaMimeType,
   prepareNativeThumbnail,
@@ -16,6 +18,27 @@ import {
   thumbnailFilenameOfPath,
   thumbnailTier,
 } from "./media";
+
+const galleryItem = (filename: string, format: "png" | "apng") =>
+  ({
+    filename,
+    format,
+    metadata: {},
+  }) as Parameters<typeof isVideoItem>[0];
+
+describe("isVideoItem", () => {
+  it("keeps APNG clips out of video-only playback and processing paths", () => {
+    expect(isVideoItem(galleryItem("generated.png", "apng"))).toBe(false);
+    expect(isVideoItem(galleryItem("generated.apng", "png"))).toBe(false);
+  });
+});
+
+describe("isClipItem", () => {
+  it("classifies APNG outputs as clips from either their format or extension", () => {
+    expect(isClipItem(galleryItem("generated.png", "apng"))).toBe(true);
+    expect(isClipItem(galleryItem("generated.apng", "png"))).toBe(true);
+  });
+});
 
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/client")>()),

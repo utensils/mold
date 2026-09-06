@@ -41,6 +41,7 @@ import {
   fetchGalleryMediaBytes,
   galleryMediaPath,
   isAudioItem,
+  isClipItem,
   isMeshItem,
   isVideoItem,
   prepareNativeThumbnail,
@@ -1754,7 +1755,7 @@ interface TileModel {
   canOrganize: boolean;
   availability: string;
   purgeAt: number | null;
-  video: boolean;
+  clip: boolean;
   audio: boolean;
   mesh: boolean;
   /** The mock's word badge: "clip 5s" / "3-D" / "audio", "" for a still. */
@@ -1775,11 +1776,11 @@ interface TileModel {
  */
 function mediaKindBadge(
   item: GalleryImage,
-  kind: { video: boolean; audio: boolean; mesh: boolean },
+  kind: { clip: boolean; audio: boolean; mesh: boolean },
 ): string {
   if (kind.mesh) return "3-D";
   if (kind.audio) return "audio";
-  if (!kind.video) return "";
+  if (!kind.clip) return "";
   const frames = item.metadata.frames ?? item.metadata.video_frames ?? null;
   const fps = item.metadata.fps ?? item.metadata.video_fps ?? null;
   if (!frames || !fps || fps <= 0) return "clip";
@@ -1801,7 +1802,7 @@ const tileModels = computed<TileModel[]>(() => {
     // Imported predicates, not the view's local aliases: `useVirtualizer`
     // evaluates `rows` (and so this computed) synchronously during setup,
     // before the aliases declared further down are initialized.
-    const video = isVideoItem(item);
+    const clip = isClipItem(item);
     const mesh = isMeshItem(item);
     const audio = isAudioItem(item);
     models[i] = {
@@ -1815,10 +1816,10 @@ const tileModels = computed<TileModel[]>(() => {
         !trash && gallery.allLocationsOf(entry).some((l) => organizeCapable(l.sourceKey)),
       availability: entry.availableOn.map((s) => s.label).join(" · "),
       purgeAt: org.purgeAt,
-      video,
+      clip,
       audio,
       mesh,
-      kindBadge: mediaKindBadge(item, { video, audio, mesh }),
+      kindBadge: mediaKindBadge(item, { clip, audio, mesh }),
       upscaled: isUpscaledImage(item),
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes

@@ -7,8 +7,8 @@ import {
   evictMedia,
   galleryMediaPath,
   isAudioItem,
+  isClipItem,
   isMeshItem,
-  isVideoItem,
   type GallerySource,
 } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
@@ -690,7 +690,7 @@ export const useGalleryStore = defineStore("gallery", {
             // a mesh or an audio print as an image.
             if (isMeshItem(e.item)) return mediaKind === "mesh";
             if (isAudioItem(e.item)) return mediaKind === "audio";
-            if (isVideoItem(e.item)) return mediaKind === "video";
+            if (isClipItem(e.item)) return mediaKind === "video";
             return mediaKind === "image";
           });
         }
@@ -795,7 +795,7 @@ export const useGalleryStore = defineStore("gallery", {
       for (const e of entries) {
         if (isMeshItem(e.item)) mesh++;
         else if (isAudioItem(e.item)) audio++;
-        else if (isVideoItem(e.item)) video++;
+        else if (isClipItem(e.item)) video++;
       }
       return {
         all: entries.length,
