@@ -243,7 +243,7 @@ Key-map facts are duplicated in `wg/tui.md`, `cr/tui.md`, and `.claude/skills/tu
 - [ ] `tui-uat/SKILL.md:167` — `x` cancels queued **or running** work on hosts advertising `queue.cooperative_cancellation`.
 
 **Mobile:**
-- [ ] `wg/iphone.md:87` — one-shot generation no longer issues a placement preview; automatic routing ranks from cached telemetry and freezes. Placement preview is the **sequence** planner. **Derive from:** `studio/lib/generationSubmissionPolicy.ts:60-81`, `desktop/src/mobile/mobileGenerationRouting.ts:187-310`.
+- [ ] `wg/iphone.md:87` — one-shot generation no longer issues a placement preview; automatic routing ranks from cached telemetry and freezes. Placement preview is the placement planner. _(Scene authoring was retired; there is no sequence path on the phone.)_ **Derive from:** `studio/lib/generationSubmissionPolicy.ts:60-81`, `desktop/src/mobile/mobileGenerationRouting.ts:187-310`.
 - [ ] `wg/iphone.md:179` — canonical families include **5:4 / 4:5**. **Derive from:** `studio/lib/outputShape.ts:139-151`.
 - [ ] `wg/iphone.md:24` — button is **Create pairing code**, not "Pair an iPhone".
 - [ ] `wg/iphone.md:414,416` — add the **Model licenses** section; rename "GPUs" to **Compute devices**.
@@ -294,7 +294,7 @@ Key-map facts are duplicated in `wg/tui.md`, `cr/tui.md`, and `.claude/skills/tu
 - [ ] `wg/feature-matrix.md:72,187` — Wan **does** take a scheduler override (`--sample-solver unipc|euler|dpm++`, same wire slot).
 - [ ] `wg/desktop.md:266,448,504,581,669` + `wg/remote-workflows.md:39` — add Saved media/Library accordion sections; **Add machine** not "Add host"; **Appearance & app** not "App"; `windows.ps1` also takes `bundle`/`clean`/`features`; add the seven `android-*` devshell commands; refresh the sample version to 0.26.0.
 - [ ] `README.md:88` — add the Windows desktop installer and the Linux AppImage pointer.
-- [ ] `SKILL` structural gaps: routing list missing 8 subcommands (:60); no `mold library` section (:583); no `mold remix` (:104); no `mold stats`/`mold clean` usage (:1073); Available Models missing **Wan**, **Qwen-Image-Edit**, **MiniMax H3** (:715) and the LTX-2.5/2.3-bf16 tiers (:747, contradicting :410); `/sequence` missing (:1618); no Lambda section (:1248); env table missing 7 vars (:1488); `MOLD_LOG` default is `info` for the server (:1499); `server start --log-file` is on by default (:1383); reference duration 2–15 s (:11); FP8→Q8 auto-conversion is **FLUX-only** (:769, :1590).
+- [ ] `SKILL` structural gaps: routing list missing 8 subcommands (:60); no `mold library` section (:583); no `mold remix` (:104); no `mold stats`/`mold clean` usage (:1073); Available Models missing **Wan**, **Qwen-Image-Edit**, **MiniMax H3** (:715) and the LTX-2.5/2.3-bf16 tiers (:747, contradicting :410); ~~`/sequence` missing (:1618)~~ (command retired); no Lambda section (:1248); env table missing 7 vars (:1488); `MOLD_LOG` default is `info` for the server (:1499); `server start --log-file` is on by default (:1383); reference duration 2–15 s (:11); FP8→Q8 auto-conversion is **FLUX-only** (:769, :1590).
 
 ---
 
