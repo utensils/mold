@@ -3,10 +3,10 @@
 Preparation status: **READY FOR UAT planning; execution ON HOLD**.
 Audited 2026-09-05 against merged `27ed658e` (PR #1604), Candle
 `744ae3b83cfac18db28107a353c449cc9b80d4ec`. This document records no new
-hardware result and authorizes no launch. The current user hold includes
-GPU device creation, model-free GPU tests, model loads, upstream inference,
-pressure tests, and UAT on both Metal and CUDA. CPU review and preparation
-may continue. No kernel setting or service change is required by this plan.
+hardware result and authorizes no launch. The user subsequently released bounded H3 CUDA validation; its completed
+results are in [the CUDA follow-up](minimax-h3-cuda-post-1604.md). Metal GPU
+device creation, tests, model loads, upstream inference, pressure tests and
+UAT remain on hold. CPU review and preparation may continue. No kernel setting or service change is required by this plan.
 
 ## Acceptance audit
 
@@ -170,13 +170,15 @@ no production accounting formula, new layout, or launcher.
 
 ## CUDA and output comparison gates
 
-After the hold ends, qualify the exact campaign revision on one idle SM89
-GPU. Keep the native CUDA INT8 and FlashAttention routes. The bounded tests
+Bounded checks at `d6096446` completed after the user released CUDA
+validation; the linked follow-up retains their results. For a later runtime
+revision, qualify that exact campaign revision on one idle SM89 GPU. Keep the native CUDA INT8 and FlashAttention routes. The bounded tests
 are `minimax_h3::attention::tests` and `comfy_int8::tests` in `mold-ai-candle`
 with `h3,cuda,h3-flash-attn-rc,flash-attn`; build the
 `h3_attention_qualification` binary from `mold-ai-inference` with
 `dev-bins,h3-cuda`. Require actual CUDA device creation, nonzero probe rows
-and no skips. These are **deferred GPU commands**, not hold-safe tests.
+and no skips. These are GPU tests, not hold-safe CPU checks. Their completed run does not
+authorize the separate paired full-render campaign.
 
 Pair rows A–F on the same source revision, checkpoint/adapter and request;
 row G requires its own capacity decision on both hosts. Retain decoded frame
@@ -194,8 +196,10 @@ or unreviewed result cannot promote Metal beyond `CorrectnessOnly`.
 
 This audit found no demonstrated additional production fix: the known
 lifetime/dispatch fixes are merged. Only documentation changes are prepared.
-No GPU was initialized, model loaded, upstream inference run, service changed,
-pressure test started or kernel setting modified in this task.
+The initial preparation initialized no GPU. Subsequently authorized bounded
+CUDA validation completed as recorded in the linked follow-up; no model was
+loaded, upstream inference run, service changed, pressure test started or
+kernel setting modified.
 
 The next operator needs: recovered verified instrumentation and watchdog;
 exact per-case allocation-free budgets; frozen input fixtures; explicit hold

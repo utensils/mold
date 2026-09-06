@@ -240,7 +240,8 @@ occurred. The separate qualification process and reservation were released.
 
 PR #1604 merged as `27ed658e`. The [next campaign plan](minimax-h3-metal-next-campaign.md)
 tracks default-resolution and broader FL2VA evidence, exact phase accounting,
-and launch/cleanup gates. GPU execution is on hold during that preparation.
+and launch/cleanup gates. Metal GPU execution remains on hold. The subsequently authorized
+[bounded CUDA follow-up](minimax-h3-cuda-post-1604.md) passed on the merged code.
 
 - Complete per-phase runtime measurements for the intended Turbo/default shape; the small base admission budget above is established.
 - Extend the completed reduced-size conditioner, DiT and VAE evidence to
