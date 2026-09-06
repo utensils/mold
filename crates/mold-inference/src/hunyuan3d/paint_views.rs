@@ -1,6 +1,43 @@
 //! Paint-specific view policy, independent of poster/turntable cameras.
 use anyhow::{ensure, Result};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaintView {
+    pub elevation: f32,
+    pub azimuth: f32,
+    pub weight: f32,
+}
+
+/// Tencent `textureGenPipeline.py:57-68`: six primary views, followed by
+/// alternating +20/-20 degree candidates at each 30 degree azimuth.
+pub fn candidate_views() -> Vec<PaintView> {
+    let mut views: Vec<_> = [
+        (0., 0., 1.),
+        (0., 90., 0.1),
+        (0., 180., 0.5),
+        (0., 270., 0.1),
+        (90., 0., 0.05),
+        (-90., 180., 0.05),
+    ]
+    .into_iter()
+    .map(|(elevation, azimuth, weight)| PaintView {
+        elevation,
+        azimuth,
+        weight,
+    })
+    .collect();
+    for azimuth in (0..360).step_by(30) {
+        for elevation in [20., -20.] {
+            views.push(PaintView {
+                elevation,
+                azimuth: azimuth as f32,
+                weight: 0.01,
+            });
+        }
+    }
+    views
+}
+
 /// Tencent `hy3dpaint/utils/pipeline_utils.py:40-109`, pinned at
 /// 82920d643c0dc2f7bfd7255f45f62d386edfe60c. Visibility uses zero-based face
 /// indices, without the rasterizer's background sentinel. The first six views
@@ -85,6 +122,22 @@ pub fn select_views(areas: &[f32], visible: &[Vec<u32>], limit: usize) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn candidate_order_and_weights_match_upstream_config() {
+        let metadata: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/hunyuan3d/paint-raster.json"
+        ))
+        .unwrap();
+        let actual = candidate_views();
+        let expected = metadata["views"].as_array().unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (a, b) in actual.iter().zip(expected) {
+            assert_eq!(
+                [a.elevation, a.azimuth, a.weight],
+                [0, 1, 2].map(|i| b[i].as_f64().unwrap() as f32)
+            );
+        }
+    }
     #[derive(serde::Deserialize)]
     struct Fixture {
         cases: Vec<Case>,

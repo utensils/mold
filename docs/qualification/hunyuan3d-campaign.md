@@ -131,6 +131,26 @@ loader without replacing network or rendering computations.
   `paint-views-green-v1.log` passes 162 Hunyuan3D tests (one hardware test ignored).
   Camera/raster parity is still a separate open gate.
 
+## Paint camera and conditioning parity
+
+- `paint-raster-oracle-v1/` captures Tencent CUDA normalization, camera matrices,
+  normal/position maps and face IDs for all 30 candidates on an asymmetric mesh.
+  The checked-in fixture is 852 KiB. `paint-raster-red-v1.log` records the missing
+  implementation; `paint-raster-green-v2.log` passes 164 tests (one hardware test
+  ignored), including camera matrices, reversible coordinates, candidate order
+  and all-view buffers at the declared 3e-5 interior tolerance. Existing poster
+  and turntable tests remain green; their framing and float depth mode are intact.
+- `paint-conditions-rust-v1/` contains all twelve 2048-pixel conditioning maps
+  produced from the real mesh in 14.968 seconds on CPU. The comparison against
+  the successful upstream run passes every preset gate (mask IoU >= .999,
+  >= .995 of channels within one level, PSNR >= 40 dB).
+  `paint-conditions-comparison-v1.json` records mask IoU exactly 1 for every map;
+  positions differ by at most one level. Normal-map PSNR is at least 59.02 dB,
+  with more than 99.999% of channels within one level; rare triangle-boundary
+  differences can be much larger and are retained in the original maps.
+- `paint-raster-clippy-v1.log` passes warnings-denied Clippy. CPU raster buffers
+  are allocated one view at a time. The native CUDA renderer is oracle-only.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

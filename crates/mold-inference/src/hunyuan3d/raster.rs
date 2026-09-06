@@ -287,14 +287,30 @@ pub fn camera_ring(count: usize, elevation_deg: f32) -> Vec<Camera> {
 /// (degenerate area, non-finite coordinate, out-of-range index) are skipped
 /// while the rest of the mesh still renders.
 pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) -> GBuffers {
-    let mut gb = GBuffers::unset(width, height);
     if width == 0 || height == 0 || mesh.vertices.is_empty() || mesh.faces.is_empty() {
-        return gb;
+        return GBuffers::unset(width, height);
     }
 
     let Some(screen) = project(mesh, camera, width, height) else {
-        return gb;
+        return GBuffers::unset(width, height);
     };
+
+    render_projected(mesh, &screen, camera.culling, width, height, false)
+}
+
+/// Shared triangle traversal; paint provides its upstream clip-space projection.
+pub(super) fn render_projected(
+    mesh: &Mesh,
+    screen: &[ScreenVertex],
+    culling: Culling,
+    width: u32,
+    height: u32,
+    quantize_depth: bool,
+) -> GBuffers {
+    let mut gb = GBuffers::unset(width, height);
+    if screen.len() != mesh.vertices.len() {
+        return gb;
+    }
 
     let normals = mesh
         .normals
@@ -325,7 +341,7 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
         if area2 == 0.0 || !area2.is_finite() {
             continue;
         }
-        match camera.culling {
+        match culling {
             Culling::None => {}
             // Negative area == front-facing; see the module docs.
             Culling::Back if area2 > 0.0 => continue,
@@ -384,6 +400,14 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
                 let b2 = l2 * s2.inv_w * inv_denom;
 
                 let depth = b0 * s0.depth + b1 * s1.depth + b2 * s2.depth;
+                // Tencent custom_rasterizer's depth token uses 18 bits plus
+                // the face index as its deterministic tie breaker. Iteration
+                // visits faces in that same ascending index order.
+                let depth = if quantize_depth {
+                    (depth * 262144.).trunc()
+                } else {
+                    depth
+                };
                 if !depth.is_finite() {
                     continue;
                 }
@@ -422,13 +446,13 @@ pub fn render_gbuffers(mesh: &Mesh, camera: &Camera, width: u32, height: u32) ->
 
 /// A projected vertex, precomputed once so the triangle loop allocates nothing.
 #[derive(Debug, Clone, Copy)]
-struct ScreenVertex {
-    x: f32,
-    y: f32,
+pub(super) struct ScreenVertex {
+    pub x: f32,
+    pub y: f32,
     /// Eye-space depth, increasing away from the eye.
-    depth: f32,
+    pub depth: f32,
     /// `1/depth` under perspective, `1` under orthographic.
-    inv_w: f32,
+    pub inv_w: f32,
 }
 
 impl ScreenVertex {
