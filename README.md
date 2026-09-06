@@ -84,6 +84,8 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Wuerstchen, LTX Video, Wan, MiniMax H3, and Hunyuan3D. See the
   [model catalog](https://utensils.io/mold/models/) for variants and hardware
   requirements.
+  Wan's 1.3B BF16 and 5B Q8/FP16 paths are performance-qualified on Apple
+  Metal as well as CUDA; fp8-scaled Wan checkpoints remain CUDA-only.
   MiniMax H3 forced-local execution accepts one FL2VA request; batches,
   sequences, and Ref2VA reference uploads require the server route.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
