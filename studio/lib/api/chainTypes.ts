@@ -164,14 +164,6 @@ export interface ChainJobSummary {
   execution_phase?: ChainExecutionPhase | null;
 }
 
-/** Internal long-video compatibility shims share the chain runner but are
- * still one-shot prints. Older servers listed those temporary records beside
- * authored sequences, so every client filters defensively at its list
- * boundary instead of letting a shim switch Create into Sequence mode. */
-export function isAuthoredSequenceJob(job: ChainJobSummary): boolean {
-  return job.ephemeral !== true;
-}
-
 export interface ChainJobStageDetail {
   idx: number;
   state: ChainStageState;
