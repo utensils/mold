@@ -17513,6 +17513,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Serialize process-env readers with test-only mutators.
     async fn placement_preview_models_one_parent_expansion_and_every_batch_child() {
         let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
