@@ -55,6 +55,10 @@ export function createAnalytics(win) {
       ad_personalization: 'denied',
     })
     gtag('js', new Date())
+    gtag('set', {
+      page_location: cleanUrl(win.location.href),
+      page_referrer: previousPage,
+    })
     gtag('config', measurementId, {
       send_page_view: false,
       allow_google_signals: false,
@@ -62,8 +66,6 @@ export function createAnalytics(win) {
       cookie_path: '/mold/',
       cookie_domain: 'utensils.io',
       cookie_prefix: 'mold',
-      page_location: cleanUrl(win.location.href),
-      page_referrer: previousPage,
     })
     const script = win.document.createElement('script')
     script.async = true
