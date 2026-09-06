@@ -393,6 +393,40 @@ loader without replacing network or rendering computations.
   Component parity does not yet qualify the assembled UNet or resolve the VAE
   float16 maximum-error gate.
 
+## Assembled upstream paint UNet captures
+
+- `scripts/capture-hunyuan3d-paint-unet.py` executes the unchanged pinned Tencent
+  wrapper and Diffusers 0.30 UNet. It captures two denoiser timesteps (500, 400),
+  all inputs, DINO projection, all 16 reference transformer caches and the four
+  position-index resolutions. Position maps are saved before Tencent mutates
+  them. The tiny architecture retains all four down/up levels, two residual
+  layers per down block, all paint branches and nonzero synthetic parameters.
+  Its weights remain outside Git in the evidence directory.
+- Float32 tiny and installed captures succeeded at two views and 8x8 latents
+  (`paint-unet-tiny-oracle-v1/`, `paint-unet-pretrained-oracle-v2/`). All tensors
+  are finite; `paint-unet-initial-capture-check-v1.json` records dimensions,
+  cache counts and distinct timestep results. The first installed invocation
+  used the config-only component directory and failed before loading weights;
+  it remains retained. The harness now validates both required files before
+  constructing a model and uses the retained joined checkpoint layout.
+- Float16 captures succeeded for the tiny architecture and the full installed
+  production dimensions: six views, three CFG batches, two materials, 64x64
+  latents (`paint-unet-production-f16-oracle-v1/`). Outputs have shape
+  `[36,4,64,64]`; both timestep outputs and all caches are finite. PyTorch peak
+  allocated/reserved memory is 6,784,477,184 / 7,742,685,184 bytes. This is an
+  upstream forward capture, not a Rust parity or full texture-generation claim.
+- Read-only review confirmed 12 newest-first residual skips, `[hidden,skip]`
+  concatenation and 16 reference cache sites. It also identified dtype-dependent
+  position mutation: `.half()` aliases F16 input but copies F32 input on each
+  pyramid scale, so invalid pixels zeroed in the first F16 scale become valid
+  zeros on later scales. Any channel equal to one after conversion is invalid;
+  half sum/product rounding and ties-to-even voxel rounding must be retained.
+- The subsequent two-reference tiny capture
+  (`paint-unet-tiny-multiref-oracle-v1/`) adds invocation counters: two denoiser
+  calls run the main network twice, but reference inference and DINO projection
+  once each. Both the multiple-reference shape and caching behavior are now
+  executable fixtures. Assembled Rust parity remains the next open gate.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification
