@@ -1348,3 +1348,38 @@ it is not a completion checklist with assumed passes.
   Follow-up read-only review confirms the shared device trace, exclusive
   evidence paths, production lifecycle and cancellation behavior, with no
   remaining actionable finding.
+
+### P7 self-contained PBR GLB
+
+- `paint_materials::encode_textured_glb` reverses paint normalization to restore
+  the source geometry, retains paint UVs for glTF's upper-left texture origin,
+  computes smooth normals, embeds albedo as an sRGB PNG and repacks Tencent's
+  R=metallic/G=roughness map into glTF's
+  R=unused/G=roughness/B=metallic linear-data layout. The existing GLB writer
+  supplies white base-color and unit metallic/roughness factors so neither map
+  is scaled. Dimension, geometry round-trip, channel packing and cancellation
+  contracts pass (`paint-pbr-glb-green-v1.log`,
+  `paint-pbr-glb-contract-v1.log`); the strengthened source-geometry and
+  asymmetric-UV regression passes in `paint-pbr-glb-review-green-v1.log`.
+- Peer review caught two differences between filling and export. Export now
+  restores the source center/scale, matching Tencent's `get_mesh(normalize=False)`.
+  A raw-accessor comparison against Tencent's Blender-produced GLB also proves
+  that Blender flips the intermediate OBJ V coordinates: raw GLB UVs match the
+  prepared paint UVs within 4.47e-8 and differ from OBJ UVs by as much as 1.0
+  (`paint-glb-raw-uv-review-v1/comparison.json`). The asymmetric-UV regression
+  pins both corrections.
+- Actual retained-mesh GLBs were written from the exact qualified 1024, 2048
+  and 4096 material results. They contain 192,906 vertices, 250,396 triangles,
+  UVs, normals and both embedded textures. The Khronos glTF Validator
+  2.0.0-dev.3.10 reports zero errors, warnings, infos or hints for all three
+  (`paint-pbr-glb-chair-{1024,2048,4096}-v4-review-fixed/`).
+- Blender 5.0.1 independently imports and renders the 1024 GLB, assigning the
+  base-color image `sRGB` and the metallic/roughness image `Non-Color`. The
+  retained 512-pixel render and import report are in
+  `paint-pbr-glb-blender-v4-review-fixed/`. Earlier normalized/UV-inverted
+  artifacts, the missing-output-directory renderer attempt, the Blender 5.1
+  engine-identifier error against Blender 5.0.1, and validator invocation errors
+  remain retained as failed evidence and are not used for qualification.
+- This qualifies the standalone PBR container. Wiring it to the durable paint
+  engine and client publication path remains part of the broader P7/P14 work;
+  this checkpoint does not claim end-to-end image-to-textured-GLB completion.

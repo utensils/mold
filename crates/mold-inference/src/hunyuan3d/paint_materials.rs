@@ -1,6 +1,8 @@
 //! Material projection, streaming bake and texture-fill composition.
 
 use super::{
+    glb::{write_glb, GlbMaterial},
+    mesh::{compute_smooth_normals, Mesh},
     paint_back_sample::{back_sample, BackSampleView},
     paint_bake::{BakedTexture, TextureBaker},
     paint_camera::CameraGeometry,
@@ -13,6 +15,7 @@ use super::{
 };
 use anyhow::{ensure, Result};
 use image::RgbImage;
+use mold_core::OutputFormat;
 
 pub struct BakedMaterials {
     pub albedo: BakedTexture,
@@ -218,6 +221,39 @@ fn fill_geometry(
     Ok((positions, uv))
 }
 
+fn export_geometry(
+    mesh: &PreparedMesh,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<FillGeometry> {
+    checkpoint()?;
+    mesh.mesh.validate()?;
+    let source_uv = mesh
+        .mesh
+        .uvs
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("paint mesh has no UVs"))?;
+    let mut positions = Vec::with_capacity(mesh.mesh.vertices.len());
+    let mut uv = Vec::with_capacity(source_uv.len());
+    // MeshRender.save_mesh calls get_mesh(normalize=False): restore the input
+    // scale/center and invert the paint frame. Upstream first restores the OBJ
+    // UVs, then Blender flips V again while converting OBJ's lower-left texture
+    // origin to glTF's upper-left origin. The resulting raw GLB accessor equals
+    // the prepared paint UVs, which also address the baked PNG without a flip.
+    for (index, p) in mesh.mesh.vertices.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            checkpoint()?;
+        }
+        positions.push(mesh.restore_position(*p));
+    }
+    for (index, p) in source_uv.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            checkpoint()?;
+        }
+        uv.push(*p);
+    }
+    Ok((positions, uv))
+}
+
 pub fn finish_materials(
     mesh: &PreparedMesh,
     baked: BakedMaterials,
@@ -260,10 +296,207 @@ pub fn finish_materials(
     })
 }
 
+/// Convert Tencent's two-channel MR convention (R metallic, G roughness) to
+/// glTF's packed convention (G roughness, B metallic). R is reserved for AO.
+fn pack_metallic_roughness(
+    source: &RgbImage,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<RgbImage> {
+    ensure!(
+        source.width() > 0 && source.height() > 0,
+        "empty material texture"
+    );
+    let mut packed = RgbImage::new(source.width(), source.height());
+    for (y, row) in source.rows().enumerate() {
+        checkpoint()?;
+        for (x, pixel) in row.enumerate() {
+            packed.put_pixel(x as u32, y as u32, image::Rgb([0, pixel[1], pixel[0]]));
+        }
+    }
+    Ok(packed)
+}
+
+/// Restore the source mesh Tencent exports and embed both PBR maps in one
+/// canonical GLB. Base color remains sRGB bytes; MR remains linear data.
+pub fn encode_textured_glb(
+    prepared: &PreparedMesh,
+    textures: &MaterialTextures,
+    metadata: Option<&serde_json::Value>,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<(Mesh, Vec<u8>)> {
+    ensure!(
+        textures.albedo.dimensions() == textures.metallic_roughness.dimensions()
+            && [1024, 2048, 4096].contains(&textures.albedo.width())
+            && textures.albedo.width() == textures.albedo.height(),
+        "material texture dimensions differ or are unsupported"
+    );
+    let (vertices, uvs) = export_geometry(prepared, checkpoint)?;
+    let mut mesh = Mesh {
+        vertices,
+        faces: prepared.mesh.faces.clone(),
+        normals: None,
+        vertex_colors: None,
+        uvs: Some(uvs),
+    };
+    compute_smooth_normals(&mut mesh);
+    checkpoint()?;
+    let metallic_roughness = pack_metallic_roughness(&textures.metallic_roughness, checkpoint)?;
+    let material = GlbMaterial {
+        base_color_texture: Some(crate::image::encode_rgb_image(
+            &textures.albedo,
+            OutputFormat::Png,
+            None,
+        )?),
+        metallic_roughness_texture: Some(crate::image::encode_rgb_image(
+            &metallic_roughness,
+            OutputFormat::Png,
+            None,
+        )?),
+        ..GlbMaterial::default()
+    };
+    checkpoint()?;
+    let glb = write_glb(&mesh, &material, metadata)?;
+    checkpoint()?;
+    Ok((mesh, glb))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{mesh::Mesh, paint_raster::PreparedMesh};
     use super::*;
+
+    #[test]
+    fn pbr_glb_packs_metallic_and_roughness_and_keeps_textured_mesh() -> Result<()> {
+        let source = Mesh {
+            vertices: vec![[2., 3., 4.], [5., 3., 4.], [2., 8., 6.]],
+            faces: vec![[0, 1, 2]],
+            // Asymmetric V values make either an omitted or a duplicate flip
+            // visible when the prepared paint UVs become raw glTF UVs.
+            uvs: Some(vec![[0.1, 0.2], [0.9, 0.3], [0.4, 0.8]]),
+            ..Mesh::default()
+        };
+        let prepared = super::super::paint_raster::prepare_mesh(&source)?;
+        // Tencent stores metallic in R and roughness in G. glTF stores
+        // roughness in G and metallic in B; its R lane is unused here.
+        let mr = RgbImage::from_pixel(2, 2, image::Rgb([44, 55, 66]));
+        let packed = pack_metallic_roughness(&mr, &mut || Ok(()))?;
+        assert!(packed.pixels().all(|pixel| pixel.0 == [0, 55, 44]));
+        let textures = MaterialTextures {
+            albedo: RgbImage::from_pixel(1024, 1024, image::Rgb([11, 22, 33])),
+            metallic_roughness: RgbImage::from_pixel(1024, 1024, image::Rgb([44, 55, 66])),
+        };
+
+        let (mesh, glb) = encode_textured_glb(&prepared, &textures, None, &mut || Ok(()))?;
+        for (actual, expected) in mesh.vertices.iter().zip(&source.vertices) {
+            for axis in 0..3 {
+                assert!((actual[axis] - expected[axis]).abs() <= 1e-6);
+            }
+        }
+        let exported_uvs = mesh.uvs.as_ref().unwrap();
+        let source_uvs = source.uvs.as_ref().unwrap();
+        for (actual, expected) in exported_uvs.iter().zip(source_uvs) {
+            assert!((actual[0] - expected[0]).abs() <= 1e-6);
+            assert!((actual[1] - (1. - expected[1])).abs() <= 1e-6);
+        }
+        assert_eq!(mesh.normals.as_ref().map(Vec::len), Some(3));
+        assert!(
+            mold_core::glb_summary::summarize_glb(&glb)
+                .unwrap()
+                .textured
+        );
+        let decoded = super::super::glb::read_glb(&glb)?;
+        assert_eq!(decoded.vertices, mesh.vertices);
+        assert_eq!(decoded.uvs, mesh.uvs);
+        Ok(())
+    }
+
+    #[test]
+    fn pbr_glb_refuses_bad_dimensions_and_pack_cancellation() {
+        assert!(pack_metallic_roughness(&RgbImage::new(0, 1), &mut || Ok(())).is_err());
+        let mut rows = 0;
+        let error = pack_metallic_roughness(&RgbImage::new(2, 2), &mut || {
+            rows += 1;
+            anyhow::ensure!(rows < 2, "cancel MR packing");
+            Ok(())
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "cancel MR packing");
+
+        let prepared = PreparedMesh {
+            mesh: Mesh {
+                vertices: vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+                faces: vec![[0, 1, 2]],
+                uvs: Some(vec![[0., 0.], [1., 0.], [0., 1.]]),
+                ..Mesh::default()
+            },
+            center: [0.; 3],
+            scale: 1.,
+        };
+        let bad = MaterialTextures {
+            albedo: RgbImage::new(1024, 1024),
+            metallic_roughness: RgbImage::new(2048, 2048),
+        };
+        assert!(encode_textured_glb(&prepared, &bad, None, &mut || Ok(())).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires retained full material oracle and new output directory"]
+    fn retained_chair_writes_self_contained_textured_glb() -> Result<()> {
+        use candle_core::Device;
+        use std::path::PathBuf;
+
+        let oracle = PathBuf::from(std::env::var("MOLD_MATERIAL_BAKE_ORACLE")?);
+        let output = PathBuf::from(std::env::var("MOLD_TEXTURED_GLB_OUTPUT")?);
+        std::fs::create_dir(&output)?;
+        let tensors =
+            candle_core::safetensors::load(oracle.join("mesh.safetensors"), &Device::Cpu)?;
+        let mesh = Mesh {
+            vertices: tensors["vertices"]
+                .to_vec2::<f32>()?
+                .into_iter()
+                .map(|value| [value[0], value[1], value[2]])
+                .collect(),
+            faces: tensors["faces"]
+                .to_vec2::<i32>()?
+                .into_iter()
+                .map(|value| [value[0] as u32, value[1] as u32, value[2] as u32])
+                .collect(),
+            uvs: Some(
+                tensors["uv"]
+                    .to_vec2::<f32>()?
+                    .into_iter()
+                    .map(|value| [value[0], value[1]])
+                    .collect(),
+            ),
+            ..Mesh::default()
+        };
+        let prepared = super::super::paint_raster::prepare_mesh(&mesh)?;
+        let textures = MaterialTextures {
+            albedo: image::open(oracle.join("albedo-filled.png"))?.to_rgb8(),
+            metallic_roughness: image::open(oracle.join("mr-filled.png"))?.to_rgb8(),
+        };
+        let metadata = serde_json::json!({"qualification": "retained-chair"});
+        let (mesh, glb) =
+            encode_textured_glb(&prepared, &textures, Some(&metadata), &mut || Ok(()))?;
+        std::fs::write(output.join("chair.glb"), &glb)?;
+        let summary = mold_core::glb_summary::summarize_glb(&glb)
+            .ok_or_else(|| anyhow::anyhow!("generated GLB has no summary"))?;
+        ensure!(summary.textured, "generated GLB is not textured");
+        ensure!(
+            summary.vertex_count == mesh.vertex_count() as u32
+                && summary.face_count == mesh.face_count() as u32,
+            "generated GLB summary geometry differs"
+        );
+        let decoded = super::super::glb::read_glb(&glb)?;
+        ensure!(
+            decoded.vertices == mesh.vertices
+                && decoded.faces == mesh.faces
+                && decoded.uvs == mesh.uvs,
+            "generated GLB geometry does not round trip"
+        );
+        Ok(())
+    }
 
     #[test]
     fn material_bake_refuses_invalid_views_before_rasterization() {
