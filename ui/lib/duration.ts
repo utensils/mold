@@ -14,11 +14,3 @@ export function formatFrameDuration(frames: number, fps: number): string {
   const safeFps = Number.isFinite(fps) && fps > 0 ? fps : FALLBACK_VIDEO_FPS;
   return `${safeFrames}f · ${(safeFrames / safeFps).toFixed(1)}s`;
 }
-
-/**
- * What a clip in a sequence is called, by position. One answer, so the rail's
- * block title and the seam editor's "join · A → B" sentence cannot disagree.
- */
-export function clipLabel(index: number): string {
-  return index === 0 ? "Opening clip" : `Clip ${index + 1}`;
-}

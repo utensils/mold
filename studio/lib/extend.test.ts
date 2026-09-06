@@ -12,7 +12,6 @@ import {
   submitsExtend,
 } from "./extend";
 import { WAN_HANDOFF_DUPLICATED_FRAMES } from "./chainRouting";
-import { sequenceFrameStep } from "./sequence";
 
 describe("canOfferExtend", () => {
   it("requires both the advertised capability and a capable family", () => {
@@ -224,14 +223,16 @@ describe("extendValidationError", () => {
   });
 
   /**
-   * One rule, one derivation: `extendOverlapOptions` enumerates the grid from
-   * `sequenceFrameStep` and the validator must reject off it from the same
-   * authority, or a family whose VAE compresses time differently gets an
-   * option list and an error message that disagree.
+   * One rule, one derivation: the validator must reject off exactly the grid
+   * `extendOverlapOptions` enumerates, or a family whose VAE compresses time
+   * differently gets an option list and an error message that disagree. The
+   * step is read back off the options themselves so this test cannot drift
+   * from the offered ladder.
    */
   it("rejects off the same grid the options are enumerated from", () => {
     for (const family of [null, "ltx2", "ltx-2"]) {
-      const step = sequenceFrameStep(family);
+      const ladder = extendOverlapOptions(97, family);
+      const step = ladder[1]! - ladder[0]!;
       for (const overlapFrames of extendOverlapOptions(97, family)) {
         expect(
           extendValidationError({ overlapFrames, frames: 97, family }),
