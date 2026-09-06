@@ -592,7 +592,8 @@ fn base_peak_memory_for_paths(
     mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Sequential)
 }
 
-/// The `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`.
+/// The `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`, removed
+/// from the CUDA Wan fit only.
 ///
 /// It is a stand-in for activation and fragmentation the generic estimate does
 /// not model. The request-aware wan path models both — `wan_admission`'s term
@@ -601,10 +602,23 @@ fn base_peak_memory_for_paths(
 /// A14B default to ~26.9 GB against ~25.2 GB usable and refused a render that
 /// measures 23,975 MiB and completes.
 ///
-/// Deliberately NOT subtracted inside `base_peak_memory_for_paths`: that
+/// Metal retains it after #1059's live margin run showed the denoise phase
+/// consuming it. Deliberately NOT subtracted inside
+/// `base_peak_memory_for_paths`: that
 /// function also serves the model-load guard, which has no request, prices
 /// activations with the generic estimate, and still needs the headroom.
 const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
+
+/// Extra allocator variation above the generic 2 GB runtime allowance for a
+/// Wan denoise on Metal.
+///
+/// The #1059 margin run isolated the 1.3B transformer/VAE phase at
+/// 8,184,725,504 allocated Metal bytes. The CUDA-calibrated request-aware
+/// formula predicted 6.2 GB because it removed the generic 2 GB allowance;
+/// retaining that allowance lands within 18 MB of the observation. Keep a
+/// further 256 MiB so admission stays above the measured peak rather than
+/// balancing on allocator noise.
+const WAN_METAL_ALLOCATOR_MARGIN_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Device memory a face-identity render needs beside the checkpoint it
 /// conditions.
@@ -1536,14 +1550,16 @@ pub(crate) struct GenerationMemoryBudget {
 pub(crate) struct GenerationOffloadPolicy {
     forced: bool,
     wan: mold_inference::wan::block_offload::AdmissionPolicy,
+    metal: bool,
 }
 
 impl GenerationOffloadPolicy {
     pub(crate) const fn new(
         forced: bool,
         wan: mold_inference::wan::block_offload::AdmissionPolicy,
+        metal: bool,
     ) -> Self {
-        Self { forced, wan }
+        Self { forced, wan, metal }
     }
 }
 
@@ -1657,7 +1673,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
             (estimate.peak_bytes, activation)
         }
         None => {
-            let mut base_peak = base_peak_memory_for_paths(
+            let base_peak = base_peak_memory_for_paths(
                 paths,
                 hint,
                 streaming,
@@ -1665,8 +1681,8 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 qwen_quantized,
                 gemma_competes,
             );
-            if hint.is_some_and(|h| h.family == ActivationFamily::WanVideo) {
-                base_peak = base_peak.saturating_sub(WAN_REQUEST_AWARE_HEADROOM_BYTES);
+            let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
+            if wan {
                 // Block offload (#776 item 3) can park trailing transformer
                 // blocks in host RAM, so a shape that does not fit resident
                 // may still be feasible. Charging the full weight term would
@@ -1676,7 +1692,6 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                     offload_policy.wan,
                     wan_geometry.map(|geometry| geometry.num_layers as usize),
                 );
-                base_peak = base_peak.saturating_sub(wan_offload_relief);
             }
             // Carry the wan checkpoint geometry in here too. Wan is never
             // streaming, so this arm is the only one it takes — recomputing
@@ -1690,7 +1705,59 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 wan_distilled,
                 projection,
             );
-            (base_peak.saturating_add(activation), activation)
+            let peak = if wan && offload_policy.metal {
+                // Wan's sequential Metal engine drops its text encoder before
+                // it loads the transformer and VAE. Price those phases
+                // separately: adding denoise activation to the generic
+                // max(weights) estimate makes a GPU-resident encoder appear to
+                // overlap the denoise and creates a discontinuous false OOM at
+                // the encoder placement threshold.
+                let (encoder_weights, inference_weights) =
+                    mold_inference::device::estimate_sequential_phase_weights(paths);
+                let encoder_is_gguf = paths
+                    .t5_encoder
+                    .iter()
+                    .chain(paths.text_encoder_files.iter())
+                    .any(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+                    });
+                let encoder_threshold = if encoder_is_gguf {
+                    mold_inference::device::t5_metal_gguf_vram_threshold(encoder_weights)
+                } else {
+                    encoder_weights.saturating_add(WAN_REQUEST_AWARE_HEADROOM_BYTES)
+                };
+                // The runtime makes this same fit decision immediately before
+                // encoding. Below the threshold UMT5 runs on CPU and consumes
+                // no Metal budget; at or above it the complete encoder phase
+                // must be covered by the plan.
+                let encoder_peak = if available_memory_bytes
+                    .is_none_or(|available| available >= encoder_threshold)
+                {
+                    encoder_threshold
+                } else {
+                    0
+                };
+                let denoise_peak = inference_weights
+                    .saturating_sub(wan_offload_relief)
+                    .saturating_add(activation)
+                    // #1059 measured 8,184,725,504 Metal bytes in this phase:
+                    // the CUDA-calibrated fit still needs the generic runtime
+                    // allowance on Metal, plus a small allocator margin.
+                    .saturating_add(WAN_REQUEST_AWARE_HEADROOM_BYTES)
+                    .saturating_add(WAN_METAL_ALLOCATOR_MARGIN_BYTES);
+                encoder_peak.max(denoise_peak)
+            } else if wan {
+                // Preserve the calibrated CUDA Wan estimate exactly: its
+                // measured activation fit already includes allocator runtime.
+                base_peak
+                    .saturating_sub(WAN_REQUEST_AWARE_HEADROOM_BYTES)
+                    .saturating_sub(wan_offload_relief)
+                    .saturating_add(activation)
+            } else {
+                base_peak.saturating_add(activation)
+            };
+            (peak, activation)
         }
     };
     // Identity conditioning adds resident weights and activations to whichever
@@ -2050,7 +2117,11 @@ mod fail_closed_tests {
     use std::path::{Path, PathBuf};
 
     fn offload(wan: AdmissionPolicy) -> GenerationOffloadPolicy {
-        GenerationOffloadPolicy::new(false, wan)
+        GenerationOffloadPolicy::new(false, wan, false)
+    }
+
+    fn metal_offload(wan: AdmissionPolicy) -> GenerationOffloadPolicy {
+        GenerationOffloadPolicy::new(false, wan, true)
     }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -2251,6 +2322,69 @@ mod fail_closed_tests {
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    fn write_sparse_wan_1_3b_header(path: &Path, target_size: u64) {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut shapes = vec![
+            (
+                "patch_embedding.weight".to_string(),
+                vec![1536, 16, 1, 2, 2],
+            ),
+            ("blocks.0.ffn.0.weight".to_string(), vec![8960, 1536]),
+            ("text_embedding.0.weight".to_string(), vec![1536, 4096]),
+            ("time_embedding.0.weight".to_string(), vec![1536, 256]),
+            ("head.head.weight".to_string(), vec![64, 1536]),
+            ("blocks.0.self_attn.q.weight".to_string(), vec![1536, 1536]),
+        ];
+        for layer in 0..30 {
+            shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 1536]));
+        }
+
+        let probe_bytes = shapes
+            .iter()
+            .map(|(_, shape)| shape.iter().product::<usize>() as u64)
+            .sum::<u64>();
+        let mut dummy_bytes = target_size - probe_bytes - 4096;
+        let (header, data_bytes) = loop {
+            let mut offset = 0u64;
+            let mut entries = serde_json::Map::new();
+            for (name, shape) in &shapes {
+                let bytes = shape.iter().product::<usize>() as u64;
+                entries.insert(
+                    name.clone(),
+                    serde_json::json!({
+                        "dtype": "U8",
+                        "shape": shape,
+                        "data_offsets": [offset, offset + bytes]
+                    }),
+                );
+                offset += bytes;
+            }
+            entries.insert(
+                "qualification.padding".to_string(),
+                serde_json::json!({
+                    "dtype": "U8",
+                    "shape": [dummy_bytes],
+                    "data_offsets": [offset, offset + dummy_bytes]
+                }),
+            );
+            let mut header = serde_json::to_vec(&serde_json::Value::Object(entries)).unwrap();
+            header.resize(header.len().next_multiple_of(8), b' ');
+            let revised = target_size - 8 - header.len() as u64 - probe_bytes;
+            if revised == dummy_bytes {
+                break (header, probe_bytes + dummy_bytes);
+            }
+            dummy_bytes = revised;
+        };
+        assert_eq!(8 + header.len() as u64 + data_bytes, target_size);
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header).unwrap();
+        file.seek(SeekFrom::Start(target_size - 1)).unwrap();
+        file.write_all(&[0]).unwrap();
     }
 
     #[test]
@@ -2810,6 +2944,121 @@ mod fail_closed_tests {
         assert!(
             !fp8_budget.wan_block_offload && !fp8_budget.block_offload,
             "fp8 cannot park, so no shape may report block offload for it"
+        );
+    }
+
+    /// At 6.5 GB the selected Q8 encoder cannot fit its 8.04 GB GPU threshold,
+    /// so the prepared plan parks it on CPU and the device estimate contains
+    /// only the 1.3B transformer, VAE, and denoise activation. The #1059 run
+    /// reached 8,184,725,504 Metal bytes in that phase after admission had
+    /// predicted 6.2 GB: Metal still needs the generic runtime allowance the
+    /// CUDA-calibrated Wan path removes.
+    #[test]
+    fn wan_metal_keeps_runtime_headroom_after_the_encoder_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("wan2.1_t2v_1.3B_bf16.safetensors");
+        let vae = dir.path().join("wan_2.1_vae.safetensors");
+        let umt5 = dir.path().join("umt5-xxl-encoder-Q8_0.gguf");
+        write_sparse_wan_1_3b_header(&transformer, 2_838_104_528);
+        std::fs::File::create(&vae)
+            .unwrap()
+            .set_len(253_815_318)
+            .unwrap();
+        std::fs::File::create(&umt5)
+            .unwrap()
+            .set_len(6_043_068_256)
+            .unwrap();
+        let mut model_paths = paths(transformer.to_str().unwrap());
+        model_paths.vae = vae;
+        model_paths.text_encoder_files = vec![umt5.clone()];
+        assert_eq!(
+            crate::wan_admission::warm_checkpoint_geometry(&model_paths),
+            Some(mold_inference::device::WanActivationGeometry::t2v_1_3b())
+        );
+        assert!(
+            mold_inference::device::t5_vram_threshold(6_043_068_256) > 6_500_000_000,
+            "the incident boundary parks this prepared encoder on CPU"
+        );
+        let mut denoise_paths = model_paths.clone();
+        denoise_paths.text_encoder_files.clear();
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a fox walking through snow",
+            "model": "wan21-t2v-1.3b:bf16",
+            "width": 512,
+            "height": 288,
+            "frames": 17,
+            "steps": 30,
+            "guidance": 6.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+
+        let old_boundary = estimate_generation_memory_for_request(
+            &request,
+            &denoise_paths,
+            Some(ActivationHint::from_request(&request, "wan")),
+            metal_offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
+            Some(6_500_000_000),
+            false,
+            false,
+        );
+        assert_eq!(old_boundary.fits_available_memory, Some(false));
+        assert!(old_boundary.peak_memory_bytes > 8_184_725_504);
+
+        let corrected_boundary = estimate_generation_memory_for_request(
+            &request,
+            &denoise_paths,
+            Some(ActivationHint::from_request(&request, "wan")),
+            metal_offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
+            Some(8_600_000_000),
+            false,
+            false,
+        );
+        assert_eq!(corrected_boundary.fits_available_memory, Some(true));
+
+        let whole_request = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            Some(ActivationHint::from_request(&request, "wan")),
+            metal_offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
+            Some(8_600_000_000),
+            false,
+            false,
+        );
+        assert_eq!(whole_request.fits_available_memory, Some(true));
+        assert_eq!(
+            whole_request.peak_memory_bytes, corrected_boundary.peak_memory_bytes,
+            "the encoder phase must not overlap the larger denoise phase"
+        );
+
+        let gpu_encoder = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            Some(ActivationHint::from_request(&request, "wan")),
+            metal_offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
+            Some(14_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(
+            gpu_encoder.peak_memory_bytes,
+            mold_inference::device::t5_metal_gguf_vram_threshold(6_043_068_256),
+            "once UMT5 promotes to Metal, admission must cover its measured phase"
+        );
+
+        let cuda = estimate_generation_memory_for_request(
+            &request,
+            &denoise_paths,
+            Some(ActivationHint::from_request(&request, "wan")),
+            offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
+            Some(6_500_000_000),
+            false,
+            false,
+        );
+        assert_eq!(
+            old_boundary.peak_memory_bytes - cuda.peak_memory_bytes,
+            WAN_REQUEST_AWARE_HEADROOM_BYTES + WAN_METAL_ALLOCATOR_MARGIN_BYTES,
+            "the live correction must be Metal-only; CUDA keeps its calibrated estimate"
         );
     }
 

@@ -84,6 +84,8 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Wuerstchen, LTX Video, Wan, MiniMax H3, and Hunyuan3D. See the
   [model catalog](https://utensils.io/mold/models/) for variants and hardware
   requirements.
+  Wan's 1.3B BF16 and 5B Q8/FP16 paths are performance-qualified on Apple
+  Metal as well as CUDA; fp8-scaled Wan checkpoints remain CUDA-only.
   MiniMax H3 forced-local execution accepts one FL2VA request; batches,
   sequences, and Ref2VA reference uploads require the server route.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
@@ -211,3 +213,7 @@ weights require separate acceptance and are limited to non-commercial research
 use.
 
 Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
+
+The [public website privacy policy](https://utensils.io/mold/privacy) describes
+Google Analytics on the documentation website. Analytics loads automatically
+without a popup; this integration is not included in Mold apps or servers.

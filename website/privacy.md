@@ -1,13 +1,40 @@
 # Privacy Policy
 
-**Effective July 21, 2026**
+**Effective September 6, 2026**
 
-This policy describes how the open-source Mold project handles information in
+This policy describes how the open-source Mold project handles information on its public website and in
 the Mold apps that link to it: the mobile app for iPhone, iPad, and Android,
 and the desktop app for macOS, Linux, and Windows. Each is a client for Mold
 servers that you choose and control. The Mold project does not operate a
 central account service, hosted generation service, advertising network, or
 analytics service for these apps.
+
+## Website analytics
+
+The public website at [utensils.io/mold](https://utensils.io/mold/) loads
+Google Analytics automatically when you visit, without a consent popup.
+
+Google Analytics measures page visits, traffic sources, scrolls,
+outbound link clicks, and file-download clicks, along with browser/device
+information and approximate geographic information derived from your connection.
+It uses cookies scoped to this website to distinguish visits. We use these
+reports to understand which documentation is useful and how visitors find Mold.
+We disable Google signals and advertising personalization, do not enable form or
+site-search measurement, and remove query strings and fragments from the page
+URLs and referrers we explicitly send. Outbound and download measurements may
+include the destination link URL.
+
+Google processes this website analytics data under
+[Google's privacy policy](https://policies.google.com/privacy). See also
+[how Google uses information from sites that use its services](https://policies.google.com/technologies/partner-sites).
+You can block Google Analytics with your browser's tracking protection or
+[Google's Analytics opt-out browser add-on](https://tools.google.com/dlpage/gaoptout).
+You can remove existing cookies through your browser's site-data settings;
+removing cookies does not erase analytics data already collected.
+
+This website analytics integration does not collect Mold prompts, generated
+media, server API keys, or usage of the CLI, desktop, mobile, or self-hosted
+Studio apps.
 
 ## Information the apps store on your device
 
@@ -43,7 +70,7 @@ not receive this server traffic merely because you use the app.
 
 ## Third-party services
 
-Mold has no advertising or tracking SDKs. A Mold server may contact model
+The Mold apps have no advertising or tracking SDKs. A Mold server may contact model
 catalogs such as [Hugging Face](https://huggingface.co/privacy) and
 [Civitai](https://civitai.com/content/privacy) when you browse or download
 models. Those requests originate from the server and are governed by the
@@ -83,7 +110,7 @@ knowingly collect personal information from children through its apps.
 
 ## Changes to this policy
 
-We may update this policy when the app's data practices change. The effective
+We may update this policy when the website or apps' data practices change. The effective
 date at the top identifies the current version.
 
 ## Contact

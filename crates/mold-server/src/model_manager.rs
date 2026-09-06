@@ -1186,6 +1186,7 @@ pub(crate) async fn estimate_generation_memory(
                     )
                 },
             ),
+            roomiest.is_some_and(|(_, _, backend)| backend == mold_core::GpuBackend::Metal),
         ),
         available,
         request_has_effective_lora(&effective_req),
@@ -1205,6 +1206,7 @@ pub(crate) async fn estimate_generation_memory(
                     runtime.value("MOLD_WAN_OFFLOAD_BLOCKS"),
                     runtime.value("MOLD_OFFLOAD"),
                 ),
+                backend == mold_core::GpuBackend::Metal,
             ),
             Some(capacity),
             request_has_effective_lora(&effective_req),

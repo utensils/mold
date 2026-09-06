@@ -8,7 +8,7 @@
     "preview": "vitepress preview",
     "fmt": "prettier --write .",
     "fmt:check": "prettier --check .",
-    "verify": "bun run scripts/verify-docs.mjs"
+    "verify": "bun run scripts/verify-docs.mjs && bun test scripts/analytics.test.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",
