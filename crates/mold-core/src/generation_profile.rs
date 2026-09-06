@@ -2255,19 +2255,14 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
                 .then(|| "Named camera views require a Hunyuan3D 2mv checkpoint".to_string()),
         }),
         mesh_input: Some(MeshInputProfile {
-            mode: if paint_available {
-                ControlMode::Adjustable
-            } else {
-                ControlMode::Hidden
-            },
+            mode: ControlMode::Hidden,
             formats: vec![MeshReferenceFormat::Glb, MeshReferenceFormat::Obj],
-            max_count: if paint_available { 1 } else { 0 },
+            max_count: 0,
             max_bytes: validation::MESH_REFERENCE_MAX_BYTES,
             up_axes: vec![MeshUpAxis::Y, MeshUpAxis::Z],
             meters_per_unit_min: 1.0e-6,
             meters_per_unit_max: 1.0e6,
-            reason: (!paint_available)
-                .then(|| "Mesh texturing requires the mesh-texture build feature".to_string()),
+            reason: Some("Supplied-mesh texturing is not executable by this build".to_string()),
         }),
         texture_resolutions: validation::MESH_TEXTURE_RESOLUTIONS.to_vec(),
         texture_default_resolution: Some(2048),
@@ -2286,8 +2281,6 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
         delight: Some(unavailable("Delighting is not executable by this build")),
         workflow_modes: if multiview {
             vec![MeshWorkflowMode::MultiviewToMesh]
-        } else if paint_available {
-            vec![MeshWorkflowMode::ImageToMesh, MeshWorkflowMode::MeshTexture]
         } else {
             vec![MeshWorkflowMode::ImageToMesh]
         },
@@ -3038,11 +3031,11 @@ mod tests {
         );
         assert_eq!(
             mesh_caps.workflow_modes,
-            if cfg!(feature = "mesh-texture") {
-                vec![MeshWorkflowMode::ImageToMesh, MeshWorkflowMode::MeshTexture]
-            } else {
-                vec![MeshWorkflowMode::ImageToMesh]
-            }
+            vec![MeshWorkflowMode::ImageToMesh]
+        );
+        assert_eq!(
+            mesh_caps.mesh_input.as_ref().map(|input| input.mode),
+            Some(ControlMode::Hidden)
         );
     }
 

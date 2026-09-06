@@ -68,7 +68,7 @@ const texturedMeshModel = () => {
   mesh.texture = { mode: "adjustable", required: false };
   mesh.texture_resolutions = [1024, 2048, 4096];
   mesh.texture_default_resolution = 2048;
-  mesh.workflow_modes = ["image_to_mesh", "mesh_texture"];
+  mesh.workflow_modes = ["image_to_mesh"];
   return modelWith("hunyuan3d-2.1:fp16", "hunyuan3d", recipe);
 };
 const rasterModel = () => modelWith("sdxl-base:fp16", "sdxl", sdxlRecipe());

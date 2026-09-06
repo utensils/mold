@@ -202,12 +202,14 @@ impl QueueJobProgress {
                 });
             }
         }
-        if self.stage != previous.and_then(|p| p.stage.clone()) {
+        let stage_changed = self.stage.as_ref() != previous.and_then(|p| p.stage.as_ref());
+        if stage_changed {
             if let Some(name) = self.stage.clone() {
                 events.push(SseProgressEvent::StageStart { name });
             }
         }
-        let stage_progress_changed = self.stage_current != previous.and_then(|p| p.stage_current)
+        let stage_progress_changed = stage_changed
+            || self.stage_current != previous.and_then(|p| p.stage_current)
             || self.stage_total != previous.and_then(|p| p.stage_total);
         if stage_progress_changed {
             if let (Some(name), Some(current), Some(total)) =
@@ -363,6 +365,44 @@ mod tests {
                 total: 15,
             }] if name == "Generating PBR views"
         ));
+    }
+
+    #[test]
+    fn a_new_stage_unfolds_equal_counters_after_its_start() {
+        let previous = folded(&[
+            SseProgressEvent::StageStart {
+                name: "Generating PBR views".into(),
+            },
+            SseProgressEvent::StageProgress {
+                name: "Generating PBR views".into(),
+                current: 1,
+                total: 1,
+            },
+        ]);
+        let current = folded(&[
+            SseProgressEvent::StageStart {
+                name: "Baking PBR textures".into(),
+            },
+            SseProgressEvent::StageProgress {
+                name: "Baking PBR textures".into(),
+                current: 1,
+                total: 1,
+            },
+        ]);
+
+        assert_eq!(
+            current.events_since(Some(&previous)),
+            vec![
+                SseProgressEvent::StageStart {
+                    name: "Baking PBR textures".into(),
+                },
+                SseProgressEvent::StageProgress {
+                    name: "Baking PBR textures".into(),
+                    current: 1,
+                    total: 1,
+                },
+            ]
+        );
     }
 
     #[test]

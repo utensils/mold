@@ -3303,7 +3303,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2.1",
-        "profile_hash": "bfc47b2b4c3cd06ab76d8151d6399c86a3b1ca233343869de158710ca3ed50bd",
+        "profile_hash": "99867a82d07c732151d2f116bcaa9cdb0659a91ddec5e968b4da2e541da0e71e",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3466,7 +3466,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                  "reason": "Supplied-mesh texturing is not executable by this build"
                 },
                 "texture_resolutions": [
                   1024,
@@ -3520,7 +3520,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-mini-turbo",
-        "profile_hash": "d9175dd5447bd4fe001afbc74fae27802f64d8f7b9d9ed207b37c2e416432c44",
+        "profile_hash": "a6da2e96a5d4eed10d4b7413a2fe2df1c2c7684ea4eecd0e0d5bb644738a44cf",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3683,7 +3683,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                  "reason": "Supplied-mesh texturing is not executable by this build"
                 },
                 "texture_resolutions": [
                   1024,
@@ -3737,7 +3737,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-turbo",
-        "profile_hash": "9f05f71269b85f9989ea8036b94891c2c06988fdf50324ca9911ff7b45e8bf4b",
+        "profile_hash": "e897a60183089be42d59bf29d5d1fcfd6c192fe135cf31e8199c32479bde2acf",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3900,7 +3900,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                  "reason": "Supplied-mesh texturing is not executable by this build"
                 },
                 "texture_resolutions": [
                   1024,
@@ -3954,7 +3954,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d",
-        "profile_hash": "262730662c515425da6f8e438c69e6024a6e88906a74971caee88cba2701eac1",
+        "profile_hash": "97e8e0cfed26640c9699747514662253171f43427bf0102f30c55f4592a905a8",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4117,7 +4117,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                  "reason": "Supplied-mesh texturing is not executable by this build"
                 },
                 "texture_resolutions": [
                   1024,
