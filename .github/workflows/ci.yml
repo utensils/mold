@@ -227,6 +227,8 @@ jobs:
               - 'scripts/capture-ltx25-cuda-verification.sh'
               - 'scripts/capture-ltx25-comfy-cuda-reference.sh'
               - 'scripts/validate-ltx25-cuda-report.py'
+              - 'scripts/validate-ltx25-server-profile.py'
+              - 'scripts/tests/ltx25-server-profile.py'
               - 'scripts/ltx25-metal-ab.py'
               - 'scripts/fixtures/ltx25-assets.json'
               - 'scripts/fixtures/ltx25-cuda-matrix.json'

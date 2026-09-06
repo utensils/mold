@@ -247,3 +247,14 @@ the venv interpreter's real Python include directory. The torch wheel's
 `site-packages/nvidia/*/lib` directories preceded the devshell libraries in
 `LD_LIBRARY_PATH`, so cuDNN loaded its matching sublibraries. Earlier failed
 attempts remain beside the successful capture.
+
+
+The CUDA matrix's `default` profile is the historical **math qualification
+baseline**, pinned with `MOLD_ATTN=math`; it is not the shipping video default,
+which can select FlashAttention when compiled. The F32, INT8-dequant and QMatMul
+profiles also pin math, and the Flash profile pins flash. Captures verify these
+values against the running server, including absence of other profile knobs.
+The startup `attention backend policy resolved requested=Some(...)` event
+records that input; each render must still supply its actual `ltx2 attention
+path=...` event and matching gallery metadata. A policy event alone is never
+proof of the executed path.

@@ -354,7 +354,7 @@ generator_commit_of() {
 # full server log is unhashed and mutable. Prints the observed list as JSON.
 #
 # Sources for the "logged once" claim (never taken on faith — grep it):
-#   - `attention backend selected backend=...` (mold_inference::attention):
+#   - `attention backend policy resolved requested=...` (mold_inference::attention):
 #     a process-wide OnceLock, one line for the life of the server.
 #   - `ltx2 int8 arm=...` (ltx2/convrot.rs `log_int8_arm_once`): "Log one
 #     INT8-arm literal at INFO, once per process per literal."
@@ -368,24 +368,27 @@ generator_commit_of() {
 # documented as once-per-render and stay slice-only.
 process_scoped_provenance_prefixes() {
   printf '%s\n' \
-    'attention backend selected backend=' \
+    'attention backend policy resolved requested=' \
     'ltx2 int8 arm=' \
     'ltx2 linear kind=' \
     'ltx2 residency mode='
 }
 
-# The shared attention dispatcher emits its line with `backend` as a
-# STRUCTURED tracing field ("message":"attention backend selected",
-# "backend":"Math"), so a JSON log never contains the flat pinned spelling;
+# The shared attention dispatcher emits its line with `requested` as a
+# STRUCTURED tracing field ("message":"attention backend policy resolved",
+# "requested":"Some(Math)"), so a JSON log never contains the flat pinned spelling;
 # this regex matches both forms. The other process-scoped lines above are
 # logged as one `tracing::info!` message with the literal already baked in
 # (`"message":"ltx2 int8 arm=native-w8a8"`), so a plain fixed-string match
 # against the JSON line already works for those and needs no regex.
 dispatcher_line_regex() {
-  local line="$1"
-  local backend="${line##*backend=}"
-  printf '"message":"attention backend selected".*"backend":"%s"|attention backend selected backend=%s' \
-    "$backend" "$backend"
+  python3 - "$1" <<'PY_REGEX'
+import re, sys
+line = sys.argv[1]
+requested = line.split("requested=", 1)[1]
+print('"message":"attention backend policy resolved".*"requested":"'
+      + re.escape(requested) + '"|' + re.escape(line).replace(r'\ ', ' '))
+PY_REGEX
 }
 
 observe_provenance() {
@@ -400,7 +403,7 @@ observe_provenance() {
       break
     done < <(process_scoped_provenance_prefixes)
     if [[ "$process_scoped" == 1 ]]; then
-      if [[ "$line" == "attention backend selected backend="* ]]; then
+      if [[ "$line" == "attention backend policy resolved requested="* ]]; then
         regex="$(dispatcher_line_regex "$line")"
         if grep -Eq -- "$regex" "$slice"; then
           scope=slice
@@ -498,13 +501,9 @@ run_mode() {
   gpu_uuid="$(jq -r '.gpus[0].uuid' <<<"$host")"
   # Observation and execution must name the same physical device. CUDA maps
   # the isolated UUID to ordinal zero inside the scratch server.
-  python3 - "$server_pid" "$gpu_uuid" <<'PY_GPU' || fail "scratch server must start with CUDA_VISIBLE_DEVICES=$gpu_uuid"
-import pathlib, sys
-entries = pathlib.Path(f"/proc/{sys.argv[1]}/environ").read_bytes().split(b"\0")
-visible = next((entry.split(b"=", 1)[1].decode() for entry in entries
-                if entry.startswith(b"CUDA_VISIBLE_DEVICES=")), None)
-raise SystemExit(0 if visible == sys.argv[2] else 1)
-PY_GPU
+  python3 "$repo_root/scripts/validate-ltx25-server-profile.py" \
+    "$server_pid" "$gpu_uuid" "$matrix" "$profile" \
+    || fail "scratch server does not match the selected GPU and qualification profile"
 
   local row_ids
   if [[ -n "${LTX25_ROWS:-}" ]]; then
