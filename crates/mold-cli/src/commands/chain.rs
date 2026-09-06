@@ -35,7 +35,7 @@ use crate::theme;
 /// would have split. Re-exported here so the CLI's own call sites and tests
 /// keep one import surface.
 pub use mold_core::chain::{
-    routing_clip_frames, text_only_wan_auto_chain_refusal, wan_default_clip_frames,
+    routing_clip_frames, text_only_auto_chain_refusal, wan_default_clip_frames,
     LTX2_DEFAULT_CLIP_FRAMES,
 };
 
@@ -193,7 +193,7 @@ pub fn decide_chain_routing(
     // Only the `--frames` auto-chain reaches here. An authored `--script`
     // sequence builds its own `ChainRequest` and is untouched: there, repeated
     // stages are what the author asked for.
-    if let Some(reason) = text_only_wan_auto_chain_refusal(
+    if let Some(reason) = text_only_auto_chain_refusal(
         family,
         model,
         source_image,
@@ -2253,33 +2253,32 @@ mod tests {
     }
 
     #[test]
-    fn routing_rejects_non_ltx2_family_over_cap() {
-        // ltx-video (not ltx2) is not chainable in v1, so anything past its own
-        // single-request ceiling has nowhere to go.
+    fn routing_keeps_legacy_ltx_video_single_above_the_ltx2_routing_default() {
         let d = decide_chain_routing(
-            Some(500),
+            Some(177),
             Some("ltx-video"),
-            "ltx-video:0.9.6",
+            "ltx-video-0.9.6-distilled:bf16",
             None,
-            4,
-            24,
+            0,
+            30,
             None,
             None,
         );
-        assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
+        assert_eq!(d, ChainRoutingDecision::SingleClip);
     }
 
-    /// The CLI used to reject any non-ltx2 request past 97 frames, which was
-    /// stricter than the server: ltx-video accepts up to the global ceiling.
+    /// An explicit clip size says to perform one denoise rather than split.
+    /// Legacy LTX-Video can still use its real single-request budget safely;
+    /// only the automatic repeated-stage fallback is refused.
     #[test]
-    fn routing_keeps_non_chainable_families_single_up_to_their_own_ceiling() {
+    fn routing_keeps_explicit_legacy_single_clip_up_to_its_own_ceiling() {
         let d = decide_chain_routing(
             Some(249),
             Some("ltx-video"),
-            "ltx-video:0.9.6",
-            None,
+            "ltx-video-0.9.6:bf16",
+            Some(249),
             4,
-            24,
+            30,
             None,
             None,
         );
@@ -2365,7 +2364,7 @@ mod tests {
                 // server's 422 and the Studio router render.
                 assert_eq!(
                     reason,
-                    mold_core::chain::text_only_wan_auto_chain_refusal(
+                    mold_core::chain::text_only_auto_chain_refusal(
                         Some("wan"),
                         "wan22-t2v-a14b:q8",
                         Some(mold_core::SourceImageCapability::Unsupported),

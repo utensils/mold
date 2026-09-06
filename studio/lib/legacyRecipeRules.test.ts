@@ -10,15 +10,15 @@ import {
 // answer for a host that predates those fields, so they must keep saying
 // exactly what they said then.
 describe("legacyPromptRequirementForFamily", () => {
-  it("makes the prompt optional for the video families with visual conditioning", () => {
+  it("makes the prompt optional only for LTX-2 visual conditioning", () => {
     expect(legacyPromptRequirementForFamily("ltx2")).toBe("optional");
     expect(legacyPromptRequirementForFamily("ltx-2")).toBe("optional");
-    expect(legacyPromptRequirementForFamily("ltx-video")).toBe("optional");
+    expect(legacyPromptRequirementForFamily("ltx-video")).toBe("required");
   });
 
   it("normalizes case and surrounding whitespace like the server", () => {
     expect(legacyPromptRequirementForFamily("  LTX2 ")).toBe("optional");
-    expect(legacyPromptRequirementForFamily("LTX-Video")).toBe("optional");
+    expect(legacyPromptRequirementForFamily("LTX-Video")).toBe("required");
   });
 
   it("requires a prompt for image families and an unknown family", () => {

@@ -7,7 +7,7 @@ import {
 } from "./minimaxH3Authoring";
 import {
   decideGenerateRequestRouting,
-  textOnlyWanSingleClipCeiling,
+  textOnlyAutoChainSingleClipCeiling,
   type GenerateRoutingRequest,
 } from "./chainRouting";
 
@@ -130,14 +130,14 @@ export function maxVideoFrames(
       maxFramesForFamilyAtFps(model?.family, rate) ??
       LEGACY_MAX_FRAMES;
   }
-  // A wan tier that hands nothing across a clip boundary has no automatic
-  // sequence to reach for, so its clip size is the real ceiling — the host's
+  // A tier that hands nothing across a clip boundary has no automatic
+  // sequence to reach for, so its clip size is the real UI ceiling — the host's
   // advertised `max_frames` is the family's 257, which submit now refuses.
   // Without this the Duration slider ran to 257 and, because a refused count
   // has no generation count of its own, collapsed every notch into a single
   // "1×" mark reading "257 frames · 16 fps · 16.1s · 1 generation" — an
   // advertised single generation that admission answers 422 to.
-  const clipCeiling = textOnlyWanSingleClipCeiling(
+  const clipCeiling = textOnlyAutoChainSingleClipCeiling(
     model?.family,
     model?.name ?? "",
     model?.source_image,

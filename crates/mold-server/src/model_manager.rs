@@ -374,6 +374,10 @@ fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config:
 /// pre-probe contract.
 fn synchronize_generation_profile_capabilities(catalog: &mut [ModelInfoExtended]) {
     for entry in catalog {
+        entry.source_image = mold_core::validation::source_image_capability_for_engine(
+            Some(&entry.info.family),
+            entry.source_image,
+        );
         let Some(profile) = entry.generation_profile.as_mut() else {
             continue;
         };

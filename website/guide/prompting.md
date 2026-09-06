@@ -56,11 +56,11 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
-| `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
-| `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
-| `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
-| `ltx-video-0.9.8-13b-dev` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
-| `ltx-video-0.9.8-13b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
+| `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
+| `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
+| `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
+| `ltx-video-0.9.8-13b-dev` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
+| `ltx-video-0.9.8-13b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-2-19b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
 | `ltx-2-19b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
 | `ltx-2.3-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
@@ -1062,19 +1062,22 @@ not.
 No weighting or attention syntax. A guidance-based checkpoint takes a negative
 prompt for visible defects; a distilled checkpoint is pinned at guidance 1.0 and
 takes none, so do not write one for it. Visible lettering is unreliable, so keep
-on-image text out of the prompt. A source image or video is attached rather than
-named in the prompt, and a conditioned run may omit the prompt entirely, which
-renders near-static micro-motion. Camera vocabulary is
-plain English: the camera slowly tilts upward, tracks alongside, pushes in,
-pulls back, or holds locked off. Use one move per clip.
+on-image text out of the prompt. Mold's legacy LTX-Video engine is text-to-video
+only: it rejects source images and requires a prompt. Use LTX-2.3 or LTX-2.5 for
+image-conditioned or continuation work. Camera vocabulary is plain English:
+the camera slowly tilts upward, tracks alongside, pushes in, pulls back, or
+holds locked off. Use one move per clip.
 
 #### Generation context
 
 Frames follow the 8n+1 grid and both dimensions are multiples of 32. The default
 canvas is 1216x704 at 30 fps with 25 frames, which is under a second, so one
 beat is all that fits; 49 frames is about 1.6 seconds and 97 about 3.2. A longer
-request is rendered as chained 97-frame clips, so write each clip as one
-continuous shot that opens on the previous clip's closing pose.
+one-shot remains a single denoise through the 257-frame engine ceiling; it is
+never automatically split at 97 because the legacy engine cannot pass motion
+context across a seam. Explicitly authored sequences remain separate clips, so
+write each stage as an intentional shot and use a cut where independent motion
+is acceptable.
 
 #### Examples
 

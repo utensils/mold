@@ -956,12 +956,13 @@ impl InferenceMode {
 
 /// Whether a run built from `params` needs a prompt.
 ///
-/// LTX-2 / LTX-Video runs that already carry a source image may go unprompted
-/// — their text encoder pads to a fixed-width context, so `""` is a trained
+/// LTX-2 runs that already carry a source image may go unprompted — their text
+/// encoder pads to a fixed-width context, so `""` is a trained
 /// input. Expect near-static, micro-motion output; it saves no VRAM, since the
 /// prompt-context tensor is the same size either way. The TUI Create form has
 /// no keyframe / source-video / extend controls, so the source image is the
-/// only conditioning it can contribute.
+/// only conditioning it can contribute. Legacy LTX-Video remains prompt-required
+/// because Mold's engine rejects source images.
 pub(crate) fn prompt_required_for_params(params: &GenerateParams, config: &Config) -> bool {
     mold_core::prompt_required_with_conditioning(
         Some(&family_for_model(&params.model, config)),
@@ -21648,6 +21649,11 @@ mod tests {
         // Image-to-video: the source image carries the shot.
         params.source_image_path = Some("/tmp/first-frame.png".to_string());
         assert!(!prompt_required_for_params(&params, &config));
+
+        // Legacy LTX-Video has no source-image path in Mold, so an attachment
+        // cannot make its prompt optional.
+        params.model = "ltx-video-0.9.6-distilled:bf16".to_string();
+        assert!(prompt_required_for_params(&params, &config));
 
         // Image families keep the prompt required even with a source image.
         params.model = "flux-dev:q4".to_string();

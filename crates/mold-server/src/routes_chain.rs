@@ -398,6 +398,10 @@ pub(crate) fn validate_and_normalize_chain_family(
     } else {
         manifest_contract
     };
+    let contract = mold_core::validation::source_image_capability_for_engine(
+        (!family.is_empty()).then_some(family.as_str()),
+        contract,
+    );
 
     // Stage 0 is the only clip that can carry an opening image; every
     // continuation is seeded by the seam. Admission never asked the
@@ -437,7 +441,7 @@ pub(crate) fn validate_and_normalize_chain_family(
 
     // A ONE-SHOT long video is a chain only because the model cannot render it
     // in one pass, so admission owes the caller the same answer the CLI router
-    // gives: a wan tier that declares `source_image: Unsupported` hands nothing
+    // gives: a text-only wan tier or the legacy LTX-Video engine hands nothing
     // across a clip boundary, and every stage re-derives the scene from the
     // same prompt and seed. The "longer" video is the same clip repeated with a
     // visible reset at each seam, paid for at full GPU price. `mold-core` owns
@@ -452,7 +456,7 @@ pub(crate) fn validate_and_normalize_chain_family(
     // the CLI (`commands/chain.rs`), the web (`useGenerateStream.ts`), desktop
     // (`stores/generation.ts`), and the iPhone (via `buildAutoChainRequest`).
     // The TUI never builds an ephemeral chain at all.
-    if req.ephemeral && family == "wan" {
+    if req.ephemeral && matches!(family.as_str(), "wan" | "ltx-video") {
         // Derived from the STAGES when there are stages: the largest stage is
         // the clip the caller actually rendered with, and it is the only form
         // of the answer that survives `normalise`, which clears `clip_frames`
@@ -487,7 +491,7 @@ pub(crate) fn validate_and_normalize_chain_family(
         } else {
             req.stages.iter().map(|stage| stage.frames).sum()
         };
-        if let Some(message) = mold_core::chain::text_only_wan_auto_chain_refusal(
+        if let Some(message) = mold_core::chain::text_only_auto_chain_refusal(
             Some(family.as_str()),
             &req.model,
             contract,
@@ -1198,8 +1202,7 @@ mod tests {
         validate_and_normalize_chain_family(&config, &mut auto_expand).expect("admitted");
     }
 
-    /// A ONE-SHOT long video on a text-to-video wan tier is refused at this
-    /// door too (#1508 shipped it on the CLI router alone).
+    /// A ONE-SHOT long video with no context handoff is refused at this door.
     ///
     /// The bug: a 259-frame one-shot submitted from the web Studio on
     /// `wan21-t2v-1.3b:turbo` was admitted here as an ephemeral three-stage
@@ -1211,7 +1214,7 @@ mod tests {
     ///
     /// The refusal is scoped to `ephemeral`: an AUTHORED sequence that repeats
     /// stages is what its author asked for, and admission must not second-guess
-    /// it. The sentence is `mold_core::chain::text_only_wan_auto_chain_refusal`'s,
+    /// it. The sentence is `mold_core::chain::text_only_auto_chain_refusal`'s,
     /// so the CLI, the Studio router, and this 422 all read the same.
     #[test]
     fn chain_preflight_refuses_a_text_only_wan_one_shot_auto_chain() {
@@ -1235,7 +1238,7 @@ mod tests {
             .expect_err("a text-only tier cannot be auto-chained into a longer video");
         assert_eq!(
             error.error,
-            mold_core::chain::text_only_wan_auto_chain_refusal(
+            mold_core::chain::text_only_auto_chain_refusal(
                 Some("wan"),
                 "wan21-t2v-1.3b:turbo",
                 Some(mold_core::SourceImageCapability::Unsupported),
@@ -1255,6 +1258,28 @@ mod tests {
         let mut authored = one_shot("wan21-t2v-1.3b:turbo", 832, 480, false);
         validate_and_normalize_chain_family(&config, &mut authored)
             .expect("an authored wan sequence is untouched by the one-shot rule");
+
+        // Legacy LTX-Video has the same deterministic failure mode: the
+        // engine ignores carry while prompt and seed stay fixed. The family
+        // itself is authoritative even if a custom entry has no manifest.
+        let mut legacy = one_shot("ltx-video-0.9.6-distilled:bf16", 1216, 704, true);
+        let error = validate_and_normalize_chain_family(&config, &mut legacy)
+            .expect_err("legacy LTX-Video cannot honestly auto-chain");
+        assert_eq!(
+            error.error,
+            mold_core::chain::text_only_auto_chain_refusal(
+                Some("ltx-video"),
+                "ltx-video-0.9.6-distilled:bf16",
+                Some(mold_core::SourceImageCapability::Unsupported),
+                259,
+                97,
+            )
+            .expect("core refuses the repeated legacy chain"),
+        );
+
+        let mut authored_legacy = one_shot("ltx-video-0.9.6-distilled:bf16", 1216, 704, false);
+        validate_and_normalize_chain_family(&config, &mut authored_legacy)
+            .expect("an authored legacy sequence still joins independent clips");
 
         // The explicit-stages shape of the same one-shot is refused too — the
         // CLI's own auto-chain posts stages, not the auto-expand sugar.
@@ -1384,7 +1409,7 @@ mod tests {
             .expect_err("three clips of one repeated scene is not a longer video");
         assert_eq!(
             error.error,
-            mold_core::chain::text_only_wan_auto_chain_refusal(
+            mold_core::chain::text_only_auto_chain_refusal(
                 Some("wan"),
                 "wan22-t2v-a14b:q8",
                 Some(mold_core::SourceImageCapability::Unsupported),

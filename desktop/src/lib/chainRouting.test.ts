@@ -109,22 +109,20 @@ describe("decideChainRouting", () => {
     });
   });
 
-  it("chains ltx-video models above the cap with motion_tail=0 (no context handoff)", () => {
-    // ltx-video has no img2vid path on the server, so motion_tail is forced
-    // to 0 — the client mirrors that. 241 frames @ clip=97, tail=0 →
-    // effective=97, remainder=144, stageCount = 1 + ceil(144/97) = 1 + 2 = 3.
+  it("keeps an ltx-video one-shot above 97 frames as one honest render", () => {
+    // The legacy engine can denoise up to its flat family ceiling but cannot
+    // carry context across stages. It therefore stays single instead of using
+    // the LTX-2 97-frame auto-chain routing default.
     const d = decideChainRouting(241, "ltx-video", "ltx-video-0.9.8-13b-dev:bf16");
-    expect(d).toEqual({
-      kind: "chain",
-      clipFrames: 97,
-      motionTail: 0,
-      stageCount: 3,
-    });
+    expect(d).toEqual({ kind: "single" });
   });
 
-  it("ignores caller-supplied motionTail for ltx-video (zeroed server-side)", () => {
+  it("ignores a caller-supplied motion tail while legacy stays single", () => {
     const d = decideChainRouting(300, "ltx-video", "ltx-video-0.9.8-13b-distilled:bf16", 17);
-    expect(d).toMatchObject({ kind: "chain", motionTail: 0 });
+    expect(d).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("257 or less"),
+    });
   });
 
   it("rejects when motion tail is >= clip frames (only relevant for ltx2 chains)", () => {
@@ -140,14 +138,6 @@ describe("decideChainRouting", () => {
     expect(decideChainRouting(1305, "ltx2", "ltx-2-19b-distilled:fp8")).toMatchObject({
       kind: "reject",
       reason: expect.stringContaining("at most 1297 frames"),
-    });
-    expect(decideChainRouting(1552, "ltx-video", "ltx-video:bf16")).toMatchObject({
-      kind: "chain",
-      stageCount: MAX_CHAIN_STAGES,
-    });
-    expect(decideChainRouting(1553, "ltx-video", "ltx-video:bf16")).toMatchObject({
-      kind: "reject",
-      reason: expect.stringContaining("at most 1552 frames"),
     });
   });
 

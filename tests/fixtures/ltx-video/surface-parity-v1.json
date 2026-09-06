@@ -1,0 +1,13 @@
+{
+  "schema": "mold.ltx-video.surface-parity.v1",
+  "family": "ltx-video",
+  "auto_chain": {
+    "text_only_refusal": {
+      "template": "'{model}' is legacy LTX-Video and cannot continue motion across a clip boundary, so rendering {total_frames} frames would repeat the same ~{clip_frames}-frame clip rather than extend it. Reduce the frame count to {clip_frames} or fewer for one continuous clip, or use LTX-2.3 or LTX-2.5, which carries context into each continuation.",
+      "model": "ltx-video-0.9.6-distilled:bf16",
+      "total_frames": 177,
+      "clip_frames": 97,
+      "comment": "The shared sentence protects durable server admission from a manually submitted context-free ephemeral chain. CLI and Studio keep ordinary legacy one-shots as one denoise up to the engine ceiling instead of auto-splitting them at 97 frames. Authored sequences remain valid independent clips."
+    }
+  }
+}
