@@ -106,6 +106,16 @@ The operator evidence bundle is
 comparison scripts, source patches and guard refusals. Timings include loading
 and compilation and are not decoder-only benchmarks.
 
+A final production-planner render was not launched. The memory-safe source path
+is a sequential Q4_K transformer with the existing Qwen3 Q8_0 encoder and no
+block offload, but the local execution planner deliberately selects eager loading
+for a Z-Image GGUF request. The largest per-tensor GGUF CPU staging allocations
+were measured from the installed headers at 394 MiB for Qwen3 and 45 MiB for the
+transformer, within the reserved host margin; that does not make the planner's
+eager co-residency safe. A custom sequential harness would not prove the shipped
+planner path, so the isolated decoder and real-latent visual result remain the
+scope of this qualification.
+
 ## Recovery integration
 
 `vae_recovery` holds the injectable ordering contract; `vae_tiling` retains
