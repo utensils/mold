@@ -1297,3 +1297,22 @@ it is not a completion checklist with assumed passes.
   reduction layout [1048576,3,3] proves it sums 0+1+2 exactly
   (`uv-reduction-order-v1.json`), unlike the separately qualified scalar depth
   layout. The trial change is removed; projection/bake drift remains open.
+
+- The UV screen-map rounding defect is now isolated and corrected. Native
+  `rasterizer_gpu.cu:63-65,93-95` contracts the final pixel multiply/add in
+  both kernels; the retained SASS review and independent reconstruction
+  (`paint-uv-screen-map-review-v1`, `uv-screen-map-isolation-v1`) show that
+  fusing 230 screen components makes every native barycentric value exact.
+  The actual-chair one-bit regression fails before the change and passes
+  afterward (`uv-screen-map-{red,green}-v1.log`).
+- With the explicit outer `mul_add`, all covered UV positions and all six
+  projected camera positions match exactly at 1024/2048/4096
+  (`paint-uv-fma{1024,2048,4096}-v1`). Coverage remains exact; unused geometric
+  UV normals remain within 1.56e-6. Optional test traces retain screen
+  vertices, normalized geometry, face IDs, coverage, and barycentrics.
+- Full 1024 bake error falls to 2.3841858e-7 for both streams, with exact trust
+  (`material-bake-rust-1024-v3`). This passes the existing float gate but
+  **still fails final byte equality** (maxima 162/153). Remaining bake
+  arithmetic differences must be isolated before full texture qualification;
+  no final-pixel tolerance is introduced. Read-only peer review found no
+  actionable concern in the scoped UV fix or regression/trace support.

@@ -15,6 +15,13 @@ pub struct UvGeometry {
     pub normals: Vec<[f32; 3]>,
 }
 
+fn screen_coordinate(ndc: f32, size: u32) -> f32 {
+    // Tencent rasterizer_gpu.cu contracts the outer pixel mapping to FFMA in
+    // both coverage and barycentric interpolation. Separate rounding changes
+    // UV weights enough to cross byte boundaries before texture hole filling.
+    (ndc * 0.5 + 0.5).mul_add((size - 1) as f32, 0.5)
+}
+
 impl UvGeometry {
     /// Tencent MeshRender.extract_textiles: rasterize the already-flipped UVs
     /// while interpolating paint-frame positions; keep the source face order.
@@ -44,8 +51,8 @@ impl UvGeometry {
             }
             let ndc = uv.map(|v| v * 2. - 1.);
             screen.push(ScreenVertex {
-                x: (ndc[0] * 0.5 + 0.5) * (size - 1) as f32 + 0.5,
-                y: (ndc[1] * 0.5 + 0.5) * (size - 1) as f32 + 0.5,
+                x: screen_coordinate(ndc[0], size),
+                y: screen_coordinate(ndc[1], size),
                 depth: -0.49999 + 0.5,
                 inv_w: 1.,
             });
@@ -139,6 +146,15 @@ mod tests {
     use super::super::{mesh::Mesh, paint_raster::prepare_mesh, paint_views::candidate_views};
     use super::*;
     use candle_core::{Device, Tensor};
+
+    #[test]
+    fn uv_screen_map_retains_cuda_fused_rounding() {
+        // Actual chair UV component; both installed CUDA kernels use FFMA.
+        assert_eq!(
+            screen_coordinate(f32::from_bits(3210749768), 1024).to_bits(),
+            1115702023
+        );
+    }
 
     #[test]
     fn paint_uv_geometry_and_cameras_match_tencent() -> anyhow::Result<()> {
@@ -244,7 +260,95 @@ mod tests {
             ..Mesh::default()
         };
         let start = std::time::Instant::now();
-        let uv = UvGeometry::extract(&prepare_mesh(&mesh)?, size, &mut || Ok(()))?;
+        let prepared = prepare_mesh(&mesh)?;
+        let uv = UvGeometry::extract(&prepared, size, &mut || Ok(()))?;
+        if std::env::var_os("MOLD_PAINT_UV_TRACE").is_some() {
+            let screen: Vec<_> = prepared
+                .mesh
+                .uvs
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|uv| {
+                    let ndc = uv.map(|v| v * 2. - 1.);
+                    ScreenVertex {
+                        x: screen_coordinate(ndc[0], size),
+                        y: screen_coordinate(ndc[1], size),
+                        depth: -0.49999 + 0.5,
+                        inv_w: 1.,
+                    }
+                })
+                .collect();
+            let buffers = render_projected_with_checkpoint(
+                &prepared.mesh,
+                &screen,
+                Culling::None,
+                [size, size],
+                true,
+                &mut || Ok(()),
+            )?;
+            let trace = HashMap::from([
+                (
+                    "barycentric".to_string(),
+                    Tensor::from_vec(
+                        buffers
+                            .barycentric
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        (size as usize, size as usize, 3),
+                        &Device::Cpu,
+                    )?,
+                ),
+                (
+                    "face_ids".to_string(),
+                    Tensor::from_vec(
+                        buffers.face_ids,
+                        (size as usize, size as usize),
+                        &Device::Cpu,
+                    )?,
+                ),
+                (
+                    "mask".to_string(),
+                    Tensor::from_vec(
+                        buffers
+                            .mask
+                            .iter()
+                            .map(|v| u8::from(*v))
+                            .collect::<Vec<_>>(),
+                        (size as usize, size as usize),
+                        &Device::Cpu,
+                    )?,
+                ),
+                (
+                    "vertices".to_string(),
+                    Tensor::from_vec(
+                        prepared
+                            .mesh
+                            .vertices
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        (prepared.mesh.vertices.len(), 3),
+                        &Device::Cpu,
+                    )?,
+                ),
+                (
+                    "screen".to_string(),
+                    Tensor::from_vec(
+                        screen
+                            .iter()
+                            .flat_map(|p| [p.x, p.y, p.depth, p.inv_w])
+                            .collect::<Vec<_>>(),
+                        (screen.len(), 4),
+                        &Device::Cpu,
+                    )?,
+                ),
+            ]);
+            candle_core::safetensors::save(&trace, output.join("raster-trace.safetensors"))?;
+        }
         let tensor = |values: &[[f32; 3]]| {
             Tensor::from_vec(
                 values.iter().flatten().copied().collect::<Vec<_>>(),
