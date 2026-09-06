@@ -8,6 +8,9 @@
 # crates.io distribution is retired: the Git-pinned backend cannot be
 # represented by registry dependencies. Keep version PRs and tags enabled.
 publish = false
+# The PR workflow supplies the last tagged workspace as the comparison baseline.
+# git_only currently packages that workspace, which rejects our Git dependencies.
+git_tag_name = "v{{ version }}"
 
 # release.yml creates the GitHub release (softprops/action-gh-release) and
 # attaches the binaries, desktop DMG, and SHA256SUMS.
@@ -40,4 +43,3 @@ git_tag_enable = false
 [[package]]
 name = "mold-ai"
 git_tag_enable = true
-git_tag_name = "v{{ version }}"

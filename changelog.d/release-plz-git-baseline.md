@@ -1,0 +1,1 @@
+- Fixed next-version release PR creation after crates.io retirement by deriving all workspace versions from the shared Git release tag.
