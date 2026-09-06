@@ -151,6 +151,28 @@ loader without replacing network or rendering computations.
 - `paint-raster-clippy-v1.log` passes warnings-denied Clippy. CPU raster buffers
   are allocated one view at a time. The native CUDA renderer is oracle-only.
 
+## Paint DINO component parity
+
+- Paint uses Transformers 4.46 size-based position interpolation, whereas the
+  existing shape encoder follows ComfyUI's scale-factor offset of 0.1. The
+  separate `paint_giant` config preserves shape's convention. The small executable
+  interpolation fixture failed before this change and passes afterward.
+- `paint-dino-cuda-red-v1.log`: the pretrained encoder under the shape convention
+  diverged (F32 max 4.5694, RMS .0621). After the correction,
+  `paint-dino-cuda-green-v1.log` passes: F32 max .000052452087 / RMS .000002648894;
+  F16 max .02734375 / RMS .002216486. Both actual outputs remain under
+  `paint-dino-candle-v2/`; reference tensors are under `paint-dino-oracle-v1/`.
+- Paint's shortest-edge 256 Pillow BICUBIC resize, centered 224 crop and ImageNet
+  normalization match the actual processor fixture within 1e-6. The shared Rust
+  resampler retains H3's exact LANCZOS pixels and cancellation behavior.
+  `paint-dino-preprocess-green-v1.log`: 166 Hunyuan3D tests passed, one hardware
+  test ignored. `shared-resize-h3-v1.log`: all 19 H3 pipeline tests passed.
+  `pillow-green-v1.log` pins exact pixels for both filters;
+  `paint-dino-clippy-v1.log` passes warnings-denied Clippy.
+- CUDA component builds now have their own retained target directory,
+  `/storage/mold/cache/cargo-campaign-1511-1496-cuda`, separate from the CPU target
+  and other tasks' build caches.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

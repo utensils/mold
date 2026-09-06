@@ -47,9 +47,9 @@ included in `crates/mold-candle/LICENSE-APACHE-2.0` and in the published
 
 ## Pillow image resampling algorithm
 
-The pure-Rust MiniMax H3 endpoint resampler in
-`crates/mold-inference/src/minimax_h3/pipeline.rs` independently expresses the
-numeric behavior of Pillow's U8 LANCZOS resampler. The reference is Pillow
+The shared pure-Rust resampler in `crates/mold-inference/src/pillow_resize.rs`
+independently expresses the numeric behavior of Pillow's U8 LANCZOS and BICUBIC
+resamplers, used by MiniMax H3 and Hunyuan3D paint preprocessing. The reference is Pillow
 12.3.0, commit `bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d`,
 `src/libImaging/Resample.c`. No Pillow source file or C implementation is
 vendored in Mold.

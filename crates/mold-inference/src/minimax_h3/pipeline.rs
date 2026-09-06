@@ -1190,171 +1190,19 @@ fn decode_endpoint(bytes: &[u8]) -> Result<RgbImage> {
         .context("endpoint image decode failed")
 }
 
-const PILLOW_RESAMPLE_PRECISION_BITS: u32 = 22;
-
-struct PillowResampleCoefficients {
-    start: usize,
-    values: Vec<i32>,
-}
-
-fn pillow_lanczos(x: f64) -> f64 {
-    fn sinc(mut x: f64) -> f64 {
-        if x == 0.0 {
-            return 1.0;
-        }
-        x *= std::f64::consts::PI;
-        x.sin() / x
-    }
-
-    if (-3.0..3.0).contains(&x) {
-        sinc(x) * sinc(x / 3.0)
-    } else {
-        0.0
-    }
-}
-
-/// Pillow's U8 LANCZOS coefficient generation and fixed-point rounding.
-///
-/// H3's pinned preprocessing authority uses `PIL.Image.Resampling.LANCZOS`.
-/// The `image` crate's similarly named Lanczos3 filter uses different edge and
-/// quantization rules, which changes the endpoint tensor before seed-42 VAE
-/// sampling. See Diffusers
-/// `src/diffusers/modular_pipelines/minimax_h3/before_encoder.py:134-158` at
-/// `9c6a68c32b3b2a64db91800b624d33cec6e25ab8` and Pillow 12.3.0
-/// (`bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d`)
-/// `src/libImaging/Resample.c:65-87,183-284,344-363,446-463`. The Pillow
-/// attribution and license are preserved in `THIRD_PARTY_NOTICES.md`.
-fn pillow_resample_coefficients(
-    input: usize,
-    output: usize,
-    checkpoint: &mut dyn FnMut() -> Result<()>,
-) -> Result<Vec<PillowResampleCoefficients>> {
-    if input == 0 || output == 0 {
-        bail!("Pillow-compatible H3 resize dimensions must be non-zero");
-    }
-    let scale = input as f64 / output as f64;
-    let filter_scale = scale.max(1.0);
-    let support = 3.0 * filter_scale;
-    let coefficient_scale = f64::from(1_u32 << PILLOW_RESAMPLE_PRECISION_BITS);
-
-    (0..output)
-        .map(|destination| {
-            checkpoint()?;
-            let center = (destination as f64 + 0.5) * scale;
-            // Match Pillow's C casts, which truncate toward zero before
-            // clamping the bounds to the source image.
-            let start = ((center - support + 0.5) as isize).max(0) as usize;
-            let end = ((center + support + 0.5) as isize).clamp(0, input as isize) as usize;
-            if end <= start {
-                bail!("Pillow-compatible H3 resize produced an empty filter window");
-            }
-            let mut weights = (start..end)
-                .map(|source| pillow_lanczos((source as f64 - center + 0.5) / filter_scale))
-                .collect::<Vec<_>>();
-            let sum = weights.iter().sum::<f64>();
-            if sum != 0.0 {
-                for weight in &mut weights {
-                    *weight /= sum;
-                }
-            }
-            let values = weights
-                .into_iter()
-                .map(|weight| {
-                    let scaled = weight * coefficient_scale;
-                    if weight < 0.0 {
-                        (scaled - 0.5) as i32
-                    } else {
-                        (scaled + 0.5) as i32
-                    }
-                })
-                .collect();
-            Ok(PillowResampleCoefficients { start, values })
-        })
-        .collect()
-}
-
-fn pillow_resample_channel(samples: impl Iterator<Item = (u8, i32)>) -> u8 {
-    let accumulator = samples.fold(
-        1_i64 << (PILLOW_RESAMPLE_PRECISION_BITS - 1),
-        |total, (sample, coefficient)| total + i64::from(sample) * i64::from(coefficient),
-    );
-    (accumulator >> PILLOW_RESAMPLE_PRECISION_BITS).clamp(0, 255) as u8
-}
-
 pub(super) fn pillow_lanczos_resize(
     source: &RgbImage,
     width: u32,
     height: u32,
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<RgbImage> {
-    let source_width =
-        usize::try_from(source.width()).context("source width does not fit usize")?;
-    let source_height =
-        usize::try_from(source.height()).context("source height does not fit usize")?;
-    let target_width = usize::try_from(width).context("target width does not fit usize")?;
-    let target_height = usize::try_from(height).context("target height does not fit usize")?;
-    let source_bytes = source.as_raw();
-
-    let horizontal = if source_width == target_width {
-        source_bytes.clone()
-    } else {
-        let coefficients = pillow_resample_coefficients(source_width, target_width, checkpoint)?;
-        let output_len = checked_product(
-            &[target_width, source_height, 3],
-            "Pillow-compatible H3 horizontal resize",
-        )?;
-        let mut output = vec![0_u8; output_len];
-        for y in 0..source_height {
-            checkpoint()?;
-            for (x, filter) in coefficients.iter().enumerate() {
-                for channel in 0..3 {
-                    output[(y * target_width + x) * 3 + channel] =
-                        pillow_resample_channel(filter.values.iter().enumerate().map(
-                            |(offset, &coefficient)| {
-                                (
-                                    source_bytes
-                                        [(y * source_width + filter.start + offset) * 3 + channel],
-                                    coefficient,
-                                )
-                            },
-                        ));
-                }
-            }
-        }
-        output
-    };
-
-    let output = if source_height == target_height {
-        horizontal
-    } else {
-        let coefficients = pillow_resample_coefficients(source_height, target_height, checkpoint)?;
-        let output_len = checked_product(
-            &[target_width, target_height, 3],
-            "Pillow-compatible H3 vertical resize",
-        )?;
-        let mut output = vec![0_u8; output_len];
-        for (y, filter) in coefficients.iter().enumerate() {
-            checkpoint()?;
-            for x in 0..target_width {
-                for channel in 0..3 {
-                    output[(y * target_width + x) * 3 + channel] =
-                        pillow_resample_channel(filter.values.iter().enumerate().map(
-                            |(offset, &coefficient)| {
-                                (
-                                    horizontal[((filter.start + offset) * target_width + x) * 3
-                                        + channel],
-                                    coefficient,
-                                )
-                            },
-                        ));
-                }
-            }
-        }
-        output
-    };
-
-    RgbImage::from_raw(width, height, output)
-        .ok_or_else(|| anyhow!("Pillow-compatible H3 resize produced an invalid RGB image"))
+    crate::pillow_resize::resize(
+        source,
+        width,
+        height,
+        crate::pillow_resize::Filter::Lanczos,
+        checkpoint,
+    )
 }
 
 fn resize_endpoint(

@@ -91,13 +91,20 @@ const POS_EMBED_CUBIC_A: f64 = -0.75;
 // Config
 // ---------------------------------------------------------------------------
 
-/// The subset of `dino2_giant.json` that changes any computation.
-///
-/// Dropout rates, `drop_path_rate`, `initializer_range` and `hidden_act` are
-/// omitted: the first three are training-only and `hidden_act` is `gelu`,
-/// which is the only activation the non-SwiGLU branch of `dino2.py` can take.
+/// The upstream convention for resampling a stored position grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionInterpolation {
+    /// ComfyUI's inherited DINO scale-factor workaround (adds 0.1).
+    ComfyScale,
+    /// Transformers 4.46 uses an explicit output size, without the offset.
+    TransformersSize,
+}
+
+/// DINO inference configuration. Training-only dropout and initialization
+/// settings are omitted; the two MLP variants fix their own activation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dinov2Config {
+    pub position_interpolation: PositionInterpolation,
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
@@ -114,6 +121,14 @@ pub struct Dinov2Config {
 }
 
 impl Dinov2Config {
+    /// Paint's pinned Transformers 4.46 DINO wrapper uses size-based position
+    /// interpolation at a 224-pixel crop, unlike shape's ComfyUI convention.
+    pub fn paint_giant() -> Self {
+        Self {
+            position_interpolation: PositionInterpolation::TransformersSize,
+            ..Self::giant()
+        }
+    }
     /// Tencent's Hunyuan3D 2.1 conditioner: DINOv2-large, verified against
     /// the bundled checkpoint's 1024-wide embeddings and 24 encoder layers.
     pub fn large() -> Self {
@@ -130,6 +145,7 @@ impl Dinov2Config {
     /// checkpoints ship the same numbers in their own `config.yaml`.
     pub fn giant() -> Self {
         Self {
+            position_interpolation: PositionInterpolation::ComfyScale,
             hidden_size: 1536,
             num_hidden_layers: 40,
             num_attention_heads: 24,
@@ -266,9 +282,14 @@ fn interpolate_patch_positions(
     channels: usize,
     rows: usize,
     columns: usize,
+    convention: PositionInterpolation,
 ) -> Vec<f32> {
-    let scale_rows = (rows as f64 + 0.1) / grid_side as f64;
-    let scale_columns = (columns as f64 + 0.1) / grid_side as f64;
+    let offset = match convention {
+        PositionInterpolation::ComfyScale => 0.1,
+        PositionInterpolation::TransformersSize => 0.,
+    };
+    let scale_rows = (rows as f64 + offset) / grid_side as f64;
+    let scale_columns = (columns as f64 + offset) / grid_side as f64;
 
     // Columns first, on the natural [row, column, channel] layout.
     let horizontal = resample_axis(grid, grid_side, grid_side, channels, columns, scale_columns);
@@ -320,6 +341,7 @@ impl PatchEmbeddings {
 /// (optionally interpolated) position grid.
 #[derive(Debug)]
 struct Embeddings {
+    position_interpolation: PositionInterpolation,
     patch_embeddings: PatchEmbeddings,
     cls_token: Tensor,
     position_embeddings: Tensor,
@@ -336,6 +358,7 @@ impl Embeddings {
             "position_embeddings",
         )?;
         Ok(Self {
+            position_interpolation: cfg.position_interpolation,
             patch_embeddings,
             cls_token,
             position_embeddings,
@@ -380,8 +403,14 @@ impl Embeddings {
         let class_position = full.i((.., 0..1, ..))?;
         let patch_grid = full.i((.., 1.., ..))?.flatten_all()?.to_vec1::<f32>()?;
 
-        let resampled =
-            interpolate_patch_positions(&patch_grid, grid_side, channels, rows, columns);
+        let resampled = interpolate_patch_positions(
+            &patch_grid,
+            grid_side,
+            channels,
+            rows,
+            columns,
+            self.position_interpolation,
+        );
         let resampled = Tensor::from_vec(resampled, (1, rows * columns, channels), &Device::Cpu)?;
 
         Ok(Tensor::cat(&[&class_position, &resampled], 1)?
@@ -631,6 +660,34 @@ impl Dinov2Model {
 // Preprocessing
 // ---------------------------------------------------------------------------
 
+/// Paint's pinned BitImageProcessor: shortest edge 256 with Pillow BICUBIC,
+/// centered 224 crop, then ImageNet rescaling/normalization. The caller supplies
+/// the already composed RGB appearance image; this stage never frames a mesh
+/// silhouette or performs background removal.
+pub fn preprocess_paint(image: &image::RgbImage) -> Result<Tensor> {
+    let shortest = image.width().min(image.height());
+    ensure!(shortest > 0, "paint appearance image is empty");
+    let width = u32::try_from(u64::from(image.width()) * 256 / u64::from(shortest))?;
+    let height = u32::try_from(u64::from(image.height()) * 256 / u64::from(shortest))?;
+    let resized = crate::pillow_resize::resize(
+        image,
+        width,
+        height,
+        crate::pillow_resize::Filter::Bicubic,
+        &mut || Ok(()),
+    )?;
+    let crop = image::imageops::crop_imm(&resized, (width - 224) / 2, (height - 224) / 2, 224, 224)
+        .to_image();
+    let mut pixels = vec![0.; 3 * 224 * 224];
+    for (index, pixel) in crop.pixels().enumerate() {
+        for channel in 0..3 {
+            pixels[channel * 224 * 224 + index] =
+                (f32::from(pixel[channel]) / 255. - IMAGE_MEAN[channel]) / IMAGE_STD[channel];
+        }
+    }
+    Ok(Tensor::from_vec(pixels, (1, 3, 224, 224), &Device::Cpu)?)
+}
+
 /// Letterbox to a square of side `letterbox`, resize to `encoder`, and
 /// normalize — the tensor [`Dinov2Model::forward`] wants, as
 /// `[1, 3, encoder, encoder]`.
@@ -837,6 +894,7 @@ mod tests {
     /// zeros.
     fn synthetic_config() -> Dinov2Config {
         Dinov2Config {
+            position_interpolation: PositionInterpolation::ComfyScale,
             hidden_size: 32,
             num_hidden_layers: 2,
             num_attention_heads: 2,
@@ -847,6 +905,123 @@ mod tests {
             qkv_bias: true,
             mlp_ratio: 4,
         }
+    }
+
+    #[test]
+    fn paint_position_resize_matches_installed_transformers_oracle() {
+        let mut tensors = candle_core::safetensors::load_buffer(
+            include_bytes!("../../../../tests/fixtures/hunyuan3d/paint-dino-position.safetensors"),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let expected = tensors.remove("expected").unwrap();
+        let mut cfg = Dinov2Config::paint_giant();
+        cfg.hidden_size = 4;
+        cfg.image_size = 6;
+        cfg.patch_size = 2;
+        for (name, shape) in [
+            ("cls_token", vec![1, 1, 4]),
+            ("patch_embeddings.projection.weight", vec![4, 3, 2, 2]),
+            ("patch_embeddings.projection.bias", vec![4]),
+        ] {
+            tensors.insert(
+                name.into(),
+                Tensor::zeros(shape, DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let actual = Embeddings::new(&cfg, vb)
+            .unwrap()
+            .interpolate_pos_encoding(10, 8, DType::F32, &Device::Cpu)
+            .unwrap();
+        let error = (actual - expected)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(error < 3e-6, "paint position resize max error {error}");
+    }
+
+    #[test]
+    fn paint_preprocessing_matches_actual_dino_processor() {
+        let tensors = candle_core::safetensors::load_buffer(
+            include_bytes!(
+                "../../../../tests/fixtures/hunyuan3d/paint-dino-preprocess.safetensors"
+            ),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let source = image::RgbImage::from_raw(
+            17,
+            11,
+            tensors["source"]
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap(),
+        )
+        .unwrap();
+        let actual = preprocess_paint(&source).unwrap();
+        let delta = (actual - &tensors["expected"])
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(delta < 1e-6, "paint preprocessing error {delta}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires retained pretrained paint DINO weights and CUDA oracle"]
+    fn pretrained_paint_dino_matches_tencent() -> Result<()> {
+        let checkpoint = std::env::var("MOLD_PAINT_DINO_CHECKPOINT")?;
+        let fixture = std::env::var("MOLD_PAINT_DINO_ORACLE")?;
+        let output = std::path::PathBuf::from(std::env::var("MOLD_PAINT_DINO_RESULT")?);
+        std::fs::create_dir(&output)?;
+        let device = Device::new_cuda(0)?;
+        let tensors = candle_core::safetensors::load(fixture, &device)?;
+        for (dtype, key, max_tolerance, rms_tolerance) in [
+            (DType::F32, "expected_f32", 0.001, 0.00005),
+            (DType::F16, "expected_f16", 0.2, 0.03),
+        ] {
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&checkpoint),
+                dtype,
+                &device,
+                "paint DINO qualification",
+                &crate::progress::ProgressReporter::default(),
+            )?;
+            let model = Dinov2Model::new(&Dinov2Config::paint_giant(), vb)?;
+            let actual = model.forward(&tensors["pixels"].to_dtype(dtype)?)?;
+            candle_core::safetensors::save(
+                &std::collections::HashMap::from([("actual".to_string(), actual.clone())]),
+                output.join(format!("{key}.safetensors")),
+            )?;
+            let delta = (actual.to_dtype(DType::F32)? - tensors[key].to_dtype(DType::F32)?)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            ensure!(delta.iter().all(|x| x.is_finite()), "nonfinite DINO output");
+            let max = delta.iter().map(|x| x.abs()).fold(0., f32::max);
+            let rms = (delta.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>()
+                / delta.len() as f64)
+                .sqrt();
+            eprintln!("paint DINO {dtype:?}: max_abs={max}, rms={rms}");
+            ensure!(
+                max < max_tolerance && rms < rms_tolerance,
+                "paint DINO {dtype:?} diverges"
+            );
+        }
+        Ok(())
     }
 
     /// Deterministic, small, and zero-mean-ish so a forward pass exercises
@@ -1064,7 +1239,14 @@ mod tests {
         let columns = rows;
         assert_eq!(rows, 73);
 
-        let out = interpolate_patch_positions(&source, grid, channels, rows, columns);
+        let out = interpolate_patch_positions(
+            &source,
+            grid,
+            channels,
+            rows,
+            columns,
+            PositionInterpolation::ComfyScale,
+        );
         assert_eq!(out.len(), rows * columns * channels);
         // A constant field must survive: the four cubic weights sum to one.
         for value in &out {
@@ -1108,7 +1290,14 @@ mod tests {
         ];
 
         let source: Vec<f32> = (0..GRID * GRID).map(|index| index as f32).collect();
-        let out = interpolate_patch_positions(&source, GRID, 1, ROWS, COLUMNS);
+        let out = interpolate_patch_positions(
+            &source,
+            GRID,
+            1,
+            ROWS,
+            COLUMNS,
+            PositionInterpolation::ComfyScale,
+        );
 
         assert_eq!(out.len(), GOLDEN.len());
         for (index, (actual, expected)) in out.iter().zip(GOLDEN.iter()).enumerate() {
@@ -1136,9 +1325,30 @@ mod tests {
             .flat_map(|(a, b)| [*a, *b])
             .collect();
 
-        let a = interpolate_patch_positions(&first, GRID, 1, ROWS, COLUMNS);
-        let b = interpolate_patch_positions(&second, GRID, 1, ROWS, COLUMNS);
-        let both = interpolate_patch_positions(&interleaved, GRID, 2, ROWS, COLUMNS);
+        let a = interpolate_patch_positions(
+            &first,
+            GRID,
+            1,
+            ROWS,
+            COLUMNS,
+            PositionInterpolation::ComfyScale,
+        );
+        let b = interpolate_patch_positions(
+            &second,
+            GRID,
+            1,
+            ROWS,
+            COLUMNS,
+            PositionInterpolation::ComfyScale,
+        );
+        let both = interpolate_patch_positions(
+            &interleaved,
+            GRID,
+            2,
+            ROWS,
+            COLUMNS,
+            PositionInterpolation::ComfyScale,
+        );
 
         for index in 0..ROWS * COLUMNS {
             assert!((both[index * 2] - a[index]).abs() < 1e-5);

@@ -34,6 +34,7 @@ pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
 pub mod metal_memory;
+mod pillow_resize;
 /// Reductions on shapes candle's Metal backend gets right.
 ///
 /// The implementation lives in `mold-candle` because the H3 audio VAE needs it
