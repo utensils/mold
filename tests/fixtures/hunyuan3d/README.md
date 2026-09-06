@@ -23,6 +23,13 @@ posterior and decode tensors. Regenerate using
 TF32. No pretrained weights are checked in. Retain each original capture and
 metadata in the campaign evidence directory before copying fixtures.
 
+`paint-vae-opmath.safetensors` records PyTorch 2.5.1 CUDA half-precision
+normalization, SiLU and biased linear outputs. GroupNorm cases exercise the
+32-thread and 512-thread reductions plus the separate spatial-one path. The
+native CUDA test compares normalization exactly, while the portable tensor
+fallback has a separately declared rounding tolerance. Regenerate with the
+same VAE capture script using `--device cuda --tiny-only`.
+
 `paint-pth-unexpected-int32.bin` contains one float32 tensor named `expected` and
 an int32 tensor named `unexpected`, generated with PyTorch 2.5.1. Candle's lenient
 parser silently omits the latter; the paint reader must reject the checkpoint.

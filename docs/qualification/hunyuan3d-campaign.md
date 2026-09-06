@@ -231,6 +231,46 @@ loader without replacing network or rendering computations.
   captures and failures remain retained. Production-size/batched conditioning,
   pipeline RNG sequencing and the full paint network remain separate open gates.
 
+## Paint VAE numerical policy checkpoint
+
+- Peer review of PyTorch 2.5.1 identified CUDA GroupNorm's half-rounded epsilon,
+  mean and reciprocal standard deviation, followed by float32 affine arithmetic;
+  SiLU uses float32 opmath and one final half conversion. The source files and
+  Welford/block-reduction definitions are retained in
+  `paint-vae-numerics-review-v1/`. The new `VaeNumerics::Diffusers` path follows
+  these boundaries; existing SD callers continue to use Candle's original path.
+- The public Candle CUDA normalization operation mirrors the 32/512-thread
+  Welford tree, `rsqrtf`, half-rounded saved statistics and fused affine, including
+  the separate spatial-one case. `paint-vae-cuda-groupnorm-v1.log` passes exact
+  comparison (maximum error zero) in all three cases and the biased-linear check.
+  Independent source/safety review found no actionable issue; runtime fixture
+  evidence is separate from that review.
+- `paint-vae-opmath-components-v2.log` passes five component tests, including
+  modern/legacy attention tensor names and 2D/1x1 weight layouts. Existing SD
+  encoder/decoder output remains bit-identical to pinned Candle for both quant
+  convolution configurations. `paint-vae-opmath-sd-regression-v1.log` passes
+  201 inference tests with four hardware tests ignored; CPU warnings-denied
+  Clippy passes in `paint-vae-opmath-clippy-v2.log`.
+  The native CUDA module also passes warnings-denied Clippy in
+  `paint-vae-opmath-cuda-clippy-v1.log`.
+- Installed float32 parity still passes (`paint-vae-cuda-opmath-f32-v1.log`):
+  sampled max .000025328249 / RMS .000004836021; decoded max .000025980175 /
+  RMS .000002742593. The installed checkpoint uses legacy attention names;
+  the first numerical-path loading failure remains retained in the v1 log.
+- **Float16 maximum-error qualification remains open; no tolerance changed.**
+  The synthetic 64-pixel input improves from sampled max .021087646 / RMS
+  .005173041 to max .013671875 / RMS .003249301
+  (`paint-vae-cuda-opmath-f16-v4.log`). A real 512-pixel conditioning map has
+  sampled max .034179688 / RMS .000892346
+  (`paint-vae-cuda-real512-v1.log`). Both fail the original .01 maximum bound.
+  The exact normalization fixture does not establish whole-VAE parity.
+- The oracle now accepts up to six conditioning images, records image hashes,
+  resolution, per-model CUDA peaks and attention backend. The separate Torch
+  math-vs-default SDPA comparison (`paint-vae-torch-sdpa-comparison-v1.json`) has
+  sampled max .001464844 / RMS .000219039, so attention backend choice alone
+  does not explain the larger VAE discrepancy. Captures, intermediate tensors
+  and failed comparisons remain retained.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

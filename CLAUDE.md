@@ -130,6 +130,11 @@ the model controls, and the length slider. A sequence is now something you scrip
   in Rust and the loader requires every checkpoint tensor to be consumed. The
   campaign qualification ledger distinguishes component parity from completed
   end-to-end paint support.
+  `VaeNumerics::Diffusers` is paint's explicit numerical policy: PyTorch's
+  normalization/statistics and SiLU rounding boundaries, with a public Candle
+  CUDA GroupNorm operation for half precision. `AutoEncoderKL::new` keeps
+  `VaeNumerics::Candle` for existing SD callers. Neither compilation nor a paint
+  render changes a process-global arithmetic switch.
 
 - **UV unwrapping is the narrow native exception.** `mesh-texture` builds vendored xatlas `f700c779`, exactly the version in the 2.1 oracle’s xatlas-python 0.0.9. The Rust wrapper validates geometry, preserves every seam-corner attribute and polls cancellation across native threads. Inference, samplers and texture baking remain Rust/Candle. Enabling the build feature alone does not advertise a paint engine.
 

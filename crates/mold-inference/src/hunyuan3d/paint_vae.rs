@@ -19,7 +19,13 @@ impl PaintVae {
             "paint VAE requires float32 or float16"
         );
         let model = super::paint_weights::load_pth_exact(path, dtype, device, |vb| {
-            AutoEncoderKL::new(vb, 3, 3, mold_candle::stable_diffusion::vae())
+            AutoEncoderKL::new_with_numerics(
+                vb,
+                3,
+                3,
+                mold_candle::stable_diffusion::vae(),
+                mold_candle::stable_diffusion::vae::VaeNumerics::Diffusers,
+            )
         })?;
         Ok(Self {
             model,

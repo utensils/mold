@@ -2,9 +2,9 @@
 //! candle-transformers/src/models/stable_diffusion/vae.rs (MIT licence;
 //! see LICENSE-CANDLE-MIT and THIRD_PARTY_NOTICES.md).
 //!
-//! Encoder/decoder blocks and default posterior arithmetic are unchanged.
-//! Mold adds raw posterior moments, opt-in Diffusers logvar bounds and explicit
-//! caller-owned noise, allowing paint and existing SD engines to share one VAE.
+//! Existing SD callers retain Candle blocks and default posterior arithmetic.
+//! Paint opts into PyTorch CUDA numerical boundaries, bounded log variance and
+//! caller-owned noise while sharing the encoder/decoder architecture.
 use candle::{Result, Tensor};
 use candle_nn as nn;
 use candle_nn::Module;
@@ -13,12 +13,25 @@ use candle_transformers::models::stable_diffusion::unet_2d_blocks::{
     UpDecoderBlock2D, UpDecoderBlock2DConfig,
 };
 
+#[cfg(feature = "cuda")]
+mod cuda_norm;
+mod precision;
+
+/// Existing image engines preserve Candle arithmetic. New paint checkpoints use
+/// PyTorch CUDA opmath and rounding boundaries, qualified separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaeNumerics {
+    Candle,
+    Diffusers,
+}
+
 #[derive(Debug, Clone)]
 struct EncoderConfig {
     // down_block_types: DownEncoderBlock2D
     block_out_channels: Vec<usize>,
     layers_per_block: usize,
     norm_num_groups: usize,
+    numerics: VaeNumerics,
     double_z: bool,
 }
 
@@ -28,6 +41,7 @@ impl Default for EncoderConfig {
             block_out_channels: vec![64],
             layers_per_block: 2,
             norm_num_groups: 32,
+            numerics: VaeNumerics::Candle,
             double_z: true,
         }
     }
@@ -36,9 +50,9 @@ impl Default for EncoderConfig {
 #[derive(Debug)]
 struct Encoder {
     conv_in: nn::Conv2d,
-    down_blocks: Vec<DownEncoderBlock2D>,
-    mid_block: UNetMidBlock2D,
-    conv_norm_out: nn::GroupNorm,
+    down_blocks: Vec<Box<dyn precision::Block>>,
+    mid_block: Box<dyn precision::Block>,
+    conv_norm_out: precision::Norm,
     conv_out: nn::Conv2d,
     #[allow(dead_code)]
     config: EncoderConfig,
@@ -80,12 +94,24 @@ impl Encoder {
                 downsample_padding: 0,
                 ..Default::default()
             };
-            let down_block = DownEncoderBlock2D::new(
-                vs_down_blocks.pp(index.to_string()),
-                in_channels,
-                out_channels,
-                cfg,
-            )?;
+            let down_block: Box<dyn precision::Block> = if config.numerics == VaeNumerics::Diffusers
+            {
+                Box::new(precision::Down::new(
+                    vs_down_blocks.pp(index.to_string()),
+                    in_channels,
+                    out_channels,
+                    config.layers_per_block,
+                    config.norm_num_groups,
+                    !is_final,
+                )?)
+            } else {
+                Box::new(DownEncoderBlock2D::new(
+                    vs_down_blocks.pp(index.to_string()),
+                    in_channels,
+                    out_channels,
+                    cfg,
+                )?)
+            };
             down_blocks.push(down_block)
         }
         let last_block_out_channels = *config.block_out_channels.last().unwrap();
@@ -96,13 +122,25 @@ impl Encoder {
             resnet_groups: Some(config.norm_num_groups),
             ..Default::default()
         };
-        let mid_block =
-            UNetMidBlock2D::new(vs.pp("mid_block"), last_block_out_channels, None, mid_cfg)?;
-        let conv_norm_out = nn::group_norm(
+        let mid_block: Box<dyn precision::Block> = if config.numerics == VaeNumerics::Diffusers {
+            Box::new(precision::Mid::new(
+                vs.pp("mid_block"),
+                last_block_out_channels,
+                config.norm_num_groups,
+            )?)
+        } else {
+            Box::new(precision::LegacyMid(UNetMidBlock2D::new(
+                vs.pp("mid_block"),
+                last_block_out_channels,
+                None,
+                mid_cfg,
+            )?))
+        };
+        let conv_norm_out = precision::Norm::new(
+            vs.pp("conv_norm_out"),
             config.norm_num_groups,
             last_block_out_channels,
-            1e-6,
-            vs.pp("conv_norm_out"),
+            config.numerics,
         )?;
         let conv_out_channels = if config.double_z {
             2 * out_channels
@@ -140,14 +178,14 @@ impl Encoder {
         let mut xs = xs.apply(&self.conv_in)?;
         observe("encoder.conv_in", &xs)?;
         for (index, down_block) in self.down_blocks.iter().enumerate() {
-            xs = xs.apply(down_block)?;
+            xs = down_block.forward(&xs)?;
             observe(&format!("encoder.down_blocks.{index}"), &xs)?;
         }
-        let xs = self.mid_block.forward(&xs, None)?;
+        let xs = self.mid_block.forward(&xs)?;
         observe("encoder.mid_block", &xs)?;
         let xs = xs.apply(&self.conv_norm_out)?;
         observe("encoder.conv_norm_out", &xs)?;
-        let xs = nn::ops::silu(&xs)?.apply(&self.conv_out)?;
+        let xs = precision::silu(&xs, self.config.numerics)?.apply(&self.conv_out)?;
         observe("encoder.conv_out", &xs)?;
         Ok(xs)
     }
@@ -159,6 +197,7 @@ struct DecoderConfig {
     block_out_channels: Vec<usize>,
     layers_per_block: usize,
     norm_num_groups: usize,
+    numerics: VaeNumerics,
 }
 
 impl Default for DecoderConfig {
@@ -167,6 +206,7 @@ impl Default for DecoderConfig {
             block_out_channels: vec![64],
             layers_per_block: 2,
             norm_num_groups: 32,
+            numerics: VaeNumerics::Candle,
         }
     }
 }
@@ -174,9 +214,9 @@ impl Default for DecoderConfig {
 #[derive(Debug)]
 struct Decoder {
     conv_in: nn::Conv2d,
-    up_blocks: Vec<UpDecoderBlock2D>,
-    mid_block: UNetMidBlock2D,
-    conv_norm_out: nn::GroupNorm,
+    up_blocks: Vec<Box<dyn precision::Block>>,
+    mid_block: Box<dyn precision::Block>,
+    conv_norm_out: precision::Norm,
     conv_out: nn::Conv2d,
     #[allow(dead_code)]
     config: DecoderConfig,
@@ -209,8 +249,20 @@ impl Decoder {
             resnet_groups: Some(config.norm_num_groups),
             ..Default::default()
         };
-        let mid_block =
-            UNetMidBlock2D::new(vs.pp("mid_block"), last_block_out_channels, None, mid_cfg)?;
+        let mid_block: Box<dyn precision::Block> = if config.numerics == VaeNumerics::Diffusers {
+            Box::new(precision::Mid::new(
+                vs.pp("mid_block"),
+                last_block_out_channels,
+                config.norm_num_groups,
+            )?)
+        } else {
+            Box::new(precision::LegacyMid(UNetMidBlock2D::new(
+                vs.pp("mid_block"),
+                last_block_out_channels,
+                None,
+                mid_cfg,
+            )?))
+        };
         let mut up_blocks = vec![];
         let vs_up_blocks = vs.pp("up_blocks");
         let reversed_block_out_channels: Vec<_> =
@@ -230,19 +282,30 @@ impl Decoder {
                 add_upsample: !is_final,
                 ..Default::default()
             };
-            let up_block = UpDecoderBlock2D::new(
-                vs_up_blocks.pp(index.to_string()),
-                in_channels,
-                out_channels,
-                cfg,
-            )?;
+            let up_block: Box<dyn precision::Block> = if config.numerics == VaeNumerics::Diffusers {
+                Box::new(precision::Up::new(
+                    vs_up_blocks.pp(index.to_string()),
+                    in_channels,
+                    out_channels,
+                    config.layers_per_block + 1,
+                    config.norm_num_groups,
+                    !is_final,
+                )?)
+            } else {
+                Box::new(UpDecoderBlock2D::new(
+                    vs_up_blocks.pp(index.to_string()),
+                    in_channels,
+                    out_channels,
+                    cfg,
+                )?)
+            };
             up_blocks.push(up_block)
         }
-        let conv_norm_out = nn::group_norm(
+        let conv_norm_out = precision::Norm::new(
+            vs.pp("conv_norm_out"),
             config.norm_num_groups,
             config.block_out_channels[0],
-            1e-6,
-            vs.pp("conv_norm_out"),
+            config.numerics,
         )?;
         let conv_cfg = nn::Conv2dConfig {
             padding: 1,
@@ -268,12 +331,12 @@ impl Decoder {
 
 impl Decoder {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let mut xs = self.mid_block.forward(&self.conv_in.forward(xs)?, None)?;
+        let mut xs = self.mid_block.forward(&self.conv_in.forward(xs)?)?;
         for up_block in self.up_blocks.iter() {
             xs = up_block.forward(&xs)?
         }
         let xs = self.conv_norm_out.forward(&xs)?;
-        let xs = nn::ops::silu(&xs)?;
+        let xs = precision::silu(&xs, self.config.numerics)?;
         self.conv_out.forward(&xs)
     }
 }
@@ -349,11 +412,23 @@ impl AutoEncoderKL {
         out_channels: usize,
         config: AutoEncoderKLConfig,
     ) -> Result<Self> {
+        Self::new_with_numerics(vs, in_channels, out_channels, config, VaeNumerics::Candle)
+    }
+
+    /// Build with an explicit numerical contract without changing existing SD callers.
+    pub fn new_with_numerics(
+        vs: nn::VarBuilder,
+        in_channels: usize,
+        out_channels: usize,
+        config: AutoEncoderKLConfig,
+        numerics: VaeNumerics,
+    ) -> Result<Self> {
         let latent_channels = config.latent_channels;
         let encoder_cfg = EncoderConfig {
             block_out_channels: config.block_out_channels.clone(),
             layers_per_block: config.layers_per_block,
             norm_num_groups: config.norm_num_groups,
+            numerics,
             double_z: true,
         };
         let encoder = Encoder::new(vs.pp("encoder"), in_channels, latent_channels, encoder_cfg)?;
@@ -361,6 +436,7 @@ impl AutoEncoderKL {
             block_out_channels: config.block_out_channels.clone(),
             layers_per_block: config.layers_per_block,
             norm_num_groups: config.norm_num_groups,
+            numerics,
         };
         let decoder = Decoder::new(vs.pp("decoder"), latent_channels, out_channels, decoder_cfg)?;
         let conv_cfg = Default::default();
@@ -482,6 +558,67 @@ mod tests {
             };
             let vb = nn::VarBuilder::from_tensors(weights.clone(), DType::F32, &device);
             let model = AutoEncoderKL::new(vb.clone(), 3, 3, cfg.clone()).unwrap();
+            let precise = AutoEncoderKL::new_with_numerics(
+                vb.clone(),
+                3,
+                3,
+                cfg.clone(),
+                VaeNumerics::Diffusers,
+            )
+            .unwrap();
+            assert!(
+                max_error(
+                    &model.encode_moments(&tensors["pixels"]).unwrap(),
+                    &precise.encode_moments(&tensors["pixels"]).unwrap()
+                ) < 1e-4
+            );
+            assert!(
+                max_error(
+                    &model.decode(&tensors["noise"]).unwrap(),
+                    &precise.decode(&tensors["noise"]).unwrap()
+                ) < 1e-4
+            );
+            let legacy_weights = weights
+                .iter()
+                .map(|(name, tensor)| {
+                    let name = name
+                        .replace(".to_q.", ".query.")
+                        .replace(".to_k.", ".key.")
+                        .replace(".to_v.", ".value.")
+                        .replace(".to_out.0.", ".proj_attn.");
+                    let tensor = if name.contains(".attentions.")
+                        && name.ends_with(".weight")
+                        && tensor.rank() == 2
+                    {
+                        tensor.unsqueeze(2).unwrap().unsqueeze(3).unwrap()
+                    } else {
+                        tensor.clone()
+                    };
+                    (name, tensor)
+                })
+                .collect();
+            let legacy = AutoEncoderKL::new_with_numerics(
+                nn::VarBuilder::from_tensors(legacy_weights, DType::F32, &device),
+                3,
+                3,
+                cfg.clone(),
+                VaeNumerics::Diffusers,
+            )
+            .unwrap();
+            assert_eq!(
+                max_error(
+                    &legacy.encode_moments(&tensors["pixels"]).unwrap(),
+                    &precise.encode_moments(&tensors["pixels"]).unwrap()
+                ),
+                0.
+            );
+            assert_eq!(
+                max_error(
+                    &legacy.decode(&tensors["noise"]).unwrap(),
+                    &precise.decode(&tensors["noise"]).unwrap()
+                ),
+                0.
+            );
             let original = candle_transformers::models::stable_diffusion::vae::AutoEncoderKL::new(
                 vb, 3, 3, cfg,
             )
