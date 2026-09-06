@@ -3,8 +3,7 @@
  * single-video Generate path, and the iPhone parameters sheet. The math
  * mirrors `mold-core/src/validation.rs` (`frame_step_for_family`) at its LTX-2
  * arm; the Rust `is_ltx2_frame_count` spelling is now test-only. The old chain
- * composer's stitch math and TOML emitter moved to `@studio/lib/sequence`
- * and `@studio/lib/chainToml` with the unified Create switchover.
+ * composer's stitch math and TOML emitter were retired with the Scenes UI.
  */
 
 /** LTX-2 pixel-frame constraint: counts of the form 8k+1 (1, 9, 17, …, 97). */

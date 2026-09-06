@@ -2433,10 +2433,7 @@ const printActivity = computed<ActivityJobVM[]>(() => {
   });
 });
 const activityRows = computed<ActivityRow[]>(() =>
-  mergeActivity(printActivity.value, []).flatMap((vm): ActivityRow[] => {
-    // `printActivity` only ever produces print rows; the merge still returns
-    // the shared union, so narrow before reading the queue fields.
-    if (vm.kind !== "print") return [];
+  mergeActivity(printActivity.value).flatMap((vm): ActivityRow[] => {
     const print = printJobsByKey.value.get(vm.key);
     return print
       ? [

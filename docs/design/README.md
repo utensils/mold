@@ -228,9 +228,10 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   selects each theme map on any element, not only `:root`, so the Look picker
   can show a theme's own surfaces without repeating a hex in TypeScript. That
   band is the only themed island the app is allowed.
-- **Smoothness for a clip stays in Advanced ▸ Video.** A clip's fps is a model
-  knob beside frames, and lifting it into the essentials would put two
-  spellings of the same number on one screen.
+- **Smoothness rides the Clip card.** The lexicon row is `Short clip · Length ·
+  Smoothness`, so a clip's frame rate sits beside the length it pairs with.
+  Advanced ▸ Video keeps the raw fps field; the card is the one people reach
+  for, and the two must never disagree.
 - **The bulk Delete says "Move N pictures to trash".** The lexicon's noun for a
   result is a picture, and the count is what makes a bulk action safe to
   confirm; "Delete" alone on a selection of forty reads as one thing.

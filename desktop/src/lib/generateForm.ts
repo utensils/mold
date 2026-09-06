@@ -50,7 +50,7 @@ import {
   type FileUnderCollectionLike,
   type FileUnderState,
 } from "@studio/lib/fileUnder";
-import { defaultVideoFps } from "@studio/lib/sequence";
+import { defaultVideoFps } from "@studio/lib/videoDuration";
 import { videoFramesForModelSelection } from "@studio/lib/videoDuration";
 import { pipelineForSettingsReuse } from "@studio/lib/outputReuse";
 import { familySupportsExtend, resolveExtendOverlapFrames } from "@studio/lib/extend";
