@@ -82,19 +82,7 @@ impl Default for TileConfig {
 /// Default VAE upsample factor for FLUX, FLUX.2, SDXL, SD3.
 pub const DEFAULT_VAE_SCALE: usize = 8;
 
-/// Resolved mode for the `MOLD_VAE_TILED` env override.
-///
-/// - `Auto` (default): full decode first, tile only on OOM.
-/// - `Force`: skip the full-decode attempt and tile from the start. Useful
-///   when the user has already observed OOMs and wants to preempt the cost.
-/// - `Off`: never tile, even on OOM. Surfaces the underlying error.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum TiledMode {
-    #[default]
-    Auto,
-    Force,
-    Off,
-}
+pub use crate::vae_recovery::TiledMode;
 
 /// Read `MOLD_VAE_TILED` once and resolve the process-wide [`TiledMode`].
 /// Scheduler plans and execution share this same authority, so changing the
@@ -331,6 +319,23 @@ where
     F: Fn(&Tensor) -> Result<Tensor>,
     R: FnOnce(),
 {
+    decode_with_fallible_oom_recovery(latents, decode_fn, || {
+        on_oom_recover();
+        Ok(())
+    })
+}
+
+/// Whole decode followed by tiled recovery, with fallible device cleanup.
+/// A repeated OOM from cleanup is consumed; unrelated cleanup errors propagate.
+pub fn decode_with_fallible_oom_recovery<F, R>(
+    latents: &Tensor,
+    decode_fn: F,
+    on_oom_recover: R,
+) -> Result<Tensor>
+where
+    F: Fn(&Tensor) -> Result<Tensor>,
+    R: FnOnce() -> Result<()>,
+{
     let mode = resolve_mode();
     let mut cfg = TileConfig::default();
 
@@ -345,28 +350,27 @@ where
             offsets = cfg.offsets,
             "MOLD_VAE_TILED=force — tiling VAE decode without trying full decode first"
         );
-        return decode_tiled(latents, decode_fn, &cfg);
     }
 
-    match decode_fn(latents) {
-        Ok(t) => Ok(t),
-        Err(e) if matches!(mode, TiledMode::Off) => Err(e),
-        Err(e) if is_out_of_memory_error(&e) => {
-            tracing::warn!(
-                error = %e,
-                tile_size = cfg.tile_size,
-                overlap = cfg.overlap,
-                offsets = cfg.offsets,
-                "VAE decode OOM — retrying with tiled decode"
-            );
-            // Caller-provided recovery (typically `device.synchronize()`) so
-            // any async-freed VRAM from the failed decode actually returns
-            // to the allocator before we start tiling.
-            on_oom_recover();
-            decode_tiled(latents, decode_fn, &cfg)
-        }
-        Err(e) => Err(e),
-    }
+    crate::vae_recovery::decode_with_recovery(
+        mode,
+        || {
+            decode_fn(latents).inspect_err(|error| {
+                if mode == TiledMode::Auto && is_out_of_memory_error(error) {
+                    tracing::warn!(
+                        error = %error,
+                        tile_size = cfg.tile_size,
+                        overlap = cfg.overlap,
+                        offsets = cfg.offsets,
+                        "VAE decode OOM — retrying with tiled decode"
+                    );
+                }
+            })
+        },
+        || decode_tiled(latents, &decode_fn, &cfg),
+        on_oom_recover,
+        is_out_of_memory_error,
+    )
 }
 
 /// Run a single tile pass with the given start offset.

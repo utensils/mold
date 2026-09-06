@@ -180,3 +180,10 @@ administer its system-wide limit; never run the server as root. Use
 Zero means automatic; increases may require restarting an idle inference process.
 
 Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
+
+For Z-Image on Metal, whole-decode attempts finish inside the memory-error
+recovery boundary: an OOM can retry with tiles, and the eager path can still
+reload the VAE on CPU if GPU recovery is exhausted. A repeated cleanup OOM
+does not prevent that retry; unrelated errors propagate. `MOLD_VAE_TILED`
+controls this Metal recovery path, while the proactive Metal span cap still
+applies. CPU/CUDA Z-Image decode policy is unchanged.

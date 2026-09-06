@@ -111,6 +111,7 @@ pub mod sd3;
 pub mod sdxl;
 pub mod shared_pool;
 pub mod upscaler;
+mod vae_recovery;
 pub mod vae_tiling;
 // The T2V engine is live, but the family ships in layers: the 14B/A14B and
 // I2V configs, the diffusers-format rename table, and several accessors are

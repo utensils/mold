@@ -475,6 +475,30 @@ fn proactive_zimage_tile_config(latent_h: usize, latent_w: usize) -> crate::vae_
     )
 }
 
+/// Complete each Metal attempt inside the recovery boundary so asynchronous GPU errors
+/// cannot escape later during image postprocessing.
+fn decode_zimage_with_recovery(
+    latents: &Tensor,
+    vae_device: &Device,
+    decode: impl Fn(&Tensor) -> Result<Tensor>,
+) -> Result<Tensor> {
+    crate::vae_recovery::decode_for_backend(
+        vae_device.is_metal(),
+        || decode(latents),
+        || {
+            crate::vae_tiling::decode_with_fallible_oom_recovery(
+                latents,
+                |tile| {
+                    crate::vae_recovery::complete_decode(decode(tile), || {
+                        vae_device.synchronize().map_err(Into::into)
+                    })
+                },
+                || vae_device.synchronize().map_err(Into::into),
+            )
+        },
+    )
+}
+
 fn zimage_debug_enabled() -> bool {
     std::env::var_os("MOLD_ZIMAGE_DEBUG").is_some()
 }
@@ -1581,7 +1605,9 @@ impl ZImageEngine {
                 &cfg,
             )?
         } else {
-            vae.decode(&latents)?
+            decode_zimage_with_recovery(&latents, &vae_device, |tile| {
+                vae.decode(tile).map_err(Into::into)
+            })?
         };
         let image = postprocess_image(&image)?;
         let image = image.i(0)?;
@@ -1995,34 +2021,42 @@ impl ZImageEngine {
                     &cfg,
                 )?
             } else {
-                match loaded.vae.decode(&decode_latents) {
-                    Ok(img) => img,
-                    // Any GPU backend, not just CUDA. This retry was gated on
-                    // `is_cuda()` and keyed off the CUDA-only OOM spellings, so on
-                    // Metal — where the message is `Insufficient Memory
-                    // (…kIOGPUCommandBufferCallbackErrorOutOfMemory)` — a decode
-                    // that had already paid for the whole denoise died outright
-                    // instead of finishing on the CPU.
-                    Err(e)
-                        if !loaded.vae_device.is_cpu()
-                            && crate::vae_tiling::is_out_of_memory_error(&e) =>
-                    {
-                        tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
-                        progress.info("VAE decode OOM on GPU — retrying on CPU");
-                        loaded.device.synchronize()?;
-                        // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
-                        let cpu_vae = load_zimage_vae(
-                            loaded.vae_path.as_path(),
-                            DType::F32,
-                            &Device::Cpu,
-                            progress,
-                            None,
-                        )?;
-                        let cpu_latents =
-                            latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-                        cpu_vae.decode(&cpu_latents)?
-                    }
-                    Err(e) => return Err(e.into()),
+                let result =
+                    decode_zimage_with_recovery(&decode_latents, &loaded.vae_device, |tile| {
+                        loaded.vae.decode(tile).map_err(Into::into)
+                    });
+                if loaded.vae_device.is_cpu() {
+                    result?
+                } else {
+                    crate::vae_recovery::retry_on_oom(
+                        result,
+                        loaded.vae_device.is_metal(),
+                        || {
+                            let cleanup_device = if loaded.vae_device.is_metal() {
+                                &loaded.vae_device
+                            } else {
+                                // Preserve the existing CUDA cleanup path.
+                                &loaded.device
+                            };
+                            cleanup_device.synchronize().map_err(Into::into)
+                        },
+                        || {
+                            tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
+                            progress.info("VAE decode OOM on GPU — retrying on CPU");
+                            // Preserve the original F32 CPU retry after GPU recovery is exhausted.
+                            let cpu_vae = load_zimage_vae(
+                                loaded.vae_path.as_path(),
+                                DType::F32,
+                                &Device::Cpu,
+                                progress,
+                                None,
+                            )?;
+                            let cpu_latents =
+                                latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                            cpu_vae.decode(&cpu_latents).map_err(Into::into)
+                        },
+                        crate::vae_tiling::is_out_of_memory_error,
+                    )?
                 }
             }
         };
