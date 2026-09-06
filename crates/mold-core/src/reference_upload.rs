@@ -315,6 +315,32 @@ fn canonical_reference(
                     .context("canonical image height is missing")?,
             }
         }
+        GenerationReference::NamedImage {
+            role, mime_type, ..
+        } => {
+            ensure!(
+                complete.metadata.kind == GenerationReferenceKind::Image
+                    && complete.metadata.image_role == Some(*role)
+                    && complete.metadata.mime_type == *mime_type,
+                "reference {expected_reference} upload response changed its named image type or role"
+            );
+            GenerationReference::NamedImage {
+                role: *role,
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance,
+                mime_type: complete.metadata.mime_type.clone(),
+                width: complete
+                    .metadata
+                    .width
+                    .filter(|value| *value > 0)
+                    .context("canonical named image width is missing")?,
+                height: complete
+                    .metadata
+                    .height
+                    .filter(|value| *value > 0)
+                    .context("canonical named image height is missing")?,
+            }
+        }
         GenerationReference::Video { mime_type, .. } => {
             ensure!(
                 mime_type == "video/mp4"
@@ -440,8 +466,37 @@ fn canonical_reference(
                 ),
             }
         }
+        GenerationReference::Mesh { format, .. } => {
+            ensure!(
+                complete.metadata.kind == GenerationReferenceKind::Mesh
+                    && complete.metadata.mesh_format == Some(*format),
+                "reference {expected_reference} upload response changed its mesh format"
+            );
+            GenerationReference::Mesh {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance,
+                mime_type: complete.metadata.mime_type.clone(),
+                format: *format,
+                byte_length: complete
+                    .metadata
+                    .byte_length
+                    .filter(|value| *value > 0)
+                    .context("canonical mesh byte length is missing")?,
+                coordinates: complete
+                    .metadata
+                    .coordinates
+                    .context("canonical mesh coordinates are missing")?,
+            }
+        }
     };
-    crate::minimax_h3::reference_prepared_shape(&descriptor).map_err(anyhow::Error::new)?;
+    if matches!(
+        &descriptor,
+        GenerationReference::Image { .. }
+            | GenerationReference::Video { .. }
+            | GenerationReference::Audio { .. }
+    ) {
+        crate::minimax_h3::reference_prepared_shape(&descriptor).map_err(anyhow::Error::new)?;
+    }
     Ok(with_authority(
         descriptor,
         GenerationReferenceAuthority::Upload {
@@ -462,6 +517,21 @@ fn with_authority(
             height,
             ..
         } => GenerationReference::Image {
+            media,
+            provenance,
+            mime_type,
+            width,
+            height,
+        },
+        GenerationReference::NamedImage {
+            role,
+            provenance,
+            mime_type,
+            width,
+            height,
+            ..
+        } => GenerationReference::NamedImage {
+            role,
             media,
             provenance,
             mime_type,
@@ -514,14 +584,31 @@ fn with_authority(
             channels,
             sample_count,
         },
+        GenerationReference::Mesh {
+            provenance,
+            mime_type,
+            format,
+            byte_length,
+            coordinates,
+            ..
+        } => GenerationReference::Mesh {
+            media,
+            provenance,
+            mime_type,
+            format,
+            byte_length,
+            coordinates,
+        },
     }
 }
 
 fn mime_type(reference: &GenerationReference) -> &str {
     match reference {
         GenerationReference::Image { mime_type, .. }
+        | GenerationReference::NamedImage { mime_type, .. }
         | GenerationReference::Video { mime_type, .. }
-        | GenerationReference::Audio { mime_type, .. } => mime_type,
+        | GenerationReference::Audio { mime_type, .. }
+        | GenerationReference::Mesh { mime_type, .. } => mime_type,
     }
 }
 
@@ -739,6 +826,10 @@ mod tests {
                 sample_count: Some(47_904),
                 prepared_shape: None,
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
             request_scope_sha256: "b".repeat(64),
             session_complete: true,

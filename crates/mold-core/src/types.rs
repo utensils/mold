@@ -1012,6 +1012,18 @@ pub enum GenerationReference {
         width: u32,
         height: u32,
     },
+    /// One semantically named image in a Hunyuan3D multiview conditioning set.
+    /// A distinct variant keeps ordinary ordered image references byte-for-byte
+    /// compatible and makes an unlabeled 2mv view unrepresentable.
+    NamedImage {
+        role: GenerationImageReferenceRole,
+        media: GenerationReferenceAuthority,
+        #[serde(default)]
+        provenance: GenerationReferenceProvenance,
+        mime_type: String,
+        width: u32,
+        height: u32,
+    },
     Video {
         media: GenerationReferenceAuthority,
         #[serde(default)]
@@ -1054,6 +1066,41 @@ pub enum GenerationReference {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sample_count: Option<u64>,
     },
+    /// A user-supplied static mesh for a texture-only mesh workflow.
+    Mesh {
+        media: GenerationReferenceAuthority,
+        #[serde(default)]
+        provenance: GenerationReferenceProvenance,
+        mime_type: String,
+        format: MeshReferenceFormat,
+        byte_length: u64,
+        coordinates: MeshReferenceCoordinates,
+    },
+}
+
+/// Semantic camera position for Hunyuan3D 2mv conditioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationImageReferenceRole {
+    Front,
+    Left,
+    Back,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshReferenceFormat {
+    Glb,
+    Obj,
+}
+
+/// Coordinate declaration carried with an imported mesh. The ingest stage
+/// normalizes this once and records the reversible transform in its artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshReferenceCoordinates {
+    pub up_axis: MeshUpAxis,
+    pub meters_per_unit: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1062,6 +1109,7 @@ pub enum GenerationReferenceKind {
     Image,
     Video,
     Audio,
+    Mesh,
 }
 
 /// Redacted, durable projection of one ordered reference. This is the only
@@ -1108,6 +1156,14 @@ pub struct GenerationReferenceMetadata {
     /// [`GenerationReferenceCrop`]); absent for every other reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<GenerationReferenceCrop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_role: Option<GenerationImageReferenceRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_format: Option<MeshReferenceFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<MeshReferenceCoordinates>,
 }
 
 pub fn generation_reference_fingerprint(references: &[GenerationReferenceMetadata]) -> String {
@@ -1187,25 +1243,37 @@ pub struct ReferenceUploadCompleteResponse {
 impl GenerationReference {
     pub const fn kind(&self) -> GenerationReferenceKind {
         match self {
-            Self::Image { .. } => GenerationReferenceKind::Image,
+            Self::Image { .. } | Self::NamedImage { .. } => GenerationReferenceKind::Image,
             Self::Video { .. } => GenerationReferenceKind::Video,
             Self::Audio { .. } => GenerationReferenceKind::Audio,
+            Self::Mesh { .. } => GenerationReferenceKind::Mesh,
         }
     }
 
     pub fn media(&self) -> &GenerationReferenceAuthority {
         match self {
-            Self::Image { media, .. } | Self::Video { media, .. } | Self::Audio { media, .. } => {
-                media
-            }
+            Self::Image { media, .. }
+            | Self::NamedImage { media, .. }
+            | Self::Video { media, .. }
+            | Self::Audio { media, .. }
+            | Self::Mesh { media, .. } => media,
         }
     }
 
     pub fn provenance(&self) -> &GenerationReferenceProvenance {
         match self {
             Self::Image { provenance, .. }
+            | Self::NamedImage { provenance, .. }
             | Self::Video { provenance, .. }
-            | Self::Audio { provenance, .. } => provenance,
+            | Self::Audio { provenance, .. }
+            | Self::Mesh { provenance, .. } => provenance,
+        }
+    }
+
+    pub const fn image_role(&self) -> Option<GenerationImageReferenceRole> {
+        match self {
+            Self::NamedImage { role, .. } => Some(*role),
+            _ => None,
         }
     }
 
@@ -1228,7 +1296,12 @@ impl GenerationReference {
     pub fn redacted_metadata(&self, index: usize) -> Option<GenerationReferenceMetadata> {
         let sha256 = self.content_sha256()?;
         let index = u32::try_from(index).ok()?.checked_add(1)?;
-        let prepared_shape = crate::minimax_h3::reference_prepared_shape(self).ok();
+        let prepared_shape = match self {
+            Self::Image { .. } | Self::Video { .. } | Self::Audio { .. } => {
+                crate::minimax_h3::reference_prepared_shape(self).ok()
+            }
+            Self::NamedImage { .. } | Self::Mesh { .. } => None,
+        };
         let name = redacted_reference_name(self.provenance());
         Some(match self {
             Self::Image {
@@ -1257,6 +1330,42 @@ impl GenerationReference {
                 sample_count: None,
                 prepared_shape,
                 crop: self.provenance().crop.clone(),
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
+            },
+            Self::NamedImage {
+                role,
+                mime_type,
+                width,
+                height,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Image,
+                index,
+                name,
+                sha256,
+                mime_type: mime_type.clone(),
+                width: Some(*width),
+                height: Some(*height),
+                frame_count: None,
+                duration_ms: None,
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+                sample_rate: None,
+                channels: None,
+                sample_count: None,
+                prepared_shape: None,
+                crop: self.provenance().crop.clone(),
+                image_role: Some(*role),
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
             Self::Video {
                 mime_type,
@@ -1292,6 +1401,10 @@ impl GenerationReference {
                 sample_count: None,
                 prepared_shape,
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
             Self::Audio {
                 mime_type,
@@ -1321,6 +1434,42 @@ impl GenerationReference {
                 sample_count: *sample_count,
                 prepared_shape,
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
+            },
+            Self::Mesh {
+                mime_type,
+                format,
+                byte_length,
+                coordinates,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Mesh,
+                index,
+                name,
+                sha256,
+                mime_type: mime_type.clone(),
+                width: None,
+                height: None,
+                frame_count: None,
+                duration_ms: None,
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+                sample_rate: None,
+                channels: None,
+                sample_count: None,
+                prepared_shape: None,
+                crop: None,
+                image_role: None,
+                mesh_format: Some(*format),
+                byte_length: Some(*byte_length),
+                coordinates: Some(*coordinates),
             },
         })
     }
@@ -1335,8 +1484,14 @@ impl GenerationReference {
         target_frames: u32,
     ) -> Option<GenerationReferenceMetadata> {
         let mut metadata = self.redacted_metadata(index)?;
-        metadata.prepared_shape =
-            Some(crate::minimax_h3::reference_prepared_shape_for_target(self, target_frames).ok()?);
+        if matches!(
+            self,
+            Self::Image { .. } | Self::Video { .. } | Self::Audio { .. }
+        ) {
+            metadata.prepared_shape = Some(
+                crate::minimax_h3::reference_prepared_shape_for_target(self, target_frames).ok()?,
+            );
+        }
         Some(metadata)
     }
 
@@ -1353,7 +1508,12 @@ impl GenerationReference {
             .and_then(|index| index.checked_add(1))
             .unwrap_or(u32::MAX);
         let name = redacted_reference_name(self.provenance());
-        let prepared_shape = crate::minimax_h3::reference_prepared_shape(self).ok();
+        let prepared_shape = match self {
+            Self::Image { .. } | Self::Video { .. } | Self::Audio { .. } => {
+                crate::minimax_h3::reference_prepared_shape(self).ok()
+            }
+            Self::NamedImage { .. } | Self::Mesh { .. } => None,
+        };
         match self {
             Self::Image {
                 mime_type,
@@ -1381,6 +1541,42 @@ impl GenerationReference {
                 sample_count: None,
                 prepared_shape,
                 crop: self.provenance().crop.clone(),
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
+            },
+            Self::NamedImage {
+                role,
+                mime_type,
+                width,
+                height,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Image,
+                index,
+                name,
+                sha256: String::new(),
+                mime_type: mime_type.clone(),
+                width: Some(*width),
+                height: Some(*height),
+                frame_count: None,
+                duration_ms: None,
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+                sample_rate: None,
+                channels: None,
+                sample_count: None,
+                prepared_shape: None,
+                crop: self.provenance().crop.clone(),
+                image_role: Some(*role),
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
             Self::Video {
                 mime_type,
@@ -1416,6 +1612,10 @@ impl GenerationReference {
                 sample_count: None,
                 prepared_shape,
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
             Self::Audio {
                 mime_type,
@@ -1445,6 +1645,42 @@ impl GenerationReference {
                 sample_count: *sample_count,
                 prepared_shape,
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
+            },
+            Self::Mesh {
+                mime_type,
+                format,
+                byte_length,
+                coordinates,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Mesh,
+                index,
+                name,
+                sha256: String::new(),
+                mime_type: mime_type.clone(),
+                width: None,
+                height: None,
+                frame_count: None,
+                duration_ms: None,
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+                sample_rate: None,
+                channels: None,
+                sample_count: None,
+                prepared_shape: None,
+                crop: None,
+                image_role: None,
+                mesh_format: Some(*format),
+                byte_length: Some(*byte_length),
+                coordinates: Some(*coordinates),
             },
         }
     }
@@ -13893,5 +14129,80 @@ mod reference_crop_tests {
                 "{width}x{height}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod mesh_reference_contract_tests {
+    use super::*;
+
+    fn provenance() -> GenerationReferenceProvenance {
+        GenerationReferenceProvenance {
+            name: Some("asset.glb".to_string()),
+            sha256: Some("ab".repeat(32)),
+            crop: None,
+        }
+    }
+
+    #[test]
+    fn named_multiview_role_survives_wire_and_redacted_metadata() {
+        let reference = GenerationReference::NamedImage {
+            role: GenerationImageReferenceRole::Left,
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: provenance(),
+            mime_type: "image/png".to_string(),
+            width: 1024,
+            height: 1024,
+        };
+
+        let json = serde_json::to_value(&reference).unwrap();
+        assert_eq!(json["kind"], "named_image");
+        assert_eq!(json["role"], "left");
+        let restored: GenerationReference = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            restored.image_role(),
+            Some(GenerationImageReferenceRole::Left)
+        );
+        let metadata = restored.redacted_metadata(0).unwrap();
+        assert_eq!(metadata.kind, GenerationReferenceKind::Image);
+        assert_eq!(
+            metadata.image_role,
+            Some(GenerationImageReferenceRole::Left)
+        );
+    }
+
+    #[test]
+    fn mesh_reference_survives_wire_without_disclosing_its_authority() {
+        let reference = GenerationReference::Mesh {
+            media: GenerationReferenceAuthority::ServerPath {
+                path: "/private/model.glb".to_string(),
+            },
+            provenance: provenance(),
+            mime_type: "model/gltf-binary".to_string(),
+            format: MeshReferenceFormat::Glb,
+            byte_length: 4096,
+            coordinates: MeshReferenceCoordinates {
+                up_axis: MeshUpAxis::Y,
+                meters_per_unit: 1.0,
+            },
+        };
+
+        let debug = format!("{reference:?}");
+        assert!(!debug.contains("/private/model.glb"));
+        let json = serde_json::to_value(&reference).unwrap();
+        assert_eq!(json["kind"], "mesh");
+        assert_eq!(json["format"], "glb");
+        let restored: GenerationReference = serde_json::from_value(json).unwrap();
+        let metadata = restored.redacted_metadata(2).unwrap();
+        assert_eq!(metadata.kind, GenerationReferenceKind::Mesh);
+        assert_eq!(metadata.mesh_format, Some(MeshReferenceFormat::Glb));
+        assert_eq!(metadata.byte_length, Some(4096));
+        assert_eq!(
+            metadata.coordinates,
+            Some(MeshReferenceCoordinates {
+                up_axis: MeshUpAxis::Y,
+                meters_per_unit: 1.0,
+            })
+        );
     }
 }

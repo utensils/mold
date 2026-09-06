@@ -3520,8 +3520,10 @@ mod structural_tests {
             .expect("fixture reference");
         match first {
             mold_core::GenerationReference::Image { provenance, .. }
+            | mold_core::GenerationReference::NamedImage { provenance, .. }
             | mold_core::GenerationReference::Video { provenance, .. }
-            | mold_core::GenerationReference::Audio { provenance, .. } => {
+            | mold_core::GenerationReference::Audio { provenance, .. }
+            | mold_core::GenerationReference::Mesh { provenance, .. } => {
                 provenance.sha256 = Some("03".repeat(32));
             }
         }

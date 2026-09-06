@@ -1548,10 +1548,13 @@ fn validate_reference_provenance(
     }
     if let Some(crop) = provenance.crop.as_ref() {
         let checked = match reference {
-            GenerationReference::Image { width, height, .. } => {
+            GenerationReference::Image { width, height, .. }
+            | GenerationReference::NamedImage { width, height, .. } => {
                 crop.validate_for_image(*width, *height)
             }
-            GenerationReference::Video { .. } | GenerationReference::Audio { .. } => {
+            GenerationReference::Video { .. }
+            | GenerationReference::Audio { .. }
+            | GenerationReference::Mesh { .. } => {
                 Err("a crop is provenance for image references only")
             }
         };
@@ -2021,6 +2024,14 @@ fn reference_prepared_shape_at(
                 audio_rows,
             }
         }
+        GenerationReference::NamedImage { .. } | GenerationReference::Mesh { .. } => {
+            return Err(reference_violation(
+                Some(index),
+                "MINIMAX_H3_REFERENCE_KIND",
+                Some("kind"),
+                "MiniMax H3 Ref2VA accepts ordinary image, video, and audio references only",
+            ));
+        }
     };
     Ok(result)
 }
@@ -2322,6 +2333,14 @@ fn validate_reference_set(
                 }
                 audio_duration_ms =
                     checked_duration_sum(audio_duration_ms, *duration_ms, index, "duration_ms")?;
+            }
+            GenerationReference::NamedImage { .. } | GenerationReference::Mesh { .. } => {
+                return Err(reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_KIND",
+                    Some("kind"),
+                    "MiniMax H3 Ref2VA accepts ordinary image, video, and audio references only",
+                ));
             }
         }
         let _ = reference_prepared_shape_at(index, reference, MAX_FRAMES)?;

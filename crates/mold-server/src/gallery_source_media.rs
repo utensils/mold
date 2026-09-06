@@ -707,8 +707,10 @@ fn hydrate_selected_members(
         for (reference, bytes) in descriptors.iter_mut().zip(references) {
             match reference {
                 mold_core::GenerationReference::Image { media, .. }
+                | mold_core::GenerationReference::NamedImage { media, .. }
                 | mold_core::GenerationReference::Video { media, .. }
-                | mold_core::GenerationReference::Audio { media, .. } => {
+                | mold_core::GenerationReference::Audio { media, .. }
+                | mold_core::GenerationReference::Mesh { media, .. } => {
                     *media = mold_core::GenerationReferenceAuthority::Inline { data: bytes };
                 }
             }

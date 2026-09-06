@@ -743,6 +743,7 @@ pub fn h3_reference_labels(references: &[ExpandReference]) -> Vec<String> {
                 audio += 1;
                 labels.push(format!("<Audio {audio}>"));
             }
+            GenerationReferenceKind::Mesh => labels.push("<Mesh>".to_string()),
         }
     }
     labels
@@ -837,6 +838,7 @@ pub fn render_generation_context(
                 GenerationReferenceKind::Image => "image",
                 GenerationReferenceKind::Video => "video",
                 GenerationReferenceKind::Audio => "audio",
+                GenerationReferenceKind::Mesh => "mesh",
             };
             let role = role_phrase(reference.role);
             if family == "minimax-h3" {

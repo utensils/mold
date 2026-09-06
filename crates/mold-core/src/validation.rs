@@ -2037,6 +2037,136 @@ pub const MESH_OCTREE_RESOLUTIONS: &[u32] = &[128, 192, 256, 320, 384];
 /// Texture atlas edge lengths a mesh request may name.
 pub const MESH_TEXTURE_RESOLUTIONS: &[u32] = &[1024, 2048, 4096];
 
+/// Maximum staged GLB/OBJ accepted as a mesh workflow input.
+pub const MESH_REFERENCE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+fn hunyuan3d_multiview_model(model: &str) -> bool {
+    matches!(
+        model.split(':').next().unwrap_or(model),
+        "hunyuan3d-2mv" | "hunyuan3d-2mv-turbo"
+    )
+}
+
+fn valid_reference_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_hunyuan3d_references(req: &GenerateRequest, form: ReferenceForm) -> Result<(), String> {
+    let Some(references) = req.references.as_deref() else {
+        return Ok(());
+    };
+    if references.is_empty() {
+        return Err("references must not be empty when provided".to_string());
+    }
+    for (index, reference) in references.iter().enumerate() {
+        let number = index + 1;
+        let digest = reference.provenance().sha256.as_deref();
+        if digest.is_some_and(|value| !valid_reference_digest(value)) {
+            return Err(format!(
+                "reference {number} provenance.sha256 must contain exactly 64 hexadecimal characters"
+            ));
+        }
+        match (form, reference.media()) {
+            (ReferenceForm::Admitted, crate::GenerationReferenceAuthority::Descriptor) => {
+                return Err(format!(
+                    "reference {number} is a payload-free descriptor; admission requires inline bytes, an upload handle, or a server path"
+                ));
+            }
+            (ReferenceForm::Resolved, crate::GenerationReferenceAuthority::Descriptor)
+                if digest.is_some() => {}
+            (ReferenceForm::Resolved, _) => {
+                return Err(format!(
+                    "resolved reference {number} must be a descriptor with a content sha256"
+                ));
+            }
+            (ReferenceForm::Admitted, crate::GenerationReferenceAuthority::Inline { data })
+                if !data.is_empty() => {}
+            (ReferenceForm::Admitted, crate::GenerationReferenceAuthority::Upload { .. })
+            | (ReferenceForm::Admitted, crate::GenerationReferenceAuthority::ServerPath { .. })
+                if digest.is_some() => {}
+            (ReferenceForm::Admitted, _) => {
+                return Err(format!(
+                    "reference {number} media authority is empty or lacks required digest provenance"
+                ));
+            }
+        }
+        match reference {
+            crate::GenerationReference::NamedImage {
+                mime_type,
+                width,
+                height,
+                provenance,
+                ..
+            } => {
+                if !mime_type.trim().to_ascii_lowercase().starts_with("image/")
+                    || *width == 0
+                    || *height == 0
+                    || *width > crate::minimax_h3::MAX_REFERENCE_DIMENSION
+                    || *height > crate::minimax_h3::MAX_REFERENCE_DIMENSION
+                    || u64::from(*width) * u64::from(*height)
+                        > crate::minimax_h3::MAX_REFERENCE_IMAGE_PIXELS
+                {
+                    return Err(format!(
+                        "reference {number} has invalid named-view image shape"
+                    ));
+                }
+                if provenance
+                    .crop
+                    .as_ref()
+                    .is_some_and(|crop| crop.validate_for_image(*width, *height).is_err())
+                {
+                    return Err(format!(
+                        "reference {number} has invalid image crop provenance"
+                    ));
+                }
+            }
+            crate::GenerationReference::Mesh {
+                mime_type,
+                format,
+                byte_length,
+                coordinates,
+                provenance,
+                ..
+            } => {
+                let expected_mime = match format {
+                    crate::MeshReferenceFormat::Glb => "model/gltf-binary",
+                    crate::MeshReferenceFormat::Obj => "model/obj",
+                };
+                if mime_type != expected_mime {
+                    return Err(format!(
+                        "reference {number} mesh format {format:?} requires MIME type {expected_mime}"
+                    ));
+                }
+                if !(1..=MESH_REFERENCE_MAX_BYTES).contains(byte_length) {
+                    return Err(format!(
+                        "reference {number} mesh byte_length must be in 1..={MESH_REFERENCE_MAX_BYTES}"
+                    ));
+                }
+                if !coordinates.meters_per_unit.is_finite()
+                    || !(1e-9..=1e6).contains(&coordinates.meters_per_unit)
+                {
+                    return Err(format!(
+                        "reference {number} mesh meters_per_unit must be finite and in 1e-9..=1e6"
+                    ));
+                }
+                if provenance.crop.is_some() {
+                    return Err(format!(
+                        "reference {number} mesh cannot carry image crop provenance"
+                    ));
+                }
+            }
+            crate::GenerationReference::Image { .. }
+            | crate::GenerationReference::Video { .. }
+            | crate::GenerationReference::Audio { .. } => {
+                return Err(format!(
+                    "reference {number} kind is not a named Hunyuan3D view or mesh input"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Upper bound on requested decimation. Above this, decimation is not doing
 /// anything a raw surface-net extraction was not already doing.
 pub const MESH_MAX_TARGET_FACES: u32 = 2_000_000;
@@ -2294,14 +2424,57 @@ fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<
 /// Rules that hold for a mesh family whether or not the request carried any
 /// `mesh` options.
 fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
-    // The source image is the ONLY conditioning this family has — there is no
-    // text encoder anywhere in it. A request without one has nothing to
-    // generate from, and the prompt (if any) is recorded as provenance only.
-    if req.source_image.as_ref().is_none_or(Vec::is_empty) {
+    let source_present = req
+        .source_image
+        .as_ref()
+        .is_some_and(|bytes| !bytes.is_empty());
+    let references = req.references.as_deref().unwrap_or_default();
+    if source_present && !references.is_empty() {
         return Err(
-            "3-D generation requires a source image: it is the only conditioning this family has"
+            "3-D generation cannot combine source_image with named views or a mesh reference"
                 .to_string(),
         );
+    }
+    if hunyuan3d_multiview_model(&req.model) {
+        if references.is_empty() {
+            return Err(
+                "Hunyuan3D 2mv requires at least one named front, left, back, or right view"
+                    .to_string(),
+            );
+        }
+        let mut roles = std::collections::HashSet::new();
+        for reference in references {
+            let crate::GenerationReference::NamedImage { role, .. } = reference else {
+                return Err("Hunyuan3D 2mv accepts named image views only".to_string());
+            };
+            if !roles.insert(*role) {
+                return Err(
+                    format!("Hunyuan3D 2mv received duplicate {role:?} view").to_ascii_lowercase()
+                );
+            }
+        }
+    } else if references
+        .iter()
+        .any(|reference| matches!(reference, crate::GenerationReference::Mesh { .. }))
+    {
+        if references.len() != 1
+            || !matches!(references[0], crate::GenerationReference::Mesh { .. })
+        {
+            return Err("mesh-input texturing requires exactly one mesh reference".to_string());
+        }
+        if req.mesh.as_ref().and_then(|mesh| mesh.texture) != Some(true) {
+            return Err("a mesh reference requires mesh.texture = true".to_string());
+        }
+    } else {
+        if !references.is_empty() {
+            return Err("named views are supported only by Hunyuan3D 2mv models".to_string());
+        }
+        if !source_present {
+            return Err(
+                "3-D generation requires a source image: it is the only conditioning this family has"
+                    .to_string(),
+            );
+        }
     }
     if req.frames.is_some() || req.fps.is_some() {
         return Err(
@@ -2330,14 +2503,20 @@ fn validate_generate_request_after_activation_with(
         }
     }
 
-    if req.references.is_some() && !family.is_some_and(crate::minimax_h3::is_family) {
+    if req.references.is_some()
+        && !family.is_some_and(crate::minimax_h3::is_family)
+        && family != Some(crate::manifest::HUNYUAN3D_FAMILY)
+    {
         return Err(
-            "references is only supported by MiniMax H3 Ref2VA; other families retain their existing source/edit fields"
+            "references is supported by MiniMax H3 Ref2VA and Hunyuan3D named-view or mesh workflows; other families retain their existing source/edit fields"
                 .to_string(),
         );
     }
 
     validate_mesh_request(req, family)?;
+    if family == Some(crate::manifest::HUNYUAN3D_FAMILY) {
+        validate_hunyuan3d_references(req, reference_form)?;
+    }
 
     // Creation-time filing is validated before anything expensive: a bad tag
     // or an unset collection ref is a client mistake, and paying for a model
@@ -3347,6 +3526,83 @@ mod tests {
 
         req.source_image = Some(vec![0u8; 8]);
         assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_ok());
+    }
+
+    fn named_view(role: crate::GenerationImageReferenceRole) -> crate::GenerationReference {
+        crate::GenerationReference::NamedImage {
+            role,
+            media: crate::GenerationReferenceAuthority::Descriptor,
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some(format!("{role:?}.png")),
+                sha256: Some("ab".repeat(32)),
+                crop: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1024,
+            height: 1024,
+        }
+    }
+
+    #[test]
+    fn multiview_shape_accepts_missing_slots_but_rejects_duplicate_roles() {
+        let mut req = crate::test_support::minimal_generate_request("hunyuan3d-2mv:fp16");
+        req.source_image = None;
+        req.references = Some(vec![
+            named_view(crate::GenerationImageReferenceRole::Front),
+            named_view(crate::GenerationImageReferenceRole::Back),
+        ]);
+        super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap();
+
+        req.references.as_mut().unwrap()[1] =
+            named_view(crate::GenerationImageReferenceRole::Front);
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(
+            error.contains("duplicate") && error.contains("front"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ordinary_shape_refuses_named_views_and_multiview_refuses_source_ambiguity() {
+        let mut ordinary = mesh_request("hunyuan3d:fp16");
+        ordinary.references = Some(vec![named_view(crate::GenerationImageReferenceRole::Front)]);
+        let error = super::validate_mesh_request(&ordinary, Some("hunyuan3d")).unwrap_err();
+        assert!(
+            error.contains("cannot combine") || error.contains("2mv"),
+            "{error}"
+        );
+
+        let mut multiview = mesh_request("hunyuan3d-2mv:fp16");
+        multiview.references = Some(vec![named_view(crate::GenerationImageReferenceRole::Front)]);
+        let error = super::validate_mesh_request(&multiview, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("cannot combine"), "{error}");
+    }
+
+    #[cfg(feature = "mesh-texture")]
+    #[test]
+    fn texture_only_request_accepts_one_mesh_and_no_source_image() {
+        let mut req = crate::test_support::minimal_generate_request("hunyuan3d:fp16");
+        req.source_image = None;
+        req.mesh = Some(crate::MeshRequestOptions {
+            texture: Some(true),
+            ..Default::default()
+        });
+        req.references = Some(vec![crate::GenerationReference::Mesh {
+            media: crate::GenerationReferenceAuthority::Descriptor,
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("chair.glb".into()),
+                sha256: Some("ab".repeat(32)),
+                crop: None,
+            },
+            mime_type: "model/gltf-binary".into(),
+            format: crate::MeshReferenceFormat::Glb,
+            byte_length: 4096,
+            coordinates: crate::MeshReferenceCoordinates {
+                up_axis: crate::MeshUpAxis::Y,
+                meters_per_unit: 1.0,
+            },
+        }]);
+        super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap();
     }
 
     #[test]

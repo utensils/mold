@@ -1366,6 +1366,10 @@ mod tests {
                     audio_rows: 320,
                 }),
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
             mold_core::GenerationReferenceMetadata {
                 kind: mold_core::GenerationReferenceKind::Audio,
@@ -1398,6 +1402,10 @@ mod tests {
                     audio_rows: 240,
                 }),
                 crop: None,
+                image_role: None,
+                mesh_format: None,
+                byte_length: None,
+                coordinates: None,
             },
         ]);
 
