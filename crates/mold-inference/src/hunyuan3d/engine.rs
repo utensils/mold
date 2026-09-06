@@ -150,6 +150,7 @@ struct Loaded {
 
 pub struct Hunyuan3dEngine {
     base: EngineBase<Loaded>,
+    paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
 }
 
 impl Hunyuan3dEngine {
@@ -161,7 +162,16 @@ impl Hunyuan3dEngine {
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            paint_assets: None,
         }
+    }
+
+    pub fn with_paint_assets(
+        mut self,
+        assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
+    ) -> Self {
+        self.paint_assets = assets;
+        self
     }
 
     /// Query points per decode chunk, honouring the env override.
@@ -272,16 +282,9 @@ impl Hunyuan3dEngine {
             .map(|value| value as usize)
             .unwrap_or(DEFAULT_OCTREE_RESOLUTION);
         let threshold = options.threshold.unwrap_or(DEFAULT_THRESHOLD);
+        #[cfg(not(feature = "mesh-texture"))]
         if options.texture == Some(true) {
-            // Defence in depth. `validation::validate_mesh_request` already
-            // refuses this at admission, which is the only place that can do
-            // so before a multi-gigabyte checkpoint is mapped; this guard
-            // exists so a caller that bypasses admission still cannot get
-            // bare geometry back from a request that asked for materials.
-            bail!(
-                "PBR texture generation is not available in this build; \
-                 omit --texture to render geometry only"
-            );
+            bail!("PBR texture generation requires the mesh-texture build feature");
         }
 
         // ── Conditioning ────────────────────────────────────────────────
@@ -298,10 +301,9 @@ impl Hunyuan3dEngine {
         // the input the docs recommend as the best one — indistinguishable
         // from a full opaque frame and condition DINOv2 on the whole canvas,
         // black transparent pixels included.
-        let image = image::DynamicImage::ImageRgba8(
-            crate::img_utils::decode_oriented_srgb_rgba(source)
-                .context("decode the source image")?,
-        );
+        let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
+            .context("decode the source image")?;
+        let image = image::DynamicImage::ImageRgba8(source_rgba.clone());
         let pixels = super::dino2::preprocess(
             &image,
             loaded.conditioning.letterbox,
@@ -340,6 +342,54 @@ impl Hunyuan3dEngine {
         // ── Surface, normals, GLB, poster (CPU) ─────────────────────────
         let mesh = self.extract_surface(&grid, threshold, options.target_faces)?;
         drop(grid);
+        #[cfg(feature = "mesh-texture")]
+        if options.texture == Some(true) {
+            let assets = self
+                .paint_assets
+                .clone()
+                .context("Hunyuan3D Paint assets were not frozen before execution")?;
+            // Shape and paint are disjoint residency phases. Release the
+            // checkpoint carrying DiT, shape VAE, and DINO before opening the
+            // first paint network; keeping it here exceeds a 24 GB device.
+            let shape = self.base.loaded.take();
+            drop(shape);
+            let _ = crate::device::post_drop_free_vram_bytes(self.base.gpu_ordinal);
+            self.base.progress.checkpoint()?;
+            let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+            let texture_size = options.texture_resolution.unwrap_or(2048);
+            let textured = super::paint_runtime::PaintRuntime {
+                assets: &assets,
+                device: &device,
+                gpu_ordinal: self.base.gpu_ordinal,
+                progress: &self.base.progress,
+            }
+            .generate(&mesh, &source_rgba, texture_size, seed)?;
+            let (bounds_min, bounds_max) = textured.mesh.bounds();
+            let poster = super::poster::render_poster(&textured.mesh, POSTER_SIZE)
+                .context("render the gallery poster")?;
+            return Ok(GenerateResponse {
+                images: Vec::new(),
+                video: None,
+                audio: None,
+                mesh: Some(MeshData {
+                    data: textured.glb,
+                    format: OutputFormat::Glb,
+                    vertex_count: textured.mesh.vertex_count() as u32,
+                    face_count: textured.mesh.face_count() as u32,
+                    bounds_min,
+                    bounds_max,
+                    textured: true,
+                    poster,
+                    poster_width: POSTER_SIZE,
+                    poster_height: POSTER_SIZE,
+                }),
+                generation_time_ms: started.elapsed().as_millis() as u64,
+                model: self.base.model_name.clone(),
+                seed_used: seed,
+                gpu: Some(self.base.gpu_ordinal),
+                request_warnings: Vec::new(),
+            });
+        }
         let (bounds_min, bounds_max) = mesh.bounds();
 
         self.base.progress.stage_start("Writing mesh");

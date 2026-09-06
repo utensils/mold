@@ -2271,14 +2271,9 @@ fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<
             ));
         }
     }
-    // Refused HERE, not in the engine. The engine's own guard fires after
-    // `load_inner` has mapped a multi-gigabyte checkpoint, so a `--texture`
-    // request would be admitted, queued, given a GPU and spend the whole load
-    // before failing. Admission is the only place that can refuse it for free.
+    #[cfg(not(feature = "mesh-texture"))]
     if options.texture == Some(true) {
-        return Err("PBR texture generation is not available in this build; \
-             omit mesh.texture to render geometry only"
-            .to_string());
+        return Err("PBR texture generation requires the mesh-texture build feature".to_string());
     }
     if let Some(resolution) = options.texture_resolution {
         if !MESH_TEXTURE_RESOLUTIONS.contains(&resolution) {
@@ -2286,12 +2281,12 @@ fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<
                 "mesh.texture_resolution ({resolution}) must be one of {MESH_TEXTURE_RESOLUTIONS:?}"
             ));
         }
-        // `texture == Some(true)` is already refused above, so this is the
-        // only remaining case: a resolution for a stage that will not run.
-        return Err(
-            "mesh.texture_resolution requires mesh.texture = true; it has no effect on a geometry-only render"
-                .to_string(),
-        );
+        if options.texture != Some(true) {
+            return Err(
+                "mesh.texture_resolution requires mesh.texture = true; it has no effect on a geometry-only render"
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -3436,6 +3431,7 @@ mod tests {
         assert!(error.contains("requires mesh.texture"), "{error}");
     }
 
+    #[cfg(not(feature = "mesh-texture"))]
     #[test]
     fn asking_for_textures_is_refused_at_admission_not_after_the_load() {
         // The engine also refuses, but only after mapping a multi-gigabyte
@@ -3448,7 +3444,19 @@ mod tests {
             ..Default::default()
         });
         let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
-        assert!(error.contains("not available in this build"), "{error}");
+        assert!(error.contains("mesh-texture build feature"), "{error}");
+    }
+
+    #[cfg(feature = "mesh-texture")]
+    #[test]
+    fn textured_mesh_with_supported_resolution_is_admitted() {
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            texture: Some(true),
+            texture_resolution: Some(4096),
+            ..Default::default()
+        });
+        super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap();
     }
 
     #[test]

@@ -1576,6 +1576,19 @@ pub(crate) async fn prepare_inputs_for_devices(
             }
             Err(error) => Err(error),
         };
+        let materialized = match materialized {
+            Ok(()) => {
+                crate::paint_dependencies::materialize_paint_assets(
+                    &dependency_context,
+                    request,
+                    &family,
+                    &mut frozen,
+                    &mut pending,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         if let Err(error) = materialized {
             failures.insert(device.id, error);
             continue;

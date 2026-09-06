@@ -20,6 +20,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 const MIB: u64 = 1024 * 1024;
 const BASE_HOST_TRANSIENT: u64 = 256 * MIB;
 const UNKNOWN_ARTIFACT_HOST_CHARGE: u64 = 64 * MIB;
+// The full native DINO -> VAE -> UNet -> VAE -> RealESRGAN run reached a
+// 37,432 MiB physical-device high-water mark on an L40S. Candle drops each
+// lexical model in sequence, but its CUDA allocator retains reusable blocks
+// across phases, so live-tensor arithmetic substantially underestimates the
+// whole-process peak. Reserve 40 GiB to include 3,528 MiB of backend and
+// workload headroom over the retained measurement.
+const HUNYUAN3D_PAINT_VRAM_PEAK: u64 = 40 * 1024 * MIB;
 
 /// Semantic position of an artifact consumed by one engine execution.
 ///
@@ -74,6 +81,15 @@ pub enum ComponentRole {
     /// facexlib's BiSeNet face parser. Runs on the host beside the other two,
     /// masking the aligned crop before the vision tower sees it (#1225).
     FaceParser,
+    /// Hunyuan3D Paint's multiview diffusion network. It is loaded only after
+    /// the shape checkpoint has been released.
+    PaintUnet,
+    /// Hunyuan3D Paint's image VAE, loaded once for encode and once for decode.
+    PaintVae,
+    /// Hunyuan3D Paint's DINO appearance encoder.
+    PaintDino,
+    /// Real-ESRGAN x4plus used between paint decode and material baking.
+    PaintUpscaler,
 }
 
 impl ComponentRole {
@@ -635,6 +651,7 @@ impl ExecutionSemanticConfig {
             // content/format facts in the enclosing descriptor, exactly like
             // the selected encoder artifacts above.
             identity_assets: _,
+            paint_assets,
             h3_factory_authority,
             // The resolved override is already represented in runtime_environment.
             request_offload: _,
@@ -686,12 +703,19 @@ impl ExecutionSemanticConfig {
             // Only video families can take cuDNN, so only they carry the
             // field; an image family's fingerprint is byte-identical to what
             // it was before this existed.
-            conv_backend: match mold_inference::conv_policy::policy_for_family(family) {
-                mold_inference::conv_policy::ConvPolicy::Image => None,
-                mold_inference::conv_policy::ConvPolicy::Video => Some(
-                    match mold_inference::conv_policy::resolve_for(
-                        mold_inference::conv_policy::ConvPolicy::Video,
-                    ) {
+            conv_backend: match (
+                mold_inference::conv_policy::policy_for_family(family),
+                paint_assets.is_some(),
+            ) {
+                (mold_inference::conv_policy::ConvPolicy::Image, false) => None,
+                (mold_inference::conv_policy::ConvPolicy::Video, _)
+                | (mold_inference::conv_policy::ConvPolicy::Paint, _)
+                | (mold_inference::conv_policy::ConvPolicy::Image, true) => Some(
+                    match mold_inference::conv_policy::resolve_for(if paint_assets.is_some() {
+                        mold_inference::conv_policy::ConvPolicy::Paint
+                    } else {
+                        mold_inference::conv_policy::ConvPolicy::Video
+                    }) {
                         mold_inference::conv_policy::ConvBackend::Im2Col => {
                             SemanticConvBackend::Im2Col
                         }
@@ -2633,6 +2657,12 @@ fn concrete_artifacts_for_family(
             identity.face_parser_source.clone(),
         );
     }
+    if let Some(paint) = &engine_config.paint_assets {
+        artifacts.insert(ComponentRole::PaintUnet, paint.unet.clone());
+        artifacts.insert(ComponentRole::PaintVae, paint.vae.clone());
+        artifacts.insert(ComponentRole::PaintDino, paint.dino.clone());
+        artifacts.insert(ComponentRole::PaintUpscaler, paint.upscaler.clone());
+    }
     artifacts
 }
 
@@ -3131,13 +3161,24 @@ fn build_plan(
                 host,
             )
         } else {
-            let strategy = if memory.block_offload
+            let strategy = if matches!(
+                role,
+                ComponentRole::PaintUnet
+                    | ComponentRole::PaintVae
+                    | ComponentRole::PaintDino
+                    | ComponentRole::PaintUpscaler
+            ) {
+                // The paint runner scopes every network separately, including
+                // two independent VAE loads around UNet denoising.
+                ComponentLoadStrategy::DropReload
+            } else if memory.block_offload
                 && matches!(
                     role,
                     ComponentRole::Transformer
                         | ComponentRole::TransformerShard(_)
                         | ComponentRole::LowNoiseTransformer
-                ) {
+                )
+            {
                 // Most streamed backends retain an anonymous host copy at the
                 // artifact's stored precision. LTX-2 safetensors is the
                 // exception: its ordinary and ConvRot loaders retain only a
@@ -3180,7 +3221,16 @@ fn build_plan(
         );
     }
 
-    let predicted_vram = memory.peak_memory_bytes.max(pending_dependency_peak);
+    let paint_requested = context.engine_config.paint_assets.is_some();
+    let predicted_vram =
+        memory
+            .peak_memory_bytes
+            .max(pending_dependency_peak)
+            .max(if paint_requested {
+                HUNYUAN3D_PAINT_VRAM_PEAK
+            } else {
+                0
+            });
     // A 3-D render's dominant HOST cost is something no component path
     // accounts for: the full occupancy grid, which the decode loop copies back
     // chunk by chunk and accumulates, plus the extracted mesh. At octree 384
@@ -3193,18 +3243,35 @@ fn build_plan(
     } else {
         0
     };
+    let texture_host = if paint_requested {
+        match context
+            .request
+            .mesh
+            .as_ref()
+            .and_then(|mesh| mesh.texture_resolution)
+            .unwrap_or(2048)
+        {
+            4096 => 2 * 1024 * MIB,
+            2048 => 768 * MIB,
+            _ => 384 * MIB,
+        }
+    } else {
+        0
+    };
     let predicted_host = host_bytes_by_path
         .values()
         .fold(BASE_HOST_TRANSIENT, |total, bytes| {
             total.saturating_add(*bytes)
         })
-        .saturating_add(mesh_host);
+        .saturating_add(mesh_host)
+        .saturating_add(texture_host);
     let predicted_warm_host = recurring_host_bytes_by_path
         .values()
         .fold(BASE_HOST_TRANSIENT, |total, bytes| {
             total.saturating_add(*bytes)
         })
-        .saturating_add(mesh_host);
+        .saturating_add(mesh_host)
+        .saturating_add(texture_host);
     let fingerprint = execution_fingerprint(
         context.model,
         device,
@@ -4821,6 +4888,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_gemma_paths,
             selected_umt5_path,
             identity_assets,
+            paint_assets,
             h3_factory_authority,
             // The resolved override is already represented in runtime_environment.
             request_offload: _,
@@ -4844,6 +4912,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             .field("ltx2_gemma_variant", ltx2_gemma_variant)
             .field("selected_t5_path", selected_t5_path)
             .field("selected_qwen3_paths", selected_qwen3_paths)
+            .field("paint_assets", paint_assets)
             .field("selected_qwen2_path", selected_qwen2_path)
             .field("selected_gemma_paths", selected_gemma_paths);
         // Both UMT5 fields are emitted only when present, so every fingerprint
@@ -6544,6 +6613,16 @@ mod tests {
     }
 
     #[test]
+    fn paint_reservation_covers_the_retained_full_runtime_high_water_mark() {
+        const MEASURED_PHYSICAL_DEVICE_MIB: u64 = 37_432;
+        const REQUIRED_MARGIN_MIB: u64 = 3_528;
+        assert_eq!(
+            HUNYUAN3D_PAINT_VRAM_PEAK,
+            (MEASURED_PHYSICAL_DEVICE_MIB + REQUIRED_MARGIN_MIB) * MIB
+        );
+    }
+
+    #[test]
     fn semantic_encoder_roles_preserve_sparse_and_mixed_topologies() {
         let root = TempDir::new().unwrap();
         for name in [
@@ -6593,6 +6672,31 @@ mod tests {
                 "{family} must retain semantic Qwen topology"
             );
         }
+
+        let mut paint_frozen = frozen.clone();
+        paint_frozen.paint_assets = Some(mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths {
+            unet: root.path().join("paint-unet.bin"),
+            vae: root.path().join("paint-vae.bin"),
+            dino: root.path().join("paint-dino.safetensors"),
+            upscaler: root.path().join("paint-upscaler.safetensors"),
+        });
+        let paint = concrete_artifacts_for_family(&paths, "hunyuan3d", &[], &paint_frozen);
+        assert_eq!(
+            paint[&ComponentRole::PaintUnet],
+            root.path().join("paint-unet.bin")
+        );
+        assert_eq!(
+            paint[&ComponentRole::PaintVae],
+            root.path().join("paint-vae.bin")
+        );
+        assert_eq!(
+            paint[&ComponentRole::PaintDino],
+            root.path().join("paint-dino.safetensors")
+        );
+        assert_eq!(
+            paint[&ComponentRole::PaintUpscaler],
+            root.path().join("paint-upscaler.safetensors")
+        );
 
         let sparse_ltx = ModelPaths {
             t5_encoder: None,
@@ -7992,6 +8096,7 @@ mod tests {
             selected_gemma_paths: Vec::new(),
             selected_umt5_path: None,
             identity_assets: None,
+            paint_assets: None,
             h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,

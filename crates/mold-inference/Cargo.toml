@@ -20,7 +20,7 @@ name = "mold_inference"
 [features]
 default = []
 # Narrow native exception: pinned xatlas UV unwrapping, with Rust inference.
-mesh-texture = ["dep:cc"]
+mesh-texture = ["dep:cc", "mold-core/mesh-texture"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",

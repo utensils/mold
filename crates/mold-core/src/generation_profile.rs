@@ -2158,17 +2158,16 @@ fn mesh_capabilities_profile() -> MeshCapabilitiesProfile {
         },
         target_faces_min: validation::MESH_MIN_TARGET_FACES,
         target_faces_max: validation::MESH_MAX_TARGET_FACES,
-        // Geometry only until the paint bundle ships. Advertised as `Hidden`
-        // with its reason rather than omitted, so a client shows why the
-        // control is missing instead of leaving a silent gap.
         texture: FeatureControlProfile {
-            mode: ControlMode::Hidden,
+            mode: if cfg!(feature = "mesh-texture") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            },
             required: false,
-            reason: Some(
-                "PBR texture generation is not available in this build; \
-                 omit mesh.texture to render geometry only"
-                    .to_string(),
-            ),
+            reason: (!cfg!(feature = "mesh-texture")).then(|| {
+                "PBR texture generation requires the mesh-texture build feature".to_string()
+            }),
         },
     }
 }
@@ -2892,7 +2891,14 @@ mod tests {
             mesh_caps.target_faces_max,
             validation::MESH_MAX_TARGET_FACES
         );
-        assert_eq!(mesh_caps.texture.mode, ControlMode::Hidden);
+        assert_eq!(
+            mesh_caps.texture.mode,
+            if cfg!(feature = "mesh-texture") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            }
+        );
     }
 
     /// Every raster and video recipe stays exactly as it was: no mesh block,
@@ -2976,18 +2982,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("mesh.target_faces"), "{error}");
-        let error = validate_request_against_generation_profile(
+        let textured = validate_request_against_generation_profile(
             &profile,
             &base(crate::types::MeshRequestOptions {
                 texture: Some(true),
                 ..Default::default()
             }),
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("texture generation is not available"),
-            "{error}"
         );
+        if cfg!(feature = "mesh-texture") {
+            textured.unwrap();
+        } else {
+            assert!(textured.unwrap_err().contains("mesh-texture build feature"));
+        }
     }
 
     /// An unadvertised format is refused by the ONE extracted check durable

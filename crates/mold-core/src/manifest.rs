@@ -48,6 +48,8 @@ pub fn hunyuan3d_uses_21_license(model: &str) -> bool {
 /// textures a mesh rather than generating one.
 pub const HUNYUAN3D_PAINT_FAMILY: &str = "hunyuan3d-paint";
 pub const HUNYUAN3D_PAINT_MANIFEST: &str = "hunyuan3d-paint";
+/// Untiled 4x upscaler required between paint diffusion and material baking.
+pub const HUNYUAN3D_PAINT_UPSCALER_MANIFEST: &str = "real-esrgan-x4plus:fp16";
 
 /// The tier a surface picks when the caller names no 3-D model.
 ///
@@ -96,6 +98,8 @@ pub enum ModelComponent {
     LowNoiseDistilledLora,
     T5Encoder,
     ClipEncoder,
+    /// A non-CLIP vision tower used for image conditioning.
+    VisionEncoder,
     T5Tokenizer,
     ClipTokenizer,
     ClipEncoder2,   // CLIP-G / OpenCLIP (SDXL)
@@ -443,6 +447,18 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
         manifest.name.as_str()
     };
     let sanitized_name = storage_name.replace(':', "-");
+
+    // Paint uses facebook/dinov2-giant in addition to the CLIP tower shipped
+    // inside Tencent's bundle. Give the external tower an unambiguous path:
+    // both repositories publish a file named `model.safetensors`, and the
+    // runtime must never silently substitute CLIP's 1280-wide tensors for
+    // DINO's 1536-wide tensors.
+    if manifest.name == HUNYUAN3D_PAINT_MANIFEST && file.hf_repo == "facebook/dinov2-giant" {
+        return PathBuf::from("shared")
+            .join(HUNYUAN3D_PAINT_FAMILY)
+            .join("dinov2-giant")
+            .join(&file.hf_filename);
+    }
 
     // H3's official and Comfy transformers use the same task architecture
     // config. Keep one copy per task across layouts while the task-specific
@@ -5069,7 +5085,8 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: HUNYUAN3D_21_MODEL.to_string(),
             family: HUNYUAN3D_FAMILY.to_string(),
-            description: "Hunyuan3D 2.1 — image-to-3D mesh with the 3.3B MoE shape model".to_string(),
+            description: "Hunyuan3D 2.1 — image-to-3D mesh with the 3.3B MoE shape model"
+                .to_string(),
             files: vec![ModelFile {
                 hf_repo: "Comfy-Org/hunyuan3D_2.1_repackaged".to_string(),
                 hf_filename: "hunyuan_3d_v2.1.safetensors".to_string(),
@@ -5086,21 +5103,14 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
         // checkpoint, never a default model, and never resolves to a
         // `ModelPaths`. Same shape as the PuLID bundles.
         //
-        // NOTE: the paint ENGINE is not implemented. These weights install and
-        // satisfy the 2.1 licence gate, but nothing renders with them yet. The
-        // manifest exists now because the 2.1 terms are a SEPARATE document
-        // from the 2.0 shape terms, and a licence no manifest requires can be
-        // read on every surface and accepted on none.
-        //
         // Upstream ships a diffusers layout. The three `unet/*.py` modules and
         // `README.md` are deliberately NOT declared: mold never executes
         // upstream Python, so shipping it would be dead weight at best.
         ModelManifest {
             name: HUNYUAN3D_PAINT_MANIFEST.to_string(),
             family: HUNYUAN3D_PAINT_FAMILY.to_string(),
-            description:
-                "Hunyuan3D 2.1 PBR paint — albedo + metallic-roughness texturing weights (no engine yet)"
-                    .to_string(),
+            description: "Hunyuan3D 2.1 PBR paint — albedo + metallic-roughness texturing weights"
+                .to_string(),
             files: hunyuan3d_paint_files(),
             defaults: hunyuan3d_paint_defaults(),
             hidden: true,
@@ -5142,7 +5152,7 @@ fn hunyuan3d_paint_files() -> Vec<ModelFile> {
                 sha256,
             }
         };
-    vec![
+    let mut files = vec![
         file("model_index.json", ModelComponent::ModelConfig, 617, None),
         // Multiview diffusion UNet — 12 input channels, 6 views at 512.
         file(
@@ -5220,7 +5230,21 @@ fn hunyuan3d_paint_files() -> Vec<ModelFile> {
             342,
             None,
         ),
-    ]
+    ];
+    // Hunyuan Paint's active reference conditioning comes from this external
+    // DINOv2 Giant tower (`multiview_utils.py`), not from the 1280-wide CLIP
+    // image encoder bundled in the diffusers directory above. Keep both: the
+    // Tencent directory remains complete, while the runtime dependency is
+    // explicit and independently integrity-pinned.
+    files.push(ModelFile {
+        hf_repo: "facebook/dinov2-giant".to_string(),
+        hf_filename: "model.safetensors".to_string(),
+        component: ModelComponent::VisionEncoder,
+        size_bytes: 4_546_005_432,
+        gated: false,
+        sha256: Some("917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f"),
+    });
+    files
 }
 
 fn ltx_video_manifests() -> Vec<ModelManifest> {
@@ -5818,6 +5842,17 @@ pub fn auxiliary_manifests_for_request_with_family(
     family_hint: Option<&str>,
 ) -> Vec<&'static str> {
     let mut manifests = Vec::new();
+    let family = family_hint
+        .or_else(|| find_manifest(&request.model).map(|manifest| manifest.family.as_str()));
+    if request
+        .mesh
+        .as_ref()
+        .is_some_and(|mesh| mesh.texture == Some(true))
+        && family == Some(HUNYUAN3D_FAMILY)
+    {
+        manifests.push(HUNYUAN3D_PAINT_MANIFEST);
+        manifests.push(HUNYUAN3D_PAINT_UPSCALER_MANIFEST);
+    }
     if crate::identity::request_mentions_identity(request)
         && crate::identity::effective_id_weight(request) > 0.0
     {
@@ -7815,6 +7850,29 @@ mod tests {
         request.id_image = None;
         request.id_weight = None;
         assert!(auxiliary_manifests_for_request(&request).is_empty());
+    }
+
+    #[test]
+    fn textured_mesh_request_names_both_paint_dependencies() {
+        let mut request = crate::test_support::minimal_generate_request("hunyuan3d-2.1:fp16");
+        request.mesh = Some(crate::types::MeshRequestOptions {
+            texture: Some(true),
+            texture_resolution: Some(2048),
+            ..Default::default()
+        });
+        assert_eq!(
+            auxiliary_manifests_for_request(&request),
+            vec![HUNYUAN3D_PAINT_MANIFEST, HUNYUAN3D_PAINT_UPSCALER_MANIFEST]
+        );
+        request.mesh.as_mut().unwrap().texture = Some(false);
+        assert!(auxiliary_manifests_for_request(&request).is_empty());
+
+        request.mesh.as_mut().unwrap().texture = Some(true);
+        request.model = "hf:owner/custom-shape".into();
+        assert_eq!(
+            auxiliary_manifests_for_request_with_family(&request, Some(HUNYUAN3D_FAMILY)),
+            vec![HUNYUAN3D_PAINT_MANIFEST, HUNYUAN3D_PAINT_UPSCALER_MANIFEST]
+        );
     }
 
     /// The bundle follows the checkpoint's family: an SDXL identity request

@@ -84,6 +84,9 @@ pub struct FrozenEngineConfig {
     /// memory demand. Populated, these four paths are verified local below
     /// exactly like the selected encoder artifacts.
     pub identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
+    /// Exact Hunyuan3D paint runtime weights materialized for a textured mesh
+    /// request before scheduler admission.
+    pub paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
     /// Exact contract-only MiniMax H3 admission/factory authority. This is
     /// `None` for every runnable family and cannot activate H3 by itself.
     pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
@@ -146,6 +149,7 @@ impl FrozenEngineConfig {
             selected_gemma_paths: Vec::new(),
             selected_umt5_path: None,
             identity_assets: None,
+            paint_assets: None,
             h3_factory_authority: None,
             runtime_environment,
             // Resolved from the FAMILY, not the image default: a video
@@ -461,6 +465,9 @@ pub fn create_engine_with_pool(
             mold_core::identity::identity_family_with_hint(&model_name, family_hint.as_deref())
                 .and_then(|family| mold_core::pulid_assets::pulid_paths_for(config, family));
     }
+    if frozen.paint_assets.is_none() {
+        frozen.paint_assets = mold_core::hunyuan3d_paint_assets::paint_paths(config);
+    }
     create_engine_with_frozen_config(
         model_name,
         paths,
@@ -604,6 +611,10 @@ where
             &assets.face_parser_source,
         ]
     });
+    let paint_paths = frozen
+        .paint_assets
+        .iter()
+        .flat_map(|assets| [&assets.unet, &assets.vae, &assets.dino, &assets.upscaler]);
     for path in frozen
         .selected_t5_path
         .iter()
@@ -612,6 +623,7 @@ where
         .chain(frozen.selected_gemma_paths.iter())
         .chain(frozen.selected_umt5_path.iter())
         .chain(identity_paths)
+        .chain(paint_paths)
     {
         if !path.is_file() {
             bail!(
@@ -911,7 +923,8 @@ where
                 paths,
                 load_strategy,
                 gpu_ordinal,
-            ),
+            )
+            .with_paint_assets(frozen.paint_assets.clone()),
         )),
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,

@@ -1383,3 +1383,40 @@ it is not a completion checklist with assumed passes.
 - This qualifies the standalone PBR container. Wiring it to the durable paint
   engine and client publication path remains part of the broader P7/P14 work;
   this checkpoint does not claim end-to-end image-to-textured-GLB completion.
+
+### Native paint runtime integration
+
+- `mesh-texture` builds now advertise and admit the existing profile-driven
+  texture controls; feature-off builds refuse texture generation before model
+  acquisition. Textured Hunyuan3D requests freeze the paint UNet, VAE, external
+  DINOv2 Giant tower and RealESRGAN paths into the execution identity and make
+  each artifact visible to dependency preview and integrity checking.
+- The first retained end-to-end attempt correctly failed before inference when
+  the manifest selected Tencent's bundled 1,280-wide CLIP vision encoder for a
+  loader expecting DINO's 1,536-wide namespace (`paint-runtime-e2e-v1.log`).
+  The manifest now declares `facebook/dinov2-giant/model.safetensors` explicitly;
+  `paint-dino-manifest-verify-v1.log` records mold's full-bundle integrity pass,
+  including SHA-256
+  `917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f`
+  for the 4,546,005,432-byte DINO file.
+- The corrected full native runtime on isolated physical GPU 3 passes in
+  728.79 seconds (`paint-runtime-e2e-v3.log`). It unwraps the retained 2.1 mesh,
+  selects and renders paint views, runs DINO/VAE/UNet/VAE and RealESRGAN, bakes
+  and fills both PBR maps, and writes `paint-runtime-e2e-v3/textured.glb` with
+  167,750 vertices, 218,448 faces and embedded 1,024-pixel base-color and
+  metallic/roughness textures. The GLB is 10,557,668 bytes with SHA-256
+  `a316683d1f167eaa516ad9f2851151f5420311ee2f55085e519ac86f4e9c327a`.
+- Two-second device telemetry is retained in `paint-runtime-e2e-v3-gpu.csv`.
+  The physical-device high-water mark was 37,432 MiB: lexical model drops do
+  not immediately return Candle allocator blocks to the driver. Admission now
+  reserves 40 GiB, leaving a measured 3,528 MiB margin; a focused execution-plan
+  regression pins the measurement and margin.
+- Khronos glTF Validator 2.0.0-dev.3.10 reports zero errors, warnings, infos or
+  hints for the runtime artifact. Blender 5.0.1 independently imports it,
+  identifies the base-color map as `sRGB` and the metallic/roughness map as
+  `Non-Color`, and renders the retained result in
+  `paint-runtime-e2e-v3/blender/chair-blender.png`.
+
+This proves the real-weight native paint engine and its container output. The
+campaign remains open: public CLI/durable-server execution, interruption and
+replay, every client surface, and P8-P15 still require their own evidence.

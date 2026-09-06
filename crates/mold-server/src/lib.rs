@@ -63,6 +63,7 @@ mod memory_preflight;
 pub mod metrics;
 pub mod model_cache;
 pub mod model_manager;
+mod paint_dependencies;
 pub mod queue;
 pub mod queue_journal;
 pub mod queue_media;

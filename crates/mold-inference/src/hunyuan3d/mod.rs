@@ -47,6 +47,8 @@ pub mod paint_positions;
 pub mod paint_projector;
 pub mod paint_raster;
 pub mod paint_reliability;
+#[cfg(feature = "mesh-texture")]
+pub mod paint_runtime;
 pub mod paint_sampler;
 pub mod paint_unet;
 pub mod paint_upscale;
