@@ -19,16 +19,16 @@ API. Patch Candle only when the change must alter a backend, storage primitive,
 or private implementation. Prefer an upstream contribution whenever the change
 is generally useful.
 
-| Capability | Owner | Reason |
-| --- | --- | --- |
-| LTX-Video model, sampler, and VAE | `mold-ai-candle` | Mold consumes and evolves this model; it uses public tensor and NN APIs. |
-| Stable Diffusion component configs | `mold-ai-candle` | These are Mold's single-file loading policy, not framework accessors. |
-| GGUF builder from in-memory `QTensor`s | `mold-ai-candle` | A small application adapter over public `QTensor` and `VarBuilder` APIs. |
-| Compact quantize-then-transfer helper | `mold-ai-candle` | Public APIs can move quantized bytes without retaining an extra dense GPU tensor. |
-| Native CUDA FP8 dtype and matmul | Candle compatibility patch | Requires backend dtype, storage, CUDA kernel, and cast changes. |
-| Stable Diffusion VAE mode and bounded attention | Candle compatibility patch | Changes Candle model internals; both are candidates for focused upstream PRs. |
-| Wuerstchen timestep dtype correction | Candle compatibility patch | Changes Candle model internals and is independently upstreamable. |
-| GGUF 5-D tensor cap raise | Candle compatibility patch | `GGUF_MAX_TENSOR_DIMS` is a private reader const; the video-model GGUF ecosystem (city96 converter lineage: Wan patch embeddings are Conv3d weights) legitimately emits 5-D tensors that n_dims-as-u32 permits. One-const change with a round-trip test; independently upstreamable. |
+| Capability                                      | Owner                      | Reason                                                                                                                                                                                                                                                                               |
+| ----------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| LTX-Video model, sampler, and VAE               | `mold-ai-candle`           | Mold consumes and evolves this model; it uses public tensor and NN APIs.                                                                                                                                                                                                             |
+| Stable Diffusion component configs              | `mold-ai-candle`           | These are Mold's single-file loading policy, not framework accessors.                                                                                                                                                                                                                |
+| GGUF builder from in-memory `QTensor`s          | `mold-ai-candle`           | A small application adapter over public `QTensor` and `VarBuilder` APIs.                                                                                                                                                                                                             |
+| Compact quantize-then-transfer helper           | `mold-ai-candle`           | Public APIs can move quantized bytes without retaining an extra dense GPU tensor.                                                                                                                                                                                                    |
+| Native CUDA FP8 dtype and matmul                | Candle compatibility patch | Requires backend dtype, storage, CUDA kernel, and cast changes.                                                                                                                                                                                                                      |
+| Stable Diffusion VAE mode and bounded attention | Candle compatibility patch | Changes Candle model internals; both are candidates for focused upstream PRs.                                                                                                                                                                                                        |
+| Wuerstchen timestep dtype correction            | Candle compatibility patch | Changes Candle model internals and is independently upstreamable.                                                                                                                                                                                                                    |
+| GGUF 5-D tensor cap raise                       | Candle compatibility patch | `GGUF_MAX_TENSOR_DIMS` is a private reader const; the video-model GGUF ecosystem (city96 converter lineage: Wan patch embeddings are Conv3d weights) legitimately emits 5-D tensors that n_dims-as-u32 permits. One-const change with a round-trip test; independently upstreamable. |
 
 Focused upstream submissions track each exit independently:
 
@@ -105,7 +105,7 @@ jobs. release-plz retains version PRs and tags with registry publishing disabled
 ## Compatibility revision lifecycle
 
 The current compatibility source is revision
-`744ae3b83cfac18db28107a353c449cc9b80d4ec` of `utensils/candle`, which contains
+`13022a3b3d8a0f5545e439e058e9e41a290d3da4` of `utensils/candle`, which contains
 the renamed `candle-core-mold` / `candle-nn-mold` / `candle-transformers-mold`
 packages every Mold cargo root pins. No manifest names a branch — the identity
 script rejects a `branch =` source outright — so moving the compatibility source

@@ -54,8 +54,10 @@ pub(crate) const AUDIO_BRANCH_RUN: &str = "ltx2 audio branch=run";
 pub(crate) const AUDIO_BRANCH_SKIPPED: &str = "ltx2 audio branch=skipped";
 
 /// The shared attention policy's explicit request line; the per-render path proves execution.
-pub(crate) const DISPATCHER_BACKEND_MATH: &str = "attention backend policy resolved requested=Some(Math)";
-pub(crate) const DISPATCHER_BACKEND_FLASH: &str = "attention backend policy resolved requested=Some(Flash)";
+pub(crate) const DISPATCHER_BACKEND_MATH: &str =
+    "attention backend policy resolved requested=Some(Math)";
+pub(crate) const DISPATCHER_BACKEND_FLASH: &str =
+    "attention backend policy resolved requested=Some(Flash)";
 
 /// Every log line a matrix row may expect, verbatim.
 pub(crate) const KNOWN_PROVENANCE_LINES: &[&str] = &[
