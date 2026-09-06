@@ -4,8 +4,9 @@
 
 Candle candidate `bedc287458e0d890dd6ed1c298c99e991e066fe1` passes the isolated
 whole-1024 decoder comparison and visual check below. The Mold integration
-passes targeted crate validation; the proactive latent-120 cap and existing Candle
-pin remain in place. This record does not qualify 1152-pixel decoding or Wan.
+pins that revision and replaces the proactive latent-120 cap with Metal-only
+completion and OOM recovery. Targeted integration checks pass. This record
+does not qualify 1152-pixel decoding or Wan.
 
 The candidate bounds Metal im2col and GEMM-result workspaces rather than
 changing the VAE's image tiling or receptive field. Spatial partitioning follows
@@ -111,16 +112,15 @@ and compilation and are not decoder-only benchmarks.
 its public mode path and cached environment resolution. Existing callers keep
 the infallible cleanup API. Z-Image selects the new fallible policy only when
 the actual VAE device is Metal, and completes each attempt before returning
-pixels. This currently applies where the retained proactive cap does not select
-the legacy tiled branch. Only recognized OOMs authorize retry. Repeated Metal cleanup OOMs are
-consumed; unrelated errors propagate. Eager CPU fallback remains GPU-only and
-loads fresh F32 VAE weights from the original latent.
+pixels. Only recognized OOMs authorize retry. Repeated Metal cleanup OOMs
+are consumed; unrelated errors propagate. Eager CPU fallback remains GPU-only
+and loads fresh F32 VAE weights from the original latent.
 
 CPU/CUDA retain their previous decode ordering and environment-policy behavior,
 including CUDA's direct CPU fallback and cleanup error propagation. Tests use
 injected decode/completion/cleanup failures without creating GPU devices.
-Validation passes 11 recovery tests, 20 VAE-tiling tests and 39 Z-Image pipeline
+Validation passes 11 recovery tests, 17 VAE-tiling tests and 35 Z-Image pipeline
 tests, plus Metal-enabled crate Clippy, workspace Rust formatting, CI routing
 and the single-Candle-identity contract. Independent review found no remaining
-source blocker. The coordinated Candle publication/pin, cap removal, final
+source blocker. Candle publication is tracked in utensils/candle#12. Final
 review and exact-head CI remain required before shipping.

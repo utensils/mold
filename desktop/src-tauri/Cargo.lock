@@ -725,7 +725,7 @@ dependencies = [
 [[package]]
 name = "candle-core-mold"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -756,7 +756,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "anyhow",
  "candle-core-mold",
@@ -767,7 +767,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "cudaforge",
 ]
@@ -775,7 +775,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels-mold"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "block2",
  "half",
@@ -790,7 +790,7 @@ dependencies = [
 [[package]]
 name = "candle-nn-mold"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "candle-core-mold",
  "candle-metal-kernels-mold",
@@ -807,7 +807,7 @@ dependencies = [
 [[package]]
 name = "candle-onnx"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "candle-core-mold",
  "candle-nn-mold",
@@ -818,7 +818,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers-mold"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "byteorder",
  "candle-core-mold",
@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec"
+source = "git+https://github.com/utensils/candle.git?rev=bedc287458e0d890dd6ed1c298c99e991e066fe1#bedc287458e0d890dd6ed1c298c99e991e066fe1"
 dependencies = [
  "ug",
  "ug-cuda",

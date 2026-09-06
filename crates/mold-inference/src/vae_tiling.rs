@@ -52,9 +52,7 @@ use candle_core::{DType, Device, Tensor};
 /// ComfyUI's *OOM-fallback* `decode_tiled_` (`comfy/sd.py`), producing a
 /// 512×512 image tile through an 8× VAE. This default exists for the
 /// reactive OOM retry, where minimizing per-tile memory matters more than
-/// decode count. Proactive tiling (a correctness cap, not an OOM) should use
-/// [`proactive_tile_config`] instead, which sizes the fewest cap-fitting
-/// tiles and runs a single pass.
+/// decode count.
 #[derive(Debug, Clone, Copy)]
 pub struct TileConfig {
     /// Tile edge length in latent space. The VAE upsample factor multiplies
@@ -232,49 +230,6 @@ where
 /// to keep the decode count bounded — for very small latents (sub-256² gen)
 /// the full decode shouldn't OOM in the first place, so this floor is
 /// preferred over collapsing to micro-tiles.
-/// Tile configuration for a *proactive* tiled decode, where tiling exists to
-/// stay under a measured per-axis correctness cap rather than to recover from
-/// an OOM.
-///
-/// Sizes the tile with the fewest-tiles policy (the same one
-/// `ltx2::tiling::axis_tiling` uses): split each axis into the minimum number
-/// of tiles that all fit `cap`, then size the tile so the grid covers the
-/// latent with the requested overlap. Single pass — the seam-cancellation
-/// offset passes exist for OOM-fallback quality on tiny tiles and cost a
-/// linear multiple of the whole decode; a 2×2 grid of near-cap tiles with a
-/// normalized feathered blend does not need them.
-pub(crate) fn proactive_tile_config(
-    cap: usize,
-    overlap: usize,
-    lat_h: usize,
-    lat_w: usize,
-) -> TileConfig {
-    debug_assert!(overlap < cap, "overlap {overlap} must be below cap {cap}");
-    let lat = lat_h.max(lat_w);
-    if lat <= cap || cap <= overlap {
-        // Nothing to split (or a degenerate cap): one tile covering the
-        // latent. decode_tiled short-circuits this into a single decode.
-        return TileConfig {
-            tile_size: cap.max(overlap + 1),
-            overlap,
-            offsets: 1,
-        };
-    }
-    // Fewest tiles n whose every tile fits `cap` after accounting for the
-    // shared overlap, then the smallest tile that still covers the axis:
-    // n·tile - (n-1)·overlap >= lat. The closed form for n (not a naive
-    // ceil(lat/cap)) is what keeps tile <= cap at every size — at lat 240,
-    // 2 tiles would need tile 128 > cap.
-    let n = (lat - overlap).div_ceil(cap - overlap);
-    let tile_size = (lat + (n - 1) * overlap).div_ceil(n);
-    debug_assert!(tile_size <= cap);
-    TileConfig {
-        tile_size,
-        overlap,
-        offsets: 1,
-    }
-}
-
 pub(crate) fn shrink_tile_for_latent(
     mut cfg: TileConfig,
     lat_h: usize,
@@ -920,92 +875,6 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         assert!(max_diff < 1e-3, "single-tile decode mismatch: {max_diff}");
-    }
-
-    #[test]
-    fn proactive_config_at_1024_is_a_2x2_single_pass() {
-        // Latent 128 with a 120-per-axis cap must become a 2×2 grid of
-        // 72-tiles with the standard 16 overlap and no offset passes: 4
-        // decode calls, 1.27× the whole-decode work, versus the 27 calls /
-        // 6.75× the previous 64/16/3 config cost.
-        let cfg = proactive_tile_config(120, 16, 128, 128);
-        assert_eq!(
-            (cfg.tile_size, cfg.overlap, cfg.offsets),
-            (72, 16, 1),
-            "expected fewest-tiles sizing from the cap"
-        );
-        let starts = axis_starts(128, cfg.tile_size, cfg.tile_size - cfg.overlap, 0);
-        assert_eq!(
-            starts,
-            vec![0, 56],
-            "grid must be exactly two tiles per axis"
-        );
-    }
-
-    #[test]
-    fn proactive_config_tiles_fit_cap_and_cover_every_latent() {
-        // The closed form must keep every tile at or under the cap and cover
-        // the full axis at any latent size — a naive ceil(lat/cap) split
-        // breaks at latent 240, where 2 tiles would need size 128 > cap.
-        for lat in [121usize, 128, 160, 192, 240, 256, 320, 512] {
-            let cfg = proactive_tile_config(120, 16, lat, lat);
-            assert!(
-                cfg.tile_size <= 120,
-                "latent {lat}: tile {} exceeds the correctness cap",
-                cfg.tile_size
-            );
-            assert!(
-                cfg.overlap < cfg.tile_size,
-                "latent {lat}: degenerate overlap"
-            );
-            assert_eq!(
-                cfg.offsets, 1,
-                "latent {lat}: proactive tiling is single-pass"
-            );
-            let starts = axis_starts(lat, cfg.tile_size, cfg.tile_size - cfg.overlap, 0);
-            let last = *starts.last().unwrap();
-            assert!(
-                last + cfg.tile_size >= lat,
-                "latent {lat}: grid ends at {} and leaves a gap",
-                last + cfg.tile_size
-            );
-            // Adjacent tiles must genuinely overlap so the blend has a seam
-            // region to feather.
-            for pair in starts.windows(2) {
-                assert!(
-                    pair[0] + cfg.tile_size > pair[1],
-                    "latent {lat}: tiles at {} and {} do not overlap",
-                    pair[0],
-                    pair[1]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn proactive_config_decodes_exactly_four_tiles_at_1024() {
-        use std::cell::Cell;
-        let latents = random_latent(16, 128, 128);
-        let cfg = proactive_tile_config(120, 16, 128, 128);
-        let calls = Cell::new(0usize);
-        let counting_decode = |t: &Tensor| {
-            calls.set(calls.get() + 1);
-            synthetic_decode(t)
-        };
-        let full = synthetic_decode(&latents).unwrap();
-        let tiled = decode_tiled(&latents, counting_decode, &cfg).unwrap();
-        assert_eq!(calls.get(), 4, "2×2 single-pass grid must decode 4 tiles");
-        let full_data: Vec<f32> = full.flatten_all().unwrap().to_vec1().unwrap();
-        let tiled_data: Vec<f32> = tiled.flatten_all().unwrap().to_vec1().unwrap();
-        let max_diff = full_data
-            .iter()
-            .zip(tiled_data.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
-        assert!(
-            max_diff < 1e-3,
-            "proactive tiled decode mismatch: {max_diff}"
-        );
     }
 
     #[test]
