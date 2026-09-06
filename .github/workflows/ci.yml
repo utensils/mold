@@ -68,6 +68,8 @@ jobs:
               - 'scripts/tests/local-multi-gpu-qualification-contract.sh'
               - 'scripts/tests/local_multi_gpu_qualification_test.py'
               - 'docs/qualification/local-multi-gpu-report.schema.json'
+              - 'scripts/minimax-h3-metal-preflight.py'
+              - 'scripts/tests/minimax-h3-metal-preflight-test.py'
               - 'scripts/minimax-h3-conformance.py'
               - 'scripts/tests/minimax-h3-conformance-contract.py'
               - 'scripts/run-minimax-h3-gpu-conformance.py'
@@ -574,6 +576,9 @@ jobs:
       - name: Test local multi-GPU qualification contract
         if: env.RUN_RUST_SUITE == 'true'
         run: bash scripts/tests/local-multi-gpu-qualification-contract.sh
+      - name: Test offline MiniMax H3 Metal preflight
+        if: env.RUN_RUST_SUITE == 'true'
+        run: python3 scripts/tests/minimax-h3-metal-preflight-test.py
       - name: Test MiniMax H3 conformance contract
         if: env.RUN_RUST_SUITE == 'true'
         run: python3 scripts/tests/minimax-h3-conformance-contract.py

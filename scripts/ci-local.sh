@@ -296,6 +296,7 @@ if wants contracts; then
       step "contracts: ${contract}" bash "$script"
     fi
   done
+  step "contracts: offline H3 Metal preflight" python3 scripts/tests/minimax-h3-metal-preflight-test.py
   step "contracts: CUDA PTX parser" python3 scripts/tests/cuda-ptx-parser-contract.py
   step "contracts: local multi-GPU qualification" \
     bash scripts/tests/local-multi-gpu-qualification-contract.sh
