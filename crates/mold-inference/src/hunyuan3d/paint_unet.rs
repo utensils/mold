@@ -122,7 +122,7 @@ impl PaintUnet {
     pub fn new(kind: PaintBlockKind, vb: VarBuilder) -> Result<Self> {
         Self::with_widths(kind, [320, 640, 1280, 1280], [5, 10, 20, 20], vb)
     }
-    fn with_widths(
+    pub(super) fn with_widths(
         kind: PaintBlockKind,
         channels: [usize; 4],
         heads: [usize; 4],

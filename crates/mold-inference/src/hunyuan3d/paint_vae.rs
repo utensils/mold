@@ -80,6 +80,8 @@ mod tests {
         let fixture = std::env::var("MOLD_PAINT_VAE_ORACLE")?;
         let output = std::path::PathBuf::from(std::env::var("MOLD_PAINT_VAE_RESULT")?);
         std::fs::create_dir(&output)?;
+        let scope = crate::conv_policy::ConvScope::for_family("hunyuan3d");
+        let dispatch_before = candle_core::cudnn_policy::dispatch_count();
         let device = Device::new_cuda(0)?;
         let tensors = candle_core::safetensors::load(fixture, &device)?;
         let dtype = tensors["pixels"].dtype();
@@ -110,6 +112,17 @@ mod tests {
             ]),
             output.join("actual.safetensors"),
         )?;
+        let dispatched = candle_core::cudnn_policy::dispatch_count() - dispatch_before;
+        eprintln!(
+            "paint VAE convolution backend={:?}, cuDNN dispatches={dispatched}",
+            scope.backend()
+        );
+        if scope.backend() == crate::conv_policy::ConvBackend::Cudnn {
+            ensure!(
+                dispatched > 0,
+                "cuDNN requested but no convolution dispatched"
+            );
+        }
         let (latent_tolerance, decode_tolerance, rms_tolerance) = if dtype == DType::F16 {
             (0.01, 0.05, 0.005)
         } else {

@@ -555,3 +555,50 @@ retained as `main-sync-{prompting,profiles,validation,chain,hunyuan}-v1.log`.
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification
 gates remain open. A successful 2.1 render does not close those gates. This ledger will record measured results as each gate is exercised;
 it is not a completion checklist with assumed passes.
+
+
+## Request-owned paint denoising checkpoint
+
+- `paint_denoiser.rs` joins the complete main/reference networks, projector,
+  learned material text, Rust position pyramid, guidance and fifteen-step UniPC.
+  The strict loader consumes the entire installed checkpoint. Prepared conditions
+  borrow their exact loaded owner, preventing cache reuse with different weights;
+  geometry is repeated for both materials and all three guidance branches, while
+  the first two DINO inputs alone are zeroed. Cancellation is checked before
+  preparing conditions and after every sampling step.
+- `paint-denoiser-red-v1.log` records the initial failing wrapper test. The
+  standalone tiny F32 network passes (`paint-denoiser-green-v1.log`). Review found
+  that repeated timestep outputs needed iteration-qualified filenames; the test
+  now requires a new output directory and retains every pass separately.
+- `paint-denoiser-installed-cuda-v1.log` passes installed-weight F32 conditioning,
+  all sixteen reference caches, forwards at 500/400/500, cancellation at callbacks
+  zero and two, and an independent complete fifteen-step guided trajectory after
+  cancellation. Final maximum error is .0000057816505, RMS .0000014784437. Original
+  bounds remain maximum 1e-4 / RMS 1e-5. Capture and tensors are retained under
+  `paint-denoiser-installed-oracle-v1/` and `paint-denoiser-installed-candle-v1/`.
+- The tiny random-weight guided trajectory **fails** those same bounds late in
+  sampling: final maximum .00035363436 / RMS .00006857673
+  (`paint-denoiser-guided-cuda-v1.log`). Its conditioning and individual forwards
+  pass. Independent source review found no omitted initial-noise scale, model
+  input scaling, timestep, guidance or cache-reset operation. This stress case
+  remains an open numerical gate; installed-weight success does not erase it.
+- The default CPU Hunyuan suite passes 183 tests with two ignored hardware tests
+  (`paint-denoiser-all-cpu-v1.log`). CPU warnings-denied Clippy including
+  `mesh-texture` passes (`paint-denoiser-clippy-v1.log`), as does the CUDA/cuDNN
+  test build (`paint-denoiser-clippy-cuda-v1.log`). Full six-view F16 guided
+  trajectory qualification is running separately and is not claimed here.
+
+## Rust cuDNN paint VAE diagnostic
+
+- The ignored VAE qualification test now uses the existing family-scoped
+  convolution policy and records the actual thread-local cuDNN dispatch count.
+  A requested cuDNN comparison refuses to pass with zero dispatches. The small
+  64-pixel fixture hits that guard (`paint-vae-cudnn-cuda-v1.log`), because the
+  fork's convolution size threshold keeps it on im2col.
+- The real 512-pixel fixture executes 72 cuDNN convolutions and **fails**, with
+  sampled latent maximum .168396 / RMS .0030051953690470204
+  (`paint-vae-cudnn-real512-cuda-v1.log`). This is worse than the retained im2col
+  result. The fork currently uses an F16 convolution compute descriptor for F16
+  input; its relationship to Torch's accumulation policy is under investigation.
+  No production convolution policy or tolerance has changed. All tensors and
+  failed diagnostics are retained.
