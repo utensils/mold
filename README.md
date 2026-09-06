@@ -185,6 +185,9 @@ Use `mold system metal-memory status` to inspect this Mac, or `mold gpu list --j
 for a running host. Explicit root-only `set <MiB>` / `reset` commands support an
 optional boot policy with `--persist`. See the [Metal memory guide](website/guide/metal-memory.md)
 for budget accounting, local-only administration and rollback semantics.
+Z-Image's Metal whole-decode path retries with tiles on memory errors and
+preserves the eager CPU fallback. CPU/CUDA decode ordering is unchanged; see
+the [VAE qualification record](docs/qualification/zimage-metal-vae.md).
 
 ## Project
 
