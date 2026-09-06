@@ -125,7 +125,12 @@ struct Projections {
     out: candle_nn::Linear,
 }
 
-fn linear(vb: VarBuilder, input: usize, output: usize, bias: bool) -> Result<candle_nn::Linear> {
+pub(super) fn linear(
+    vb: VarBuilder,
+    input: usize,
+    output: usize,
+    bias: bool,
+) -> Result<candle_nn::Linear> {
     Ok(candle_nn::Linear::new(
         vb.get((output, input), "weight")?.to_dtype(DType::F32)?,
         if bias {
@@ -136,7 +141,7 @@ fn linear(vb: VarBuilder, input: usize, output: usize, bias: bool) -> Result<can
     ))
 }
 
-fn projected(layer: &candle_nn::Linear, input: &Tensor) -> Result<Tensor> {
+pub(super) fn projected(layer: &candle_nn::Linear, input: &Tensor) -> Result<Tensor> {
     // Torch includes bias in float32 accumulation, then rounds the output once.
     layer
         .forward(&input.to_dtype(DType::F32)?)?

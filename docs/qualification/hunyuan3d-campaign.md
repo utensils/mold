@@ -319,6 +319,35 @@ loader without replacing network or rendering computations.
   `paint-attention-pretrained-candle-v1/`. This does not yet qualify the complete
   transformer block, full spatial attention sizes or whole denoiser.
 
+## Complete paint transformer block checkpoint
+
+- `paint_block.rs` ports the complete `Basic2p5DTransformerBlock` from Tencent
+  `modules.py:273-707`: material self-attention, albedo-query reference attention,
+  multiview attention, text and DINO attention, and GEGLU feed-forward. The first
+  three branches share the original norm1; text and DINO share norm2. The dual
+  reference network returns its pre-attention norm1 cache. Independent source
+  review confirmed the layout and ordering.
+- The executable capture uses the unchanged upstream wrapper and Diffusers 0.30
+  BasicTransformerBlock. Synthetic weights make all branches nonzero. The
+  initial identity baseline failed (`paint-block-red-v1.log`). Review found that
+  per-batch reference scales needed the scalar path's finite-value check; its
+  failing regression is retained in `paint-block-scales-red-v1.log` and the fix
+  rejects NaN and both infinities before attention.
+- `paint-block-hunyuan-tests-v2.log` passes 171 Hunyuan tests with one hardware
+  test ignored. Coverage includes one/three views, both networks and dtypes,
+  scalar and per-batch scales, zero-reference suppression, three CFG batches with
+  `[0,1,1]` scales, and cache independence from changed text conditioning.
+  Warnings-denied Clippy passes in `paint-block-clippy-v2.log`.
+- The installed checkpoint's complete first down-block passes on CUDA in
+  `paint-block-pretrained-cuda-v2.log`: one/six views, production head width 64,
+  DINO context length 1,028, and the same scaling/CFG cases. Predeclared complete
+  block bounds are float32 maximum 1e-4 / RMS 1e-5 and float16 maximum .02 /
+  RMS .002. Captures, hashes and outputs are retained in
+  `paint-block-pretrained-oracle-v2/` and `paint-block-pretrained-candle-v2/`;
+  previous captures and runs remain retained. Wider block widths, full spatial
+  sizes, UNet convolution/resampling, scheduling and end-to-end paint remain
+  separate open gates.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

@@ -50,3 +50,11 @@ two batches, two materials and three views expose the reference processor's
 concatenate-values-before-head-reshape ordering. Its script also captures installed
 weights at production dimensions; those larger files stay in the campaign
 evidence directory and are never checked in as synthetic fixtures.
+
+`paint-block.safetensors` captures Tencent's unchanged complete paint transformer
+wrapper around Diffusers 0.30's BasicTransformerBlock. Synthetic weights make
+every residual branch nonzero. Both main/reference networks, one/three views,
+float32/float16, per-batch/scalar reference scales and three CFG batches with
+`[0,1,1]` scales are covered. The reference network's cached norm1 is captured
+separately. Regenerate with `scripts/capture-hunyuan3d-paint-block.py` without
+`--checkpoint`; preserve the original capture and metadata in campaign evidence.
