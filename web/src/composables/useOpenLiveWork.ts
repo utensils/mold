@@ -5,23 +5,19 @@ import { selectedQueueGeneration } from "@studio/api/generationSelection";
 import type { OutputMetadata } from "../types";
 import type { HostRouting } from "./useHostRouting";
 import { setGenerationHandoff } from "./useGenerationHandoff";
-import { setSequenceHandoff } from "./useSequenceHandoff";
 import { toast } from "../lib/toasts";
 
-/** Opens server-owned work in the web surface that can inspect or resume it. */
+/**
+ * Opens server-owned work in the web surface that can inspect or resume it.
+ *
+ * A server-side chain row (a long video another client is auto-chaining, or a
+ * `mold run --script` job) has no web surface any more: it falls through to
+ * its machine's page rather than pretending Create can reattach to it.
+ */
 export function useOpenLiveWork(routing: HostRouting) {
   const router = useRouter();
 
   return async (row: FleetActiveWork) => {
-    if (row.kind === "sequence" || row.execution === "chain") {
-      setSequenceHandoff({
-        kind: "inspect",
-        hostId: row.hostId,
-        jobId: row.id,
-      });
-      await router.push("/create");
-      return;
-    }
     if (row.kind === "generation") {
       const host = routing.hosts.value.find(
         (candidate) => candidate.id === row.hostId,

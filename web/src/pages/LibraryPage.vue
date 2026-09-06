@@ -46,18 +46,7 @@ import {
   loadGalleryThumbnailSize,
   saveGalleryThumbnailSize,
 } from "@studio/lib/galleryThumbnailSize";
-import {
-  ApiHttpError,
-  deleteGalleryImage,
-  fetchModels,
-  getChainJob,
-} from "../api";
-import {
-  planSequenceReuse,
-  sequenceEditAvailability,
-  sequenceGoneMessage,
-  sequenceHostUnreachableMessage,
-} from "@studio/lib/sequenceReuse";
+import { deleteGalleryImage, fetchModels } from "../api";
 import {
   tagKey,
   trashRetentionSummary,
@@ -68,7 +57,6 @@ import {
   type OrganizationMutation,
 } from "@studio/lib/libraryOrganization";
 import { defaultSourceFitPolicy } from "@studio/lib/sourceFit";
-import { useChainJobs } from "../composables/useChainJobs";
 import { blobToBase64 } from "../lib/base64";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
 import {
@@ -141,7 +129,6 @@ import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
-import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import LibraryChipRow from "../components/library/LibraryChipRow.vue";
 import CollectionsShelf from "../components/library/CollectionsShelf.vue";
 import CollectionPicker, {
@@ -149,8 +136,6 @@ import CollectionPicker, {
 } from "../components/library/CollectionPicker.vue";
 import TagEditor from "../components/library/TagEditor.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
-import { setSequenceHandoff } from "../composables/useSequenceHandoff";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
@@ -237,9 +222,6 @@ const favoritesOnly = ref(false);
 const tagFilter = ref<string[]>([]);
 
 const form = useGenerateForm();
-const draft = useSequenceDraftStore();
-draft.hydrate();
-const chainJobs = useChainJobs();
 const route = useRoute();
 const router = useRouter();
 
@@ -358,36 +340,6 @@ function clearOrganizationFilters() {
   favoritesOnly.value = false;
   tagFilter.value = [];
   syncOrganizationToUrl();
-}
-
-// History drawer state lives in the URL (?panel=history), so the Create
-// activity digest can deep-link straight to its Sequences lens.
-const historyOpen = computed(() => route.query.panel === "history");
-function openHistory() {
-  void router.push({
-    query: { ...route.query, panel: "history", tab: "sequences" },
-  });
-}
-function closeHistory() {
-  const query = { ...route.query };
-  delete query.panel;
-  delete query.tab;
-  void router.replace({ query });
-}
-/** Re-enter a durable sequence in Create: the job is watched (or edited)
- *  there, never in a Library drawer. */
-function onOpenSequence(payload: {
-  hostId: string;
-  jobId: string;
-  edit: boolean;
-}) {
-  closeHistory();
-  setSequenceHandoff({
-    kind: payload.edit ? "edit" : "inspect",
-    hostId: payload.hostId,
-    jobId: payload.jobId,
-  });
-  void router.push({ path: "/create", query: { output: "sequence" } });
 }
 
 function syncSearchToUrl(value: string) {
@@ -1665,39 +1617,6 @@ function stepLightbox(delta: number) {
   selected.value = list[next] ?? null;
 }
 
-// ── Sequence prints ─────────────────────────────────────────────────────────
-// A print stitched from a sequence carries per-clip provenance
-// (`metadata.chain`) and, when a durable job produced it, that job's id.
-// Reuse settings follows a still. A sequence's primary action CONTINUES the
-// original durable job with its cached clips; Duplicate as new is the explicit
-// fresh-draft path.
-
-const isSequencePrint = (item: GalleryImage | null) =>
-  item !== null && planSequenceReuse(item.metadata) !== null;
-
-/** Render-time gate — never probes. See `sequenceEditAvailability`. */
-function canEditSequence(item: GalleryImage | null): boolean {
-  if (!item || !isSequencePrint(item)) return false;
-  const host = hostForEntry(item);
-  return (
-    sequenceEditAvailability({
-      chainJobId: item.metadata.chain_job_id,
-      hostId: host?.id ?? null,
-      knownJobIds: host
-        ? (chainJobs.state.byHost[host.id]?.jobs.map((job) => job.id) ?? null)
-        : null,
-    }) === "available"
-  );
-}
-
-function reuseSequence(item: GalleryImage) {
-  // Clips are clamped against the LIVE model's motion tail in Create, so the
-  // metadata travels and Create decides.
-  setSequenceHandoff({ kind: "reuse", metadata: item.metadata });
-  closeLightbox();
-  void router.push({ path: "/create", query: { output: "sequence" } });
-}
-
 let reuseEpoch = 0;
 
 async function restoreLibrarySource(
@@ -1866,23 +1785,6 @@ async function restoreLibrarySource(
 async function onReuse(item: GalleryImage) {
   const epoch = ++reuseEpoch;
   const retainedVersion = beginRetainedSourceReuseIntent();
-  if (isSequencePrint(item)) {
-    reuseSequence(item);
-    return;
-  }
-  // A rendered non-sequence print is always a One shot. Switch before
-  // restoring its metadata so Create's persisted Sequence mode and
-  // sequence-only model guard cannot replace the recorded settings.
-  draft.setOutput(
-    "single",
-    {
-      getPrompt: () => form.state.value.prompt,
-      setPrompt: (prompt) => (form.state.value.prompt = prompt),
-    },
-    25,
-  );
-  draft.stopEditing();
-  draft.lastSingleModel = null;
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
     models: models.value,
@@ -1899,34 +1801,6 @@ async function onReuse(item: GalleryImage) {
   await router.push({ name: "create" });
   if (epoch !== reuseEpoch) return;
   await restoreLibrarySource(item, epoch, retainedVersion, expected);
-}
-
-/**
- * Check once, on click. A 404 means the job was deleted or GC'd, so fall back
- * to the reuse path rather than leaving an enabled control as a dead end; any
- * other failure keeps the cached clips by refusing to downgrade.
- */
-async function onEditSequence(item: GalleryImage) {
-  const host = hostForEntry(item);
-  const jobId = item.metadata.chain_job_id;
-  if (!host || !jobId) return;
-  try {
-    await getChainJob(jobId, {
-      baseUrl: host.url,
-      ...(host.apiKey ? { apiKey: host.apiKey } : {}),
-    });
-  } catch (error) {
-    if (error instanceof ApiHttpError && error.status === 404) {
-      toast("info", sequenceGoneMessage(host.name));
-      reuseSequence(item);
-      return;
-    }
-    toast("error", sequenceHostUnreachableMessage(host.name));
-    return;
-  }
-  setSequenceHandoff({ kind: "edit", hostId: host.id, jobId });
-  closeLightbox();
-  void router.push({ path: "/create", query: { output: "sequence" } });
 }
 
 async function setAsSource(item: GalleryImage): Promise<boolean> {
@@ -2240,11 +2114,6 @@ function contextReuse() {
   closeContextMenu();
   if (item) onReuse(item);
 }
-async function contextEditSequence() {
-  const item = contextMenu.value?.item;
-  closeContextMenu();
-  if (item) await onEditSequence(item);
-}
 async function contextSource() {
   const item = contextMenu.value?.item;
   closeContextMenu();
@@ -2527,19 +2396,6 @@ onBeforeUnmount(() => {
         </label>
 
         <div class="gal__tools">
-          <button
-            v-if="scope === 'prints'"
-            type="button"
-            class="gal__icon"
-            data-test="open-history"
-            aria-label="History"
-            title="History"
-            :aria-pressed="historyOpen"
-            @click="openHistory"
-          >
-            <Icon name="history" :size="16" />
-          </button>
-
           <div
             v-if="scope === 'prints'"
             class="gal__viewtoggle"
@@ -2991,21 +2847,8 @@ onBeforeUnmount(() => {
         </button>
       </template>
       <template v-else>
-        <button
-          v-if="canEditSequence(contextMenu.item)"
-          type="button"
-          role="menuitem"
-          data-test="context-edit-sequence"
-          @click="contextEditSequence"
-        >
-          Edit sequence
-        </button>
         <button type="button" role="menuitem" @click="contextReuse">
-          {{
-            isSequencePrint(contextMenu.item)
-              ? "Duplicate as new"
-              : "Reuse settings"
-          }}
+          Reuse settings
         </button>
         <button type="button" role="menuitem" @click="contextSource">
           Use as source
@@ -3247,8 +3090,6 @@ onBeforeUnmount(() => {
       :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
       :muted="muted"
       :upscale-enabled="canUpscaleItem(selected)"
-      :is-sequence="isSequencePrint(selected)"
-      :can-edit-sequence="canEditSequence(selected)"
       :can-organize="canOrganizeEntry(selected)"
       :can-trash="allCopiesTrash(selected)"
       :in-trash="scope === 'trash'"
@@ -3261,7 +3102,6 @@ onBeforeUnmount(() => {
       @use-source="onUseAsSource"
       @upscale="onUpscale"
       @delete="onLightboxDelete"
-      @edit-sequence="onEditSequence"
       @rename="onRename"
       @favorite="onFavorite"
       @add-tag="onAddTag"
@@ -3288,12 +3128,6 @@ onBeforeUnmount(() => {
       @pause="transitionUpscale('pause')"
       @resume="transitionUpscale('resume')"
       @cancel="transitionUpscale('cancel')"
-    />
-
-    <HistoryDrawer
-      :open="historyOpen"
-      @close="closeHistory"
-      @open-sequence="onOpenSequence"
     />
   </div>
 </template>

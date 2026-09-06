@@ -8,7 +8,6 @@ import {
   watch,
 } from "vue";
 import { requestChoice, toast, undoableAction } from "../lib/toasts";
-import { useRoute, useRouter } from "vue-router";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
 import { REQUIRED_PROMPT_GUIDANCE } from "../components/create/emptyCanvasGuidance";
@@ -19,7 +18,6 @@ import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
 import IdentityPanel from "../components/create/IdentityPanel.vue";
 import FileUnderGroup from "../components/create/FileUnderGroup.vue";
-import SequenceOpeningImagePanel from "../components/create/SequenceOpeningImagePanel.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
@@ -28,7 +26,6 @@ import {
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { projectResolution } from "../components/create/resolutionProjection";
-import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import RemixModal from "../components/RemixModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -43,7 +40,6 @@ import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
 import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
-import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
@@ -54,10 +50,8 @@ import {
   resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
 import type { DevelopPhase } from "@ui/lib/grain";
-import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
-import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import {
   applyAuthoredPrompt,
@@ -100,52 +94,15 @@ import {
   wanRecipeFromWire,
 } from "@studio/lib/wanRecipe";
 import {
-  defaultClipFrames,
-  friendlySequenceError,
-  modelsForOutput,
-  modelSupportsSequence,
-  sequenceMotionTailFrames,
-  type OutputMode,
-} from "@studio/lib/sequence";
-import {
-  buildChainRequest,
-  chainScriptToClips,
-  type SequenceSharedParams,
-} from "@studio/lib/sequenceForm";
-import {
-  clampClipsToMotionTail,
-  isPrintOfChainJob,
-  planSequenceReuse,
-  sequenceReuseClampNote,
-  sequenceReuseNote,
-} from "@studio/lib/sequenceReuse";
-import {
-  pendingSequenceHandoff,
-  takeSequenceHandoff,
-} from "../composables/useSequenceHandoff";
-import {
   pendingGenerationHandoff,
   takeGenerationHandoff,
 } from "../composables/useGenerationHandoff";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
-  sequenceToVM,
-  type ActivityAction,
-  type ActivityJobVM,
-} from "@studio/lib/activity";
-import type { AmendRequest } from "@studio/lib/api/chainTypes";
-import {
-  ApiHttpError,
-  chainJobStagePreviewUrl,
   deleteGalleryImage,
   expandPrompt,
-  fetchChainLimits,
-  getChainJob,
   imageUrl,
   listGallery,
   upscaleStream,
-  type ChainLimits,
-  type StreamTarget,
 } from "../api";
 import { apiJsonTo } from "@studio/api/client";
 import {
@@ -174,13 +131,6 @@ import type {
   RemixDimension,
   RemixResponseWire,
 } from "../types";
-import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
-import { useChainJobs } from "../composables/useChainJobs";
-import { sequenceSharedParams } from "../lib/sequenceParams";
-import {
-  countLeadingCompletedStages,
-  normalizeServerChainScript,
-} from "@studio/lib/chainScriptWire";
 import {
   applyMetadataToForm,
   isQwenImageEditFamily,
@@ -339,8 +289,6 @@ function loadMuted(): boolean {
 }
 
 const form = useGenerateForm();
-const pageRoute = useRoute();
-const router = useRouter();
 const { status } = useStatusPoll();
 const routing = useHostRouting();
 const licenseAcceptance = useLicenseAcceptance();
@@ -879,62 +827,9 @@ function drawableFitPolicy(
   return policy;
 }
 
-// ── Output mode (mockup 1c/3a: a setting, not a place) ────────────────
-// The clip list and output mode live in the shared sequence draft store;
-// shared generation params stay in the live generate form and are read at
-// submit time — the fix for the old stale-inspector sequence bug.
-const draft = useSequenceDraftStore();
-draft.hydrate();
-const sequenceMode = computed(() => draft.output === "sequence");
 const durationRoutingRequest = computed(() =>
   form.toRequest(currentModel.value),
 );
-const promptBridge = {
-  getPrompt: () => form.state.value.prompt,
-  setPrompt: (v: string) => {
-    form.state.value.prompt = v;
-  },
-};
-
-function setOutput(mode: OutputMode) {
-  if (mode === "sequence" && draft.output !== "sequence") {
-    // Remember the single-mode model so switching back restores it.
-    draft.lastSingleModel = form.state.value.model || null;
-  }
-  // Leaving Sequence retires the reuse caveat with the rail it described.
-  if (mode !== "sequence") sequenceReuseNotice.value = null;
-  draft.setOutput(mode, promptBridge, sequenceDefaultFrames.value);
-}
-
-// Legacy `?mode=sequence` deep links redirect to `?output=sequence`; that
-// query is consumed ONCE (setOutput + strip) so the persisted draft output
-// wins on every later visit. Registered from onMounted — the handler leans
-// on computeds declared further down.
-function queryWithout(
-  query: Record<string, unknown>,
-  key: string,
-  extra?: Record<string, string>,
-): Record<string, string> {
-  const next: Record<string, unknown> = { ...query, ...(extra ?? {}) };
-  delete next[key];
-  return next as Record<string, string>;
-}
-
-function consumeOutputQuery(query: Record<string, unknown>) {
-  if (query.mode === "sequence") {
-    void router.replace({
-      query: queryWithout(query, "mode", { output: "sequence" }),
-    });
-    return;
-  }
-  if (query.output === "sequence") {
-    setOutput("sequence");
-    void router.replace({ query: queryWithout(query, "output") });
-  }
-}
-
-const expandClipId = ref<string | null>(null);
-const expandStagePrompt = ref("");
 const expandTask = ref<ExpandTask>("text-to-image");
 const expandContext = ref<ExpandContext | null>(null);
 const remixContext = ref<ExpandContext | null>(null);
@@ -942,20 +837,12 @@ const remixContext = ref<ExpandContext | null>(null);
 function expansionTaskForCurrentOutput(
   request: GenerateRequestWire,
 ): ExpandTask {
-  if (sequenceMode.value) {
-    return expansionTaskForRequest(currentFamily.value, {
-      source_image: draft.openingImage?.base64,
-    });
-  }
   return expansionTaskForRequest(currentFamily.value, request);
 }
 // The composer's style chip steers the main-prompt expansion as natural
-// language. Sequence clips are their own text — the style row never touches
-// them.
+// language.
 const expandStyleDirective = computed(() =>
-  expandClipId.value !== null
-    ? null
-    : styleHint(form.state.value.stylePreset ?? ""),
+  styleHint(form.state.value.stylePreset ?? ""),
 );
 
 // Drawer state (mirrors LibraryPage).
@@ -981,78 +868,6 @@ const stream = useGenerateStream(
   // Same offer, same policy as the pre-submission dead end.
   (job) => void offerHeldMissingModelPull(job),
 );
-// ── Durable sequence jobs (multi-host, mockup 1c: the chain Jobs list
-//    merges with the activity strip) ────────────────────────────────────
-const chainJobs = useChainJobs();
-
-function hostLabelFor(hostId: string): string {
-  return routing.hosts.value.find((h) => h.id === hostId)?.label ?? hostId;
-}
-
-function hostTargetFor(hostId: string): StreamTarget | undefined {
-  const host = routing.hosts.value.find((h) => h.id === hostId);
-  if (!host) return undefined;
-  return { baseUrl: host.url, ...(host.apiKey ? { apiKey: host.apiKey } : {}) };
-}
-
-function hostRouteFor(hostId: string): HostRoute | null {
-  const host = routing.hosts.value.find((candidate) => candidate.id === hostId);
-  if (!host) return null;
-  return {
-    hostId: host.id,
-    label: host.label,
-    target: {
-      baseUrl: host.url,
-      ...(host.apiKey ? { apiKey: host.apiKey } : {}),
-    },
-    instanceId: host.instanceId ?? null,
-    ...(routing.capabilitiesByHost.value[host.id]?.durable_media
-      ? {
-          durableMedia:
-            routing.capabilitiesByHost.value[host.id]!.durable_media!,
-        }
-      : {}),
-    ...(routing.capabilitiesByHost.value[host.id]?.queue
-      ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
-      : {}),
-    ...(routing.capabilitiesByHost.value[host.id]?.events
-      ? {
-          eventsAvailable:
-            routing.capabilitiesByHost.value[host.id]!.events!.available ===
-            true,
-        }
-      : {}),
-  };
-}
-
-const watchedProgress = computed(() => {
-  const live = chainJobs.state.live;
-  return live.activeStage !== null
-    ? (live.progress[live.activeStage] ?? null)
-    : null;
-});
-
-const sequenceVMs = computed<ActivityJobVM[]>(() => {
-  const out: ActivityJobVM[] = [];
-  const watched = chainJobs.state.watching;
-  for (const [hostId, hostState] of Object.entries(chainJobs.state.byHost)) {
-    for (const job of hostState.jobs) {
-      const progress =
-        watched && watched.hostId === hostId && watched.jobId === job.id
-          ? watchedProgress.value
-          : null;
-      out.push(
-        sequenceToVM(
-          job,
-          { hostId, hostLabel: hostLabelFor(hostId) },
-          progress,
-        ),
-      );
-    }
-  }
-  return out;
-});
-
 /** Server-owned rows survive this tab and client. Avoid duplicating work that
  * the current Create session is still streaming — but a LOCAL row that has
  * already settled as a failure loses to the live server row, because a host
@@ -1061,14 +876,6 @@ const sharedActivityRows = computed(() =>
   liveActivity.rows.value.filter((row) => {
     if (row.kind === "generation") {
       return !sharedRowIsLocallyOwned(row, stream.jobs.value, ORIGIN_HOST_ID);
-    }
-    if (row.kind === "sequence") {
-      return !sequenceVMs.value.some(
-        (job) =>
-          job.kind === "sequence" &&
-          job.jobId === row.id &&
-          job.hostId === row.hostId,
-      );
     }
     return true;
   }),
@@ -1082,350 +889,6 @@ const localActivityJobs = computed(() =>
     (job) =>
       !localRowHiddenFromStrip(job, liveActivity.rows.value, ORIGIN_HOST_ID),
   ),
-);
-
-// The watched job's progress renders in the canvas region (the old
-// ChainJobCard's job): stage/step readout plus the latest stage preview.
-const watchedSequenceDetail = computed(() => chainJobs.state.live.detail);
-const watchedSequenceActive = computed(() => {
-  const d = watchedSequenceDetail.value;
-  return !!d && (d.state === "running" || d.state === "queued");
-});
-
-/**
- * The watched job once it has settled. The activity strip no longer keeps a
- * settled row, so the canvas is what holds the result: the finished video with
- * Edit sequence / Show in library, or the failure with Resume. Settling must
- * never blank the canvas.
- */
-const settledSequence = computed(() => {
-  const d = watchedSequenceDetail.value;
-  return d && d.state !== "running" && d.state !== "queued" ? d : null;
-});
-
-/** The print this job produced, when it landed in this server's gallery. */
-const settledSequencePrint = computed(() => {
-  const d = settledSequence.value;
-  if (!d) return null;
-  return (
-    galleryEntries.value.find((entry) =>
-      isPrintOfChainJob(entry.metadata, d.id),
-    ) ?? null
-  );
-});
-
-const settledSequenceCaption = computed(() => {
-  const d = settledSequence.value;
-  if (!d) return "";
-  const meta = settledSequencePrint.value?.metadata;
-  const bits = [
-    d.model,
-    `${d.stage_count} clip${d.stage_count === 1 ? "" : "s"}`,
-  ];
-  if (meta) bits.push(`S ${meta.seed}`, `${meta.width}×${meta.height}`);
-  const host = chainJobs.state.watching?.hostId;
-  if (host) bits.push(hostLabelFor(host));
-  return bits.join(" · ");
-});
-
-const settledSequenceError = computed(() =>
-  settledSequence.value?.state === "failed"
-    ? friendlySequenceError(
-        settledSequence.value.error ?? "Sequence failed.",
-        chainJobs.state.watching?.hostId
-          ? hostLabelFor(chainJobs.state.watching.hostId)
-          : null,
-      )
-    : null,
-);
-const settledSequenceErrorCopy = computed(() => {
-  const raw = settledSequence.value?.error;
-  return raw && settledSequenceError.value
-    ? copyableError(raw, settledSequenceError.value)
-    : (settledSequenceError.value ?? "");
-});
-
-function onEditSettledSequence() {
-  const d = settledSequence.value;
-  const host = chainJobs.state.watching?.hostId;
-  if (d && host) void editSequence(host, d.id);
-}
-
-function onResumeSettledSequence() {
-  const d = settledSequence.value;
-  const host = chainJobs.state.watching?.hostId;
-  if (!d || !host) return;
-  void chainJobs
-    .resume(host, d.id)
-    .catch((error) =>
-      toast("error", error instanceof Error ? error.message : String(error)),
-    );
-}
-
-function onShowSettledSequenceInLibrary() {
-  void router.push("/library");
-}
-const sequenceCanvasPercent = computed(() => {
-  const p = watchedProgress.value;
-  return p?.total ? Math.round((p.step / p.total) * 100) : 0;
-});
-const sequenceCanvasStage = computed(() => {
-  const d = watchedSequenceDetail.value;
-  if (!d) return "";
-  const live = chainJobs.state.live;
-  if (live.activeStage !== null) {
-    const p = watchedProgress.value;
-    const step = p ? ` · step ${p.step}/${p.total}` : "";
-    return `Clip ${live.activeStage + 1}/${d.stage_count}${step}`;
-  }
-  return d.state === "queued" ? "Queued" : "Rendering sequence";
-});
-
-// Ported from ChainJobCard: authenticated per-stage previews as blob URLs;
-// the latest previewed stage feeds the canvas.
-const sequencePreviews = ref<Record<number, string>>({});
-const sequenceMediaUrls = ref<Record<number, string>>({});
-const sequenceStageClipIds = ref<string[]>([]);
-const sequenceStageClipIdsByJob = new Map<string, string[]>();
-const playingSequenceStage = ref<number | null>(null);
-let sequencePreviewKey = "";
-let sequencePreviewEpoch = 0;
-const pendingSequencePreviews = new Set<string>();
-const pendingSequenceMedia = new Set<string>();
-function clearSequencePreviews() {
-  sequencePreviewEpoch += 1;
-  pendingSequencePreviews.clear();
-  pendingSequenceMedia.clear();
-  for (const url of Object.values(sequencePreviews.value)) {
-    URL.revokeObjectURL(url);
-  }
-  sequencePreviews.value = {};
-  sequenceMediaUrls.value = {};
-  sequenceStageClipIds.value = [];
-  playingSequenceStage.value = null;
-  sequencePreviewKey = "";
-}
-watch(
-  () => {
-    const d = watchedSequenceDetail.value;
-    const watched = chainJobs.state.watching;
-    return d && watched
-      ? [
-          watched.hostId,
-          d.id,
-          d.stages
-            .filter((s) => s.has_preview || s.has_media)
-            .map(
-              (s) => `${s.idx}:${s.has_preview ? 1 : 0}:${s.has_media ? 1 : 0}`,
-            )
-            .join(","),
-        ].join(":")
-      : "";
-  },
-  () => {
-    const d = watchedSequenceDetail.value;
-    const watched = chainJobs.state.watching;
-    if (!d || !watched) return;
-    const nextKey = `${watched.hostId}:${d.id}`;
-    if (sequencePreviewKey !== nextKey) {
-      clearSequencePreviews();
-      sequencePreviewKey = nextKey;
-      const script = normalizeServerChainScript(d.script);
-      const boundIds = sequenceStageClipIdsByJob.get(nextKey);
-      const editing = draft.editing;
-      const editingMatches =
-        editing?.hostId === watched.hostId &&
-        editing.jobId === d.id &&
-        draft.clips.length === d.stages.length;
-      const matchesDraft =
-        script?.stages.length === draft.clips.length &&
-        script.stages.every(
-          (stage, index) => stage.prompt === draft.clips[index]?.prompt,
-        );
-      sequenceStageClipIds.value =
-        boundIds?.length === d.stages.length
-          ? [...boundIds]
-          : editingMatches
-            ? draft.clips.map((clip) => clip.id)
-            : matchesDraft
-              ? draft.clips.map((clip) => clip.id)
-              : [];
-    }
-    const stagesByIdx = new Map(d.stages.map((stage) => [stage.idx, stage]));
-    for (const [rawIdx, url] of Object.entries(sequencePreviews.value)) {
-      const idx = Number(rawIdx);
-      if (!stagesByIdx.get(idx)?.has_preview) {
-        URL.revokeObjectURL(url);
-        const next = { ...sequencePreviews.value };
-        delete next[idx];
-        sequencePreviews.value = next;
-      }
-    }
-    for (const rawIdx of Object.keys(sequenceMediaUrls.value)) {
-      const idx = Number(rawIdx);
-      if (!stagesByIdx.get(idx)?.has_media) {
-        const next = { ...sequenceMediaUrls.value };
-        delete next[idx];
-        sequenceMediaUrls.value = next;
-        if (playingSequenceStage.value === idx)
-          playingSequenceStage.value = null;
-      }
-    }
-    const target = hostTargetFor(watched.hostId);
-    const requestEpoch = sequencePreviewEpoch;
-    for (const stage of d.stages) {
-      const pendingKey = `${requestEpoch}:${nextKey}:${stage.idx}`;
-      if (
-        stage.has_preview &&
-        !sequencePreviews.value[stage.idx] &&
-        !pendingSequencePreviews.has(pendingKey)
-      ) {
-        pendingSequencePreviews.add(pendingKey);
-        const headers = target?.apiKey
-          ? { "x-api-key": target.apiKey }
-          : undefined;
-        void fetch(chainJobStagePreviewUrl(d.id, stage.idx, target), {
-          ...(headers ? { headers } : {}),
-        })
-          .then(async (response) => {
-            if (!response.ok)
-              throw new Error(`Preview failed: ${response.status}`);
-            const url = URL.createObjectURL(await response.blob());
-            const currentStage = chainJobs.state.live.detail?.stages.find(
-              (candidate) => candidate.idx === stage.idx,
-            );
-            if (
-              requestEpoch !== sequencePreviewEpoch ||
-              sequencePreviewKey !== nextKey ||
-              chainJobs.state.watching?.hostId !== watched.hostId ||
-              chainJobs.state.live.detail?.id !== d.id ||
-              !currentStage?.has_preview
-            ) {
-              URL.revokeObjectURL(url);
-              return;
-            }
-            sequencePreviews.value = {
-              ...sequencePreviews.value,
-              [stage.idx]: url,
-            };
-          })
-          .catch(() => {})
-          .finally(() => pendingSequencePreviews.delete(pendingKey));
-      }
-      if (
-        stage.has_media &&
-        !sequenceMediaUrls.value[stage.idx] &&
-        !pendingSequenceMedia.has(pendingKey)
-      ) {
-        pendingSequenceMedia.add(pendingKey);
-        void sequenceStageMediaUrl(d.id, stage.idx, target)
-          .then((url) => {
-            const currentStage = chainJobs.state.live.detail?.stages.find(
-              (candidate) => candidate.idx === stage.idx,
-            );
-            if (
-              requestEpoch !== sequencePreviewEpoch ||
-              sequencePreviewKey !== nextKey ||
-              chainJobs.state.watching?.hostId !== watched.hostId ||
-              chainJobs.state.live.detail?.id !== d.id ||
-              !currentStage?.has_media
-            ) {
-              return;
-            }
-            sequenceMediaUrls.value = {
-              ...sequenceMediaUrls.value,
-              [stage.idx]: url,
-            };
-          })
-          .catch(() => {})
-          .finally(() => pendingSequenceMedia.delete(pendingKey));
-      }
-    }
-  },
-  { immediate: true },
-);
-const sequencePreviewSrc = computed(() => {
-  const best = Object.entries(sequencePreviews.value)
-    .map(([idx, url]) => [Number(idx), url] as const)
-    .sort((a, b) => b[0] - a[0])[0];
-  return best?.[1];
-});
-const sequencePlaybackSrc = computed(() => {
-  const idx = playingSequenceStage.value;
-  return idx === null ? null : (sequenceMediaUrls.value[idx] ?? null);
-});
-const sequenceFilmstripMediaByClipId = computed<
-  Record<string, ClipRailMedia | undefined>
->(() => {
-  const detail = watchedSequenceDetail.value;
-  if (!detail) return {};
-  return Object.fromEntries(
-    [...detail.stages]
-      .sort((a, b) => a.idx - b.idx)
-      .flatMap((stage) => {
-        const clipId = sequenceStageClipIds.value[stage.idx];
-        if (!clipId) return [];
-        const progress = chainJobs.state.live.progress[stage.idx];
-        const status: ClipRailMedia["status"] =
-          stage.state === "completed"
-            ? "ready"
-            : stage.state === "failed"
-              ? "error"
-              : stage.state;
-        return [
-          [
-            clipId,
-            {
-              stageIdx: stage.idx,
-              status,
-              posterUrl: sequencePreviews.value[stage.idx] ?? null,
-              hasMedia: Boolean(
-                stage.has_media && sequenceMediaUrls.value[stage.idx],
-              ),
-              cacheReady: stage.cache_ready,
-              progressPercent:
-                progress && progress.total > 0
-                  ? (progress.step / progress.total) * 100
-                  : null,
-              error: stage.error,
-            } satisfies ClipRailMedia,
-          ],
-        ];
-      }),
-  );
-});
-
-function playSequenceStage(stageIdx: number) {
-  if (!sequenceMediaUrls.value[stageIdx]) return;
-  playingSequenceStage.value =
-    playingSequenceStage.value === stageIdx ? null : stageIdx;
-}
-
-function playSequenceClip(clipId: string) {
-  const stageIdx = sequenceStageClipIds.value.indexOf(clipId);
-  if (stageIdx >= 0) playSequenceStage(stageIdx);
-}
-
-const playingSequenceClipId = computed(() => {
-  const idx = playingSequenceStage.value;
-  return idx === null ? null : (sequenceStageClipIds.value[idx] ?? null);
-});
-
-function returnToLiveSequence() {
-  playingSequenceStage.value = null;
-}
-
-// Surface the watched sequence's terminal states without a dedicated card.
-watch(
-  () => watchedSequenceDetail.value?.state,
-  (state, prev) => {
-    if (!state || !prev || state === prev) return;
-    if (state === "completed") {
-      // Verb→noun (§11): the sequence is a thing now, and it has a home.
-      toast("info", "Sequence ready — saved to Library");
-      void refreshGallery();
-    }
-  },
 );
 
 async function refreshGallery() {
@@ -1516,9 +979,6 @@ const currentModel = computed(
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
 let previousStillAutomaticResolution: SourceDimensions | null = null;
-let previousOpeningSource = "";
-let previousOpeningResolution: SourceResolutionResult | null = null;
-let previousOpeningAutomaticResolution: SourceDimensions | null = null;
 const canvasIntent = ref<CanvasIntent>("model-default");
 let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
@@ -1623,7 +1083,6 @@ watch(
         .join("|") ?? "",
   ],
   () => {
-    if (sequenceMode.value) return;
     const next = syncSourceCanvas(
       form.state.value.imageAttachments[0] ?? null,
       {
@@ -1639,38 +1098,8 @@ watch(
   { immediate: true },
 );
 
-watch(
-  [
-    () => draft.openingImage?.base64 ?? null,
-    () => currentModel.value?.name ?? form.state.value.model,
-    () => form.state.value.pipeline ?? null,
-    () => currentModel.value?.generation_profile?.profile_hash ?? null,
-    () => currentModel.value?.max_pixels ?? null,
-    () => currentModel.value?.max_axis_pixels ?? null,
-    () => currentModel.value?.dimension_alignment ?? null,
-    () =>
-      currentModel.value?.recommended_dimensions
-        ?.map(({ width, height }) => `${width}x${height}`)
-        .join("|") ?? "",
-  ],
-  () => {
-    if (!sequenceMode.value) return;
-    const next = syncSourceCanvas(draft.openingImage, {
-      base64: previousOpeningSource,
-      resolution: previousOpeningResolution,
-      automaticResolution: previousOpeningAutomaticResolution,
-    });
-    previousOpeningSource = next.base64;
-    previousOpeningResolution = next.resolution;
-    previousOpeningAutomaticResolution = next.automaticResolution;
-  },
-  { immediate: true },
-);
-
 const activeSourceDimensions = computed(() => {
-  const image = sequenceMode.value
-    ? draft.openingImage
-    : form.state.value.imageAttachments[0];
+  const image = form.state.value.imageAttachments[0];
   return image?.width && image.height
     ? { width: image.width, height: image.height }
     : null;
@@ -1758,33 +1187,22 @@ const identityRestoreNotice = ref<string | null>(null);
 let identityRestoreEpoch = 0;
 /** Why the identity partition would be refused, in the server's own order. */
 const identityError = computed(() =>
-  sequenceMode.value
-    ? // The chain wire has no identity slot, so nothing here can be refused
-      // for it — and a hidden control must never block Generate.
-      null
-    : identityValidationError({
-        supported: identitySupported.value,
-        image: form.state.value.identityImage?.base64
-          ? {
-              base64: form.state.value.identityImage.base64,
-              filename: form.state.value.identityImage.filename,
-            }
-          : null,
-        weight: form.state.value.identityWeight ?? null,
-        startStep: form.state.value.identityStartStep ?? null,
-        steps: form.state.value.steps,
-        hasLora: form.state.value.loras.length > 0,
-        hasSourceImage: form.state.value.imageAttachments.length > 0,
-      }),
+  identityValidationError({
+    supported: identitySupported.value,
+    image: form.state.value.identityImage?.base64
+      ? {
+          base64: form.state.value.identityImage.base64,
+          filename: form.state.value.identityImage.filename,
+        }
+      : null,
+    weight: form.state.value.identityWeight ?? null,
+    startStep: form.state.value.identityStartStep ?? null,
+    steps: form.state.value.steps,
+    hasLora: form.state.value.loras.length > 0,
+    hasSourceImage: form.state.value.imageAttachments.length > 0,
+  }),
 );
 
-/** The sequence opening frame is source media, so it obeys the selected
- * checkpoint's own source-image contract (#772) exactly as the one-shot well
- * does: an `unsupported` checkpoint renders no well at all, while an absent
- * field keeps the family fallback (older servers stay as they were). */
-const showSequenceOpeningImage = computed(
-  () => capabilities.value.sourceImageCapability !== "unsupported",
-);
 const h3FrameError = computed(() =>
   minimaxH3AuthoringError(
     currentFamily.value,
@@ -1867,18 +1285,6 @@ const extendDefaultOverlapFrames = computed(() =>
   serverExtendOverlapDefault(currentModel.value),
 );
 
-const supportsChain = computed(() => {
-  if (currentModel.value) return modelSupportsSequence(currentModel.value);
-
-  // Keep imported or restored forms usable while the installed-model inventory
-  // is still loading. The server remains the final authority at submission.
-  const model = form.state.value.model.toLowerCase();
-  if (currentFamily.value === "ltx-video") return true;
-  if (currentFamily.value !== "ltx2") return false;
-
-  return !model.includes("-dev");
-});
-
 const gpuListForPlacement = computed(
   () =>
     status.value?.gpus?.map((g) => ({
@@ -1926,20 +1332,7 @@ const estimateTarget = computed(() =>
 const installedModels = computed(() =>
   models.value.filter((m) => m.downloaded && isStandaloneGenerationModel(m)),
 );
-const sequenceModels = computed(() =>
-  modelsForOutput(installedModels.value, "sequence"),
-);
-const showSequenceEmpty = computed(
-  () =>
-    sequenceMode.value &&
-    modelsLoaded.value &&
-    sequenceModels.value.length === 0,
-);
-const composerModels = computed(() =>
-  modelsForOutput(installedModels.value, draft.output),
-);
-const sequenceBrowsePath =
-  "/models?tab=discover&type=video&kind=checkpoint&intent=sequence";
+const composerModels = computed(() => installedModels.value);
 
 // Cold start (spec §08 G10): nothing installed to generate with. Only after the
 // first load resolves, so the guide replaces the empty canvas rather than
@@ -2002,538 +1395,6 @@ watch(
   { immediate: true },
 );
 
-// Entering Sequence is an intent change: keep only compatible models in the
-// picker and move off an image/two-stage model automatically when a runnable
-// sequence checkpoint is already installed.
-watch(
-  [sequenceMode, sequenceModels, modelsLoaded],
-  () => {
-    if (!sequenceMode.value) return;
-    const current = form.state.value.model;
-    if (sequenceModels.value.some((model) => model.name === current)) return;
-    if (!modelsLoaded.value) {
-      if (currentModel.value && !modelSupportsSequence(currentModel.value)) {
-        form.state.value.model = "";
-        form.state.value.modelFamily = "";
-      }
-      return;
-    }
-    const first = sequenceModels.value[0];
-    if (first) {
-      form.applyModelDefaults(first);
-    } else {
-      form.state.value.model = "";
-      form.state.value.modelFamily = "";
-    }
-  },
-  { immediate: true },
-);
-
-// Switching back to One shot restores the model that was selected before the
-// Sequence trip (when it is still installed).
-watch(sequenceMode, (isSequence, wasSequence) => {
-  if (isSequence || !wasSequence) return;
-  const name = draft.lastSingleModel;
-  if (!name) return;
-  const model = installedModels.value.find((m) => m.name === name);
-  if (model) form.applyModelDefaults(model);
-});
-
-// ── Sequence submit path (live-form projection) ───────────────────────
-const sequenceMotionTail = computed(() =>
-  sequenceMotionTailFrames({
-    name: form.state.value.model,
-    family: currentFamily.value,
-    // Wan's seam carries context only for an image-conditioned checkpoint
-    // (#783); without the advertised contract every wan sequence read as a
-    // tail-free join. The persisted snapshot covers a form restored before
-    // the inventory lands, exactly as `capabilities` does.
-    source_image:
-      currentModel.value?.source_image ??
-      form.state.value.sourceImageCapability,
-  }),
-);
-const sequenceDefaultFrames = computed(() =>
-  defaultClipFrames(currentModel.value, null, sequenceMotionTail.value),
-);
-const sharedParams = computed<SequenceSharedParams>(() =>
-  sequenceSharedParams(form.state.value, currentFamily.value),
-);
-const sequenceTarget = computed<StreamTarget | undefined>(
-  () => routing.resolve(form.state.value.model || null)?.target,
-);
-const sequenceChainLimits = ref<ChainLimits | null>(null);
-
-// Edit sessions snapshot the shared params at load so shape/detail changes
-// mark every clip as re-rendering in the rail's plan badges.
-const editBaselineShared = ref<string | null>(null);
-/** What a Library reuse could NOT restore, said once and quietly beneath the
- *  rail. It describes one handoff, not a standing property of the draft. */
-const sequenceReuseNotice = ref<string | null>(null);
-const chainLevelDirty = computed(
-  () =>
-    editBaselineShared.value !== null &&
-    (editBaselineShared.value !== JSON.stringify(sharedParams.value) ||
-      JSON.stringify(draft.editing?.baselineOpeningImage ?? null) !==
-        JSON.stringify(draft.openingImage)),
-);
-
-/** Apply a script's chain-level params onto the LIVE form (edit + import). */
-function applySharedToForm(shared: Partial<SequenceSharedParams>) {
-  if (shared.model) {
-    const model = installedModels.value.find((m) => m.name === shared.model);
-    // applyModelDefaults REPLACES state.value — read the form only after.
-    if (model) form.applyModelDefaults(model);
-    else form.state.value.model = shared.model;
-  }
-  const s = form.state.value;
-  if (shared.width != null) s.width = shared.width;
-  if (shared.height != null) s.height = shared.height;
-  if (shared.fps != null) s.fps = shared.fps;
-  if (shared.steps != null) s.steps = shared.steps;
-  if (shared.guidance != null) s.guidance = shared.guidance;
-  if (shared.strength != null) s.strength = shared.strength;
-  if (shared.seed != null && shared.seed !== "") {
-    s.seedMode = "static";
-    s.seed = Number(shared.seed);
-  }
-}
-
-const sequenceSubmitInFlight = ref(false);
-let sequenceSubmitController: AbortController | null = null;
-let sequenceSubmitAttempt = 0;
-let sequenceAmendInFlight = false;
-let sequenceCancellationRequest: (() => Promise<void>) | null = null;
-
-async function onSubmitSequence() {
-  if (sequenceSubmitInFlight.value) {
-    cancelSequenceSubmit();
-    return;
-  }
-  clearSelectedQueueRender();
-  const attempt = ++sequenceSubmitAttempt;
-  const controller = new AbortController();
-  sequenceSubmitController = controller;
-  sequenceSubmitInFlight.value = true;
-  try {
-    await onSubmitSequenceInner(
-      controller.signal,
-      () => attempt === sequenceSubmitAttempt && !controller.signal.aborted,
-    );
-  } finally {
-    if (attempt === sequenceSubmitAttempt) {
-      sequenceSubmitController = null;
-      sequenceSubmitInFlight.value = false;
-      sequenceAmendInFlight = false;
-      sequenceCancellationRequest = null;
-    }
-  }
-}
-
-function cancelSequenceSubmit() {
-  if (!sequenceSubmitInFlight.value) return;
-  sequenceSubmitAttempt += 1;
-  sequenceSubmitController?.abort(new Error("cancelled"));
-  sequenceSubmitController = null;
-  const cancellation = sequenceCancellationRequest;
-  const cancellingAmendment = sequenceAmendInFlight;
-  sequenceCancellationRequest = null;
-  sequenceAmendInFlight = false;
-  sequenceSubmitInFlight.value = false;
-  preprocessingStatus.value = null;
-  composerError.value = null;
-  if (!cancellation) {
-    toast("info", "Sequence preparation cancelled — nothing was queued.");
-    return;
-  }
-  toast(
-    "info",
-    cancellingAmendment
-      ? "Cancelling the sequence update…"
-      : "Cancelling sequence creation…",
-  );
-  void confirmCancellation(cancellation)
-    .then(() =>
-      toast(
-        "info",
-        cancellingAmendment
-          ? "Sequence update cancelled."
-          : "Sequence creation cancelled — nothing was queued.",
-      ),
-    )
-    .catch(() => {
-      composerError.value =
-        "Cancellation could not be confirmed. Check Activity before retrying.";
-      toast("error", composerError.value);
-    });
-}
-
-async function onSubmitSequenceInner(
-  signal: AbortSignal,
-  isCurrent: () => boolean,
-) {
-  composerError.value = null;
-  if (
-    !sequenceMode.value ||
-    !sequenceModels.value.some((model) => model.name === form.state.value.model)
-  ) {
-    composerError.value =
-      "Choose an installed sequence-capable video model on the selected machine.";
-    return;
-  }
-  // The stitched print carries a title and its filing, so an invalid title
-  // blocks a sequence exactly as it blocks a one-shot.
-  const sequenceTitle = validatePrintTitle(form.state.value.title ?? "");
-  if (!sequenceTitle.ok) {
-    titleError.value = sequenceTitle.reason;
-    composerError.value = sequenceTitle.reason;
-    return;
-  }
-  // Freeze every request-affecting value at the click boundary. Source
-  // preprocessing may take minutes; edits during that await belong to the
-  // next submission and must not create a hybrid request.
-  const editing = draft.editing ? { ...draft.editing } : null;
-  const shared = {
-    ...sharedParams.value,
-    sourceFitPolicy: sharedParams.value.sourceFitPolicy
-      ? JSON.parse(JSON.stringify(sharedParams.value.sourceFitPolicy))
-      : undefined,
-  } satisfies SequenceSharedParams;
-  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  // A checkpoint that reads no source image has no opening-image well, so a
-  // retained image is parked out of the request exactly as the one-shot
-  // wells park theirs — never shipped as invisible conditioning the server
-  // would refuse.
-  const openingSnapshot =
-    showSequenceOpeningImage.value && draft.openingImage
-      ? { ...draft.openingImage }
-      : null;
-  const enableAudio = draft.enableAudio;
-  const motionTailFrames = sequenceMotionTail.value;
-  const initialRoute = editing
-    ? hostRouteFor(editing.hostId)
-    : routing.resolve(shared.model || null);
-  if (!initialRoute) {
-    composerError.value = "The selected sequence host is unavailable.";
-    return;
-  }
-  // Refresh chain limits when stale (30 s cache) — the server still remains
-  // the final authority at submission.
-  await fetchChainLimits(shared.model, initialRoute.target, shared.fps).catch(
-    () => {},
-  );
-  if (!isCurrent()) return;
-  const preliminaryRequest = buildChainRequest(shared, clips, {
-    motionTailFrames,
-    enableAudio,
-    openingImage: openingSnapshot,
-  });
-  let route = initialRoute;
-  if (!editing) {
-    const feasibility = await routing.resolveFeasibleChain(
-      preliminaryRequest,
-      1,
-      {
-        signal,
-      },
-    );
-    if (!isCurrent()) return;
-    if (feasibility.kind !== "route") {
-      composerError.value = feasibilityMessage(feasibility, "this sequence");
-      return;
-    }
-    route = feasibility.route;
-  }
-  let openingImage = openingSnapshot;
-  if (openingImage?.base64) {
-    const prepared = await prepareStillSourceToRequest(
-      route,
-      {
-        source: {
-          kind: "upload",
-          filename: openingImage.filename,
-          base64: openingImage.base64,
-          width: openingImage.width,
-          height: openingImage.height,
-          mime: /\.jpe?g$/i.test(openingImage.filename)
-            ? "image/jpeg"
-            : "image/png",
-        },
-        mask: null,
-        maskless: true,
-        settings: {
-          policy: shared.sourceFitPolicy,
-          upscalerModel: shared.upscalerModel,
-          family: shared.family,
-          frames: null,
-          width: shared.width,
-          height: shared.height,
-        },
-      },
-      signal,
-    );
-    if (prepared === false || !isCurrent()) return;
-    openingImage = prepared.source
-      ? {
-          ...openingImage,
-          base64: prepared.source.base64,
-          width: prepared.source.width ?? undefined,
-          height: prepared.source.height ?? undefined,
-        }
-      : openingImage;
-  }
-  const req = buildChainRequest(shared, clips, {
-    motionTailFrames,
-    enableAudio,
-    openingImage,
-  });
-
-  if (editing) {
-    const operationId = createUuid();
-    const amendReq: AmendRequest = {
-      stages: req.stages,
-      motion_tail_frames: req.motion_tail_frames ?? null,
-      fps: req.fps ?? null,
-      seed: shared.seed.trim() === "" ? null : shared.seed,
-      steps: req.steps,
-      guidance: req.guidance,
-      strength: req.strength ?? null,
-      enable_audio: enableAudio ? true : null,
-    };
-    try {
-      if (!sameRoute(route, hostRouteFor(editing.hostId))) {
-        composerError.value =
-          "The sequence machine changed during source preparation. Review the machine and Update again.";
-        return;
-      }
-      sequenceStageClipIdsByJob.set(
-        `${editing.hostId}:${editing.jobId}`,
-        clips.map((clip) => clip.id),
-      );
-      sequenceAmendInFlight = true;
-      sequenceCancellationRequest = () =>
-        chainJobs.cancelMutation(
-          editing.hostId,
-          editing.jobId,
-          operationId,
-          route.target,
-        );
-      await chainJobs.amend(
-        editing.hostId,
-        editing.jobId,
-        amendReq,
-        route.target,
-        operationId,
-      );
-      if (!isCurrent()) {
-        await chainJobs
-          .cancel(editing.hostId, editing.jobId, route.target)
-          .catch(() => {});
-        return;
-      }
-      draft.stopEditing();
-      editBaselineShared.value = null;
-      toast("info", "Sequence updated — unchanged clips stay cached.");
-      return;
-    } catch (error) {
-      if (error instanceof ApiHttpError && error.status === 409) {
-        toast(
-          "error",
-          "This sequence changed on its host while you edited. Retry after reloading it, or use Duplicate as new to submit your version.",
-        );
-        composerError.value =
-          "The original sequence changed. Your edits are still here; reload the sequence or choose Duplicate as new.";
-        return;
-      } else {
-        composerError.value =
-          error instanceof Error ? error.message : String(error);
-        return;
-      }
-    }
-  }
-
-  try {
-    const feasibility = await routing.revalidateFeasibleChain(route, req, 1, {
-      signal,
-    });
-    if (!isCurrent()) return;
-    if (feasibility.kind !== "route") {
-      throw new Error(
-        feasibilityMessage(feasibility, "this finalized sequence"),
-      );
-    }
-    route = feasibility.route;
-    const { accepted } = await licenseAcceptance.request({
-      hostLabel: route.label,
-      target: {
-        baseUrl: route.target.baseUrl,
-        apiKey: route.target.apiKey ?? null,
-      },
-      requirements: licenseRequirements(feasibility.preview?.pending_downloads),
-    });
-    if (!accepted || !isCurrent()) return;
-    // Title and filing describe the STITCHED print — a sequence renders one
-    // print, and the clips it stitches are never filed individually.
-    const operationId = createUuid();
-    sequenceCancellationRequest = () =>
-      chainJobs.cancelMutation(
-        route.hostId,
-        operationId,
-        operationId,
-        route.target,
-      );
-    const jobId = await chainJobs.create(
-      route.hostId,
-      {
-        ...req,
-        ...(sequenceTitle.value ? { title: sequenceTitle.value } : {}),
-        ...fileUnder.requestFields(),
-      },
-      route.target,
-      operationId,
-    );
-    if (!isCurrent()) {
-      await chainJobs.cancel(route.hostId, jobId, route.target).catch(() => {});
-      return;
-    }
-    sequenceStageClipIdsByJob.set(
-      `${route.hostId}:${jobId}`,
-      clips.map((clip) => clip.id),
-    );
-    if (editing) {
-      draft.stopEditing();
-      editBaselineShared.value = null;
-    }
-    // The caveat described the handoff, not the submitted job.
-    sequenceReuseNotice.value = null;
-    toast("info", `Sequence queued on ${route.label}.`);
-  } catch (error) {
-    if (!isCurrent()) return;
-    composerError.value =
-      error instanceof Error ? error.message : String(error);
-  }
-}
-
-/** Load a durable job's effective script into an edit session. */
-async function editSequence(hostId: string, jobId: string) {
-  await loadSequence(hostId, jobId, true);
-}
-
-async function inspectSequence(hostId: string, jobId: string) {
-  await loadSequence(hostId, jobId, false);
-}
-
-async function loadSequence(hostId: string, jobId: string, editing: boolean) {
-  // An edit session is lossless — any reuse caveat on screen is now stale.
-  sequenceReuseNotice.value = null;
-  try {
-    const detail = await getChainJob(jobId, hostTargetFor(hostId));
-    const script = normalizeServerChainScript(detail.script);
-    if (!script) throw new Error("This sequence job has no editable script.");
-    const loaded = chainScriptToClips(script);
-    applySharedToForm(loaded.shared);
-    if (loaded.openingImage?.base64) {
-      preserveRestoredSourceCanvas(loaded.openingImage.base64);
-      form.state.value.sourceFitPolicy = {
-        mode: "crop-fill",
-        alignX: "center",
-        alignY: "center",
-      };
-    }
-    if (editing) {
-      draft.loadFromJob(
-        {
-          jobId,
-          hostId,
-          baseline: loaded.clips.map((clip) => ({ ...clip })),
-          completedStages: countLeadingCompletedStages(detail.stages),
-        },
-        loaded.clips,
-        loaded.enableAudio,
-        loaded.openingImage,
-      );
-      editBaselineShared.value = JSON.stringify(
-        sequenceSharedParams(form.state.value, currentFamily.value),
-      );
-    } else {
-      draft.stopEditing();
-      editBaselineShared.value = null;
-      setOutput("sequence");
-      draft.clips.splice(0, draft.clips.length, ...loaded.clips);
-      draft.activeClipId = loaded.clips[0]?.id ?? null;
-      draft.enableAudio = loaded.enableAudio;
-      draft.openingImage = loaded.openingImage;
-    }
-    if (form.state.value.model) draft.bindSequenceModel(form.state.value.model);
-    sequenceStageClipIdsByJob.set(
-      `${hostId}:${jobId}`,
-      draft.clips.map((clip) => clip.id),
-    );
-    chainJobs.watch(hostId, jobId);
-  } catch (error) {
-    toast("error", error instanceof Error ? error.message : String(error));
-  }
-}
-
-function onDuplicateAsNew() {
-  draft.stopEditing();
-  editBaselineShared.value = null;
-  toast("info", "Detached from the job — Generate now queues a new sequence.");
-}
-
-function onDiscardEdit() {
-  const editing = draft.editing;
-  if (!editing) return;
-  draft.clips.splice(
-    0,
-    draft.clips.length,
-    ...editing.baseline.map((clip) => ({ ...clip })),
-  );
-  draft.openingImage = editing.baselineOpeningImage
-    ? { ...editing.baselineOpeningImage }
-    : null;
-  draft.enableAudio = editing.baselineEnableAudio ?? false;
-  draft.stopEditing();
-  editBaselineShared.value = null;
-  draft.activeClipId = draft.clips[0]?.id ?? null;
-}
-
-function onImportShared(shared: Partial<SequenceSharedParams>) {
-  applySharedToForm(shared);
-  if (draft.openingImage) {
-    // Imported opening-image bytes are already the script's prepared source;
-    // never inherit a stale client-only upscale policy from the prior draft.
-    form.state.value.sourceFitPolicy = { mode: "crop-fill" };
-  }
-}
-
-function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
-  if (vm.kind !== "sequence") return;
-  const fail = (error: unknown) =>
-    toast("error", error instanceof Error ? error.message : String(error));
-  switch (action) {
-    case "watch":
-      void inspectSequence(vm.hostId, vm.jobId);
-      break;
-    case "cancel":
-      void chainJobs.cancel(vm.hostId, vm.jobId).catch(fail);
-      break;
-    case "resume":
-      void chainJobs.resume(vm.hostId, vm.jobId).catch(fail);
-      break;
-    case "edit":
-      void editSequence(vm.hostId, vm.jobId);
-      break;
-    case "delete":
-      void chainJobs.remove(vm.hostId, vm.jobId).catch(fail);
-      break;
-    case "retake":
-      // The strip never offers retake directly; stage-level retakes live in
-      // the edit flow.
-      break;
-  }
-}
-
 function cancelPrint(id: string) {
   void stream
     .cancel(id)
@@ -2549,63 +1410,6 @@ function retryPrint(id: string) {
       toast("error", error instanceof Error ? error.message : String(error)),
     );
 }
-
-/**
- * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
- * session, nothing cached, Generate queues a fresh job. Shared params ride
- * the same `applyMetadataToForm` path a single print's reuse uses.
- */
-function applySequenceReuse(metadata: OutputMetadata) {
-  const plan = planSequenceReuse(metadata);
-  if (!plan) return;
-  const oneShotPrompt = form.state.value.prompt;
-  form.state.value = applyMetadataToForm(form.state.value, metadata, {
-    models: models.value,
-  });
-  void restoreReusedIdentityPhoto(metadata);
-  // Reusing a sequence must not overwrite the parked one-shot prompt.
-  form.state.value.prompt = oneShotPrompt;
-  // Restore what the stitched print was actually filed under.
-  fileUnder.restoreFromMetadata(metadata);
-
-  // The live tail belongs to the model selected NOW, not the recorded one.
-  const { clips, raised } = clampClipsToMotionTail(
-    plan.clips,
-    sequenceMotionTail.value,
-    9,
-  );
-
-  draft.stopEditing();
-  editBaselineShared.value = null;
-  draft.output = "sequence";
-  draft.clips.splice(0, draft.clips.length, ...clips);
-  draft.activeClipId = clips[0]?.id ?? null;
-  draft.enableAudio = metadata.enable_audio === true;
-  draft.bindSequenceModel(form.state.value.model);
-
-  const notes = [sequenceReuseNote(clips.length, plan.lossy)];
-  if (raised > 0) notes.push(sequenceReuseClampNote(currentModelLabel.value));
-  sequenceReuseNotice.value = notes.join(" · ");
-}
-
-/** A sequence handed over from the Library: History ▸ Sequences hands over
- *  `inspect`/`edit`; a sequence print hands over `reuse`. One-shot — the slot is
- *  emptied on arrival so a back-nav cannot replay it. */
-function applySequenceHandoff() {
-  const handoff = takeSequenceHandoff();
-  if (!handoff) return;
-  clearRetainedSourceReuseIntent();
-  if (handoff.kind === "reuse") {
-    applySequenceReuse(handoff.metadata);
-    return;
-  }
-  if (handoff.kind === "inspect") {
-    void inspectSequence(handoff.hostId, handoff.jobId);
-  } else {
-    void editSequence(handoff.hostId, handoff.jobId);
-  }
-}
-watch(pendingSequenceHandoff(), applySequenceHandoff, { immediate: true });
 
 /**
  * A first/last-frame print restores every knob except its closing still:
@@ -2821,9 +1625,6 @@ function applyGenerationHandoff() {
   const handoff = takeGenerationHandoff();
   if (!handoff) return;
   clearRetainedSourceReuseIntent();
-  setOutput("single");
-  draft.stopEditing();
-  editBaselineShared.value = null;
   const metadata = settingsRestoreMetadata(handoff.metadata, {
     seedPinned: handoff.seedPinned,
   });
@@ -2836,15 +1637,6 @@ function applyGenerationHandoff() {
   noticeFirstLastFrameRestore(metadata);
 }
 watch(pendingGenerationHandoff(), applyGenerationHandoff, { immediate: true });
-
-/** The digest chip's one hop. `Clear inactive` and `Clean up disk` moved with
- *  it: they are destructive, host-scoped, and live in the History drawer now. */
-function onShowSequenceHistory() {
-  void router.push({
-    path: "/library",
-    query: { panel: "history", tab: "sequences" },
-  });
-}
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
@@ -2908,32 +1700,17 @@ function onResetSettings() {
   // resetSettings swaps in a freshly built state object, so the previous one is
   // never mutated and can be handed straight back on undo.
   const previous = form.state.value;
-  const previousSequenceAudio = sequenceMode.value ? draft.enableAudio : null;
-  // Parity with the one-shot reset, which discards staged source media
-  // (`settingsResetPatch`): the sequence's staged source media is the opening
-  // frame, and it lives on the shared draft rather than in the form.
-  const previousOpeningImage = draft.openingImage;
   // The canvas is part of what Reset restores, so its authority resets with
   // it — otherwise the next model change would re-snap the reset canvas back
   // onto the attached source (#1166).
   const previousIntent = canvasIntent.value;
   form.resetSettings(currentModel.value ?? null);
   canvasIntent.value = "model-default";
-  if (sequenceMode.value) {
-    draft.enableAudio = false;
-    // Undo hands the retained in-memory object (bytes included) back, and the
-    // store's persist pass re-writes its media blob.
-    draft.clearOpeningImage();
-  }
   undoableAction({
     text: "Settings reset to model defaults",
     undo: () => {
       form.state.value = previous;
       canvasIntent.value = previousIntent;
-      if (previousSequenceAudio !== null) {
-        draft.enableAudio = previousSequenceAudio;
-        draft.openingImage = previousOpeningImage;
-      }
     },
     commit: () => {},
   });
@@ -2949,57 +1726,50 @@ const aspectLabel = computed(
 );
 
 const advCount = computed(() =>
-  sequenceMode.value
-    ? // The opening image is primary-form source media, so it never counts
-      // toward the Advanced badge (which promises Advanced content only).
-      Number(
-        capabilities.value.supportsNegativePrompt &&
-          draft.clips.some((clip) => clip.negativePrompt.trim()),
-      ) + Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
-    : advancedActiveCount({
-        negativePrompt: capabilities.value.supportsNegativePrompt
-          ? form.state.value.negativePrompt
-          : "",
-        negativePromptDefault: capabilities.value.supportsNegativePrompt
-          ? (form.state.value.negativePromptDefault ?? "")
-          : "",
-        loraCount: form.state.value.loras.length,
-        upscaleOn: form.state.value.upscaleModel.trim() !== "",
-        scheduler: capabilities.value.supportsScheduler
-          ? form.state.value.scheduler
-          : null,
-        customSize: projection.value.isCustom,
-        videoNonDefault:
-          capabilities.value.supportsVideo &&
-          form.state.value.frames != null &&
-          form.state.value.frames !== 25,
-        videoSuite:
-          capabilities.value.supportsVideo &&
-          (form.state.value.gifPreview ||
-            form.state.value.cameraControl != null ||
-            form.state.value.pipeline != null ||
-            form.state.value.icLoraControl != null ||
-            form.state.value.audioFile != null ||
-            form.state.value.audioFilePath.trim() !== "" ||
-            form.state.value.sourceVideo != null ||
-            form.state.value.sourceVideoPath.trim() !== "" ||
-            form.state.value.keyframes.length > 0 ||
-            form.state.value.retakeRange != null ||
-            form.state.value.spatialUpscale != null ||
-            form.state.value.temporalUpscale != null ||
-            guidanceOverrideCount(form.state.value.guidanceOverrides) > 0),
-        wanRecipe: capabilities.value.wanRecipe.supported
-          ? wanRecipeCount(form.state.value.wanRecipe)
-          : 0,
-        // Capability gating is the caller's job (advancedCount.ts): a knob
-        // whose group does not render must not inflate the badge.
-        identity: identitySupported.value
-          ? identityActiveCount({
-              weight: form.state.value.identityWeight ?? null,
-              startStep: form.state.value.identityStartStep ?? null,
-            })
-          : 0,
-      }),
+  advancedActiveCount({
+    negativePrompt: capabilities.value.supportsNegativePrompt
+      ? form.state.value.negativePrompt
+      : "",
+    negativePromptDefault: capabilities.value.supportsNegativePrompt
+      ? (form.state.value.negativePromptDefault ?? "")
+      : "",
+    loraCount: form.state.value.loras.length,
+    upscaleOn: form.state.value.upscaleModel.trim() !== "",
+    scheduler: capabilities.value.supportsScheduler
+      ? form.state.value.scheduler
+      : null,
+    customSize: projection.value.isCustom,
+    videoNonDefault:
+      capabilities.value.supportsVideo &&
+      form.state.value.frames != null &&
+      form.state.value.frames !== 25,
+    videoSuite:
+      capabilities.value.supportsVideo &&
+      (form.state.value.gifPreview ||
+        form.state.value.cameraControl != null ||
+        form.state.value.pipeline != null ||
+        form.state.value.icLoraControl != null ||
+        form.state.value.audioFile != null ||
+        form.state.value.audioFilePath.trim() !== "" ||
+        form.state.value.sourceVideo != null ||
+        form.state.value.sourceVideoPath.trim() !== "" ||
+        form.state.value.keyframes.length > 0 ||
+        form.state.value.retakeRange != null ||
+        form.state.value.spatialUpscale != null ||
+        form.state.value.temporalUpscale != null ||
+        guidanceOverrideCount(form.state.value.guidanceOverrides) > 0),
+    wanRecipe: capabilities.value.wanRecipe.supported
+      ? wanRecipeCount(form.state.value.wanRecipe)
+      : 0,
+    // Capability gating is the caller's job (advancedCount.ts): a knob
+    // whose group does not render must not inflate the badge.
+    identity: identitySupported.value
+      ? identityActiveCount({
+          weight: form.state.value.identityWeight ?? null,
+          startStep: form.state.value.identityStartStep ?? null,
+        })
+      : 0,
+  }),
 );
 
 // ── Canvas state ──────────────────────────────────────────────────────
@@ -3479,9 +2249,7 @@ function validateSubmit(): boolean {
   }
   // An invalid print title blocks the submit like every other inline
   // validation — `toRequest` would silently drop it otherwise, generating
-  // an untitled print despite a populated field (codex review). A sequence
-  // now carries a title too (it renders one stitched print), so the check
-  // applies to both outputs.
+  // an untitled print despite a populated field (codex review).
   const titleCheck = validatePrintTitle(form.state.value.title ?? "");
   if (!titleCheck.ok) {
     titleError.value = titleCheck.reason;
@@ -4532,15 +3300,11 @@ async function onExpand() {
           variations: count,
           ...(style ? { style } : {}),
           task,
-          ...(sequenceMode.value
-            ? {}
-            : {
-                context: expansionContextForRequest(
-                  family,
-                  baseRequest,
-                  activeRecipe.value,
-                ),
-              }),
+          context: expansionContextForRequest(
+            family,
+            baseRequest,
+            activeRecipe.value,
+          ),
         },
         undefined,
         submitRoute?.target,
@@ -4586,13 +3350,11 @@ async function onExpand() {
   expandPrintRoute.value = cloneRoute(route);
   const expandRequest = form.toRequest(currentModel.value);
   expandTask.value = expansionTaskForCurrentOutput(expandRequest);
-  expandContext.value = sequenceMode.value
-    ? null
-    : expansionContextForRequest(
-        currentFamily.value,
-        expandRequest,
-        activeRecipe.value,
-      );
+  expandContext.value = expansionContextForRequest(
+    currentFamily.value,
+    expandRequest,
+    activeRecipe.value,
+  );
   showExpand.value = true;
 }
 
@@ -4715,30 +3477,6 @@ async function prepareRemixBatch(response: RemixResponseWire) {
   showRemix.value = false;
 }
 
-function onExpandClip(clipId: string, prompt: string) {
-  if (promptTransformRefused()) return;
-  const route = resolveSubmitRoute();
-  if (route === false) return;
-  const expansion = expansionTargetFor(route);
-  if (expansion.missing) return;
-  expandRoute.value = cloneRoute(expansion.route);
-  expandPrintRoute.value = cloneRoute(route);
-  expandClipId.value = clipId;
-  expandStagePrompt.value = prompt;
-  const index = draft.clips.findIndex((clip) => clip.id === clipId);
-  const clip = index >= 0 ? draft.clips[index] : null;
-  const sourceImage =
-    clip?.sourceImage?.base64 ||
-    (index === 0 ? draft.openingImage?.base64 : undefined);
-  expandTask.value = sourceImage
-    ? "image-to-video"
-    : index > 0 && clip?.transition === "smooth"
-      ? "video-to-video"
-      : expansionTaskForRequest(currentFamily.value, {});
-  expandContext.value = null;
-  showExpand.value = true;
-}
-
 /**
  * Bake-and-clear owes the user the preset's curated negative: the chip is
  * about to be dropped, so submit-time composition will never see it again.
@@ -4758,11 +3496,6 @@ function bakeStyleAndClear() {
 }
 
 function applyExpandedPrompt(v: string) {
-  if (expandClipId.value !== null) {
-    const clip = draft.clips.find((c) => c.id === expandClipId.value);
-    if (clip) clip.prompt = v;
-    return;
-  }
   prevPrompt.value = form.state.value.prompt;
   prevOriginalPrompt.value = form.state.value.originalPrompt ?? null;
   quickPrepared.value = {
@@ -4975,21 +3708,6 @@ async function onClearSource() {
 }
 
 async function onPickSource(v: SourceImageState[]) {
-  if (sequenceMode.value) {
-    const first = v[0];
-    if (first) {
-      draft.openingImage = {
-        filename: first.filename,
-        base64: first.base64,
-        draftId: first.draftId,
-        width: first.width ?? undefined,
-        height: first.height ?? undefined,
-      };
-      form.state.value.sourceFitPolicy = defaultSourceFitPolicy();
-    }
-    composerError.value = null;
-    return;
-  }
   const qwenEdit =
     isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
@@ -5159,7 +3877,7 @@ const RECENT_CONTEXT_UNFILED_REASON =
  * Why this print cannot condition the next render, or `null` when it can.
  * One rule for the Recent tiles and the finished render on the canvas: a mesh
  * is geometry rather than pixels (the Library lightbox refuses it in the same
- * words), and a sequence's opening media has to be an image.
+ * words).
  */
 const recentSourceDisabledReason = computed<string | null>(() => {
   const menu = recentContextMenu.value;
@@ -5168,8 +3886,6 @@ const recentSourceDisabledReason = computed<string | null>(() => {
   const kind = mediaKind(item.format, item.filename);
   if (kind === "mesh")
     return "A 3-D mesh cannot condition a render — source images are pixels.";
-  if (sequenceMode.value && (kind === "video" || kind === "audio"))
-    return "Sequence opening media must be an image.";
   // Unfiled AND payload-free: a print restored from a reload before its row
   // is listed. There is nothing to read and no name to read it by.
   if (menu.unfiled && !menu.inlineBase64) return RECENT_CONTEXT_UNFILED_REASON;
@@ -5226,12 +3942,6 @@ function openItem(item: GalleryImage) {
 
 function recreateFromGallery(item: GalleryImage) {
   clearSelectedQueueRender();
-  // The Create drawer can reuse a normal print without navigating, so retire
-  // Sequence explicitly before applying that print's one-shot settings.
-  setOutput("single");
-  draft.stopEditing();
-  editBaselineShared.value = null;
-  draft.lastSingleModel = null;
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
     models: models.value,
@@ -5247,10 +3957,8 @@ function openJob(job: Job) {
   clearSelectedQueueRender();
   const epoch = ++openJobEpoch;
   stream.select(job.id);
-  setOutput("single");
-  // Activity's print rows call this path; durable sequence rows use the
-  // sequence-action handoff below. Keep the broad Job request union at the
-  // stream boundary, then restore the complete one-shot wire shape here.
+  // Activity's print rows call this path. Keep the broad Job request union at
+  // the stream boundary, then restore the complete one-shot wire shape here.
   const request = job.request as GenerateRequestWire;
   const image = (base64: string, filename: string) => ({
     kind: "upload" as const,
@@ -5511,20 +4219,6 @@ async function attachLightboxSource(
       form.state.value.audioFilePath = "";
     } else {
       const state = form.state.value;
-      if (sequenceMode.value) {
-        const dimensions = imageDimensionsFromBase64(base64) ?? {
-          width: item.metadata.width,
-          height: item.metadata.height,
-        };
-        draft.openingImage = {
-          filename: item.filename,
-          base64,
-          width: dimensions.width,
-          height: dimensions.height,
-        };
-        state.sourceFitPolicy = defaultSourceFitPolicy();
-        return true;
-      }
       const h3Task = minimaxH3TaskForModel(state.model);
       if (h3Task) {
         const dimensions = imageDimensionsFromBase64(base64) ?? {
@@ -5627,7 +4321,6 @@ function dropContext() {
     referenceMax: capabilities.value.referenceImages?.max ?? null,
     refusalReason: capabilities.value.referenceImagesReason,
     identityVisible: identitySupported.value === true,
-    openingVisible: sequenceMode.value && showSequenceOpeningImage.value,
   };
 }
 
@@ -5663,7 +4356,6 @@ async function applyDropToForm(
     target,
     image,
     dropContext(),
-    sequenceMode.value ? draft : null,
   );
   composerError.value = error;
 }
@@ -5680,7 +4372,6 @@ async function onWindowDrop(event: DragEvent): Promise<void> {
   if (!file) return;
   // Always: this is what stops the browser navigating away from the SPA.
   event.preventDefault();
-  if (sequenceMode.value && !showSequenceOpeningImage.value) return;
   // The well under the pointer decides. A labelled well that handled the drop
   // itself never reaches here, but one that only NAMES itself still routes
   // correctly — which is why this is a hit test rather than a plan default.
@@ -5699,12 +4390,6 @@ onMounted(async () => {
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
-  // Legacy/entry query handling — registered here (not at setup top level)
-  // because the handler reads computeds declared later in the file.
-  watch(() => pageRoute.query, consumeOutputQuery, { immediate: true });
-  // Durable sequences: refresh every host's list and reattach the watch to
-  // any tracked in-flight job.
-  void chainJobs.start();
   // Models arrive from the host-routing poll (every machine, not just this
   // one); the watcher above homes the form onto one that's actually installed.
   void routing.refresh();
@@ -5731,18 +4416,8 @@ onBeforeUnmount(() => {
   submitAttempt += 1;
   submitController?.abort(new Error("unmounted"));
   submitController = null;
-  sequenceSubmitAttempt += 1;
-  sequenceSubmitController?.abort(new Error("unmounted"));
-  sequenceSubmitController = null;
-  const sequenceCancellation = sequenceCancellationRequest;
-  sequenceCancellationRequest = null;
-  sequenceAmendInFlight = false;
-  if (sequenceCancellation) {
-    void confirmCancellation(sequenceCancellation).catch(() => {});
-  }
   promptHistoryCoordinator.invalidate();
   stopAutoRefresh();
-  clearSequencePreviews();
   phoneQuery?.removeEventListener?.("change", syncPhone);
   window.removeEventListener("mold:new-print", onNewPrint);
   document.removeEventListener("pointerdown", onTemplatesPointerDown);
@@ -5770,24 +4445,19 @@ onBeforeUnmount(() => {
         </h1>
         <ActivityStrip
           :jobs="localActivityJobs"
-          :sequences="sequenceVMs"
           :shared="sharedActivityRows"
           :queue-status="routing.queueStatus.value"
           @cancel="cancelPrint"
           @retry="retryPrint"
           @dismiss="stream.remove"
           @open="openJob"
-          @sequence-action="onSequenceAction"
-          @show-history="onShowSequenceHistory"
           @shared-open="openLiveWork"
         />
 
         <div class="flex items-center gap-2">
           <!-- Print title (D5): a real field bound to the form, not a
-               constant. Rides every one-shot request as `title`; empty is
-               untitled (placeholder, never a literal). A sequence renders
-               ONE stitched print, and the chain wire now carries a title —
-               so the field applies to both outputs. -->
+               constant. Rides every request as `title`; empty is untitled
+               (placeholder, never a literal). -->
           <label
             class="flex min-w-0 flex-1 items-center gap-2"
             data-test="print-title-field"
@@ -5797,9 +4467,7 @@ onBeforeUnmount(() => {
               :value="form.state.value.title ?? ''"
               type="text"
               maxlength="160"
-              :placeholder="
-                sequenceMode ? 'Untitled sequence' : 'Untitled print'
-              "
+              placeholder="Untitled print"
               aria-label="Print title"
               class="w-full min-w-0 max-w-[28rem] rounded-control border border-transparent bg-transparent px-2 py-1 font-display text-[15px] font-semibold text-ink outline-none transition placeholder:font-medium placeholder:text-ink-3 hover:border-ce focus:border-safelight"
               data-test="print-title"
@@ -5836,507 +4504,256 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div
-          v-if="sequenceMode && (!supportsChain || showSequenceEmpty)"
-          class="rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
-          data-test="chain-unsupported"
-          :data-empty="showSequenceEmpty ? 'true' : 'false'"
+        <ComposerCard
+          ref="composerCardRef"
+          :prompt="form.state.value.prompt"
+          v-model:style-preset="form.state.value.stylePreset"
+          :aspect-label="aspectLabel"
+          :width="form.state.value.width"
+          :height="form.state.value.height"
+          :steps="form.state.value.steps"
+          :batch-size="form.state.value.batchSize"
+          :busy="ordinarySubmitBlocked || submitInFlight"
+          :cancellable="submitInFlight"
+          :busy-label="placementStatus ?? 'Planning generation…'"
+          :disabled-reason="h3GenerationInputBlocker"
+          :expanded="expanded"
+          :prompt-optional="canSkipPrompt"
+          :required-placeholder="requiredPromptPlaceholder"
+          :placeholder="composerPromptPlaceholder"
+          :transform-blocked-reason="promptTransformBlocked"
+          :history="promptHistory"
+          @update:prompt="onPromptAuthored"
+          @submit="onSubmit"
+          @cancel="cancelSubmitPlanning"
+          @expand="onExpand"
+          @remix="onRemix"
+          @undo-expand="undoExpand"
         >
-          <div class="flex items-start gap-3">
-            <span
-              class="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-bath text-ink-3"
+          <template v-if="isPhone" #mobile-controls>
+            <div
+              class="mt-3 flex flex-col gap-3"
+              data-test="phone-create-controls"
             >
-              <Icon name="chain" :size="17" />
-            </span>
-            <div class="min-w-0">
-              <p class="font-display text-[15px] font-semibold text-rebate">
-                sequences need a video model
-              </p>
-              <p class="mt-1 font-mono text-[11px] leading-relaxed text-ink-3">
-                <template v-if="showSequenceEmpty">
-                  No chain-capable video model is installed on the selected
-                  machine. Pull an LTX Video or distilled LTX-2 checkpoint to
-                  continue.
+              <CreateModelPicker
+                :models="composerModels"
+                :model="form.state.value.model"
+                :missing-model="missingModelId"
+                browse-to="/models"
+                empty-label="No models installed"
+                @select="selectModel"
+              />
+              <ControlsAside
+                v-model="form.state.value"
+                :family="currentFamily"
+                :model="currentModel"
+                :routing-request="durationRoutingRequest"
+                :source-dimensions="activeSourceDimensions"
+                :canvas-intent="canvasIntent"
+                :adv-count="advCount"
+                :mobile="true"
+                :last-seed="lastSeedUsed"
+                @open-advanced="openAdvanced"
+                @reset-settings="onResetSettings"
+                @canvas-intent="setCanvasIntent"
+              >
+                <template v-if="fileUnder.available.value" #file-under>
+                  <FileUnderGroup
+                    v-model:state="fileUnder.state.value"
+                    :title="form.state.value.title"
+                    :auto-tag="autoTagTitle"
+                    :suggestions="fileUnder.suggestions.value"
+                    :collections="fileUnder.collections.value"
+                    :model="form.state.value.model"
+                    :ext="form.state.value.outputFormat"
+                    :timestamp="fileUnderStamp"
+                  />
                 </template>
-                <template v-else>
-                  <span class="text-ink-2">{{ currentModelLabel }}</span>
-                  renders single prints only. pick an ltx-video or ltx-2 model
-                  to chain clips into a sequence.
-                </template>
-              </p>
-              <div class="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  class="rounded-control border border-ce px-3 py-1.5 font-mono text-[11px] text-ink-2 transition hover:border-safelight hover:text-rebate"
-                  data-test="chain-back-to-single"
-                  @click="setOutput('single')"
-                >
-                  back to one shot
-                </button>
-                <router-link
-                  :to="sequenceBrowsePath"
-                  data-test="browse-sequence-models"
-                  class="rounded-control border border-ce px-3 py-1.5 font-mono text-[11px] text-ink-2 transition hover:border-safelight hover:text-rebate"
-                >
-                  browse video models →
-                </router-link>
-              </div>
+              </ControlsAside>
+              <SourceMediaPanel
+                v-model="form.state.value"
+                :family="currentFamily"
+                :models="models"
+                @open-picker="showPicker = true"
+                @open-target-picker="openTargetPicker"
+                @clear-source="onClearSource"
+                @open-end-frame-picker="showEndFramePicker = true"
+                @clear-end-frame="onClearEndFrame"
+                @open-mask="showMask = true"
+                @open-h3-first-frame-picker="
+                  h3BoundaryPickerTarget = 'firstFrame'
+                "
+                @open-h3-last-frame-picker="
+                  h3BoundaryPickerTarget = 'lastFrame'
+                "
+                @open-h3-reference-picker="h3ReferencePickerOpen = true"
+                @open-reference-picker="showReferencePicker = true"
+                @crop-h3-reference="h3CropIndex = $event"
+              />
+              <IdentityPanel
+                v-model="form.state.value"
+                :models="models"
+                :notice="identityRestoreNotice"
+              />
             </div>
+          </template>
+        </ComposerCard>
+        <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
+
+        <div
+          v-if="quickConflictReasons.length"
+          class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
+          role="alert"
+          data-test="web-quick-expansion-stale"
+        >
+          <div class="flex items-start gap-2">
+            <p class="min-w-0 flex-1">{{ quickConflictMessage }}</p>
+            <button
+              type="button"
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
+              aria-label="Copy error message"
+              title="Copy error message"
+              @click="copyQuickConflict"
+            >
+              <Icon name="copy" :size="16" />
+            </button>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-test="web-reexpand-current-prompt"
+              class="rounded-control bg-stop px-3 py-1.5 font-semibold text-on-accent"
+              @click="reexpandCurrentPrompt"
+            >
+              Re-expand for {{ currentModelLabel }}
+            </button>
+            <button
+              type="button"
+              data-test="web-generate-expanded-anyway"
+              class="rounded-control border border-stop/50 px-3 py-1.5 font-medium"
+              @click="generateExpandedAnyway"
+            >
+              Generate expanded prompt anyway
+            </button>
+            <button
+              type="button"
+              class="rounded-control px-3 py-1.5 text-ink-2 hover:text-ink"
+              @click="undoExpand"
+            >
+              Restore original
+            </button>
           </div>
         </div>
 
-        <template v-else-if="sequenceMode">
-          <template v-if="isPhone">
-            <CreateModelPicker
-              :models="sequenceModels"
-              :model="form.state.value.model"
-              :missing-model="missingModelId"
-              :browse-to="sequenceBrowsePath"
-              empty-label="No sequence models installed"
-              @select="selectModel"
-            />
-            <!-- Phones lose the right-hand aside, so the Output card (and the
-                 shared settings that drive the sequence) render here. -->
-            <ControlsAside
-              v-model="form.state.value"
-              :family="currentFamily"
-              :model="currentModel"
-              :routing-request="durationRoutingRequest"
-              :source-dimensions="activeSourceDimensions"
-              :canvas-intent="canvasIntent"
-              :adv-count="advCount"
-              :mobile="true"
-              :last-seed="lastSeedUsed"
-              :output="sequenceMode ? 'sequence' : 'single'"
-              :clip-count="sequenceMode ? draft.clips.length : 0"
-              :chain-limits="sequenceMode ? sequenceChainLimits : null"
-              data-test="phone-sequence-controls"
-              @update:output="setOutput"
-              @open-advanced="openAdvanced"
-              @reset-settings="onResetSettings"
-              @canvas-intent="setCanvasIntent"
-            />
-          </template>
-          <SequenceComposer
-            :model="form.state.value.model"
-            :family="currentFamily"
-            :source-image="
-              currentModel?.source_image ??
-              form.state.value.sourceImageCapability
-            "
-            :recipe="activeRecipe"
-            :shared="sharedParams"
-            :model-default-frames="currentModel?.default_frames ?? null"
-            :target="sequenceTarget"
-            :chain-level-dirty="chainLevelDirty"
-            :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
-            :playing-clip-id="playingSequenceClipId"
-            :submitting="sequenceSubmitInFlight"
-            @limits-change="sequenceChainLimits = $event"
-            @submit="onSubmitSequence"
-            @cancel="cancelSequenceSubmit"
-            @duplicate-as-new="onDuplicateAsNew"
-            @discard-edit="onDiscardEdit"
-            @expand-clip="onExpandClip"
-            @import-shared="onImportShared"
-            @play-clip="playSequenceClip"
-          />
-
-          <p
-            v-if="sequenceReuseNotice"
-            data-test="sequence-reuse-note"
-            class="font-mono text-[0.7rem] leading-relaxed text-ink-3"
-          >
-            {{ sequenceReuseNotice }}
+        <div
+          v-else-if="expansionPull && !promptTransformBlocked"
+          class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
+          role="alert"
+          data-test="web-expansion-pull"
+        >
+          <p class="min-w-0">
+            The expansion model {{ expansionPull.model }} isn't installed on
+            {{ expansionPull.label }}.
           </p>
-
-          <div
-            v-if="composerError"
-            class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
-            data-test="sequence-submit-error"
-            role="alert"
-          >
-            <div class="flex items-start gap-2">
-              <p class="min-w-0 flex-1">{{ composerError }}</p>
-              <button
-                type="button"
-                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
-                aria-label="Copy error message"
-                title="Copy error message"
-                @click="copyErrorMessage(composerError)"
-              >
-                <Icon name="copy" :size="16" />
-              </button>
-            </div>
-          </div>
-
-          <div
-            v-if="sequencePlaybackSrc"
-            class="relative flex min-h-[280px] flex-col overflow-hidden rounded-card border border-edge bg-print"
-            data-test="sequence-stage-player"
-          >
-            <video
-              :key="sequencePlaybackSrc"
-              :src="sequencePlaybackSrc"
-              class="max-h-[60vh] min-h-0 w-full flex-1 object-contain"
-              autoplay
-              controls
-              loop
-              playsinline
-            />
-            <div
-              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-edge bg-bench/90 px-2 py-1.5 shadow-raised backdrop-blur"
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-test="web-expansion-pull-action"
+              class="rounded-control bg-stop px-3 py-1.5 font-semibold text-on-accent disabled:opacity-60"
+              :disabled="expansionPullBusy"
+              @click="pullExpansionModel"
             >
-              <span
-                class="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-3"
-              >
-                Clip {{ (playingSequenceStage ?? 0) + 1 }}
-              </span>
-              <button
-                type="button"
-                class="rounded-control border border-ce px-2 py-1 text-xs text-ink-2 hover:text-rebate"
-                data-test="sequence-return-live"
-                @click="returnToLiveSequence"
-              >
-                Return to live render
-              </button>
-            </div>
+              Pull {{ expansionPull.model }} on {{ expansionPull.label }}
+            </button>
+            <button
+              type="button"
+              class="rounded-control px-3 py-1.5 text-ink-2 hover:text-ink"
+              @click="expansionPull = null"
+            >
+              Dismiss
+            </button>
           </div>
+        </div>
 
-          <!-- The canvas region stays in sequence mode: the watched job's
-               stage progress and latest clip preview develop here. -->
-          <ResultCanvas
-            v-else-if="watchedSequenceActive"
-            mode="generating"
-            :progress="sequenceCanvasPercent"
-            :stage="sequenceCanvasStage"
-            :preview-src="sequencePreviewSrc"
-            :progress-fraction="sequenceCanvasPercent / 100"
-            :develop-phase="watchedProgress ? 'developing' : 'latent'"
-            :print-width="form.state.value.width"
-            :print-height="form.state.value.height"
-            data-test="sequence-canvas"
-          />
-
-          <!-- Settling must not blank the canvas: the strip no longer keeps a
-               settled row, so the result lands here with its actions. -->
-          <div
-            v-else-if="settledSequence"
-            class="flex flex-col gap-2 rounded-card border border-edge bg-bench p-3"
-            data-test="sequence-result"
-          >
-            <video
-              v-if="settledSequencePrint"
-              :src="imageUrl(settledSequencePrint.filename)"
-              class="max-h-[60vh] w-full rounded-media bg-print object-contain"
-              controls
-              loop
-              playsinline
-            />
-            <ErrorNotice
-              v-if="settledSequenceError"
-              data-test="sequence-result-error"
-              :message="settledSequenceError"
-              :copy-message="settledSequenceErrorCopy"
-            />
-            <p class="data-mono text-caption text-ink-3">
-              {{ settledSequenceCaption }}
-            </p>
-            <div class="flex flex-wrap items-center gap-2">
-              <button
-                v-if="settledSequenceError"
-                type="button"
-                class="rounded-control bg-stop px-3 py-1.5 text-sm font-semibold text-on-accent"
-                data-test="sequence-result-resume"
-                @click="onResumeSettledSequence"
-              >
-                Resume
-              </button>
-              <button
-                type="button"
-                class="rounded-control border border-ce px-3 py-1.5 text-sm text-ink-2 hover:text-rebate"
-                data-test="sequence-result-edit"
-                @click="onEditSettledSequence"
-              >
-                Edit sequence
-              </button>
-              <button
-                type="button"
-                class="rounded-control border border-ce px-3 py-1.5 text-sm text-ink-2 hover:text-rebate"
-                data-test="sequence-result-library"
-                @click="onShowSettledSequenceInLibrary"
-              >
-                Show in library
-              </button>
-            </div>
+        <div
+          v-else-if="submitStatus"
+          class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
+          data-test="composer-submit-error"
+        >
+          <div class="flex items-start gap-2">
+            <p class="min-w-0 flex-1">{{ submitStatus }}</p>
+            <button
+              type="button"
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
+              aria-label="Copy error message"
+              title="Copy error message"
+              @click="copyErrorMessage(submitStatus)"
+            >
+              <Icon name="copy" :size="16" />
+            </button>
           </div>
-        </template>
+        </div>
 
-        <template v-else>
-          <ComposerCard
-            ref="composerCardRef"
-            :prompt="form.state.value.prompt"
-            v-model:style-preset="form.state.value.stylePreset"
-            :aspect-label="aspectLabel"
-            :width="form.state.value.width"
-            :height="form.state.value.height"
-            :steps="form.state.value.steps"
-            :batch-size="form.state.value.batchSize"
-            :busy="ordinarySubmitBlocked || submitInFlight"
-            :cancellable="submitInFlight"
-            :busy-label="placementStatus ?? 'Planning generation…'"
-            :disabled-reason="h3GenerationInputBlocker"
-            :expanded="expanded"
-            :prompt-optional="canSkipPrompt"
-            :required-placeholder="requiredPromptPlaceholder"
-            :placeholder="composerPromptPlaceholder"
-            :transform-blocked-reason="promptTransformBlocked"
-            :history="promptHistory"
-            @update:prompt="onPromptAuthored"
-            @submit="onSubmit"
-            @cancel="cancelSubmitPlanning"
-            @expand="onExpand"
-            @remix="onRemix"
-            @undo-expand="undoExpand"
-          >
-            <template v-if="isPhone" #mobile-controls>
-              <div
-                class="mt-3 flex flex-col gap-3"
-                data-test="phone-create-controls"
-              >
-                <CreateModelPicker
-                  :models="composerModels"
-                  :model="form.state.value.model"
-                  :missing-model="missingModelId"
-                  browse-to="/models"
-                  empty-label="No models installed"
-                  @select="selectModel"
-                />
-                <ControlsAside
-                  v-model="form.state.value"
-                  :family="currentFamily"
-                  :model="currentModel"
-                  :routing-request="durationRoutingRequest"
-                  :source-dimensions="activeSourceDimensions"
-                  :canvas-intent="canvasIntent"
-                  :adv-count="advCount"
-                  :mobile="true"
-                  :last-seed="lastSeedUsed"
-                  :output="sequenceMode ? 'sequence' : 'single'"
-                  :clip-count="sequenceMode ? draft.clips.length : 0"
-                  :chain-limits="sequenceMode ? sequenceChainLimits : null"
-                  @update:output="setOutput"
-                  @open-advanced="openAdvanced"
-                  @reset-settings="onResetSettings"
-                  @canvas-intent="setCanvasIntent"
-                >
-                  <template v-if="fileUnder.available.value" #file-under>
-                    <FileUnderGroup
-                      v-model:state="fileUnder.state.value"
-                      :title="form.state.value.title"
-                      :auto-tag="autoTagTitle"
-                      :suggestions="fileUnder.suggestions.value"
-                      :collections="fileUnder.collections.value"
-                      :model="form.state.value.model"
-                      :ext="form.state.value.outputFormat"
-                      :timestamp="fileUnderStamp"
-                    />
-                  </template>
-                </ControlsAside>
-                <SourceMediaPanel
-                  v-if="!sequenceMode"
-                  v-model="form.state.value"
-                  :family="currentFamily"
-                  :models="models"
-                  @open-picker="showPicker = true"
-                  @open-target-picker="openTargetPicker"
-                  @clear-source="onClearSource"
-                  @open-end-frame-picker="showEndFramePicker = true"
-                  @clear-end-frame="onClearEndFrame"
-                  @open-mask="showMask = true"
-                  @open-h3-first-frame-picker="
-                    h3BoundaryPickerTarget = 'firstFrame'
-                  "
-                  @open-h3-last-frame-picker="
-                    h3BoundaryPickerTarget = 'lastFrame'
-                  "
-                  @open-h3-reference-picker="h3ReferencePickerOpen = true"
-                  @open-reference-picker="showReferencePicker = true"
-                  @crop-h3-reference="h3CropIndex = $event"
-                />
-                <IdentityPanel
-                  v-if="!sequenceMode"
-                  v-model="form.state.value"
-                  :models="models"
-                  :notice="identityRestoreNotice"
-                />
-                <SequenceOpeningImagePanel
-                  v-else-if="showSequenceOpeningImage"
-                  v-model="form.state.value"
-                  @open-picker="showPicker = true"
-                />
-              </div>
-            </template>
-          </ComposerCard>
-          <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
+        <div
+          v-if="chainDecision.kind === 'chain'"
+          class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
+        >
+          Will render as
+          <span class="font-semibold">{{ chainDecision.stageCount }}</span>
+          chained clips of up to {{ chainDecision.clipFrames }} frames — expect
+          this to take substantially longer than a single clip.
+        </div>
+        <div
+          v-else-if="singleShotPreservationNote"
+          class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
+          data-test="single-shot-preservation-cue"
+        >
+          {{ singleShotPreservationNote }}
+        </div>
 
-          <div
-            v-if="quickConflictReasons.length"
-            class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
-            role="alert"
-            data-test="web-quick-expansion-stale"
-          >
-            <div class="flex items-start gap-2">
-              <p class="min-w-0 flex-1">{{ quickConflictMessage }}</p>
-              <button
-                type="button"
-                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
-                aria-label="Copy error message"
-                title="Copy error message"
-                @click="copyQuickConflict"
-              >
-                <Icon name="copy" :size="16" />
-              </button>
-            </div>
-            <div class="mt-2 flex flex-wrap gap-2">
-              <button
-                type="button"
-                data-test="web-reexpand-current-prompt"
-                class="rounded-control bg-stop px-3 py-1.5 font-semibold text-on-accent"
-                @click="reexpandCurrentPrompt"
-              >
-                Re-expand for {{ currentModelLabel }}
-              </button>
-              <button
-                type="button"
-                data-test="web-generate-expanded-anyway"
-                class="rounded-control border border-stop/50 px-3 py-1.5 font-medium"
-                @click="generateExpandedAnyway"
-              >
-                Generate expanded prompt anyway
-              </button>
-              <button
-                type="button"
-                class="rounded-control px-3 py-1.5 text-ink-2 hover:text-ink"
-                @click="undoExpand"
-              >
-                Restore original
-              </button>
-            </div>
-          </div>
-
-          <div
-            v-else-if="expansionPull && !promptTransformBlocked"
-            class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
-            role="alert"
-            data-test="web-expansion-pull"
-          >
-            <p class="min-w-0">
-              The expansion model {{ expansionPull.model }} isn't installed on
-              {{ expansionPull.label }}.
-            </p>
-            <div class="mt-2 flex flex-wrap gap-2">
-              <button
-                type="button"
-                data-test="web-expansion-pull-action"
-                class="rounded-control bg-stop px-3 py-1.5 font-semibold text-on-accent disabled:opacity-60"
-                :disabled="expansionPullBusy"
-                @click="pullExpansionModel"
-              >
-                Pull {{ expansionPull.model }} on {{ expansionPull.label }}
-              </button>
-              <button
-                type="button"
-                class="rounded-control px-3 py-1.5 text-ink-2 hover:text-ink"
-                @click="expansionPull = null"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
-
-          <div
-            v-else-if="submitStatus"
-            class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
-            data-test="composer-submit-error"
-          >
-            <div class="flex items-start gap-2">
-              <p class="min-w-0 flex-1">{{ submitStatus }}</p>
-              <button
-                type="button"
-                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
-                aria-label="Copy error message"
-                title="Copy error message"
-                @click="copyErrorMessage(submitStatus)"
-              >
-                <Icon name="copy" :size="16" />
-              </button>
-            </div>
-          </div>
-
-          <div
-            v-if="chainDecision.kind === 'chain'"
-            class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
-          >
-            Will render as
-            <span class="font-semibold">{{ chainDecision.stageCount }}</span>
-            chained clips of up to {{ chainDecision.clipFrames }} frames —
-            expect this to take substantially longer than a single clip.
-          </div>
-          <div
-            v-else-if="singleShotPreservationNote"
-            class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
-            data-test="single-shot-preservation-cue"
-          >
-            {{ singleShotPreservationNote }}
-          </div>
-
-          <div
-            v-if="canvasMode === 'empty' && showColdStart"
-            class="flex min-h-[300px] items-center justify-center rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
-          >
-            <ColdStartGuide />
-          </div>
-          <ResultCanvas
-            v-else
-            :mode="canvasMode"
-            :empty-guidance="emptyCanvasGuidance"
-            :progress="genProgress"
-            :stage="genStage"
-            :preview-src="
-              selectedQueueRender?.preview?.preview_image
-                ? `data:image/png;base64,${selectedQueueRender.preview.preview_image}`
-                : (runningJob?.previewUrl ?? undefined)
-            "
-            :progress-fraction="genProgress / 100"
-            :develop-seed="
-              runningJob?.seedVisual ?? selectedQueueRender?.source.jobId
-            "
-            :develop-phase="developPhase"
-            :print-width="
-              selectedQueueRender?.width ?? runningJob?.request.width
-            "
-            :print-height="
-              selectedQueueRender?.height ?? runningJob?.request.height
-            "
-            :result-src="resultSrc"
-            :result-video-src="resultVideoSrc"
-            :result-audio-src="resultAudioSrc"
-            :result-mesh-src="resultMeshSrc"
-            :result-caption="resultCaption"
-            :error="latestErrorMessage"
-            :error-copy="latestErrorCopy"
-            :variations="variations"
-            :variation-batch-id="preparedBatch?.batchId"
-            :queueing-variations="queueingVariations"
-            @update:variations="variations = $event"
-            @use-variation="useVariation"
-            @discard="discardVariations"
-            @queue="queueVariations"
-            @context-menu="openCanvasContextMenu"
-            @click="canvasMode === 'result' ? openLatestResult() : undefined"
-          />
-        </template>
+        <div
+          v-if="canvasMode === 'empty' && showColdStart"
+          class="flex min-h-[300px] items-center justify-center rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
+        >
+          <ColdStartGuide />
+        </div>
+        <ResultCanvas
+          v-else
+          :mode="canvasMode"
+          :empty-guidance="emptyCanvasGuidance"
+          :progress="genProgress"
+          :stage="genStage"
+          :preview-src="
+            selectedQueueRender?.preview?.preview_image
+              ? `data:image/png;base64,${selectedQueueRender.preview.preview_image}`
+              : (runningJob?.previewUrl ?? undefined)
+          "
+          :progress-fraction="genProgress / 100"
+          :develop-seed="
+            runningJob?.seedVisual ?? selectedQueueRender?.source.jobId
+          "
+          :develop-phase="developPhase"
+          :print-width="selectedQueueRender?.width ?? runningJob?.request.width"
+          :print-height="
+            selectedQueueRender?.height ?? runningJob?.request.height
+          "
+          :result-src="resultSrc"
+          :result-video-src="resultVideoSrc"
+          :result-audio-src="resultAudioSrc"
+          :result-mesh-src="resultMeshSrc"
+          :result-caption="resultCaption"
+          :error="latestErrorMessage"
+          :error-copy="latestErrorCopy"
+          :variations="variations"
+          :variation-batch-id="preparedBatch?.batchId"
+          :queueing-variations="queueingVariations"
+          @update:variations="variations = $event"
+          @use-variation="useVariation"
+          @discard="discardVariations"
+          @queue="queueVariations"
+          @context-menu="openCanvasContextMenu"
+          @click="canvasMode === 'result' ? openLatestResult() : undefined"
+        />
 
         <section>
           <div class="mb-2 flex items-center justify-between">
@@ -6364,12 +4781,8 @@ onBeforeUnmount(() => {
           :models="composerModels"
           :model="form.state.value.model"
           :missing-model="missingModelId"
-          :browse-to="sequenceMode ? sequenceBrowsePath : '/models'"
-          :empty-label="
-            sequenceMode
-              ? 'No sequence models installed'
-              : 'No models installed'
-          "
+          browse-to="/models"
+          empty-label="No models installed"
           @select="selectModel"
         />
         <ControlsAside
@@ -6382,10 +4795,6 @@ onBeforeUnmount(() => {
           :adv-count="advCount"
           :mobile="false"
           :last-seed="lastSeedUsed"
-          :output="sequenceMode ? 'sequence' : 'single'"
-          :clip-count="sequenceMode ? draft.clips.length : 0"
-          :chain-limits="sequenceMode ? sequenceChainLimits : null"
-          @update:output="setOutput"
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
           @canvas-intent="setCanvasIntent"
@@ -6406,7 +4815,6 @@ onBeforeUnmount(() => {
         <!-- Source media in the primary form: the model dictates whether
              (and how) it renders, exactly like resolutions. -->
         <SourceMediaPanel
-          v-if="!sequenceMode"
           v-model="form.state.value"
           :family="currentFamily"
           :models="models"
@@ -6425,17 +4833,9 @@ onBeforeUnmount(() => {
         <!-- The identity photo is media the user attaches, not a setting, so
              it sits with the source wells; only its two knobs are Advanced. -->
         <IdentityPanel
-          v-if="!sequenceMode"
           v-model="form.state.value"
           :models="models"
           :notice="identityRestoreNotice"
-        />
-        <!-- Sequence's own source media: the opening frame sits exactly where
-             the one-shot well does, never behind the Advanced toggle. -->
-        <SequenceOpeningImagePanel
-          v-else-if="showSequenceOpeningImage"
-          v-model="form.state.value"
-          @open-picker="showPicker = true"
         />
         <!-- Tablet+ : inline, always-visible Advanced column. -->
         <AdvancedDrawer
@@ -6448,7 +4848,6 @@ onBeforeUnmount(() => {
           :routing-request="durationRoutingRequest"
           :can-extend="canExtend"
           :extend-default-overlap-frames="extendDefaultOverlapFrames"
-          :output="sequenceMode ? 'sequence' : 'single'"
           @open-picker="showPicker = true"
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
@@ -6477,7 +4876,6 @@ onBeforeUnmount(() => {
         :routing-request="durationRoutingRequest"
         :can-extend="canExtend"
         :extend-default-overlap-frames="extendDefaultOverlapFrames"
-        :output="sequenceMode ? 'sequence' : 'single'"
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
         @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
@@ -6493,9 +4891,7 @@ onBeforeUnmount(() => {
 
     <ExpandModal
       :open="showExpand"
-      :prompt="
-        expandClipId !== null ? expandStagePrompt : form.state.value.prompt
-      "
+      :prompt="form.state.value.prompt"
       :expand="form.state.value.expand"
       :current-model="currentModel"
       :style-directive="expandStyleDirective"
@@ -6506,7 +4902,6 @@ onBeforeUnmount(() => {
       @apply-prompt="applyExpandedPrompt"
       @close="
         showExpand = false;
-        expandClipId = null;
         expandRoute = null;
         expandPrintRoute = null;
       "
@@ -6528,18 +4923,14 @@ onBeforeUnmount(() => {
     <ImagePickerModal
       :open="showPicker"
       :title="
-        sequenceMode
-          ? 'Opening sequence image'
-          : replaceTargetOnPick
-            ? 'Edit target'
-            : attachmentPicker
-              ? 'Edit images'
-              : 'Source image'
+        replaceTargetOnPick
+          ? 'Edit target'
+          : attachmentPicker
+            ? 'Edit images'
+            : 'Source image'
       "
-      :multiple="!sequenceMode && !replaceTargetOnPick && attachmentPicker"
-      :gallery-only="
-        replaceTargetOnPick || (!sequenceMode && !attachmentPicker)
-      "
+      :multiple="!replaceTargetOnPick && attachmentPicker"
+      :gallery-only="replaceTargetOnPick || !attachmentPicker"
       @pick="onPickSource"
       @close="
         showPicker = false;

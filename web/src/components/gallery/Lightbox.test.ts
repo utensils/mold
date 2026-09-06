@@ -179,22 +179,34 @@ describe("Lightbox (desktop two-pane)", () => {
     });
   });
 
-  it("makes cached editing primary and keeps duplication explicit for sequence prints", async () => {
-    const wrapper = mountWide({ isSequence: true, canEditSequence: true });
-    expect(
-      wrapper.get("[data-test='lightbox-primary-action']").text(),
-    ).toContain("Edit sequence");
-    expect(
-      wrapper.get("[data-test='lightbox-duplicate-sequence']").text(),
-    ).toBe("Duplicate as new");
+  it("offers only a plain reuse for a print carrying chain provenance", async () => {
+    const wrapper = mountWide({
+      item: {
+        ...item,
+        filename: "stitched.mp4",
+        format: "mp4",
+        metadata: {
+          ...item.metadata,
+          prompt: "clip one\nclip two",
+          chain: {
+            stage_count: 2,
+            motion_tail_frames: 8,
+            stages: [
+              { prompt: "clip one", frames: 97, transition: "smooth" },
+              { prompt: "clip two", frames: 97, transition: "smooth" },
+            ],
+          },
+        },
+      },
+    });
 
-    await wrapper.get("[data-test='lightbox-primary-action']").trigger("click");
-    expect(wrapper.emitted("edit-sequence")).toHaveLength(1);
-    expect(wrapper.emitted("reuse")).toBeUndefined();
+    const primary = wrapper.get("[data-test='lightbox-primary-action']");
+    expect(primary.text()).toContain("Reuse these settings");
+    expect(
+      wrapper.find("[data-test='lightbox-duplicate-sequence']").exists(),
+    ).toBe(false);
 
-    await wrapper
-      .get("[data-test='lightbox-duplicate-sequence']")
-      .trigger("click");
+    await primary.trigger("click");
     expect(wrapper.emitted("reuse")).toHaveLength(1);
   });
 
