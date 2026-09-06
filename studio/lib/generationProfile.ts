@@ -406,6 +406,11 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
   if (!isRecord(value)) return false;
   const { octree_resolutions, octree_default, target_faces_min } = value;
   const { target_faces_max } = value;
+  const textureResolutions = value.texture_resolutions;
+  const textureDefault = value.texture_default_resolution;
+  const namedViews = value.named_views;
+  const meshInput = value.mesh_input;
+  const workflowModes = value.workflow_modes;
   return (
     Array.isArray(octree_resolutions) &&
     octree_resolutions.length > 0 &&
@@ -416,7 +421,86 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
     positiveIntegerValue(target_faces_min) &&
     positiveIntegerValue(target_faces_max) &&
     target_faces_min <= target_faces_max &&
-    isFeatureControl(value.texture)
+    isFeatureControl(value.texture) &&
+    (namedViews === undefined ||
+      namedViews === null ||
+      isNamedViewsProfile(namedViews)) &&
+    (meshInput === undefined ||
+      meshInput === null ||
+      isMeshInputProfile(meshInput)) &&
+    (textureResolutions === undefined ||
+      (Array.isArray(textureResolutions) &&
+        textureResolutions.length > 0 &&
+        textureResolutions.every(positiveIntegerValue))) &&
+    (textureDefault === undefined ||
+      textureDefault === null ||
+      (positiveIntegerValue(textureDefault) &&
+        Array.isArray(textureResolutions) &&
+        textureResolutions.includes(textureDefault))) &&
+    (value.texture_view_count === undefined ||
+      value.texture_view_count === null ||
+      isIntegerControl(value.texture_view_count)) &&
+    (value.matting === undefined ||
+      value.matting === null ||
+      isFeatureControl(value.matting)) &&
+    (value.delight === undefined ||
+      value.delight === null ||
+      isFeatureControl(value.delight)) &&
+    (workflowModes === undefined ||
+      (Array.isArray(workflowModes) &&
+        new Set(workflowModes).size === workflowModes.length &&
+        workflowModes.every((mode) =>
+          [
+            "image_to_mesh",
+            "multiview_to_mesh",
+            "mesh_texture",
+            "text_to_mesh",
+          ].includes(String(mode)),
+        )))
+  );
+}
+
+function isNamedViewsProfile(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const roles = value.roles;
+  return (
+    ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
+    Array.isArray(roles) &&
+    new Set(roles).size === roles.length &&
+    roles.every((role) =>
+      ["front", "left", "back", "right"].includes(String(role)),
+    ) &&
+    Number.isInteger(value.min_count) &&
+    Number(value.min_count) >= 0 &&
+    Number.isInteger(value.max_count) &&
+    Number(value.max_count) >= Number(value.min_count) &&
+    Number(value.max_count) <= roles.length &&
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
+  );
+}
+
+function isMeshInputProfile(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
+    Array.isArray(value.formats) &&
+    value.formats.length > 0 &&
+    value.formats.every((format) => ["glb", "obj"].includes(String(format))) &&
+    Number.isInteger(value.max_count) &&
+    Number(value.max_count) >= 0 &&
+    positiveIntegerValue(value.max_bytes) &&
+    Array.isArray(value.up_axes) &&
+    value.up_axes.length > 0 &&
+    value.up_axes.every((axis) => ["y", "z"].includes(String(axis))) &&
+    finiteNumber(value.meters_per_unit_min) &&
+    value.meters_per_unit_min > 0 &&
+    finiteNumber(value.meters_per_unit_max) &&
+    value.meters_per_unit_min <= value.meters_per_unit_max &&
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
   );
 }
 

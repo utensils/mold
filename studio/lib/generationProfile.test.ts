@@ -532,6 +532,59 @@ describe("prompt, strength, and mesh contract", () => {
     expect(advertisedGenerationProfile(modelWith(notRecord))).toBeNull();
   });
 
+  it("accepts the complete mesh workflow contract and rejects malformed additions", () => {
+    const complete = hunyuan3dRecipe();
+    Object.assign(caps(complete).mesh as LooseCaps, {
+      named_views: {
+        mode: "hidden",
+        roles: ["front", "left", "back", "right"],
+        min_count: 0,
+        max_count: 0,
+        reason: "Named camera views require a 2mv checkpoint",
+      },
+      mesh_input: {
+        mode: "hidden",
+        formats: ["glb", "obj"],
+        max_count: 0,
+        max_bytes: 268_435_456,
+        up_axes: ["y", "z"],
+        meters_per_unit_min: 0.000_001,
+        meters_per_unit_max: 1_000_000,
+      },
+      texture_resolutions: [1024, 2048, 4096],
+      texture_default_resolution: 2048,
+      texture_view_count: {
+        default: 6,
+        min: 6,
+        max: 6,
+        step: 1,
+        mode: "fixed",
+      },
+      matting: { mode: "hidden", required: false },
+      delight: { mode: "hidden", required: false },
+      workflow_modes: ["image_to_mesh"],
+    });
+    expect(advertisedGenerationProfile(modelWith(complete))).not.toBeNull();
+
+    const duplicateRole = structuredClone(complete);
+    (caps(duplicateRole).mesh as LooseCaps).named_views = {
+      mode: "adjustable",
+      roles: ["front", "front"],
+      min_count: 1,
+      max_count: 2,
+    };
+    expect(advertisedGenerationProfile(modelWith(duplicateRole))).toBeNull();
+
+    const badTextureDefault = structuredClone(complete);
+    (caps(badTextureDefault).mesh as LooseCaps).texture_default_resolution =
+      3072;
+    expect(advertisedGenerationProfile(modelWith(badTextureDefault))).toBeNull();
+
+    const unknownWorkflow = structuredClone(complete);
+    (caps(unknownWorkflow).mesh as LooseCaps).workflow_modes = ["magic_mesh"];
+    expect(advertisedGenerationProfile(modelWith(unknownWorkflow))).toBeNull();
+  });
+
   it("fills the legacy adapter from the pre-profile family rules", () => {
     // A host that predates the profile still has the old client rules
     // applied to it, so behaviour there is unchanged: LTX-2 with visual

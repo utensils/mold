@@ -1079,7 +1079,9 @@ pub enum GenerationReference {
 }
 
 /// Semantic camera position for Hunyuan3D 2mv conditioning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationImageReferenceRole {
     Front,
@@ -1088,7 +1090,9 @@ pub enum GenerationImageReferenceRole {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshReferenceFormat {
     Glb,
@@ -1097,7 +1101,7 @@ pub enum MeshReferenceFormat {
 
 /// Coordinate declaration carried with an imported mesh. The ingest stage
 /// normalizes this once and records the reversible transform in its artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct MeshReferenceCoordinates {
     pub up_axis: MeshUpAxis,
     pub meters_per_unit: f64,
@@ -11834,7 +11838,9 @@ pub struct MeshTurntableOptions {
 /// so a `y`-up export arrives lying on its side. OBJ is the exception:
 /// Blender's OBJ importer converts `y`-up itself, so rotating here as well
 /// would tip it over.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum MeshUpAxis {
     /// glTF's own frame, unchanged.

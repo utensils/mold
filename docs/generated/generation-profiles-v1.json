@@ -3303,7 +3303,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2.1",
-        "profile_hash": "c3a6d3e220e26c9c7da2d1edf8145f7906d3ed0f1d5329459828fcc02cb8fc58",
+        "profile_hash": "bfc47b2b4c3cd06ab76d8151d6399c86a3b1ca233343869de158710ca3ed50bd",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3439,7 +3439,62 @@
                   "mode": "hidden",
                   "required": false,
                   "reason": "PBR texture generation requires the mesh-texture build feature"
-                }
+                },
+                "named_views": {
+                  "mode": "hidden",
+                  "roles": [
+                    "front",
+                    "left",
+                    "back",
+                    "right"
+                  ],
+                  "min_count": 0,
+                  "max_count": 0,
+                  "reason": "Named camera views require a Hunyuan3D 2mv checkpoint"
+                },
+                "mesh_input": {
+                  "mode": "hidden",
+                  "formats": [
+                    "glb",
+                    "obj"
+                  ],
+                  "max_count": 0,
+                  "max_bytes": 268435456,
+                  "up_axes": [
+                    "y",
+                    "z"
+                  ],
+                  "meters_per_unit_min": 1e-6,
+                  "meters_per_unit_max": 1000000.0,
+                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                },
+                "texture_resolutions": [
+                  1024,
+                  2048,
+                  4096
+                ],
+                "texture_default_resolution": 2048,
+                "texture_view_count": {
+                  "default": 6,
+                  "min": 6,
+                  "max": 6,
+                  "step": 1,
+                  "mode": "fixed",
+                  "note": "Hunyuan3D Paint renders six canonical views"
+                },
+                "matting": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Background matting is not executable by this build"
+                },
+                "delight": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Delighting is not executable by this build"
+                },
+                "workflow_modes": [
+                  "image_to_mesh"
+                ]
               }
             },
             "provenance": [
@@ -3465,7 +3520,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-mini-turbo",
-        "profile_hash": "830f0f8620510a8db66d8f019329b709cb09e56b2429454bd589e94e37c9a7a5",
+        "profile_hash": "d9175dd5447bd4fe001afbc74fae27802f64d8f7b9d9ed207b37c2e416432c44",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3601,7 +3656,62 @@
                   "mode": "hidden",
                   "required": false,
                   "reason": "PBR texture generation requires the mesh-texture build feature"
-                }
+                },
+                "named_views": {
+                  "mode": "hidden",
+                  "roles": [
+                    "front",
+                    "left",
+                    "back",
+                    "right"
+                  ],
+                  "min_count": 0,
+                  "max_count": 0,
+                  "reason": "Named camera views require a Hunyuan3D 2mv checkpoint"
+                },
+                "mesh_input": {
+                  "mode": "hidden",
+                  "formats": [
+                    "glb",
+                    "obj"
+                  ],
+                  "max_count": 0,
+                  "max_bytes": 268435456,
+                  "up_axes": [
+                    "y",
+                    "z"
+                  ],
+                  "meters_per_unit_min": 1e-6,
+                  "meters_per_unit_max": 1000000.0,
+                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                },
+                "texture_resolutions": [
+                  1024,
+                  2048,
+                  4096
+                ],
+                "texture_default_resolution": 2048,
+                "texture_view_count": {
+                  "default": 6,
+                  "min": 6,
+                  "max": 6,
+                  "step": 1,
+                  "mode": "fixed",
+                  "note": "Hunyuan3D Paint renders six canonical views"
+                },
+                "matting": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Background matting is not executable by this build"
+                },
+                "delight": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Delighting is not executable by this build"
+                },
+                "workflow_modes": [
+                  "image_to_mesh"
+                ]
               }
             },
             "provenance": [
@@ -3627,7 +3737,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-turbo",
-        "profile_hash": "70260cba994e3bf5e684cc98faa7d1e1862a9e216a6612cede90658e236adb50",
+        "profile_hash": "9f05f71269b85f9989ea8036b94891c2c06988fdf50324ca9911ff7b45e8bf4b",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3763,7 +3873,62 @@
                   "mode": "hidden",
                   "required": false,
                   "reason": "PBR texture generation requires the mesh-texture build feature"
-                }
+                },
+                "named_views": {
+                  "mode": "hidden",
+                  "roles": [
+                    "front",
+                    "left",
+                    "back",
+                    "right"
+                  ],
+                  "min_count": 0,
+                  "max_count": 0,
+                  "reason": "Named camera views require a Hunyuan3D 2mv checkpoint"
+                },
+                "mesh_input": {
+                  "mode": "hidden",
+                  "formats": [
+                    "glb",
+                    "obj"
+                  ],
+                  "max_count": 0,
+                  "max_bytes": 268435456,
+                  "up_axes": [
+                    "y",
+                    "z"
+                  ],
+                  "meters_per_unit_min": 1e-6,
+                  "meters_per_unit_max": 1000000.0,
+                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                },
+                "texture_resolutions": [
+                  1024,
+                  2048,
+                  4096
+                ],
+                "texture_default_resolution": 2048,
+                "texture_view_count": {
+                  "default": 6,
+                  "min": 6,
+                  "max": 6,
+                  "step": 1,
+                  "mode": "fixed",
+                  "note": "Hunyuan3D Paint renders six canonical views"
+                },
+                "matting": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Background matting is not executable by this build"
+                },
+                "delight": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Delighting is not executable by this build"
+                },
+                "workflow_modes": [
+                  "image_to_mesh"
+                ]
               }
             },
             "provenance": [
@@ -3789,7 +3954,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d",
-        "profile_hash": "ec452cc3d9c96a47cabf56f58a9dc379cdd9ef27ce825d5c6499d8799a84c803",
+        "profile_hash": "262730662c515425da6f8e438c69e6024a6e88906a74971caee88cba2701eac1",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3925,7 +4090,62 @@
                   "mode": "hidden",
                   "required": false,
                   "reason": "PBR texture generation requires the mesh-texture build feature"
-                }
+                },
+                "named_views": {
+                  "mode": "hidden",
+                  "roles": [
+                    "front",
+                    "left",
+                    "back",
+                    "right"
+                  ],
+                  "min_count": 0,
+                  "max_count": 0,
+                  "reason": "Named camera views require a Hunyuan3D 2mv checkpoint"
+                },
+                "mesh_input": {
+                  "mode": "hidden",
+                  "formats": [
+                    "glb",
+                    "obj"
+                  ],
+                  "max_count": 0,
+                  "max_bytes": 268435456,
+                  "up_axes": [
+                    "y",
+                    "z"
+                  ],
+                  "meters_per_unit_min": 1e-6,
+                  "meters_per_unit_max": 1000000.0,
+                  "reason": "Mesh texturing requires the mesh-texture build feature"
+                },
+                "texture_resolutions": [
+                  1024,
+                  2048,
+                  4096
+                ],
+                "texture_default_resolution": 2048,
+                "texture_view_count": {
+                  "default": 6,
+                  "min": 6,
+                  "max": 6,
+                  "step": 1,
+                  "mode": "fixed",
+                  "note": "Hunyuan3D Paint renders six canonical views"
+                },
+                "matting": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Background matting is not executable by this build"
+                },
+                "delight": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Delighting is not executable by this build"
+                },
+                "workflow_modes": [
+                  "image_to_mesh"
+                ]
               }
             },
             "provenance": [
