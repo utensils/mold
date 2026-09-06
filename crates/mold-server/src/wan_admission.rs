@@ -269,6 +269,10 @@ pub(crate) fn wan_geometry_from_header(paths: &ModelPaths) -> Option<WanActivati
     mold_inference::wan::pipeline::activation_geometry_across(
         &mold_inference::wan::pipeline::transformer_files(paths),
     )
+    .map(|geometry| WanActivationGeometry {
+        expert_pair: paths.low_noise_transformer.is_some(),
+        ..geometry
+    })
 }
 
 /// The file whose identity keys the geometry cache: the first of the DiT's

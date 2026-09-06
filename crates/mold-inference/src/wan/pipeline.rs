@@ -179,6 +179,7 @@ fn denoise_activation_bytes(
     files: &[PathBuf],
     config: &WanTransformerConfig,
     distilled: bool,
+    expert_pair: bool,
 ) -> Option<u64> {
     // Prefer the config the caller already resolved over re-probing the files:
     // the probe can fail on an unfamiliar export, and a `None` here silently
@@ -197,8 +198,13 @@ fn denoise_activation_bytes(
             vae,
             patch_spatial: config.patch_size.1.max(1) as u64,
             per_token_timesteps: false,
+            expert_pair: false,
         })
     })?;
+    let geometry = crate::device::WanActivationGeometry {
+        expert_pair,
+        ..geometry
+    };
     // An absent frame count is the engine's own default, not "no video" — and
     // pricing it as zero would size the budget for a single latent frame and
     // disable offload exactly where it is needed most.
@@ -268,6 +274,7 @@ pub fn activation_geometry_across(
         // TI2V latent inpaint drives them — so the geometry does not decide
         // it. The caller sets it from the request it is pricing.
         per_token_timesteps: false,
+        expert_pair: false,
     })
 }
 
@@ -1842,7 +1849,7 @@ impl WanEngine {
                 device,
                 dtype,
                 &loras,
-                denoise_activation_bytes(req, &files, config, distill_is_active(paths)),
+                denoise_activation_bytes(req, &files, config, distill_is_active(paths), false),
                 req.offload,
             )?;
             progress.phase_done(
@@ -1899,6 +1906,7 @@ impl WanEngine {
                 &transformer_files(paths),
                 config,
                 distill_is_active(paths),
+                true,
             ),
             req.offload,
         )
@@ -2262,6 +2270,7 @@ impl WanEngine {
             steps,
             distill_is_active,
             transformer_config.dim as u64,
+            low_noise_expert.is_some(),
         );
         if let Some(refusal) = refusal {
             progress.info(refusal.message());

@@ -23,8 +23,9 @@ from a built-in manifest profile.
 
 `mold run --offload` carries the forced-offload preference to the GPU host,
 including durable sequences. Without it, the request inherits the host policy.
-Wan 1.3B always runs without residual caching because cached output is not
-quality-qualified; setting `MOLD_WAN_STEP_CACHE` cannot override that refusal.
+Wan 1.3B and dense Wan 2.1 14B always run without residual caching because
+cached output is not quality-qualified; setting `MOLD_WAN_STEP_CACHE` cannot
+override that refusal. Wan 2.2 A14B remains qualified for the cache.
 
 ## Reference-image editing
 

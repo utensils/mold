@@ -89,7 +89,7 @@ pub(crate) enum WanStepCacheRefusal {
     TooFewSteps,
     /// A distill adapter is active; there is no redundancy to skip.
     Distilled,
-    /// The 1.3B geometry collapses to noise with residual reuse (#1559).
+    /// This execution graph collapses to noise with residual reuse (#1559).
     UnqualifiedGeometry,
 }
 
@@ -97,7 +97,7 @@ impl WanStepCacheRefusal {
     pub fn message(self) -> &'static str {
         match self {
             Self::UnqualifiedGeometry => {
-                "step cache ignored: Wan 1.3B residual caching is not quality-qualified"
+                "step cache ignored: this Wan checkpoint is not quality-qualified for residual caching"
             }
             Self::TooFewSteps => {
                 "step cache ignored: schedules under 12 steps have no redundant steps to skip"
@@ -121,6 +121,7 @@ impl WanStepCachePolicy {
         steps: u32,
         distilled: bool,
         hidden_dim: u64,
+        expert_pair: bool,
     ) -> (Self, Option<WanStepCacheRefusal>) {
         let Some(threshold) = requested else {
             return (Self::Off, None);
@@ -131,7 +132,7 @@ impl WanStepCachePolicy {
         if steps < MIN_CACHEABLE_STEPS {
             return (Self::Off, Some(WanStepCacheRefusal::TooFewSteps));
         }
-        if hidden_dim == 1536 {
+        if hidden_dim == 1536 || (hidden_dim == 5120 && !expert_pair) {
             return (Self::Off, Some(WanStepCacheRefusal::UnqualifiedGeometry));
         }
         (Self::Threshold(threshold), None)
@@ -169,9 +170,10 @@ pub(crate) fn parse_threshold(raw: &str) -> Result<Option<f64>> {
 ///
 /// Unset means `off`: full denoising is the correctness-preserving default.
 /// `auto` remains an explicit opt-in to the measured threshold for workloads
-/// where its output has been inspected. Wan 1.3B (hidden width 1536) refuses
-/// residual reuse even with an explicit threshold because its cached render
-/// collapses to noise (#1559). Distilled adapters and schedules shorter than
+/// where its output has been inspected. Wan 1.3B and dense Wan 2.1 14B refuse
+/// residual reuse even with an explicit threshold because their cached renders
+/// collapse to noise or blur (#1559). The independently measured two-expert
+/// A14B path remains qualified. Distilled adapters and schedules shorter than
 /// twelve steps also refuse it. The uncached route runs every block, matching
 /// ComfyUI's unpatched Wan forward (`comfy/ldm/wan/model.py:940-959`, revision
 /// 8a43c6b).
@@ -349,18 +351,29 @@ mod tests {
     fn auto_refuses_itself_on_distilled_and_short_schedules() {
         let requested = threshold_for_env(Some("auto")).expect("auto is valid");
 
-        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, true, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, true, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, Some(WanStepCacheRefusal::Distilled));
 
-        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 4, false, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 4, false, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, Some(WanStepCacheRefusal::TooFewSteps));
 
         // ...and does engage on the shape it was measured on.
-        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, false, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, false, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Threshold(AUTO_THRESHOLD));
         assert_eq!(refusal, None);
+    }
+
+    #[test]
+    fn dense_14b_refuses_the_cache_while_the_a14b_pair_remains_qualified() {
+        let requested = Some(AUTO_THRESHOLD);
+        let dense = WanStepCachePolicy::resolve(requested, 30, false, 5120, false);
+        assert_eq!(dense.0, WanStepCachePolicy::Off);
+        assert_eq!(dense.1, Some(WanStepCacheRefusal::UnqualifiedGeometry));
+
+        let pair = WanStepCachePolicy::resolve(requested, 20, false, 5120, true);
+        assert_eq!(pair, (WanStepCachePolicy::Threshold(AUTO_THRESHOLD), None));
     }
 
     use candle_core::{DType, Device};
@@ -389,26 +402,26 @@ mod tests {
     /// disclose rather than silently doing nothing.
     #[test]
     fn distilled_and_short_schedules_refuse_the_cache_and_say_why() {
-        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 4, true, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 4, true, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, Some(WanStepCacheRefusal::Distilled));
 
         // Distilled wins even at a long schedule.
-        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 40, true, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 40, true, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, Some(WanStepCacheRefusal::Distilled));
 
-        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 4, false, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 4, false, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, Some(WanStepCacheRefusal::TooFewSteps));
 
         // The quality tiers qualify.
-        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 20, false, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(Some(0.05), 20, false, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Threshold(0.05));
         assert_eq!(refusal, None);
 
         // An explicitly disabled cache has nothing to disclose.
-        let (policy, refusal) = WanStepCachePolicy::resolve(None, 20, false, 5120);
+        let (policy, refusal) = WanStepCachePolicy::resolve(None, 20, false, 5120, true);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, None);
     }

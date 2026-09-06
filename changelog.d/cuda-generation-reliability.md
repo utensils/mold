@@ -1,5 +1,6 @@
-- **Restore uncached Wan 1.3B rendering.** Refuse residual caching on the 1.3B
-  geometry, including explicit thresholds, to prevent noise-only output
+- **Restore uncached Wan 1.3B and dense 14B rendering.** Refuse residual caching
+  on both unqualified execution graphs, including explicit thresholds, to
+  prevent noise-only or blurred output while preserving the qualified A14B pair
   ([#1559](https://github.com/utensils/mold/issues/1559)).
 - **Carry offload requests to GPU hosts.** Preserve `--offload` through HTTP,
   frozen admission, worker validation, and durable sequence stages
