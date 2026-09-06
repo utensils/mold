@@ -895,6 +895,54 @@ describe("LibraryView Use these settings retained source media", () => {
     wrapper.unmount();
   });
 
+  // Scene-by-scene authoring is retired, but the prints it made — and every
+  // auto-chained long clip the host stitches — still carry `metadata.chain`.
+  // They are ordinary prints here: one reuse door, down the retained-source
+  // road, with no authoring re-entry left on the row.
+  it("reuses a chain-stitched print down the ordinary road", async () => {
+    const stitched: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-stitched.mp4",
+      format: "mp4",
+      timestamp: 3,
+      metadata: {
+        ...prints[0]!.metadata,
+        seed: 9,
+        chain_job_id: "job-1",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 8,
+          stages: [
+            { prompt: "a lighthouse at dusk", frames: 97, transition: "smooth", seed: "42" },
+            { prompt: "the beam sweeps the bay", frames: 97, transition: "smooth", seed: "43" },
+          ],
+        },
+      },
+    };
+    const inventory = { availability: "unavailable_legacy" as const, members: [] };
+    retainedInventoryMock.mockResolvedValueOnce(inventory);
+    const { wrapper, router } = await mountView(stitched);
+
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
+    await tile!.trigger("contextmenu");
+    const labels = useContextMenuStore()
+      .entries.filter((e) => !("separator" in e))
+      .map((e) => (e as { label: string }).label);
+    expect(labels).toContain("Use these settings");
+    expect(labels).not.toContain("Edit clip");
+    expect(labels).not.toContain("Duplicate as new");
+
+    await reuseFromContextMenu(wrapper);
+
+    // The same road any other print takes: retained authority attached, the
+    // print named on the prefill, and Create is where it lands.
+    expect(retainedInventoryMock).toHaveBeenCalledWith("remote-stitched.mp4", plato);
+    expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
+    expect(useComposerStore().prefill).toMatchObject({ metadata: stitched.metadata });
+    expect(router.currentRoute.value.path).toBe("/create");
+    wrapper.unmount();
+  });
+
   it("still restores retained media the metadata could not name", async () => {
     // An inline source video leaves no `OutputMetadata` marker at all, yet the
     // host retains it. Skipping the probe on missing markers would have lost it.

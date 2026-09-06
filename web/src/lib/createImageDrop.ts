@@ -30,8 +30,6 @@ export interface CreateDropContext {
   refusalReason: string | null;
   /** The identity-photo well is rendering (a qualified checkpoint). */
   identityVisible: boolean;
-  /** The sequence Opening image well is rendering. */
-  openingVisible: boolean;
 }
 
 /** How many references the strip holds, in whichever store this plan uses. */
@@ -86,18 +84,15 @@ export function routeCreateDrop(
     hasSource: Boolean(state.imageAttachments[0]?.base64),
     referenceCount: droppedReferenceCount(state, context.plan),
     identityVisible: context.identityVisible,
-    openingVisible: context.openingVisible,
+    // The sequence Opening image well is retired on web, so the shared router
+    // can never select `opening` here.
+    openingVisible: false,
     h3FirstPresent: Boolean(state.h3Authoring?.firstFrame),
     h3ReferenceCount: state.h3Authoring?.references.length ?? 0,
     h3ReferenceMax: MINIMAX_H3_MAX_REFERENCES,
     lastWrite: state.exclusiveWell ?? null,
     refusalReason: context.refusalReason,
   });
-}
-
-/** The sequence draft slot a drop can write. */
-export interface OpeningImageDraft {
-  openingImage: { filename: string; base64: string | null } | null;
 }
 
 /**
@@ -111,7 +106,6 @@ export async function applyCreateDrop(
   target: DropTarget,
   image: SourceImageState,
   context: Pick<CreateDropContext, "plan" | "referenceMax">,
-  draft?: OpeningImageDraft | null,
 ): Promise<string | null> {
   switch (target) {
     case "source":
@@ -146,8 +140,8 @@ export async function applyCreateDrop(
       state.identityImage = image;
       return null;
     case "opening":
-      if (!draft) return "This sequence has no opening-image well.";
-      draft.openingImage = { filename: image.filename, base64: image.base64 };
+      // Unreachable: `routeCreateDrop` always reports the well as absent. The
+      // arm stays so the switch remains exhaustive over the shared target set.
       return null;
     case "h3-first":
     case "h3-last": {

@@ -2,10 +2,8 @@ import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { apiFetchTo } from "@studio/api/client";
 import type { FleetActiveWork } from "@studio/api/activity";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useOpenLiveWork } from "./useOpenLiveWork";
 import { useQueueActivity, type QueueRow } from "./useQueueActivity";
-import { useChainJobsStore } from "../stores/chainJobs";
 import { jobCanBeRemoved, useGenerationStore, type Job } from "../stores/generation";
 import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
@@ -88,9 +86,7 @@ export function useQueueCommands(): QueueCommands {
   const router = useRouter();
   const composer = useComposerStore();
   const contextMenu = useContextMenuStore();
-  const draft = useSequenceDraftStore();
   const generation = useGenerationStore();
-  const chainJobs = useChainJobsStore();
   const hosts = useHostsStore();
   const hostStatus = useHostStatusStore();
   const jobs = useJobsStore();
@@ -164,8 +160,13 @@ export function useQueueCommands(): QueueCommands {
     }
   }
 
-  async function cancelShared(row: FleetActiveWork) {
-    if (cancellingShared.value.includes(row.key)) return;
+  /**
+   * The live route to a shared row's machine, or null when this client's view
+   * of that machine has moved on. Acting on a stale snapshot would send the
+   * request to whatever now answers on that URL, so both Stop and Resume ask
+   * the same question before they touch the network.
+   */
+  function sharedRowTarget(row: FleetActiveWork) {
     const snapshot = liveActivity.hosts[row.hostId];
     const host = hosts.all.find((candidate) => candidate.id === row.hostId);
     if (
@@ -178,12 +179,54 @@ export function useQueueCommands(): QueueCommands {
     ) {
       toasts.push("This machine changed. Refresh its jobs and try again.", "error");
       void liveActivity.refresh();
-      return;
+      return null;
     }
+    return snapshot.target;
+  }
+
+  /**
+   * Whether this row is an auto-chained video the host parked at shutdown.
+   *
+   * A clip longer than the checkpoint can denoise in one pass runs as a chain
+   * job. Graceful shutdown parks it as `paused` with its manifest, source
+   * media, completed clips, and tail cache preserved precisely so it can be
+   * resumed — the server answers `can_cancel: false` while parked, so Stop is
+   * correctly absent and Resume is the only thing left to offer.
+   */
+  function canResumeChain(row: QueueRow): boolean {
+    return (
+      row.kind === "shared" && row.shared.execution === "chain" && row.shared.phase === "paused"
+    );
+  }
+
+  /**
+   * Resume a parked chain job on its own route. It lives in the chain-job id
+   * space, so the generation queue's per-job pause has no row to act on and
+   * `pauseEntries` stays empty for it.
+   */
+  async function resumeSharedChain(row: FleetActiveWork) {
+    const target = sharedRowTarget(row);
+    if (!target) return;
+    try {
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/resume`, {
+        method: "POST",
+      });
+      toasts.push("Resumed");
+    } catch (error) {
+      report(error);
+    } finally {
+      await liveActivity.refresh();
+    }
+  }
+
+  async function cancelShared(row: FleetActiveWork) {
+    if (cancellingShared.value.includes(row.key)) return;
+    const target = sharedRowTarget(row);
+    if (!target) return;
     cancellingShared.value = [...cancellingShared.value, row.key];
     try {
       if (row.execution === "chain") {
-        await apiFetchTo(snapshot.target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
+        await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
           method: "POST",
         });
       } else {
@@ -206,7 +249,6 @@ export function useQueueCommands(): QueueCommands {
   }
 
   function canCancel(row: QueueRow): boolean {
-    if (row.kind === "sequence") return row.sequence.actions.includes("cancel");
     if (row.kind === "print") {
       return (
         row.print.status !== "complete" && row.print.status !== "error" && !row.print.cancelling
@@ -225,20 +267,17 @@ export function useQueueCommands(): QueueCommands {
 
   async function cancel(row: QueueRow) {
     if (row.kind === "print") await cancelPrint(row.print);
-    else if (row.kind === "shared") await cancelShared(row.shared);
-    else await chainJobs.cancel(row.sequence.hostId, row.sequence.jobId).catch(report);
+    else await cancelShared(row.shared);
   }
 
-  /** The host a row's server queue lives on, and the row's server id. A
-   * sequence answers with its chain job, which lives in a different id space
-   * from the generation queue — so it resolves a HOST but never matches a
-   * queue entry, and the reorder and per-job pause entries stay empty for it. */
+  /** The host a row's server queue lives on, and the row's server id. A long
+   * clip the host chained answers with its chain job, which lives in a
+   * different id space from the generation queue — so it resolves a HOST but
+   * never matches a queue entry, and the reorder and per-job pause entries
+   * stay empty for it. */
   function serverRef(row: QueueRow): { hostId: string; id: string } | null {
     if (row.kind === "print") {
       return row.print.id ? { hostId: row.print.hostId ?? "local", id: row.print.id } : null;
-    }
-    if (row.kind === "sequence") {
-      return { hostId: row.sequence.hostId, id: row.sequence.jobId };
     }
     if (row.kind === "shared" && row.shared.kind === "generation") {
       return { hostId: row.shared.hostId, id: row.shared.id };
@@ -251,7 +290,6 @@ export function useQueueCommands(): QueueCommands {
    * already decided. */
   function hostIdFor(row: QueueRow): string | null {
     if (row.kind === "print") return row.print.hostId ?? hosts.primaryHost?.id ?? "local";
-    if (row.kind === "sequence") return row.sequence.hostId;
     return row.shared.hostId;
   }
 
@@ -405,8 +443,6 @@ export function useQueueCommands(): QueueCommands {
 
   function openPrint(job: Job) {
     generation.select(job.clientId);
-    draft.stopEditing();
-    draft.output = "single";
     if (job.request) composer.set({ request: job.request });
     if (job.status === "complete") {
       if (job.result?.filename) {
@@ -428,14 +464,7 @@ export function useQueueCommands(): QueueCommands {
 
   function open(row: QueueRow) {
     if (row.kind === "print") openPrint(row.print);
-    else if (row.kind === "sequence") {
-      composer.setSequence({
-        kind: "inspect",
-        hostId: row.sequence.hostId,
-        jobId: row.sequence.jobId,
-      });
-      void router.push("/create");
-    } else void openLiveWork(row.shared);
+    else void openLiveWork(row.shared);
   }
 
   function menu(row: QueueRow): MenuEntry[] {
@@ -443,12 +472,9 @@ export function useQueueCommands(): QueueCommands {
       return [
         ...reorderEntries(row),
         ...pauseEntries(row),
-        { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
-      ];
-    }
-    if (row.kind === "sequence") {
-      return [
-        { label: "Open", action: () => open(row) },
+        ...(canResumeChain(row)
+          ? [{ label: "Resume", action: () => void resumeSharedChain(row.shared) }]
+          : []),
         { label: "Stop", danger: true, disabled: !canCancel(row), action: () => void cancel(row) },
       ];
     }

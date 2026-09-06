@@ -487,8 +487,7 @@ cmd_send() {
 # All views handle number keys 1-5 for workspace switching (Create,
 # Library, Models, Machines, Settings). However, in Create view with the
 # prompt focused, number keys type into the prompt instead. We detect this
-# and send Escape to enter nav mode first. The chain composer is a Create
-# sub-mode: `view chain` navigates to Create and presses `c`.
+# and send Escape to enter nav mode first.
 cmd_view() {
     require_session
     local target="$1"
@@ -499,7 +498,7 @@ cmd_view() {
     # Landmarks must be unique to each view's content area, NOT the tab header.
     # The tab header ("1 Create  2 Library …") is on every screen, so we use
     # box-drawing prefixes (┌) to match section headers instead.
-    # Legacy names (generate/gallery/queue/script) stay as aliases for one
+    # Legacy names (generate/gallery/queue) stay as aliases for one
     # release so existing UAT transcripts keep working.
     case "$target" in
         1|create|Create|generate|Generate)   key="1"; landmark="┌ Parameters|┌ Prompt";;
@@ -507,20 +506,8 @@ cmd_view() {
         3|models|Models)                     key="3"; landmark="┌ Installed|┌ Available";;
         4|machines|Machines|queue|Queue)     key="4"; landmark="┌ Machines";;
         5|settings|Settings)                 key="5"; landmark="┌ Appearance|┌ Configuration";;
-        chain|Chain|script|Script)
-            # Chain is a Create sub-mode, not a tab: go to Create, press c.
-            cmd_view create >/dev/null
-            send_one_key "$term_id" "c"
-            sleep 0.7
-            if capture | grep -Eq "┌ Stages|Stages"; then
-                echo "OK: Switched to view chain"
-                return 0
-            fi
-            echo "FAIL: Could not enter the chain composer" >&2
-            return 1
-            ;;
         *)
-            echo "ERROR: Unknown view '$target'. Use 1-5, create/library/models/machines/settings, or chain." >&2
+            echo "ERROR: Unknown view '$target'. Use 1-5, or create/library/models/machines/settings." >&2
             exit 1
             ;;
     esac
@@ -1075,67 +1062,6 @@ case "${1:-help}" in
     status)
         cmd_status
         ;;
-    scenario)
-        shift
-        case "${1:-}" in
-            script_mode)
-                echo "=== Scenario: script_mode ==="
-                echo "Prerequisites: launch the TUI first with '$0 launch'"
-                require_session
-                TERM_ID=$(load_state)
-
-                echo "Step 1: Open the chain composer (Create sub-mode)"
-                cmd_view chain
-                sleep 0.5
-                cmd_assert "Stages"
-
-                echo "Step 2: Add two stages (a × 2)"
-                send_one_key "$TERM_ID" "a"
-                sleep 0.3
-                send_one_key "$TERM_ID" "a"
-                sleep 0.3
-                cmd_assert "3 stage"
-
-                echo "Step 3: Cycle transition on stage 2 to cut"
-                send_one_key "$TERM_ID" "k"
-                sleep 0.2
-                send_one_key "$TERM_ID" "t"
-                sleep 0.3
-                cmd_assert "cut"
-
-                echo "Step 4: Save to /tmp/mold-uat.toml"
-                send_one_key "$TERM_ID" "ctrl+s"
-                sleep 0.5
-                send_text "$TERM_ID" "/tmp/mold-uat.toml"
-                sleep 0.2
-                send_one_key "$TERM_ID" "enter"
-                sleep 0.5
-
-                if [ -f /tmp/mold-uat.toml ]; then
-                    echo "  File exists: /tmp/mold-uat.toml"
-                    if grep -q 'transition = "cut"' /tmp/mold-uat.toml; then
-                        echo "  Contains transition = \"cut\": PASS"
-                    else
-                        echo "  FAIL: missing transition = \"cut\"" >&2
-                        exit 1
-                    fi
-                else
-                    echo "  FAIL: /tmp/mold-uat.toml not created" >&2
-                    exit 1
-                fi
-
-                echo "Step 5: Return to Create compose mode"
-                send_one_key "$TERM_ID" "escape"
-                sleep 0.3
-
-                echo "=== script_mode scenario PASSED ==="
-                ;;
-            *)
-                echo "Unknown scenario '${1:-}'. Available: script_mode" >&2
-                exit 1
-                ;;
-        esac
-        ;;
     env)
         cmd_env
         ;;
@@ -1194,8 +1120,7 @@ Screen I/O:
   send <key>...                   Send keystrokes (see KEYS below)
   view <1-5|name>                 Navigate to workspace (1=Create,
                                   2=Library, 3=Models, 4=Machines,
-                                  5=Settings; 'chain' opens the Create
-                                  chain composer via c)
+                                  5=Settings)
   wait-for <pattern> [timeout]    Wait up to N seconds for text
   assert <pattern>                Fail if text missing from screen
 
@@ -1217,10 +1142,6 @@ Settings helpers:
                                   safelight-dark, safelight-light,
                                   mocha, latte, ristretto, gruvbox,
                                   tokyo, nord, dracula
-
-Scripted scenarios:
-  scenario script_mode            Exercise Script-view stage editing
-                                  and TOML save round-trip.
 
 KEYS
   Special:  enter, escape, tab, space, up, down, left, right,

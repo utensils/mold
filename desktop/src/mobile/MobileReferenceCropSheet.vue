@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /*
  * Reference crop sheet — the iPhone presentation of the shared
- * @studio ReferenceCropEditor. Like MobileSeamSheet (and deliberately NOT
+ * @studio ReferenceCropEditor. Like MobileAdvancedSheet (and deliberately NOT
  * @ui/SheetPanel, whose `position: absolute; inset: 0` renders off-screen in
  * the scrolling content column): a fixed overlay whose body owns its own
  * scroll and every safe-area inset.

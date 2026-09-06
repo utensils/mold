@@ -493,8 +493,12 @@ export async function previewGenerationPlacement(
   }
 }
 
-/** Preserve sequence topology and conditioning presence while removing prompt
- * and image contents before probing another host. */
+/** Preserve chain topology and conditioning presence while removing prompt and
+ * image contents before probing another host.
+ *
+ * Scene authoring is retired, so the only chain a client builds is the
+ * automatic split of ONE long clip — but it is still a `ChainRequest` on the
+ * wire, and it is still placed through the scheduler's chain preview. */
 export function redactChainForPlacement<T extends Record<string, unknown>>(
   request: T,
 ): T {

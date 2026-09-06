@@ -73,9 +73,9 @@ describe("applyMobileGalleryMetadata", () => {
     });
   });
 
-  it("keeps an auto-chained One shot out of the sequence editor", () => {
+  it("keeps an auto-chained One shot's own frame count", () => {
     const form = newGenerateForm();
-    const result = applyMobileGalleryMetadata(
+    applyMobileGalleryMetadata(
       form,
       {
         ...metadata,
@@ -95,7 +95,6 @@ describe("applyMobileGalleryMetadata", () => {
       [model],
     );
 
-    expect(result.sequence).toBeNull();
     expect(form.frames).toBe(metadata.frames);
     expect(form.pipeline).toBeNull();
   });
@@ -133,7 +132,6 @@ describe("applyMobileGalleryMetadata", () => {
       modelName: model.name,
       substitutedModel: false,
       title: "",
-      sequence: null,
     });
 
     expect(form).toMatchObject({
@@ -227,7 +225,6 @@ describe("applyMobileGalleryMetadata", () => {
       modelName: replacement.name,
       substitutedModel: true,
       title: "",
-      sequence: null,
     });
     expect(form.model).toBe(replacement.name);
     expect(form.family).toBe(replacement.family);
@@ -340,7 +337,6 @@ describe("applyMobileGalleryMetadata", () => {
     expect(result).toMatchObject({
       modelName: "minimax-h3-fl2va:official-bf16",
       substitutedModel: false,
-      sequence: null,
     });
     expect(form.model).toBe("minimax-h3-fl2va:official-bf16");
     expect(form.family).toBe("minimax-h3");
@@ -376,7 +372,6 @@ describe("applyMobileGalleryMetadata", () => {
     expect(result).toMatchObject({
       modelName: unknown,
       substitutedModel: false,
-      sequence: null,
     });
     expect(form.model).toBe(unknown);
     expect(form.family).toBe("minimax-h3");
@@ -449,9 +444,18 @@ describe("applyMobileGalleryMetadata", () => {
   });
 });
 
-// iPhone gets Reuse only in this pass (Edit sequence needs a chain-detail
-// fetch on the recovery route), so the clip rail is the whole contract here.
-describe("applyMobileGalleryMetadata — sequence prints", () => {
+/**
+ * A print stitched from several clips restores as an ORDINARY ONE SHOT. There
+ * is no clip rail on any surface any more, and the print is never refused —
+ * whatever the host recorded comes back as a single render.
+ *
+ * The prompt is the whole subtlety: `metadata.prompt` on a stitched print is
+ * every clip's prompt joined by newlines, which nobody wrote and nobody can
+ * re-render. Clip 1's own prompt from `metadata.chain.stages[0]` is the only
+ * honest answer, and it is the SHARED mapper that resolves it — asserted here
+ * because the phone is one of its callers, not because it holds a second copy.
+ */
+describe("applyMobileGalleryMetadata — stitched prints", () => {
   const sequenceModel = {
     ...model,
     name: "ltx-video-0.9.8-2b-distilled:bf16",
@@ -478,158 +482,93 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
     } as OutputMetadata;
   }
 
-  it("returns the clip rail without overwriting the one-shot prompt", () => {
+  it("restores the FIRST clip's prompt, never the newline-joined blob", () => {
     const form = newGenerateForm();
-    form.prompt = "parked one shot";
-    form.originalPrompt = "parked provenance";
     const result = applyMobileGalleryMetadata(form, chainPrint([25, 33]), [sequenceModel]);
 
-    expect(result.sequence?.clips.map((c) => c.prompt)).toEqual(["clip 1", "clip 2"]);
-    expect(result.sequence?.clips.map((c) => c.frames)).toEqual([25, 33]);
-    expect(result.sequence?.raised).toBe(0);
-    expect(form.prompt).toBe("parked one shot");
-    expect(form.originalPrompt).toBe("parked provenance");
-  });
-
-  it("raises clips that no longer clear the model's motion tail", () => {
-    const ltx2 = {
-      ...sequenceModel,
-      name: "ltx-2.3-22b-distilled:fp8",
-      family: "ltx2",
-    } as ModelEntry;
-    const form = newGenerateForm();
-    const result = applyMobileGalleryMetadata(form, chainPrint([9, 65], { model: ltx2.name }), [
-      ltx2,
-    ]);
-
-    expect(result.sequence?.raised).toBe(1);
-    expect(result.sequence?.clips.every((c) => c.frames > 17)).toBe(true);
-  });
-
-  it("substitutes a SEQUENCE-capable model when the recorded one is gone", () => {
-    // Falling back to the first installed model would hand the clip rail an
-    // image model that cannot render a sequence at all.
-    const still = {
-      ...model,
-      name: "flux-dev:q8",
-      family: "flux",
-      supports_sequence: false,
-    } as ModelEntry;
-    const other = {
-      ...sequenceModel,
-      name: "ltx-video-0.9.8-2b-distilled:q8",
-    } as ModelEntry;
-    const form = newGenerateForm();
-    const result = applyMobileGalleryMetadata(form, chainPrint([25, 25]), [still, other]);
-
-    expect(result.substitutedModel).toBe(true);
-    expect(result.modelName).toBe(other.name);
-    expect(result.sequence?.clips).toHaveLength(2);
-  });
-
-  it("fails an H3 sequence explicitly without substituting another partition", () => {
-    const other = {
-      ...sequenceModel,
-      name: "ltx-video-0.9.8-2b-distilled:q8",
-    } as ModelEntry;
-    const form = newGenerateForm();
-    const initialModel = form.model;
-    const result = applyMobileGalleryMetadata(
-      form,
-      chainPrint([25, 25], { model: "minimax-h3-fl2va:official-bf16" }),
-      [other],
-    );
-
-    expect(result).toMatchObject({
-      modelName: "minimax-h3-fl2va:official-bf16",
+    expect(form.prompt).toBe("clip 1");
+    expect(form.prompt).not.toContain("clip 2");
+    expect(result).toEqual({
+      modelName: sequenceModel.name,
       substitutedModel: false,
-      sequence: null,
+      title: "",
     });
-    expect(result.sequenceUnsupportedReason).toContain("cannot render a clip sequence");
-    expect(form.model).toBe(initialModel);
-    expect(form.model).not.toBe(other.name);
   });
 
-  it.each(["unavailable", "installed"])(
-    "refuses an %s unknown H3 sequence without mutating the form",
-    (availability) => {
-      const unknown = "minimax-h3-ref2va:future-layout";
-      const other = {
-        ...sequenceModel,
-        name: "ltx-video-0.9.8-2b-distilled:q8",
-      } as ModelEntry;
-      const installedUnknown = {
-        ...sequenceModel,
-        name: unknown,
-        family: "minimax-h3",
-      } as ModelEntry;
-      const form = newGenerateForm();
-      form.prompt = "parked one shot";
-      const before = structuredClone(form);
-
-      const result = applyMobileGalleryMetadata(
-        form,
-        chainPrint([25, 25], { model: unknown }),
-        availability === "installed" ? [installedUnknown, other] : [other],
-      );
-
-      expect(result).toMatchObject({
-        modelName: unknown,
-        substitutedModel: false,
-        sequence: null,
-      });
-      expect(result.sequenceUnsupportedReason).toContain("cannot render a clip sequence");
-      expect(form).toEqual(before);
-    },
-  );
-
-  it("reports what the print could not give back", () => {
+  it("restores the recorded model, canvas, fps and seed as a one shot", () => {
     const form = newGenerateForm();
-    const result = applyMobileGalleryMetadata(
+    applyMobileGalleryMetadata(
       form,
-      chainPrint([25, 25], { negative_prompt: "calm water" }),
+      chainPrint([25, 33], {
+        width: 1024,
+        height: 576,
+        generation_width: 1024,
+        generation_height: 576,
+        fps: 30,
+        seed: 4242,
+      }),
       [sequenceModel],
     );
-    expect(result.sequence?.lossy.negatives).toBe(true);
-    expect(result.sequence?.clips[0]!.negativePrompt).toBe("calm water");
-    expect(result.sequence?.clips[1]!.negativePrompt).toBe("");
+
+    expect(form.model).toBe(sequenceModel.name);
+    expect(form.width).toBe(1024);
+    expect(form.height).toBe(576);
+    expect(form.fps).toBe(30);
+    expect(form.seed).toBe("4242");
   });
 
-  /**
-   * Wan's seam carries context only for an image-conditioned checkpoint
-   * (#783), so the live tail the reused clips are clamped against belongs to
-   * the resolved model's advertised `source_image`, not to the family. Reuse
-   * passed bare name/family strings, which made every wan sequence look
-   * tail-free. A single-frame clip is the boundary the one-frame handoff
-   * moves.
-   */
-  it("clamps against an image-conditioned wan checkpoint's one-frame handoff", () => {
-    const wan = (name: string, sourceImage: string) =>
-      ({
-        ...sequenceModel,
-        name,
-        family: "wan",
-        source_image: sourceImage,
-      }) as ModelEntry;
+  it("never refuses a stitched print, including an H3 one", () => {
+    const h3 = {
+      ...sequenceModel,
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+    } as ModelEntry;
+    const form = newGenerateForm();
+    const result = applyMobileGalleryMetadata(form, chainPrint([25, 25], { model: h3.name }), [h3]);
 
-    const conditioned = wan("wan22-i2v-a14b:q5", "required");
-    expect(
-      applyMobileGalleryMetadata(
-        newGenerateForm(),
-        chainPrint([1, 53], { model: conditioned.name }),
-        [conditioned],
-      ).sequence?.raised,
-    ).toBe(1);
+    expect(result.modelName).toBe(h3.name);
+    expect(result.substitutedModel).toBe(false);
+    expect(form.prompt).toBe("clip 1");
+  });
 
-    // A text-to-video checkpoint genuinely carries nothing across the seam.
-    const unconditioned = wan("wan22-t2v-a14b:q5", "unsupported");
-    expect(
-      applyMobileGalleryMetadata(
-        newGenerateForm(),
-        chainPrint([1, 53], { model: unconditioned.name }),
-        [unconditioned],
-      ).sequence?.raised,
-    ).toBe(0);
+  it("substitutes an installed model when the recorded one is gone", () => {
+    const other = {
+      ...sequenceModel,
+      name: "wan22-ti2v-5b:dmd",
+      family: "wan",
+    } as ModelEntry;
+    const form = newGenerateForm();
+    const result = applyMobileGalleryMetadata(form, chainPrint([25, 25]), [other]);
+
+    expect(result.substitutedModel).toBe(true);
+    expect(form.model).toBe(other.name);
+    expect(form.prompt).toBe("clip 1");
+  });
+
+  it("keeps an ephemeral auto-chain's own prompt untouched", () => {
+    // Every stage of an auto-chained long video carries the SAME prompt, so
+    // the recorded prompt and clip 1's are the same string — nothing to undo.
+    const form = newGenerateForm();
+    applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        model: sequenceModel.name,
+        output_mode: "one-shot",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 17,
+          stages: [
+            { prompt: metadata.prompt, frames: 97, transition: "smooth" as const },
+            { prompt: metadata.prompt, frames: 97, transition: "smooth" as const },
+          ],
+        },
+      } as OutputMetadata,
+      [sequenceModel],
+    );
+
+    expect(form.prompt).toBe(metadata.prompt);
+    expect(form.originalPrompt).toBe(metadata.original_prompt);
   });
 });
 

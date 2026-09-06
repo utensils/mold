@@ -1,17 +1,15 @@
 /**
- * Unified activity view-model: one discriminated union rendering BOTH
- * single-generation ("print") jobs and durable sequence (chain) jobs in the
- * same jobs surface — desktop's ActivityStrip, web's Create strip, and the
- * iPhone queue list all consume this merge instead of keeping a separate
- * chain-jobs list ("the chain Jobs list merges with the
- * activity strip").
+ * Activity view-model for the jobs surfaces — desktop's ActivityStrip, web's
+ * Create strip, and the iPhone queue list.
+ *
+ * This used to be a discriminated union carrying durable sequence (chain) jobs
+ * beside prints, because the apps authored sequences. They no longer do, so
+ * there is exactly one kind of row again. A long clip the host renders as
+ * chained clips is still ONE print carrying `chain: { stageIndex, stageCount }`
+ * — a progress detail, not a second kind of work — and it must stay that way:
+ * a sequence arm here is what made a single render read as two rows.
  */
 
-import type {
-  ChainExecutionPhase,
-  ChainJobState,
-  ChainJobSummary,
-} from "./api/chainTypes";
 import {
   queueStatusFor,
   queueWaitLabel,
@@ -19,7 +17,6 @@ import {
   type QueuePreparation,
   type QueueStatusIndex,
 } from "./queuePosition";
-import { friendlySequenceError } from "./sequence";
 import { compareNewestSubmitted } from "./activityOrder";
 
 export type ActivityAction =
@@ -28,135 +25,44 @@ export type ActivityAction =
 export type PrintPhase =
   "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
 
-export type ActivityJobVM =
-  | {
-      kind: "print";
-      key: string;
-      hostId: string;
-      hostLabel: string;
-      model: string;
-      prompt: string;
-      phase: PrintPhase;
-      progress: { step: number; total: number } | null;
-      /** Auto-chained long single videos already carry stage info. */
-      chain: { stageIndex: number; stageCount: number } | null;
-      actions: ActivityAction[];
-      /** Wall clock at submit — NOT a client counter; attention rows sort
-       *  against sequence epoch stamps. */
-      createdAtMs: number;
-      /** Wall clock when the job settled; null while it is still in flight. */
-      settledAtMs: number | null;
-      error: string | null;
-      /** Live 0-based dispatch order from the host's `/api/queue` listing, not
-       *  the one-shot SSE `Queued` frame. Absent when the host has not been
-       *  read or is too old to list the job. */
-      queuePosition?: number | null;
-      /** Effective waiting lifecycle after projecting host-wide pause state. */
-      queueState?: string | null;
-      /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
-      blockedReason?: string | null;
-      /** Live dependency preparation detail from the scheduler plan. */
-      preparation?: QueuePreparation | null;
-    }
-  | {
-      kind: "sequence";
-      key: string;
-      jobId: string;
-      hostId: string;
-      hostLabel: string;
-      model: string;
-      state: ChainJobState;
-      /** Lease-aware active phase. Unlike parent `state`, `running` means a
-       * stage actually owns a scheduler lane. */
-      phase: ChainExecutionPhase | null;
-      stageCount: number;
-      currentStage: number;
-      progress: { step: number; total: number } | null;
-      error: string | null;
-      actions: ActivityAction[];
-      createdAtMs: number;
-      /** Server truth (`updated_at_unix_ms`) once settled, else null. The age
-       *  rule reads this, so an app restart never resurrects an old failure. */
-      settledAtMs: number | null;
-    };
+export interface ActivityJobVM {
+  kind: "print";
+  key: string;
+  hostId: string;
+  hostLabel: string;
+  model: string;
+  prompt: string;
+  phase: PrintPhase;
+  progress: { step: number; total: number } | null;
+  /** Auto-chained long single videos already carry stage info. */
+  chain: { stageIndex: number; stageCount: number } | null;
+  actions: ActivityAction[];
+  /** Wall clock at submit — NOT a client counter. */
+  createdAtMs: number;
+  /** Wall clock when the job settled; null while it is still in flight. */
+  settledAtMs: number | null;
+  error: string | null;
+  /** Live 0-based dispatch order from the host's `/api/queue` listing, not
+   *  the one-shot SSE `Queued` frame. Absent when the host has not been
+   *  read or is too old to list the job. */
+  queuePosition?: number | null;
+  /** Effective waiting lifecycle after projecting host-wide pause state. */
+  queueState?: string | null;
+  /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
+  blockedReason?: string | null;
+  /** Live dependency preparation detail from the scheduler plan. */
+  preparation?: QueuePreparation | null;
+}
 
 /** How long a settled-but-wrong job keeps a row in the Create strip. */
 export const SETTLED_VISIBLE_MS = 5 * 60_000;
 /** Strip rows for wrong-but-settled work; the overflow becomes a digest count. */
 export const MAX_ATTENTION_ROWS = 2;
-/** Rows rendered in Library ▸ History ▸ Sequences before the count footnote. */
+/** Rows a History lens renders before the count footnote. */
 export const HISTORY_JOBS_RENDER_CAP = 200;
 
-/** Actions available for a sequence job in a given state. Interrupted /
- * failed / cancelled jobs surface `resume` — resumability with cached
- * stages is a server feature the strip must not hide. */
-export function sequenceActions(state: ChainJobState): ActivityAction[] {
-  switch (state) {
-    case "queued":
-    case "running":
-      return ["watch", "cancel"];
-    case "completed":
-      return ["watch", "edit", "delete"];
-    case "paused":
-    case "interrupted":
-    case "failed":
-    case "cancelled":
-      return ["resume", "edit", "delete"];
-  }
-}
-
-const ACTION_LABEL: Record<ActivityAction, string> = {
-  watch: "Watch",
-  cancel: "Cancel",
-  resume: "Resume",
-  edit: "Edit",
-  delete: "Delete",
-  retake: "Retake",
-};
-
-/** §11 voice: `watch` is present tense, so a settled job is *opened* instead.
- *  Same action id on the wire — only the label moves. */
-export function sequenceActionLabel(
-  action: ActivityAction,
-  state: ChainJobState,
-): string {
-  if (action === "watch")
-    return state === "queued" || state === "running" ? "Watch" : "Open";
-  return ACTION_LABEL[action];
-}
-
-export function sequenceToVM(
-  summary: ChainJobSummary,
-  host: { hostId: string; hostLabel: string },
-  progress: { step: number; total: number } | null = null,
-): ActivityJobVM {
-  const settled = summary.state !== "queued" && summary.state !== "running";
-  return {
-    kind: "sequence",
-    key: `seq:${host.hostId}:${summary.id}`,
-    jobId: summary.id,
-    hostId: host.hostId,
-    hostLabel: host.hostLabel,
-    model: summary.model,
-    state: summary.state,
-    phase:
-      summary.execution_phase ??
-      (summary.state === "queued" || summary.state === "running"
-        ? summary.state
-        : null),
-    stageCount: summary.stage_count,
-    currentStage: summary.current_stage,
-    progress,
-    error: summary.error
-      ? friendlySequenceError(summary.error, host.hostLabel)
-      : null,
-    actions: sequenceActions(summary.state),
-    createdAtMs: summary.created_at_unix_ms,
-    settledAtMs: settled ? summary.updated_at_unix_ms : null,
-  };
-}
-
-export type PrintActivityVM = Extract<ActivityJobVM, { kind: "print" }>;
+/** Retained name for the surfaces that still spell the row out. */
+export type PrintActivityVM = ActivityJobVM;
 
 /**
  * Attach the host's live dispatch order to a print row.
@@ -187,10 +93,10 @@ export function withLiveQueueStatus(
  * genuinely parked says why — that is the answer the user is after — the head
  * of the line says "Next up", everyone behind it counts down, and a host that
  * lists nothing still says "Queued". Null means the row is not waiting at all
- * (running, settled, or a sequence), so the surface renders its own chrome.
+ * (running or settled), so the surface renders its own chrome.
  */
 export function queueStatusLabel(vm: ActivityJobVM): string | null {
-  if (vm.kind !== "print" || vm.phase !== "queued") return null;
+  if (vm.phase !== "queued") return null;
   return queueWaitLabel(
     resolveQueueWait({
       state: vm.queueState,
@@ -231,30 +137,25 @@ export function activityAnnouncement(counts: ActivityCounts): string {
 }
 
 function isActive(vm: ActivityJobVM): boolean {
-  return vm.kind === "print"
-    ? vm.phase === "queued" || vm.phase === "running" || vm.phase === "paused"
-    : vm.state === "queued" || vm.state === "running" || vm.state === "paused";
+  return (
+    vm.phase === "queued" || vm.phase === "running" || vm.phase === "paused"
+  );
 }
 
-/** Settled work that still wants a decision: a failed print, a failed or
- *  interrupted (resumable) sequence. `completed` is not news the composer
- *  needs to carry, and a `cancelled` job was the user's own call. */
+/** Settled work that still wants a decision: a failed print. `done` is not
+ *  news the composer needs to carry, and a `cancelled` job was the user's own
+ *  call. */
 export function needsAttention(vm: ActivityJobVM): boolean {
-  return vm.kind === "print"
-    ? vm.phase === "failed"
-    : vm.state === "failed" ||
-        vm.state === "interrupted" ||
-        vm.state === "paused";
+  return vm.phase === "failed";
 }
 
-/** Merge prints and sequences into one list. Active work stays newest-first,
+/** Order the rows the strip renders. Active work stays newest-first,
  * regardless of whether a row is queued or running; settled work follows by
  * recency and is partitioned into attention/history below. */
 export function mergeActivity(
   prints: readonly ActivityJobVM[],
-  sequences: readonly ActivityJobVM[],
 ): ActivityJobVM[] {
-  return [...prints, ...sequences].sort((a, b) => {
+  return [...prints].sort((a, b) => {
     const activeDelta = Number(isActive(b)) - Number(isActive(a));
     if (activeDelta !== 0) return activeDelta;
     if (isActive(a)) return compareNewestSubmitted(a, b);
@@ -263,12 +164,10 @@ export function mergeActivity(
 }
 
 export interface ActivityPartition {
-  /** Queued / running prints and sequences, in merge order. */
+  /** Queued / running prints, in merge order. */
   active: ActivityJobVM[];
   /** Settled-but-wrong rows the strip still shows, newest first. */
   attention: ActivityJobVM[];
-  /** Settled sequences the strip is deliberately not showing. */
-  settledSequences: number;
   /** Attention-eligible rows dropped by the cap, counted rather than lost. */
   hiddenAttention: number;
 }
@@ -304,7 +203,6 @@ export function partitionActivity(
 
   const active: ActivityJobVM[] = [];
   const eligible: ActivityJobVM[] = [];
-  let settledSequences = 0;
 
   for (const vm of rows) {
     if (isActive(vm)) {
@@ -317,12 +215,9 @@ export function partitionActivity(
       vm.settledAtMs === null || nowMs - vm.settledAtMs < settledVisibleMs;
     if (needsAttention(vm) && fresh) {
       // A dismissal is a decision, not a deferral — the row leaves the strip
-      // without reappearing as a count. The durable job is untouched and
-      // still listed in Library ▸ History ▸ Sequences.
+      // without reappearing as a count.
       if (!dismissed.has(vm.key)) eligible.push(vm);
-      continue;
     }
-    if (vm.kind === "sequence") settledSequences += 1;
   }
 
   eligible.sort(
@@ -333,22 +228,15 @@ export function partitionActivity(
   return {
     active,
     attention,
-    settledSequences,
     hiddenAttention: eligible.length - attention.length,
   };
 }
 
 /** The one mono chip at the end of the strip header, or null for silence. */
 export function activityDigestLabel(partition: {
-  settledSequences: number;
   hiddenAttention: number;
 }): string | null {
-  const parts: string[] = [];
-  if (partition.hiddenAttention > 0)
-    parts.push(`${partition.hiddenAttention} failed`);
-  if (partition.settledSequences > 0) {
-    const n = partition.settledSequences;
-    parts.push(`${n} settled sequence${n === 1 ? "" : "s"}`);
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
+  return partition.hiddenAttention > 0
+    ? `${partition.hiddenAttention} failed`
+    : null;
 }

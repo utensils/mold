@@ -1,11 +1,11 @@
 import { computed, type ComputedRef } from "vue";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isModelRuntimeUnavailable } from "@studio/lib/modelRuntimeAvailability";
 import type { GenerateForm } from "../lib/generateForm";
 import { findInstalledModel } from "../lib/generateModels";
 import { useGenerateFormStore } from "../stores/generateForm";
+import { useUiStore } from "../stores/ui";
 import { useStylePicker } from "./useStylePicker";
 import {
   modelsForOutputKind,
@@ -19,25 +19,20 @@ import {
  * ONE decision, whoever opens them. The view toolbar's segmented control
  * renders `outputOptions` and calls `setOutputKind`; the ⌘K palette's
  * "Make a short clip" and File ▸ New Clip raise the `shortClip` intent, which
- * the view answers with the same `setOutputKind("clip")`. Before this the
- * palette and the menu deep-linked `?output=sequence`, which put a person in
- * Scenes when the Short clip door opens onto Simple, and did nothing at all
- * when New image was already open, because the query is consumed on mount.
+ * the view answers with the same `setOutputKind("clip")`.
  *
- * Still picture ↔ Scenes is the inspector's swap (`setOutput`); Simple and
- * 3-D adopt a style HERE, because handing the inspector `single` restores a
- * PICTURE style, the opposite of what those doors ask for.
+ * Every door ADOPTS a style here, because that is the whole of what a kind
+ * is: a clip style makes a clip, a 3-D style makes a 3-D object, and a
+ * picture style makes a picture. There is no second sub-mode behind the clip
+ * door any more.
  */
-export function useOutputKindDoor(
-  form: () => GenerateForm,
-  setOutput: (mode: "single" | "sequence") => void,
-): {
+export function useOutputKindDoor(form: () => GenerateForm): {
   outputKind: ComputedRef<OutputKind>;
   outputOptions: ComputedRef<{ value: OutputKind; label: string }[]>;
   setOutputKind: (kind: string | number) => void;
 } {
-  const draft = useSequenceDraftStore();
   const lastUsed = useLastUsedStylesStore();
+  const ui = useUiStore();
   const formStore = useGenerateFormStore();
   // ONE inventory for the toolbar and the inspector. The header partitioned
   // every style any machine has while the inspector partitioned the picker's
@@ -45,7 +40,6 @@ export function useOutputKindDoor(
   // is aimed at cannot run.
   const { targetModels } = useStylePicker(form);
 
-  const isSequence = computed(() => draft.output === "sequence");
   const isMesh = computed(() => isMeshFamily(form().family));
   // Which styles each section holds is `useCreateOutputKind`'s one answer —
   // the same one the picker narrows on, so the door and the menu behind it
@@ -62,7 +56,7 @@ export function useOutputKindDoor(
 
   // The same decision the title bar reads (`useCreateOutputKind`), from this
   // form rather than the store so the header answers for the form it renders.
-  const outputKind = computed<OutputKind>(() => outputKindFor(draft.output, form().family));
+  const outputKind = computed<OutputKind>(() => outputKindFor(form().family));
   // The words are `OUTPUT_KIND_LABEL`'s, shared with the Styles view's kind
   // filter, so a person learns the three kinds once.
   const outputOptions = computed(() => [
@@ -75,45 +69,27 @@ export function useOutputKindDoor(
       : []),
   ]);
 
-  /** The plain one-shot clip: the output stays `single` and the STYLE is
-   *  what makes it a clip. */
-  const isSimpleClip = computed(() => !isSequence.value && outputKind.value === "clip");
+  const isClip = computed(() => outputKind.value === "clip");
 
-  /** Remember the picture style while another kind holds the form. Parked
-   *  on the DRAFT: leaving New image unmounts the toolbar, and a
-   *  component-local ref took the parked style with it. A kind that is
-   *  already not Still picture holds no picture style worth parking. */
+  /** Remember the picture style while another kind holds the form. A kind
+   *  that is already not Still picture holds no picture style worth parking. */
   function parkStillModel() {
-    if (isMesh.value || isSimpleClip.value) return;
-    draft.lastStillModel = form().model || null;
+    if (isMesh.value || isClip.value) return;
+    ui.parkedStillModel = form().model || null;
   }
 
   function setOutputKind(kind: string | number) {
     if (kind === outputKind.value) return;
     if (kind === "clip") {
-      // Which of the two the door opens onto is the remembered sub-mode.
-      // Scenes is the inspector's swap, exactly as before; Simple keeps the
-      // one-shot output and adopts a clip style here, the way the 3-D door
-      // adopts a 3-D one — the inspector's `setOutputMode("single")` would
-      // restore a PICTURE style, which is the opposite of what Simple asks
-      // for.
-      if (draft.clipMode === "scenes") {
-        setOutput("sequence");
-        return;
-      }
-      // The clip style this section was last used with, else the first.
+      // The clip style this section was last used with, else the first. With
+      // no clip style on this machine there is nothing to adopt, so the door
+      // does nothing rather than putting a picture style under a clip label.
       const pick = lastUsed.pick("clip", clipModels.value);
-      // No clip style on this machine: Scenes owns that empty state and says
-      // where to get one, so the door still opens rather than doing nothing.
-      if (!pick) {
-        setOutput("sequence");
-        return;
-      }
+      if (!pick) return;
       parkStillModel();
       formStore.applyModel(pick);
       return;
     }
-    if (isSequence.value) setOutput("single");
     if (kind === "mesh") {
       const pick = lastUsed.pick("mesh", meshModels.value);
       if (!pick) return;
@@ -121,7 +97,7 @@ export function useOutputKindDoor(
       formStore.applyModel(pick);
       return;
     }
-    if (isMesh.value || isSimpleClip.value) {
+    if (isMesh.value || isClip.value) {
       // Whatever we restore has to be a style Still picture can make. The
       // old "anything that is not 3-D" fallback reached for the first row on
       // the machine, which on a box with a clip style installed put a video
@@ -129,10 +105,10 @@ export function useOutputKindDoor(
       // immediate round trip; the last-used memory covers every later visit
       // and the next launch.
       const restored =
-        (draft.lastStillModel && findInstalledModel(stillModels.value, draft.lastStillModel)) ||
+        (ui.parkedStillModel && findInstalledModel(stillModels.value, ui.parkedStillModel)) ||
         lastUsed.pick("still", stillModels.value);
       if (restored) formStore.applyModel(restored);
-      draft.lastStillModel = null;
+      ui.parkedStillModel = null;
     }
   }
 

@@ -6,8 +6,9 @@ title: Video Generation
 
 Mold supports generating video clips using LTX Video (including LTX-2.5), Wan
 2.1/2.2, and MiniMax H3. Every LTX-2 and Wan
-checkpoint can chain multiple clips together for longer videos with
-scene-by-scene direction; H3 is single-clip only. A dev checkpoint
+checkpoint can chain multiple clips together for longer videos — the apps do
+this for you whenever the length you ask for exceeds one pass, and the CLI can
+also direct a chain scene by scene from a script; H3 is single-clip only. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one; stage 1 runs classifier-free guidance
 as two sequential forward passes.
@@ -29,14 +30,14 @@ the stitched video delivers exactly the frames you asked for.
 
 A **text-to-video** tier is the exception: it hands nothing across a seam, so
 an automatic split would render the same clip again rather than extend it.
-`mold run`, the Studio, and `POST /api/chain-jobs` all refuse a one-shot past
-that tier's clip size with the same sentence. An authored sequence still
+`mold run`, the apps, and `POST /api/chain-jobs` all refuse a one-shot past
+that tier's clip size with the same sentence. A scripted sequence still
 composes those clips deliberately.
 
 Legacy LTX-Video also has no image-to-video handoff. Mold therefore keeps its
 one-shot requests as one denoise up to the 257-frame engine ceiling instead of
 automatically splitting at 97 and rerunning the same prompt and seed. Use
-LTX-2.3/LTX-2.5 for image-conditioned continuation; an explicitly authored
+LTX-2.3/LTX-2.5 for image-conditioned continuation; an explicitly scripted
 sequence may still join independent legacy clips on purpose.
 
 ```bash
@@ -170,7 +171,13 @@ always has; `off` past the span is refused rather than quietly degraded. See
 
 ## Multi-prompt scripts (v2)
 
-Direct any-length video scene-by-scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
+Direct any-length video scene by scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
+
+::: tip Scripts are the only way to direct scenes
+Scene-by-scene authoring lives in the CLI and the HTTP API. The apps (web,
+desktop, iPhone) make one clip at a time from one prompt: set the length you
+want and the host chains and stitches the clips for you.
+:::
 
 ### Canonical form
 
@@ -237,44 +244,18 @@ transition = "fade"
 fade_frames = 12
 ```
 
-### Sequences in the apps
+### Longer clips in the apps
 
-On web, desktop, and iPhone, multi-clip video is a setting rather than a
-separate page. In Create, set **Output** (beside Model) to **Sequence** and the
-composer becomes a clip rail: clip pills carrying a prompt and frame count,
-joined by seam pills. Seams are named in words (**Smooth**, **Cut**, and
-**Fade 8f**) and a click opens the seam editor with its fade-length stepper.
-LTX-Video has no motion tail, so its seams read **Join**. New clips
-default to the selected model's advertised frame count. Frame choices and
-timeline metadata include their duration at the live model FPS, such as
-`97f · 4.0s`.
+Web, desktop, and iPhone have no scene composer. Create makes one clip from one
+prompt, and the only length control is the clip's own duration. Ask for more
+frames than the checkpoint renders in a single pass and the host splits the work
+into clips on its own, carries the motion tail across each seam, and stitches
+the result — you get one video and one Library entry, and the progress readout
+names the clip it is on.
 
-Sequences run as durable jobs in the same activity strip as ordinary prints.
-Desktop and web show each scene as a 16:9 filmstrip tile with its poster,
-render progress, and cache state. As soon as a stage finishes, its play control
-opens the raw scene in the main Create canvas while later stages continue
-rendering; **Return to live render** switches the canvas back to progress.
-Desktop and web can edit a finished sequence in place: its clips reload onto the
-rail, each pill shows cached (✓) versus re-render (↻), and **Update sequence**
-re-renders only from the earliest changed clip; transition and fade-length
-edits re-stitch with no re-render at all. Every settled sequence job is listed
-in **Library ▸ History ▸ Sequences**, and a sequence print in the Library uses
-**Edit sequence** as its primary desktop/web action (re-enter the original job
-with its cached clips). **Duplicate as new** starts a fresh sequence from the
-recorded clips. Desktop and web keep TOML import/export for `mold.chain.v1`
-scripts under the composer's file tools. Web, desktop, and iPhone also offer
-**Validate plan**: it
-asks the currently selected authenticated host to normalize the live draft,
-then shows each clip's input/output frames, transition, conditioning inputs,
-warnings, and VRAM estimate when available. Validation creates no job and
-starts no download or inference work.
-
-### TUI chain composer
-
-Press `c` from Create's navigation mode in `mold tui` to author a
-`mold.chain.v1` script with per-stage prompts, frame counts, source images, and
-`smooth` / `cut` / `fade` transitions. See the
-[TUI guide](/guide/tui#chain-composer).
+Clips made by an older build's sequence composer are still in your library with
+their per-scene provenance intact. **Use these settings again** on one of them
+restores a plain one-shot clip built from the first scene's prompt.
 
 ### Capabilities endpoint
 
@@ -282,7 +263,7 @@ Press `c` from Create's navigation mode in `mold tui` to author a
 GET /api/capabilities/chain-limits?model=<name>[&fps=<n>]
 ```
 
-Returns per-model caps used by every sequence UI:
+Returns the per-model caps the CLI and the chain API validate against:
 
 ```json
 {
@@ -305,7 +286,7 @@ Returns per-model caps used by every sequence UI:
 renders when a long one-shot request is chained automatically (97 for LTX-2;
 for Wan the checkpoint's own manifest default over a 53-frame A14B /
 121-frame floor, e.g. 121 for TI2V-5B)) so a sequence clip can never be longer
-than the clips the Duration slider would have produced.
+than the clips an automatically chained one-shot would have produced.
 `fps` echoes the frame rate the cap was computed at; it defaults to the
 model's own default fps when the query omits it. It matters because LTX-2's
 family ceiling is a runtime duration (`frames_per_clip_runtime_seconds`, 20 s),
@@ -313,8 +294,7 @@ so pass the fps you will actually render at and the cap moves with it.
 `frames_per_clip_recommended` follows the model's own default frame count (97
 for LTX-2, 25 for LTX-Video) so clients do not have to hardcode one.
 `supports_sequence` is model-specific and is also advertised per model on
-`GET /api/models`, so a picker never has to infer it from the checkpoint name.
-A family with no chain path reports `false` with a
+`GET /api/models`. A family with no chain path reports `false` with a
 `sequence_unsupported_reason`. `GET /api/models` carries the matching per-model
 `default_frames`, `default_fps`, `max_frames`, and `frame_step` fields.
 

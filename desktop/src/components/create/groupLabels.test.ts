@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import inspectorSource from "./InspectorPanel.vue?raw";
-import sequenceComposerSource from "./SequenceComposer.vue?raw";
 import loraStackSource from "../generate/LoraStack.vue?raw";
 
 /*
@@ -14,7 +13,6 @@ import loraStackSource from "../generate/LoraStack.vue?raw";
 
 const SURFACES: ReadonlyArray<readonly [string, string]> = [
   ["InspectorPanel.vue", inspectorSource],
-  ["SequenceComposer.vue", sequenceComposerSource],
   ["LoraStack.vue", loraStackSource],
 ];
 

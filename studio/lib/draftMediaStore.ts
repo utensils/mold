@@ -315,6 +315,36 @@ export async function deleteDraftMedia(draftId: string): Promise<void> {
   await withStore("readwrite", (store) => store.delete(draftId));
 }
 
+/**
+ * Delete every stored record whose draft id starts with `prefix`, and answer
+ * with the ids removed.
+ *
+ * `deleteDraftMedia` can only reach a key the caller already knows. A retired
+ * feature's blobs are exactly the ones nobody knows the ids of any more — the
+ * draft that named them is itself being deleted, and may be unreadable — so
+ * retirement needs to sweep by prefix or leave megabytes of base64 behind in
+ * the user's quota forever.
+ */
+export async function deleteDraftMediaByPrefix(
+  prefix: string,
+): Promise<string[]> {
+  const keys = await withStore<IDBValidKey[]>("readonly", (store) =>
+    store.getAllKeys(),
+  );
+  const matched = (keys ?? [])
+    .filter((key): key is string => typeof key === "string")
+    .filter((key) => key.startsWith(prefix));
+  for (const key of matched) await deleteDraftMedia(key);
+  for (const key of [...memory.keys()]) {
+    if (key.startsWith(prefix)) {
+      memory.delete(key);
+      durableDraftIds.delete(key);
+      if (!matched.includes(key)) matched.push(key);
+    }
+  }
+  return matched;
+}
+
 export function clearMemoryDraftsForTest() {
   memory.clear();
   durableDraftIds.clear();

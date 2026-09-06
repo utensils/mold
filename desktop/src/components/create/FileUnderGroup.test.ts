@@ -350,11 +350,4 @@ describe("FileUnderGroup — filename preview", () => {
     const wrapper = mountGroup({ title: "", model: "ltx2", extension: "mp4" });
     expect(wrapper.get("[data-test='file-under-filename']").text()).toMatch(/mold-ltx2-\d+\.mp4/);
   });
-
-  it("switches to the chain grammar for a sequence's stitched print", () => {
-    const wrapper = mountGroup({ model: "ltx2", extension: "mp4", outputKind: "sequence" });
-    expect(wrapper.get("[data-test='file-under-filename']").text()).toContain(
-      "mold-chain-…-take-0~smurf-village.mp4",
-    );
-  });
 });

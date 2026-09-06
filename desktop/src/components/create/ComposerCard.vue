@@ -61,38 +61,28 @@ const props = withDefaults(
     remixSource?: "original" | "current";
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
-    /** Clip mode: the composer writes the SELECTED SCENE's words rather than
-     * the form's prompt. Null keeps the one-shot binding. */
-    promptValue?: string | null;
-    /** Clip mode's own invitation — "Scene 2 — describe what happens next". */
+    /** The kind's own invitation — "Describe the clip". Null keeps the
+     * recipe's own prompt placeholder. */
     placeholder?: string | null;
-    /** A chain has no batch, so the scene-by-scene clip hides Make outright
-     * rather than showing a count nothing reads. */
-    showCount?: boolean;
     /**
      * The clip's length, as the chip beside Shape. `lengthContract` absent
-     * hides it — a still has no length, and a sequence's lengths are
-     * per-scene. It is the same `form.frames` the inspector's Clip card
-     * slider writes, so the two are one control shown twice.
+     * hides it — a still has no length. It is the same `form.frames` the
+     * inspector's Clip card slider writes, so the two are one control shown
+     * twice.
      */
     lengthFrames?: number | null;
     lengthFps?: number;
     lengthContract?: VideoFrameContract | null;
-    /** Rewriting reaches the one-shot prompt only, so a scene has no expander. */
-    showExpand?: boolean;
   }>(),
   {
     history: () => [],
     remixSource: "original",
     warningReason: null,
     batchLocked: false,
-    promptValue: null,
     placeholder: null,
-    showCount: true,
     lengthFrames: null,
     lengthFps: 24,
     lengthContract: null,
-    showExpand: true,
   },
 );
 
@@ -105,8 +95,6 @@ const emit = defineEmits<{
   /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
    * prompt and releases any quick expansion, where typing keeps it. */
   "prompt-authored": [value: string, source: PromptAuthoringSource];
-  /** Clip mode: the selected scene's new words. */
-  "update:promptValue": [value: string];
   /** The Length chip's new frame count, already on the family's grid. */
   "update:lengthFrames": [frames: number];
   "update:remixSource": [value: "original" | "current"];
@@ -129,12 +117,13 @@ const invitation = computed(
       "Describe the picture you want — “a brass teapot on a rainy windowsill, evening light”",
     ),
 );
-/** One writable prompt whichever words the composer is carrying. */
+/** The composer always carries the FORM's prompt: there is no second set of
+ * words behind it any more, so its provenance, its quick rewrite and its
+ * ↑/↓ history never stand down. */
 const promptText = computed({
-  get: () => props.promptValue ?? props.form.prompt,
+  get: () => props.form.prompt,
   set: (value: string) => {
-    if (props.promptValue === null) props.form.prompt = value;
-    else emit("update:promptValue", value);
+    props.form.prompt = value;
   },
 });
 // Expand and Remix rewrite the prompt, so the same recipe snapshot answers
@@ -314,7 +303,6 @@ defineExpose({ focus, expand, record });
           <span class="ms-chip__id" data-test="length-readout">{{ lengthReadout }}</span>
         </span>
         <span
-          v-if="showCount"
           class="ms-chip ms-chip--stepper"
           data-test="batch-chip"
           :class="{ 'ms-chip--locked': batchLocked }"
@@ -331,7 +319,6 @@ defineExpose({ focus, expand, record });
           />
         </span>
         <ExpandControl
-          v-if="showExpand"
           ref="expandControl"
           :prompt="form.prompt"
           :batch-size="effectiveBatchSize"

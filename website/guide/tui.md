@@ -86,15 +86,14 @@ iPhone apps, shown as tabs at the top of the screen:
 
 Switch workspaces with **Esc** then **1**–**5**, or click the tabs.
 **Alt+1**–**Alt+5** works from anywhere, and **Esc** from any other
-workspace returns to Create. The chain composer opens with **c** from
-Create; it is a Create sub-mode, not a tab.
+workspace returns to Create.
 
 ## Command Palette
 
 **Ctrl+K** opens the command palette from any workspace or focus; the
 TUI's version of the GUI surfaces' ⌘K launcher. Type to filter, **Up**/
 **Down** to select, **Enter** to run, **Esc** to close. It covers
-navigation (all five workspaces, the chain composer), actions (toggle
+navigation (all five workspaces), actions (toggle
 Advanced, connect a machine, randomize seed, expand prompt, retry held
 prints, prompt history, help, quit), and switching between all eleven theme
 presets.
@@ -392,20 +391,6 @@ Thumbnails are cached at `~/.mold/cache/thumbnails/` and generated automatically
 on first scan and after each generation. Delete the cache directory to force
 regeneration.
 
-## Chain Composer
-
-The chain composer authors `mold.chain.v1` TOML for multi-clip video chains;
-LTX-2, LTX-Video, and Wan 2.1/2.2. Frame counts validate on the selected
-family's own grid (`8n+1` for LTX-2, `4n+1` for Wan) and the seam carryover is
-per family: LTX-2 carries a 17-frame motion tail, Wan's image-conditioned
-checkpoints continue from a single seed frame, and text-to-video checkpoints
-join independent clips. Press
-**c** from Create's navigation mode to open it (Esc returns to composing;
-a chain in progress survives switching workspaces). It lets you build
-per-stage prompts, frame counts, source images, and `smooth` / `cut` / `fade`
-transitions, then submit the normalised script through the same chain endpoint
-used by `mold run --script`.
-
 ## Models View
 
 See all installed and available models with family, size, defaults, and status.
@@ -520,12 +505,12 @@ the grid scrolls by whole card rows to keep the selection visible.
 The Configuration list starts with a DB-backed Preferences section. Each
 toggle persists to `mold.db` the moment it flips.
 
-| Row           | Key                       | Default | Effect                                                                                                                                  |
-| ------------- | ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Format        | `tui.default_format`      | `png`   | Seeds a fresh session's Format parameter (a saved session or per-model preference still wins)                                           |
-| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables the workspace fade and the completion sweep                                                                                    |
-| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view                                                                                                   |
-| Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions (deleting a print, removing a model, deleting a chain stage) run immediately without a confirmation popup |
+| Row           | Key                       | Default | Effect                                                                                                          |
+| ------------- | ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| Format        | `tui.default_format`      | `png`   | Seeds a fresh session's Format parameter (a saved session or per-model preference still wins)                   |
+| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables the workspace fade and the completion sweep                                                            |
+| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view                                                                           |
+| Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions (deleting a print, removing a model) run immediately without a confirmation popup |
 
 A **Library** section follows: **Trash (days)** edits the shared
 `gallery.trash_retention_days` key; how long trashed prints survive
@@ -608,7 +593,6 @@ views.
 | Ctrl+R | Any        | Cycle seed mode                          |
 | Ctrl+E | Any        | Expand prompt via LLM                    |
 | Alt+N  | Any        | Open Advanced → Negative → focus editor  |
-| c      | Navigation | Open chain composer                      |
 | A      | Anywhere   | Toggle the Advanced accordion            |
 | +/-    | Parameters | Adjust value / expand-collapse a section |
 | j/k    | Parameters | Navigate rows (flat, sections included)  |

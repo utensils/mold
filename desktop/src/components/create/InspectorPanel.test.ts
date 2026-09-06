@@ -23,7 +23,6 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -646,8 +645,7 @@ describe("InspectorPanel — seed mode", () => {
 
 /*
  * Save every result — on by default; off, the host publishes the print and
- * moves it straight to the trash. A sequence has no such switch: its
- * stitched clip is the durable job's whole deliverable.
+ * moves it straight to the trash.
  */
 describe("InspectorPanel — save every result", () => {
   it("is on by default and flips the form with a hint when off", async () => {
@@ -661,10 +659,9 @@ describe("InspectorPanel — save every result", () => {
     expect(wrapper.get('[data-test="save-result-hint"]').text()).toContain("straight to the trash");
   });
 
-  it("is hidden for a sequence", () => {
-    useSequenceDraftStore().output = "sequence";
+  it("stands for every kind, a clip included", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("ltx-video") } });
-    expect(wrapper.find('[data-test="save-result-field"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="save-result-field"]').exists()).toBe(true);
   });
 });
 
@@ -695,24 +692,6 @@ describe("InspectorPanel — advanced", () => {
     });
   });
 
-  it("never counts the Sequence opening image — it is primary-form media, not Advanced", async () => {
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(97);
-    draft.openingImage = { filename: "opening.png", base64: "PARKED" };
-    const form = formFor("ltx2");
-    form.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(InspectorPanel, { props: { form } });
-
-    expect(wrapper.find("[data-test='advanced-count']").exists()).toBe(false);
-    expect(draft.openingImage?.base64).toBe("PARKED");
-
-    draft.clips[0]!.cameraControl = "dolly-in";
-    await flushPromises();
-    expect(wrapper.get("[data-test='advanced-count']").text()).toContain("1 on");
-    expect(draft.openingImage?.base64).toBe("PARKED");
-  });
-
   it("keeps the simplified inspector by default and expands Advanced inline", async () => {
     const form = formFor("sdxl");
     form.negativePrompt = "blurry";
@@ -732,98 +711,35 @@ describe("InspectorPanel — advanced", () => {
     expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
   });
 
-  it("shows only sequence-specific Advanced controls in Sequence output", async () => {
-    const draft = useSequenceDraftStore();
-    draft.hydrate();
-    draft.output = "sequence";
-    draft.ensureClips(97);
+  /*
+   * A clip has ONE way of being made, so there is no second Advanced panel:
+   * every kind expands the same one.
+   */
+  it("expands the one Advanced panel for a clip too", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(InspectorPanel, {
-      props: {
-        form,
-        chainLimits: {
-          model: form.model,
-          supports_sequence: true,
-          supports_audio: true,
-          max_stages: 16,
-          max_total_frames: 1552,
-          frames_per_clip_cap: 97,
-          frames_per_clip_recommended: 97,
-          fade_frames_max: 24,
-          transition_modes: ["smooth", "cut", "fade"],
-          quantization_family: "fp8",
-        },
-      },
-    });
+    const wrapper = mount(InspectorPanel, { props: { form } });
 
     await wrapper.get('[data-test="open-advanced"]').trigger("click");
 
-    expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="sequence-section-opening-image"]').exists()).toBe(false);
-    expect(wrapper.find('[data-test="sequence-section-negative"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="sequence-section-audio"]').exists()).toBe(false);
-    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="sequence-inline-advanced"]').exists()).toBe(false);
   });
 });
 
-describe("InspectorPanel — sequence opening image in the primary form", () => {
-  function sequenceForm() {
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(97);
+/*
+ * The sequence's Opening image well is retired with the timeline it belonged
+ * to: a clip's conditioning is the ordinary source well, in the primary form.
+ */
+describe("InspectorPanel — no sequence opening image", () => {
+  it("renders the ordinary source well for a clip, and no opening-image one", () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b-distilled:fp8";
-    return form;
-  }
-
-  it("renders the opening image beside the other primary controls, never inside Advanced", async () => {
-    const wrapper = mount(InspectorPanel, { props: { form: sequenceForm() } });
-
-    const field = wrapper.get("[data-test='inspector-sequence-opening-image']");
-    expect(field.find("[data-test='sequence-opening-image-well']").exists()).toBe(true);
-
-    await wrapper.get('[data-test="open-advanced"]').trigger("click");
-    const advanced = wrapper.get("[data-test='sequence-inline-advanced']");
-    expect(advanced.find("[data-test='sequence-opening-image-well']").exists()).toBe(false);
-    expect(advanced.find("[data-test='sequence-source-strength']").exists()).toBe(false);
-    // Still exactly one well on the panel — it did not move, it was moved out.
-    expect(wrapper.findAll("[data-test='sequence-opening-image-well']")).toHaveLength(1);
-  });
-
-  it("stands down for a checkpoint whose contract rejects a source image", async () => {
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(97);
-    draft.openingImage = { filename: "opening.png", base64: "PARKED" };
-    const form = formFor("wan");
-    form.model = "wan22-t2v-a14b";
-    form.sourceImageCapability = "unsupported";
     const wrapper = mount(InspectorPanel, { props: { form } });
 
     expect(wrapper.find("[data-test='inspector-sequence-opening-image']").exists()).toBe(false);
-    expect(draft.openingImage?.base64).toBe("PARKED");
-
-    form.sourceImageCapability = "optional";
-    await flushPromises();
-    expect(wrapper.find("[data-test='inspector-sequence-opening-image']").exists()).toBe(true);
-    expect(draft.openingImage?.base64).toBe("PARKED");
-  });
-
-  it("keeps the one-shot source well out of sequence mode", () => {
-    const wrapper = mount(InspectorPanel, { props: { form: sequenceForm() } });
-    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
-  });
-
-  it("clears the opening image with the header Reset, like one-shot source media", async () => {
-    const draft = useSequenceDraftStore();
-    const form = sequenceForm();
-    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
-    const wrapper = mount(InspectorPanel, { props: { form } });
-
-    await wrapper.get('[data-test="settings-reset"]').trigger("click");
-
-    expect(draft.openingImage).toBeNull();
+    expect(wrapper.find("[data-test='sequence-opening-image-well']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(true);
   });
 });
 
@@ -884,163 +800,32 @@ describe("InspectorPanel — reset to model defaults", () => {
     // back onto the attached source.
     expect(wrapper.emitted("canvas-intent")?.at(-1)).toEqual(["model-default"]);
   });
-
-  it("resets sequence audio as part of the full Settings reset", async () => {
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.enableAudio = true;
-    const wrapper = mount(InspectorPanel, { props: { form: formFor("ltx2") } });
-
-    await wrapper.get('[data-test="settings-reset"]').trigger("click");
-
-    expect(draft.enableAudio).toBe(false);
-  });
 });
 
+/*
+ * A clip has ONE way of being made, so the inspector owns no output switch at
+ * all — not the retired One shot | Sequence pair, and not a `setOutputMode`
+ * for the header to call. The three kinds are the header's own doors
+ * (`useOutputKindDoor`, covered by CreateHeader.test.ts).
+ */
 describe("InspectorPanel — output", () => {
-  const videoModel: ModelEntry = {
-    name: "ltx-video",
-    family: "ltx-video",
-    downloaded: true,
-    default_width: 1024,
-    default_height: 576,
-    default_steps: 25,
-    default_guidance: 3,
-  } as ModelEntry;
-  const stillModel: ModelEntry = {
-    name: "flux-dev:q8",
-    family: "flux",
-    downloaded: true,
-    default_width: 1024,
-    default_height: 1024,
-    default_steps: 20,
-    default_guidance: 4.5,
-  } as ModelEntry;
-
-  /** The view toolbar's Still picture | Short clip control emits `set-output`
-   * into exactly this. The inspector carries no second output switch. */
-  function setOutput(wrapper: ReturnType<typeof mount>, mode: "single" | "sequence") {
-    (wrapper.vm as unknown as { setOutputMode: (m: string) => void }).setOutputMode(mode);
-  }
-
-  it("carries no output switch of its own", () => {
+  it("carries no output switch of its own, and exposes no mode setter", () => {
     const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
     expect(wrapper.find("[data-test='output-card']").exists()).toBe(false);
     expect(wrapper.find("[data-test='output-mode']").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("One shot");
     expect(wrapper.text()).not.toContain("Sequence");
+    expect((wrapper.vm as unknown as { setOutputMode?: unknown }).setOutputMode).toBeUndefined();
   });
 
-  it("switching to Sequence keeps prompts separate, remembers + swaps the model, and locks batch", async () => {
-    useModelStore().all = [stillModel, videoModel];
-    const form = useGenerateFormStore().form;
-    form.model = stillModel.name;
-    form.family = stillModel.family;
-    form.prompt = "a cat at dusk";
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    setOutput(wrapper, "sequence");
-    await flushPromises();
-
-    const draft = useSequenceDraftStore();
-    expect(draft.output).toBe("sequence");
-    expect(draft.clips).toHaveLength(2);
-    expect(draft.clips[0]!.prompt).toBe("");
-    // A non-capable model is remembered and swapped for the first capable one.
-    expect(draft.lastSingleModel).toBe("flux-dev:q8");
-    expect(form.model).toBe("ltx-video");
-    // The one-shot prompt is parked, not carried into clip 1.
-    expect(form.prompt).toBe("a cat at dusk");
-  });
-
-  it("switching back restores the remembered single model without leaking clip 1's prompt", async () => {
-    useModelStore().all = [stillModel, videoModel];
-    const form = useGenerateFormStore().form;
-    form.model = videoModel.name;
-    form.family = videoModel.family;
-    form.prompt = "the one-shot prompt";
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(25);
-    draft.clips[0]!.prompt = "the opening clip";
-    draft.lastSingleModel = "flux-dev:q8";
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    setOutput(wrapper, "single");
-    await flushPromises();
-
-    expect(draft.output).toBe("single");
-    expect(form.model).toBe("flux-dev:q8");
-    expect(form.prompt).toBe("the one-shot prompt");
-    expect(draft.lastSingleModel).toBeNull();
-    // Clips are parked, never erased.
-    expect(draft.clips).toHaveLength(2);
-  });
-
-  // The picker's own sequence narrowing moved with the picker, to
-  // StylePicker.test.ts ("filters to sequence-capable models while in
-  // sequence mode"). What the inspector still owns is the swap ABOVE.
-
-  it("finds a clip style even though the picker is showing the Still picture section", async () => {
-    // The picker narrows to the section the view is IN, which while the user
-    // is still on Still picture holds no clip style at all. The swap reads the
-    // target's whole inventory instead, or Short clip would be a dead end on
-    // every machine whose current style is a picture style.
-    useModelStore().all = [stillModel, videoModel];
-    const form = useGenerateFormStore().form;
-    form.model = stillModel.name;
-    form.family = stillModel.family;
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    setOutput(wrapper, "sequence");
-    await flushPromises();
-
-    expect(form.model).toBe("ltx-video");
-  });
-
-  it("restores a STILL style on the way back, never the clip one it swapped in", async () => {
-    // Nothing was parked (the form already carried a clip style when Short
-    // clip was chosen), so returning to Still picture must still leave a style
-    // the section can make.
-    useModelStore().all = [stillModel, videoModel];
-    const form = useGenerateFormStore().form;
-    form.model = videoModel.name;
-    form.family = videoModel.family;
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(25);
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    setOutput(wrapper, "single");
-    await flushPromises();
-
-    expect(form.model).toBe("flux-dev:q8");
-    expect(form.family).toBe("flux");
-  });
-
-  it("leaves the form alone when no still style is installed", async () => {
-    useModelStore().all = [videoModel];
-    const form = useGenerateFormStore().form;
-    form.model = videoModel.name;
-    form.family = videoModel.family;
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.ensureClips(25);
-    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
-
-    setOutput(wrapper, "single");
-    await flushPromises();
-
-    expect(form.model).toBe("ltx-video");
-  });
-
-  it("surfaces a frame-rate stepper and hides lock-last-seed in sequence mode", async () => {
-    useSequenceDraftStore().output = "sequence";
+  it("keeps the clip card's own controls standing for a clip style", async () => {
     const form = formFor("ltx-video");
     const wrapper = mount(InspectorPanel, { props: { form, lastSeed: 77 } });
-    expect(wrapper.find('[data-test="sequence-fps"]').exists()).toBe(true);
+    // Short clip · Length · Smoothness — the clip card's own row.
+    expect(wrapper.find('[data-test="clip-fps"]').exists()).toBe(true);
     expect(wrapper.get('[data-test="clip-card"]').text()).toContain("Smoothness");
-    expect(wrapper.find('[data-test="lock-last-seed"]').exists()).toBe(false);
+    // lock-last-seed is an ordinary print control and never stands down.
+    expect(wrapper.find('[data-test="lock-last-seed"]').exists()).toBe(true);
   });
 });
 
@@ -1232,8 +1017,7 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(form.identityImage).toEqual({ filename: "ada.png", base64: "AAAA" });
   });
 
-  it("keeps identity out of sequence mode", () => {
-    useSequenceDraftStore().output = "sequence";
+  it("keeps identity out of an unqualified checkpoint", () => {
     const form = formFor("flux");
     form.model = "flux-dev:q8";
     form.identitySupported = true;
@@ -1252,25 +1036,14 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(true);
   });
 
-  it("stands down in sequence mode — the sequence composer owns its opening image", () => {
-    useSequenceDraftStore().output = "sequence";
-    const wrapper = mount(InspectorPanel, { props: { form: formFor("sd15") } });
-    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
-  });
-
-  it("hides a parked Sequence opening image from unsupported shape controls", () => {
+  it("hides a parked source image from unsupported shape controls", () => {
     const form = formFor("wan");
     form.model = "wan22-t2v-a14b";
     form.sourceImageCapability = "unsupported";
+    form.sourceImage = "PARKED";
+    form.sourceImageWidth = 1024;
+    form.sourceImageHeight = 1024;
     useModelStore().all = [wanModel("unsupported")];
-    const draft = useSequenceDraftStore();
-    draft.output = "sequence";
-    draft.openingImage = {
-      filename: "opening.png",
-      base64: "PARKED",
-      width: 1024,
-      height: 1024,
-    };
 
     const wrapper = mount(InspectorPanel, { props: { form } });
 
@@ -1279,7 +1052,7 @@ describe("InspectorPanel — source media in the primary form", () => {
     );
     expect(wrapper.getComponent(ResolutionSelector).props("status")).not.toContain("source");
     expect(wrapper.find("[data-test='match-source-resolution']").exists()).toBe(false);
-    expect(draft.openingImage?.base64).toBe("PARKED");
+    expect(form.sourceImage).toBe("PARKED");
   });
 });
 

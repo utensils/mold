@@ -603,7 +603,7 @@ describe("useGenerateForm", () => {
           frames: 177,
           fps: 24,
           pipeline: "distilled",
-          output_mode: "one-shot",
+
           chain: { stages: [{ frames: 97 }, { frames: 97 }] },
         } as OutputMetadata,
         {
@@ -635,7 +635,6 @@ describe("useGenerateForm", () => {
           frames: 217,
           fps: 24,
           pipeline: "distilled",
-          output_mode: "one-shot",
         } as OutputMetadata,
         {
           models: [

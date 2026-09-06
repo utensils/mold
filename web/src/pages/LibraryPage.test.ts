@@ -513,6 +513,52 @@ describe("LibraryPage", () => {
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
   });
 
+  it("reuse degrades a stitched print to a one-shot on the first clip's prompt", async () => {
+    // The print's own `metadata.prompt` is every clip newline-joined — a
+    // description of the render, never a prompt anybody can re-submit.
+    const stitched: GalleryImage = {
+      filename: "harbour.mp4",
+      timestamp: 9,
+      format: "mp4",
+      metadata: {
+        prompt: "the harbour at dawn\nthe harbour at dusk",
+        model: "sdxl:fp16",
+        seed: 77,
+        steps: 20,
+        guidance: 3.5,
+        width: 1024,
+        height: 576,
+        version: "test",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 8,
+          stages: [
+            { prompt: "the harbour at dawn", frames: 97, transition: "smooth" },
+            { prompt: "the harbour at dusk", frames: 97, transition: "smooth" },
+          ],
+        },
+      },
+    };
+    listGalleryMock.mockResolvedValue([stitched]);
+    const wrapper = await mounted();
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-reuse']").trigger("click");
+    await flushPromises();
+
+    const state = useGenerateForm().state.value;
+    expect(state.prompt).toBe("the harbour at dawn");
+    expect(state.model).toBe("sdxl:fp16");
+    expect(state.width).toBe(1024);
+    expect(state.height).toBe(576);
+    expect(state.seed).toBe(77);
+    // A plain one-shot restore: no clip rail, no sequence output query.
+    expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+    expect(pushMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ query: { output: "sequence" } }),
+    );
+  });
+
   it("reuse stays quiet about an unavailable answer for a print that shipped none", async () => {
     // The reported bug: a text-to-image print from a keyless remote host. Its
     // archive entry resolves with no pins, which the server can only report

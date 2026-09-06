@@ -551,10 +551,6 @@
     url = "https://registry.npmjs.org/@types/qrcode/-/qrcode-1.5.6.tgz";
     hash = "sha512-te7NQcV2BOvdj2b1hCAHzAoMNuj65kNBMz0KBaxM6c3VGBOhU0dURQKOtH8CFNI/dsKkwlv32p26qYQTWoB5bw==";
   };
-  "@types/sortablejs@1.15.9" = fetchurl {
-    url = "https://registry.npmjs.org/@types/sortablejs/-/sortablejs-1.15.9.tgz";
-    hash = "sha512-7HP+rZGE2p886PKV9c9OJzLBI6BBJu1O7lJGYnPyG3fS4/duUCcngkNCjsLwIMV+WMqANe3tt4irrXHSIe68OQ==";
-  };
   "@types/whatwg-mimetype@3.0.2" = fetchurl {
     url = "https://registry.npmjs.org/@types/whatwg-mimetype/-/whatwg-mimetype-3.0.2.tgz";
     hash = "sha512-c2AKvDT8ToxLIOUlN51gTiHXflsfIFisS4pO7pDPoKouJCESkhZnEy623gwP9laCy5lnLDAw1vAzu2vM2YLOrA==";
@@ -1312,10 +1308,6 @@
   "vue-component-type-helpers@3.3.7" = fetchurl {
     url = "https://registry.npmjs.org/vue-component-type-helpers/-/vue-component-type-helpers-3.3.7.tgz";
     hash = "sha512-Skkhw9agYSgsWqv7bxSOGJZa9SaiJbZVGdXuFWnrzKaQYHnw9qbjD630rw6RyMqDbp54nfLCLw5SZA55if7JLg==";
-  };
-  "vue-draggable-plus@0.6.1" = fetchurl {
-    url = "https://registry.npmjs.org/vue-draggable-plus/-/vue-draggable-plus-0.6.1.tgz";
-    hash = "sha512-FbtQ/fuoixiOfTZzG3yoPl4JAo9HJXRHmBQZFB9x2NYCh6pq0TomHf7g5MUmpaDYv+LU2n6BPq2YN9sBO+FbIg==";
   };
   "vue-router@4.6.4" = fetchurl {
     url = "https://registry.npmjs.org/vue-router/-/vue-router-4.6.4.tgz";

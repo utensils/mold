@@ -41,7 +41,6 @@ function mountGroup(
     model: string;
     extension: string;
     batchSize: number;
-    outputKind: "print" | "sequence";
   }> = {},
 ): VueWrapper {
   current = props.state ?? emptyFileUnderState();
@@ -275,14 +274,6 @@ describe("MobileFileUnder filename preview", () => {
     mountGroup({ title: "" });
 
     expect(wrapper!.get("[data-test='mobile-file-under-filename']").text()).not.toContain("~");
-  });
-
-  it("previews the chain grammar for a sequence's stitched print", () => {
-    mountGroup({ outputKind: "sequence" });
-
-    expect(wrapper!.get("[data-test='mobile-file-under-filename']").text()).toContain(
-      "mold-chain-…-take-0~smurfs.mp4",
-    );
   });
 });
 

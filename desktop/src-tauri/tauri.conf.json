@@ -35,7 +35,7 @@
     "copyright": "Copyright \u00a9 2026 James Brink and Jeffrey Dilley. MIT License.",
     "category": "GraphicsAndDesign",
     "shortDescription": "Local AI image and video generation.",
-    "longDescription": "Mold generates images and video locally on your GPU \u2014 FLUX, SD, SDXL, SD3.5, Z-Image, Qwen-Image, LTX video and more \u2014 with a gallery, model manager, and multi-stage chain composer. Runs its engine in-process or connects to a remote mold server.",
+    "longDescription": "Mold generates images and video locally on your GPU \u2014 FLUX, SD, SDXL, SD3.5, Z-Image, Qwen-Image, LTX video and more \u2014 with a gallery, model manager, and live job queue. Runs its engine in-process or connects to a remote mold server.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

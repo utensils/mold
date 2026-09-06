@@ -30,7 +30,6 @@ import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
   GenerateFormState,
-  Ltx2CameraControlInfo,
   LoraSelection,
   ModelInfoExtended,
   OutputFormat,
@@ -61,8 +60,6 @@ import {
   supportsIdentity,
 } from "@studio/lib/identityConditioning";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
-import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import type { OutputMode } from "@studio/lib/sequence";
 import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import {
@@ -73,12 +70,7 @@ import {
   videoFrameGridLabel,
   videoFrameStep,
 } from "@studio/lib/videoDuration";
-import {
-  cameraMotionLoraPath,
-  cameraMotionMode,
-  parseCameraControlAvailability,
-  isCameraMotionPreset,
-} from "@studio/lib/cameraMotion";
+import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
 import {
   isMinimaxH3Identity,
   MINIMAX_H3_MAX_FRAMES,
@@ -105,7 +97,6 @@ const props = withDefaults(
     /** Host advertises `video.can_extend`; false hides the continuation UI. */
     canExtend?: boolean;
     extendDefaultOverlapFrames?: number;
-    output?: OutputMode;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
   }>(),
   {
@@ -116,7 +107,6 @@ const props = withDefaults(
     models: () => [],
     canExtend: false,
     extendDefaultOverlapFrames: DEFAULT_EXTEND_OVERLAP_FRAMES,
-    output: "single",
   },
 );
 
@@ -136,74 +126,9 @@ const emit = defineEmits<{
   "canvas-intent": [intent: CanvasIntent];
 }>();
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
-const draft = useSequenceDraftStore();
-const sequenceMode = computed(() => props.output === "sequence");
 const selectedModel = computed(
   () =>
     props.models.find((model) => model.name === props.modelValue.model) ?? null,
-);
-const activeSequenceClip = computed(
-  () =>
-    draft.clips.find((clip) => clip.id === draft.activeClipId) ??
-    draft.clips[0] ??
-    null,
-);
-const activeSequenceIndex = computed(() =>
-  activeSequenceClip.value
-    ? draft.clips.findIndex((clip) => clip.id === activeSequenceClip.value?.id)
-    : -1,
-);
-const sequenceCameraControls = ref<Ltx2CameraControlInfo[]>([]);
-const sequenceCameraControlsLoaded = ref(false);
-const sequenceCameraUnsupportedReason = ref<string | null>(null);
-let cameraControlsEpoch = 0;
-watch(
-  [sequenceMode, () => props.family, () => props.modelValue.model],
-  async () => {
-    const epoch = ++cameraControlsEpoch;
-    // Drop the previous model's reason immediately; keeping it while the
-    // new request is in flight shows a stale explanation for the wrong model.
-    sequenceCameraUnsupportedReason.value = null;
-    sequenceCameraControls.value = [];
-    sequenceCameraControlsLoaded.value = false;
-    if (
-      !sequenceMode.value ||
-      props.family !== "ltx2" ||
-      !props.modelValue.model
-    )
-      return;
-    try {
-      const response = await fetch(
-        `/api/capabilities/ltx2-camera-controls?model=${encodeURIComponent(props.modelValue.model)}&detail=1`,
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const availability = parseCameraControlAvailability(
-        await response.json(),
-      );
-      const options = availability.controls;
-      if (epoch !== cameraControlsEpoch) return;
-      sequenceCameraControls.value = options;
-      sequenceCameraUnsupportedReason.value = availability.unsupportedReason;
-      sequenceCameraControlsLoaded.value = true;
-      for (const clip of draft.clips) {
-        const camera = clip.cameraControl;
-        if (
-          camera &&
-          isCameraMotionPreset(camera) &&
-          !options.some((option) => option.id === camera)
-        ) {
-          clip.cameraControl = null;
-        }
-      }
-    } catch {
-      // The custom-path escape hatch remains usable while the host recovers.
-      if (epoch === cameraControlsEpoch) {
-        sequenceCameraUnsupportedReason.value = null;
-        sequenceCameraControlsLoaded.value = false;
-      }
-    }
-  },
-  { immediate: true },
 );
 const overlayOpen = computed(() => props.mobile && props.open);
 const { onKeydown } = useOverlayFocus(overlayOpen, host, () => emit("close"));
@@ -327,10 +252,7 @@ const identitySupported = computed(() =>
       )
     : (props.modelValue.identitySupported ?? false),
 );
-/** Sequence clips carry no identity slot on the chain wire. */
-const showIdentity = computed(
-  () => !sequenceMode.value && identitySupported.value,
-);
+const showIdentity = computed(() => identitySupported.value);
 const identityWeight = computed(
   () => props.modelValue.identityWeight ?? ID_WEIGHT_DEFAULT,
 );
@@ -456,13 +378,6 @@ function clampFrames(n: number): number {
 // ── Reset (advanced fields only — prompt/model/shape/seed survive; source
 // media lives in the primary form now and must survive too) ───────────
 function resetAdvanced() {
-  if (sequenceMode.value) {
-    for (const clip of draft.clips) {
-      clip.negativePrompt = "";
-      clip.cameraControl = null;
-    }
-    return;
-  }
   patch({
     // Reset restores the model's advertised default negative (wan), not the
     // explicit empty opt-out — matching the iPhone reset.
@@ -482,17 +397,6 @@ function resetAdvanced() {
     cameraControl: null,
     wanRecipe: emptyWanRecipe(),
   });
-}
-
-function setSequenceCameraMode(mode: string) {
-  const clip = activeSequenceClip.value;
-  if (!clip) return;
-  if (mode === "custom") {
-    if (cameraMotionMode(clip.cameraControl) !== "custom")
-      clip.cameraControl = "";
-  } else {
-    clip.cameraControl = mode || null;
-  }
 }
 </script>
 
@@ -541,581 +445,476 @@ function setSequenceCameraMode(mode: string) {
     </div>
 
     <div class="adv__sections">
-      <template v-if="sequenceMode">
-        <!-- The opening frame is source media, so it renders in the primary
-             form (`SequenceOpeningImagePanel`) beside the one-shot well — not
-             here, and never in the Advanced count. -->
-        <AccordionSection
-          v-if="activeSequenceClip && family === 'ltx2'"
-          icon="video"
-          :title="`Clip ${activeSequenceIndex + 1} camera motion`"
-          :summary="
-            sequenceCameraControls.find(
-              (control) => control.id === activeSequenceClip?.cameraControl,
-            )?.label ??
-            activeSequenceClip.cameraControl ??
-            'None'
-          "
-          :open="true"
-          :header-interactive="false"
-          data-test="sequence-section-camera"
-        >
+      <AccordionSection
+        v-if="showScheduler"
+        icon="scheduler"
+        title="Scheduler & sampling"
+        :summary="schedulerSummary"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-scheduler"
+      >
+        <div v-if="caps.supportsScheduler" class="adv__field">
+          <label class="adv__label">Scheduler</label>
           <select
-            class="adv__input"
-            data-test="sequence-camera-motion"
-            aria-label="Active clip camera motion"
-            :value="cameraMotionMode(activeSequenceClip.cameraControl)"
-            @change="
-              setSequenceCameraMode(($event.target as HTMLSelectElement).value)
-            "
+            class="adv__select"
+            data-test="scheduler-select"
+            :value="schedulerName"
+            @change="setScheduler(($event.target as HTMLSelectElement).value)"
           >
-            <option value="">None</option>
-            <option
-              v-for="control in sequenceCameraControls"
-              :key="control.id"
-              :value="control.id"
-            >
-              {{ control.label
-              }}{{ control.installed ? "" : " · downloads on first use" }}
+            <option v-for="s in schedulerChoices" :key="s" :value="s">
+              {{ schedulerLabel(s) }}
             </option>
-            <option value="custom">Custom LoRA path…</option>
           </select>
+        </div>
+        <div v-if="caps.supportsCfgPlus" class="adv__row">
+          <span class="adv__label">CFG++</span>
+          <SwitchToggle
+            :model-value="modelValue.cfgPlus"
+            label="CFG++"
+            data-test="cfg-plus"
+            @update:model-value="patch({ cfgPlus: $event })"
+          />
+        </div>
+      </AccordionSection>
+
+      <AccordionSection
+        v-if="caps.wanRecipe.supported"
+        icon="scheduler"
+        title="Sampler recipe"
+        :summary="wanRecipeSummary"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-wan-recipe"
+      >
+        <div class="adv__field">
+          <label class="adv__label">Sample solver</label>
+          <select
+            class="adv__select"
+            data-test="wan-solver-select"
+            :value="schedulerName"
+            @change="setScheduler(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="s in schedulerChoices" :key="s" :value="s">
+              {{ schedulerLabel(s) }}
+            </option>
+          </select>
+        </div>
+        <div class="adv__field">
+          <label class="adv__label">Flow shift</label>
           <input
-            v-if="
-              cameraMotionMode(activeSequenceClip.cameraControl) === 'custom'
+            class="adv__input"
+            type="number"
+            inputmode="decimal"
+            step="0.5"
+            min="0"
+            placeholder="Model default"
+            data-test="wan-sample-shift"
+            :value="wanRecipe.sampleShift ?? ''"
+            @input="
+              setWanRecipe({
+                sampleShift: numberOrNull(
+                  ($event.target as HTMLInputElement).value,
+                ),
+              })
             "
-            v-model="activeSequenceClip.cameraControl"
-            class="adv__input adv__camera-path"
-            data-test="sequence-camera-motion-custom"
-            aria-label="Active clip camera motion LoRA path"
-            placeholder="/path/to/lora.safetensors"
           />
-          <p
-            v-if="
-              sequenceCameraControlsLoaded &&
-              sequenceCameraControls.length === 0
-            "
-            class="adv__hint"
-            data-test="sequence-camera-motion-19b-hint"
-          >
-            {{
-              sequenceCameraUnsupportedReason ??
-              "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
-            }}
+          <p class="adv__hint">
+            Higher shift spends more steps on structure. Empty keeps this
+            model's own value.
           </p>
-        </AccordionSection>
-
-        <AccordionSection
-          v-if="activeSequenceClip"
-          icon="negative"
-          :title="`Clip ${activeSequenceIndex + 1} negative prompt`"
-          summary="What to steer away from in this clip"
-          :open="true"
-          :header-interactive="false"
-          data-test="sequence-section-negative"
+        </div>
+        <div
+          v-if="caps.wanRecipe.supportsDistillStrength"
+          class="adv__field adv__pair"
         >
-          <textarea
-            v-model="activeSequenceClip.negativePrompt"
-            :disabled="!caps.supportsNegativePrompt"
-            class="adv__textarea"
-            data-test="sequence-negative-input"
-            placeholder="blurry, low quality, deformed…"
-          />
-          <p
-            v-if="!caps.supportsNegativePrompt"
-            class="adv__hint"
-            data-test="sequence-negative-unavailable-hint"
-          >
-            Saved for reuse, but this distilled recipe does not use
-            negative-prompt guidance.
-          </p>
-          <div v-if="caps.supportsNegativePrompt" class="adv__chips">
-            <Chip
-              v-for="word in NEG_CHIPS"
-              :key="word"
-              @click="
-                activeSequenceClip.negativePrompt =
-                  activeSequenceClip.negativePrompt.trim()
-                    ? `${activeSequenceClip.negativePrompt.trim()}, ${word}`
-                    : word
-              "
-              >+ {{ word }}</Chip
-            >
-          </div>
-        </AccordionSection>
-      </template>
-      <template v-else>
-        <AccordionSection
-          v-if="showScheduler"
-          icon="scheduler"
-          title="Scheduler & sampling"
-          :summary="schedulerSummary"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-scheduler"
-        >
-          <div v-if="caps.supportsScheduler" class="adv__field">
-            <label class="adv__label">Scheduler</label>
-            <select
-              class="adv__select"
-              data-test="scheduler-select"
-              :value="schedulerName"
-              @change="setScheduler(($event.target as HTMLSelectElement).value)"
-            >
-              <option v-for="s in schedulerChoices" :key="s" :value="s">
-                {{ schedulerLabel(s) }}
-              </option>
-            </select>
-          </div>
-          <div v-if="caps.supportsCfgPlus" class="adv__row">
-            <span class="adv__label">CFG++</span>
-            <SwitchToggle
-              :model-value="modelValue.cfgPlus"
-              label="CFG++"
-              data-test="cfg-plus"
-              @update:model-value="patch({ cfgPlus: $event })"
-            />
-          </div>
-        </AccordionSection>
-
-        <AccordionSection
-          v-if="caps.wanRecipe.supported"
-          icon="scheduler"
-          title="Sampler recipe"
-          :summary="wanRecipeSummary"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-wan-recipe"
-        >
-          <div class="adv__field">
-            <label class="adv__label">Sample solver</label>
-            <select
-              class="adv__select"
-              data-test="wan-solver-select"
-              :value="schedulerName"
-              @change="setScheduler(($event.target as HTMLSelectElement).value)"
-            >
-              <option v-for="s in schedulerChoices" :key="s" :value="s">
-                {{ schedulerLabel(s) }}
-              </option>
-            </select>
-          </div>
-          <div class="adv__field">
-            <label class="adv__label">Flow shift</label>
+          <label class="adv__label">
+            High-noise distill
             <input
               class="adv__input"
               type="number"
               inputmode="decimal"
-              step="0.5"
+              step="0.1"
               min="0"
-              placeholder="Model default"
-              data-test="wan-sample-shift"
-              :value="wanRecipe.sampleShift ?? ''"
+              :max="MAX_WAN_DISTILL_STRENGTH"
+              placeholder="1.0"
+              data-test="wan-distill-high"
+              :value="wanRecipe.distillStrengthHigh ?? ''"
               @input="
                 setWanRecipe({
-                  sampleShift: numberOrNull(
+                  distillStrengthHigh: numberOrNull(
                     ($event.target as HTMLInputElement).value,
                   ),
                 })
               "
             />
-            <p class="adv__hint">
-              Higher shift spends more steps on structure. Empty keeps this
-              model's own value.
-            </p>
-          </div>
-          <div
-            v-if="caps.wanRecipe.supportsDistillStrength"
-            class="adv__field adv__pair"
-          >
-            <label class="adv__label">
-              High-noise distill
-              <input
-                class="adv__input"
-                type="number"
-                inputmode="decimal"
-                step="0.1"
-                min="0"
-                :max="MAX_WAN_DISTILL_STRENGTH"
-                placeholder="1.0"
-                data-test="wan-distill-high"
-                :value="wanRecipe.distillStrengthHigh ?? ''"
-                @input="
-                  setWanRecipe({
-                    distillStrengthHigh: numberOrNull(
-                      ($event.target as HTMLInputElement).value,
-                    ),
-                  })
-                "
-              />
-            </label>
-            <label class="adv__label">
-              Low-noise distill
-              <input
-                class="adv__input"
-                type="number"
-                inputmode="decimal"
-                step="0.1"
-                min="0"
-                :max="MAX_WAN_DISTILL_STRENGTH"
-                placeholder="1.0"
-                data-test="wan-distill-low"
-                :value="wanRecipe.distillStrengthLow ?? ''"
-                @input="
-                  setWanRecipe({
-                    distillStrengthLow: numberOrNull(
-                      ($event.target as HTMLInputElement).value,
-                    ),
-                  })
-                "
-              />
-            </label>
-          </div>
-          <p
-            v-if="wanRecipeMessage"
-            class="adv__error"
-            role="alert"
-            data-test="wan-recipe-error"
-          >
-            {{ wanRecipeMessage }}
-          </p>
-          <button
-            v-if="wanRecipeActive"
-            type="button"
-            class="adv__reset"
-            data-test="wan-recipe-reset"
-            @click="resetWanRecipe"
-          >
-            Reset recipe
-          </button>
-        </AccordionSection>
-
-        <AccordionSection
-          v-if="caps.supportsNegativePrompt || modelValue.negativePrompt.trim()"
-          icon="negative"
-          title="Negative prompt"
-          summary="What to steer away from"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-negative"
-        >
-          <textarea
-            class="adv__textarea"
-            data-test="negative-input"
-            placeholder="blurry, low quality, deformed…"
-            :value="modelValue.negativePrompt"
-            :disabled="!caps.supportsNegativePrompt"
-            @input="
-              patch({
-                negativePrompt: ($event.target as HTMLTextAreaElement).value,
-              })
-            "
-          />
-          <p
-            v-if="!caps.supportsNegativePrompt"
-            class="adv__hint"
-            data-test="negative-unavailable-hint"
-          >
-            Saved for reuse, but this distilled recipe fixes CFG and does not
-            use negative-prompt guidance. Choose a Dev checkpoint with Auto or a
-            guided pipeline to enable it.
-          </p>
-          <div class="adv__chips">
-            <Chip
-              v-for="word in NEG_CHIPS"
-              :key="word"
-              :data-test="`neg-chip-${word.replace(/\s+/g, '-')}`"
-              @click="addNegative(word)"
-              >+ {{ word }}</Chip
-            >
-          </div>
-        </AccordionSection>
-
-        <AccordionSection
-          v-if="caps.supportsLora"
-          icon="layers"
-          title="LoRA stack"
-          :summary="`${modelValue.loras.length} active · style adapters`"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-lora"
-        >
-          <LoraPicker
-            :family="family"
-            :model-value="modelValue.loras"
-            @update:model-value="setLoras"
-            @append-prompt="emit('append-prompt', $event)"
-          />
-        </AccordionSection>
-
-        <!-- Identity sits beside the LoRA stack because admission refuses the
-             two together; the photo itself is primary form. -->
-        <AccordionSection
-          v-if="showIdentity"
-          icon="image"
-          :title="IDENTITY_SECTION_LABEL"
-          :summary="identitySummary"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-identity"
-        >
-          <div class="adv__field" data-test="identity-weight">
-            <SliderRow
-              :label="IDENTITY_WEIGHT_LABEL"
-              :model-value="identityWeight"
-              :min="ID_WEIGHT_MIN"
-              :max="ID_WEIGHT_MAX"
-              :step="ID_WEIGHT_STEP"
-              :value-label="
-                modelValue.identityWeight == null
-                  ? `${identityWeight.toFixed(2)} · default`
-                  : identityWeight.toFixed(2)
-              "
-              @update:model-value="patch({ identityWeight: $event })"
-            />
-            <p class="adv__hint">{{ IDENTITY_WEIGHT_HINT }}</p>
-          </div>
-          <div class="adv__field">
-            <label class="adv__label">{{ IDENTITY_START_STEP_LABEL }}</label>
+          </label>
+          <label class="adv__label">
+            Low-noise distill
             <input
               class="adv__input"
               type="number"
-              inputmode="numeric"
-              step="1"
+              inputmode="decimal"
+              step="0.1"
               min="0"
-              :max="identityStartStepMax"
-              :placeholder="`Model default (${ID_START_STEP_DEFAULT})`"
-              data-test="identity-start-step"
-              :value="modelValue.identityStartStep ?? ''"
+              :max="MAX_WAN_DISTILL_STRENGTH"
+              placeholder="1.0"
+              data-test="wan-distill-low"
+              :value="wanRecipe.distillStrengthLow ?? ''"
               @input="
-                patch({
-                  identityStartStep: numberOrNull(
+                setWanRecipe({
+                  distillStrengthLow: numberOrNull(
                     ($event.target as HTMLInputElement).value,
                   ),
                 })
               "
             />
-            <p class="adv__hint">{{ IDENTITY_START_STEP_HINT }}</p>
-          </div>
-          <button
-            v-if="identityActive"
-            type="button"
-            class="adv__reset"
-            data-test="identity-reset"
-            @click="resetIdentity"
-          >
-            Use model defaults
-          </button>
-        </AccordionSection>
-
-        <UpscaleSection
-          v-if="showUpscale"
-          :model-value="modelValue.upscaleModel"
-          @update:model-value="patch({ upscaleModel: $event })"
-        />
-
-        <AccordionSection
-          icon="output"
-          title="Output & seed"
-          summary="Format and reproducibility"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-output"
+          </label>
+        </div>
+        <p
+          v-if="wanRecipeMessage"
+          class="adv__error"
+          role="alert"
+          data-test="wan-recipe-error"
         >
-          <div class="adv__field">
-            <label class="adv__label">File format</label>
-            <SegmentedControl
-              :model-value="modelValue.outputFormat"
-              :options="
-                formats.map((f) => ({ value: f, label: f.toUpperCase() }))
-              "
-              label="File format"
-              @update:model-value="
-                patch({ outputFormat: $event as OutputFormat })
-              "
-            />
-          </div>
-          <!-- A canvasless recipe (a 3-D mesh) renders at no pixel size, so
-               there is nothing to type here — the same reason the rail hides
-               Shape and Resolution. -->
-          <div v-if="!caps.canvasless" class="adv__field">
-            <label class="adv__label">Exact size</label>
-            <div class="adv__size">
-              <input
-                class="adv__input"
-                type="number"
-                min="64"
-                :step="resolutionAlignment"
-                data-test="exact-width"
-                aria-label="Width in pixels"
-                :value="modelValue.width"
-                @change="setWidth(($event.target as HTMLInputElement).value)"
-              />
-              <button
-                type="button"
-                class="adv__swap"
-                data-test="exact-swap"
-                aria-label="Swap width and height"
-                title="Swap width and height"
-                @click="swapDims"
-              >
-                <Icon name="swap" :size="15" />
-              </button>
-              <input
-                class="adv__input"
-                type="number"
-                min="64"
-                :step="resolutionAlignment"
-                data-test="exact-height"
-                aria-label="Height in pixels"
-                :value="modelValue.height"
-                @change="setHeight(($event.target as HTMLInputElement).value)"
-              />
-            </div>
-            <p class="adv__hint">
-              snaps to the nearest {{ resolutionAlignment }}px.
-            </p>
-            <p
-              v-if="exactSizeAdvisory"
-              class="adv__hint adv__hint--warn"
-              data-test="exact-size-advisory"
-            >
-              {{ exactSizeAdvisory }}
-            </p>
-          </div>
-          <div class="adv__field">
-            <label class="adv__label">Seed</label>
-            <SegmentedControl
-              :model-value="modelValue.seedMode"
-              :options="seedModes"
-              label="Seed mode"
-              @update:model-value="patch({ seedMode: $event })"
-            />
-          </div>
+          {{ wanRecipeMessage }}
+        </p>
+        <button
+          v-if="wanRecipeActive"
+          type="button"
+          class="adv__reset"
+          data-test="wan-recipe-reset"
+          @click="resetWanRecipe"
+        >
+          Reset recipe
+        </button>
+      </AccordionSection>
+
+      <AccordionSection
+        v-if="caps.supportsNegativePrompt || modelValue.negativePrompt.trim()"
+        icon="negative"
+        title="Negative prompt"
+        summary="What to steer away from"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-negative"
+      >
+        <textarea
+          class="adv__textarea"
+          data-test="negative-input"
+          placeholder="blurry, low quality, deformed…"
+          :value="modelValue.negativePrompt"
+          :disabled="!caps.supportsNegativePrompt"
+          @input="
+            patch({
+              negativePrompt: ($event.target as HTMLTextAreaElement).value,
+            })
+          "
+        />
+        <p
+          v-if="!caps.supportsNegativePrompt"
+          class="adv__hint"
+          data-test="negative-unavailable-hint"
+        >
+          Saved for reuse, but this distilled recipe fixes CFG and does not use
+          negative-prompt guidance. Choose a Dev checkpoint with Auto or a
+          guided pipeline to enable it.
+        </p>
+        <div class="adv__chips">
+          <Chip
+            v-for="word in NEG_CHIPS"
+            :key="word"
+            :data-test="`neg-chip-${word.replace(/\s+/g, '-')}`"
+            @click="addNegative(word)"
+            >+ {{ word }}</Chip
+          >
+        </div>
+      </AccordionSection>
+
+      <AccordionSection
+        v-if="caps.supportsLora"
+        icon="layers"
+        title="LoRA stack"
+        :summary="`${modelValue.loras.length} active · style adapters`"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-lora"
+      >
+        <LoraPicker
+          :family="family"
+          :model-value="modelValue.loras"
+          @update:model-value="setLoras"
+          @append-prompt="emit('append-prompt', $event)"
+        />
+      </AccordionSection>
+
+      <!-- Identity sits beside the LoRA stack because admission refuses the
+           two together; the photo itself is primary form. -->
+      <AccordionSection
+        v-if="showIdentity"
+        icon="image"
+        :title="IDENTITY_SECTION_LABEL"
+        :summary="identitySummary"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-identity"
+      >
+        <div class="adv__field" data-test="identity-weight">
+          <SliderRow
+            :label="IDENTITY_WEIGHT_LABEL"
+            :model-value="identityWeight"
+            :min="ID_WEIGHT_MIN"
+            :max="ID_WEIGHT_MAX"
+            :step="ID_WEIGHT_STEP"
+            :value-label="
+              modelValue.identityWeight == null
+                ? `${identityWeight.toFixed(2)} · default`
+                : identityWeight.toFixed(2)
+            "
+            @update:model-value="patch({ identityWeight: $event })"
+          />
+          <p class="adv__hint">{{ IDENTITY_WEIGHT_HINT }}</p>
+        </div>
+        <div class="adv__field">
+          <label class="adv__label">{{ IDENTITY_START_STEP_LABEL }}</label>
           <input
-            v-if="modelValue.seedMode !== 'random'"
             class="adv__input"
-            data-test="output-seed"
             type="number"
+            inputmode="numeric"
+            step="1"
             min="0"
-            placeholder="Seed"
-            :value="modelValue.seed ?? ''"
+            :max="identityStartStepMax"
+            :placeholder="`Model default (${ID_START_STEP_DEFAULT})`"
+            data-test="identity-start-step"
+            :value="modelValue.identityStartStep ?? ''"
             @input="
               patch({
-                seed: Number(($event.target as HTMLInputElement).value) || null,
+                identityStartStep: numberOrNull(
+                  ($event.target as HTMLInputElement).value,
+                ),
               })
             "
           />
-        </AccordionSection>
-
-        <AccordionSection
-          v-if="caps.supportsVideo"
-          icon="video"
-          title="Video"
-          :summary="`${modelValue.frames ?? 25} frames · ${modelValue.fps ?? 24} fps`"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-video"
+          <p class="adv__hint">{{ IDENTITY_START_STEP_HINT }}</p>
+        </div>
+        <button
+          v-if="identityActive"
+          type="button"
+          class="adv__reset"
+          data-test="identity-reset"
+          @click="resetIdentity"
         >
-          <div class="adv__field">
-            <VideoDurationSlider
-              :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
-              :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
-              :model="selectedModel"
-              :family="family"
-              :model-name="modelValue.model"
-              :source-image-capability="
-                selectedModel?.source_image ?? modelValue.sourceImageCapability
-              "
-              :routing-request="routingRequest"
-              label="Duration"
-              @update:frames="patch({ frames: $event })"
-            />
-          </div>
-          <div class="adv__field">
-            <label class="adv__label">Frames ({{ frameGridLabel }})</label>
+          Use model defaults
+        </button>
+      </AccordionSection>
+
+      <UpscaleSection
+        v-if="showUpscale"
+        :model-value="modelValue.upscaleModel"
+        @update:model-value="patch({ upscaleModel: $event })"
+      />
+
+      <AccordionSection
+        icon="output"
+        title="Output & seed"
+        summary="Format and reproducibility"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-output"
+      >
+        <div class="adv__field">
+          <label class="adv__label">File format</label>
+          <SegmentedControl
+            :model-value="modelValue.outputFormat"
+            :options="
+              formats.map((f) => ({ value: f, label: f.toUpperCase() }))
+            "
+            label="File format"
+            @update:model-value="
+              patch({ outputFormat: $event as OutputFormat })
+            "
+          />
+        </div>
+        <!-- A canvasless recipe (a 3-D mesh) renders at no pixel size, so
+             there is nothing to type here — the same reason the rail hides
+             Shape and Resolution. -->
+        <div v-if="!caps.canvasless" class="adv__field">
+          <label class="adv__label">Exact size</label>
+          <div class="adv__size">
             <input
               class="adv__input"
-              data-test="video-frames"
               type="number"
-              :min="frameMinimum"
-              :step="frameStep"
-              :value="modelValue.frames ?? 25"
-              @change="
-                patch({
-                  frames: clampFrames(
-                    Number(($event.target as HTMLInputElement).value),
-                  ),
-                })
-              "
+              min="64"
+              :step="resolutionAlignment"
+              data-test="exact-width"
+              aria-label="Width in pixels"
+              :value="modelValue.width"
+              @change="setWidth(($event.target as HTMLInputElement).value)"
             />
-            <p class="adv__hint">
-              Frames must follow {{ frameGridLabel
-              }}<template v-if="h3Family"
-                >, from {{ MINIMAX_H3_MIN_FRAMES }} through
-                {{ MINIMAX_H3_MAX_FRAMES }}</template
-              >.
-            </p>
-          </div>
-          <div class="adv__field">
-            <label class="adv__label">Frames per second</label>
+            <button
+              type="button"
+              class="adv__swap"
+              data-test="exact-swap"
+              aria-label="Swap width and height"
+              title="Swap width and height"
+              @click="swapDims"
+            >
+              <Icon name="swap" :size="15" />
+            </button>
             <input
               class="adv__input"
-              data-test="video-fps"
               type="number"
-              min="1"
-              :disabled="fixedFps !== null"
-              :value="modelValue.fps ?? 24"
-              @change="
-                patch({
-                  fps: Number(($event.target as HTMLInputElement).value) || 24,
-                })
-              "
+              min="64"
+              :step="resolutionAlignment"
+              data-test="exact-height"
+              aria-label="Height in pixels"
+              :value="modelValue.height"
+              @change="setHeight(($event.target as HTMLInputElement).value)"
             />
           </div>
-          <div v-if="!h3Family" class="adv__row">
-            <span class="adv__label">GIF preview</span>
-            <SwitchToggle
-              :model-value="modelValue.gifPreview"
-              label="Generate GIF preview"
-              data-test="video-gif-preview"
-              @update:model-value="patch({ gifPreview: $event })"
-            />
-          </div>
-          <!-- Continuation is per model, not per family (#783): wan reaches
-               it without the LTX-2 suite behind `showLtx2`. -->
-          <ExtendVideoControls
-            v-if="canExtend"
-            :model-value="modelValue"
-            :family="family"
-            :default-overlap-frames="extendDefaultOverlapFrames"
-            @update:model-value="emit('update:modelValue', $event)"
+          <p class="adv__hint">
+            snaps to the nearest {{ resolutionAlignment }}px.
+          </p>
+          <p
+            v-if="exactSizeAdvisory"
+            class="adv__hint adv__hint--warn"
+            data-test="exact-size-advisory"
+          >
+            {{ exactSizeAdvisory }}
+          </p>
+        </div>
+        <div class="adv__field">
+          <label class="adv__label">Seed</label>
+          <SegmentedControl
+            :model-value="modelValue.seedMode"
+            :options="seedModes"
+            label="Seed mode"
+            @update:model-value="patch({ seedMode: $event })"
           />
-          <Ltx2VideoControls
-            v-if="showLtx2"
-            :model-value="modelValue"
-            @update:model-value="emit('update:modelValue', $event)"
-          />
-        </AccordionSection>
+        </div>
+        <input
+          v-if="modelValue.seedMode !== 'random'"
+          class="adv__input"
+          data-test="output-seed"
+          type="number"
+          min="0"
+          placeholder="Seed"
+          :value="modelValue.seed ?? ''"
+          @input="
+            patch({
+              seed: Number(($event.target as HTMLInputElement).value) || null,
+            })
+          "
+        />
+      </AccordionSection>
 
-        <AccordionSection
-          v-if="showPlacement"
-          icon="machines"
-          title="GPU placement"
-          summary="Pin this job to a device"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-placement"
-        >
-          <PlacementPanel
-            :model-value="modelValue.placement"
+      <AccordionSection
+        v-if="caps.supportsVideo"
+        icon="video"
+        title="Video"
+        :summary="`${modelValue.frames ?? 25} frames · ${modelValue.fps ?? 24} fps`"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-video"
+      >
+        <div class="adv__field">
+          <VideoDurationSlider
+            :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
+            :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
+            :model="selectedModel"
             :family="family"
-            :model="modelValue.model"
-            :gpus="placementGpus"
-            @update:model-value="setPlacement"
+            :model-name="modelValue.model"
+            :source-image-capability="
+              selectedModel?.source_image ?? modelValue.sourceImageCapability
+            "
+            :routing-request="routingRequest"
+            label="Duration"
+            @update:frames="patch({ frames: $event })"
           />
-        </AccordionSection>
-      </template>
+        </div>
+        <div class="adv__field">
+          <label class="adv__label">Frames ({{ frameGridLabel }})</label>
+          <input
+            class="adv__input"
+            data-test="video-frames"
+            type="number"
+            :min="frameMinimum"
+            :step="frameStep"
+            :value="modelValue.frames ?? 25"
+            @change="
+              patch({
+                frames: clampFrames(
+                  Number(($event.target as HTMLInputElement).value),
+                ),
+              })
+            "
+          />
+          <p class="adv__hint">
+            Frames must follow {{ frameGridLabel
+            }}<template v-if="h3Family"
+              >, from {{ MINIMAX_H3_MIN_FRAMES }} through
+              {{ MINIMAX_H3_MAX_FRAMES }}</template
+            >.
+          </p>
+        </div>
+        <div class="adv__field">
+          <label class="adv__label">Frames per second</label>
+          <input
+            class="adv__input"
+            data-test="video-fps"
+            type="number"
+            min="1"
+            :disabled="fixedFps !== null"
+            :value="modelValue.fps ?? 24"
+            @change="
+              patch({
+                fps: Number(($event.target as HTMLInputElement).value) || 24,
+              })
+            "
+          />
+        </div>
+        <div v-if="!h3Family" class="adv__row">
+          <span class="adv__label">GIF preview</span>
+          <SwitchToggle
+            :model-value="modelValue.gifPreview"
+            label="Generate GIF preview"
+            data-test="video-gif-preview"
+            @update:model-value="patch({ gifPreview: $event })"
+          />
+        </div>
+        <!-- Continuation is per model, not per family (#783): wan reaches
+             it without the LTX-2 suite behind `showLtx2`. -->
+        <ExtendVideoControls
+          v-if="canExtend"
+          :model-value="modelValue"
+          :family="family"
+          :default-overlap-frames="extendDefaultOverlapFrames"
+          @update:model-value="emit('update:modelValue', $event)"
+        />
+        <Ltx2VideoControls
+          v-if="showLtx2"
+          :model-value="modelValue"
+          @update:model-value="emit('update:modelValue', $event)"
+        />
+      </AccordionSection>
+
+      <AccordionSection
+        v-if="showPlacement"
+        icon="machines"
+        title="GPU placement"
+        summary="Pin this job to a device"
+        :open="true"
+        :header-interactive="false"
+        data-test="section-placement"
+      >
+        <PlacementPanel
+          :model-value="modelValue.placement"
+          :family="family"
+          :model="modelValue.model"
+          :gpus="placementGpus"
+          @update:model-value="setPlacement"
+        />
+      </AccordionSection>
     </div>
 
     <div v-if="mobile" class="adv__footer">

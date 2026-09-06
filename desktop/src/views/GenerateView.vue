@@ -5,9 +5,8 @@ import {
   isSupportedDroppedImage,
   reduceNativeImageDrag,
 } from "../lib/nativeImageDrop";
-import { useRoute, useRouter } from "vue-router";
+import { useRouter } from "vue-router";
 import {
-  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
@@ -17,7 +16,6 @@ import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import Icon from "@ui/components/Icon.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
-import type { ClipRailMedia } from "@ui/components/types";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
@@ -37,26 +35,11 @@ import {
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
-import ClipModeStrip from "../components/create/ClipModeStrip.vue";
 import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import StylePicker from "../components/create/StylePicker.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
-import SequenceComposer from "../components/create/SequenceComposer.vue";
-import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
-import { SEQUENCE_NEEDS_STYLE, type SequenceConfirmation } from "../lib/sequenceTimeline";
-import {
-  BENCH_RESIZER_HEIGHT,
-  COMPOSER_FALLBACK_HEIGHT,
-  DEFAULT_SEQUENCE_BENCH_HEIGHT,
-  MIN_BENCH_HEIGHT,
-  MIN_SEQUENCE_BENCH_HEIGHT,
-  MIN_SEQUENCE_CANVAS_HEIGHT,
-  MIN_STILL_CANVAS_HEIGHT,
-  benchHeightCeiling,
-  clampBenchHeight as clampBenchHeightWithin,
-} from "../lib/benchLayout";
-import { useSequenceDraftStore, type ClipMode } from "@studio/stores/sequenceDraft";
+import { MIN_CANVAS_HEIGHT } from "../lib/benchLayout";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import { formatGenerationTime } from "@studio/lib/generationTime";
 import { outputKindFor, outputKindForModel } from "../composables/useCreateOutputKind";
@@ -82,18 +65,6 @@ import {
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
 import type { CanvasIntent } from "@studio/lib/outputShape";
-import { useChainJobsStore } from "../stores/chainJobs";
-import { buildChainRequest } from "@studio/lib/sequenceForm";
-import { chainScriptToClips } from "@studio/lib/sequenceForm";
-import {
-  defaultClipFrames,
-  friendlySequenceError,
-  modelSupportsSequence,
-  modelsForOutput,
-  sequenceClipFrameCap,
-  sequenceFrameOptions,
-  sequenceMotionTailFrames,
-} from "@studio/lib/sequence";
 import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
 import { promptInputForForm, promptRecipeFromForm } from "../lib/promptRecipe";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
@@ -112,27 +83,7 @@ import {
   setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
 import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
-import {
-  clampClipsToMotionTail,
-  isPrintOfChainJob,
-  planSequenceReuse,
-  sequenceReuseClampNote,
-  sequenceReuseNote,
-} from "@studio/lib/sequenceReuse";
-import type { AmendRequest, ChainLimits } from "@studio/lib/api/chainTypes";
-import {
-  countLeadingCompletedStages,
-  normalizeServerChainScript,
-} from "@studio/lib/chainScriptWire";
-import { routeForModel } from "../lib/sequenceRoute";
-import { sequenceParams } from "../lib/sequenceParams";
-import { fetchChainLimits } from "../lib/api/chains";
-import {
-  normalizeTargetHost,
-  pickAutoHost,
-  pickMostCapableHost,
-  readyHostSignature,
-} from "../lib/hosts";
+import { normalizeTargetHost, pickAutoHost, pickMostCapableHost } from "../lib/hosts";
 import {
   expandModelId,
   expansionPolicyForSelection,
@@ -140,8 +91,6 @@ import {
   type ExpansionCandidate,
 } from "@studio/lib/expansionRouting";
 import { useAppPrefsStore } from "../stores/appPrefs";
-import { createUuid } from "@studio/lib/id";
-import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { useHostModelsStore } from "../stores/hostModels";
 import { strongestRoutableGpu, useHostsStore, type FeasibleRouteResult } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
@@ -180,7 +129,6 @@ import {
 import {
   applyPrefillToForm,
   buildRequest,
-  chainFilingFields,
   cloneGenerateForm,
   keepingPrintIdentity,
   loraBindingMatchesRoute,
@@ -188,6 +136,7 @@ import {
   MAX_BATCH_SIZE,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
+  restoredPrompt,
 } from "../lib/generateForm";
 import { emptyMeshForm } from "@studio/lib/meshControls";
 import { videoFramesError, type VideoFrameContract } from "@studio/lib/videoDuration";
@@ -245,12 +194,7 @@ import {
   recordPromptHistoryCache,
 } from "@studio/lib/promptHistoryCache";
 import { randomSeed } from "../stores/generation";
-import type {
-  ChainCreateRequest,
-  CompleteEvent,
-  GenerateRequest,
-  OutputMetadata,
-} from "../lib/api/types";
+import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   videoExportFilename,
@@ -295,8 +239,6 @@ import { useReuseStillPrint } from "../composables/useReuseStillPrint";
 import { upscaleLibraryImage } from "@studio/api/videoUpscale";
 import { defaultUpscaler } from "@studio/lib/upscale";
 import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
-import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
-import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
@@ -736,125 +678,18 @@ const formStore = useGenerateFormStore();
 const form = formStore.form;
 
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
-const workbenchRef = ref<HTMLDivElement | null>(null);
 const inspectorTab = ref<InspectorTab>("settings");
-const inspectorRef = ref<InstanceType<typeof InspectorPanel> | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
 const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
-const BENCH_HEIGHT_KEY = "mold.desktop.create-bench-height.v1";
-function readStoredBenchHeight(): number | null {
-  try {
-    const value = globalThis.localStorage?.getItem(BENCH_HEIGHT_KEY);
-    return value == null ? null : Number(value);
-  } catch {
-    return null;
-  }
-}
-const storedBenchHeight = readStoredBenchHeight();
-const benchHeight = ref(
-  Number.isFinite(storedBenchHeight)
-    ? Math.max(MIN_BENCH_HEIGHT, storedBenchHeight!)
-    : DEFAULT_SEQUENCE_BENCH_HEIGHT,
-);
-let benchResizeStartY = 0;
-let benchResizeStartHeight = 0;
 
 /**
- * The composer's real height, measured. It is the piece `overflow-hidden`
- * eats when the reservation is short, and it is the one piece whose height
- * the user changes (a long prompt grows the textarea), so the bench ceiling
- * has to follow it rather than assume it.
+ * The canvas's own floor — bound to its `min-height` rather than written as a
+ * utility class, so the CSS and the layout can never disagree the way they
+ * did when one said 320 and the other reserved 144. The workbench stacks two
+ * incompressible pieces, the canvas and the composer, and nothing between.
  */
-const composerHeight = ref(COMPOSER_FALLBACK_HEIGHT);
-let composerObserver: ResizeObserver | null = null;
-
-/** The canvas's own floor — bound to its `min-height`, so the CSS and the
- *  clamp can never disagree the way they did when one said 320 and the
- *  other reserved 144. */
-const canvasFloor = computed(() =>
-  isSequence.value ? MIN_SEQUENCE_CANVAS_HEIGHT : MIN_STILL_CANVAS_HEIGHT,
-);
-
-function minBenchHeight(): number {
-  return isSequence.value ? MIN_SEQUENCE_BENCH_HEIGHT : MIN_BENCH_HEIGHT;
-}
-
-function benchClampInput(requested: number) {
-  return {
-    requested,
-    available: workbenchRef.value?.clientHeight ?? window.innerHeight,
-    minBench: minBenchHeight(),
-    canvasFloor: canvasFloor.value,
-    resizerHeight: BENCH_RESIZER_HEIGHT,
-    composerHeight: composerHeight.value,
-  };
-}
-
-function clampBenchHeight(height: number): number {
-  return clampBenchHeightWithin(benchClampInput(height));
-}
-
-/** The resizer's `aria-valuemax`: the same ceiling the clamp enforces. */
-function maxBenchHeight(): number {
-  return benchHeightCeiling(benchClampInput(benchHeight.value));
-}
-
-function setBenchHeight(height: number) {
-  benchHeight.value = clampBenchHeight(height);
-  try {
-    globalThis.localStorage?.setItem(BENCH_HEIGHT_KEY, String(benchHeight.value));
-  } catch {
-    // A private or restricted WebView still gets an in-memory resize.
-  }
-}
-
-function onBenchResizeMove(event: PointerEvent) {
-  setBenchHeight(benchResizeStartHeight + benchResizeStartY - event.clientY);
-}
-
-function stopBenchResize() {
-  document.removeEventListener("pointermove", onBenchResizeMove);
-  document.removeEventListener("pointerup", stopBenchResize);
-}
-
-function startBenchResize(event: PointerEvent) {
-  event.preventDefault();
-  benchResizeStartY = event.clientY;
-  benchResizeStartHeight = benchHeight.value;
-  document.addEventListener("pointermove", onBenchResizeMove);
-  document.addEventListener("pointerup", stopBenchResize);
-}
-
-function onBenchResizeKeydown(event: KeyboardEvent) {
-  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-  event.preventDefault();
-  setBenchHeight(benchHeight.value + (event.key === "ArrowUp" ? 24 : -24));
-}
-
-function clampBenchToViewport() {
-  benchHeight.value = clampBenchHeight(benchHeight.value);
-}
-
-/**
- * Watch the composer's box. A prompt that grows to several lines takes those
- * pixels from the same column the bench sits in, so the ceiling has to move
- * with it — otherwise a long prompt pushes Generate out under
- * `overflow-hidden` again.
- */
-function observeComposerHeight() {
-  const el = composerRef.value?.$el;
-  if (!(el instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
-  composerHeight.value = el.offsetHeight || COMPOSER_FALLBACK_HEIGHT;
-  clampBenchToViewport();
-  composerObserver = new ResizeObserver(() => {
-    const measured = el.offsetHeight;
-    if (!measured || measured === composerHeight.value) return;
-    composerHeight.value = measured;
-    clampBenchToViewport();
-  });
-  composerObserver.observe(el);
-}
+const canvasFloor = MIN_CANVAS_HEIGHT;
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const remixSource = ref<"original" | "current">("original");
 const expansionRunning = ref(false);
@@ -882,7 +717,6 @@ const preparedSubmitting = ref(false);
 const submissionPlanning = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
-const sequenceSubmissionGuard = new PreparationRequestGuard();
 // Completion is detached from authoring once the store accepts a batch. Only
 // the newest accepted submission may publish mutable recovery authority:
 // older batches can finish later, but must not replace a newer pull/resume
@@ -930,9 +764,7 @@ async function importDroppedImage(path: string, hovered: string | null) {
       installedModels.value,
       hovered as DropTarget | null,
       {
-        identityVisible: !isSequence.value && form.identitySupported === true,
-        openingVisible: isSequence.value,
-        sequenceDraft: isSequence.value ? draft : null,
+        identityVisible: form.identitySupported === true,
       },
     );
     if (result.metadataApplied) discloseMissingRestoredModel();
@@ -992,12 +824,6 @@ const recentPrints = computed(() => hostGallery.merged.slice(0, RECENT_PRINTS_CA
  * path, not a prompt-only shortcut.
  */
 function reuseRecentPrint(entry: MergedPrint) {
-  // A stitched clip restores as a clip, exactly as the Lightbox restores it:
-  // a metadata prefill would force `single` and keep one scene's words.
-  if (planSequenceReuse(entry.item.metadata)) {
-    composer.setSequence({ kind: "reuse", metadata: entry.item.metadata });
-    return;
-  }
   reuseStillPrint(entry);
   inspectorTab.value = "settings";
   void nextTick(() => composerRef.value?.focus?.());
@@ -1337,12 +1163,7 @@ const quickStaleMessage = computed(() =>
 );
 const currentModelLabel = computed(() => modelDisplayNameForId(form.model, installedModels.value));
 
-// ── Output = Sequence (mode is a setting, not a place) ───────────────────────
-const activeRoute = useRoute();
-const draft = useSequenceDraftStore();
 const lastUsed = useLastUsedStylesStore();
-const chains = useChainJobsStore();
-const isSequence = computed(() => draft.output === "sequence");
 const selectedEntry = computed(() =>
   hostModels.installedEntryForTarget(form.model, stickyTarget.value),
 );
@@ -1361,9 +1182,6 @@ const contractEntry = computed(() =>
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
 let previousStillAutomaticResolution: SourceDimensions | null = null;
-let previousOpeningSource = "";
-let previousOpeningResolution: SourceResolutionResult | null = null;
-let previousOpeningAutomaticResolution: SourceDimensions | null = null;
 const canvasIntent = ref<CanvasIntent>("model-default");
 let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
@@ -1466,7 +1284,6 @@ watch(
         .join("|") ?? "",
   ],
   ([base64]) => {
-    if (isSequence.value) return;
     // This watcher also runs when Create remounts. Keep it limited to derived
     // dimensions; source attachment boundaries own their one-time fit default
     // so a route change cannot overwrite the user's selected policy.
@@ -1489,848 +1306,6 @@ watch(
   { immediate: true },
 );
 
-watch(
-  [
-    () => draft.openingImage?.base64 ?? null,
-    () => contractEntry.value?.name ?? form.model,
-    () => form.pipeline ?? null,
-    () => contractEntry.value?.generation_profile?.profile_hash ?? null,
-    () => contractEntry.value?.max_pixels ?? null,
-    () => contractEntry.value?.max_axis_pixels ?? null,
-    () => contractEntry.value?.dimension_alignment ?? null,
-    () =>
-      contractEntry.value?.recommended_dimensions
-        ?.map(({ width, height }) => `${width}x${height}`)
-        .join("|") ?? "",
-  ],
-  ([base64]) => {
-    if (!isSequence.value) return;
-    const next = applyDecodedSourceResolution(
-      base64,
-      {
-        base64: previousOpeningSource,
-        resolution: previousOpeningResolution,
-        automaticResolution: previousOpeningAutomaticResolution,
-      },
-      (width, height) => {
-        if (!draft.openingImage) return;
-        if (width === null) delete draft.openingImage.width;
-        else draft.openingImage.width = width;
-        if (height === null) delete draft.openingImage.height;
-        else draft.openingImage.height = height;
-      },
-    );
-    previousOpeningSource = next.base64;
-    previousOpeningResolution = next.resolution;
-    previousOpeningAutomaticResolution = next.automaticResolution;
-  },
-  { immediate: true },
-);
-/** Sequence inventory follows the route policy. A pinned host must never
- * inherit a compatible model from another machine's union. Edit sessions are
- * stricter still: their immutable durable route owns the available model. */
-const sequenceTargetHostId = computed<string | null>(
-  () => draft.editing?.hostId ?? stickyTarget.value,
-);
-const sequenceTargetModels = computed(() => {
-  const target = sequenceTargetHostId.value;
-  const fixed = target && target !== "capable";
-  const fetched = fixed && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-  if (fixed && !fetched) {
-    if (target === "local" && !models.loading) return models.installed;
-    return [];
-  }
-  return filterModelsForTarget(
-    installedModels.value,
-    target,
-    fetched ? new Set(hostModels.installedOn(target).map((model) => model.name)) : null,
-  );
-});
-const sequenceCapableModels = computed(() =>
-  modelsForOutput(sequenceTargetModels.value, "sequence"),
-);
-const selectedSequenceEntry = computed(() =>
-  findInstalledModel(sequenceCapableModels.value, form.model),
-);
-const sequenceTarget = computed(() => {
-  const entry = selectedSequenceEntry.value;
-  if (!entry) return null;
-  return draft.editing
-    ? (hosts.resolveRoute(draft.editing.hostId, entry.name)?.target ?? null)
-    : (routeForModel(entry)?.target ?? null);
-});
-const sequenceInventorySettled = computed(() => {
-  const target = sequenceTargetHostId.value;
-  if (target && target !== "capable") {
-    if (target === "local" && (hostModels.byHost[target]?.fetchedAt ?? 0) === 0) {
-      return !models.loading;
-    }
-    return !hostModels.loading && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-  }
-  if (hosts.all.length <= 1) return !models.loading;
-  return !models.loading && !hostModels.loading && hostModels.allReadyHostsFetched;
-});
-const chainLimits = ref<ChainLimits | null>(null);
-const sequenceSubmitting = ref(false);
-let sequenceAmendInFlight = false;
-let sequenceCancellationRequest: (() => Promise<void>) | null = null;
-/** Snapshot of the shared params at edit-load time — drives chainLevelDirty. */
-const editSharedBaseline = ref<string | null>(null);
-/** What a My images reuse could NOT restore, said once and quietly beneath the
- *  rail. Cleared the moment the user submits or leaves Sequence — it describes
- *  one handoff, not a standing property of the draft. */
-const sequenceReuseNotice = ref<string | null>(null);
-
-const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedSequenceEntry.value));
-const sequenceDefaultFrames = computed(() =>
-  defaultClipFrames(selectedSequenceEntry.value, chainLimits.value, sequenceMotionTail.value),
-);
-/** No chain-capable video model on the selected route → guide to Discover. */
-const showSequenceEmpty = computed(
-  () =>
-    isSequence.value &&
-    conn.ready &&
-    sequenceInventorySettled.value &&
-    sequenceCapableModels.value.length === 0,
-);
-
-/** Sequence is authoritative over a stale single-image selection. Re-run
- * after host inventory arrives and whenever the target changes. */
-watch(
-  [isSequence, sequenceCapableModels, sequenceInventorySettled, sequenceTargetHostId],
-  () => {
-    if (!isSequence.value) return;
-    const current = form.model;
-    if (sequenceCapableModels.value.some((model) => model.name === current)) return;
-    if (current && !draft.lastSingleModel && !draft.editing) {
-      draft.lastSingleModel = current;
-    }
-    const pick = lastUsed.pick("clip", sequenceCapableModels.value);
-    if (pick) {
-      formStore.applyModel(pick);
-    } else if (
-      sequenceInventorySettled.value ||
-      (selectedEntry.value !== null && !modelSupportsSequence(selectedEntry.value))
-    ) {
-      form.model = "";
-      form.family = "";
-      chainLimits.value = null;
-    }
-  },
-  { immediate: true },
-);
-
-function sharedSnapshot(): string {
-  return JSON.stringify({
-    ...sequenceParams(form, selectedSequenceEntry.value),
-    enableAudio: draft.enableAudio,
-    motionTail: sequenceMotionTail.value,
-  });
-}
-const chainLevelDirty = computed(
-  () =>
-    draft.editing !== null &&
-    editSharedBaseline.value !== null &&
-    (editSharedBaseline.value !== sharedSnapshot() ||
-      JSON.stringify(draft.editing.baselineOpeningImage ?? null) !==
-        JSON.stringify(draft.openingImage)),
-);
-
-/** `?output=sequence` deep-links (palette, menu, legacy /chains) are consumed
- * ONCE, then stripped; the persisted draft output wins on ordinary visits. */
-function consumeOutputQuery() {
-  if (activeRoute.query.output !== "sequence") return;
-  if (draft.output !== "sequence") {
-    // Mirror the inspector's model rule, and swap BEFORE seeding clips: a
-    // non-capable selection is remembered and replaced by the first
-    // chain-capable model so setOutput's new clips default their frames
-    // from the effective selection, not the outgoing still model's.
-    const current = selectedEntry.value;
-    if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
-      draft.lastSingleModel = form.model || null;
-      const pick = lastUsed.pick("clip", sequenceCapableModels.value);
-      if (pick) formStore.applyModel(pick);
-    }
-    draft.setOutput(
-      "sequence",
-      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-      sequenceDefaultFrames.value,
-    );
-  }
-  void router.replace({ path: "/create" });
-}
-
-let chainLimitsFetch = 0;
-async function loadChainLimits() {
-  const version = ++chainLimitsFetch;
-  const entry = selectedSequenceEntry.value;
-  if (!entry) {
-    chainLimits.value = null;
-    return;
-  }
-  try {
-    const target = routeForModel(entry)?.target ?? null;
-    const limits = (await fetchChainLimits(entry.name, target, form.fps)) as ChainLimits;
-    if (version !== chainLimitsFetch) return;
-    chainLimits.value = limits;
-    if (!limits.supports_audio) draft.enableAudio = false;
-    if (!draft.editing) {
-      const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
-      // A model switch adopts that model's audio answer — on wherever the
-      // chain renders sound, matching a one-shot of the same model. A
-      // re-fetch for the SAME model returns false from `adoptSequenceModel`
-      // and leaves the user's own choice alone.
-      draft.adoptSequenceModel(entry.name, frames, limits.supports_audio);
-    }
-  } catch {
-    if (version === chainLimitsFetch) chainLimits.value = null;
-  }
-}
-
-// Chain limits are per model AND per host — refetch when either moves.
-watch(
-  () => form.model,
-  (next, previous) => {
-    if (isSequence.value && previous && next !== previous) {
-      if (draft.editing) {
-        draft.stopEditing();
-        editSharedBaseline.value = null;
-      }
-    }
-  },
-);
-watch(
-  [isSequence, () => form.model, () => form.fps, stickyTarget, () => readyHostSignature(hosts.all)],
-  () => {
-    if (isSequence.value && form.model) void loadChainLimits();
-  },
-  { immediate: true },
-);
-
-// The queue rail lists every connected host's durable jobs.
-watch(
-  () => readyHostSignature(hosts.all),
-  () => void chains.fetchAll(),
-  { immediate: true },
-);
-
-// A finalized sequence lands in the origin host's gallery — refresh so the
-// video appears without a manual reload.
-watch(
-  () => chains.finalizedTick,
-  () => void hostGallery.fetchAll().catch(() => {}),
-);
-
-/** The watched durable job, while it is actually rendering. */
-const watchedSequence = computed(() => {
-  if (!chains.watching) return null;
-  const detail = chains.live.detail;
-  if (!detail) return null;
-  return detail.state === "running" || detail.state === "queued" ? detail : null;
-});
-const watchedSequencePct = computed(() => {
-  const active = chains.live.activeStage;
-  if (active === null) return 0;
-  const progress = chains.live.progress[active];
-  return progress && progress.total > 0 ? (progress.step / progress.total) * 100 : 0;
-});
-
-const sequenceStagePosters = ref<Record<number, string>>({});
-const sequenceStageMedia = ref<Record<number, string>>({});
-const sequenceStageClipIds = ref<string[]>([]);
-const sequenceStageClipIdsByJob = new Map<string, string[]>();
-const playingSequenceStage = ref<number | null>(null);
-let sequenceStageMediaKey = "";
-let sequenceStageMediaEpoch = 0;
-const pendingSequencePosters = new Set<string>();
-const pendingSequenceMedia = new Set<string>();
-
-function clearSequenceStageMedia() {
-  sequenceStageMediaEpoch += 1;
-  pendingSequencePosters.clear();
-  pendingSequenceMedia.clear();
-  for (const url of Object.values(sequenceStagePosters.value)) {
-    URL.revokeObjectURL(url);
-  }
-  sequenceStagePosters.value = {};
-  sequenceStageMedia.value = {};
-  sequenceStageClipIds.value = [];
-  playingSequenceStage.value = null;
-  sequenceStageMediaKey = "";
-}
-
-watch(
-  () => {
-    const detail = chains.live.detail;
-    const watched = chains.watching;
-    return detail && watched
-      ? [
-          watched.hostId,
-          detail.id,
-          detail.stages
-            .filter((stage) => stage.has_preview || stage.has_media)
-            .map((stage) => `${stage.idx}:${stage.has_preview ? 1 : 0}:${stage.has_media ? 1 : 0}`)
-            .join(","),
-        ].join(":")
-      : "";
-  },
-  () => {
-    const detail = chains.live.detail;
-    const watched = chains.watching;
-    if (!detail || !watched) return;
-    const key = `${watched.hostId}:${detail.id}`;
-    if (key !== sequenceStageMediaKey) {
-      clearSequenceStageMedia();
-      sequenceStageMediaKey = key;
-      const script = normalizeServerChainScript(detail.script);
-      const boundIds = sequenceStageClipIdsByJob.get(key);
-      const editing = draft.editing;
-      const editingMatches =
-        editing?.hostId === watched.hostId &&
-        editing.jobId === detail.id &&
-        draft.clips.length === detail.stages.length;
-      if (boundIds?.length === detail.stages.length) {
-        sequenceStageClipIds.value = [...boundIds];
-      } else if (editingMatches) {
-        // The binding cache belongs to this view instance, while the edit
-        // session is durable store state. Rebuild positionally on remount
-        // even when the user has already changed a prompt from the job script.
-        sequenceStageClipIds.value = draft.clips.map((clip) => clip.id);
-      } else if (
-        script &&
-        script.stages.length === draft.clips.length &&
-        script.stages.every((stage, idx) => stage.prompt === draft.clips[idx]?.prompt)
-      ) {
-        sequenceStageClipIds.value = draft.clips.map((clip) => clip.id);
-      }
-    }
-    const stagesByIdx = new Map(detail.stages.map((stage) => [stage.idx, stage]));
-    for (const [rawIdx, url] of Object.entries(sequenceStagePosters.value)) {
-      const idx = Number(rawIdx);
-      if (!stagesByIdx.get(idx)?.has_preview) {
-        URL.revokeObjectURL(url);
-        const next = { ...sequenceStagePosters.value };
-        delete next[idx];
-        sequenceStagePosters.value = next;
-      }
-    }
-    for (const rawIdx of Object.keys(sequenceStageMedia.value)) {
-      const idx = Number(rawIdx);
-      if (!stagesByIdx.get(idx)?.has_media) {
-        const next = { ...sequenceStageMedia.value };
-        delete next[idx];
-        sequenceStageMedia.value = next;
-        if (playingSequenceStage.value === idx) playingSequenceStage.value = null;
-      }
-    }
-    const target = chains.targetFor(watched.hostId);
-    const requestEpoch = sequenceStageMediaEpoch;
-    for (const stage of detail.stages) {
-      const pendingKey = `${requestEpoch}:${key}:${stage.idx}`;
-      if (
-        stage.has_preview &&
-        !sequenceStagePosters.value[stage.idx] &&
-        !pendingSequencePosters.has(pendingKey)
-      ) {
-        pendingSequencePosters.add(pendingKey);
-        const path = `/api/chain-jobs/${encodeURIComponent(detail.id)}/stages/${stage.idx}/preview`;
-        void apiFetchTo(target, path)
-          .then((response) => response.blob())
-          .then((blob) => {
-            const url = URL.createObjectURL(blob);
-            const currentStage = chains.live.detail?.stages.find(
-              (candidate) => candidate.idx === stage.idx,
-            );
-            if (
-              requestEpoch !== sequenceStageMediaEpoch ||
-              sequenceStageMediaKey !== key ||
-              chains.watching?.hostId !== watched.hostId ||
-              chains.live.detail?.id !== detail.id ||
-              !currentStage?.has_preview
-            ) {
-              URL.revokeObjectURL(url);
-              return;
-            }
-            sequenceStagePosters.value = {
-              ...sequenceStagePosters.value,
-              [stage.idx]: url,
-            };
-          })
-          .catch(() => {})
-          .finally(() => pendingSequencePosters.delete(pendingKey));
-      }
-      if (
-        stage.has_media &&
-        !sequenceStageMedia.value[stage.idx] &&
-        !pendingSequenceMedia.has(pendingKey)
-      ) {
-        pendingSequenceMedia.add(pendingKey);
-        void sequenceStageMediaUrl(target, detail.id, stage.idx)
-          .then((url) => {
-            const currentStage = chains.live.detail?.stages.find(
-              (candidate) => candidate.idx === stage.idx,
-            );
-            if (
-              requestEpoch !== sequenceStageMediaEpoch ||
-              sequenceStageMediaKey !== key ||
-              chains.watching?.hostId !== watched.hostId ||
-              chains.live.detail?.id !== detail.id ||
-              !currentStage?.has_media
-            ) {
-              return;
-            }
-            sequenceStageMedia.value = {
-              ...sequenceStageMedia.value,
-              [stage.idx]: url,
-            };
-          })
-          .catch(() => {})
-          .finally(() => pendingSequenceMedia.delete(pendingKey));
-      }
-    }
-  },
-  { immediate: true },
-);
-
-const sequencePlaybackSrc = computed(() => {
-  const idx = playingSequenceStage.value;
-  return idx === null ? null : (sequenceStageMedia.value[idx] ?? null);
-});
-const sequenceFilmstripMediaByClipId = computed<
-  Readonly<Record<string, ClipRailMedia | undefined>>
->(() => {
-  const detail = chains.live.detail;
-  if (!detail) return {};
-  return Object.fromEntries(
-    [...detail.stages]
-      .sort((a, b) => a.idx - b.idx)
-      .flatMap((stage) => {
-        const clipId = sequenceStageClipIds.value[stage.idx];
-        if (!clipId) return [];
-        const progress = chains.live.progress[stage.idx];
-        const status: ClipRailMedia["status"] =
-          stage.state === "completed" ? "ready" : stage.state === "failed" ? "error" : stage.state;
-        return [
-          [
-            clipId,
-            {
-              stageIdx: stage.idx,
-              status,
-              posterUrl: sequenceStagePosters.value[stage.idx] ?? null,
-              hasMedia: Boolean(stage.has_media && sequenceStageMedia.value[stage.idx]),
-              cacheReady: stage.cache_ready,
-              progressPercent:
-                progress && progress.total > 0 ? (progress.step / progress.total) * 100 : null,
-              error: stage.error,
-            } satisfies ClipRailMedia,
-          ],
-        ];
-      }),
-  );
-});
-
-function playSequenceStage(stageIdx: number) {
-  if (!sequenceStageMedia.value[stageIdx]) return;
-  playingSequenceStage.value = playingSequenceStage.value === stageIdx ? null : stageIdx;
-}
-
-function playSequenceClip(clipId: string) {
-  const stageIdx = sequenceStageClipIds.value.indexOf(clipId);
-  if (stageIdx >= 0) playSequenceStage(stageIdx);
-}
-
-const playingSequenceClipId = computed(() => {
-  const stageIdx = playingSequenceStage.value;
-  return stageIdx === null ? null : (sequenceStageClipIds.value[stageIdx] ?? null);
-});
-
-/** How far the playing scene's own player has run. The timeline adds the
- *  scenes before it to put the transport's needle on the whole clip. */
-const sequenceClipElapsed = ref(0);
-watch(sequencePlaybackSrc, () => (sequenceClipElapsed.value = 0));
-function onSequenceTimeUpdate(event: Event) {
-  sequenceClipElapsed.value = (event.target as HTMLVideoElement).currentTime;
-}
-
-function returnToLiveSequence() {
-  playingSequenceStage.value = null;
-}
-
-/**
- * The watched job once it has settled. The Create strip no longer keeps a
- * settled row, so the canvas is what holds the result: the finished video with
- * Edit clip / Show in My images, or the failure with Resume. Settling must
- * never drop the canvas back to the empty state.
- */
-const settledSequence = computed(() => {
-  if (!chains.watching) return null;
-  const detail = chains.live.detail;
-  if (!detail) return null;
-  return detail.state === "running" || detail.state === "queued" ? null : detail;
-});
-
-/** The gallery row this job produced, on the job's OWN host — never a sibling
- *  host's auto-saved copy. Resolves after the finalize refetch; until then the
- *  caption and its actions render over the last stage preview. */
-const settledSequencePrint = computed(() => {
-  const detail = settledSequence.value;
-  const hostId = chains.watching?.hostId;
-  if (!detail || !hostId) return null;
-  return (
-    hostGallery.merged.find(
-      (entry) => entry.sourceKey === hostId && isPrintOfChainJob(entry.item.metadata, detail.id),
-    ) ?? null
-  );
-});
-
-/**
- * Largest rect of the settled print's aspect that fits the canvas region —
- * the same pure-CSS containment as `previewFrameStyle`, so the stitched video
- * always shrinks to fit and is never clipped by a width-driven frame.
- */
-const settledFrameStyle = computed(() => {
-  const meta = settledSequencePrint.value?.item.metadata;
-  const w = meta?.width || 16;
-  const h = meta?.height || 9;
-  return {
-    aspectRatio: `${w} / ${h}`,
-    width: `min(100cqw, ${(100 * w) / h}cqh)`,
-  };
-});
-
-const settledSequenceCaption = computed(() => {
-  const detail = settledSequence.value;
-  if (!detail) return "";
-  const print = settledSequencePrint.value;
-  const meta = print?.item.metadata;
-  const bits = [
-    modelDisplayNameForId(detail.model, installedModels.value),
-    `${detail.stage_count} clip${detail.stage_count === 1 ? "" : "s"}`,
-  ];
-  if (meta) bits.push(`S ${meta.seed}`, `${meta.width}×${meta.height}`);
-  bits.push(hosts.all.find((h) => h.id === chains.watching?.hostId)?.label ?? "this device");
-  return bits.join(" · ");
-});
-
-const settledSequenceError = computed(() =>
-  settledSequence.value?.state === "failed"
-    ? friendlySequenceError(
-        settledSequence.value.error ?? "Sequence failed.",
-        hosts.all.find((h) => h.id === chains.watching?.hostId)?.label,
-      )
-    : null,
-);
-const settledSequenceErrorCopy = computed(() => {
-  const raw = settledSequence.value?.error;
-  return raw && settledSequenceError.value
-    ? copyableError(raw, settledSequenceError.value)
-    : (settledSequenceError.value ?? "");
-});
-
-function showSettledSequenceInLibrary() {
-  const print = settledSequencePrint.value;
-  void router.push(
-    print ? { path: "/library", query: { print: print.item.filename } } : { path: "/library" },
-  );
-}
-
-function editSettledSequence() {
-  const detail = settledSequence.value;
-  const hostId = chains.watching?.hostId;
-  if (!detail || !hostId) return;
-  void editSequence({ hostId, jobId: detail.id });
-}
-
-function resumeSettledSequence() {
-  const detail = settledSequence.value;
-  const hostId = chains.watching?.hostId;
-  if (!detail || !hostId) return;
-  void chains.resume(hostId, detail.id).catch((err) => toasts.push(String(err), "error"));
-}
-
-async function generateSequence() {
-  if (sequenceSubmitting.value) {
-    cancelSequenceSubmission();
-    return;
-  }
-  clearSelectedQueueRender();
-  const entry = selectedSequenceEntry.value;
-  if (!entry) {
-    toasts.push("Choose an installed sequence-capable video model first.", "error");
-    return;
-  }
-  // Freeze the complete request at the click boundary. Preprocessing can be
-  // slow, and edits made while it runs belong to the next submission.
-  const editing = draft.editing ? { ...draft.editing } : null;
-  const requestForm = cloneGenerateForm(form);
-  const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
-  // Sequence stage images predate the additive contract. Preserve compatible
-  // behavior for absent/unknown fields and park them only when this exact
-  // checkpoint explicitly advertises `unsupported`.
-  const supportsSourceImages = entry.source_image !== "unsupported";
-  // Sequence media is parked just like the one-shot source. Strip only the
-  // frozen request copy for an unsupported checkpoint; the shared draft stays
-  // intact so switching back restores every opening/per-clip image.
-  const openingSnapshot =
-    supportsSourceImages && draft.openingImage ? { ...draft.openingImage } : null;
-  if (!supportsSourceImages) {
-    for (const clip of clips) clip.sourceImage = null;
-  }
-  const enableAudio = draft.enableAudio;
-  const motionTailFrames = sequenceMotionTail.value;
-  const hostRoute = editing ? hosts.resolveRoute(editing.hostId, entry.name) : routeForModel(entry);
-  if (!hostRoute) {
-    toasts.push("The selected host isn't reachable. Pick another host.", "error");
-    return;
-  }
-  sequenceSubmitting.value = true;
-  const token = sequenceSubmissionGuard.begin();
-  const signal = sequenceSubmissionGuard.signalFor(token);
-  const isCurrent = () => sequenceSubmissionGuard.isCurrent(token) && !signal.aborted;
-  try {
-    // Refetch stale limits so frames caps/audio gating match the routed host.
-    if (!chainLimits.value || chainLimits.value.model !== entry.name) {
-      await loadChainLimits();
-      if (!isCurrent()) return;
-    }
-    requestForm.sourceImage = openingSnapshot?.base64 ?? null;
-    requestForm.maskImage = null;
-    if (!(await preprocessSourceFit(hostRoute, requestForm, signal)) || !isCurrent()) return;
-    const openingImage = openingSnapshot
-      ? { ...openingSnapshot, base64: requestForm.sourceImage }
-      : null;
-    // The stitched print is the only artifact a sequence puts in the gallery,
-    // so it is what carries the header title and the File under choice.
-    const request: ChainCreateRequest = {
-      ...buildChainRequest(sequenceParams(requestForm, entry), clips, {
-        motionTailFrames,
-        enableAudio,
-        openingImage,
-      }),
-      ...chainFilingFields(requestForm),
-    };
-    const currentRoute = hosts.resolveRoute(hostRoute.hostId, entry.name);
-    if (
-      !currentRoute ||
-      currentRoute.hostId !== hostRoute.hostId ||
-      currentRoute.target.baseUrl !== hostRoute.target.baseUrl ||
-      currentRoute.target.apiKey !== hostRoute.target.apiKey ||
-      (currentRoute.instanceId ?? null) !== (hostRoute.instanceId ?? null)
-    ) {
-      toasts.push(
-        "The sequence machine changed during source preparation. Review the machine and Generate again.",
-        "error",
-      );
-      return;
-    }
-    const feasibility = await hosts.resolveFeasible(hostRoute.hostId, request, 1, { signal });
-    if (!isCurrent()) return;
-    if (
-      feasibility.kind !== "route" ||
-      feasibility.route.hostId !== hostRoute.hostId ||
-      feasibility.route.target.baseUrl !== hostRoute.target.baseUrl ||
-      feasibility.route.target.apiKey !== hostRoute.target.apiKey
-    ) {
-      toasts.push(
-        feasibility.kind === "route"
-          ? "The sequence machine changed while checking dependencies. Nothing was queued."
-          : placementFailureMessage(feasibility),
-        "error",
-      );
-      return;
-    }
-    const { accepted } = await licenseAcceptance.request({
-      hostLabel: hostRoute.label,
-      target: hostRoute.target,
-      requirements: licenseRequirements(feasibility.preview?.pending_downloads),
-    });
-    if (!accepted || !isCurrent()) return;
-    if (editing) {
-      const operationId = createUuid();
-      const amend: AmendRequest = {
-        stages: request.stages,
-        motion_tail_frames: request.motion_tail_frames ?? null,
-        fps: request.fps ?? null,
-        seed: requestForm.seed.trim() === "" ? null : requestForm.seed.trim(),
-        steps: request.steps,
-        guidance: request.guidance,
-        strength: request.strength ?? null,
-        // Always explicit: null means "keep current" server-side, which
-        // would make turning audio OFF impossible through an edit.
-        enable_audio: enableAudio,
-      };
-      try {
-        sequenceStageClipIdsByJob.set(
-          `${editing.hostId}:${editing.jobId}`,
-          clips.map((clip) => clip.id),
-        );
-        sequenceAmendInFlight = true;
-        sequenceCancellationRequest = () =>
-          chains.cancelMutation(editing.hostId, editing.jobId, operationId, hostRoute.target);
-        const outcome = await chains.amend(
-          editing.hostId,
-          editing.jobId,
-          amend,
-          hostRoute.target,
-          operationId,
-        );
-        if (!isCurrent()) {
-          await chains.cancel(editing.hostId, editing.jobId, hostRoute.target).catch(() => {});
-          return;
-        }
-        toasts.push(
-          `Sequence updated · ${outcome.preserved_stages} clip${outcome.preserved_stages === 1 ? "" : "s"} kept from cache`,
-        );
-        draft.stopEditing();
-        editSharedBaseline.value = null;
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 409) {
-          toasts.push(
-            "This sequence changed on its host while you edited. Use Duplicate as new to submit your version.",
-            "error",
-          );
-          return;
-        }
-        throw err;
-      }
-    } else {
-      const operationId = createUuid();
-      sequenceCancellationRequest = () =>
-        chains.cancelMutation(hostRoute.hostId, operationId, operationId, hostRoute.target);
-      const jobId = await chains.create(hostRoute.hostId, request, hostRoute.target, operationId);
-      if (!isCurrent()) {
-        await chains.cancel(hostRoute.hostId, jobId, hostRoute.target).catch(() => {});
-        return;
-      }
-      sequenceStageClipIdsByJob.set(
-        `${hostRoute.hostId}:${jobId}`,
-        clips.map((clip) => clip.id),
-      );
-      toasts.push("Sequence queued");
-    }
-    // The caveat described the handoff, not the submitted job.
-    sequenceReuseNotice.value = null;
-  } catch (err) {
-    if (!isCurrent()) return;
-    toasts.push(String(err), "error");
-  } finally {
-    if (sequenceSubmissionGuard.isCurrent(token)) {
-      sequenceSubmitting.value = false;
-      sequenceAmendInFlight = false;
-      sequenceCancellationRequest = null;
-    }
-  }
-}
-
-function cancelSequenceSubmission() {
-  if (!sequenceSubmitting.value) return;
-  sequenceSubmissionGuard.invalidate();
-  const cancellation = sequenceCancellationRequest;
-  const cancellingAmendment = sequenceAmendInFlight;
-  sequenceCancellationRequest = null;
-  sequenceAmendInFlight = false;
-  sequenceSubmitting.value = false;
-  preprocessingStatus.value = null;
-  if (!cancellation) {
-    toasts.push("Sequence preparation cancelled — nothing was queued");
-    return;
-  }
-  toasts.push(
-    cancellingAmendment ? "Cancelling the sequence update…" : "Cancelling sequence creation…",
-  );
-  void confirmCancellation(cancellation)
-    .then(() =>
-      toasts.push(
-        cancellingAmendment
-          ? "Sequence update cancelled"
-          : "Sequence creation cancelled — nothing was queued",
-      ),
-    )
-    .catch(() =>
-      toasts.push("Cancellation could not be confirmed. Check Activity before retrying.", "error"),
-    );
-}
-
-/** Edit session: submit the current clips as a brand-new job instead. */
-async function duplicateSequenceAsNew() {
-  draft.stopEditing();
-  editSharedBaseline.value = null;
-  await generateSequence();
-}
-
-/** Edit sequence: load a durable job's effective script into an edit
- * session — applying its shared params to the form is the explicit action. */
-async function editSequence(payload: { hostId: string; jobId: string }) {
-  await loadSequence(payload, true);
-}
-
-/** Select/watch a durable job without turning a row click into an amend. */
-async function inspectSequence(payload: { hostId: string; jobId: string }) {
-  await loadSequence(payload, false);
-}
-
-async function loadSequence(payload: { hostId: string; jobId: string }, editing: boolean) {
-  // An edit session is lossless — any reuse caveat on screen is now stale.
-  sequenceReuseNotice.value = null;
-  try {
-    const detail = await chains.fetchDetail(payload.hostId, payload.jobId);
-    const script = normalizeServerChainScript(detail.script);
-    if (!script) {
-      toasts.push("This job carries no editable script.", "error");
-      return;
-    }
-    const loaded = chainScriptToClips(script);
-    const shared = loaded.shared;
-    if (shared.model) {
-      const entry = findInstalledModel(installedModels.value, shared.model);
-      if (entry) formStore.applyModel(entry);
-      else form.model = shared.model;
-    }
-    if (shared.width != null) form.width = shared.width;
-    if (shared.height != null) form.height = shared.height;
-    if (shared.fps != null) form.fps = shared.fps;
-    if (shared.steps != null) form.steps = shared.steps;
-    if (shared.guidance != null) form.guidance = shared.guidance;
-    if (shared.strength != null) form.strength = shared.strength;
-    if (loaded.openingImage?.base64) {
-      preserveRestoredSourceCanvas(loaded.openingImage.base64);
-      form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
-    }
-    form.seed = shared.seed ?? "";
-    if (editing) {
-      draft.loadFromJob(
-        {
-          jobId: payload.jobId,
-          hostId: payload.hostId,
-          baseline: loaded.clips.map((clip) => ({ ...clip })),
-          completedStages: countLeadingCompletedStages(detail.stages),
-        },
-        loaded.clips,
-        loaded.enableAudio,
-        loaded.openingImage,
-      );
-      editSharedBaseline.value = sharedSnapshot();
-    } else {
-      draft.stopEditing();
-      editSharedBaseline.value = null;
-      draft.output = "sequence";
-      draft.clips.splice(0, draft.clips.length, ...loaded.clips);
-      draft.activeClipId = loaded.clips[0]?.id ?? null;
-      draft.enableAudio = loaded.enableAudio;
-      draft.openingImage = loaded.openingImage;
-    }
-    if (form.model) draft.bindSequenceModel(form.model);
-    sequenceStageClipIdsByJob.set(
-      `${payload.hostId}:${payload.jobId}`,
-      draft.clips.map((clip) => clip.id),
-    );
-    await chains.watch(payload.hostId, payload.jobId);
-    void loadChainLimits();
-  } catch (err) {
-    toasts.push(String(err), "error");
-  }
-}
-
 // Availability data is demand-driven: fetch when the set of ready hosts
 // changes. immediate so routing is model-aware on the FIRST Generate click.
 // (The inspector's picker force-refreshes on open.)
@@ -2344,17 +1319,7 @@ watch(
   { immediate: true },
 );
 
-/** Amending an existing clip is not a new print: the one Generate button says
- *  what it will actually do to the clip already on the timeline. */
-// "Update clip" only while the button really amends: an edit session parked
-// behind the Simple toggle is kept, but Simple's Generate makes a new print.
-const buttonLabel = computed(() =>
-  composerSubmitting.value
-    ? "Cancel"
-    : isSequence.value && draft.editing
-      ? "Update clip"
-      : "Generate",
-);
+const buttonLabel = computed(() => (composerSubmitting.value ? "Cancel" : "Generate"));
 /** The queue depth rides beside the button, never inside its one word. */
 const queuedNote = computed(() =>
   generation.pending.length > 0 ? `+${generation.pending.length} queued` : null,
@@ -2368,7 +1333,6 @@ const submissionStatus = computed(() =>
 function cancelSubmissionPlanning() {
   if (!submissionPlanning.value) return;
   submissionGuard.invalidate();
-  sequenceSubmissionGuard.invalidate();
   submissionPlanning.value = false;
   preparedSubmitting.value = false;
 }
@@ -2848,7 +1812,7 @@ function capabilitiesForPrint(request: GenerateRequest, hostId: string | null) {
 
 function canMakeVariations(candidate: Job | null): boolean {
   const request = candidate?.request;
-  if (isSequence.value || !request) return false;
+  if (!request) return false;
   return canRepeatPrint(
     candidate,
     batchLockedForRequest(request, capabilitiesForPrint(request, candidate.hostId ?? null)),
@@ -3296,7 +2260,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   if (refusePromptTransform()) return;
   if (!form.prompt.trim() || !form.model || expansionRunning.value) return;
   submissionGuard.invalidate();
-  sequenceSubmissionGuard.invalidate();
   const route = currentExpansionRoute.value;
   // Frozen before the request: an Auto rerank mid-flight must not move the
   // print's machine out from under the reviewed set.
@@ -3923,9 +2886,6 @@ function appendPromptWord(word: string) {
 }
 
 function onPromptAuthored(prompt: string, source: PromptAuthoringSource = "typed") {
-  // Clip mode's words belong to the selected scene, so neither the one-shot
-  // prompt's provenance nor its quick rewrite has anything to say about them.
-  if (isSequence.value) return;
   // A ↑/↓ recall replaces the whole prompt, so the prepared rewrite has
   // nothing left to describe: release it instead of raising the stale banner
   // whose recovery actions would re-expand a prompt no longer on screen.
@@ -4194,42 +3154,18 @@ const composerWarningReason = computed<string | null>(() =>
       ),
 );
 
-/*
- * One composer, two modes. In clip mode it carries the SELECTED SCENE's words,
- * the timeline above owns the refusal, and Generate submits the whole chain —
- * so every binding below asks `isSequence` once and nothing downstream has to.
- */
-const activeScene = computed(
-  () => draft.clips.find((clip) => clip.id === draft.activeClipId) ?? draft.clips[0] ?? null,
-);
-const activeSceneIndex = computed(() => {
-  const index = draft.clips.findIndex((clip) => clip.id === activeScene.value?.id);
-  return index >= 0 ? index : 0;
-});
-const composerPrompt = computed(() =>
-  isSequence.value ? (activeScene.value?.prompt ?? "") : null,
-);
-/** A one-shot on a clip style: the plain render the Simple sub-mode makes.
- *  Read from the one section authority, never a second family list. */
-const isSimpleClip = computed(
-  () => !isSequence.value && outputKindFor(draft.output, form.family) === "clip",
-);
-const composerPlaceholder = computed(() => {
-  if (isSimpleClip.value) return "Describe the clip";
-  if (!isSequence.value) return null;
-  return activeSceneIndex.value === 0
-    ? "Scene 1 — describe how the clip opens"
-    : `Scene ${activeSceneIndex.value + 1} — describe what happens next`;
-});
+/** A clip: the render a clip style makes. Read from the one section
+ *  authority, never a second family list. */
+const isClip = computed(() => outputKindFor(form.family) === "clip");
+const composerPlaceholder = computed(() => (isClip.value ? "Describe the clip" : null));
 
 /**
  * The Length chip's contract, which is the SAME row the inspector's Clip card
  * reads — both write `form.frames`, so the chip and the slider are one control
- * shown twice. Absent outside the simple clip: a sequence's lengths are
- * per-scene and a still has none.
+ * shown twice. Absent outside a clip: a still has no length.
  */
 const composerLengthContract = computed<VideoFrameContract | null>(() => {
-  if (!isSimpleClip.value || form.predictDuration) return null;
+  if (!isClip.value || form.predictDuration) return null;
   const entry = contractEntry.value;
   return {
     ...(entry ?? {}),
@@ -4238,49 +3174,15 @@ const composerLengthContract = computed<VideoFrameContract | null>(() => {
     source_image: entry?.source_image ?? form.sourceImageCapability,
   };
 });
-function writeScenePrompt(value: string) {
-  const scene = activeScene.value;
-  if (scene) scene.prompt = value;
-}
-/**
- * What Generate must refuse for in clip mode. The timeline raises its own
- * refusal while it is mounted, but it is `v-else`'d away entirely when no
- * installed style can make a clip — so the view answers for it there, and the
- * one composer is locked whether or not the timeline exists.
- */
-const timelineBlockedReason = ref<string | null>(SEQUENCE_NEEDS_STYLE);
-const sequenceBlockedReason = computed(() =>
-  showSequenceEmpty.value ? SEQUENCE_NEEDS_STYLE : timelineBlockedReason.value,
-);
-const composerRefusal = computed(() =>
-  isSequence.value ? sequenceBlockedReason.value : composerBlockerReason.value,
-);
-const composerLocked = computed(() =>
-  isSequence.value ? sequenceBlockedReason.value !== null : composerDisabled.value,
-);
-const composerSubmitting = computed(() =>
-  isSequence.value ? sequenceSubmitting.value : submissionPlanning.value,
-);
-
-/**
- * The timeline's destructive questions, asked over the whole workbench. The
- * bench strip is a `container-type: size` box, which makes it the containing
- * block for an absolutely positioned dialog — one rendered inside it would be
- * centred and clipped in a 320px strip.
- */
-const sequenceConfirmation = ref<SequenceConfirmation | null>(null);
-function resolveSequenceConfirmation(answer: "confirm" | "cancel") {
-  const pending = sequenceConfirmation.value;
-  if (pending) pending[answer]();
-}
+const composerRefusal = computed(() => composerBlockerReason.value);
+const composerLocked = computed(() => composerDisabled.value);
+const composerSubmitting = computed(() => submissionPlanning.value);
 
 function composerGenerate() {
-  if (isSequence.value) void generateSequence();
-  else void generate();
+  void generate();
 }
 function composerCancel() {
-  if (isSequence.value) cancelSequenceSubmission();
-  else cancelSubmissionPlanning();
+  cancelSubmissionPlanning();
 }
 
 // The shared rule picks the sentence: the surface's own wording while the
@@ -4859,10 +3761,6 @@ watch(
   [installedModels, installedInventorySettled],
   ([installed, settled]) => {
     if (form.model || installed.length === 0) return;
-    // In Scenes the sequence watcher above owns the pick (memory-aware too)
-    // and may leave the form EMPTY on purpose when the pinned machine has no
-    // style that can join scenes; refilling it here would fight that.
-    if (isSequence.value) return;
     const section = lastUsed.lastSection;
     const rememberedName = section ? lastUsed.bySection[section] : null;
     const remembered = rememberedName ? findInstalledModel(installed, rememberedName) : null;
@@ -4882,11 +3780,11 @@ watch(
 // these settings, an edit session — so the memory can never disagree with
 // the screen.
 //
-// The section is the INSTALLED entry's, never the form's family: an edit
-// session can put a sequence style's name on the form while the family still
-// reads the previous still style's, and a name no machine has (a restored
-// print's missing style) is not remembered at all — it could only ever be
-// restored under the wrong kind.
+// The section is the INSTALLED entry's, never the form's family: a restore
+// can put a clip style's name on the form while the family still reads the
+// previous still style's, and a name no machine has (a restored print's
+// missing style) is not remembered at all — it could only ever be restored
+// under the wrong kind.
 watch(
   () => [form.model, installedModels.value] as const,
   ([model, installed]) => {
@@ -4942,7 +3840,10 @@ function showRestoredPrint(print: GalleryPrintOnCanvas): void {
     request = buildRequest(form);
   } catch {
     request = {
-      prompt: print.metadata.prompt,
+      // `metadata.prompt` on a stitched print is every clip newline-joined.
+      // The form already holds the honest first-clip degradation, so the
+      // fallback has to reach for the same rule rather than the raw blob.
+      prompt: restoredPrompt(print.metadata),
       model: print.metadata.model,
       width: print.metadata.width,
       height: print.metadata.height,
@@ -4968,20 +3869,6 @@ function applyPrefill() {
     });
   }
   restoreEpoch += 1;
-  // A gallery/history metadata prefill represents one rendered print. Sequence
-  // prints use the separate sequence handoff above; every other print must
-  // restore into One shot even when the persisted Create draft is currently a
-  // sequence. Switch first so the sequence-only model guard cannot replace the
-  // print's model after its settings land.
-  if ("metadata" in prefill && prefill.metadata && isSequence.value) {
-    draft.setOutput(
-      "single",
-      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-      sequenceDefaultFrames.value,
-    );
-    draft.stopEditing();
-    draft.lastSingleModel = null;
-  }
   // Gallery reuse ships full metadata (full-fidelity restore); palette /
   // history / jobs keep the legacy scalar copy.
   if (
@@ -5217,138 +4104,6 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
 watch(() => composer.prefill, applyPrefill, { immediate: true });
 
 /**
- * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
- * session, nothing cached, `Generate sequence` queues a fresh job. Shared
- * params ride the same `applyPrefillToForm` path a single print's reuse uses,
- * so model defaults, legacy normalization and capability gating stay in one
- * place.
- */
-function applySequenceReuse(metadata: OutputMetadata) {
-  const plan = planSequenceReuse(metadata);
-  if (!plan) return;
-  const oneShotPrompt = form.prompt;
-  applyPrefillToForm(form, { metadata }, installedModels.value);
-  // Reusing a sequence must not overwrite the parked one-shot prompt.
-  form.prompt = oneShotPrompt;
-
-  // The live tail belongs to the model that is selected NOW, not the one the
-  // print recorded — raise anything that no longer clears it, and say so.
-  const tail = sequenceMotionTailFrames(selectedEntry.value);
-  const { clips, raised } = clampClipsToMotionTail(plan.clips, tail, 9);
-
-  draft.stopEditing();
-  editSharedBaseline.value = null;
-  draft.output = "sequence";
-  draft.clips.splice(0, draft.clips.length, ...clips);
-  draft.activeClipId = clips[0]?.id ?? null;
-  draft.enableAudio = metadata.enable_audio === true;
-  draft.bindSequenceModel(form.model);
-
-  const notes = [sequenceReuseNote(clips.length, plan.lossy)];
-  if (raised > 0) {
-    notes.push(sequenceReuseClampNote(modelDisplayNameForId(form.model, installedModels.value)));
-  }
-  sequenceReuseNotice.value = notes.join(" · ");
-  void loadChainLimits();
-}
-
-/**
- * Simple | Scenes — the two ways of making a clip, from the toolbar toggle and
- * from the palette. The sub-mode is a remembered preference on the draft; the
- * switch itself moves the draft's OUTPUT, keeping the clip style either way.
- *
- * Nothing is destroyed in either direction. Going to Scenes seeds scene 1 from
- * the words and the length already on the composer when no scene has been
- * written yet; coming back parks the scenes exactly as they are — the
- * timeline's own Clear the clip is the only eraser.
- */
-function setClipMode(mode: ClipMode) {
-  draft.clipMode = mode;
-  if (mode === "simple") {
-    if (!isSequence.value) return;
-    draft.setOutput(
-      "single",
-      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-      sequenceDefaultFrames.value,
-    );
-    return;
-  }
-  if (isSequence.value) return;
-  const seedPrompt = form.prompt.trim();
-  const seedFrames = form.frames;
-  // Mirror the inspector's model rule, and swap BEFORE seeding clips: a style
-  // that cannot join scenes is parked and replaced by the first one that can,
-  // so the new clips default their length from the model that will render them.
-  const current = selectedEntry.value;
-  if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
-    draft.lastSingleModel = form.model || null;
-    const pick = lastUsed.pick("clip", sequenceCapableModels.value);
-    if (pick) formStore.applyModel(pick);
-  }
-  const unwritten = draft.clips.every((clip) => !clip.prompt.trim());
-  draft.setOutput(
-    "sequence",
-    { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-    sequenceDefaultFrames.value,
-  );
-  if (!unwritten) return;
-  const first = draft.clips[0];
-  if (!first) return;
-  if (seedPrompt) first.prompt = seedPrompt;
-  const seededLength = sceneLengthFor(seedFrames);
-  if (seededLength !== null) first.frames = seededLength;
-}
-
-/**
- * The composer's length as ONE scene's length: the longest offered scene that
- * does not exceed it. A simple clip may be longer than any single scene — that
- * is the auto-chained one-shot — so it becomes the longest scene there is
- * rather than a length the chain validator refuses. `null` = shorter than the
- * shortest scene, so scene 1 keeps the model's own default.
- */
-function sceneLengthFor(frames: number): number | null {
-  if (!Number.isFinite(frames) || frames <= 0) return null;
-  const options = sequenceFrameOptions(
-    sequenceClipFrameCap(selectedSequenceEntry.value, chainLimits.value),
-    sequenceMotionTail.value,
-    selectedSequenceEntry.value?.family,
-  );
-  const fits = options.filter((option) => option <= frames);
-  return fits.length > 0 ? fits[fits.length - 1]! : null;
-}
-
-/** A sequence handed over from elsewhere: Library ▸ History ▸ Sequences and
- *  the canvas hand over `edit`; a Library sequence print hands over `reuse`.
- *  One-shot — the slot is emptied on arrival so a back-nav cannot replay it. */
-function applySequenceHandoff() {
-  const handoff = composer.takeSequence();
-  if (!handoff) return;
-  if (handoff.kind === "reuse") {
-    applySequenceReuse(handoff.metadata);
-    return;
-  }
-  if (handoff.kind === "inspect") {
-    void inspectSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
-  } else {
-    void editSequence({ hostId: handoff.hostId, jobId: handoff.jobId });
-  }
-}
-watch(() => composer.pendingSequence, applySequenceHandoff, { immediate: true });
-// Leaving Sequence retires the caveat with the rail it described.
-watch(isSequence, (on) => {
-  if (!on) {
-    sequenceReuseNotice.value = null;
-    // No bench is mounted in one-shot mode, and a still reserves more than
-    // twice a clip's canvas floor — clamping here measured the timeline
-    // against a floor it was never under and shrank a height the user dragged.
-    return;
-  }
-  // The bench floor is mode-aware; a persisted one-shot height may sit below
-  // the sequence floor and would otherwise scroll the composer.
-  clampBenchToViewport();
-});
-
-/**
  * Act on a shell intent exactly once, whether it was raised while this view
  * was mounted or on the way here. The palette and the native menu raise the
  * intent and then navigate, so a plain watcher registered on the already
@@ -5412,40 +4167,10 @@ onCreateIntent(
   },
 );
 
-// Palette — take the clip apart into scenes.
-onCreateIntent(
-  "clipScenes",
-  () => ui.clipScenesTick,
-  () => setClipMode("scenes"),
-);
-
 // Palette's Make a short clip and File ▸ New Clip — the Short clip door,
-// exactly as the toolbar's segment opens it (remembered way, remembered
-// style), whether or not New image was already open.
-const outputKindDoor = useOutputKindDoor(
-  () => form,
-  (mode) => {
-    // Raised from another workspace, the intent is consumed during setup,
-    // before the inspector exists; the swap waits a tick for it rather than
-    // falling on the floor. With no style installed at all the starter cards
-    // hold the view and the inspector never mounts, so the draft is switched
-    // directly — there is no style to swap anyway, and Scenes owns that empty
-    // state.
-    const swap = () => {
-      const inspector = inspectorRef.value;
-      if (typeof inspector?.setOutputMode === "function") inspector.setOutputMode(mode);
-      else if (mode !== draft.output) {
-        draft.setOutput(
-          mode,
-          { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-          sequenceDefaultFrames.value,
-        );
-      }
-    };
-    if (inspectorRef.value) swap();
-    else void nextTick(swap);
-  },
-);
+// exactly as the toolbar's segment opens it (the remembered clip style),
+// whether or not New image was already open.
+const outputKindDoor = useOutputKindDoor(() => form);
 onCreateIntent(
   "shortClip",
   () => ui.shortClipTick,
@@ -5459,12 +4184,11 @@ onCreateIntent(
   () => makeVariations(),
 );
 
-// Menu ▸ Generate / Expand Prompt reuse the composer actions. In sequence
-// output the same intent submits the sequence.
+// Menu ▸ Generate / Expand Prompt reuse the composer actions.
 onCreateIntent(
   "generate",
   () => ui.generateTick,
-  () => (isSequence.value ? void generateSequence() : void generate()),
+  () => void generate(),
 );
 onCreateIntent(
   "expand",
@@ -5480,14 +4204,7 @@ onMounted(() => {
   // ready-host transition refreshes and replaces each live host's slice.
   if (!import.meta.env.TEST) void loadPromptHistory();
   if (!import.meta.env.TEST) liveActivity.start();
-  window.addEventListener("resize", clampBenchToViewport);
-  clampBenchToViewport();
-  observeComposerHeight();
   void listenForNativeImageDrops();
-  // The persisted sequence draft wins on ordinary visits; a ?output=sequence
-  // deep-link is consumed once and stripped.
-  draft.hydrate();
-  consumeOutputQuery();
 });
 
 onBeforeUnmount(() => {
@@ -5496,20 +4213,8 @@ onBeforeUnmount(() => {
   if (!import.meta.env.TEST) liveActivity.stop();
   preparationGuard.invalidate();
   submissionGuard.invalidate();
-  sequenceSubmissionGuard.invalidate();
-  const sequenceCancellation = sequenceCancellationRequest;
-  sequenceCancellationRequest = null;
-  sequenceAmendInFlight = false;
-  if (sequenceCancellation) {
-    void confirmCancellation(sequenceCancellation).catch(() => {});
-  }
-  clearSequenceStageMedia();
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
-  stopBenchResize();
-  window.removeEventListener("resize", clampBenchToViewport);
-  composerObserver?.disconnect();
-  composerObserver = null;
 });
 </script>
 
@@ -5527,21 +4232,15 @@ onBeforeUnmount(() => {
 
     <!-- Main column: header / canvas / activity / composer -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <CreateHeader
-        :form="form"
-        @open-tab="inspectorTab = $event"
-        @set-output="inspectorRef?.setOutputMode($event)"
-      />
-      <ClipModeStrip :form="form" @set-clip-mode="setClipMode" />
+      <CreateHeader :form="form" @open-tab="inspectorTab = $event" />
 
       <div
-        ref="workbenchRef"
         data-test="generate-workbench"
         class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        <!-- Canvas. Its floor is BOUND, not a utility: the bench clamp
-             reserves the same number, and a hard-coded class is how the two
-             drifted to 320 and 144 and clipped the composer away. -->
+        <!-- Canvas. Its floor is BOUND, not a utility: a hard-coded class
+             beside a different constant is how the two drifted to 320 and 144
+             and clipped the composer away. -->
         <div
           data-test="generate-canvas"
           class="flex flex-1 items-center justify-center overflow-hidden bg-bg-crust p-7"
@@ -5813,134 +4512,6 @@ onBeforeUnmount(() => {
             />
           </div>
 
-          <div
-            v-else-if="isSequence && sequencePlaybackSrc"
-            data-test="sequence-stage-player"
-            class="relative flex h-full w-full min-h-0 flex-col items-center"
-          >
-            <video
-              :key="sequencePlaybackSrc"
-              :src="sequencePlaybackSrc"
-              class="min-h-0 w-full flex-1 rounded-inner border border-border-control bg-media-bed object-contain"
-              autoplay
-              controls
-              loop
-              playsinline
-              @timeupdate="onSequenceTimeUpdate"
-            />
-            <div
-              class="absolute left-3 top-3 flex items-center gap-2 rounded-control border border-border bg-bg/90 px-2 py-1.5 shadow-md backdrop-blur"
-            >
-              <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                >Scene {{ (playingSequenceStage ?? 0) + 1 }}</span
-              >
-              <button
-                type="button"
-                data-test="sequence-return-live"
-                class="rounded-control border border-border px-2 py-1 text-micro text-fg-2 hover:text-fg"
-                @click="returnToLiveSequence"
-              >
-                Return to live render
-              </button>
-            </div>
-          </div>
-
-          <!-- Watched sequence: denoise progress in the develop chrome -->
-          <div
-            v-else-if="isSequence && watchedSequence"
-            data-test="sequence-develop"
-            class="pointer-events-none flex flex-col items-center justify-center gap-3"
-          >
-            <ProgressRing :value="watchedSequencePct" :size="96" show-label />
-            <span class="font-mono text-micro whitespace-nowrap text-accent">
-              clip {{ (chains.live.activeStage ?? watchedSequence.current_stage) + 1 }}/{{
-                watchedSequence.stage_count
-              }}
-              · developing…
-            </span>
-          </div>
-
-          <!-- Settled sequence: the canvas holds the result, because the
-               queue rail never did. -->
-          <div
-            v-else-if="isSequence && settledSequence"
-            data-test="sequence-result"
-            class="flex h-full w-full min-h-0 flex-col items-center"
-          >
-            <div
-              v-if="settledSequencePrint"
-              data-test="sequence-result-stage"
-              class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
-            >
-              <div
-                data-test="sequence-result-frame"
-                class="relative max-h-full w-full max-w-full overflow-hidden rounded-inner border border-border-control bg-media-bed"
-                :style="settledFrameStyle"
-              >
-                <AuthedMedia
-                  class="absolute inset-0"
-                  video
-                  controls
-                  :path="
-                    galleryMediaPath(
-                      settledSequencePrint.item.filename,
-                      hostGallery.mediaSourceOf(settledSequencePrint.sourceKey),
-                    )
-                  "
-                  :target="hostGallery.targetOf(settledSequencePrint.sourceKey)"
-                  :cache-key="settledSequencePrint.sourceKey"
-                  :alt="settledSequenceCaption"
-                />
-              </div>
-            </div>
-            <GenerateErrorNotice
-              v-else-if="settledSequenceError"
-              data-test="sequence-failed"
-              class="w-full"
-              :message="settledSequenceError"
-              :copy-message="settledSequenceErrorCopy"
-            />
-            <div v-else class="grid min-h-0 w-full flex-1 place-items-center">
-              <span class="font-mono text-micro text-fg-dim whitespace-nowrap"
-                >saved to My images</span
-              >
-            </div>
-
-            <div
-              class="font-mono text-micro text-fg-dim whitespace-nowrap mt-2 max-w-full truncate"
-              :title="settledSequenceCaption"
-            >
-              {{ settledSequenceCaption }}
-            </div>
-            <div class="mt-2 flex items-center gap-2">
-              <button
-                v-if="settledSequenceError"
-                type="button"
-                data-test="sequence-resume"
-                class="rounded-control bg-error px-3 py-1 text-sm font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px"
-                @click="resumeSettledSequence"
-              >
-                Resume
-              </button>
-              <button
-                type="button"
-                data-test="sequence-edit"
-                class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
-                @click="editSettledSequence"
-              >
-                Edit clip
-              </button>
-              <button
-                type="button"
-                data-test="sequence-show-in-library"
-                class="border-border-control rounded-control border px-3 py-1 text-sm text-fg-2 transition-colors hover:text-fg"
-                @click="showSettledSequenceInLibrary"
-              >
-                Show in My images
-              </button>
-            </div>
-          </div>
-
           <!-- Empty -->
           <EmptyStateBlock
             v-else
@@ -6008,99 +4579,7 @@ onBeforeUnmount(() => {
           @retry-expansion="retryExpansionAfterPull"
         />
 
-        <div
-          v-if="isSequence"
-          data-test="create-bench-resizer"
-          class="group relative z-10 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center border-y border-border bg-bg-deep/80"
-          role="separator"
-          aria-label="Resize Activity and sequence editor"
-          aria-orientation="horizontal"
-          :aria-valuenow="benchHeight"
-          :aria-valuemin="minBenchHeight()"
-          :aria-valuemax="maxBenchHeight()"
-          tabindex="0"
-          title="Drag to resize · double-click to reset"
-          @pointerdown="startBenchResize"
-          @keydown="onBenchResizeKeydown"
-          @dblclick="setBenchHeight(DEFAULT_SEQUENCE_BENCH_HEIGHT)"
-        >
-          <span
-            class="h-1 w-12 rounded-inner bg-fg-dim/50 transition-colors group-hover:bg-accent group-focus-visible:bg-accent"
-            aria-hidden="true"
-          />
-        </div>
-
-        <div
-          v-if="isSequence"
-          data-test="create-bottom-panel"
-          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-bg-deep"
-          :style="{
-            height: `${benchHeight}px`,
-            containerType: 'size',
-            containerName: 'create-bench',
-          }"
-        >
-          <p
-            v-if="isSequence && sequenceReuseNotice"
-            data-test="sequence-reuse-note"
-            class="font-mono text-micro text-fg-dim whitespace-nowrap shrink-0 px-1 pt-1.5"
-          >
-            {{ sequenceReuseNotice }}
-          </p>
-
-          <!-- The clip timeline sits above the composer, never instead of it -->
-          <EmptyStateBlock
-            v-if="showSequenceEmpty"
-            data-test="sequence-empty"
-            class="flex-1 py-6"
-            icon="image"
-            headline="A short clip needs a video style"
-            guidance="Get an LTX Video or distilled LTX-2 style that can chain, then tell the story one scene at a time."
-          >
-            <template #action>
-              <button
-                type="button"
-                data-test="sequence-browse-models"
-                class="rounded-control bg-accent px-3 py-1.5 text-sm font-semibold text-on-accent"
-                @click="
-                  router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')
-                "
-              >
-                Browse video styles
-              </button>
-            </template>
-          </EmptyStateBlock>
-          <!-- Protect the timeline's hard chrome floor from Activity. The
-               timeline itself stays min-h-0 so its lane can squash, but this
-               parent flex item makes Activity yield before the transport or
-               the readout can clip at the supported bench floor. -->
-          <div
-            v-else-if="isSequence"
-            data-test="generate-sequence-shell"
-            class="flex min-h-[228px] flex-[1_0_228px] overflow-hidden"
-          >
-            <SequenceComposer
-              data-test="generate-sequence-composer"
-              class="min-h-0 flex-1"
-              :form="form"
-              :selected-model="selectedSequenceEntry"
-              :chain-limits="chainLimits"
-              :installed-models="installedModels"
-              :submitting="sequenceSubmitting"
-              :chain-level-dirty="chainLevelDirty"
-              :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
-              :playing-clip-id="playingSequenceClipId"
-              :elapsed-seconds="sequenceClipElapsed"
-              :target="sequenceTarget"
-              @duplicate="duplicateSequenceAsNew"
-              @play-clip="playSequenceClip"
-              @update:blocked-reason="timelineBlockedReason = $event"
-              @update:confirmation="sequenceConfirmation = $event"
-            />
-          </div>
-        </div>
-        <!-- One composer for both modes: in clip mode it carries the selected
-             scene's words and Generate submits the whole chain. -->
+        <!-- The one composer: it always carries the form's own words. -->
         <ComposerCard
           ref="composerRef"
           data-test="generate-composer"
@@ -6113,26 +4592,22 @@ onBeforeUnmount(() => {
           :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
           :disabled="composerLocked"
           :disabled-reason="composerRefusal"
-          :warning-reason="isSequence ? null : composerWarningReason"
+          :warning-reason="composerWarningReason"
           :submitting="composerSubmitting"
           :button-label="buttonLabel"
-          :queued-note="isSequence ? null : queuedNote"
-          :estimate-request="isSequence ? null : estimateRequest"
+          :queued-note="queuedNote"
+          :estimate-request="estimateRequest"
           :estimate-target="estimateTarget"
-          :preprocessing-status="isSequence ? null : submissionStatus"
-          :history="isSequence ? [] : promptHistory"
+          :preprocessing-status="submissionStatus"
+          :history="promptHistory"
           :remix-source="remixSource"
           :batch-locked="batchLocked"
-          :prompt-value="composerPrompt"
           :placeholder="composerPlaceholder"
-          :show-count="!isSequence"
           :length-frames="form.frames"
           :length-fps="form.fps"
           :length-contract="composerLengthContract"
-          :show-expand="!isSequence"
           @open-shape="inspectorTab = 'settings'"
           @prompt-authored="onPromptAuthored"
-          @update:prompt-value="writeScenePrompt"
           @update:length-frames="form.frames = $event"
           @generate="composerGenerate"
           @cancel="composerCancel"
@@ -6146,27 +4621,15 @@ onBeforeUnmount(() => {
             <StylePicker :form="form" @pull-missing-model="offerPullForSelectedModel" />
           </template>
         </ComposerCard>
-
-        <ConfirmDialog
-          :open="sequenceConfirmation !== null"
-          :title="sequenceConfirmation?.title ?? ''"
-          :message="sequenceConfirmation?.message ?? ''"
-          :confirm-label="sequenceConfirmation?.confirmLabel ?? 'Confirm'"
-          danger
-          @confirm="resolveSequenceConfirmation('confirm')"
-          @cancel="resolveSequenceConfirmation('cancel')"
-        />
       </div>
     </div>
 
     <!-- Inspector (persisted, left-edge resizable width) -->
     <InspectorPanel
-      ref="inspectorRef"
       :form="form"
       :tab="inspectorTab"
       :recent="recentPrints"
       :last-seed="generation.lastSeedUsed"
-      :chain-limits="chainLimits"
       :canvas-intent="canvasIntent"
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"

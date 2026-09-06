@@ -49,19 +49,13 @@ import {
 } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
 import {
-  planSequenceReuse,
-  sequenceEditAvailability,
-  sequenceGoneMessage,
-  sequenceHostUnreachableMessage,
-} from "@studio/lib/sequenceReuse";
-import {
   displayTitle,
   rememberSessionScroll,
   sessionScrollPosition,
   validatePrintTitle,
   type MergedCollection,
 } from "@studio/lib/libraryOrganization";
-import { ApiError, type ApiTarget } from "../lib/api/client";
+import { type ApiTarget } from "../lib/api/client";
 import { useReuseStillPrint } from "../composables/useReuseStillPrint";
 import {
   useGalleryStore,
@@ -72,8 +66,6 @@ import {
   type MergedPrint,
 } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
-import { useChainJobsStore } from "../stores/chainJobs";
-import { useComposerStore } from "../stores/composer";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
@@ -123,8 +115,6 @@ const route = useRoute();
 const gallery = useGalleryStore();
 const hosts = useHostsStore();
 const models = useModelStore();
-const chains = useChainJobsStore();
-const composer = useComposerStore();
 const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
@@ -634,79 +624,18 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
   }
 }
 
-// ── Sequence prints ─────────────────────────────────────────────────────────
-// A print stitched from a sequence carries per-clip provenance
-// (`metadata.chain`) and, when a durable job produced it, that job's id. Reuse
-// settings follows the print: one shot for a still, a fresh clip rail for a
-// sequence. A sequence's primary action CONTINUES the original durable job
-// with its cached clips; Duplicate as new is the explicit fresh-draft path.
-
-const isSequencePrint = (entry: MergedPrint) => planSequenceReuse(entry.item.metadata) !== null;
-
-/**
- * The producing host — resolved ONLY from the entry's own origin bucket. A
- * merged print may live on three hosts; the other two hold auto-saved copies,
- * and a job-id hit there would edit an unrelated sequence.
- */
-const originHostId = (entry: MergedPrint) => gallery.hostFor(entry.sourceKey)?.id ?? null;
-const originHostLabel = (entry: MergedPrint) =>
-  gallery.hostFor(entry.sourceKey)?.label ?? entry.hostLabel;
-
-/** Render-time gate — never probes. See `sequenceEditAvailability`. */
-function canEditSequence(entry: MergedPrint): boolean {
-  if (!isSequencePrint(entry)) return false;
-  const hostId = originHostId(entry);
-  return (
-    sequenceEditAvailability({
-      chainJobId: entry.item.metadata.chain_job_id,
-      hostId,
-      knownJobIds: hostId ? (chains.byHost[hostId]?.jobs.map((job) => job.id) ?? null) : null,
-    }) === "available"
-  );
-}
-
-/** Load the recorded clips into Create as a NEW sequence draft. */
-function reuseSequence(entry: MergedPrint) {
-  composer.setSequence({ kind: "reuse", metadata: entry.item.metadata });
-  lightboxOpen.value = false;
-  void router.push({ path: "/create", query: { output: "sequence" } });
-}
+// ── Reuse ───────────────────────────────────────────────────────────────────
+// One door for every print. A stitched clip carries `metadata.chain` whether
+// an author composed it or the host auto-chained one long render, so it
+// restores exactly like any other print — this is the ONLY path that attaches
+// retained source-media authority (`composer.set` invalidates it).
 
 function reuseSettings(entry: MergedPrint) {
-  if (isSequencePrint(entry)) {
-    reuseSequence(entry);
-    return;
-  }
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
   reuseStillPrint(entry);
   lightboxOpen.value = false;
   void router.push("/create");
-}
-
-/**
- * Check once, on click. A 404 means the job was deleted or GC'd, so fall back
- * to the reuse path rather than leaving an enabled control as a dead end; any
- * other failure keeps the cached clips by refusing to downgrade.
- */
-async function editSequence(entry: MergedPrint) {
-  const hostId = originHostId(entry);
-  const jobId = entry.item.metadata.chain_job_id;
-  if (!hostId || !jobId) return;
-  try {
-    await chains.fetchDetail(hostId, jobId);
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 404) {
-      toasts.push(sequenceGoneMessage(originHostLabel(entry)));
-      reuseSequence(entry);
-      return;
-    }
-    toasts.push(sequenceHostUnreachableMessage(originHostLabel(entry)), "error");
-    return;
-  }
-  composer.setSequence({ kind: "edit", hostId, jobId });
-  lightboxOpen.value = false;
-  void router.push({ path: "/create", query: { output: "sequence" } });
 }
 
 // ── Organization actions (fan-out; the store reaches every copy) ────────────
@@ -1256,14 +1185,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     ];
   }
   return [
-    ...(isSequencePrint(entry)
-      ? [
-          ...(canEditSequence(entry)
-            ? [{ label: "Edit clip", action: () => void editSequence(entry) }]
-            : []),
-          { label: "Duplicate as new", action: () => reuseSequence(entry) },
-        ]
-      : [{ label: "Use these settings", action: () => reuseSettings(entry) }]),
+    { label: "Use these settings", action: () => reuseSettings(entry) },
     ...(organize
       ? [
           { separator: true } as MenuEntry,
@@ -2910,8 +2832,6 @@ onUnmounted(() => {
       :cache-key="selectedEntry.sourceKey"
       :host-label="availabilityLabel(selectedEntry)"
       :can-reveal="canReveal(selectedEntry)"
-      :is-sequence="isSequencePrint(selectedEntry)"
-      :can-edit-sequence="canEditSequence(selectedEntry)"
       :organization="orgOf(selectedEntry)"
       :can-organize="organizeAvailable && canOrganizeEntry(selectedEntry)"
       :can-trash="entryTrashCapable(selectedEntry)"
@@ -2926,8 +2846,6 @@ onUnmounted(() => {
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
       @reuse="reuseSettings(selectedEntry!)"
-      @reuse-sequence="reuseSequence(selectedEntry)"
-      @edit-sequence="editSequence(selectedEntry)"
       @rename="(title) => renamePrint(selectedEntry!, title)"
       @favorite="(value) => setFavorite([selectedEntry!], value)"
       @tags="(change) => applyTags([selectedEntry!], change)"

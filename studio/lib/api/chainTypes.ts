@@ -9,7 +9,14 @@
  * and TOML projections use decimal strings where noted below.
  */
 
-import type { SequenceTransition } from "../sequence";
+/**
+ * How one clip joins the next on the wire. Scene-by-scene authoring is retired
+ * from every app, so nothing in a client picks between these any more — an
+ * auto-chained long video is uniformly `smooth`. The union stays complete
+ * because a scripted sequence (`mold run --script`, `POST /api/chain-jobs`)
+ * still uses all three, and this module mirrors the Rust wire exactly.
+ */
+export type ChainTransition = "smooth" | "cut" | "fade";
 
 export interface ChainStageWire {
   prompt: string;
@@ -18,7 +25,7 @@ export interface ChainStageWire {
   source_image?: string | null;
   negative_prompt?: string | null;
   seed_offset?: number | null;
-  transition?: SequenceTransition;
+  transition?: ChainTransition;
   fade_frames?: number | null;
   loras?: Array<{ path: string; scale: number; name?: string | null }>;
 }
@@ -48,7 +55,7 @@ export interface ChainValidationStage {
   prompt: string;
   frames: number;
   output_frames: number;
-  transition: SequenceTransition;
+  transition: ChainTransition;
   fade_frames?: number | null;
   has_source_image: boolean;
   has_negative_prompt: boolean;
@@ -83,7 +90,7 @@ export interface ChainValidationResponse {
 export interface ChainStageMetadata {
   prompt: string;
   frames: number;
-  transition: SequenceTransition;
+  transition: ChainTransition;
   fade_frames?: number | null;
   seed?: string | null;
   loras?: Array<{ path: string; scale: number; name?: string | null }>;
@@ -115,7 +122,7 @@ export interface ChainScriptChain {
 export interface ChainScriptStage {
   prompt: string;
   frames?: number;
-  transition?: SequenceTransition;
+  transition?: ChainTransition;
   fade_frames?: number | null;
   negative_prompt?: string | null;
   source_image_path?: string | null;
@@ -155,14 +162,6 @@ export interface ChainJobSummary {
   /** Additive server truth for active work. Parent state can be `running`
    * while its next clip is still waiting for a scheduler lease. */
   execution_phase?: ChainExecutionPhase | null;
-}
-
-/** Internal long-video compatibility shims share the chain runner but are
- * still one-shot prints. Older servers listed those temporary records beside
- * authored sequences, so every client filters defensively at its list
- * boundary instead of letting a shim switch Create into Sequence mode. */
-export function isAuthoredSequenceJob(job: ChainJobSummary): boolean {
-  return job.ephemeral !== true;
 }
 
 export interface ChainJobStageDetail {

@@ -15,7 +15,6 @@
  */
 
 import { WAN_HANDOFF_DUPLICATED_FRAMES } from "./chainRouting";
-import { sequenceFrameStep } from "./sequence";
 
 /** Matches `DEFAULT_EXTEND_OVERLAP_FRAMES`; the shared chain motion tail. */
 export const DEFAULT_EXTEND_OVERLAP_FRAMES = 17;
@@ -34,6 +33,20 @@ const EXTEND_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
   "ltx-2",
   "wan",
 ]);
+
+/**
+ * The frame-count grid a continuation's carried frames must sit on.
+ *
+ * Wan's VAE compresses time by 4 where the LTX families compress by 8, so its
+ * valid counts are `4k+1`, not `8k+1`. Offering an off-grid option sends the
+ * request straight into a 422 from the validator that owns the real rule.
+ *
+ * This lived in the shared sequence module until scene authoring was retired;
+ * continuation is its only consumer now, so it lives beside it.
+ */
+function familyFrameStep(family: string | null | undefined): number {
+  return family?.trim().toLowerCase() === "wan" ? 4 : 8;
+}
 
 export function familySupportsExtend(
   family: string | null | undefined,
@@ -121,7 +134,7 @@ export function resolveExtendOverlapFrames(
  *
  * The carried frames re-encode through the family's own video VAE, so the
  * grid is that family's frame step — `8k+1` for the LTX families, `4k+1` for
- * wan (`sequenceFrameStep`). Wan then collapses to a single choice: it has no
+ * wan (`familyFrameStep`). Wan then collapses to a single choice: it has no
  * latent motion tail, so the continuation carries exactly the one frame it
  * was seeded with and `wan/pipeline.rs`'s `extend_inner` refuses anything
  * larger rather than silently trimming good frames.
@@ -136,7 +149,7 @@ export function extendOverlapOptions(
       ? [WAN_HANDOFF_DUPLICATED_FRAMES]
       : [];
   }
-  const step = sequenceFrameStep(family);
+  const step = familyFrameStep(family);
   const options: number[] = [];
   for (let overlap = 1; overlap < limit; overlap += step) options.push(overlap);
   return options;
@@ -209,10 +222,10 @@ export function extendValidationError(
     }
   } else {
     // One grid, one derivation: `extendOverlapOptions` enumerates from
-    // `sequenceFrameStep` and the rejection has to come from the same place,
+    // `familyFrameStep` and the rejection has to come from the same place,
     // or a family whose VAE compresses time differently gets an option list
     // and an error message that disagree.
-    const step = sequenceFrameStep(input.family);
+    const step = familyFrameStep(input.family);
     if (overlap % step !== 1) {
       const ladder = [1, step + 1, 2 * step + 1, 3 * step + 1].join(", ");
       return `Overlap (${overlap}) must be ${step}k+1 (${ladder}, …) so the carried frames re-encode cleanly through the video VAE.`;

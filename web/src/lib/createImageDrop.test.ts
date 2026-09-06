@@ -39,7 +39,6 @@ function context(
     referenceMax: plan.kind === "attachments" ? plan.max : 4,
     refusalReason: null,
     identityVisible: false,
-    openingVisible: false,
     ...overrides,
   };
 }
@@ -186,28 +185,22 @@ describe("applyCreateDrop", () => {
     expect(s.exclusiveWell).toBe("source");
   });
 
-  it("reaches the end frame, the identity photo and the sequence opening", async () => {
+  it("reaches the end frame and the identity photo", async () => {
     const s = state();
     await applyCreateDrop(s, "end", image("close.png"), context(single));
     expect(s.endFrame?.filename).toBe("close.png");
 
     await applyCreateDrop(s, "identity", image("face.png"), context(single));
     expect(s.identityImage?.filename).toBe("face.png");
+  });
 
-    const draft = {
-      openingImage: null as { filename: string; base64: string | null } | null,
-    };
-    await applyCreateDrop(
-      s,
-      "opening",
-      image("open.png"),
-      context(single),
-      draft,
-    );
-    expect(draft.openingImage).toEqual({
-      filename: "open.png",
-      base64: "BYTES_open.png",
-    });
+  // The sequence composer is retired, so there is no opening-image well left
+  // for the shared router to hand a drop to.
+  it("never routes a drop to the retired sequence opening well", () => {
+    expect(routeCreateDrop(state(), context(single))).toBe("source");
+    expect(
+      routeCreateDrop(state(), context(single), { clientX: 5, clientY: 5 }),
+    ).not.toBe("opening");
   });
 
   it("writes H3 boundaries to the authoring state, never the strip", async () => {

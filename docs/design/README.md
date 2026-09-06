@@ -57,7 +57,7 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 | Connect a machine · Rent a GPU · billing begins now      | Add host, Provision pod                 | Machines             |
 | My images · albums · Favourites · Everything             | Library, collections, gallery, Prints   | Nav, My images       |
 | Ready to use \| Browse more · Get it · ● ready           | Installed \| Discover, Pull, installed  | Styles               |
-| Short clip · Simple \| Scenes · Length · Smoothness      | Sequence, clips, frames, fps, timeline  | Clip toolbar         |
+| Short clip · Length · Smoothness                          | Sequence, clips, frames, fps, timeline  | Clip toolbar         |
 
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).
@@ -108,24 +108,15 @@ Decisions worth keeping:
   it: a picture section never lists a clip or 3-D style, and no style belongs to
   nowhere. The style is what decides — a one-shot on a clip style IS Short clip,
   which is why the simple clip is not filed under Still picture. The menu names the section it is showing and its Browse more opens
-  Styles filtered to the same kind. A clip style that cannot join scenes stays
-  in the clip section, disabled with the reason on the row.
-- **A clip is made the simple way unless the person asks for scenes.** Short
-  clip opens onto **Simple**: a prompt, a clip style, a Length slider on the
-  composer, Generate. **Simple | Scenes** is a strip of its own UNDER the view
-  toolbar (the chip row's chrome), present only while the kind is a clip, with
-  one plain sentence beside it saying what the chosen way does — "One prompt,
-  one clip." / "Scene by scene, joined into one clip." — and **Scenes** is
-  what raises the timeline. It is not a second control on the toolbar: beside
-  the kind control it pushed the whole right-hand cluster left whenever Short
-  clip was chosen, so the toolbar holds the same children in every kind and
-  nothing on it ever moves. The choice is remembered with the draft, so
-  Short clip opens where it was left; switching either way destroys nothing —
-  going to Scenes seeds scene 1 from the words and the length already written,
-  coming back parks the scenes exactly as they are, and the timeline's own
-  Clear the clip stays the only eraser. Simple keeps the ordinary one-shot
-  output, so Make is a real batch count there and is hidden outright in Scenes,
-  where a chain has no batch.
+  Styles filtered to the same kind. Every clip style is offered in the clip
+  section; nothing is disabled for what it cannot compose.
+- **A clip has one way of being made.** Short clip is a prompt, a clip style, a
+  Length slider on the composer, Generate. There is no mode strip and no
+  timeline: scene-by-scene authoring belongs to `mold run --script` and the
+  chain API. A length past what the checkpoint renders in one pass is still
+  honoured — the machine splits, carries and stitches it — but that is
+  machinery, not a mode, and it is never surfaced as one. **Make** is a real
+  batch count here, as on every other kind.
 - **The three kinds have three names, used everywhere a kind is chosen or
   filtered.** Still picture · Short clip · 3-D object are the Create toolbar's
   words AND the Styles view's kind filter (All · Still picture · Short clip ·
@@ -213,7 +204,6 @@ a literal.
 | New image: the inspector's groups (no style field — see the row below)                                                                          | `desktop/src/components/create/InspectorPanel.vue`, `lib/qualityPresets.ts`, `lib/meshDetailLadder.ts`                      |
 | New image: the ONE style picker — the composer's Style chip and the menu it opens upward                                                        | `desktop/src/components/create/{StylePicker,ModelPicker}.vue`, `composables/useStylePicker.ts`                              |
 | New image: the Starters and Recent tabs beside Settings                                                                                         | `desktop/src/components/create/{inspectorTabs.ts,StarterList.vue,RecentPrints.vue}`                                         |
-| Clip mode: the timeline (transport · ruler · scenes lane · playhead) above the one composer                                                     | `desktop/src/components/create/{SequenceComposer,SceneLane,ComposerCard}.vue`                                               |
 | My images: scopes, the chip row, the trash banner, History as a column                                                                          | `desktop/src/components/library/{LibraryHeader,LibraryChipRow,CollectionsShelf,TrashBanner,BulkBar,HistoryDrawer}.vue`      |
 | Styles: the one column axis (`--model-row-columns`) and the pinned download banner                                                              | `desktop/src/components/models/{InstalledTab,ModelTableRow,CatalogTab,DownloadsTray}.vue`                                   |
 | Settings: the jump nav's sections and rows                                                                                                      | `desktop/src/lib/settingsSchema.ts`, `components/settings/{AppearanceCard,StylesDiskSection}.vue`                           |
@@ -238,34 +228,20 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   selects each theme map on any element, not only `:root`, so the Look picker
   can show a theme's own surfaces without repeating a hex in TypeScript. That
   band is the only themed island the app is allowed.
-- **Smoothness for a one-shot clip stays in Advanced ▸ Video.** The Clip card
-  carries it only in clip mode, where the whole sequence renders at one fps. A
-  one-shot's fps is a model knob beside frames, and lifting it into the
-  essentials would put two spellings of the same number on one screen.
+- **Smoothness rides the Clip card.** The lexicon row is `Short clip · Length ·
+  Smoothness`, so a clip's frame rate sits beside the length it pairs with.
+  Advanced ▸ Video keeps the raw fps field; the card is the one people reach
+  for, and the two must never disagree.
 - **The bulk Delete says "Move N pictures to trash".** The lexicon's noun for a
   result is a picture, and the count is what makes a bulk action safe to
   confirm; "Delete" alone on a selection of forty reads as one thing.
-- **Write more for me is hidden in clip mode.** The composer's rewrite reaches
-  the one-shot prompt, and in clip mode the field holds the selected scene's
-  words. Rewriting a scene is a different feature, so the control stands down
-  rather than silently retargeting.
-- **The plan validator takes the caller's words.** Its sentences live in
-  `studio/lib/sequence.ts`, shared with web and the phone, which say clip and
-  sequence (the default); desktop hands it `scene` and `clip`
-  (`desktop/src/lib/sequenceWording.ts`), so "Describe scene 2 before
-  generating." reads under a lane labelled scenes. One shared sentence with a
-  wording parameter beats a desktop-only copy that would drift.
-- **The seam chip is built in `SceneLane.vue`.** Web renders it from the shared
-  `ClipRail`, but the lane's blocks are time-proportional and its seam floats on
-  the join, so the geometry is desktop's. The words are still the shared
-  `transitionLabel` from `ui/lib/seam.ts`.
 - **An active download reads "Downloading", not "Being made".** The queue's
   vocabulary describes a picture arriving; a style arriving is a different
   event, and `DownloadsTray` names it plainly rather than borrowing the row
   sentence.
-- **History is a column and keeps its Runs / Prompts / Sequences tabs.** Moving
-  it out of a modal drawer took the scrim away, not the three lenses; the tabs
-  render in the column body, and `?panel=history&tab=` still addresses them.
+- **History is a column and keeps its Runs / Prompts tabs.** Moving it out of a
+  modal drawer took the scrim away, not the lenses; the tabs render in the
+  column body, and `?panel=history&tab=` still addresses them.
 - **Refresh stays in My images.** The primary bucket is SSE-live, but a
   connected remote's gallery is polled, so the toolbar keeps one explicit way to
   ask every machine again.
@@ -291,9 +267,7 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   and then moves it to the trash while the publication writer is still held,
   so a throwaway never lists in My images yet stays recoverable until
   retention empties the trash. The inspector's toggle sits under Repeat this
-  look with its hint; a sequence has no such switch — its stitched clip is the
-  durable job's whole deliverable, and the chain body carries no such field. A
-  requested Framewise upscale still runs: it is enqueued before the trash step
+  look with its hint. A requested Framewise upscale still runs: it is enqueued before the trash step
   and pins its source by hard link. Its own published print is a second,
   explicitly requested result and keeps saving.
 - **Rent this GPU states RunPod's own hourly rate** for the chosen cloud

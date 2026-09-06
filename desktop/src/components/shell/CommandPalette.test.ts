@@ -125,8 +125,7 @@ describe("CommandPalette command registry", () => {
     const wrapper = await openPalette();
     const input = wrapper.get("input");
 
-    // "clips" and "video" both find the sequence entry (mode is a setting of
-    // Create now, so the entry deep-links rather than opening a chains page).
+    // "clip" and "video" both find the one clip door.
     await input.setValue("clips");
     let texts = wrapper.findAll("[role='option']").map((o) => o.text());
     expect(texts.some((t) => t.includes("Make a short clip"))).toBe(true);
@@ -136,9 +135,9 @@ describe("CommandPalette command registry", () => {
     expect(texts.some((t) => t.includes("Recent settings"))).toBe(true);
 
     // Picking the entry opens the Short clip door — an intent New image
-    // consumes, not a `?output=sequence` deep link, which landed in Scenes
-    // when the door opens onto Simple and did nothing from inside New image.
-    await input.setValue("sequence");
+    // consumes, not a deep link, which did nothing from inside New image
+    // because the query is read only on mount.
+    await input.setValue("video");
     const option = wrapper
       .findAll("[role='option']")
       .find((o) => o.text().includes("Make a short clip"));
@@ -264,22 +263,13 @@ describe("CommandPalette shortcut column and mock groups", () => {
   });
 
   /*
-   * The clip's scene-by-scene way of working is a sub-mode of New image, not a
-   * place, so the palette raises the intent and goes to Create rather than
-   * deep-linking a query the view only reads while it is mounting.
+   * A clip has ONE way of being made, so the palette offers exactly one clip
+   * door and nothing that re-enters a scene timeline.
    */
-  it("opens the clip scene by scene, as one make command", async () => {
+  it("offers no scene-by-scene door", async () => {
     const wrapper = await openPalette();
-    const ui = useUiStore();
-    await wrapper.get("input").setValue("scene by scene");
-    const row = rowFor(wrapper, "Edit the clip scene by scene")!;
-    expect(row.exists()).toBe(true);
-    expect(columns(row).group).toBe("make");
-
-    await row.trigger("click");
-    expect(ui.clipScenesTick).toBe(1);
-    expect(routerPush).toHaveBeenCalledWith("/create");
-    expect(ui.paletteOpen).toBe(false);
+    await wrapper.get("input").setValue("scene");
+    expect(rowFor(wrapper, "Edit the clip scene by scene")).toBeUndefined();
     wrapper.unmount();
   });
 

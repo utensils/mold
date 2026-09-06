@@ -389,7 +389,7 @@ describe("automatic chain request projection", () => {
     ).toEqual({
       kind: "reject",
       reason:
-        "489 frames exceeds the 481-frame single-shot limit at 24 fps, and automatic chaining can’t preserve negative prompt. Reduce Frames, remove that option, or author a Sequence with compatible per-clip settings.",
+        "489 frames exceeds the 481-frame single-shot limit at 24 fps, and automatic chaining can’t preserve negative prompt. Reduce Frames, remove that option, or script the clips yourself with mold run --script.",
     });
   });
 

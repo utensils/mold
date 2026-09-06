@@ -259,7 +259,7 @@ describe("ModalPanel layering and ground", () => {
   /*
    * The dialog is `position: absolute` inside its frame, so without a
    * z-index it painted UNDER the Create bench resizer and the clip lane's
-   * seam chip — "Clear the clip?" showed the bar through its own scrim.
+   * a chip inside a positioned panel showed the bar through its own scrim.
    */
   it("paints above every in-view layer, with a fallback for a host without the token", () => {
     expect(ModalPanelSource).toMatch(

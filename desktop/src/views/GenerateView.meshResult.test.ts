@@ -165,7 +165,7 @@ function mountView() {
   return mount(GenerateView, {
     shallow: true,
     attachTo: document.body,
-    global: { stubs: { SequenceComposer: true, ComposerCard: true } },
+    global: { stubs: { ComposerCard: true } },
   });
 }
 

@@ -46,6 +46,22 @@ function emitChainJobEvent(event: unknown): void {
   options?.onmessage?.({ event: "chain_job", data: JSON.stringify(event) });
 }
 
+/** Drive the host-wide `/api/events` subscription — the stream that carries
+ *  every server-side lifecycle hint, including ones for work this client did
+ *  not create. */
+function emitHostEvent(payload: unknown, eventName = "event"): void {
+  const call = [...(fetchEventSource.mock.calls as unknown[][])]
+    .reverse()
+    .find((entry) => String(entry[0]).endsWith("/api/events"));
+  const options = call?.[1] as
+    | { onmessage?: (message: { event: string; data: string }) => void }
+    | undefined;
+  options?.onmessage?.({
+    event: eventName,
+    data: JSON.stringify(payload),
+  });
+}
+
 const admitGenerationBatch = vi.hoisted(() => vi.fn());
 const lookupGenerationBatchByClientId = vi.hoisted(() => vi.fn());
 const reconcileGenerationBatches = vi.hoisted(() => vi.fn());
@@ -1705,5 +1721,51 @@ describe("useGenerateStream host routing", () => {
   it("rejects the retired pre-routing job-array schema", () => {
     const restored = __testing__.loadPersistedJobs(JSON.stringify([]));
     expect(restored).toEqual([]);
+  });
+});
+
+describe("server chain-job lifecycle hints", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    __testing__.resetDurableLifecycleForTests();
+    clearJobs();
+    admitGenerationBatch.mockReset();
+    reconcileGenerationBatches.mockReset();
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
+  });
+
+  // The host keeps emitting `chain_job_queued` / `chain_job_started` /
+  // `chain_job_ended` for jobs the CLI (`mold run --script`) and other
+  // clients create. Web authors no sequences any more, so those frames must
+  // be ignored the way any other unknown hint is: no throw, no dead handler,
+  // and no reconciliation storm against work this client does not own.
+  it("ignores a chain_job_* hint for work this client did not create", async () => {
+    const stream = useGenerateStream();
+    const id = await submitDurable(stream, singleGen({ prompt: "a cat" }));
+    // The hints only mean anything if the subscription that carries them is
+    // actually open — otherwise this test would pass on a dead stream.
+    expect(
+      (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
+        String(entry[0]).endsWith("/api/events"),
+      ),
+    ).toBe(true);
+    const before = reconcileGenerationBatches.mock.calls.length;
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const stageBefore = job.progress.stage;
+
+    for (const payload of [
+      { type: "chain_job_queued", id: "c1", model: "ltx-2", stage_count: 3 },
+      { type: "chain_job_started", id: "c1", model: "ltx-2" },
+      { type: "chain_job_ended", id: "c1", state: "completed" },
+    ]) {
+      expect(() => emitHostEvent(payload)).not.toThrow();
+    }
+    await flushDurable();
+
+    expect(stream.jobs.value).toHaveLength(1);
+    expect(job.state).toBe("running");
+    expect(job.progress.stage).toBe(stageBefore);
+    expect(reconcileGenerationBatches.mock.calls.length).toBe(before);
   });
 });

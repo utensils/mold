@@ -15,13 +15,6 @@ export const router = createRouter({
       component: () => import("./views/GenerateView.vue"),
     },
     {
-      // Sequence is an Output setting of Create, not a place — the retired
-      // nested chain-composer route deep-links into Create with the sequence
-      // output preselected (GenerateView consumes the query once).
-      path: "/create/chain",
-      redirect: { path: "/create", query: { output: "sequence" } },
-    },
-    {
       path: "/queue",
       name: "queue",
       meta: { title: "Queue" },
@@ -72,8 +65,13 @@ export const router = createRouter({
     // "/library", "/history" opens the History column in My images).
     { path: "/generate", redirect: "/create" },
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
-    { path: "/chains", redirect: { path: "/create", query: { output: "sequence" } } },
     { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
+    // Scene-by-scene authoring is retired, but a persisted last-route or an
+    // old deep link still points here. Land on Create — the one way a clip is
+    // made now — rather than leaving a returning user on a blank unmatched
+    // route.
+    { path: "/create/chain", redirect: "/create" },
+    { path: "/chains", redirect: "/create" },
     { path: "/jobs", redirect: "/queue" },
     { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
     { path: "/runpod", redirect: "/machines/runpod" },

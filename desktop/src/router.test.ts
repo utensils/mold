@@ -9,6 +9,7 @@ import { router } from "./router";
 // the same cost made `/jobs -> /machines` time out, so stub EVERY lazily
 // imported destination: each view has its own suite that mounts it for real.
 vi.mock("./views/GenerateView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/QueueView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/LibraryView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/ModelsView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/MachinesView.vue", () => ({ default: { template: "<div />" } }));
@@ -35,15 +36,15 @@ describe("router — five-destination IA", () => {
     expect(router.currentRoute.value.path).toBe("/create");
   });
 
-  it("folds the retired chain composer route into Create's sequence output", async () => {
-    // Sequence is an Output setting of Create now, not a place — both the
-    // nested /create/chain route and the legacy /chains path deep-link into
-    // Create with the sequence output preselected.
-    for (const legacy of ["/create/chain", "/chains"]) {
-      await router.push(legacy);
+  it("lands the retired scene-composer deep links on Create", async () => {
+    // A clip has ONE way of being made, so there is nothing left to author
+    // here — but a persisted last route or an old link still points at these,
+    // and every other legacy path stays a permanent redirect. Dropping them
+    // outright put a returning user on a blank unmatched route.
+    for (const retired of ["/create/chain", "/chains"]) {
+      await router.push(retired);
       expect(router.currentRoute.value.path).toBe("/create");
-      expect(router.currentRoute.value.name).toBe("create");
-      expect(router.currentRoute.value.query.output).toBe("sequence");
+      expect(router.currentRoute.value.query).toEqual({});
     }
   });
 

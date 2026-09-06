@@ -25,19 +25,18 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                                                                                                                                                                     |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references                                                                                      |
-| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                                                                                                             |
-| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video (which joins independently rendered clips) or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                          |
-| `/remix`             | Rewrite a prompt into subject-preserving alternatives, one creative dimension each (`dimensions`, `style`, `variations` 1-5)                                                                                                    |
-| `/models`            | List available models with download/loaded status                                                                                                                                                                               |
-| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                                                                                                           |
-| `/quota`             | Check your remaining daily generation quota                                                                                                                                                                                     |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                                                                             |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                                                                               |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                                                                      |
+| Command              | Description                                                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references |
+| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                        |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                     |
+| `/remix`             | Rewrite a prompt into subject-preserving alternatives, one creative dimension each (`dimensions`, `style`, `variations` 1-5)               |
+| `/models`            | List available models with download/loaded status                                                                                          |
+| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                      |
+| `/quota`             | Check your remaining daily generation quota                                                                                                |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                        |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                          |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                 |
 
 ### `/identity`
 
@@ -112,15 +111,6 @@ advertised default negative (Wan ships a tuned one). To explicitly disable the
 negative prompt, pass `negative_prompt: none` (case-insensitive; `-` also
 accepted); Discord's 25-option cap means the opt-out rides the existing
 option as a sentinel rather than its own toggle.
-:::
-
-::: tip Durable sequences
-`/sequence` accepts prompts separated by `|` and queues them through the
-server's durable chain-job API. A normal bot-authored channel message follows
-clip progress and attaches the completed MP4 when it fits, so delivery does not
-expire with the slash-command interaction token. Larger outputs receive a deep
-link to the exact print in the server's Library instead of failing Discord
-upload.
 :::
 
 ::: warning Re-register after command-option changes

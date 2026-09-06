@@ -1,10 +1,3 @@
-import { modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
-import type { SequenceClipForm } from "@studio/lib/sequenceForm";
-import {
-  clampClipsToMotionTail,
-  planSequenceReuse,
-  type SequenceReuseLossiness,
-} from "@studio/lib/sequenceReuse";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 import { coerceFormOutputFormat, generationCapabilitiesForFamily } from "../lib/capabilities";
 import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
@@ -13,26 +6,12 @@ import { emptyWanRecipe } from "@studio/lib/wanRecipe";
 import { canonicalMinimaxH3ModelName, isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { reusedPrintTitle } from "./libraryOrganization";
 
-/** The clip rail a sequence print reloads, plus what it could not give back. */
-export interface MobileSequenceReuse {
-  clips: SequenceClipForm[];
-  lossy: SequenceReuseLossiness;
-  /** Clips raised because the resolved model's motion tail grew — the caller
-   * must say so rather than silently resizing. */
-  raised: number;
-}
-
 export interface MobileGalleryReuseResult {
   modelName: string;
   substitutedModel: boolean;
   /** The print's saved title, restored into the Create title field (`""`
    * when the print was untitled — restoring clears a stale title too). */
   title: string;
-  /** Non-null only for a print stitched from a sequence (`metadata.chain`). */
-  sequence: MobileSequenceReuse | null;
-  /** Present when durable metadata claims a sequence for a model partition
-   * that cannot safely be reinterpreted as a sequence-capable checkpoint. */
-  sequenceUnsupportedReason?: string;
 }
 
 /**
@@ -41,18 +20,18 @@ export interface MobileGalleryReuseResult {
  * capability-aware request behavior. Binary media still clears in the shared
  * mapper because output metadata cannot carry those bytes.
  *
- * A sequence print additionally returns its recorded clips: iPhone gets
- * **Reuse only** in this pass — Edit sequence needs a chain-detail fetch on
- * the recovery route, which mobile does not have yet.
+ * A STITCHED print restores as an ordinary one-shot — model, canvas, fps, seed
+ * and clip 1's prompt. There is no clip rail to reload on any surface any
+ * more, and a stitched print is never refused: whatever the host recorded is
+ * handed back as a single render the user can run again. The prompt rule
+ * (`chain.stages[0].prompt` over the newline-joined `metadata.prompt`) lives
+ * in `applyMetadataToForm`, so the phone and desktop cannot disagree about it.
  */
 export function applyMobileGalleryMetadata(
   form: GenerateForm,
   metadata: OutputMetadata,
   models: ModelEntry[],
 ): MobileGalleryReuseResult {
-  const plan = planSequenceReuse(metadata);
-  const oneShotPrompt = form.prompt;
-  const oneShotOriginalPrompt = form.originalPrompt;
   const canonicalRecordedModel = canonicalMinimaxH3ModelName(metadata.model);
   const recordedH3Identity = isMinimaxH3Identity(null, metadata.model);
   const installedRecordedModel = models.find(
@@ -68,25 +47,7 @@ export function applyMobileGalleryMetadata(
   // substituted into another family.
   const preserveMissingH3 = !originalModelInstalled && recordedH3Identity;
 
-  // H3 is one-shot-only. A malformed or future durable snapshot must not turn
-  // an H3 chain into an unrelated installed sequence model merely because the
-  // original exact checkpoint is absent. Leave the form untouched and give
-  // the caller a concrete recovery error instead.
-  if (plan && recordedH3Identity) {
-    return {
-      modelName: canonicalRecordedModel ?? metadata.model,
-      substitutedModel: false,
-      title: reusedPrintTitle(metadata),
-      sequence: null,
-      sequenceUnsupportedReason:
-        "This print records a MiniMax H3 checkpoint, which cannot render a clip sequence.",
-    };
-  }
-  // A sequence must fall back to a SEQUENCE-capable model; the first installed
-  // model could be an image model the clip rail can never render.
-  const candidates = plan ? modelsForOutput(models, "sequence") : models;
-  const fallbackModel =
-    candidates.find((model) => model.name === form.model) ?? candidates[0] ?? models[0];
+  const fallbackModel = models.find((model) => model.name === form.model) ?? models[0];
   const mobileMetadata = installedRecordedModel
     ? { ...metadata, model: installedRecordedModel.name }
     : preserveMissingH3
@@ -143,24 +104,7 @@ export function applyMobileGalleryMetadata(
     coerceFormOutputFormat(form.outputFormat, form.family, form.recipeCapabilities) ??
     form.outputFormat;
 
-  let sequence: MobileSequenceReuse | null = null;
-  if (plan) {
-    // The live tail belongs to the model resolved above, not the recorded one
-    // — and for wan it belongs to that checkpoint's advertised `source_image`
-    // contract rather than to the family, because only an image-conditioned
-    // checkpoint carries anything across the seam (#783).
-    const resolvedModel = models.find((entry) => entry.name === form.model) ?? null;
-    const tail = sequenceMotionTailFrames({
-      name: form.model,
-      family: form.family,
-      source_image: resolvedModel?.source_image ?? null,
-    });
-    const { clips, raised } = clampClipsToMotionTail(plan.clips, tail, 9);
-    sequence = { clips, lossy: plan.lossy, raised };
-    // Reusing a sequence must not overwrite the parked one-shot prompt.
-    form.prompt = oneShotPrompt;
-    form.originalPrompt = oneShotOriginalPrompt;
-  } else if (!metadata.prompt?.trim()) {
+  if (!metadata.prompt?.trim() && !metadata.chain?.stages?.[0]?.prompt?.trim()) {
     // A promptless print has no prompt provenance. Clear any provenance left
     // by the previously edited print so typing a new prompt cannot revive it.
     form.originalPrompt = null;
@@ -170,6 +114,5 @@ export function applyMobileGalleryMetadata(
     modelName: form.model,
     substitutedModel,
     title: reusedPrintTitle(metadata),
-    sequence,
   };
 }

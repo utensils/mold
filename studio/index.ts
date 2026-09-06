@@ -6,7 +6,6 @@ export * from "./lib/promptCycler";
 export * from "./lib/sourceFit";
 export * from "./lib/chainRouting";
 export * from "./lib/modelDisplay";
-export * from "./lib/sequence";
 export * from "./lib/base64";
 export * from "./lib/starterModels";
 export * from "./lib/generationLifecycle";

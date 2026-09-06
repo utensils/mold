@@ -16,8 +16,6 @@ export const ORIGIN_HOST_ID = "origin";
 export const HOSTS_STORAGE_KEY = "mold.web.hosts.v1";
 export const HOSTS_CHANGED_EVENT = "mold:hosts-changed";
 export const GENERATE_TARGET_CHANGED_EVENT = "mold:generate-target-changed";
-const TRACKED_SEQUENCES_KEY = "mold.create.tracked-sequences.v1";
-const LEGACY_SEQUENCE_HOST_KEY = "mold.create.chain-job-host";
 const GENERATE_JOBS_KEY = "mold.generate.jobs";
 const GENERATE_RECOVERY_PREFIX = `${GENERATE_JOBS_KEY}.recovery.`;
 
@@ -161,14 +159,14 @@ function remapPersistedHostIds(
   const remap = new Map(
     dropped.map(({ loser, survivor }) => [loser, survivor]),
   );
-  const remapJson = (key: string, arrayRoot: boolean): void => {
+  /** Every remaining record with host ids is `{ version, jobs: [...] }`. */
+  const remapJson = (key: string): void => {
     const raw = localStorage.getItem(key);
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw) as unknown;
-      const rows = arrayRoot
-        ? parsed
-        : parsed && typeof parsed === "object"
+      const rows =
+        parsed && typeof parsed === "object"
           ? (parsed as { jobs?: unknown }).jobs
           : null;
       if (!Array.isArray(rows)) return;
@@ -187,16 +185,11 @@ function remapPersistedHostIds(
       // Recovery state is best effort; malformed records remain untouched.
     }
   };
-  remapJson(TRACKED_SEQUENCES_KEY, true);
-  remapJson(GENERATE_JOBS_KEY, false);
+  remapJson(GENERATE_JOBS_KEY);
   for (let index = 0; index < localStorage.length; index += 1) {
     const key = localStorage.key(index);
-    if (key?.startsWith(GENERATE_RECOVERY_PREFIX)) remapJson(key, false);
+    if (key?.startsWith(GENERATE_RECOVERY_PREFIX)) remapJson(key);
   }
-  const legacyHost = localStorage.getItem(LEGACY_SEQUENCE_HOST_KEY);
-  const legacySurvivor = legacyHost ? remap.get(legacyHost) : null;
-  if (legacySurvivor)
-    localStorage.setItem(LEGACY_SEQUENCE_HOST_KEY, legacySurvivor);
 }
 
 function applyAliasRemap(

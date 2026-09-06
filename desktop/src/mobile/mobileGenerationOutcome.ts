@@ -19,7 +19,7 @@ export function mobileCompletionSummary(result: CompleteEvent): string {
 
 /**
  * One sentence naming WHICH sibling of a batch failed and the prompt it was
- * reviewed with. Shared so the sequence path and the durable print path
+ * reviewed with. Shared so every submission path and the durable print path
  * cannot word a partial failure differently.
  */
 export function preparedVariationFailure(

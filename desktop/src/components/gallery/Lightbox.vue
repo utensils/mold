@@ -87,12 +87,6 @@ const props = withDefaults(
     /** Origin host's friendly name for the metadata block. */
     hostLabel?: string | null;
     canReveal?: boolean;
-    /** This print was stitched from a sequence (`metadata.chain` present), so
-     *  reuse loads a clip rail instead of the One shot composer. */
-    isSequence?: boolean;
-    /** The producing job is (as far as we know without probing) still on its
-     *  origin host — see `sequenceEditAvailability`. */
-    canEditSequence?: boolean;
     /** Title / ♥ / tags / collections union for this print; null hides the
      *  editing rows (the title line still shows the display title). */
     organization?: LightboxOrganization | null;
@@ -131,8 +125,6 @@ const props = withDefaults(
     cacheKey: null,
     hostLabel: null,
     canReveal: false,
-    isSequence: false,
-    canEditSequence: false,
     organization: null,
     canOrganize: false,
     canTrash: false,
@@ -151,8 +143,6 @@ const emit = defineEmits<{
   /** One-shot reuse. The OWNER runs it: retained private source media is
    *  attached there, and doing it here would drop it. */
   reuse: [];
-  reuseSequence: [];
-  editSequence: [];
   /** Title edited in the aside (`null` clears it). */
   rename: [title: string | null];
   favorite: [value: boolean];
@@ -322,11 +312,6 @@ const when = computed(() =>
 );
 
 function primaryAction() {
-  if (props.isSequence) {
-    if (props.canEditSequence) emit("editSequence");
-    else emit("reuseSequence");
-    return;
-  }
   // Hand the one-shot back to the owner rather than prefilling here. This used
   // to call `composer.set` directly, which INVALIDATES retained-source
   // authority — so the most visible reuse control silently dropped a print's
@@ -614,9 +599,7 @@ async function performVideoExport(options: VideoExportOptions) {
         @click="primaryAction"
       >
         <Icon name="reuse" :size="13" />
-        {{
-          isSequence ? (canEditSequence ? "Edit clip" : "Duplicate as new") : "Use these settings"
-        }}
+        Use these settings
       </button>
       <button
         ref="closeBtn"
@@ -948,15 +931,6 @@ async function performVideoExport(options: VideoExportOptions) {
 
         <!-- the secondary actions -->
         <div class="mt-auto flex flex-col gap-2 pt-2">
-          <button
-            v-if="canEditSequence && !fromTrash"
-            type="button"
-            data-test="lightbox-duplicate-sequence"
-            class="ms-toolbar-button justify-center"
-            @click="emit('reuseSequence')"
-          >
-            Duplicate as new
-          </button>
           <div class="flex gap-2">
             <button
               v-if="!fromTrash"

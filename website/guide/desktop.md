@@ -153,69 +153,26 @@ the phone keep Create / Library / Models until their own redesign.
   starting points plus **Use these settings** restore recorded overrides.
 - **Short clip** (inside New image): video is a setting, not a place. Switch
   the view toolbar's control to **Short clip** (File → New Clip and the ⌘K
-  palette's **Make a short clip** land there too) and a strip appears under the
-  toolbar: **Simple | Scenes**, with one sentence saying what the chosen way
-  does. It has a row of its own so the toolbar's control never moves.
+  palette's **Make a short clip** land there too) and Create keeps the shape it
+  already had — describe the clip, pick a clip style, drag the **Length** chip
+  on the composer, press Generate. The chip reads `97f · 4.0s` and snaps to the
+  same frame grid the inspector's Clip card slider offers, because the two are
+  one control shown twice. Ask for more than one render's worth and Mold splits
+  the work into clips on the machine, carries the motion across each seam, and
+  stitches them into one video — you get one clip and one entry in My images,
+  and the progress line names the part it is on. **Make** is an ordinary batch
+  count, so you can ask for four clips at once wherever the style allows it.
 
-  **Simple** is where Short clip opens, and it is the plain render — describe
-  the clip, pick a clip style, drag the **Length** chip on the composer, press
-  Generate. The chip reads `97f · 4.0s` and snaps to the same frame grid the
-  inspector's Clip card slider offers, because the two are one control shown
-  twice; ask for more than one render's worth and Mold splits it into a
-  sequence for you. **Make** is an ordinary batch count here, so you can ask for
-  four clips at once wherever the style allows it.
-
-  **Scenes** is the second way, and it is what raises the timeline above the
-  composer. The composer stays where it is: it now carries the selected scene's
-  words — "Scene 2 — describe what happens next" — **Make** is hidden, because a
-  clip made scene by scene has no batch, and ⌘↩ makes the whole clip. Switching
-  from Simple seeds scene 1 with the words and the length you had already
-  written; switching back parks the scenes untouched, so nothing is lost either
-  way, and Mold remembers which way you were working. The palette's **Edit the
-  clip scene by scene** is the same door. The timeline is a transport (play the clip back once
-  scenes have rendered, with the clock reading `0:06 / 0:20`, and **Add a
-  scene**), a ruler in round seconds, and the scenes lane. Each block in the
-  lane is as wide as the time it plays, so the lane always fits the window and
-  never scrolls; a block wears the scene's own words, its rendered frame behind
-  them, and its length in the corner. Drag the selected block's right edge to
-  make that scene longer — it snaps to the family's own frame grid (`8n+1`, or
-  `4n+1` for Wan, defaulted from the selected model and capped at that model's
-  own clip size, so a scene is never longer than the clips a one-shot Duration
-  would be split into) — or drag the block itself to reorder. The seam floating
-  above each join names its transition in words; **Smooth**, **Cut**, or
-  **Fade 8f** (zero-tail joins say **Join**); a click opens the seam editor's
-  teaching rows and fade-length stepper. With a block focused, ←/→ move between
-  scenes, Shift+←/→ change its length, ↩ opens the seam before it, and ⌫ removes
-  it after a confirm. Right-click a block for Play (when a cached render
-  exists), Duplicate, Insert before/after, Move, and Remove, or the lane
-  background for Add clip, Check the plan, the TOML file tools, and Clear the
-  clip. One mono line beneath the lane says what the clip adds up to — "3 scenes
-  · 289 frames · 0:12 at 24fps", or the machine's own answer once you check the
-  plan. A live fits/duration forecast runs against
-  `/api/capabilities/chain-limits`, TOML import/export lives under File tools,
-  and a running clip sits in the sidebar's queue beside prints, with
-  watch and cancel. A finished clip leaves the queue: its video lands on
-  the New image canvas with **Edit clip** and **Show in My images**, its print
-  is in My images, and its job record is in **My images ▸ History ▸
-  Clips**. Editing a finished clip reloads its scenes onto
-  the lane, marks which stay cached versus re-render as you change
-  things, and **Update sequence** re-renders only from the earliest changed
-  clip; changing a transition type or a fade length re-stitches with no
-  re-render at all. From a clip print in My images, **Edit clip**
-  re-enters the original job with its cached clips and **Duplicate as new**
-  starts a fresh sequence from the recorded clips. The picker shows
-  clip styles from every connected
-  machine (choosing Short clip auto-picks one that can join scenes and
-  remembers your single-mode style, and a clip style that only renders one
-  clip at a time is listed with that reason on its row; switching back to
-  Still picture restores a picture style; with none installed the menu says
-  so and Browse more deep-links to the video filter), and limits, creation,
-  events, previews, and job actions
-  stay routed to the style's machine. An optional **Opening image** well (with its
-  source strength and fit-to-frame controls) sits in the inspector's primary
-  form exactly where one-shot source media lives (the header ↺ Reset clears it;
-  the Advanced reset does not), and Advanced keeps the per-clip negative
-  prompt and camera motion. Job and action failures stay visible inline.
+  The picker shows clip styles from every connected machine (choosing Short
+  clip auto-picks one and remembers the style you last used there; switching
+  back to Still picture restores a picture style; with none installed the menu
+  says so and Browse more deep-links to the video filter), and limits,
+  creation, events, previews, and job actions stay routed to the style's
+  machine. An optional **Opening image** well (with its source strength and
+  fit-to-frame controls) sits in the inspector's primary form exactly where
+  one-shot source media lives (the header ↺ Reset clears it; the Advanced reset
+  does not), and Advanced keeps the negative prompt and camera motion. Job and
+  action failures stay visible inline.
 
 - **Queue** (⌘2): the same line the sidebar shows, at full width. Three counts
   — **Being made**, **Waiting**, **Done today** — one explainer, and a table
@@ -230,14 +187,11 @@ the phone keep Create / Library / Models until their own redesign.
   Lightroom-style small-to-large slider in the view toolbar
   that resizes the contact sheet continuously and remembers its setting, NEW
   badges on fresh prints, a two-pane lightbox, and a History column holding
-  Runs, Prompts and Sequences. **Space** opens
+  Runs and Prompts. **Space** opens
   Quick Look, ←/→ navigate, and **Use these settings** jumps back to New image
-  with every parameter restored. On a print a clip produced, **Edit clip**
-  is the primary action and re-enters the original job on the machine that made
-  it so already-rendered clips stay cached. **Duplicate as new** loads the
-  recorded clips as a fresh sequence (if the durable job is gone Mold takes
-  this fallback and says so; if the machine is unreachable it says so and
-  changes nothing). All merges every connected host without repeating
+  with every parameter restored. A print made scene by scene on an older build
+  keeps its per-scene provenance, and **Use these settings** restores a plain
+  clip built from its first scene's prompt. All merges every connected host without repeating
   matching saved prints, prefers the copy on **This device**, and labels every
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and
@@ -284,22 +238,18 @@ the phone keep Create / Library / Models until their own redesign.
   the collection whose name matches the title, with a picker for the fleet's
   collections and an inline **New album…**. A line beneath previews the
   filename the print will land as. The choice rides the one shot, every
-  sibling of a batch, every prepared variation, and the single print a
-  sequence stitches; **Use these settings** restores it, and
+  sibling of a batch, and every prepared variation; **Use these settings** restores it, and
   **Settings ▸ My images & trash ▸ Tag new prints with their title** turns the title
   chip off without touching prints you already made. Older servers without
   organization simply hide these controls and keep the previous delete
   wording.
 - **History** (a column inside My images, `?panel=history`): a fast,
-  searchable list of past prompts from every ready machine, with **Runs**,
-  **Prompts** and **Clips** as tabs in the column body; ↩ refills the
-  composer, while Up/Down recalls the same merged history inline. It opens
-  beside the grid rather than over it, so the pictures stay clickable. The
-  **Clips** tab is the one place durable clip jobs are listed: open,
-  edit, resume, or delete a job, jump to the print it produced, and run the
-  machine-scoped **Clear inactive** and **Clean up disk** maintenance. It
-  renders the 200 newest jobs and says so when
-  there are more. Web has the same panel at `?panel=history`.
+  searchable list of past prompts from every ready machine, with **Runs** and
+  **Prompts** as tabs in the column body; ↩ refills the composer, while
+  Up/Down recalls the same merged history inline. It opens beside the grid
+  rather than over it, so the pictures stay clickable. It renders the 200
+  newest entries and says so when there are more. This column is desktop-only;
+  the web app has no History panel.
 - **Styles** (⌘4): one searchable styles workspace whose view toolbar carries
   **Ready to use | Browse more**, the kind filter (**All / Pictures / Clips**)
   and **Filter…**. Ready to use opens with a disk-used-by-styles meter — one
@@ -422,7 +372,7 @@ the phone keep Create / Library / Models until their own redesign.
   empties it.
 - **Native desktop integration**: platform menus and shortcuts, Linux and
   Windows native window decorations, macOS overlay chrome, and background
-  notifications on generation, chain, and pull completion. macOS uses
+  notifications on generation and pull completion. macOS uses
   UserNotifications so a signed release inherits Mold's bundle identity and app
   icon; Windows uses a WinRT toast whose click routes to the print, model, or
   update the alert names, exactly as the macOS and Linux notifications do.
@@ -485,9 +435,6 @@ release is published.
 | Cmd/Ctrl+K          | Command palette                                              |
 | Cmd/Ctrl+N          | New image (clear composer, focus)                            |
 | Cmd/Ctrl+Enter      | Generate (in Short clip, make the whole clip)                |
-| ←/→                 | Short clip: move between scenes on the lane                  |
-| Shift+←/→           | Short clip: shorten / lengthen the selected scene            |
-| ↩ / ⌫               | Short clip: open the seam before a scene / remove it         |
 | Alt/Option+Enter    | Make 4 variations of the finished picture (not in a field)   |
 | Cmd/Ctrl+E          | Write more for me                                            |
 | Cmd/Ctrl+R          | Surprise me (a new seed)                                     |
@@ -601,7 +548,7 @@ wire types as the CLI and web UI:
   in mono beside it and one-click "lock last"; **Save every result** is on by
   default, and switched off it sends each print straight to the trash after
   it lands, so a throwaway never clutters My images yet stays recoverable
-  until the trash empties (not offered for a sequence); the style picker offers only
+  until the trash empties; the style picker offers only
   the styles the section you are in can make — picture styles under **Still
   picture**, clip styles under **Short clip**, 3-D styles under **3-D
   object** — names that section above the list, marks each
@@ -637,14 +584,11 @@ wire types as the CLI and web UI:
   this app submitted that the machine parked. A job that has only just been
   accepted may not show its settings yet (the machine lists it before it loads
   the request) and the panel says so rather than pretending they are missing.
-- **History (a column in My images)** (three lenses: **Runs** (every finished
-  generation with its thumbnail, style, size, seed, and clock) click to reuse
-  the full settings including the seed), **Prompts** (the raw prompt log,
-  searchable, for prompts whose outputs are gone), and **Clips** (every
-  durable clip job on every connected machine, with open / edit / resume /
-  delete, a jump to the print it produced, and the machine-scoped **Clear
-  inactive** and **Clean up disk** maintenance). The tab is in the URL, so
-  `?panel=history&tab=sequences` opens straight onto it.
+- **History (a column in My images)** (two lenses: **Runs**, every finished
+  generation with its thumbnail, style, size, seed, and clock — click to reuse
+  the full settings including the seed — and **Prompts**, the raw prompt log,
+  searchable, for prompts whose outputs are gone). The tab is in the URL, so
+  `?panel=history` opens straight onto it.
 - **Remote prints saved locally**: generations from remote machines and RunPod
   are also written into this Mac's output directory (Settings → Look → "Save
   remote prints locally", on by default), with embedded metadata

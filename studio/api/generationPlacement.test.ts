@@ -398,7 +398,7 @@ describe("generation placement preview", () => {
     expect(classifyPlacementPreview(preview)).toBe(expected);
   });
 
-  test("redacts every sequence prompt and source while preserving topology", () => {
+  test("redacts every chain prompt and source while preserving topology", () => {
     expect(
       redactChainForPlacement({
         model: "cv:123",

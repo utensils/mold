@@ -39,7 +39,7 @@ open the scanner again without restarting Mold.
 An identity photo conditions a print on a person's face while the prompt owns
 the scene, styling, and composition. The **Identity** well appears in the main
 Create form beside the source wells only when the selected model and target
-machine positively advertise identity support. It stays hidden for Sequence.
+machine positively advertise identity support.
 
 Tap the well and choose one native action:
 

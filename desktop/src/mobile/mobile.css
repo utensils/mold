@@ -330,124 +330,6 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   transition: none;
 }
 
-/*
- * Output (One shot | Sequence) — a field in the Create form stack, not a
- * mode pair pinned above it. Same mobile-scoped @ui SegmentedControl override
- * as the resolution tier: the kit's default segment height is under the
- * iPhone 44pt floor, and the three-class selector outranks its scoped rule.
- */
-.mobile-output-mode {
-  display: grid;
-  gap: 7px;
-  margin: 14px 0;
-}
-
-.mobile-output-mode .ms-seg {
-  gap: 0;
-  min-height: 44px;
-  padding: 0;
-  border: 0;
-  box-shadow: inset 0 0 0 1px var(--ce);
-}
-
-.mobile-output-mode .ms-seg .ms-seg__btn {
-  min-height: 44px;
-  justify-content: center;
-  padding-block: 0;
-  border-radius: 0;
-}
-
-.mobile-output-mode .ms-seg .ms-seg__btn:first-child {
-  border-radius: calc(var(--radius-control) - 1px) 0 0 calc(var(--radius-control) - 1px);
-}
-
-.mobile-output-mode .ms-seg .ms-seg__btn:last-child {
-  border-radius: 0 calc(var(--radius-control) - 1px) calc(var(--radius-control) - 1px) 0;
-}
-
-.mobile-output-mode .ms-seg .ms-seg__btn + .ms-seg__btn {
-  border-left: 1px solid var(--ce);
-}
-
-.mobile-output-mode .ms-seg .ms-seg__btn[data-on="true"] {
-  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--safelight) 60%, transparent);
-}
-
-.mobile-output-mode-label {
-  color: var(--ink-2);
-  font-family: var(--font-utility);
-  font-size: var(--text-edge-code);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.mobile-output-mode-hint {
-  margin: 0;
-  color: var(--ink-3);
-  font-size: var(--text-caption);
-}
-
-/* Sequence output with no chain-capable checkpoint installed anywhere. */
-.mobile-sequence-empty {
-  display: grid;
-  gap: 12px;
-  margin-top: 14px;
-  padding: 14px;
-  border: 1px solid var(--edge);
-  border-radius: 16px;
-  background: var(--bench);
-}
-
-.mobile-sequence-empty p {
-  margin: 0;
-  color: var(--ink-2);
-}
-
-.mobile-sequence-row-error {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  min-height: 44px;
-  border: 0;
-  padding: 4px 0;
-  background: transparent;
-  color: var(--stop);
-  font: inherit;
-  text-align: left;
-}
-
-.mobile-sequence-row-error > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mobile-sequence-row-error > span:last-child {
-  flex: 0 0 auto;
-  margin-left: auto;
-  color: var(--ink-3);
-  font-family: var(--font-utility);
-  font-size: var(--text-edge-code);
-  text-transform: uppercase;
-}
-
-.mobile-sequence-row-error--expanded > span:first-child {
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.mobile-sequence-resume {
-  color: var(--safelight);
-}
-
-.mobile-sequence-dismiss {
-  color: var(--ink-3);
-}
-
 .mobile-shell.is-settings-open .mobile-content {
   padding-bottom: max(24px, env(safe-area-inset-bottom));
 }
@@ -2127,97 +2009,7 @@ button.mobile-generate-disclosure {
   }
 }
 
-/*
- * Seam sheet — the bottom-sheet host for the shared @ui SeamEditor, and
- * mobile's only fade-length control. Same bespoke fixed-overlay pattern as
- * the Advanced sheet (@ui/SheetPanel is absolute-inset and its `full`
- * variant has no header slot), so the body owns the scroll and every inset.
- */
-.mobile-seam-sheet {
-  display: none;
-  position: fixed;
-  inset: 0 0 auto;
-  height: var(--mobile-visual-viewport-height, 100dvh);
-  z-index: 46;
-  flex-direction: column;
-  justify-content: flex-end;
-}
-
-.mobile-seam-sheet.is-open {
-  display: flex;
-}
-
-.mobile-seam-sheet-backdrop {
-  position: absolute;
-  inset: 0;
-  border: 0;
-  background: color-mix(in srgb, var(--print) 62%, transparent);
-}
-
-.mobile-seam-sheet-panel {
-  position: relative;
-  display: flex;
-  min-height: 0;
-  max-height: min(86dvh, var(--mobile-visual-viewport-height, 100dvh));
-  flex-direction: column;
-  border-top: 1px solid var(--edge);
-  border-radius: 18px 18px 0 0;
-  background: var(--bath);
-  color: var(--rebate);
-  animation: mobile-sheet-in 0.2s ease;
-}
-
-.mobile-seam-sheet-grabber {
-  display: block;
-  width: 38px;
-  height: 4px;
-  flex: 0 0 auto;
-  margin: 8px auto 2px;
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--rebate) 22%, transparent);
-}
-
-.mobile-seam-sheet-body {
-  display: grid;
-  flex: 1;
-  min-height: 0;
-  gap: 10px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: none;
-  touch-action: manipulation;
-  padding: 10px max(18px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
-    max(18px, env(safe-area-inset-left));
-}
-
-.mobile-seam-sheet-head {
-  margin: 0;
-  color: var(--ink-3);
-  font-family: var(--font-utility);
-  font-size: var(--text-edge-code);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.mobile-seam-sheet-done {
-  min-height: 46px;
-  margin-top: 2px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
-  color: var(--rebate);
-  font-family: var(--font-body);
-  font-size: var(--text-body);
-  font-weight: 650;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mobile-seam-sheet-panel {
-    animation: none;
-  }
-}
-
-/* Reference crop sheet — the same fixed-overlay recipe as the seam sheet. */
+/* Reference crop sheet — the same fixed-overlay recipe as the Advanced sheet. */
 .mobile-crop-sheet {
   display: none;
   position: fixed;
@@ -4970,7 +4762,6 @@ button:disabled {
     margin-inline: auto;
   }
 
-  .mobile-seam-sheet-panel,
   .mobile-library-sheet-panel,
   .mobile-catalog-target-panel {
     width: min(720px, calc(100% - 48px));
@@ -5393,7 +5184,7 @@ button:disabled {
 }
 
 /* Library bottom sheet (tag editor, collection checklist, viewer info).
-   The MobileSeamSheet pattern: fixed overlay, body owns scroll + insets. */
+   The MobileAdvancedSheet pattern: fixed overlay, body owns scroll + insets. */
 .mobile-library-sheet {
   display: none;
   position: fixed;
