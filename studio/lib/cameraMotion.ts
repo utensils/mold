@@ -4,10 +4,8 @@
  * This is NOT an options source — availability always comes from
  * `GET /api/capabilities/ltx2-camera-controls`, which knows what the selected
  * checkpoint can actually run. These entries exist because a clip's camera
- * choice has to be recovered from a chain script, a saved print, or a template
- * with no server in the loop (`sequenceForm.chainScriptToClips`,
- * `sequenceReuse.chainMetadataToClips`), and because the matching there falls
- * back to the human label.
+ * choice has to be recovered from a saved print or a template with no server
+ * in the loop, and because the matching there falls back to the human label.
  *
  * `ltx2_camera.rs` is the authority; `camera_motion_ts_mirror_matches_the_rust_registry`
  * pins this list to it.
