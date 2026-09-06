@@ -529,12 +529,24 @@ export const galleryMediaPath = (
       : `${mediaPath(filename)}${fromTrash ? "?view=trash" : ""}`;
 
 /**
- * Whether a gallery print is a video. The single source of truth shared by
- * the grid's ▶ badge, the store's Images/Video kind filter, and the chip
- * counts — so they can never disagree.
+ * Whether a gallery print can enter the desktop's video playback and
+ * processing paths. Animated image containers use `isClipItem` instead:
+ * APNG bytes are not valid input for `<video>` or framewise video upscale.
  */
 export const isVideoItem = (item: GalleryImage): boolean =>
-  item.format === "mp4" || item.filename.endsWith(".mp4") || !!item.metadata.video_frames;
+  item.format === "mp4" ||
+  item.filename.toLowerCase().endsWith(".mp4") ||
+  !!item.metadata.video_frames;
+
+/**
+ * Whether a gallery print belongs to the Library's motion/clip class. This
+ * drives its clip badge, Video filter, and counts without opting animated
+ * image containers into video-only playback or processing.
+ */
+export const isClipItem = (item: GalleryImage): boolean => {
+  const filename = item.filename.toLowerCase();
+  return isVideoItem(item) || item.format === "apng" || filename.endsWith(".apng");
+};
 
 /**
  * Whether a gallery print is an audio-only artifact (LTX-2 text-to-audio).

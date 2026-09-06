@@ -1149,6 +1149,26 @@ describe("LibraryView header + NEW badges", () => {
     wrapper.unmount();
   });
 
+  it("badges an APNG output as a clip without frame metadata", async () => {
+    const { wrapper } = await mountView(undefined, (gallery) => {
+      const first = gallery.buckets.local?.items[0];
+      if (first) {
+        first.filename = "animated-output.png";
+        first.format = "apng";
+        first.metadata = {
+          ...first.metadata,
+          frames: null,
+          fps: null,
+          video_frames: null,
+          video_fps: null,
+        };
+      }
+    });
+
+    expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("clip");
+    wrapper.unmount();
+  });
+
   it("badges a mesh tile with the 3-D word", async () => {
     const { wrapper } = await mountView(undefined, (gallery) => {
       const first = gallery.buckets.local?.items[0];

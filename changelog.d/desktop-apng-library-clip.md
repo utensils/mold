@@ -1,0 +1,1 @@
+- **Label APNG outputs as clips.** The desktop Library now gives APNG animations the same clip badge and media handling as other generated videos.
