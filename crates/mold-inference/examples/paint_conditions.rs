@@ -16,7 +16,7 @@ fn main() -> Result<()> {
         let buffers = paint_raster::render(&mesh, view.elevation, view.azimuth, 2048)?;
         for (position, output_index) in [(false, index), (true, index + 6)] {
             let mut pixels = vec![255; 2048 * 2048 * 3];
-            for (pixel, rgb) in pixels.chunks_exact_mut(3).enumerate() {
+            for (pixel, rgb) in pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 if !buffers.mask[pixel] {
                     continue;
                 }

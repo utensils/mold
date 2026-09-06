@@ -427,7 +427,7 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
         let mut rgb = Vec::with_capacity(values.len());
-        for pixel in values.chunks_exact(3) {
+        for pixel in values.as_chunks::<3>().0 {
             for channel in pixel.iter().rev() {
                 rgb.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
             }
