@@ -70,7 +70,7 @@ impl PreparedMesh {
 
 /// `camera_utils.py:34-71` uses Z-up inside the paint frame. Keep f64 for
 /// NumPy-equivalent camera construction, then cast once before projection.
-fn view_matrix(elevation: f32, azimuth: f32) -> [[f32; 4]; 4] {
+pub(super) fn view_matrix(elevation: f32, azimuth: f32) -> [[f32; 4]; 4] {
     let elev = -f64::from(elevation).to_radians();
     let azim = (f64::from(azimuth) + 90.).to_radians();
     let eye = [

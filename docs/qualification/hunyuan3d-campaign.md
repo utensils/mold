@@ -837,3 +837,69 @@ it is not a completion checklist with assumed passes.
   unseen-texel propagation, Navier–Stokes fill and final PBR GLB qualification
   remain part of the active campaign. Existing neural parity failures remain
   unchanged; no texture capability is newly advertised by this checkpoint.
+
+## P7 UV geometry and camera qualification
+
+- `paint_uv::UvGeometry` rasterizes prepared, V-flipped UVs and retains covered
+  paint-frame positions, source face normals and row-major texel indices.
+  Degenerate geometry keeps Tencent's zero normal. In-place compaction avoids
+  allocating another two full-resolution geometry arrays. Raster traversal,
+  extraction and projection poll cancellation callbacks.
+- `capture-hunyuan3d-paint-uv.py` executes the pinned Tencent renderer's actual
+  `set_mesh` / `extract_textiles` and camera matrices. The checked-in small
+  fixture covers asymmetric geometry, UV seams and a degenerate geometric face
+  with a valid UV chart (`paint-uv-oracle-v1`, RED `paint-uv-red-v1.log`, GREEN
+  `paint-uv-green-v2.log`).
+- The first actual 4096 atlas comparison failed on one extra covered texel,
+  index 8085715 (`paint-uv-real4096-candle-v1` and `paint-uv-real4096-cpu-v1.log`).
+  All shared positions and normals already met the unchanged 2e-6 gate. The
+  isolated edge test reproduces that failure (`paint-uv-edge-red-v1.log`).
+  Tencent derives alpha from beta/gamma, tests both bounds, and uses distinct
+  fused gamma arithmetic for coverage and interpolation. Read-only peer review
+  verified the installed CUDA module's SASS, including double-precision alpha
+  subtraction (`paint-uv-edge-review-v1/review.md`, retained disassembly).
+  The correction is confined to the existing Tencent paint raster branch;
+  ordinary gallery raster arithmetic remains unchanged.
+- Final `paint-uv-real{1024,2048,4096}-candle-v3/comparison.json` records exact
+  coverage at **638,538 / 2,557,480 / 10,239,775 texels** on the retained
+  250,396-face mesh. Across all sizes, maximum position error is 1.20e-7,
+  normal error 1.56e-6, and six-camera projection error 2.39e-7. Corresponding
+  `paint-uv-real*-cpu-v3.log` tests all pass. The broad Hunyuan3D selection
+  passes 212 tests with 18 explicit oracle tests ignored
+  (`paint-uv-raster-green-v3.log`). These results establish UV construction,
+  not final textured GLB or end-to-end paint completion.
+- Follow-up review found that the early degeneracy check also needed paint's
+  fused determinant: separately rounded products can cancel to zero when
+  Tencent's determinant is nonzero. The exact-power-of-two vertex regression
+  fails first (`paint-uv-area-red-v1.log`), then passes with the correction;
+  it separately asserts that the ordinary raster keeps its prior behavior.
+  Peer review confirms the finding is closed. Final functional selection:
+  **215 passed, 18 ignored** (`paint-uv-edges-final-tests-v1.log`).
+- `paint-uv-final-qualification-v1/run.json` retains the tested binary, binary
+  and source digests, oracle metadata/digests, commands, exit codes, artifact
+  digests, timings and child-process RSS accounting. All three size checks
+  pass again with the final degeneracy correction. The subsequent Clippy
+  cleanup only replaces `Option::unwrap_or_else` with `unwrap_or` for a pure
+  arithmetic fallback; it does not change the selected depth calculation.
+  All-target CUDA/cuDNN Clippy passes with warnings denied
+  (`paint-uv-edges-clippy-v2.log`); formatting and diff whitespace checks pass.
+
+## P7 depth-edge primitive
+
+- `paint_edges::depth_edges` ports the exact `cv2.Canny(depth_bytes, 30, 80)`
+  recipe used by Tencent's `render_sketch_from_depth`. It uses replicated
+  Sobel borders, L1 magnitude, OpenCV's integer direction thresholds and
+  asymmetric nonmaximum comparisons, then eight-connected hysteresis.
+  Dimensions are bounded at 2048; allocations and long loops poll cancellation.
+- The executable oracle uses installed OpenCV 4.10.0, matching the read-only
+  source clone at `71d3237a093b60a27601c20e9ee6c3e52154e8b1`.
+  `capture-hunyuan3d-paint-edges.py` records eight cases: singleton, one-row,
+  one-column, random strong and weak gradients, directional edges, plateaus,
+  and weak edges connected to a strong segment versus detached weak edges.
+  All final masks match exactly (`paint-edges-oracle-v1`, RED absent-function
+  `paint-edges-red-v1.log`, GREEN `paint-edges-green-v1.log`). Cancellation at
+  every observed checkpoint also passes. Read-only peer review reports no
+  Sobel, suppression, hysteresis or cancellation defect.
+- This qualifies the byte-image edge detector. Camera depth normalization,
+  cosine rejection, erosion/dilation and their integration into back-projection
+  remain active implementation work, alongside the remaining paint pipeline.
