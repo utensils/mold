@@ -903,3 +903,63 @@ it is not a completion checklist with assumed passes.
 - This qualifies the byte-image edge detector. Camera depth normalization,
   cosine rejection, erosion/dilation and their integration into back-projection
   remain active implementation work, alongside the remaining paint pipeline.
+
+## P7 texture reliability and camera geometry
+
+- `paint_reliability::ReliabilityMask` now composes visible-only depth
+  normalization, the qualified Canny detector, cosine rejection at75 degrees,
+  visibility erosion and edge dilation. Integral images implement the exact
+  binary square convolution. Radius0 does not remove edges from visibility;
+  outside-image samples contribute zero even for inverted visibility; the
+  dilated boundary map remains independent of final visibility. Flat depth
+  retains upstream's NaN-to-zero byte behavior, and empty visibility is refused.
+- `capture-hunyuan3d-paint-reliability.py` executes the unchanged upstream
+  statements and sketch method on six cases spanning holes, depth steps,
+  radius0/1/2/8, flat depth and neighboring cosine threshold values. The first
+  harness run lacked its namespace's device field and is retained as a failure;
+  `paint-reliability-oracle-v2` is the successful fixture. The absent-type RED
+  test is `paint-reliability-red-v1.log`; the GREEN fixtures and cancellation
+  sweep are `paint-reliability-green-v2.log`. Peer review found no filtering,
+  integer-bound, border or cancellation defect.
+- The actual CUDA renderer captured all six2048 views of the retained mesh
+  (`paint-reliability-mesh-oracle-v1`). Filtering those raw camera fields in
+  Rust produces exact visibility and boundary masks, with cosine error no
+  greater than1.20e-7 (`paint-reliability-mesh-candle-v1/comparison.json`).
+- `paint_camera::CameraGeometry` constructs those fields from the mesh, using
+  normals computed AFTER camera transformation and interpolated camera-space Z.
+  The existing paint raster now exposes cancellable projection and traversal.
+  The six-view small CUDA fixture catches a depth-reduction ordering difference:
+  `custom_rasterizer/render.py` multiplies independently, then Torch sums the
+  three contributions in0+2+1 order. Applying that order matches every captured
+  depth pixel on both the small and actual mesh when fed the oracle barycentrics
+  (`paint-camera-depth-reduction-v1/comparison.json`).
+- Full camera comparison exposed near-overlap triangle selection differences.
+  Installed CUDA SASS establishes fused screen mapping and weighted coverage
+  depth accumulation (`paint-uv-edge-review-v1/depth-review.md`). After those
+  changes only six pixels across the six real views selected another triangle;
+  all other camera depth pixels matched exactly. A further actual `pos_clip`
+  capture proves that Torch's preceding Z projection is SEPARATE multiplication
+  and addition, followed by CUDA's FUSED depth mapping. The exact-bit regression
+  fails first (`paint-camera-depth-rounding-red-v1.log`) and pins that boundary;
+  `paint-camera-projection-diagnosis-v1/comparison.json` records the independent
+  comparison on all vertices/views. Ordinary gallery raster arithmetic remains
+  unchanged throughout these paint-specific corrections.
+- Final mesh-to-reliability qualification passes on all six2048 views:
+  **camera depth, raw visibility, reliable visibility and boundaries match
+  exactly**, maximum normal error is1.78e-6 and cosine error1.17e-6, below the
+  unchanged2e-6 gates (`paint-camera-mesh-candle-v4/comparison.json`). The isolated
+  competing-face calculation also selects the correct triangle at all six
+  disputed pixels (`paint-camera-face-diagnosis-v2/comparison.json`).
+- The final Hunyuan3D selection passes **220 tests, 20 explicit oracle tests
+  ignored** (`paint-camera-reliability-final-tests-v1.log`). All-target CUDA/cuDNN
+  Clippy passes with warnings denied (`paint-camera-reliability-clippy-v1.log`).
+  The full4096 UV oracle comparison still passes after the shared paint depth
+  correction (`paint-uv-real4096-camera-regression-v1.log`). Both constructors'
+  cancellation sweeps and geometry validation tests pass. Read-only peer review
+  confirms the numerical findings are closed with no remaining concern in scope.
+- `paint-camera-final-qualification-v1/run.json` preserves the test binary,
+  source and artifact digests, oracle device identity, command/environment and
+  comparison results. All earlier failures and intermediate captures remain.
+  This completes camera-to-reliability construction; RealESRGAN integration,
+  complete baking/filling/export, neural parity and the remaining campaign
+  deliverables continue as active work.

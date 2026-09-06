@@ -431,7 +431,14 @@ pub(super) fn render_projected_with_checkpoint(
                     if ![alpha, beta, gamma].iter().all(|v| (0. ..=1.).contains(v)) {
                         continue;
                     }
-                    let depth = alpha * s0.depth + beta * s1.depth + gamma * s2.depth;
+                    // Installed Tencent CUDA rasterizer: FMUL beta*z1,
+                    // FFMA z0*alpha + tmp, then FFMA z2*gamma + tmp.
+                    let depth = s2
+                        .depth
+                        .mul_add(gamma, s0.depth.mul_add(alpha, beta * s1.depth));
+                    if depth < 0. {
+                        continue;
+                    }
                     // Upstream recomputes interpolation in a separate kernel;
                     // without the loop hoist, gamma contracts its first term.
                     let gamma = area(s0, s1, p) * inverse;

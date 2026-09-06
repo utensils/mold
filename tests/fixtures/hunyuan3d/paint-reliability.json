@@ -1,0 +1,38 @@
+{
+  "revision": "82920d643c0dc2f7bfd7255f45f62d386edfe60c",
+  "source_sha256": "5f008d9149c0dcac2ac5ffa7d2e797657b21515878d9b5804f6bf95c08135cce",
+  "torch": "2.5.1+cu124",
+  "opencv": "4.10.0",
+  "cases": [
+    {
+      "name": "full",
+      "size": 16,
+      "radius": 2
+    },
+    {
+      "name": "hole",
+      "size": 16,
+      "radius": 1
+    },
+    {
+      "name": "step",
+      "size": 16,
+      "radius": 0
+    },
+    {
+      "name": "step_dilated",
+      "size": 16,
+      "radius": 2
+    },
+    {
+      "name": "flat",
+      "size": 16,
+      "radius": 8
+    },
+    {
+      "name": "angle",
+      "size": 16,
+      "radius": 0
+    }
+  ]
+}

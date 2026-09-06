@@ -102,6 +102,16 @@ pub(super) fn view_matrix(elevation: f32, azimuth: f32) -> [[f32; 4]; 4] {
 }
 
 pub fn render(mesh: &PreparedMesh, elevation: f32, azimuth: f32, size: u32) -> Result<GBuffers> {
+    render_with_checkpoint(mesh, elevation, azimuth, size, &mut || Ok(()))
+}
+
+pub(super) fn render_with_checkpoint(
+    mesh: &PreparedMesh,
+    elevation: f32,
+    azimuth: f32,
+    size: u32,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<GBuffers> {
     ensure!(
         (1..=2048).contains(&size),
         "paint raster size must be 1 through 2048"
@@ -115,33 +125,57 @@ pub fn render(mesh: &PreparedMesh, elevation: f32, azimuth: f32, size: u32) -> R
         .mesh
         .vertices
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(index, p)| {
+            if index.is_multiple_of(4096) {
+                checkpoint()?;
+            }
             let camera = [0, 1, 2].map(|i| {
                 matrix[i][0] * p[0] + matrix[i][1] * p[1] + matrix[i][2] * p[2] + matrix[i][3]
             });
-            let ndc_z = (-2. / 99.9) * camera[2] - (100.1 / 99.9);
-            ScreenVertex {
+            Ok(ScreenVertex {
                 // Upstream rasterizer_gpu.cu:93-95 maps BOTH axes without a Y
                 // flip and places NDC endpoints at pixel centers.
-                x: (camera[0] * (2. / 1.2) * 0.5 + 0.5) * (size - 1) as f32 + 0.5,
-                y: (camera[1] * (2. / 1.2) * 0.5 + 0.5) * (size - 1) as f32 + 0.5,
-                depth: ndc_z * 0.49999 + 0.5,
+                x: (camera[0] * (2. / 1.2))
+                    .mul_add(0.5, 0.5)
+                    .mul_add((size - 1) as f32, 0.5),
+                y: (camera[1] * (2. / 1.2))
+                    .mul_add(0.5, 0.5)
+                    .mul_add((size - 1) as f32, 0.5),
+                depth: screen_depth(camera[2]),
                 inv_w: 1.,
-            }
+            })
         })
-        .collect();
-    Ok(raster::render_projected(
+        .collect::<Result<_>>()?;
+    raster::render_projected_with_checkpoint(
         &mesh.mesh,
         &screen,
         Culling::None,
-        size,
-        size,
+        [size, size],
         true,
-    ))
+        checkpoint,
+    )
+}
+
+fn screen_depth(camera_z: f32) -> f32 {
+    // Torch's projection matmul rounds the Z product before adding its offset.
+    // The following custom CUDA raster mapping contracts multiply/add instead.
+    let ndc_z = (-2f32 / 99.9) * camera_z - (100.1 / 99.9);
+    ndc_z.mul_add(0.49999, 0.5)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn projection_and_depth_mapping_keep_their_distinct_rounding() {
+        // Retained real mesh, view0 vertex369: actual Torch pos_clip followed
+        // by the native CUDA rasterizer's FMA depth mapping.
+        assert_eq!(
+            super::screen_depth(f32::from_bits(0xbfc1ae8c)).to_bits(),
+            0x3c67eb90
+        );
+    }
+
     use super::*;
     use candle_core::{DType, Device};
 
