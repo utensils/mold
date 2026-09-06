@@ -615,7 +615,7 @@
               cargoLock = {
                 lockFile = ./desktop/src-tauri/Cargo.lock;
                 outputHashes = {
-                  "candle-core-mold-0.11.1" = "sha256-LUaWamgFC6Af0WBGV2zPkwFtKDA1I7dsk/frEiZhgqY=";
+                  "candle-core-mold-0.11.1" = "sha256-gInEf6Y3muHf+uzg974bfoSFJMhKoOqkz1aNjgXHduI=";
                   "cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";
                 };
               };

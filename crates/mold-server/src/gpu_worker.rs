@@ -6494,7 +6494,7 @@ fn pause_owner_stage_for_test(work_id: &str, point: TestOwnerStageBarrier) {
 
 /// Owner-only measurement after every Wan render. Lazy CUDA libraries can grow
 /// the retained context on later runs, so release the sole engine and refresh
-/// the monotonic certificate at each synchronized tensor-free boundary.
+/// the certificate at each synchronized tensor-free boundary.
 fn certify_wan_context_after_render(worker: &GpuWorker, model: &str) {
     #[cfg(feature = "cuda")]
     {
