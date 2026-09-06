@@ -26,19 +26,9 @@ function fixture(url = 'https://utensils.io/mold/') {
   return { win, events, scripts, stored, analytics: createAnalytics(win) }
 }
 
-test('no Google script or events before consent, including rejection', () => {
-  const f = fixture()
-  f.analytics.start()
-  f.analytics.pageView()
-  f.analytics.choose(false)
-  assert.equal(f.scripts.length, 0)
-  assert.equal(f.events.length, 0)
-  assert.equal(f.analytics.choice(), 'denied')
-})
-
-test('accept loads once and records one sanitized page view per navigation', () => {
+test('starts automatically once and records one sanitized page view per navigation', () => {
   const f = fixture('https://utensils.io/mold/?secret=value#fragment')
-  f.analytics.choose(true)
+  f.analytics.start()
   f.analytics.start()
   assert.equal(f.scripts.length, 1)
   assert.match(f.scripts[0].src, new RegExp(measurementId))
@@ -65,18 +55,6 @@ test('accept loads once and records one sanitized page view per navigation', () 
   assert.equal(views[1][2].page_referrer, 'https://utensils.io/mold/')
 })
 
-test('saved acceptance starts tracking; withdrawal disables subsequent events', () => {
-  const f = fixture()
-  f.stored.set('mold.website.analytics', 'granted')
-  f.analytics.start()
-  assert.equal(f.scripts.length, 1)
-  f.analytics.choose(false)
-  assert.equal(f.win[`ga-disable-${measurementId}`], true)
-  const count = f.events.length
-  f.analytics.pageView()
-  assert.equal(f.events.length, count)
-})
-
 test('development, previews, and other utensils sites never load analytics', () => {
   for (const url of [
     'http://localhost:5173/mold/',
@@ -84,14 +62,14 @@ test('development, previews, and other utensils sites never load analytics', () 
     'https://example.com/mold/',
   ]) {
     const f = fixture(url)
-    f.analytics.choose(true)
+    f.analytics.start()
     f.analytics.pageView()
     assert.equal(f.scripts.length, 0)
     assert.equal(f.events.length, 0)
   }
 })
 
-test('unavailable storage does not break the website or consent choice', () => {
+test('automatic analytics does not depend on browser local storage', () => {
   const f = fixture()
   f.win.localStorage = {
     getItem() {
@@ -102,7 +80,6 @@ test('unavailable storage does not break the website or consent choice', () => {
     },
   }
   assert.doesNotThrow(() => f.analytics.start())
-  f.analytics.choose(true)
-  assert.equal(f.analytics.choice(), 'granted')
+  f.analytics.start()
   assert.equal(f.scripts.length, 1)
 })
