@@ -6483,6 +6483,69 @@ fn pause_owner_stage_for_test(work_id: &str, point: TestOwnerStageBarrier) {
     }
 }
 
+/// One-time owner-only measurement. Parked Wan engines still own GPU prompt
+/// tensors, so release the sole engine before attributing bytes to context.
+fn certify_wan_context_after_render(worker: &GpuWorker, model: &str) {
+    #[cfg(feature = "cuda")]
+    {
+        if worker.gpu.backend != mold_core::GpuBackend::Cuda
+            || !worker.cuda_peak.needs_certificate()
+            || worker.in_flight.load(Ordering::SeqCst) != 1
+            || ensure_owner_thread(worker).is_err()
+        {
+            return;
+        }
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if cache.len() != 1 || !cache.contains(model) {
+            return;
+        }
+        let Ok(context) = cudarc::driver::CudaContext::new(worker.gpu.ordinal) else {
+            worker.cuda_peak.invalidate();
+            return;
+        };
+        let Some(engine) = cache.remove(model) else {
+            return;
+        };
+        drop(cache);
+        worker.set_resident_model(None);
+        if teardown_inference_engines_safely(
+            worker,
+            std::iter::once(engine),
+            "Wan context certification",
+        )
+        .is_err()
+        {
+            std::mem::forget(context);
+            worker.cuda_peak.invalidate();
+            return;
+        }
+        if context.synchronize().is_err() {
+            std::mem::forget(context);
+            quarantine_poisoned_worker(worker);
+            return;
+        }
+        let bytes = crate::cuda_peak::context_only_bytes(
+            &context,
+            crate::resources::current_process_vram_bytes(&worker.gpu),
+        );
+        if let Some(bytes) = bytes {
+            worker.cuda_peak.certify(worker.owner_epoch, bytes, context);
+            tracing::info!(
+                gpu = worker.gpu.ordinal,
+                baseline_bytes = bytes,
+                "certified retained Wan CUDA context after releasing engine tensors"
+            );
+        } else {
+            worker.cuda_peak.invalidate();
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = (worker, model);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7550,7 +7613,7 @@ mod tests {
             (
                 "claimed-h3-empty-output",
                 FakeH3Outcome::EmptyOutput,
-                "frozen publication contract",
+                "response-video",
             ),
         ] {
             let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
@@ -7681,7 +7744,7 @@ mod tests {
                 Ok(_) => panic!("invalid H3 publication unexpectedly completed"),
             };
 
-            assert!(error.contains("frozen publication contract"));
+            assert!(error.contains("terminal media provenance mismatch"));
             assert!(error.contains(expected_axis), "unexpected error: {error}");
             assert_eq!(runs.load(Ordering::SeqCst), 1);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -13467,67 +13530,4 @@ mod tests {
             "cache must be completely empty after a failed load"
         );
     }
-}
-
-/// One-time owner-only measurement. Parked Wan engines still own GPU prompt
-/// tensors, so release the sole engine before attributing bytes to context.
-fn certify_wan_context_after_render(worker: &GpuWorker, model: &str) {
-    #[cfg(feature = "cuda")]
-    {
-        if worker.gpu.backend != mold_core::GpuBackend::Cuda
-            || !worker.cuda_peak.needs_certificate()
-            || worker.in_flight.load(Ordering::SeqCst) != 1
-            || ensure_owner_thread(worker).is_err()
-        {
-            return;
-        }
-        let mut cache = worker
-            .model_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if cache.len() != 1 || !cache.contains(model) {
-            return;
-        }
-        let Ok(context) = cudarc::driver::CudaContext::new(worker.gpu.ordinal) else {
-            worker.cuda_peak.invalidate();
-            return;
-        };
-        let Some(engine) = cache.remove(model) else {
-            return;
-        };
-        drop(cache);
-        worker.set_resident_model(None);
-        if teardown_inference_engines_safely(
-            worker,
-            std::iter::once(engine),
-            "Wan context certification",
-        )
-        .is_err()
-        {
-            std::mem::forget(context);
-            worker.cuda_peak.invalidate();
-            return;
-        }
-        if context.synchronize().is_err() {
-            std::mem::forget(context);
-            quarantine_poisoned_worker(worker);
-            return;
-        }
-        let bytes = crate::cuda_peak::context_only_bytes(
-            &context,
-            crate::resources::current_process_vram_bytes(&worker.gpu),
-        );
-        if let Some(bytes) = bytes {
-            worker.cuda_peak.certify(worker.owner_epoch, bytes, context);
-            tracing::info!(
-                gpu = worker.gpu.ordinal,
-                baseline_bytes = bytes,
-                "certified retained Wan CUDA context after releasing engine tensors"
-            );
-        } else {
-            worker.cuda_peak.invalidate();
-        }
-    }
-    #[cfg(not(feature = "cuda"))]
-    let _ = (worker, model);
 }

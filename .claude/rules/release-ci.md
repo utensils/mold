@@ -20,3 +20,5 @@ Moved verbatim from the root CLAUDE.md; loaded only when working under the paths
 Changelog-only release repair pushes must trigger both Desktop and iOS: the tag gate requires Apple candidate delivery at the exact repaired main SHA, even when the version and application source are unchanged. `scripts/tests/ci-routing-contract.sh` pins these push paths.
 
 - The existing CUDA toolkit job also runs `scripts/test-h3-cuda-server.sh` for PRs touching the H3/server dependency paths. It runs the complete hermetic `h3-cuda` server library suite with a thirty-minute test timeout; hosted CI uses the driver link stub and supplies no physical GPU. Live CUDA qualification must still run on hardware. The wrapper clears all `MOLD_*` overrides and isolates XDG config; do not replace the full suite with a name filter.
+
+The H3 CUDA server wrapper defaults `RUST_TEST_THREADS` to 8 so large hosts do not launch hundreds of timing-sensitive owner tests at once; an explicit test-thread setting remains available for diagnosis.

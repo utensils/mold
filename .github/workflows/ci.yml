@@ -707,13 +707,13 @@ jobs:
   # included in any release artifact, so it never consumes the PR critical
   # path or read-only PR cache generations.
   #
-  # Being push-only means a PR cannot see this job go red: #1399 landed a
+  # Before PR coverage, #1399 landed a
   # duplicate `candle-core` in the CUDA graph and broke four consecutive main
   # merges before anyone read the result. The cheap half of that coverage —
   # every candle crate resolving to ONE package identity — is now
   # `scripts/tests/candle-single-identity.sh` on the release-contract route,
   # which does run on PRs. Keep dependency-shape assertions there; this job
-  # stays the compile-the-kernels backstop.
+  # also runs the full H3 server suite for affected PRs.
   flash-attn-check:
     name: CUDA feature checks and H3 server tests
     needs: changes

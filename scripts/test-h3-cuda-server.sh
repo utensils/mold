@@ -10,5 +10,5 @@ while IFS= read -r name; do
   [[ "$name" == MOLD_* ]] && unset_args+=(-u "$name")
 done < <(compgen -e)
 timeout --signal=TERM --kill-after=30s 30m \
-  env "${unset_args[@]}" XDG_CONFIG_HOME="$test_config" \
+  env "${unset_args[@]}" XDG_CONFIG_HOME="$test_config" RUST_TEST_THREADS="${RUST_TEST_THREADS:-8}" \
   cargo test --locked -p mold-ai-server --lib --features h3-cuda -- "$@"

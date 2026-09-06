@@ -636,6 +636,8 @@ impl ExecutionSemanticConfig {
             // the selected encoder artifacts above.
             identity_assets: _,
             h3_factory_authority,
+            // The resolved override is already represented in runtime_environment.
+            request_offload: _,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -4817,6 +4819,8 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_umt5_path,
             identity_assets,
             h3_factory_authority,
+            // The resolved override is already represented in runtime_environment.
+            request_offload: _,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -7932,6 +7936,7 @@ mod tests {
             },
         )]);
         let engine_config = mold_inference::FrozenEngineConfig {
+            request_offload: None,
             family: "flux2".into(),
             artifact_root: PathBuf::from("/models"),
             is_schnell: Some(false),

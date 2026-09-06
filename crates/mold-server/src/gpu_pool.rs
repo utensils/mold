@@ -2107,6 +2107,48 @@ impl crate::durable_generation_settlement::IntoSettlementChannels for PostGenera
     }
 }
 
+impl GpuWorker {
+    pub(crate) fn wan_context_baseline(&self) -> Option<crate::cuda_peak::CertifiedBaseline> {
+        if self.poisoned.load(Ordering::SeqCst) || self.in_flight.load(Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let active = self.model_cache.try_lock().ok()?.active_vram_bytes();
+        self.cuda_peak.snapshot(
+            self.owner_epoch,
+            crate::resources::current_process_vram_bytes(&self.gpu),
+            active,
+        )
+    }
+
+    pub(crate) fn incremental_wan_peak(
+        &self,
+        total: u64,
+        admitted: Option<crate::cuda_peak::CertifiedBaseline>,
+        active_credit: u64,
+    ) -> u64 {
+        let Some(admitted) = admitted else {
+            return total;
+        };
+        if self.poisoned.load(Ordering::SeqCst) {
+            return total;
+        }
+        self.cuda_peak
+            .snapshot(
+                self.owner_epoch,
+                crate::resources::current_process_vram_bytes(&self.gpu),
+                active_credit,
+            )
+            .filter(|fresh| fresh.owner_epoch == admitted.owner_epoch)
+            .map_or(total, |fresh| {
+                crate::cuda_peak::CertifiedBaseline {
+                    bytes: fresh.bytes.min(admitted.bytes),
+                    ..fresh
+                }
+                .incremental_peak(total)
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3034,47 +3076,5 @@ mod tests {
         assert!(record_reduced_vram_grant("model", "shape", 0, 0).is_none());
         assert_eq!(reduced_vram_grant("model", "shape", 0), None);
         clear_model_cuda_ooms_for_tests();
-    }
-}
-
-impl GpuWorker {
-    pub(crate) fn wan_context_baseline(&self) -> Option<crate::cuda_peak::CertifiedBaseline> {
-        if self.poisoned.load(Ordering::SeqCst) || self.in_flight.load(Ordering::SeqCst) != 0 {
-            return None;
-        }
-        let active = self.model_cache.try_lock().ok()?.active_vram_bytes();
-        self.cuda_peak.snapshot(
-            self.owner_epoch,
-            crate::resources::current_process_vram_bytes(&self.gpu),
-            active,
-        )
-    }
-
-    pub(crate) fn incremental_wan_peak(
-        &self,
-        total: u64,
-        admitted: Option<crate::cuda_peak::CertifiedBaseline>,
-        active_credit: u64,
-    ) -> u64 {
-        let Some(admitted) = admitted else {
-            return total;
-        };
-        if self.poisoned.load(Ordering::SeqCst) {
-            return total;
-        }
-        self.cuda_peak
-            .snapshot(
-                self.owner_epoch,
-                crate::resources::current_process_vram_bytes(&self.gpu),
-                active_credit,
-            )
-            .filter(|fresh| fresh.owner_epoch == admitted.owner_epoch)
-            .map_or(total, |fresh| {
-                crate::cuda_peak::CertifiedBaseline {
-                    bytes: fresh.bytes.min(admitted.bytes),
-                    ..fresh
-                }
-                .incremental_peak(total)
-            })
     }
 }

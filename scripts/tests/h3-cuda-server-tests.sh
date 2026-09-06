@@ -7,6 +7,7 @@ mkdir -p "$scratch/bin"
 cat >"$scratch/bin/cargo" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${RUST_TEST_THREADS:-}" == 8 ]]
 [[ -d "$XDG_CONFIG_HOME" && "$XDG_CONFIG_HOME" != "$ORIGINAL_CONFIG" ]]
 [[ -z "${MOLD_HOME+x}${MOLD_MODELS_DIR+x}${MOLD_DB_PATH+x}${MOLD_OFFLOAD+x}" ]]
 [[ "$*" == 'test --locked -p mold-ai-server --lib --features h3-cuda -- fixture_test' ]]
