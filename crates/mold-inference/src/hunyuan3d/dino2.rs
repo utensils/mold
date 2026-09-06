@@ -114,6 +114,18 @@ pub struct Dinov2Config {
 }
 
 impl Dinov2Config {
+    /// Tencent's Hunyuan3D 2.1 conditioner: DINOv2-large, verified against
+    /// the bundled checkpoint's 1024-wide embeddings and 24 encoder layers.
+    pub fn large() -> Self {
+        Self {
+            hidden_size: 1024,
+            num_hidden_layers: 24,
+            num_attention_heads: 16,
+            use_swiglu_ffn: false,
+            ..Self::giant()
+        }
+    }
+
     /// `comfy/image_encoders/dino2_giant.json`, verbatim. The Hunyuan3D
     /// checkpoints ship the same numbers in their own `config.yaml`.
     pub fn giant() -> Self {

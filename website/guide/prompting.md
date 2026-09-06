@@ -56,6 +56,7 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
+| `hunyuan3d-2.1` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 603 |
 | `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |

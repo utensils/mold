@@ -136,7 +136,9 @@ job; retry only when the status explicitly marks it retryable.
 `generate_mesh` is the one MCP generate tool whose schema requires `image`
 rather than `prompt`: the 3-D family has no text encoder, so there is nothing
 for a prompt to do. `mold run hunyuan3d-mini-turbo --image chair.png` is
-likewise a complete CLI request with no prompt at all. It returns a rendered
+likewise a complete CLI request with no prompt at all. `hunyuan3d-2.1` uses
+the same image-only contract and requires the separate `tencent-hunyuan3d-2.1`
+licence acceptance. It returns a rendered
 poster plus mesh statistics; the glTF itself lands in the gallery and is
 fetched by filename. Its optional `octree` (the advertised allowlist; cost is
 cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and

@@ -125,6 +125,15 @@ impl Default for ShapeVaeConfig {
 }
 
 impl ShapeVaeConfig {
+    /// Published 2.1 shape config, and ComfyUI's Hunyuan3Dv2_1 latent format.
+    pub fn v2_1() -> Self {
+        Self {
+            num_latents: 4096,
+            scale_factor: 1.003_950_615_875_240_3,
+            ..Self::v2_0()
+        }
+    }
+
     /// `hunyuan3d-dit-v2-0` and `hunyuan3d-dit-v2-0-turbo`.
     pub fn v2_0() -> Self {
         Self {

@@ -340,7 +340,7 @@ draw glTF bytes as a picture.
 
 ## What is not supported yet
 
-Texture and PBR material generation, the Hunyuan3D 2.1 shape model, multi-view
+Texture and PBR material generation, multi-view
 input, and text-to-3D are tracked in
 [#1496](https://github.com/utensils/mold/issues/1496). Today's output is
 geometry only — a clean white mesh.

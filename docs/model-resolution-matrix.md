@@ -368,6 +368,21 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ## `hunyuan3d`
 
+### `hunyuan3d-2.1:fp16`
+
+Schema 1 · hash `02446110facde8bf2b9969b66aeff039a2dd9ddc29bc54a3ed8c92aba798f0ba` · default recipe `default`
+
+Models: `hunyuan3d-2.1:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 30 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### `hunyuan3d-mini-turbo:fp16`
 
 Schema 1 · hash `431b417ede7d5a584d16478a77f7221d8acc54741ab7b0bcf78060d41f2ddfbd` · default recipe `default`

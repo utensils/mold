@@ -63,7 +63,7 @@ ground and every other prop cropped away.
 - The web, desktop, and mobile apps' export menu offers the same OBJ, STL,
   and PLY geometry exports and the GIF, APNG, and WebP turntables as
   `mold library export` and the `export_mesh` MCP tool.
-- Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
+- Texturing, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.
 
@@ -72,6 +72,9 @@ ground and every other prop cropped away.
 ```bash
 # The default tier: 0.6B, step-distilled, ~5 GB VRAM
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb
+
+# 2.1 shape uses the same image-only prompt contract and separate 2.1 terms
+mold run hunyuan3d-2.1 --image chair.png -o chair.glb
 
 # Undistilled 1.1B, 30 guided steps, higher detail
 mold run hunyuan3d --image chair.png --octree 320 -o chair.glb
@@ -109,3 +112,6 @@ gallery export menu all transcode the same stored `.glb`.
   `VoxelToMesh`: the threshold scale)
 - Best practice: the centred-subject, cutout-background, three-quarter-view
   image advice is community practice, not a published upstream rule.
+
+- https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/tree/82920d643c0dc2f7bfd7255f45f62d386edfe60c/hy3dshape
+  — 2.1 shape retains image conditioning without a text encoder.
