@@ -1149,3 +1149,27 @@ it is not a completion checklist with assumed passes.
   warnings denied passes (`paint-adapter-clippy-v1.log`), as does rustfmt.
   Read-only peer review confirms the scoped backend lifetime and preserved
   overrides; its stale thread-local documentation comment was corrected.
+
+
+### P7 bounded upscaler memory plan
+
+- `ResolvedUpscaleExecutionPlan::for_paint_materials` specializes the existing
+  artifact/placement plan for sequential untiled 512-to-2048 material views.
+  It reserves 9 GiB plus weights on the device and 1 GiB plus weights on the
+  host; unified-memory Metal includes both in its host floor. The 9 GiB
+  allowance exceeds the observed 8,257 MiB CUDA board peak. Metal is not
+  numerically or physically qualified by that CUDA measurement.
+- The adapter requires this specialization. Plan validation rederives budgets
+  and fingerprints; input validation refuses larger images and tiling changes.
+  Generic upscaler budgets remain unchanged. Read-only review caught a stale
+  Metal preflight allowance, now replaced by the plan's host increment, and
+  improved the CPU rejection test to use a valid CPU plan.
+- The missing-specialization regression is retained in `paint-budget-red-v1.log`.
+  This component estimate must be consumed by durable paint-stage admission;
+  it does not itself reserve CUDA capacity or establish the complete paint peak.
+- Final validation passes eight exact-upscaler engine tests, including memory
+  tampering and input-size/tiling guards (`paint-budget-green-v2.log`), and
+  all-target CUDA/cuDNN Clippy with warnings denied (`paint-budget-clippy-v2.log`).
+  The rebuilt real adapter still matches both material streams exactly with
+  no backend override (`paint-budget-adapter-v1`). Read-only follow-up review
+  reports both findings resolved and no additional actionable findings.

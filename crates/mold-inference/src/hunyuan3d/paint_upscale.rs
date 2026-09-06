@@ -23,6 +23,10 @@ pub fn upscale_materials(
     mut checkpoint: impl FnMut() -> Result<()>,
 ) -> Result<PaintMaterials> {
     validate_materials(materials)?;
+    ensure!(
+        plan.is_paint_materials(),
+        "paint requires a material memory plan"
+    );
     ensure!(plan.model_name == MODEL, "paint requires {MODEL}");
     ensure!(
         matches!(plan.placement, ExactUpscalePlacement::Device { .. }),
@@ -172,6 +176,7 @@ mod tests {
                 ordinal: 0,
             },
         )?;
+        let plan = plan.for_paint_materials()?;
         let start = std::time::Instant::now();
         let result = upscale_materials(
             plan,

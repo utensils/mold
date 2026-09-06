@@ -47,9 +47,49 @@ pub struct ResolvedUpscaleExecutionPlan {
     pub predicted_vram_peak_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub execution_fingerprint: String,
+    paint_materials: bool,
 }
 
 impl ResolvedUpscaleExecutionPlan {
+    /// Freeze the bounded, sequential 512-to-2048 material recipe. The CUDA
+    /// adapter measured 8,257 MiB board use; reserve 9 GiB plus weights. One
+    /// GiB of host allowance covers twelve retained RGB views and conversion
+    /// buffers. This is not a complete paint-pipeline memory estimate.
+    pub fn for_paint_materials(mut self) -> Result<Self> {
+        self.validate()?;
+        anyhow::ensure!(
+            self.model_name == "real-esrgan-x4plus:fp16"
+                && matches!(self.placement, ExactUpscalePlacement::Device { .. }),
+            "paint upscaling requires the FP16 RealESRGAN accelerator recipe"
+        );
+        self.paint_materials = true;
+        (
+            self.predicted_vram_peak_bytes,
+            self.predicted_host_increment_bytes,
+        ) = upscale_plan_memory_floors(&self.weights, self.placement, true);
+        self.execution_fingerprint = upscale_execution_fingerprint(
+            &self.model_name,
+            &self.weights,
+            self.artifact_root.as_deref(),
+            self.placement,
+            self.predicted_vram_peak_bytes,
+            self.predicted_host_increment_bytes,
+        );
+        Ok(self)
+    }
+
+    pub fn is_paint_materials(&self) -> bool {
+        self.paint_materials
+    }
+
+    fn validate_input(&self, width: u32, height: u32, tile: Option<u32>) -> Result<()> {
+        anyhow::ensure!(
+            !self.paint_materials || (width == 512 && height == 512 && tile == Some(0)),
+            "paint memory plan requires untiled 512x512 inputs"
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         require_upscale_model_activation(
             &self.model_name,
@@ -62,7 +102,7 @@ impl ResolvedUpscaleExecutionPlan {
             bail!("upscaler artifact changed after planning");
         }
         let (predicted_vram_peak_bytes, predicted_host_increment_bytes) =
-            upscale_plan_memory_floors(&self.weights, self.placement);
+            upscale_plan_memory_floors(&self.weights, self.placement, self.paint_materials);
         let execution_fingerprint = upscale_execution_fingerprint(
             &self.model_name,
             &self.weights,
@@ -137,7 +177,20 @@ fn freeze_upscale_artifact(path: &Path) -> Result<ResolvedUpscaleArtifact> {
 fn upscale_plan_memory_floors(
     weights: &ResolvedUpscaleArtifact,
     placement: ExactUpscalePlacement,
+    paint_materials: bool,
 ) -> (u64, u64) {
+    if paint_materials {
+        let device = weights.size_bytes.saturating_add(9 << 30);
+        let host = weights.size_bytes.saturating_add(1 << 30);
+        return match placement {
+            ExactUpscalePlacement::Cpu => (0, host),
+            ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Metal,
+                ..
+            } => (device, device.saturating_add(host)),
+            ExactUpscalePlacement::Device { .. } => (device, host),
+        };
+    }
     match placement {
         ExactUpscalePlacement::Cpu => (
             0,
@@ -228,7 +281,7 @@ pub fn resolve_upscale_execution_plan_from_artifact(
 ) -> ResolvedUpscaleExecutionPlan {
     let model_name = model_name.into();
     let (predicted_vram_peak_bytes, predicted_host_increment_bytes) =
-        upscale_plan_memory_floors(&weights, placement);
+        upscale_plan_memory_floors(&weights, placement, false);
     let execution_fingerprint = upscale_execution_fingerprint(
         &model_name,
         &weights,
@@ -245,6 +298,7 @@ pub fn resolve_upscale_execution_plan_from_artifact(
         predicted_vram_peak_bytes,
         predicted_host_increment_bytes,
         execution_fingerprint,
+        paint_materials: false,
     }
 }
 
@@ -273,7 +327,8 @@ where
                 crate::device::preflight_memory_check(
                     "Upscaler",
                     plan.weights.size_bytes,
-                    UPSCALE_ACTIVATION_HEADROOM,
+                    plan.predicted_host_increment_bytes
+                        .saturating_sub(plan.weights.size_bytes),
                 )?;
             }
             gpu_factory(backend, ordinal)
@@ -431,6 +486,9 @@ impl UpscaleEngine for UpscalerEngine {
         let img = image::load_from_memory(&req.image).context("failed to decode input image")?;
         let original_width = img.width();
         let original_height = img.height();
+        if let Some(plan) = &self.exact_plan {
+            plan.validate_input(original_width, original_height, req.tile_size)?;
+        }
         let rgb = img.to_rgb8();
 
         // Convert to tensor [1, 3, H, W] in [0, 1] range
@@ -869,6 +927,53 @@ mod tests {
             cleared.load(Ordering::SeqCst),
             "an unwinding upscale must clear its attempt token before engine reuse"
         );
+    }
+
+    #[test]
+    fn paint_plan_prices_untiled_views_and_rejects_budget_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+        let generic = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            None,
+            ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+        let paint = generic.clone().for_paint_materials().unwrap();
+        assert!(paint.predicted_vram_peak_bytes >= 9 << 30);
+        assert!(paint.predicted_host_increment_bytes >= 1 << 30);
+        assert_ne!(paint.execution_fingerprint, generic.execution_fingerprint);
+        paint.validate().unwrap();
+        paint.validate_input(512, 512, Some(0)).unwrap();
+        for (width, height, tile) in [
+            (513, 512, Some(0)),
+            (512, 513, Some(0)),
+            (512, 512, None),
+            (512, 512, Some(512)),
+        ] {
+            assert!(paint.validate_input(width, height, tile).is_err());
+        }
+        let mut tampered = paint;
+        tampered.predicted_vram_peak_bytes = generic.predicted_vram_peak_bytes;
+        assert!(tampered.validate().is_err());
+        let cpu = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            None,
+            ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
+        assert!(cpu
+            .for_paint_materials()
+            .unwrap_err()
+            .to_string()
+            .contains("accelerator recipe"));
+        generic.validate_input(1024, 768, None).unwrap();
     }
 
     #[test]
