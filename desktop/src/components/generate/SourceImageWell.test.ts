@@ -65,7 +65,8 @@ describe("SourceImageWell", () => {
     // asking for the editor anyway does nothing.
     expect(wrapper.vm.maskAvailable).toBe(false);
     expect(wrapper.find("[data-test='mask-well']").exists()).toBe(false);
-    wrapper.vm.openMaskEditor();
+    expect(wrapper.vm.openMaskEditor).toBeTypeOf("function");
+    wrapper.vm.openMaskEditor?.();
     await flushPromises();
     expect(wrapper.findComponent(MaskEditorModal).props("open")).toBe(false);
 
@@ -73,7 +74,7 @@ describe("SourceImageWell", () => {
     await flushPromises();
     expect(wrapper.vm.maskAvailable).toBe(true);
     expect(wrapper.find("[data-test='mask-well']").exists()).toBe(true);
-    wrapper.vm.openMaskEditor();
+    wrapper.vm.openMaskEditor?.();
     await flushPromises();
     wrapper.findComponent(MaskEditorModal).vm.$emit("apply", "MASKB64");
     await flushPromises();

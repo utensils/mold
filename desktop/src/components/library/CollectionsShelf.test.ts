@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import CollectionCard from "./CollectionCard.vue";
-import CollectionsShelf, { type ShelfCard } from "./CollectionsShelf.vue";
+import CollectionsShelf from "./CollectionsShelf.vue";
+
+type ShelfCard = InstanceType<typeof CollectionsShelf>["$props"]["cards"][number];
 
 const authedMediaStub = {
   name: "AuthedMedia",
