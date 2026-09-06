@@ -11946,7 +11946,11 @@ mod tests {
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        // Durable admission and feeder scheduling are setup for the contract
+        // below, not the latency being measured. Give them the same bounded
+        // window as the other blocking-generation fixtures under a loaded CI
+        // runner; the 200 ms status request remains the non-blocking assertion.
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !blocker.entered.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -12711,7 +12715,11 @@ mod tests {
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        // Durable admission and feeder scheduling are setup for the contract
+        // below, not the latency being measured. Give them the same bounded
+        // window as the other blocking-generation fixtures under a loaded CI
+        // runner; the 200 ms models request remains the non-blocking assertion.
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !blocker.entered.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
