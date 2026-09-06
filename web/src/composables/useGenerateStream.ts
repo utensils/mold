@@ -92,8 +92,10 @@ export interface JobProgress {
 export interface Job {
   id: string;
   /** Either a single-clip `GenerateRequestWire` or a canonical
-   * `ChainRequestWire` (Script mode on CreatePage submits the latter
-   * directly). Only `model` is read from this, so the union is safe. */
+   * `ChainRequestWire`. Create only ever produces the former — a long clip
+   * becomes a chain inside `submit()`, never in the page — so the second arm
+   * is only reachable through the exported API. Only `model` is read from
+   * this, so the union is safe. */
   request: GenerateRequestWire | ChainRequestWire;
   startedAt: number;
   controller: AbortController;
@@ -397,8 +399,11 @@ function buildChainRequest(
 }
 
 /** Returns `true` when `req` is already a canonical `ChainRequestWire` with
- * at least one stage authored — i.e. Script-mode submissions that should be
- * sent verbatim instead of re-projected through `buildChainRequest`. */
+ * at least one authored stage, which must be sent verbatim instead of being
+ * re-projected through `buildChainRequest`. No Create surface authors stages
+ * any more — a scripted sequence is `mold run --script` and the
+ * `/api/chain-jobs` API — so this now only guards the exported `submit()`
+ * against a caller that hands one in. */
 export function isPrebuiltChainRequest(
   req: GenerateRequestWire | ChainRequestWire,
 ): req is ChainRequestWire {
@@ -406,11 +411,11 @@ export function isPrebuiltChainRequest(
   return Array.isArray(stages) && stages.length > 0;
 }
 
-/** Decide which wire body to send for a chain submission. Script-mode
- * callers pass a `ChainRequestWire` with populated `stages` — that goes
- * through untouched. Single-prompt callers pass a `GenerateRequestWire`
- * whose `frames` crossed the per-clip cap; those get projected into the
- * auto-expand form.
+/** Decide which wire body to send for a chain submission. Create passes a
+ * `GenerateRequestWire` whose `frames` crossed the per-clip cap; that gets
+ * projected into the auto-expand form. A caller that already holds a
+ * `ChainRequestWire` with populated `stages` has it passed through untouched
+ * — nothing in the app builds one, but the union is part of the exported API.
  *
  * Exported so unit tests can cover the branching without mocking SSE. */
 export function resolveChainRequest(

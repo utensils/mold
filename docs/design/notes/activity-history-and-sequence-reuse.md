@@ -1,10 +1,19 @@
 # Activity is present tense — job visibility + sequence reuse from the Library
 
-**Status (2026-08-30):** shipped. `studio/lib/activity.ts` and
-`studio/lib/sequenceReuse.ts` are the landed modules, and CLAUDE.md's
-"Activity-is-present-tense invariant" and "Sequence-reuse invariant" are the
-maintained statements of the rules. This note is kept as the design record;
-symbols that moved after landing are repointed inline below.
+**Status (2026-09-06):** shipped, then half retired. Part A's **rule** is
+still live — `studio/lib/activity.ts` is the landed module and
+`.claude/rules/studio-web.md`'s "Activity-is-present-tense invariant" is the
+maintained statement of it — but the strip's **sequence arm** is gone with
+scene-by-scene authoring: no sequence rows, no settled-sequence digest chip,
+no History ▸ Sequences tab (A.4), no maintenance footer. All of **Part B** is
+retired with it; `studio/lib/sequenceReuse.ts`, `studio/lib/sequence.ts`,
+`studio/stores/sequenceDraft.ts`, the `useChainJobs` / `chainJobs` stores and
+the `ui/` seam kit are DELETED, and CLAUDE.md's "A print made by a sequence is
+provenance, not a door back" replaces the Sequence-reuse invariant. A
+sequence is now authored only by `mold run --script` and the `/api/chain-jobs`
+API. This note is kept as the design record of what shipped in August 2026, not
+as a specification; retired sections are banner-marked inline below, and symbols
+that moved after landing are repointed inline.
 
 Design note, 2026-07-28. Follow-up to #565 (shared sequence kit), #566 (chain
 lifecycle events), #568 (desktop unified Create), the in-flight web unified-Create
@@ -44,7 +53,8 @@ present-tense work.
   sequence's settings are reused or its job re-entered.
 - **Library ▸ History** grows a third tab, **Sequences**, which is the one
   place the durable server-side job list is enumerated, maintained, and
-  cleaned up.
+  cleaned up. **RETIRED** — see A.4; the first three bullets are still the
+  rule, this one is not.
 
 This keeps the five-workspace IA intact (§04: do not re-expand it), keeps the
 spec's restraint budget (§10), and gives G2's "the Create activity strip renders
@@ -75,6 +85,11 @@ A job has three lifespans, and today all three are crammed into one surface.
 | **In flight**        | queued / running prints and sequences              | Create activity strip; sidebar **Now developing**                                                              | cancel; watch (sequence)                                                   |
 | **Needs a decision** | failed print; failed / interrupted sequence        | Create activity strip, capped and expiring                                                                     | resume, dismiss, read the error                                            |
 | **Settled**          | completed / cancelled; failed once it has aged out | canvas (the one you just watched), **Library** (the print), **Library ▸ History ▸ Sequences** (the job record) | open, edit sequence, reuse settings, delete, clear inactive, clean up disk |
+
+**RETIRED, third column.** The Settled row's third home and its
+`edit sequence` / `clear inactive` / `clean up disk` actions were History ▸
+Sequences (A.4) and are gone; a settled job is enumerated by `mold jobs list`
+alone. In-flight and needs-a-decision remain as written for prints.
 
 Two things follow that are worth stating plainly:
 
@@ -180,6 +195,14 @@ What changes:
 - Empty copy stays `nothing developing`.
 
 ## A.4 Library ▸ History ▸ Sequences (new third tab)
+
+> **RETIRED.** The third tab never survived the retirement of scene authoring.
+> Desktop's `HistoryDrawer.vue` keeps its two lenses — **Runs | Prompts** — and
+> normalizes a bookmarked `?tab=sequences` to Runs rather than rendering
+> nothing; web's copy is deleted outright along with `useChainJobs`,
+> `chainJobs.ts` and `sequenceToVM`. `mold jobs list` is the one surface that
+> still enumerates durable chain jobs. Everything below is the August 2026
+> design record.
 
 `desktop/src/components/library/HistoryDrawer.vue` already is "the past" —
 **Runs** (gallery-backed) and **Prompts** (`prompt_history`-backed), opened at
@@ -331,6 +354,15 @@ What mobile gets:
 ---
 
 # Part B — reuse a sequence's settings from the Library
+
+> **RETIRED IN FULL.** No client reuses a print as a sequence and nothing
+> re-enters a chain job for editing. Reuse on a sequence print degrades to a
+> plain one-shot restore built from the first stage's prompt — never
+> `metadata.prompt`, which is every stage newline-joined — per CLAUDE.md's "A
+> print made by a sequence is provenance, not a door back". `Edit sequence`,
+> the sequence handoff, `studio/lib/sequenceReuse.ts` and
+> `studio/stores/sequenceDraft.ts` are deleted. Everything below is the
+> August 2026 design record.
 
 ## B.1 One button, sequence-aware
 
