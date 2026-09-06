@@ -47,12 +47,12 @@ size in the CLI.
 | Order / case | Model tag suffix (`minimax-h3-fl2va:`) | Canvas / frames | Conditioning / purpose |
 | --- | --- | --- | --- |
 | A / smoke-replay | `comfy-pruned-int8-turbo-4step-768p` | 256×256 / 107 | First frame; revalidate guard and exact-current local/server identity |
-| B / intermediate | same | 768×768 / 107 | First frame; phase scaling and decoder checkpoint before default size |
-| C / default | same | 1344×768 / 124 | First frame; actual default canvas and duration, Metal/CUDA pair |
+| B / intermediate | `comfy-pruned-int8-turbo-4step-768p` | 768×768 / 107 | First frame; phase scaling and decoder checkpoint before default size |
+| C / default | `comfy-pruned-int8-turbo-4step-768p` | 1344×768 / 124 | First frame; actual default canvas and duration, Metal/CUDA pair |
 | D / base-first | `comfy-pruned-int8` | 1344×768 / 124 | First frame; base schedule and quality independently of Turbo |
-| E / base-last | same base | 768×768 / 107 | Last frame; only if current profile accepts this mode |
-| F / base-both | same base | 768×768 / 107 | First and last frames; endpoint overlap and conditioning cost |
-| G / long | original Turbo tag | 768×768 / 345 | First frame; duration scaling, only after a separate safe budget decision |
+| E / base-last | `comfy-pruned-int8` | 768×768 / 107 | Last frame; only if current profile accepts this mode |
+| F / base-both | `comfy-pruned-int8` | 768×768 / 107 | First and last frames; endpoint overlap and conditioning cost |
+| G / long | `comfy-pruned-int8-turbo-4step-768p` | 768×768 / 345 | First frame; duration scaling, only after a separate safe budget decision |
 
 Turbo 4-step is **five terminal-inclusive sigma points / four evaluations**;
 base defaults to 21 points / 20 evaluations. Resolve defaults from the exact
@@ -84,10 +84,14 @@ visual_decode, audio_decode, waveform_transfer, mux
 
 For each prefix preserve the exact `_phase_device_bytes` and
 `_phase_host_bytes`, checked sum, applicability and binding maximum. Keep
-inapplicable reference phases explicit. Metal's zero separate host increment
-means host cost is already included; it does not mean host residency is zero.
-Also retain all fields from `public_runtime_bounds_for_shape`, adapter
-resident charge, packed video/audio/condition rows, Qwen pre-merge patch
+inapplicable reference phases explicit. These per-phase host fields remain
+separate and can be nonzero on Metal: preserve every host and device value
+before summing. Only the final Metal owner grant projects the maximum combined
+phase sum into unified device bytes with a zero **additional** host claim
+(`private_server.rs::owner_fence_budget_preserves_cuda_and_projects_metal_unified_memory`).
+That owner projection must never overwrite the phase report's host columns or
+be interpreted as zero host residency. Also retain all fields from
+`public_runtime_bounds_for_shape`, adapter resident charge, packed video/audio/condition rows, Qwen pre-merge patch
 rows and merged text pads. A 256-square **base** budget cannot price row C's
 Turbo adapter or 124-frame sequence.
 
