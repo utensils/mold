@@ -97,13 +97,12 @@ const printVMs = computed<ActivityJobVM[]>(() =>
 );
 
 const partition = computed(() =>
-  partitionActivity(mergeActivity(printVMs.value, [])),
+  partitionActivity(mergeActivity(printVMs.value)),
 );
 
 /** Failed prints the strip is still holding, in partition order. */
 const errors = computed(() =>
   partition.value.attention.flatMap((vm) => {
-    if (vm.kind !== "print") return [];
     const job = props.jobs.find((j) => `print:${j.id}` === vm.key);
     return job ? [job] : [];
   }),

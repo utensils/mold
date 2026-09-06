@@ -493,6 +493,60 @@ export async function previewGenerationPlacement(
   }
 }
 
+/** Preserve chain topology and conditioning presence while removing prompt and
+ * image contents before probing another host.
+ *
+ * Scene authoring is retired, so the only chain a client builds is the
+ * automatic split of ONE long clip — but it is still a `ChainRequest` on the
+ * wire, and it is still placed through the scheduler's chain preview. */
+export function redactChainForPlacement<T extends Record<string, unknown>>(
+  request: T,
+): T {
+  const redacted: Record<string, unknown> = { ...request };
+  if (redacted.prompt !== undefined && redacted.prompt !== null)
+    redacted.prompt = "";
+  redactPresent(redacted, request, "original_prompt");
+  redactPresent(redacted, request, "source_image");
+  if (Array.isArray(request.stages)) {
+    redacted.stages = request.stages.map((value) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return value;
+      const stage = value as Record<string, unknown>;
+      const copy: Record<string, unknown> = { ...stage, prompt: "" };
+      redactPresent(copy, stage, "negative_prompt");
+      redactPresent(copy, stage, "source_image");
+      return copy;
+    });
+  }
+  return redacted as T;
+}
+
+export async function previewChainPlacement(
+  target: ApiTarget,
+  request: Record<string, unknown>,
+  copies = 1,
+  options: PlacementPreviewOptions = {},
+): Promise<GenerationPlacementPreview> {
+  const bound = placementPreviewBound(options.signal);
+  try {
+    return await apiJsonTo<GenerationPlacementPreview>(
+      target,
+      "/api/chain-jobs/placement-preview",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          request: redactChainForPlacement(request),
+          copies,
+        }),
+        ...(bound ? { signal: bound.signal } : {}),
+      },
+    );
+  } finally {
+    bound?.release();
+  }
+}
+
 export function comparePlacementPreviews(
   left: {
     hostId: string;

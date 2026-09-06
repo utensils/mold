@@ -3,8 +3,10 @@ import {
   comparePlacementPreviews,
   classifyMissingModelHold,
   classifyPlacementPreview,
+  previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  redactChainForPlacement,
   redactGenerationForPlacement,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
@@ -396,12 +398,43 @@ describe("generation placement preview", () => {
     expect(classifyPlacementPreview(preview)).toBe(expected);
   });
 
-  test("the preview probe carries a bounded timeout so a hung server can never leave planning stuck forever", async () => {
+  test("redacts every chain prompt and source while preserving topology", () => {
+    expect(
+      redactChainForPlacement({
+        model: "cv:123",
+        original_prompt: "secret original",
+        stages: [
+          {
+            prompt: "secret one",
+            frames: 97,
+            negative_prompt: "secret negative",
+            source_image: "secret image",
+          },
+          { prompt: "secret two", frames: 121, transition: "cut" },
+        ],
+      }),
+    ).toEqual({
+      model: "cv:123",
+      original_prompt: "",
+      stages: [
+        {
+          prompt: "",
+          frames: 97,
+          negative_prompt: "",
+          source_image: "",
+        },
+        { prompt: "", frames: 121, transition: "cut" },
+      ],
+    });
+  });
+
+  test("both preview probes carry a bounded timeout so a hung server can never leave planning stuck forever", async () => {
     apiJsonTo.mockClear();
     const target = { baseUrl: "http://plato:7680", apiKey: null };
     await previewGenerationPlacement(target, { model: "m", prompt: "p" });
+    await previewChainPlacement(target, { model: "m", prompt: "p" });
 
-    expect(apiJsonTo).toHaveBeenCalledTimes(1);
+    expect(apiJsonTo).toHaveBeenCalledTimes(2);
     for (const call of apiJsonTo.mock.calls) {
       const init = call[2] as RequestInit;
       expect(init.signal).toBeInstanceOf(AbortSignal);
