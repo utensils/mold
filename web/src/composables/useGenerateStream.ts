@@ -591,9 +591,12 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         // A row whose server id is known is NOT dead-lettered on boot: the
         // server may still be rendering it, and the queue reconciler can
         // prove that either way. Only a row that never received its queued
-        // frame has nothing to reconcile against.
+        // frame has nothing to reconcile against. An auto-chained long clip
+        // is durable in the same way — its identity is the chain job, which
+        // this boot re-subscribes to (#1621).
         !persisted.serverId &&
         !persisted.durableBatch &&
+        !persisted.chain?.jobId &&
         (!newestZombie || persisted.startedAt > newestZombie.startedAt)
       ) {
         newestZombie = persisted;
@@ -607,7 +610,9 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
       // settled that way before the reload.
       const detached =
         (p.state === "running" &&
-          (Boolean(p.serverId) || Boolean(p.durableBatch))) ||
+          (Boolean(p.serverId) ||
+            Boolean(p.durableBatch) ||
+            Boolean(p.chain?.jobId))) ||
         p.detached === true;
       const wasZombie = p.state === "running" && !detached;
       const state: Job["state"] = wasZombie ? "error" : p.state;
@@ -971,6 +976,7 @@ export const __testing__ = {
   reconcileDurableHost,
   handleDurableEvent,
   resetDurableLifecycleForTests,
+  recoverAutoChainJobs,
 };
 
 function createJobRecord(
@@ -1037,6 +1043,7 @@ const durableCancellations = new Map<string, Promise<void>>();
 const durableGallerySnapshots = new Map<string, Promise<GalleryImage[]>>();
 const durableGalleryRows = new Map<string, GalleryImage>();
 let durableRecoveryStarted = false;
+let autoChainRecoveryStarted = false;
 let durableWakeListenersInstalled = false;
 
 function routeSignature(route: HostRoute): string {
@@ -1917,6 +1924,49 @@ function ensureDurableEventSession(route: HostRoute): void {
   });
 }
 
+/**
+ * Re-subscribe to every auto-chained long clip this browser left running.
+ *
+ * A chain job is durable on the host: it survives the page, and a graceful
+ * shutdown parks it rather than dropping it. The id rides `chain.jobId`
+ * through localStorage, so a reload can pick the same stream back up instead
+ * of telling the user their render failed while the machine is still
+ * stitching it (#1621). Without this, relaxing the boot dead-letter would
+ * only trade a false failure for a row that runs forever.
+ *
+ * A row whose machine this browser no longer knows about keeps the honest
+ * detached ending: nothing here can reach it to ask.
+ */
+function recoverAutoChainJobs(): void {
+  if (autoChainRecoveryStarted) return;
+  autoChainRecoveryStarted = true;
+  for (const job of jobs.value) {
+    const chainJobId = job.chain?.jobId;
+    if (!chainJobId || job.state !== "running" || job.durableBatch) continue;
+    const target = routeForDetachedJob(job);
+    const hostId = job.hostId ?? ORIGIN_HOST_ID;
+    if (hostId !== ORIGIN_HOST_ID && !target) {
+      settleDetachedJob(job.id, "That machine is no longer connected.");
+      continue;
+    }
+    const route: HostRoute = {
+      hostId,
+      label: job.hostLabel ?? hostId,
+      target: target ?? { baseUrl: "" },
+    };
+    job.streamStarted = true;
+    void attachAutoChainJob(job, chainJobId, route, job.controller, (err) => {
+      // The host is unreachable or no longer holds the job. This is the
+      // detached ending, not a failure of the render: the machine may well
+      // still be working, and the print lands in the Library either way.
+      settleDetachedJob(
+        job.id,
+        err.message ?? "Lost contact with that machine.",
+      );
+    });
+  }
+}
+
 function recoverDurableLifecycle(): void {
   if (durableRecoveryStarted) return;
   durableRecoveryStarted = true;
@@ -1997,6 +2047,7 @@ function resetDurableLifecycleForTests(): void {
   durableGallerySnapshots.clear();
   durableGalleryRows.clear();
   durableRecoveryStarted = false;
+  autoChainRecoveryStarted = false;
 }
 
 function submitJobs(
@@ -2043,6 +2094,25 @@ async function followAutoChainJob(
     return;
   }
   if (job.chain) job.chain.jobId = jobId;
+  await attachAutoChainJob(job, jobId, route, controller, onError);
+}
+
+/**
+ * Follow an EXISTING chain job's event stream to settlement.
+ *
+ * Split out from the creation above because a chain job outlives the page
+ * that started it: the id is persisted, so a reload can subscribe to the same
+ * stream instead of dead-lettering work the host is still doing (#1621). The
+ * server replays the job's frames on subscribe, so a reattached stream
+ * reconstructs stage progress rather than resuming mid-count.
+ */
+async function attachAutoChainJob(
+  job: Job,
+  jobId: string,
+  route: HostRoute | null,
+  controller: AbortController,
+  onError: (err: { kind: "http" | "network"; message?: string }) => void,
+): Promise<void> {
   let live = emptyChainJobLive();
   let settled = false;
   const settle = (run: () => void) => {
@@ -2399,6 +2469,7 @@ export function useGenerateStream(
   onHeld?: (job: Job) => void,
 ): UseGenerateStream {
   recoverDurableLifecycle();
+  recoverAutoChainJobs();
   installDurableWakeListeners();
   // Per-call: register the optional `onComplete` listener and tear it
   // down when the calling component unmounts so navigating away from

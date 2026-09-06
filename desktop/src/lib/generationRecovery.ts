@@ -476,6 +476,20 @@ function settleUnreconciled(job: Job, message: string): void {
   }
 }
 
+/**
+ * Settle a job the host deliberately PARKED and is holding for a decision.
+ *
+ * Like `settleUnreconciled` this is advisory rather than a failure — the work
+ * is intact on the host — but the cause is known, so it says so. Releasing the
+ * server id matters twice over here: it stops this dead row from suppressing
+ * the host's own fleet row, and that row is the one carrying **Resume**.
+ */
+function settleParked(job: Job, message: string): void {
+  settleUnreconciled(job, message);
+  // The host did not merely stop answering; it told us it kept the work.
+  job.retainedByHost = true;
+}
+
 function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationRecoveryOptions): void {
   job.result = metadataOnlyResult(complete);
   job.visualSeed = String(complete.seed_used);
@@ -642,14 +656,23 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         });
         transportRetries = 0;
         if (settledExternally(job) || !isActive()) return;
-        if (
-          detail &&
-          (detail.state === "queued" || detail.state === "running" || detail.state === "paused")
-        ) {
-          job.stage =
-            detail.state === "paused"
-              ? `Paused after restart on ${opts.hostLabel}`
-              : `Developing on ${opts.hostLabel}`;
+        // A parked chain is waiting on a PERSON, not on the host. Graceful
+        // shutdown journals the manifest, source media, finished clips and
+        // tail cache precisely so it can be resumed, and nothing changes
+        // until someone says so — polling it is an unbounded 4s loop around
+        // a row that can never settle (#1622). Hand it back instead: the
+        // release below un-suppresses the host's own fleet row, which is
+        // where Resume lives.
+        if (detail?.state === "paused") {
+          settleParked(
+            job,
+            `${opts.hostLabel} paused this clip when it restarted. ` +
+              `Resume it from the queue to finish the render.`,
+          );
+          return;
+        }
+        if (detail && (detail.state === "queued" || detail.state === "running")) {
+          job.stage = `Developing on ${opts.hostLabel}`;
           await sleep(interval);
           continue;
         }

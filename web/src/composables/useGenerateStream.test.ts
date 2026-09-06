@@ -454,6 +454,57 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
     expect(loaded.jobs[0].progress.stage).toBe("Denoising");
   });
 
+  it("keeps a reloaded auto-chained clip running for its own chain stream", () => {
+    // A long clip the host had to split runs as a durable chain job. Its id
+    // is persisted, the job outlives the page, and the host keeps rendering
+    // and stitching — so a reload that announced "server progress lost" was
+    // reporting a failure that had not happened (#1621).
+    const raw = persistedPayload([
+      persisted({
+        id: "long-clip",
+        chain: {
+          stageCount: 3,
+          currentStage: 2,
+          estimatedTotalFrames: 291,
+          jobId: "chain-9",
+        },
+      }),
+    ]);
+
+    const loaded = __testing__.loadPersistedState(raw);
+
+    expect(loaded.canvasErrorJobId).toBeNull();
+    expect(loaded.jobs[0]).toMatchObject({
+      id: "long-clip",
+      state: "running",
+      error: null,
+      detached: true,
+      settledAt: null,
+    });
+  });
+
+  it("still dead-letters a chain row that never got its job id", () => {
+    // The chain block exists from the moment the row is created; only the id
+    // proves the host admitted it. Without one there is nothing to re-attach
+    // to, so the ordinary dead-letter is the honest answer.
+    const raw = persistedPayload([
+      persisted({
+        id: "never-admitted",
+        chain: {
+          stageCount: 3,
+          currentStage: 0,
+          estimatedTotalFrames: 291,
+          jobId: null,
+        },
+      }),
+    ]);
+
+    const loaded = __testing__.loadPersistedState(raw);
+
+    expect(loaded.canvasErrorJobId).toBe("never-admitted");
+    expect(loaded.jobs[0]).toMatchObject({ state: "error", detached: false });
+  });
+
   it("does not give settled persisted failures canvas authority", () => {
     const raw = persistedPayload([
       persisted({ id: "old-error", state: "error", error: "old failure" }),
