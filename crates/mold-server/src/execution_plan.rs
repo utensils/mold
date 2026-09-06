@@ -4912,7 +4912,6 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             .field("ltx2_gemma_variant", ltx2_gemma_variant)
             .field("selected_t5_path", selected_t5_path)
             .field("selected_qwen3_paths", selected_qwen3_paths)
-            .field("paint_assets", paint_assets)
             .field("selected_qwen2_path", selected_qwen2_path)
             .field("selected_gemma_paths", selected_gemma_paths);
         // Both UMT5 fields are emitted only when present, so every fingerprint
@@ -4927,6 +4926,12 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
         // identity conditioning keeps its exact bytes.
         if let Some(identity) = identity_assets {
             debug.field("identity_assets", identity);
+        }
+        // Emitted only when present, so every fingerprint that predates PBR
+        // paint keeps its exact bytes while paint asset changes still force a
+        // distinct execution identity.
+        if let Some(paint) = paint_assets {
+            debug.field("paint_assets", paint);
         }
         if let Some(authority) = h3_factory_authority {
             debug.field("h3_factory_authority", &authority.identity_sha256());
@@ -8132,6 +8137,27 @@ mod tests {
                 false,
             ),
             "the storage trust root is not part of execution identity"
+        );
+
+        let mut paint_config = engine_config.clone();
+        paint_config.paint_assets = Some(mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths {
+            unet: PathBuf::from("/models/paint/unet.bin"),
+            vae: PathBuf::from("/models/paint/vae.bin"),
+            dino: PathBuf::from("/models/paint/dino.safetensors"),
+            upscaler: PathBuf::from("/models/paint/upscaler.safetensors"),
+        });
+        assert_ne!(
+            fingerprint,
+            execution_fingerprint(
+                "cv:opaque",
+                &device,
+                &effective,
+                &components,
+                &paint_config,
+                &[],
+                false,
+            ),
+            "paint assets are execution inputs when they are present"
         );
     }
 
