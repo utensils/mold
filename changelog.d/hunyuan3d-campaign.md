@@ -1,2 +1,3 @@
 - **Hunyuan3D 2.1 shape.** Image-to-mesh generation with the MoE shape transformer, DINOv2-large conditioner and separate 2.1 licence gate.
 - **Mesh admission.** Price the selected checkpoint’s latent set and encoder size, including canvasless mini requests.
+- **Mesh geometry.** Read all static GLB scene primitives with their transforms and interleaved attributes, and reject accessors that escape their declared buffers.

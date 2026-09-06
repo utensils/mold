@@ -437,27 +437,25 @@ pub enum GlbReadError {
     Malformed(String),
 }
 
-/// Parse a binary glTF file back into a [`Mesh`].
+#[path = "glb_scene.rs"]
+mod scene;
+
+/// Flatten the selected static binary glTF scene into a [`Mesh`].
 ///
-/// Scoped ON PURPOSE to what mold itself writes plus the small neighbourhood
-/// around it: ONE mesh, ONE triangle primitive, float `VEC3` positions, an
-/// optional float `NORMAL`/`TEXCOORD_0`, optional float `COLOR_0`, and
-/// `u16`/`u32` indices, all in the embedded BIN chunk. It is the input half of
-/// the gallery's OBJ/STL/PLY exports, not a general glTF importer: anything
-/// outside that envelope is refused by name rather than silently
-/// mis-converted, because a wrong answer here becomes a file the user opens in
-/// another program and believes.
+/// Applies parent transforms, inverse-transpose normals and reflected winding
+/// to every triangle primitive. Reads embedded float attributes and unsigned
+/// indices. Unsupported compression, posed geometry and external resources are
+/// refused explicitly. Material images are not part of the returned geometry.
 pub fn read_glb(bytes: &[u8]) -> Result<Mesh, GlbReadError> {
     let (json, bin) = split_glb_chunks(bytes)?;
+    scene::read_mesh(&json, bin)
+}
 
-    let primitive = json
-        .get("meshes")
-        .and_then(|meshes| meshes.get(0))
-        .and_then(|mesh| mesh.get("primitives"))
-        .and_then(|primitives| primitives.get(0))
-        .ok_or(GlbReadError::Unsupported(
-            "the file contains no mesh primitive".to_string(),
-        ))?;
+fn read_primitive(
+    json: &serde_json::Value,
+    bin: &[u8],
+    primitive: &serde_json::Value,
+) -> Result<Mesh, GlbReadError> {
     if let Some(mode) = primitive.get("mode").and_then(serde_json::Value::as_u64) {
         if mode != u64::from(MODE_TRIANGLES) {
             return Err(GlbReadError::Unsupported(format!(
@@ -478,27 +476,27 @@ pub fn read_glb(bytes: &[u8]) -> Result<Mesh, GlbReadError> {
         .ok_or(GlbReadError::Unsupported(
             "the primitive has no POSITION attribute".to_string(),
         ))?;
-    let vertices = read_vec3(&json, bin, position_index, "POSITION")?;
+    let vertices = read_vec3(json, bin, position_index, "POSITION")?;
     let normals = match attributes.get("NORMAL").and_then(serde_json::Value::as_u64) {
-        Some(index) => Some(read_vec3(&json, bin, index, "NORMAL")?),
+        Some(index) => Some(read_vec3(json, bin, index, "NORMAL")?),
         None => None,
     };
     let vertex_colors = match attributes
         .get("COLOR_0")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(index) => Some(read_vec3(&json, bin, index, "COLOR_0")?),
+        Some(index) => Some(read_vec3(json, bin, index, "COLOR_0")?),
         None => None,
     };
     let uvs = match attributes
         .get("TEXCOORD_0")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(index) => Some(read_vec2(&json, bin, index, "TEXCOORD_0")?),
+        Some(index) => Some(read_vec2(json, bin, index, "TEXCOORD_0")?),
         None => None,
     };
     let faces = match primitive.get("indices").and_then(serde_json::Value::as_u64) {
-        Some(index) => read_indices(&json, bin, index)?,
+        Some(index) => read_indices(json, bin, index)?,
         // An unindexed primitive is a legal glTF: consecutive triples.
         None => (0..vertices.len() as u32 / 3)
             .map(|triangle| [triangle * 3, triangle * 3 + 1, triangle * 3 + 2])
@@ -607,7 +605,7 @@ fn accessor_bytes<'a>(
     expected_type: &str,
     expected_components: usize,
     component_size: usize,
-) -> Result<(&'a [u8], usize), GlbReadError> {
+) -> Result<(&'a [u8], usize, usize), GlbReadError> {
     let accessor = json
         .get("accessors")
         .and_then(|accessors| accessors.get(accessor_index as usize))
@@ -661,11 +659,17 @@ fn accessor_bytes<'a>(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as usize;
     let element = expected_components * component_size;
-    if stride != 0 && stride != element {
+    if stride != 0
+        && (stride < element
+            || stride > 252
+            || !stride.is_multiple_of(4)
+            || expected_type == "SCALAR")
+    {
         return Err(GlbReadError::Unsupported(format!(
-            "interleaved buffer views are not read (byteStride {stride})"
+            "invalid byteStride {stride}"
         )));
     }
+    let stride = if stride == 0 { element } else { stride };
     // Every figure here is a JSON-supplied u64, so the arithmetic is checked
     // end to end: a foreign file with an absurd count or offset is a
     // Malformed error, never an overflow panic that `spawn_blocking` turns
@@ -684,14 +688,32 @@ fn accessor_bytes<'a>(
     let offset = view_offset
         .checked_add(accessor_offset)
         .ok_or_else(out_of_range)?;
-    let end = count
-        .checked_mul(element as u64)
-        .and_then(|len| offset.checked_add(len))
+    let view_length = view
+        .get("byteLength")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| GlbReadError::Malformed("bufferView has no byteLength".into()))?;
+    let view_end = view_offset
+        .checked_add(view_length)
         .filter(|end| *end <= bin.len() as u64)
+        .ok_or_else(out_of_range)?;
+    if !offset.is_multiple_of(component_size as u64) {
+        return Err(GlbReadError::Malformed("unaligned accessor offset".into()));
+    }
+    let span = if count == 0 {
+        Some(0)
+    } else {
+        (count - 1)
+            .checked_mul(stride as u64)
+            .and_then(|size| size.checked_add(element as u64))
+    }
+    .ok_or_else(out_of_range)?;
+    let end = offset
+        .checked_add(span)
+        .filter(|end| *end <= view_end)
         .ok_or_else(out_of_range)?;
     // Both fit in usize now: `end` is bounded by `bin.len()`.
     let (offset, end) = (offset as usize, end as usize);
-    Ok((&bin[offset..end], count as usize))
+    Ok((&bin[offset..end], count as usize, stride))
 }
 
 fn component_type(json: &serde_json::Value, accessor_index: u64) -> u32 {
@@ -718,13 +740,14 @@ fn read_vec3(
             "{name} is not stored as float"
         )));
     }
-    let (bytes, count) = accessor_bytes(json, bin, accessor_index, "VEC3", 3, 4)?;
+    let (bytes, count, stride) = accessor_bytes(json, bin, accessor_index, "VEC3", 3, 4)?;
     Ok((0..count)
         .map(|i| {
+            let element = &bytes[i * stride..i * stride + 12];
             [
-                read_f32(bytes, i * 3),
-                read_f32(bytes, i * 3 + 1),
-                read_f32(bytes, i * 3 + 2),
+                read_f32(element, 0),
+                read_f32(element, 1),
+                read_f32(element, 2),
             ]
         })
         .collect())
@@ -741,9 +764,12 @@ fn read_vec2(
             "{name} is not stored as float"
         )));
     }
-    let (bytes, count) = accessor_bytes(json, bin, accessor_index, "VEC2", 2, 4)?;
+    let (bytes, count, stride) = accessor_bytes(json, bin, accessor_index, "VEC2", 2, 4)?;
     Ok((0..count)
-        .map(|i| [read_f32(bytes, i * 2), read_f32(bytes, i * 2 + 1)])
+        .map(|i| {
+            let element = &bytes[i * stride..i * stride + 8];
+            [read_f32(element, 0), read_f32(element, 1)]
+        })
         .collect())
 }
 
@@ -763,19 +789,20 @@ fn read_indices(
             )))
         }
     };
-    let (bytes, count) = accessor_bytes(json, bin, accessor_index, "SCALAR", 1, size)?;
+    let (bytes, count, stride) = accessor_bytes(json, bin, accessor_index, "SCALAR", 1, size)?;
     if !count.is_multiple_of(3) {
         return Err(GlbReadError::Malformed(format!(
             "the index count ({count}) is not a whole number of triangles"
         )));
     }
     let at = |i: usize| -> u32 {
+        let start = i * stride;
         match size {
-            4 => u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("4 bytes")),
+            4 => u32::from_le_bytes(bytes[start..start + 4].try_into().expect("4 bytes")),
             2 => u32::from(u16::from_le_bytes(
-                bytes[i * 2..i * 2 + 2].try_into().expect("2 bytes"),
+                bytes[start..start + 2].try_into().expect("2 bytes"),
             )),
-            _ => u32::from(bytes[i]),
+            _ => u32::from(bytes[start]),
         }
     };
     Ok((0..count / 3)
@@ -1348,6 +1375,111 @@ mod tests {
         assert_eq!(parsed, mesh);
     }
 
+    #[test]
+    fn read_glb_flattens_all_primitives_through_parent_transforms() {
+        let mesh = triangle_mesh();
+        let parsed = parse_glb(&write_glb(&mesh, &GlbMaterial::default(), None).unwrap());
+        let mut json = parsed.json.clone();
+        let primitive = json["meshes"][0]["primitives"][0].clone();
+        json["meshes"][0]["primitives"] = serde_json::json!([primitive, primitive]);
+        json["nodes"] = serde_json::json!([
+            {"translation": [10., 0., 0.], "children": [1]},
+            {"mesh": 0, "translation": [0., 3., 0.], "scale": [2., 2., 2.]}
+        ]);
+        json["scenes"] = serde_json::json!([{"nodes": [0]}]);
+        json["scene"] = serde_json::json!(0);
+        let output = read_glb(&rebuild_glb(&json, &parsed.bin)).unwrap();
+        assert_eq!(output.faces.len(), mesh.faces.len() * 2);
+        assert_eq!(output.vertices.len(), mesh.vertices.len() * 2);
+        for (input, output) in mesh.vertices.iter().zip(&output.vertices) {
+            assert_eq!(
+                *output,
+                [input[0] * 2. + 10., input[1] * 2. + 3., input[2] * 2.]
+            );
+        }
+    }
+
+    #[test]
+    fn read_glb_respects_the_selected_scene() {
+        let parsed =
+            parse_glb(&write_glb(&triangle_mesh(), &GlbMaterial::default(), None).unwrap());
+        let mut json = parsed.json.clone();
+        json["nodes"] = serde_json::json!([
+            {"mesh": 0, "translation": [9., 0., 0.]}, {"mesh": 0, "translation": [2., 0., 0.]}
+        ]);
+        json["scenes"] = serde_json::json!([{"nodes": [0]}, {"nodes": [1]}]);
+        json["scene"] = serde_json::json!(1);
+        let output = read_glb(&rebuild_glb(&json, &parsed.bin)).unwrap();
+        assert_eq!(output.vertices[0][0], triangle_mesh().vertices[0][0] + 2.);
+    }
+
+    #[test]
+    fn read_glb_refuses_cycles_skinning_and_unknown_required_extensions() {
+        let parsed =
+            parse_glb(&write_glb(&triangle_mesh(), &GlbMaterial::default(), None).unwrap());
+        for change in [
+            (|json: &mut serde_json::Value| {
+                json["nodes"][0]["children"] = serde_json::json!([0]);
+            }) as fn(&mut serde_json::Value),
+            |json| {
+                json["nodes"][0]["skin"] = serde_json::json!(0);
+            },
+            |json| {
+                json["extensionsRequired"] = serde_json::json!(["KHR_draco_mesh_compression"]);
+            },
+            |json| {
+                json["nodes"][0]["matrix"] =
+                    serde_json::json!([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+                json["nodes"][0]["translation"] = serde_json::json!([1, 2, 3]);
+            },
+        ] {
+            let mut json = parsed.json.clone();
+            change(&mut json);
+            assert!(read_glb(&rebuild_glb(&json, &parsed.bin)).is_err());
+        }
+    }
+
+    #[test]
+    fn read_glb_transforms_normals_and_reflected_winding() {
+        let mut mesh = triangle_mesh();
+        let n = 1.0 / 2.0f32.sqrt();
+        mesh.normals = Some(vec![[n, n, 0.]; mesh.vertices.len()]);
+        let parsed = parse_glb(&write_glb(&mesh, &GlbMaterial::default(), None).unwrap());
+        let mut json = parsed.json.clone();
+        json["nodes"][0]["scale"] = serde_json::json!([-1., 2., 3.]);
+        let output = read_glb(&rebuild_glb(&json, &parsed.bin)).unwrap();
+        assert_eq!(
+            output.faces[0],
+            [mesh.faces[0][0], mesh.faces[0][2], mesh.faces[0][1]]
+        );
+        let actual = output.normals.unwrap()[0];
+        assert!((actual[0] + 2.0 / 5.0f32.sqrt()).abs() < 1e-6);
+        assert!((actual[1] - 1.0 / 5.0f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn read_glb_refuses_shear_and_nonfinite_vertex_attributes() {
+        let mut mesh = triangle_mesh();
+        mesh.normals = Some(vec![[0., 0., 1.]; mesh.vertices.len()]);
+        let parsed = parse_glb(&write_glb(&mesh, &GlbMaterial::default(), None).unwrap());
+        let mut json = parsed.json.clone();
+        json["nodes"][0]["matrix"] =
+            serde_json::json!([1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+        assert!(read_glb(&rebuild_glb(&json, &parsed.bin)).is_err());
+        let accessor = parsed.json["meshes"][0]["primitives"][0]["attributes"]["NORMAL"]
+            .as_u64()
+            .unwrap() as usize;
+        let view = parsed.json["accessors"][accessor]["bufferView"]
+            .as_u64()
+            .unwrap() as usize;
+        let offset = parsed.json["bufferViews"][view]["byteOffset"]
+            .as_u64()
+            .unwrap() as usize;
+        let mut bin = parsed.bin.clone();
+        bin[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(read_glb(&rebuild_glb(&parsed.json, &bin)).is_err());
+    }
+
     /// A real extracted mesh, not a hand-built one: the writer is fed the
     /// surface-net output and the reader must recover every vertex.
     #[test]
@@ -1372,6 +1504,38 @@ mod tests {
     /// Every refusal is by NAME. An export error is shown to a user looking
     /// at a file in their own gallery, so "not a GLB" and "a GLB shape this
     /// reader does not cover" must not collapse into one message.
+    #[test]
+    fn read_glb_accessor_cannot_escape_its_buffer_view() {
+        let parsed =
+            parse_glb(&write_glb(&triangle_mesh(), &GlbMaterial::default(), None).unwrap());
+        let mut json = parsed.json.clone();
+        json["bufferViews"][0]["byteLength"] = serde_json::json!(4);
+        assert!(read_glb(&rebuild_glb(&json, &parsed.bin)).is_err());
+    }
+
+    #[test]
+    fn read_glb_reads_interleaved_positions_without_padding() {
+        let mesh = triangle_mesh();
+        let parsed = parse_glb(&write_glb(&mesh, &GlbMaterial::default(), None).unwrap());
+        let mut json = parsed.json.clone();
+        let mut bin = parsed.bin.clone();
+        let offset = bin.len();
+        for position in &mesh.vertices {
+            for component in position {
+                bin.extend_from_slice(&component.to_le_bytes());
+            }
+            bin.extend_from_slice(&f32::NAN.to_le_bytes());
+        }
+        json["bufferViews"][0]["byteOffset"] = serde_json::json!(offset);
+        json["bufferViews"][0]["byteLength"] = serde_json::json!(mesh.vertices.len() * 16);
+        json["bufferViews"][0]["byteStride"] = serde_json::json!(16);
+        json["buffers"][0]["byteLength"] = serde_json::json!(bin.len());
+        assert_eq!(
+            read_glb(&rebuild_glb(&json, &bin)).unwrap().vertices,
+            mesh.vertices
+        );
+    }
+
     #[test]
     fn read_glb_refuses_foreign_layouts() {
         assert!(matches!(
@@ -1409,7 +1573,7 @@ mod tests {
                 json["accessors"][0]["componentType"] = serde_json::json!(5120);
             },
             |json: &mut serde_json::Value| {
-                json["bufferViews"][0]["byteStride"] = serde_json::json!(16);
+                json["bufferViews"][0]["byteStride"] = serde_json::json!(10);
             },
         ] {
             let mut json = parsed.json.clone();

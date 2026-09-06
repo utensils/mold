@@ -7,6 +7,7 @@ capture runner. Python and native Tencent code are reference-only dependencies.
 
 import argparse
 import json
+import os
 import importlib
 from pathlib import Path
 import subprocess
@@ -32,6 +33,15 @@ def main():
     root = args.upstream.resolve()
     cache = args.cache.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
+    # Probe export before expensive model work, using the identical native
+    # process environment for both the version query and actual export.
+    blender_environment = os.environ.copy()
+    for name in ["LD_LIBRARY_PATH", "LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "PYTHONHOME"]:
+        blender_environment.pop(name, None)
+    blender_version = subprocess.check_output(
+        [str(cache / "native/blender/bin/blender"), "--version"],
+        text=True, env=blender_environment,
+    ).splitlines()[0]
     import faulthandler
     faulthandler.enable()
     sys.path[:0] = [str(root), str(root / "hy3dpaint")]
@@ -113,7 +123,7 @@ def main():
                         "--factory-startup", "--python-exit-code", "1", "--python",
                         str(Path(__file__).with_name("capture-hunyuan3d-blender-export.py").resolve()),
                         "--", "--upstream", str(root), "--input", obj_path,
-                        "--output", glb_path], check=True)
+                        "--output", glb_path], check=True, env=blender_environment)
         return True
     textureGenPipeline.convert_obj_to_glb = export_glb
     original_uv = textureGenPipeline.mesh_uv_wrap
@@ -158,7 +168,7 @@ def main():
         "view_size": 512, "render_size": config.render_size, "remesh": False,
         "torch": torch.__version__, "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
         "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
-        "blender": subprocess.check_output([str(cache / "native/blender/bin/blender"), "--version"], text=True).splitlines()[0],
+        "blender": blender_version,
         "export_note": "Unmodified Tencent exporter in native Blender; embedded bpy teardown crashes on Nix.",
     }, indent=2) + "\n")
     print("Paint artifacts and measurements retained", flush=True)

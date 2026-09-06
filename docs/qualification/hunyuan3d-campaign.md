@@ -89,6 +89,28 @@ loader without replacing network or rendering computations.
   after teardown crashes; the complete reference repeat uses the native exporter.
   This is an export-environment deviation, not a change to model mathematics.
 
+## Static GLB ingestion and oracle export corrections
+
+- GLB geometry ingestion now flattens every triangle primitive in the selected
+  scene, composing parent TRS/matrices, inverse-transpose normals and reflected
+  winding. Cycles, excessive depth, skinning, morph targets, required extensions,
+  external resources, local shear and nonfinite attributes are refused.
+- Interleaved float attributes are read with their declared stride. Accessors
+  are bounded by their own buffer view as well as the BIN chunk: the new boundary
+  regression failed on the previous reader (`glb-view-bounds-red-v1.log`).
+- `mesh-import-green-v2.log`: 153 tests pass, one pretrained CUDA test ignored.
+  Scene, shear and interleaving red/green logs remain beside that result.
+- The retained real-mesh unwrap exposed xatlas's intentional uncharted slivers
+  (`xatlas.cpp:9688–9701`, `atlasIndex = -1`, zero UVs). The bridge now preserves
+  them just as xatlas-python does. `uv-sliver-red-v1.log` reproduces the refusal;
+  `uv-sliver-green-v1.log` passes all six UV tests. The full-mesh repeat is pending.
+- `capture-20260906T044756Z-08905857bcb7` produced 4096-pixel albedo/MR maps and
+  `textured.glb`, but remains FAILED: its final Blender version query inherited
+  incompatible library paths and prevented measurement metadata publication.
+  Export itself succeeded with a clean environment. Both native invocations now
+  share that environment, and the version probe runs before model loading.
+  The repeat is `capture-20260906T045720Z-89be259ea074`; no success is assumed.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

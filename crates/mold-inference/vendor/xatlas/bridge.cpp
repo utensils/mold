@@ -35,7 +35,10 @@ extern "C" void *mold_xatlas_generate(const float *positions, uint32_t vertex_co
         const auto &output = atlas->meshes[0];
         if (!output.vertexCount || output.indexCount != index_count) return nullptr;
         for (uint32_t i = 0; i < output.vertexCount; ++i) {
-            if (output.vertexArray[i].atlasIndex != 0 || output.vertexArray[i].xref >= vertex_count) return nullptr;
+            // xatlas.cpp:9688-9701 deliberately retains uncharted slivers with
+            // atlasIndex -1 and UV (0,0). xatlas-python returns those too.
+            if (output.vertexArray[i].atlasIndex < -1 || output.vertexArray[i].atlasIndex > 0 ||
+                output.vertexArray[i].xref >= vertex_count) return nullptr;
         }
         *out_vertices = output.vertexCount;
         *out_indices = output.indexCount;

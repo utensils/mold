@@ -247,6 +247,43 @@ mod tests {
     }
 
     #[test]
+    fn unwrap_preserves_geometry_with_unused_source_vertices() {
+        let mut source = tetrahedron();
+        source.vertices.push([0., 0., 0.]);
+        source.normals.as_mut().unwrap().push([0., 0., 1.]);
+        source.vertex_colors.as_mut().unwrap().push([1., 1., 1.]);
+        let output = unwrap(&source, &AtomicBool::new(false)).unwrap();
+        assert_eq!(output.faces.len(), source.faces.len());
+        for (old, new) in source.faces.iter().zip(&output.faces) {
+            for (&old, &new) in old.iter().zip(new) {
+                assert_eq!(source.vertices[old as usize], output.vertices[new as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn unwrap_preserves_slivers_that_xatlas_leaves_out_of_charts() {
+        let mut source = tetrahedron();
+        source
+            .vertices
+            .extend([[0., 0., 0.], [1e-8, 0., 0.], [0., 1e-8, 0.]]);
+        source.faces.push([4, 5, 6]);
+        source.normals.as_mut().unwrap().extend([[0., 0., 1.]; 3]);
+        source
+            .vertex_colors
+            .as_mut()
+            .unwrap()
+            .extend([[1., 1., 1.]; 3]);
+        let output = unwrap(&source, &AtomicBool::new(false)).unwrap();
+        assert_eq!(output.faces.len(), source.faces.len());
+        let last = output.faces.last().unwrap();
+        for (&old, &new) in source.faces.last().unwrap().iter().zip(last) {
+            assert_eq!(source.vertices[old as usize], output.vertices[new as usize]);
+            assert_eq!(output.uvs.as_ref().unwrap()[new as usize], [0., 0.]);
+        }
+    }
+
+    #[test]
     fn unwrap_honors_cancellation() {
         assert!(unwrap(&tetrahedron(), &AtomicBool::new(true)).is_err());
     }
