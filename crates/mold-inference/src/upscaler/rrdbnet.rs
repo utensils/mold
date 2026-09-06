@@ -186,8 +186,18 @@ impl RRDBNet {
         })
     }
 
+    #[cfg(test)]
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         self.forward_with_observer(xs, |_, _| Ok(()))
+    }
+
+    pub fn forward_with_checkpoint(
+        &self,
+        xs: &Tensor,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<Tensor> {
+        checkpoint()?;
+        self.forward_with_observer(xs, |_, _| checkpoint())
     }
 
     fn forward_with_observer(
@@ -242,6 +252,43 @@ mod tests {
     use super::*;
     use candle_core::{DType, Device};
     use candle_nn::VarMap;
+
+    #[test]
+    fn rrdb_cancellation_at_every_boundary_preserves_reuse() -> Result<()> {
+        let (_weights, model) = build_test_rrdbnet(4, 2, 2, 4);
+        let input = Tensor::randn(0f32, 0.1, (1, 3, 2, 2), &Device::Cpu)?;
+        let expected = model.forward(&input)?.flatten_all()?.to_vec1::<f32>()?;
+        let mut boundaries = 0;
+        let actual = model.forward_with_checkpoint(&input, || {
+            boundaries += 1;
+            Ok(())
+        })?;
+        assert_eq!(actual.flatten_all()?.to_vec1::<f32>()?, expected);
+        // Entry + first convolution + two RRDBs + body/up1/up2/hr/last.
+        assert_eq!(boundaries, 9);
+        for stop in 1..=boundaries {
+            let token = crate::progress::InferenceCancellationToken::default();
+            let mut progress = crate::progress::ProgressReporter::default();
+            progress.set_cancellation_token(token.clone());
+            let mut visited = 0;
+            let error = model
+                .forward_with_checkpoint(&input, || {
+                    visited += 1;
+                    if visited == stop {
+                        token.cancel();
+                    }
+                    Ok(progress.checkpoint()?)
+                })
+                .unwrap_err();
+            assert!(crate::progress::is_inference_cancelled(&error));
+            assert_eq!(visited, stop);
+            assert_eq!(
+                model.forward(&input)?.flatten_all()?.to_vec1::<f32>()?,
+                expected
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     #[cfg(feature = "cuda")]

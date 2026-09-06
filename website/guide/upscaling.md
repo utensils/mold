@@ -4,6 +4,8 @@ mold supports image upscaling using Real-ESRGAN super-resolution models. Upscale
 
 RRDB models use float32 scalar arithmetic for their half-precision residuals and activations, matching upstream Torch. This precision correction can change pixels produced by earlier mold versions.
 
+Cancellation is checked between RRDB blocks and tiles, and before returning the encoded image. A GPU convolution already in progress must finish before the next cancellation check.
+
 ## Quick Start
 
 ```bash

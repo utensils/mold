@@ -167,7 +167,10 @@ where
             total: 1,
             elapsed: std::time::Duration::ZERO,
         });
-        return forward_fn(input);
+        progress.checkpoint()?;
+        let output = forward_fn(input)?;
+        progress.checkpoint()?;
+        return Ok(output);
     }
 
     let tiles = calculate_tiles(img_w, img_h, config);
@@ -195,6 +198,7 @@ where
 
         // Run upscaler on this tile
         let tile_output = forward_fn(&tile_input)?;
+        progress.checkpoint()?;
         let tile_output = tile_output.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
 
         // Get tile output as flat f32 vec [C, H, W]
@@ -221,6 +225,7 @@ where
         // Accumulate weighted output and weights
         for c in 0..3 {
             for row in 0..out_th {
+                progress.checkpoint()?;
                 for col in 0..out_tw {
                     let w = weight_data[row * out_tw + col];
                     let val = tile_data[c * out_th * out_tw + row * out_tw + col];
@@ -244,6 +249,9 @@ where
     // Normalize by weight sum
     for c in 0..3 {
         for i in 0..out_h * out_w {
+            if i % 4096 == 0 {
+                progress.checkpoint()?;
+            }
             if weight_acc[i] > 0.0 {
                 output_acc[c * out_h * out_w + i] /= weight_acc[i];
             }
@@ -252,12 +260,49 @@ where
 
     // Convert back to tensor
     let output = Tensor::from_vec(output_acc, (1, 3, out_h, out_w), device)?;
+    progress.checkpoint()?;
     Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_during_last_forward_never_returns_an_image() {
+        use std::cell::Cell;
+        for tile_size in [2, 8] {
+            let device = Device::Cpu;
+            let input = Tensor::zeros((1, 3, 4, 4), DType::F32, &device).unwrap();
+            let config = TilingConfig {
+                tile_size,
+                overlap: 0,
+                min_tile_size: 1,
+            };
+            let count = calculate_tiles(4, 4, &config).len();
+            let token = crate::progress::InferenceCancellationToken::default();
+            let mut progress = ProgressReporter::default();
+            progress.set_cancellation_token(token.clone());
+            let calls = Cell::new(0);
+            let result = upscale_with_tiling(
+                &input,
+                &|tensor| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == count {
+                        token.cancel();
+                    }
+                    Ok(tensor.clone())
+                },
+                1,
+                &config,
+                &device,
+                &progress,
+            );
+            assert_eq!(calls.get(), count);
+            let error = result.expect_err("cancelled final forward must not return output");
+            assert!(crate::progress::is_inference_cancelled(&error));
+        }
+    }
 
     #[test]
     fn cancelled_attempt_stops_before_first_upscale_tile() {

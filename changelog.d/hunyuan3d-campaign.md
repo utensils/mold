@@ -3,3 +3,4 @@
 - **Mesh geometry.** Read all static GLB scene primitives with their transforms and interleaved attributes, and reject accessors that escape their declared buffers.
 - **CUDA half-precision convolutions.** Use float32 accumulation for cuDNN Conv1D and Conv2D with float16 tensors, reducing accumulated numerical error while preserving float16 storage.
 - **Real-ESRGAN precision.** Keep RRDB residual and LeakyReLU scalars in float32 before rounding half-precision activations, matching upstream Torch arithmetic.
+- **Upscaler cancellation.** Stop RRDB inference between network blocks and reject cancellation during the final tile or output encoding before returning an image.

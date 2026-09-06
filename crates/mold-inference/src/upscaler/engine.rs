@@ -344,10 +344,11 @@ enum LoadedModel {
 }
 
 impl LoadedModel {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, progress: &ProgressReporter) -> Result<Tensor> {
+        progress.checkpoint()?;
         match self {
             LoadedModel::SRVGGNet(m) => m.forward(xs),
-            LoadedModel::RRDBNet(m) => m.forward(xs),
+            LoadedModel::RRDBNet(m) => m.forward_with_checkpoint(xs, || Ok(progress.checkpoint()?)),
         }
     }
 }
@@ -474,7 +475,8 @@ impl UpscaleEngine for UpscalerEngine {
 
         // Build the forward function closure — captures the loaded model state
         let loaded = self.loaded.as_ref().unwrap();
-        let forward_fn = |tile: &Tensor| -> Result<Tensor> { loaded.model.forward(tile) };
+        let forward_fn =
+            |tile: &Tensor| -> Result<Tensor> { loaded.model.forward(tile, &self.progress) };
 
         let output = upscale_with_tiling(
             &input,
@@ -491,6 +493,7 @@ impl UpscaleEngine for UpscalerEngine {
             upscale_start.elapsed(),
         );
         self.progress.stage_start("Encoding output");
+        self.progress.checkpoint()?;
         let encode_start = Instant::now();
 
         // Convert output tensor to image bytes
@@ -534,6 +537,7 @@ impl UpscaleEngine for UpscalerEngine {
             self.unload();
         }
 
+        self.progress.checkpoint()?;
         Ok(mold_core::UpscaleResponse {
             image: mold_core::ImageData {
                 data: encoded,

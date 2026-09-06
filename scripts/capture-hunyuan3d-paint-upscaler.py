@@ -87,9 +87,15 @@ def main():
     image.save(args.output / "input.png")
     network = imageSuperNet(SimpleNamespace(realesrgan_ckpt_path=str(args.pth)))
     captured = {}
+    layouts = {}
 
     def hook(name):
         def capture(module, inputs, output):
+            layouts[name] = {
+                "input_stride": inputs[0].stride(), "output_stride": output.stride(),
+                "input_channels_last": inputs[0].is_contiguous(memory_format=torch.channels_last),
+                "output_channels_last": output.is_contiguous(memory_format=torch.channels_last),
+            }
             captured[name] = output.detach().cpu().contiguous().clone()
             if name == "conv_first":
                 captured["input"] = inputs[0].detach().cpu().contiguous().clone()
@@ -108,6 +114,7 @@ def main():
     metadata["seconds"] = time.monotonic() - start
     metadata["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
     metadata["input_size"] = image.size
+    metadata["layouts"] = layouts
     result.save(args.output / "expected.png")
     save_file(captured, str(args.output / "stages.safetensors"))
     for handle in handles:

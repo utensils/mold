@@ -1034,3 +1034,33 @@ it is not a completion checklist with assumed passes.
   (`paint-upscaler-parity-clippy-v1.log`). All six views in both streams,
   intermediate-error diagnosis, cancellation and engine integration remain
   active requirements.
+
+### P7 cancellation and convolution-layout investigation
+
+- The regression `cancellation_during_last_forward_never_returns_an_image`
+  first reproduces a cancelled final tile returning an image
+  (`paint-upscaler-cancel-red-v1.log`). Both single-pass and tiled routes now
+  check cancellation after the forward, before output can escape. Blend rows
+  and normalization chunks also poll, and the engine checks after encoding.
+- RRDB inference polls at entry and after each network block/convolution
+  boundary. Its cancellation sweep stops at every boundary, verifies the
+  cancellation error identity, and reruns the same model to check unchanged
+  output and reuse. The callback-free and checkpointed outputs match exactly.
+  A running GPU convolution itself remains non-preemptible. Read-only review
+  found no issue in these changes.
+- The upscaler oracle now records live input/output strides before fixture
+  serialization. `paint-upscaler-layout-oracle-v1` reproduces the previous
+  albedo PNG and stage-file hashes exactly. Its first input is channels-last
+  according to `is_contiguous`, but the first output and every later stage
+  are contiguous NCHW. Torch 2.5.1 `ConvUtils.h:328` instead consults
+  `suggest_memory_format`; `MemoryFormat.h:139-145` rejects the singleton
+  batch stride 3 after accumulating the spatial extent. Thus the first
+  convolution also selects NCHW. The earlier hypothesis that NHWC propagation
+  explains accumulated drift is ruled out, not used to justify a backend
+  change. The independent source and CPU proof remain in
+  `paint-upscaler-layout-review-v1`; intermediate numerical gates remain open.
+- Final upscaler selection passes 30 tests, with two separately run CUDA oracle
+  tests ignored (`paint-upscaler-cancel-green-v2.log`); all-target CUDA/cuDNN
+  Clippy passes with warnings denied (`paint-upscaler-cancel-clippy-v1.log`).
+  The first build log is retained: its callback error-conversion compile
+  errors were corrected without changing cancellation behavior.
