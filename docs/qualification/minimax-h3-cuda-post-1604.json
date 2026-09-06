@@ -1,0 +1,104 @@
+{
+  "schema": "mold.minimax-h3.attention-qualification.v1",
+  "decision": "qualified-release-candidate-only",
+  "build": {
+    "schema": "mold.minimax-h3.attention-rc.v2",
+    "identity_sha256": "6158bf6fad87b8c8e36fa9e1b7a798c14ce8e273818ba7859abdfb7c9f212035",
+    "cargo_feature": "h3-flash-attn-rc",
+    "claim_marker": "mold.minimax-h3.attention-rc.kernel-compiled.v1",
+    "kernel_compiled": true,
+    "compiled_compute_capability": [
+      8,
+      9
+    ],
+    "package_version": "0.11.0",
+    "package_source": "git+https://github.com/utensils/candle.git?rev=744ae3b83cfac18db28107a353c449cc9b80d4ec#744ae3b83cfac18db28107a353c449cc9b80d4ec",
+    "kernel": "CandleFlashFwdHdim128Bf16Sm80V011",
+    "mask": "FullNonCausalPacked",
+    "model_contract": {
+      "heads": 56,
+      "head_dim": 128,
+      "dtype": "Bf16"
+    }
+  },
+  "observed_device": {
+    "Cuda": {
+      "compute_capability": [
+        8,
+        9
+      ]
+    }
+  },
+  "authority_identity_sha256": "f573fff4df6893637e5314553af333a88997820b84c4d7e9a6161dd92db4f376",
+  "probe": {
+    "schema": "mold.minimax-h3.attention-rc.v2",
+    "plan_identity_sha256": "ee9a47a22f50412de1297041cb91de50b15297543dbd540ed85f3c41e3240318",
+    "backend": "FlashAttentionV2",
+    "kernel": "CandleFlashFwdHdim128Bf16Sm80V011",
+    "activation": "ReleaseCandidateQualificationOnly",
+    "device": {
+      "Cuda": {
+        "compute_capability": [
+          8,
+          9
+        ]
+      }
+    },
+    "scope": "PackedTransformer",
+    "mask": "FullNonCausalPacked",
+    "dtype": "Bf16",
+    "batch_size": 1,
+    "sequence_rows": 257,
+    "heads": 56,
+    "head_dim": 128,
+    "workspace": {
+      "input_output_tensor_bytes": 14737408,
+      "qkv_compute_bytes": 0,
+      "score_matrix_bytes": 0,
+      "probability_matrix_bytes": 0,
+      "output_compute_bytes": 0,
+      "softmax_lse_bytes": 57568,
+      "peak_auxiliary_bytes_upper_bound": 57568
+    },
+    "elapsed_micros": 10033
+  },
+  "max_absolute_difference": 0.00048828125,
+  "maximum_allowed_difference": 0.02,
+  "qk_swap_max_absolute_difference": 0.04736328,
+  "minimum_qk_swap_difference": 0.02,
+  "planned_shapes": [
+    {
+      "sequence_rows": 37296,
+      "workspace": {
+        "input_output_tensor_bytes": 2138701824,
+        "qkv_compute_bytes": 0,
+        "score_matrix_bytes": 0,
+        "probability_matrix_bytes": 0,
+        "output_compute_bytes": 0,
+        "softmax_lse_bytes": 8354304,
+        "peak_auxiliary_bytes_upper_bound": 8354304
+      }
+    },
+    {
+      "sequence_rows": 107856,
+      "workspace": {
+        "input_output_tensor_bytes": 6184894464,
+        "qkv_compute_bytes": 0,
+        "score_matrix_bytes": 0,
+        "probability_matrix_bytes": 0,
+        "output_compute_bytes": 0,
+        "softmax_lse_bytes": 24159744,
+        "peak_auxiliary_bytes_upper_bound": 24159744
+      }
+    }
+  ],
+  "release_activation": "rejected",
+  "release_requirements": [
+    "MiniMaxH3Authorization",
+    "ReleaseArtifactIncludesKernel",
+    "CrossBackendReproducibilityDecision",
+    "RemainingCudaArchitectureQualification"
+  ],
+  "model_artifacts_accessed": false,
+  "runtime_activated": false
+}

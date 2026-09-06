@@ -1,0 +1,34 @@
+
+running 29 tests
+test comfy_int8::tests::device_resident_forward_is_bit_identical_to_cpu_staged ... ok
+test comfy_int8::tests::forward_refuses_a_bias_of_the_wrong_shape ... ok
+test comfy_int8::tests::forward_with_bias_is_the_reference_forward_plus_bias_narrowed_once ... ok
+test comfy_int8::tests::forward_without_bias_is_the_reference_forward ... ok
+test comfy_int8::tests::native_biased_forward_matches_portable_reference_plus_bias ... ok
+test comfy_int8::tests::new_on_device_accepts_cpu_storage_and_shares_the_h3_validation ... ok
+test comfy_int8::tests::new_on_device_refuses_a_weight_and_scales_on_different_devices ... ok
+test comfy_int8::tests::the_arm_is_native_only_for_a_compiled_kernel_on_cuda ... ok
+test comfy_int8::tests::the_arm_on_cuda_needs_the_kernel_and_multiple_of_four_extents ... ok
+test minimax_h3::attention::tests::a_chunked_dense_pass_equals_the_unchunked_one ... ok
+test minimax_h3::attention::tests::an_edited_query_chunk_fails_the_frozen_identity ... ok
+test minimax_h3::attention::tests::an_oversized_row_still_yields_a_one_row_chunk ... ok
+test minimax_h3::attention::tests::bounded_dense_execution_matches_direct_f32_reference ... ok
+test minimax_h3::attention::tests::dense_math_is_bounded_to_synthetic_score_shapes ... ok
+test minimax_h3::attention::tests::expected_runtime_identity_rejects_each_crossed_tuple_field ... ok
+test minimax_h3::attention::tests::flash_bf16_cpu_reference_cuda_parity ... ok
+test minimax_h3::attention::tests::flash_contract_mutations_fail_closed_before_tensor_execution ... ok
+test minimax_h3::attention::tests::flash_release_candidate_rejects_non_native_batch ... ok
+test minimax_h3::attention::tests::flash_tensor_strides_are_checked_before_u32_ffi_conversion ... ok
+test minimax_h3::attention::tests::flash_workspace_is_linear_for_released_row_counts ... ok
+test minimax_h3::attention::tests::frozen_plan_mutation_and_tensor_shape_mismatch_are_rejected ... ok
+test minimax_h3::attention::tests::only_the_metal_backend_narrows_the_query_axis ... ok
+test minimax_h3::attention::tests::qualification_telemetry_contains_only_frozen_geometry_and_timing ... ok
+test minimax_h3::attention::tests::release_candidate_build_requires_kernel_target_and_matching_sm89_device ... ok
+test minimax_h3::attention::tests::release_candidate_dispatch_requires_the_current_compiled_build ... ok
+test minimax_h3::attention::tests::released_flash_authority_is_exact_and_never_release_activated ... ok
+test minimax_h3::attention::tests::the_chunked_backend_is_refused_on_every_non_metal_device ... ok
+test minimax_h3::attention::tests::the_metal_authority_freezes_released_production_rows ... ok
+test minimax_h3::attention::tests::the_metal_query_chunk_is_the_score_budget_over_one_row ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 292 filtered out; finished in 11.37s
+
