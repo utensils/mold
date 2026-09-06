@@ -6492,13 +6492,14 @@ fn pause_owner_stage_for_test(work_id: &str, point: TestOwnerStageBarrier) {
     }
 }
 
-/// One-time owner-only measurement. Parked Wan engines still own GPU prompt
-/// tensors, so release the sole engine before attributing bytes to context.
+/// Owner-only measurement after every Wan render. Lazy CUDA libraries can grow
+/// the retained context on later runs, so release the sole engine and refresh
+/// the monotonic certificate at each synchronized tensor-free boundary.
 fn certify_wan_context_after_render(worker: &GpuWorker, model: &str) {
     #[cfg(feature = "cuda")]
     {
         if worker.gpu.backend != mold_core::GpuBackend::Cuda
-            || !worker.cuda_peak.needs_certificate()
+            || !worker.cuda_peak.accepts_certificate()
             || worker.in_flight.load(Ordering::SeqCst) != 1
             || ensure_owner_thread(worker).is_err()
         {

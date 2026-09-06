@@ -104,9 +104,9 @@ impl OwnerContext {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn needs_certificate(&self) -> bool {
+    pub fn accepts_certificate(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        !state.disabled && state.baseline.is_none()
+        !state.disabled
     }
 
     pub fn snapshot(
@@ -130,14 +130,25 @@ impl OwnerContext {
         context: std::sync::Arc<cudarc::driver::CudaContext>,
     ) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if !state.disabled && state.baseline.is_none() && bytes > 0 {
-            state.baseline = Some(CertifiedBaseline {
-                owner_epoch: epoch,
-                bytes,
-            });
+        if install_certificate(&mut state, epoch, bytes) {
             state.context = Some(context);
         }
     }
+}
+
+fn install_certificate(state: &mut OwnerState, epoch: u64, bytes: u64) -> bool {
+    if state.disabled || bytes == 0 {
+        return false;
+    }
+    let bytes = state
+        .baseline
+        .filter(|baseline| baseline.owner_epoch == epoch)
+        .map_or(bytes, |baseline| baseline.bytes.max(bytes));
+    state.baseline = Some(CertifiedBaseline {
+        owner_epoch: epoch,
+        bytes,
+    });
+    true
 }
 
 impl OwnerContext {
@@ -247,6 +258,23 @@ mod lifecycle_tests {
         owner.invalidate();
         assert!(owner.snapshot(7, Some(3_000), 0).is_none());
         #[cfg(feature = "cuda")]
-        assert!(!owner.needs_certificate());
+        assert!(!owner.accepts_certificate());
+    }
+
+    #[test]
+    fn a_clean_owner_boundary_monotonically_refreshes_a_growing_context() {
+        let owner = OwnerContext::default();
+        owner.state.lock().unwrap().baseline = Some(CertifiedBaseline {
+            owner_epoch: 7,
+            bytes: 500,
+        });
+
+        // Lazy CUDA libraries can add context-owned allocations on a later
+        // render. A newly synchronized tensor-free boundary must replace the
+        // stale smaller certificate, while a lower sample must not shrink it.
+        install_certificate(&mut owner.state.lock().unwrap(), 7, 2_500);
+        assert_eq!(owner.snapshot(7, Some(3_000), 0).unwrap().bytes, 2_500);
+        install_certificate(&mut owner.state.lock().unwrap(), 7, 2_000);
+        assert_eq!(owner.snapshot(7, Some(3_000), 0).unwrap().bytes, 2_500);
     }
 }

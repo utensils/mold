@@ -6,9 +6,10 @@
   frozen admission, worker validation, and durable sequence stages
   ([#1462](https://github.com/utensils/mold/issues/1462)).
 - **Count retained Wan CUDA context memory once.** After releasing a completed
-  Wan engine, certify its retained context separately from live allocations
-  release device-owned GGUF scratch buffers, and apply that baseline
-  consistently to admission and worker memory checks
+  Wan engine, certify its retained context separately from live allocations,
+  refresh that certificate as lazy CUDA libraries grow it on later runs,
+  release device-owned GGUF scratch buffers, and apply the baseline consistently
+  to admission and worker memory checks
   ([#1481](https://github.com/utensils/mold/issues/1481)).
 - **Exercise the complete H3 CUDA server library suite.** Isolate test settings
   from the host and run relevant PRs through the existing CUDA toolkit job
