@@ -8,6 +8,7 @@
 pub use candle_transformers::models::stable_diffusion::{
     build_clip_transformer, clip, schedulers, unet_2d, StableDiffusionConfig,
 };
+pub mod normalization;
 pub mod vae;
 
 pub fn sd15_unet() -> unet_2d::UNet2DConditionModelConfig {

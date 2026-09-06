@@ -24,11 +24,7 @@ impl Module for LegacyMid {
 #[derive(Debug)]
 pub(super) enum Norm {
     Candle(nn::GroupNorm),
-    Diffusers {
-        weight: Tensor,
-        bias: Tensor,
-        groups: usize,
-    },
+    Diffusers(crate::stable_diffusion::normalization::DiffusersGroupNorm),
 }
 impl Norm {
     pub(super) fn new(
@@ -38,14 +34,11 @@ impl Norm {
         numerics: VaeNumerics,
     ) -> Result<Self> {
         if numerics == VaeNumerics::Diffusers {
-            if groups == 0 || !channels.is_multiple_of(groups) {
-                candle::bail!("invalid VAE normalization groups")
-            }
-            Ok(Self::Diffusers {
-                weight: vb.get(channels, "weight")?.to_dtype(DType::F32)?,
-                bias: vb.get(channels, "bias")?.to_dtype(DType::F32)?,
-                groups,
-            })
+            Ok(Self::Diffusers(
+                crate::stable_diffusion::normalization::DiffusersGroupNorm::new(
+                    vb, groups, channels, 1e-6,
+                )?,
+            ))
         } else {
             Ok(Self::Candle(nn::group_norm(groups, channels, 1e-6, vb)?))
         }
@@ -53,55 +46,10 @@ impl Norm {
 }
 impl Module for Norm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let Self::Diffusers {
-            weight,
-            bias,
-            groups,
-        } = self
-        else {
-            let Self::Candle(layer) = self else {
-                unreachable!()
-            };
-            return layer.forward(xs);
-        };
-        let (batch, channels, height, width) = xs.dims4()?;
-        #[cfg(feature = "cuda")]
-        if xs.device().is_cuda() && xs.dtype() == DType::F16 {
-            return super::cuda_norm::forward(xs, weight, bias, *groups);
+        match self {
+            Self::Candle(norm) => norm.forward(xs),
+            Self::Diffusers(norm) => norm.forward(xs),
         }
-        let grouped = xs.to_dtype(DType::F32)?.reshape((
-            batch,
-            *groups,
-            channels / groups * height * width,
-        ))?;
-        let mean = grouped.mean_keepdim(2)?;
-        let variance = grouped.broadcast_sub(&mean)?.sqr()?.mean_keepdim(2)?;
-        // Torch 2.5.1 CUDA group_norm_kernel.cu:30-70,90-109,575-576,663:
-        // epsilon and saved mean/rstd are scalar_t; affine uses opmath_t.
-        let epsilon = Tensor::new(1e-6f32, xs.device())?
-            .to_dtype(xs.dtype())?
-            .to_dtype(DType::F32)?;
-        let rstd = variance
-            .broadcast_add(&epsilon)?
-            .sqrt()?
-            .recip()?
-            .to_dtype(xs.dtype())?
-            .to_dtype(DType::F32)?
-            .reshape((batch, *groups, 1, 1))?;
-        let mean = mean
-            .to_dtype(xs.dtype())?
-            .to_dtype(DType::F32)?
-            .reshape((batch, *groups, 1, 1))?;
-        let affine_shape = (1, *groups, channels / groups, 1);
-        let a = rstd.broadcast_mul(&weight.reshape(affine_shape)?)?;
-        let b = bias
-            .reshape(affine_shape)?
-            .broadcast_sub(&a.broadcast_mul(&mean)?)?;
-        let x = grouped.reshape((batch, *groups, channels / groups, height * width))?;
-        x.broadcast_mul(&a)?
-            .broadcast_add(&b)?
-            .reshape(xs.shape())?
-            .to_dtype(xs.dtype())
     }
 }
 pub(super) fn silu(xs: &Tensor, numerics: VaeNumerics) -> Result<Tensor> {
@@ -367,6 +315,26 @@ impl Module for Mid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unet_normalization_uses_its_own_epsilon() -> Result<()> {
+        let device = candle::Device::Cpu;
+        let fixture = candle::safetensors::load_buffer(
+            include_bytes!("../../../../../tests/fixtures/hunyuan3d/paint-conv.safetensors"),
+            &device,
+        )?;
+        let vb = nn::VarBuilder::from_tensors(fixture.clone(), DType::F16, &device).pp("norm.unet");
+        let actual =
+            crate::stable_diffusion::normalization::DiffusersGroupNorm::new(vb, 4, 32, 1e-5)?
+                .forward(&fixture["norm.unet.input"])?;
+        let error = (actual.to_dtype(DType::F32)?
+            - fixture["norm.unet.expected"].to_dtype(DType::F32)?)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+        assert!(error <= 0.002, "UNet epsilon error {error}");
+        Ok(())
+    }
+
     #[test]
     fn normalization_and_silu_match_pytorch_cuda_half_fixture() -> Result<()> {
         let device = candle::Device::Cpu;

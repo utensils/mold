@@ -10,6 +10,7 @@ mod kernels { include!(concat!(env!("OUT_DIR"), "/vae_precision_cuda.rs")); }
 
 struct GroupNorm {
     groups: usize,
+    epsilon: f32,
 }
 impl CustomOp3 for GroupNorm {
     fn name(&self) -> &'static str {
@@ -76,6 +77,7 @@ impl CustomOp3 for GroupNorm {
         let mut builder = stats.builder();
         builder.arg(&input_slice).arg(&mut mean).arg(&mut rstd);
         candle::builder_arg!(builder, row_size as i64);
+        candle::builder_arg!(builder, self.epsilon);
         let config = LaunchConfig {
             grid_dim: ((batch * self.groups) as u32, 1, 1),
             block_dim: (if row_size < 512 { 32 } else { 512 }, 1, 1),
@@ -116,8 +118,11 @@ pub(super) fn forward(
     weight: &Tensor,
     bias: &Tensor,
     groups: usize,
+    epsilon: f32,
 ) -> Result<Tensor> {
-    if input.dtype() != DType::F16
+    if !epsilon.is_finite()
+        || epsilon <= 0.
+        || input.dtype() != DType::F16
         || weight.dtype() != DType::F32
         || bias.dtype() != DType::F32
         || !input.device().same_device(weight.device())
@@ -128,6 +133,6 @@ pub(super) fn forward(
     input.contiguous()?.apply_op3_no_bwd(
         &weight.contiguous()?,
         &bias.contiguous()?,
-        &GroupNorm { groups },
+        &GroupNorm { groups, epsilon },
     )
 }

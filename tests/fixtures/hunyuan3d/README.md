@@ -58,3 +58,11 @@ float32/float16, per-batch/scalar reference scales and three CFG batches with
 `[0,1,1]` scales are covered. The reference network's cached norm1 is captured
 separately. Regenerate with `scripts/capture-hunyuan3d-paint-block.py` without
 `--checkpoint`; preserve the original capture and metadata in campaign evidence.
+
+`paint-conv.safetensors` contains synthetic Diffusers 0.30 paint residual blocks
+with/without a channel shortcut, timestep inputs, convolutional downsampling and
+nearest-neighbor upsampling. Odd input sizes and an explicit odd upsample target
+expose padding/coordinate differences. Low-variance CUDA GroupNorm cases
+distinguish VAE `1e-6` from UNet residual `1e-5` epsilon. Regenerate with
+`scripts/capture-hunyuan3d-paint-conv.py` without `--checkpoint`; the installed
+weight mode writes only to retained qualification evidence.

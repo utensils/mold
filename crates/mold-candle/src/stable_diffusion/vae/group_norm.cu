@@ -34,7 +34,7 @@ __device__ Moments warp_reduce(Moments a) {
     return a;
 }
 extern "C" __global__ void paint_group_norm_stats(
-    const __half* input, __half* mean, __half* rstd, int64_t row_size) {
+    const __half* input, __half* mean, __half* rstd, int64_t row_size, float epsilon) {
     Moments state = {0, 0, 0, 0};
     const int64_t base = static_cast<int64_t>(blockIdx.x) * row_size;
     for (int64_t j = threadIdx.x; j < row_size; j += blockDim.x)
@@ -51,7 +51,7 @@ extern "C" __global__ void paint_group_norm_stats(
     }
     if (threadIdx.x == 0) {
         const float variance = state.m2 / state.nf;
-        const float eps = __half2float(__float2half(1e-6f));
+        const float eps = __half2float(__float2half(epsilon));
         mean[blockIdx.x] = __float2half(state.mean);
         rstd[blockIdx.x] = __float2half(rsqrtf(variance + eps));
     }

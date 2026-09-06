@@ -1,5 +1,18 @@
 # Third-Party Notices
 
+## Diffusers paint UNet convolutional stages
+
+`src/hunyuan3d/paint_conv.rs` adapts Hugging Face Diffusers v0.30.0,
+commit `8a79d8ec3973e78065f13638eefc0dc7d4dc6009`, specifically
+`models/resnet.py`, `models/downsampling.py` and `models/upsampling.py`.
+The Rust port implements the fixed inference recipe, explicit timestep
+conditioning and bounded output-size validation; training branches are omitted.
+
+    Copyright 2024 The HuggingFace Team. All rights reserved.
+
+Diffusers is Apache-2.0; the full license is retained in `LICENSE-APACHE-2.0`.
+No Python or PyTorch runtime ships with this implementation.
+
 ## FerrisMind/candle-video (LTX-Video port)
 
 Mold's legacy LTX-Video transformer, 3D causal video VAE, and flow-match Euler

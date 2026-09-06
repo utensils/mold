@@ -363,6 +363,36 @@ loader without replacing network or rendering computations.
   is retained in `paint-vae-native-conv-stage-comparison-v1.json`. No production
   backend or qualification tolerance was changed.
 
+## Paint convolution and shared normalization checkpoint
+
+- `paint_conv.rs` ports Diffusers 0.30 timestep-conditioned residual blocks,
+  padding-one stride-two downsampling and nearest-neighbor/convolution upsampling
+  including explicit output dimensions. Initial residual and epsilon mismatch
+  tests failed (`paint-conv-red-v1.log`, `paint-conv-norm-red-v1.log`). The
+  standalone capture's first installed attempt exposed duplicate downsampler
+  aliases; it now uses the UNet's actual `name="op"` constructor. Failed capture
+  and missing-fixture run remain retained; successful captures are v2.
+- `DiffusersGroupNorm` is shared by the paint VAE and UNet and receives epsilon
+  explicitly. Both VAE `1e-6` and residual `1e-5` fixtures match CUDA exactly
+  (`paint-conv-cuda-norm-v1.log`), as do the existing 32-thread, 512-thread and
+  spatial-one VAE fixtures. Spatial Transformer2D normalization uses `1e-6`.
+  The native ABI now carries the epsilon as float32 and rounds it to half in
+  the kernel. Independent review found no actionable ABI, ordering or bounds
+  defect. Six shared SD/VAE tests pass, including bit-identical default SD VAE
+  behavior (`paint-conv-norm-green-v2.log`).
+- Installed residual, downsample and upsample weights pass CUDA in both dtypes
+  (`paint-conv-pretrained-cuda-v2.log`), with odd 9x7 inputs and explicit 17x13
+  upsample output. Float32 worst maximum is .000025749207 / RMS .000002208311;
+  float16 worst maximum is .0078125 / RMS .000759318. Declared bounds remain
+  maximum 1e-4 / RMS 1e-5 for float32 and maximum .02 / RMS .002 for float16.
+  Full tensors and checkpoint hashes are retained in
+  `paint-conv-pretrained-oracle-v2/` and `paint-conv-pretrained-candle-v2/`.
+  The updated Hunyuan suite passes 172 tests with one hardware test ignored
+  (`paint-conv-hunyuan-tests-v2.log`); CPU Clippy passes (`paint-conv-clippy-v1.log`).
+  CUDA warnings-denied Clippy also passes (`paint-conv-cuda-clippy-v1.log`).
+  Component parity does not yet qualify the assembled UNet or resolve the VAE
+  float16 maximum-error gate.
+
 ## Remaining gates
 
 Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualification

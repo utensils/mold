@@ -30,6 +30,7 @@ pub mod mesh;
 pub mod obj;
 pub mod paint_attention;
 pub mod paint_block;
+pub mod paint_conv;
 pub mod paint_projector;
 pub mod paint_raster;
 pub mod paint_vae;

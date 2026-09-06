@@ -13,8 +13,6 @@ use candle_transformers::models::stable_diffusion::unet_2d_blocks::{
     UpDecoderBlock2D, UpDecoderBlock2DConfig,
 };
 
-#[cfg(feature = "cuda")]
-mod cuda_norm;
 mod precision;
 
 /// Existing image engines preserve Candle arithmetic. New paint checkpoints use

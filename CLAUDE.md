@@ -135,6 +135,9 @@ the model controls, and the length slider. A sequence is now something you scrip
   CUDA GroupNorm operation for half precision. `AutoEncoderKL::new` keeps
   `VaeNumerics::Candle` for existing SD callers. Neither compilation nor a paint
   render changes a process-global arithmetic switch.
+  `stable_diffusion::normalization::DiffusersGroupNorm` is shared by paint VAE
+  and UNet components; epsilon belongs to the layer (VAE and spatial attention
+  `1e-6`, UNet residual blocks `1e-5`), including the half-rounded CUDA epsilon.
 
 - **UV unwrapping is the narrow native exception.** `mesh-texture` builds vendored xatlas `f700c779`, exactly the version in the 2.1 oracle’s xatlas-python 0.0.9. The Rust wrapper validates geometry, preserves every seam-corner attribute and polls cancellation across native threads. Inference, samplers and texture baking remain Rust/Candle. Enabling the build feature alone does not advertise a paint engine.
 
