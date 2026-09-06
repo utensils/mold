@@ -31,10 +31,6 @@ impl InferenceCancellationToken {
             Ok(())
         }
     }
-
-    pub(crate) fn flag(&self) -> &AtomicBool {
-        &self.cancelled
-    }
 }
 
 /// Read-only view of one attempt-scoped cancellation token.
@@ -284,10 +280,6 @@ impl ProgressReporter {
             Some(token) => token.checkpoint(),
             None => Ok(()),
         }
-    }
-
-    pub(crate) fn cancellation_token(&self) -> InferenceCancellationToken {
-        self.cancellation.clone().unwrap_or_default()
     }
 }
 
