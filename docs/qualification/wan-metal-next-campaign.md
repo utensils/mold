@@ -1,12 +1,67 @@
 # Wan Metal: correctness, admission and performance campaign
 
-**Prepared on 2026-09-05; Wan is queued behind #1040's exclusive GPU slot.**
-The user released the UAT hold, but this lane must wait for the root task's
-explicit slot handoff after verified cleanup. This is a runbook, not qualification
-evidence. Do not execute device tests, reference models, server renders or the
-pressure helper before that handoff.
+**Prepared on 2026-09-05; execution checkpoint recorded on 2026-09-06.**
+The shared GPU slot was handed to this campaign after #1040 verified cleanup.
+The campaign is paused after its first visually valid Q8/cache-off render; the
+cache-on control, server admission work and performance matrix remain pending.
 Issues [#1059](https://github.com/utensils/mold/issues/1059) and
 [#1094](https://github.com/utensils/mold/issues/1094) remain open.
+
+## 2026-09-06 execution checkpoint
+
+The campaign used Mold baseline `8f0c5d1c` with Candle `744ae3b` and the #1608
+candidate Mold `fd513991` with Candle `bedc2874`. The official Wan reference was
+refreshed and pinned at `9737cba9`. An atomic exclusive Metal reservation covered
+all real-checkpoint work. Qualification instrumentation was retained only in
+detached evidence worktrees and was not committed to Mold.
+
+A deterministic real-checkpoint Wan 2.1 VAE decode used latent shape
+`[1,16,5,36,64]` and produced 512x288x17 RGB output. Mold's baseline CPU F32
+decode took 100.278 s. Baseline and candidate Metal BF16 both passed the predeclared
+BF16/F32 limits with maximum absolute error `0.0339382` and relative L2
+`0.00720944`; their raw BF16 outputs and all 17 rendered diagnostic frames were
+byte-identical. Manual contact-sheet inspection found the same coherent abstract
+spatial and temporal structure in all three rows, without the saturated field
+corruption from the earlier failed renders. These diagnostic textures are VAE
+evidence only and are not a prompt-generation visual pass.
+
+The candidate also completed an instrumented first denoise step at the exact
+512x288x17 request geometry. Captured conditional/unconditional embeddings,
+initial latent, timestep, model input, conditional/unconditional predictions,
+guided velocity and post-step latent were finite with expected shapes; timestep
+was 999. Baseline capture could not pass the original 12 GiB availability floor,
+so this row does not establish baseline/candidate numerical parity or an
+executable upstream transformer comparison.
+
+After the user explicitly allowed macOS swap, a separately recorded guard kept
+normal kernel pressure, sampling and timeout checks, a 2 GiB emergency
+availability floor and an 8 GiB swap-growth ceiling. It did not replace the
+original guard for admission-margin evidence. The candidate then completed two
+cache-off prompt renders. The first auto-selected FP16 UMT5 despite the generic
+`--t5-variant q8` argument; it completed in 192.139 s, with 5.222 GiB minimum
+native availability, zero swap growth and normal pressure. The controlled row
+set `MOLD_UMT5_VARIANT=q8`, resolved the retained Q8 file, and completed in
+309.537 s, with 15.663 GiB minimum native availability, zero swap growth and
+normal pressure. The timing difference is not a performance comparison because
+the encoder tier and run conditions differ.
+
+Both APNGs decoded as 512x288, 17 frames at 16 fps. Every frame was extracted;
+manual inspection of complete contact sheets plus frames 1, 9 and 17 found a
+recognizable red fox moving coherently through a stable snowy pine scene, with
+no saturated black/white/red fields, horizontal tearing or scene reset. Minor
+stylized gait anatomy remains a quality limitation, not the prior correctness
+failure. The controlled Q8 APNG SHA-256 is
+`93522c18bcf718fb6fffd9e45cfcec8252a30ee148aa22087124fff74786673d`.
+Its media, per-frame hashes, contact sheet, guard samples and provenance are under
+`/Volumes/ExternalStorage/mold2/output/` and
+`/Volumes/ExternalStorage/mold-1059-qualification/full-model-20260905/`.
+
+This checkpoint proves a visually valid 1.3B Q8 render on the candidate Candle
+revision when Wan step cache is disabled. It does not yet isolate Candle from
+step-cache behavior: the exact Q8/cache-on candidate control and a current-main
+control are still required. It also does not satisfy #1059's durable server,
+pressure-boundary, authored-chain or recovery gates, or #1094's 832x480 and 5B
+cold/warm performance matrix. No capability promotion is justified yet.
 
 ## Starting evidence and ownership
 
@@ -108,9 +163,16 @@ Use the previous small request unchanged before increasing its shape:
 {
   "model": "wan21-t2v-1.3b:bf16",
   "prompt": "Medium wide shot in soft morning light. A red fox walks slowly through fresh snow in a quiet pine forest. Its paws lift small puffs of powder. The camera remains steady, showing the fox in profile against dark green trees.",
-  "width": 512, "height": 288, "frames": 17, "fps": 16,
-  "steps": 30, "guidance": 6.0, "seed": 1059,
-  "output_format": "apng", "expand": false, "save_to_gallery": true
+  "width": 512,
+  "height": 288,
+  "frames": 17,
+  "fps": 16,
+  "steps": 30,
+  "guidance": 6.0,
+  "seed": 1059,
+  "output_format": "apng",
+  "expand": false,
+  "save_to_gallery": true
 }
 ```
 
