@@ -49,10 +49,8 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         }
     }
 
-    // View-specific key mapping. The chain composer is a Create sub-mode,
-    // not a tab — Create routes to it while `create_mode` is Chain.
+    // View-specific key mapping.
     match app.active_view {
-        View::Create if app.create_mode == crate::app::CreateMode::Chain => map_chain_key(key, app),
         View::Create => map_generate_key(key, app),
         View::Library => map_gallery_key(key, app),
         View::Models => map_models_key(key),
@@ -82,6 +80,24 @@ fn control_shortcut(key: &KeyEvent) -> Option<Action> {
     }
 }
 
+/// The Create view's navigation-focus key map. Pure in the key code, so
+/// the binding table is a testable contract: an unlisted key is a no-op,
+/// and a key that reappears here has to be added deliberately.
+fn map_create_navigation_key(code: KeyCode) -> Action {
+    match code {
+        KeyCode::Char('1') => Action::SwitchView(View::Create),
+        KeyCode::Char('2') => Action::SwitchView(View::Library),
+        KeyCode::Char('3') => Action::SwitchView(View::Models),
+        KeyCode::Char('4') => Action::SwitchView(View::Machines),
+        KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('a') | KeyCode::Char('A') => Action::ToggleAdvanced,
+        KeyCode::Char('/') => Action::SearchHistory,
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
+        _ => Action::None,
+    }
+}
+
 fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
     use crate::app::GenerateFocus;
 
@@ -107,19 +123,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
     // Navigation mode: number keys switch views, Enter focuses prompt
     // View cycling uses Alt+Left/Right (handled globally above)
     if app.generate.focus == GenerateFocus::Navigation {
-        return match key.code {
-            KeyCode::Char('1') => Action::SwitchView(View::Create),
-            KeyCode::Char('2') => Action::SwitchView(View::Library),
-            KeyCode::Char('3') => Action::SwitchView(View::Models),
-            KeyCode::Char('4') => Action::SwitchView(View::Machines),
-            KeyCode::Char('5') => Action::SwitchView(View::Settings),
-            KeyCode::Char('c') => Action::ChainEnter,
-            KeyCode::Char('a') | KeyCode::Char('A') => Action::ToggleAdvanced,
-            KeyCode::Char('/') => Action::SearchHistory,
-            KeyCode::Char('q') => Action::Quit,
-            KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
-            _ => Action::None,
-        };
+        return map_create_navigation_key(key.code);
     }
 
     // Enter behavior depends on focus
@@ -273,61 +277,6 @@ fn map_settings_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Machines),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
-        _ => Action::None,
-    }
-}
-
-/// Key map for the chain composer — the Create view's Chain sub-mode.
-/// All Script* bindings are unchanged from the former Script tab; only
-/// Esc differs: it exits back to Create's compose mode instead of
-/// switching tabs.
-fn map_chain_key(key: &KeyEvent, app: &App) -> Action {
-    use crate::ui::script_composer::ScriptModal;
-
-    if app.script.modal.is_open() {
-        return match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) => Action::ScriptModalCancel,
-            // Ctrl-S submits in any modal
-            (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptModalSubmit,
-            // In FramesEdit/SavePath/LoadPath, plain Enter submits
-            (KeyCode::Enter, KeyModifiers::NONE)
-                if matches!(
-                    app.script.modal,
-                    ScriptModal::FramesEdit { .. }
-                        | ScriptModal::SavePath { .. }
-                        | ScriptModal::LoadPath { .. }
-                ) =>
-            {
-                Action::ScriptModalSubmit
-            }
-            // In PromptEdit, plain Enter adds a newline
-            (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptModalNewline,
-            (KeyCode::Backspace, _) => Action::ScriptModalBackspace,
-            (KeyCode::Char(c), _) => Action::ScriptModalChar(c),
-            _ => Action::None,
-        };
-    }
-
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptSave,
-        (KeyCode::Char('o'), KeyModifiers::CONTROL) => Action::ScriptLoad,
-        (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
-            Action::ScriptMoveDown
-        }
-        (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
-            Action::ScriptMoveUp
-        }
-        (KeyCode::Char('J'), KeyModifiers::SHIFT) => Action::ScriptReorderDown,
-        (KeyCode::Char('K'), KeyModifiers::SHIFT) => Action::ScriptReorderUp,
-        (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ScriptAddAfter,
-        (KeyCode::Char('A'), KeyModifiers::SHIFT) => Action::ScriptAddBefore,
-        (KeyCode::Char('d'), KeyModifiers::NONE) => Action::ScriptDelete,
-        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::ScriptCycleTransition,
-        (KeyCode::Char('i'), KeyModifiers::NONE) => Action::ScriptOpenPromptEditor,
-        (KeyCode::Char('f'), KeyModifiers::NONE) => Action::ScriptOpenFramesEditor,
-        (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptSubmit,
-        (KeyCode::Esc, _) => Action::ChainExit,
-        (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,
     }
 }
@@ -690,8 +639,8 @@ mod tests {
 
     #[test]
     fn number_six_is_unbound_in_every_direct_mapper() {
-        // The Script tab is gone — `6` must be a no-op everywhere. The
-        // chain composer is reachable only via `c` (Create) or the palette.
+        // Five workspaces, five number keys — `6` must be a no-op
+        // everywhere.
         assert_eq!(map_settings_key(&key(KeyCode::Char('6'))), Action::None);
         assert_eq!(map_models_key(&key(KeyCode::Char('6'))), Action::None);
         assert_eq!(map_machines_key(&key(KeyCode::Char('6'))), Action::None);
@@ -720,6 +669,35 @@ mod tests {
         assert_eq!(control_shortcut(&ctrl(KeyCode::Char('z'))), None);
         // Without the modifier these are ordinary text.
         assert_eq!(control_shortcut(&key(KeyCode::Char('t'))), None);
+    }
+
+    /// The Create view's navigation-focus bindings, in full. `c` is
+    /// deliberately absent: the chain composer it used to open is retired,
+    /// and the key stays unbound rather than picking up a new meaning.
+    #[test]
+    fn create_navigation_key_map_contract() {
+        for (code, action) in [
+            (KeyCode::Char('1'), Action::SwitchView(View::Create)),
+            (KeyCode::Char('2'), Action::SwitchView(View::Library)),
+            (KeyCode::Char('3'), Action::SwitchView(View::Models)),
+            (KeyCode::Char('4'), Action::SwitchView(View::Machines)),
+            (KeyCode::Char('5'), Action::SwitchView(View::Settings)),
+            (KeyCode::Char('a'), Action::ToggleAdvanced),
+            (KeyCode::Char('A'), Action::ToggleAdvanced),
+            (KeyCode::Char('/'), Action::SearchHistory),
+            (KeyCode::Char('q'), Action::Quit),
+            (KeyCode::Enter, Action::FocusNext),
+            (KeyCode::Char('i'), Action::FocusNext),
+            (KeyCode::Down, Action::FocusNext),
+        ] {
+            assert_eq!(map_create_navigation_key(code), action, "{code:?}");
+        }
+        assert_eq!(
+            map_create_navigation_key(KeyCode::Char('c')),
+            Action::None,
+            "`c` no longer opens a chain composer and must stay unbound"
+        );
+        assert_eq!(map_create_navigation_key(KeyCode::Char('z')), Action::None);
     }
 
     #[test]

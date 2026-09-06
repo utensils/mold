@@ -105,7 +105,6 @@ fn render_help(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Enter              Start generation"),
-        Line::from("  c                  Open chain composer"),
         Line::from("  A                  Toggle the Advanced accordion"),
         Line::from("  Alt+N              Edit the negative prompt"),
         Line::from("  Ctrl+E             Expand prompt via LLM"),
@@ -2174,7 +2173,6 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App {
             active_view: crate::action::View::Library,
-            create_mode: crate::app::CreateMode::default(),
             motion: crate::motion::MotionState::new(false),
             generate: crate::app::GenerateState {
                 prompt: tui_textarea::TextArea::default(),
@@ -2221,7 +2219,6 @@ mod tests {
             target: crate::hosts::GenTarget::default(),
             settings: crate::app::SettingsState::default(),
             prefs: crate::prefs::TuiPrefs::default(),
-            script: crate::ui::script_composer::ScriptComposerState::default(),
             config: mold_core::Config::default(),
             server_url: None,
             picker,

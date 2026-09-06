@@ -93,10 +93,6 @@ pub enum Action {
     OpenPalette,
     /// Apply a theme preset (palette theme commands).
     SetTheme(crate::ui::theme::ThemePreset),
-    /// Enter the chain composer sub-mode of the Create view.
-    ChainEnter,
-    /// Leave the chain composer back to the Create compose mode.
-    ChainExit,
     /// Image crop/pan: move viewport.
     PanLeft,
     PanRight,
@@ -111,41 +107,6 @@ pub enum Action {
     GridLeft,
     /// Gallery grid: move right one cell.
     GridRight,
-    /// Script: move selection down one stage.
-    ScriptMoveDown,
-    /// Script: move selection up one stage.
-    ScriptMoveUp,
-    /// Script: move selected stage down (reorder).
-    ScriptReorderDown,
-    /// Script: move selected stage up (reorder).
-    ScriptReorderUp,
-    /// Script: add a new stage after the current selection.
-    ScriptAddAfter,
-    /// Script: add a new stage before the current selection.
-    ScriptAddBefore,
-    /// Script: delete the current stage (shows confirmation if >1 stage).
-    ScriptDelete,
-    ScriptCycleTransition,
-    /// Script: save the current script to a TOML file.
-    ScriptSave,
-    /// Script: load a script from a TOML file.
-    ScriptLoad,
-    /// Script: open the prompt editor modal.
-    ScriptOpenPromptEditor,
-    /// Script: open the frames editor modal.
-    ScriptOpenFramesEditor,
-    /// Script modal: insert a character.
-    ScriptModalChar(char),
-    /// Script modal: delete the last character.
-    ScriptModalBackspace,
-    /// Script modal: insert a newline (prompt editor).
-    ScriptModalNewline,
-    /// Script modal: submit the current value.
-    ScriptModalSubmit,
-    /// Script modal: cancel and close without saving.
-    ScriptModalCancel,
-    /// Script: submit the current chain script for generation.
-    ScriptSubmit,
     /// Machines: open the stepped connect-a-machine flow.
     MachinesConnect,
     /// Machines: set the selected row as the sticky generation target.
@@ -174,10 +135,6 @@ pub enum Action {
 
 /// The five top-level workspaces — the shared Mold Studio IA
 /// (Create · Library · Models · Machines · Settings, keys `1`–`5`).
-///
-/// The chain composer is not a tab: it is a sub-mode of Create
-/// (`App::create_mode`), mirroring the graphical surfaces, where Sequence
-/// is an Output setting of Create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Create,

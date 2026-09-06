@@ -11,7 +11,6 @@ pub mod param_form;
 pub mod popup;
 pub mod preview;
 pub mod progress;
-pub mod script_composer;
 pub mod settings;
 pub mod theme;
 pub mod theme_cards;
@@ -55,9 +54,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // ── Content ─────────────────────────────────────────────────
     match app.active_view {
-        View::Create if app.create_mode == crate::app::CreateMode::Chain => {
-            script_composer::render(frame, &app.script, layout[1], &app.theme)
-        }
         View::Create => generate::render(frame, app, layout[1]),
         View::Library => {
             gallery::render(frame, app, layout[1]);
@@ -227,14 +223,6 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
     };
 
     let shortcuts = match app.active_view {
-        View::Create if app.create_mode == crate::app::CreateMode::Chain => vec![
-            ("j/k", "Navigate"),
-            ("a/d", "Add/Del"),
-            ("t", "Transition"),
-            ("i", "Prompt"),
-            ("f", "Frames"),
-            ("Esc", "Back"),
-        ],
         View::Create => {
             if app.generate.generating {
                 let status = if app.generate.progress.is_downloading() {
@@ -248,7 +236,6 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
                     ("^K", "Commands"),
                     ("1-5", "Workspace"),
                     ("Enter", "Edit"),
-                    ("c", "Chain"),
                     ("A", "Advanced"),
                     ("?", "Help"),
                     ("q", "Quit"),
