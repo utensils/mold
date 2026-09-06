@@ -13,6 +13,20 @@ pub struct CameraGeometry {
     pub visible: Vec<bool>,
 }
 
+fn face_normal(ab: [f32; 3], ac: [f32; 3]) -> [f32; 3] {
+    // torch.cross on CUDA contracts the first product with the already-rounded
+    // negative second product. Its three-element norm reduction sums 0+2+1.
+    let cross = [
+        ab[1].mul_add(ac[2], -(ab[2] * ac[1])),
+        ab[2].mul_add(ac[0], -(ab[0] * ac[2])),
+        ab[0].mul_add(ac[1], -(ab[1] * ac[0])),
+    ];
+    let length = (cross[0] * cross[0] + cross[2] * cross[2] + cross[1] * cross[1])
+        .sqrt()
+        .max(1e-12);
+    cross.map(|v| v / length)
+}
+
 impl CameraGeometry {
     /// Tencent MeshRender.back_project:1141-1180: face normals are computed
     /// AFTER transforming vertices to camera space, and depth is interpolated
@@ -57,14 +71,10 @@ impl CameraGeometry {
             let [a, b, c] = face.map(|v| camera[v as usize]);
             let ab = [0, 1, 2].map(|i| b[i] - a[i]);
             let ac = [0, 1, 2].map(|i| c[i] - a[i]);
-            let n = [
-                ab[1] * ac[2] - ab[2] * ac[1],
-                ab[2] * ac[0] - ab[0] * ac[2],
-                ab[0] * ac[1] - ab[1] * ac[0],
-            ];
-            let norm = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
-            normals.push(n.map(|v| v / norm));
+            normals.push(face_normal(ab, ac));
         }
+        #[cfg(test)]
+        trace_camera(elevation, azimuth, size, &camera, &normals)?;
         for index in 0..buffers.mask.len() {
             if index.is_multiple_of(4096) {
                 checkpoint()?;
@@ -108,10 +118,81 @@ impl CameraGeometry {
 }
 
 #[cfg(test)]
+fn trace_camera(
+    elevation: f32,
+    azimuth: f32,
+    size: usize,
+    camera: &[[f32; 3]],
+    normals: &[[f32; 3]],
+) -> Result<()> {
+    use candle_core::{Device, Tensor};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TRACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    let Some(root) = std::env::var_os("MOLD_PAINT_CAMERA_TRACE") else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    std::fs::create_dir_all(&root)?;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let invocation = root.join(format!(
+        "camera-e{:08x}-a{:08x}-s{size}-v{}-f{}-p{}-t{timestamp}-i{}",
+        elevation.to_bits(),
+        azimuth.to_bits(),
+        camera.len(),
+        normals.len(),
+        std::process::id(),
+        TRACE_ID.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::create_dir(&invocation)?;
+    let triples = |values: &[[f32; 3]]| {
+        Tensor::from_vec(
+            values.iter().flatten().copied().collect::<Vec<_>>(),
+            (values.len(), 3),
+            &Device::Cpu,
+        )
+    };
+    candle_core::safetensors::save(
+        &HashMap::from([
+            ("camera".to_string(), triples(camera)?),
+            ("face_normals".to_string(), triples(normals)?),
+        ]),
+        invocation.join("camera.safetensors"),
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::{mesh::Mesh, paint_raster::prepare_mesh, paint_views::candidate_views};
     use candle_core::{Device, Tensor};
     use std::collections::HashMap;
+
+    #[test]
+    fn face_normal_retains_cuda_cross_and_reduction_rounding() {
+        let normal = super::face_normal(
+            [
+                f32::from_bits(991_916_288),
+                f32::from_bits(3_139_132_416),
+                f32::from_bits(969_838_592),
+            ],
+            [
+                f32::from_bits(985_397_888),
+                f32::from_bits(981_444_096),
+                f32::from_bits(989_915_136),
+            ],
+        );
+        assert_eq!(
+            normal.map(f32::to_bits),
+            [3_205_734_210, 3_203_850_629, 1_059_640_947]
+        );
+    }
 
     fn mesh_from_fixture(fixture: &HashMap<String, Tensor>) -> anyhow::Result<Mesh> {
         Ok(Mesh {

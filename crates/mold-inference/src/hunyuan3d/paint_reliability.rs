@@ -8,6 +8,13 @@ pub struct ReliabilityMask {
     pub boundary: Vec<bool>,
 }
 
+fn view_cosine(n: [f32; 3]) -> f32 {
+    // cosine_similarity uses the same CUDA three-element reduction as
+    // normalize: sum components 0+2 before adding component 1.
+    let norm = (n[0] * n[0] + n[2] * n[2] + n[1] * n[1]).sqrt().max(1e-8);
+    -n[2] / norm
+}
+
 impl ReliabilityMask {
     /// Tencent MeshRender.back_project:1182-1214. Input normals and depth are
     /// camera-space values; radius is the renderer's unreliable-kernel radius
@@ -85,8 +92,7 @@ impl ReliabilityMask {
             if index.is_multiple_of(4096) {
                 checkpoint()?;
             }
-            let norm = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-8);
-            let cos = -n[2] / norm;
+            let cos = view_cosine(*n);
             cosine.push(if !reliable[index] || cos < threshold {
                 0.
             } else {
@@ -142,6 +148,16 @@ fn square_dilate(
 #[cfg(test)]
 mod tests {
     use candle_core::Device;
+
+    #[test]
+    fn cosine_retains_cuda_three_element_reduction_order() {
+        let cosine = super::view_cosine([
+            f32::from_bits(1_045_635_208),
+            f32::from_bits(1_063_664_835),
+            f32::from_bits(3_200_607_285),
+        ]);
+        assert_eq!(cosine.to_bits(), 1_053_123_637);
+    }
 
     #[test]
     fn reliability_matches_tencent() -> anyhow::Result<()> {

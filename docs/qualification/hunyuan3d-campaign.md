@@ -1316,3 +1316,35 @@ it is not a completion checklist with assumed passes.
   arithmetic differences must be isolated before full texture qualification;
   no final-pixel tolerance is introduced. Read-only peer review found no
   actionable concern in the scoped UV fix or regression/trace support.
+- Per-view tracing then isolates the remaining difference to the reliability
+  cosine map: all twelve projected RGB maps and all twelve boundary maps are
+  byte-exact. Camera-space vertices are also exact. CUDA `torch.cross`
+  contracts the first product with the rounded negative second product, and
+  the three-element face-normal and cosine norms reduce squares in 0+2+1
+  order. Real-chair bit regressions preserve both boundaries; their initial
+  failure and corrected pass are retained in
+  `paint-camera-cross-normal-{red-v1,green-v1}.log`. The corrected six cosine
+  maps are bit-exact (`material-bake-rust-1024-v7-camera-projection-trace`).
+- PyTorch 2.5.1's `PowKernel.cu` specializes only exponents two and three, so
+  Tencent's tensor exponent four uses the general CUDA `powf` path. A retained
+  CUDA isolation shows that host `powf` and NVIDIA libdevice are not
+  bit-identical. `TextureBaker` therefore computes the entire cosine-weight
+  tensor through Candle on the active render device and transfers the result
+  back before mutating accumulation state. Cancellation is checked before and
+  after this bounded device operation, and a failure exposes no partial bake.
+- The complete projection, bake, vertex propagation and Navier–Stokes result is
+  now exact at every supported texture size. Both material streams have zero
+  maximum float difference, zero trust-mask difference and zero final byte
+  difference at 1024, 2048 and 4096
+  (`material-bake-rust-1024-v10-device-pow`,
+  `material-bake-rust-2048-v2-device-pow`, and
+  `material-bake-rust-4096-v2-device-pow`). A final 1024 run using the shared
+  production/trace device-weight function remains exact and writes every trace
+  to an exclusive invocation directory
+  (`material-bake-rust-1024-v11-exclusive-device-trace`). The focused paint
+  suite passes 66 tests with 20 hardware/oracle tests explicitly ignored
+  (`paint-material-device-final-unit-v1.log`), and all-target CUDA/cuDNN Clippy
+  passes with warnings denied (`material-bake-device-pow-clippy-v2.log`).
+  Follow-up read-only review confirms the shared device trace, exclusive
+  evidence paths, production lifecycle and cancellation behavior, with no
+  remaining actionable finding.

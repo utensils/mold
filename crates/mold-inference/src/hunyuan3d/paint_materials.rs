@@ -31,6 +31,7 @@ pub fn bake_materials(
     materials: &PaintMaterials,
     views: &[PaintView],
     size: u32,
+    device: &candle_core::Device,
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<BakedMaterials> {
     checkpoint()?;
@@ -71,9 +72,9 @@ pub fn bake_materials(
             CameraGeometry::render(mesh, view.elevation, view.azimuth, 2048, checkpoint)?;
         let reliability = geometry.reliability(checkpoint)?;
         let projected = uv.project(view.elevation, view.azimuth, checkpoint)?;
-        for (image, baker) in [
-            (&materials.albedo[index], &mut albedo),
-            (&materials.metallic_roughness[index], &mut mr),
+        for (stream, image, baker) in [
+            ("albedo", &materials.albedo[index], &mut albedo),
+            ("mr", &materials.metallic_roughness[index], &mut mr),
         ] {
             let mut colors = Vec::with_capacity(2048 * 2048);
             for (pixel, rgb) in image.pixels().enumerate() {
@@ -96,13 +97,95 @@ pub fn bake_materials(
                 size,
                 checkpoint,
             )?;
-            baker.add_view(&sampled.colors, &sampled.cosine, view.weight, checkpoint)?;
+            trace_projection(stream, index, view.weight, device, &sampled)?;
+            baker.add_view(
+                &sampled.colors,
+                &sampled.cosine,
+                view.weight,
+                device,
+                checkpoint,
+            )?;
         }
     }
     Ok(BakedMaterials {
         albedo: albedo.finish(checkpoint)?,
         metallic_roughness: mr.finish(checkpoint)?,
     })
+}
+
+#[cfg(not(test))]
+fn trace_projection(
+    _stream: &str,
+    _index: usize,
+    _weight: f32,
+    _device: &candle_core::Device,
+    _sampled: &super::paint_back_sample::ProjectedTexture,
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn trace_projection(
+    stream: &str,
+    index: usize,
+    weight: f32,
+    device: &candle_core::Device,
+    sampled: &super::paint_back_sample::ProjectedTexture,
+) -> Result<()> {
+    use candle_core::{Device, Tensor};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TRACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    let Some(root) = std::env::var_os("MOLD_MATERIAL_PROJECTION_TRACE") else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    std::fs::create_dir_all(&root)?;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let invocation = root.join(format!(
+        "{stream}-projection-{index:02}-s{}-p{}-t{timestamp}-i{}",
+        sampled.size,
+        std::process::id(),
+        TRACE_ID.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::create_dir(&invocation)?;
+    let size = sampled.size as usize;
+    let colors = Tensor::from_vec(
+        sampled.colors.iter().flatten().copied().collect::<Vec<_>>(),
+        (size, size, 3),
+        &Device::Cpu,
+    )?;
+    let cosine = Tensor::from_vec(sampled.cosine.clone(), (size, size, 1), &Device::Cpu)?;
+    let weighted = Tensor::from_vec(
+        super::paint_bake::cosine_weights(&sampled.cosine, weight, device)?,
+        (size, size, 1),
+        &Device::Cpu,
+    )?;
+    let boundary = Tensor::from_vec(
+        sampled
+            .boundary
+            .iter()
+            .map(|value| u8::from(*value))
+            .collect::<Vec<_>>(),
+        (size, size, 1),
+        &Device::Cpu,
+    )?;
+    candle_core::safetensors::save(
+        &HashMap::from([
+            ("texture".to_string(), colors),
+            ("cosine".to_string(), cosine),
+            ("weighted".to_string(), weighted),
+            ("boundary".to_string(), boundary),
+        ]),
+        invocation.join("projection.safetensors"),
+    )?;
+    Ok(())
 }
 
 type FillGeometry = (Vec<[f32; 3]>, Vec<[f32; 2]>);
@@ -194,13 +277,25 @@ mod tests {
             metallic_roughness: vec![],
         };
         let views = super::super::paint_views::candidate_views();
-        let error = bake_materials(&mesh, &materials, &views[..6], 1024, &mut || Ok(()))
-            .err()
-            .unwrap();
+        let error = bake_materials(
+            &mesh,
+            &materials,
+            &views[..6],
+            1024,
+            &candle_core::Device::Cpu,
+            &mut || Ok(()),
+        )
+        .err()
+        .unwrap();
         assert!(error.to_string().contains("view counts"));
-        let error = bake_materials(&mesh, &materials, &views[..6], 1024, &mut || {
-            anyhow::bail!("cancelled")
-        })
+        let error = bake_materials(
+            &mesh,
+            &materials,
+            &views[..6],
+            1024,
+            &candle_core::Device::Cpu,
+            &mut || anyhow::bail!("cancelled"),
+        )
         .err()
         .unwrap();
         assert_eq!(error.to_string(), "cancelled");
@@ -310,7 +405,15 @@ mod tests {
         };
         let views = super::super::paint_views::candidate_views();
         let start = std::time::Instant::now();
-        let baked = bake_materials(&mesh, &materials, &views[..6], size, &mut || Ok(()))?;
+        let device = Device::new_cuda(0)?;
+        let baked = bake_materials(
+            &mesh,
+            &materials,
+            &views[..6],
+            size,
+            &device,
+            &mut || Ok(()),
+        )?;
         let mut reports = Vec::new();
         let mut failed = false;
         for (name, actual) in [("albedo", &baked.albedo), ("mr", &baked.metallic_roughness)] {

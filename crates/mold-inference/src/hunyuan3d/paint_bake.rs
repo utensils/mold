@@ -20,6 +20,27 @@ pub struct TextureBaker {
     valid: bool,
 }
 
+#[cfg(test)]
+fn cosine_weight(cosine: f32, weight: f32) -> f32 {
+    // PyTorch 2.5.1 PowKernel.cu only specializes exponents 2 and 3. Tencent's
+    // tensor ** 4 therefore takes the general floating-point pow path.
+    weight * cosine.powf(4.)
+}
+
+pub(super) fn cosine_weights(
+    cosine: &[f32],
+    weight: f32,
+    device: &candle_core::Device,
+) -> Result<Vec<f32>> {
+    Ok(
+        candle_core::Tensor::from_vec(cosine.to_vec(), cosine.len(), device)?
+            .powf(4.)?
+            .affine(f64::from(weight), 0.)?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1::<f32>()?,
+    )
+}
+
 impl TextureBaker {
     pub fn new(size: u32, checkpoint: &mut dyn FnMut() -> Result<()>) -> Result<Self> {
         ensure!(
@@ -50,6 +71,7 @@ impl TextureBaker {
         colors: &[[f32; 3]],
         cosine: &[f32],
         weight: f32,
+        device: &candle_core::Device,
         checkpoint: &mut dyn FnMut() -> Result<()>,
     ) -> Result<bool> {
         ensure!(self.valid, "paint bake was cancelled during accumulation");
@@ -66,12 +88,7 @@ impl TextureBaker {
             "invalid paint camera weight"
         );
         checkpoint()?;
-        let mut weighted = Vec::with_capacity(cosine.len());
-        let mut visible = 0usize;
-        let mut painted = 0usize;
-        for (index, ((color, &cosine), &previous)) in
-            colors.iter().zip(cosine).zip(&self.weights).enumerate()
-        {
+        for (index, (color, &cosine)) in colors.iter().zip(cosine).enumerate() {
             if index.is_multiple_of(4096) {
                 checkpoint()?;
             }
@@ -85,9 +102,19 @@ impl TextureBaker {
                 cosine.is_finite() && cosine >= 0.,
                 "invalid paint cosine map"
             );
-            let value = weight * cosine.powi(4);
+        }
+        checkpoint()?;
+        // Tencent applies tensor ** 4 on the active accelerator. This matters
+        // numerically: CUDA's libdevice powf is not bit-identical to host powf.
+        let weighted = cosine_weights(cosine, weight, device)?;
+        checkpoint()?;
+        let mut visible = 0usize;
+        let mut painted = 0usize;
+        for (index, (&value, &previous)) in weighted.iter().zip(&self.weights).enumerate() {
+            if index.is_multiple_of(4096) {
+                checkpoint()?;
+            }
             ensure!(value.is_finite(), "paint cosine weight overflow");
-            weighted.push(value);
             if value > 0. {
                 visible += 1;
                 painted += usize::from(previous > 0.);
@@ -156,6 +183,18 @@ impl TextureBaker {
 mod tests {
     use super::*;
     use candle_core::Device;
+
+    #[test]
+    fn fourth_power_uses_torch_cuda_general_pow_path() {
+        assert_eq!(
+            super::cosine_weight(
+                std::hint::black_box(f32::from_bits(1_062_387_645)),
+                std::hint::black_box(1.),
+            )
+            .to_bits(),
+            1_055_599_141
+        );
+    }
     #[test]
     fn paint_bake_matches_tencent_overlap_and_trust() -> anyhow::Result<()> {
         let fixture = candle_core::safetensors::load_buffer(
@@ -181,6 +220,7 @@ mod tests {
                         &colors,
                         &cosine[index * 100..(index + 1) * 100],
                         weights[index],
+                        &Device::Cpu,
                         &mut || Ok(()),
                     )?;
                 }
@@ -218,16 +258,22 @@ mod tests {
         assert!(TextureBaker::new(0, &mut || Ok(())).is_err());
         assert!(TextureBaker::new(4097, &mut || Ok(())).is_err());
         let mut baker = TextureBaker::new(1, &mut || Ok(()))?;
-        assert!(baker.add_view(&[[0.2, 0.4, 0.6]], &[1.], 1., &mut || Ok(()))?);
+        assert!(baker.add_view(&[[0.2, 0.4, 0.6]], &[1.], 1., &Device::Cpu, &mut || Ok(()))?);
         assert!(baker
-            .add_view(&[[f32::NAN, 0., 0.]], &[1.], 1., &mut || Ok(()))
-            .is_err());
-        assert!(baker.add_view(&[], &[], 1., &mut || Ok(())).is_err());
-        assert!(baker
-            .add_view(&[[0.; 3]], &[f32::INFINITY], 1., &mut || Ok(()))
+            .add_view(&[[f32::NAN, 0., 0.]], &[1.], 1., &Device::Cpu, &mut || Ok(
+                ()
+            ))
             .is_err());
         assert!(baker
-            .add_view(&[[0.; 3]], &[1.], -1., &mut || Ok(()))
+            .add_view(&[], &[], 1., &Device::Cpu, &mut || Ok(()))
+            .is_err());
+        assert!(baker
+            .add_view(&[[0.; 3]], &[f32::INFINITY], 1., &Device::Cpu, &mut || Ok(
+                ()
+            ))
+            .is_err());
+        assert!(baker
+            .add_view(&[[0.; 3]], &[1.], -1., &Device::Cpu, &mut || Ok(()))
             .is_err());
         let result = baker.finish(&mut || Ok(()))?;
         assert_eq!(result.colors, [[0.2, 0.4, 0.6]]);
@@ -244,7 +290,7 @@ mod tests {
         for stop in 1..32 {
             let mut baker = TextureBaker::new(128, &mut || Ok(()))?;
             let mut calls = 0;
-            let result = baker.add_view(&colors, &cosine, 1., &mut || {
+            let result = baker.add_view(&colors, &cosine, 1., &Device::Cpu, &mut || {
                 calls += 1;
                 if calls == stop {
                     anyhow::bail!("cancel bake")
