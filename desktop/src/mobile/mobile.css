@@ -2287,6 +2287,7 @@ button.mobile-generate-disclosure {
 }
 
 .mobile-create-action .primary-button {
+  font-size: min(var(--text-body), 24px);
   width: 100%;
   min-width: 0;
   white-space: normal;
@@ -5699,8 +5700,11 @@ button:disabled {
     padding-block: 4px;
   }
   .mobile-shell.is-keyboard-open .mobile-prompt-field textarea {
-    min-height: 44px;
-    height: 56px;
+    font-size: clamp(16px, 1rem, 32px) !important;
+    min-height: max(56px, calc(1.1em + 10px));
+    height: max(56px, calc(1.1em + 10px));
+    padding-block: 4px;
+    line-height: 1.1;
   }
   .mobile-shell.is-keyboard-open .mobile-create-action {
     padding-block: 4px;
@@ -5786,6 +5790,7 @@ button:disabled {
 }
 
 .mobile-create-action .mobile-estimate p {
+  font-size: min(var(--text-body), 16px);
   margin: 0;
   white-space: normal;
   overflow-wrap: anywhere;
