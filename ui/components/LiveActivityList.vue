@@ -251,7 +251,7 @@ function progress(row: FleetActiveWork): number | null {
 }
 .live-activity-copy strong {
   overflow: hidden;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -259,7 +259,7 @@ function progress(row: FleetActiveWork): number | null {
 .live-activity-copy span {
   overflow: hidden;
   color: var(--mold-text-dim);
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-overflow: ellipsis;
   text-transform: capitalize;
   white-space: nowrap;
@@ -270,9 +270,9 @@ function progress(row: FleetActiveWork): number | null {
   background: transparent;
 }
 .live-activity-list--compact .live-activity-copy strong {
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 .live-activity-list--compact .live-activity-copy span {
-  font-size: 9.5px;
+  font-size: 0.59375rem;
 }
 </style>

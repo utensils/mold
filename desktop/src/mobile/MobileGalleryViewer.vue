@@ -1895,7 +1895,7 @@ onBeforeUnmount(() => {
    the moment it takes focus, so the one text input they render is bumped here
    rather than in the component every surface shares. */
 .gallery-viewer-mesh-export :deep(.mesh-geometry-custom input) {
-  font-size: 16px;
+  font-size: 1rem;
 }
 
 .gallery-viewer-identity {
@@ -1907,13 +1907,13 @@ onBeforeUnmount(() => {
 
 .gallery-viewer-identity dt {
   color: var(--mold-text-dim);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .gallery-viewer-identity dd {
   margin: 0;
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 13px;
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
 }
 
@@ -1935,7 +1935,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   color: var(--mold-text-dim);
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1981,13 +1981,13 @@ onBeforeUnmount(() => {
   overflow: visible;
   margin: 0;
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   -webkit-line-clamp: unset;
 }
 
 .gallery-viewer-info-secondary {
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
 }
 
@@ -2009,7 +2009,7 @@ onBeforeUnmount(() => {
 
 .gallery-viewer-info-facts dt {
   color: var(--mold-text-dim);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .gallery-viewer-info-facts dd {
@@ -2018,7 +2018,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   color: var(--mold-text);
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 13px;
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
   text-align: right;
 }
@@ -2091,7 +2091,7 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   background: rgba(8, 7, 12, 0.68);
   color: #f5efff;
-  font-size: 38px;
+  font-size: 2.375rem;
   line-height: 1;
   -webkit-tap-highlight-color: transparent;
   backdrop-filter: blur(8px);

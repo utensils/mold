@@ -57,7 +57,7 @@ const effectiveTitle = () =>
   background: color-mix(in srgb, var(--mold-error) 14%, transparent);
   color: var(--mold-error);
   font-family: var(--mold-font-mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 .ms-action-blocker--warn {
@@ -74,7 +74,7 @@ const effectiveTitle = () =>
   flex-wrap: wrap;
   align-items: baseline;
   gap: 3px 7px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.35;
 }
 .ms-action-blocker__copy strong {
@@ -92,6 +92,6 @@ const effectiveTitle = () =>
   flex-basis: 18px;
   width: 18px;
   height: 18px;
-  font-size: 10px;
+  font-size: 0.625rem;
 }
 </style>

@@ -278,7 +278,7 @@ describe("MobileFileUnder filename preview", () => {
 });
 
 describe("MobileFileUnder iPhone interaction invariants", () => {
-  it("keeps every row and control at 44pt and every editable input at 16px", () => {
+  it("keeps every row and control at 44pt and editable inputs on the scalable body size", () => {
     // The rows and the sheet controls are the whole surface of this group;
     // a sub-44pt chip remove or a 15px input is an iPhone regression.
     for (const rule of [
@@ -288,7 +288,7 @@ describe("MobileFileUnder iPhone interaction invariants", () => {
       /\.mobile-file-under-clear\s*\{[^}]*min-width:\s*44px/s,
       /\.mobile-file-under-chip\s+button\s*\{[^}]*min-height:\s*44px/s,
       /\.mobile-file-under-new\s*\{[^}]*min-height:\s*44px/s,
-      /\.mobile-file-under\s+input\s*\{[^}]*font-size:\s*16px/s,
+      /\.mobile-file-under\s+input\s*\{[^}]*font-size:\s*1rem/s,
     ]) {
       expect(component).toMatch(rule);
     }

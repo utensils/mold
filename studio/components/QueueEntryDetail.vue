@@ -259,10 +259,10 @@ async function copyDetail(): Promise<void> {
   box-sizing: border-box;
   flex-direction: column;
   color: var(--mold-text-2, currentColor);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .qed--compact {
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 .qed__head {
   display: flex;
@@ -276,7 +276,7 @@ async function copyDetail(): Promise<void> {
   padding: 2px 6px;
   border: 1px solid var(--line, var(--mold-border-control));
   border-radius: var(--mold-radius-2, 999px);
-  font-size: 10px;
+  font-size: 0.625rem;
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
@@ -294,13 +294,13 @@ async function copyDetail(): Promise<void> {
   flex: 1;
   margin: 0;
   color: var(--mold-text);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .qed--compact .qed__title {
-  font-size: 17px;
+  font-size: 1.0625rem;
 }
 .qed__close {
   min-width: 32px;
@@ -335,7 +335,7 @@ async function copyDetail(): Promise<void> {
 .qed__preview figcaption {
   margin-top: 4px;
   color: var(--mold-text-dim, currentColor);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 .qed__problem {
   display: flex;
@@ -356,7 +356,7 @@ async function copyDetail(): Promise<void> {
 }
 .qed__legend {
   color: var(--mold-text-dim, currentColor);
-  font-size: 10px;
+  font-size: 0.625rem;
   letter-spacing: 0.08em;
 }
 .qed__prompt p,
@@ -386,10 +386,10 @@ async function copyDetail(): Promise<void> {
 }
 .qed__group dt {
   color: var(--mold-text-dim, currentColor);
-  font-size: 10px;
+  font-size: 0.625rem;
 }
 .qed--compact .qed__group dt {
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .qed__group dd {
   margin: 0;
@@ -435,7 +435,7 @@ async function copyDetail(): Promise<void> {
 .qed--compact .qed__actions button {
   min-width: 0;
   min-height: 44px;
-  font-size: 16px;
+  font-size: 1rem;
 }
 .qed--compact .qed__actions {
   display: grid;

@@ -85,13 +85,13 @@ function laneLabel(item: QueueWorkItem): string {
   border: 1px solid var(--line, var(--mold-border-control));
   border-radius: 7px;
   color: var(--mold-text-2, currentColor);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .plan-work__phase {
   padding: 2px 6px;
   border: 1px solid var(--line, var(--mold-border-control));
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 0.625rem;
   text-transform: uppercase;
   white-space: nowrap;
 }

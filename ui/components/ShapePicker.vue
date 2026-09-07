@@ -167,6 +167,6 @@ function onKeydown(event: KeyboardEvent) {
 
 .ms-shape__label {
   font-family: var(--mold-font-mono);
-  font-size: 10px;
+  font-size: 0.625rem;
 }
 </style>

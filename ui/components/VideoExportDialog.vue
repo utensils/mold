@@ -321,7 +321,7 @@ function submit(): void {
 }
 .video-export-heading h2 {
   margin: 4px 0 0;
-  font-size: 20px;
+  font-size: 1.25rem;
   line-height: 1.2;
 }
 .video-export-heading button {
@@ -331,12 +331,12 @@ function submit(): void {
   border-radius: 999px;
   background: rgb(128 120 140 / 12%);
   color: inherit;
-  font-size: 25px;
+  font-size: 1.5625rem;
 }
 .video-export-kicker,
 legend {
   font-family: var(--mold-font-mono, monospace);
-  font-size: 11px;
+  font-size: 0.6875rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mold-text-dim, #777078);
@@ -346,7 +346,7 @@ legend {
   overflow: hidden;
   color: var(--mold-text-2, #575057);
   font-family: var(--mold-font-mono, monospace);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -361,7 +361,7 @@ legend {
 fieldset > p {
   margin: 8px 0 0;
   color: var(--mold-text-dim, #777078);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .video-export-options {
   display: grid;
@@ -376,7 +376,7 @@ fieldset > p {
 }
 .video-export-options--four span {
   padding: 0 4px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .video-export-options input {
   position: absolute;
@@ -403,7 +403,7 @@ fieldset > p {
   margin: 0 0 14px;
   min-width: 0;
   max-width: 100%;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .video-export-actions {
   display: grid;

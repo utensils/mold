@@ -607,7 +607,7 @@ function imagePreview(
 .h3-authoring__budget {
   margin: 3px 0 0;
   color: var(--mold-text-dim, #737373);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
 }
 .h3-authoring__add {
@@ -660,7 +660,7 @@ function imagePreview(
   box-sizing: border-box;
   padding: 0 9px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 0.75rem;
   overflow: hidden;
 }
 .h3-authoring__reattach input {
@@ -698,7 +698,7 @@ function imagePreview(
   border-radius: 8px;
   background: var(--well, rgba(128, 128, 128, 0.14));
   color: var(--mold-text-dim, #737373);
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
   letter-spacing: 0.08em;
 }
@@ -720,7 +720,7 @@ function imagePreview(
 .h3-authoring__notice {
   margin: 0;
   color: var(--mold-text-dim, #737373);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
 }
 .h3-authoring__order {
@@ -730,7 +730,7 @@ function imagePreview(
   height: 26px;
   border-radius: 50%;
   background: var(--well, rgba(128, 128, 128, 0.14));
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 .h3-authoring__reference-copy {
@@ -751,7 +751,7 @@ function imagePreview(
 .h3-authoring__errors {
   margin: 0;
   color: var(--mold-error, #b42318);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
 }
 .h3-authoring--touch button,

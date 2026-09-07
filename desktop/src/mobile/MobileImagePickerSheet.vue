@@ -418,7 +418,7 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
 .mobile-image-picker-panel header p {
   margin: 4px 0 0;
   color: var(--mold-text-dim);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .mobile-image-picker-tabs {
@@ -502,7 +502,7 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   border-radius: 6px;
   background: rgb(0 0 0 / 68%);
   color: white;
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -516,6 +516,6 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
 .mobile-image-picker-error {
   margin: 0;
   color: var(--mold-error);
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 </style>

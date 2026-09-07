@@ -1,0 +1,1 @@
+- Make iOS text follow Dynamic Type, reflow mobile controls and screen headings at larger sizes, and keep navigation and keyboard actions reachable. Show held Queue errors across the full card width with complete details and accessible status labels.

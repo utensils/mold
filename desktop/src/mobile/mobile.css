@@ -25,7 +25,7 @@ textarea,
 select,
 [contenteditable="true"] {
   /* iOS WebKit magnifies focused editable controls below 16 CSS pixels. */
-  font-size: 16px;
+  font-size: max(16px, 1rem) !important;
   scroll-margin-block: 12px;
 }
 
@@ -47,6 +47,7 @@ button {
      shell scrolling, which can move the header offscreen after theme changes. */
   overflow: clip;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   background: var(--mold-bg-deep);
   color: var(--mold-text);
@@ -210,6 +211,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-header-actions .host-chip {
+  font-size: min(var(--text-edge-code), 16px);
   max-width: min(58vw, 220px);
 }
 
@@ -250,7 +252,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-settings-nav > strong {
-  font-size: var(--text-body-lg);
+  font-size: min(var(--text-body-lg), 24px);
   font-weight: 700;
 }
 
@@ -267,7 +269,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-settings-back > span {
   margin-top: -2px;
-  font-size: 28px;
+  font-size: min(1.75rem, 28px);
   line-height: 1;
 }
 
@@ -277,8 +279,9 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-wordmark {
+  flex: none;
   font-family: var(--font-display);
-  font-size: var(--text-display);
+  font-size: min(var(--text-display), 28px);
   font-weight: 700;
   letter-spacing: -0.035em;
 }
@@ -340,6 +343,8 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-tab {
+  min-width: 0;
+  overflow-wrap: anywhere;
   min-height: 48px;
   display: flex;
   flex-direction: column;
@@ -353,6 +358,11 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   font-family: var(--font-utility);
   font-size: var(--mold-fs-micro);
   letter-spacing: 0.01em;
+}
+
+.mobile-tab > span {
+  max-width: 100%;
+  font-size: min(var(--mold-fs-micro), 14px);
 }
 
 .mobile-tab svg {
@@ -410,6 +420,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-settings-fieldset {
+  overflow-wrap: anywhere;
   min-width: 0;
   margin: 18px 0 0;
   border: 0;
@@ -557,6 +568,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-settings-check {
+  max-width: 24px;
   opacity: 0;
   color: var(--mold-blue);
   font-size: 18px;
@@ -565,6 +577,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-theme-option[data-selected="true"] .mobile-settings-check {
+  max-width: 24px;
   opacity: 1;
 }
 
@@ -713,6 +726,8 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .section-title {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   margin: 6px 0 0;
   font-family: var(--font-display);
   font-size: var(--text-large-title);
@@ -729,6 +744,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-create-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -737,6 +753,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 /* Screen header row: large title + optional trailing action (Settings gear). */
 .mobile-screen-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -744,6 +761,8 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-screen-head .section-title {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   margin: 0;
 }
 
@@ -820,7 +839,7 @@ textarea.control {
   border-radius: 12px;
   background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
   color: var(--mold-text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
 }
 
@@ -857,7 +876,7 @@ textarea.control {
   width: auto;
   height: auto;
   padding: 7px;
-  flex: 1 1 60px;
+  flex: 1 1 max-content;
 }
 
 .mobile-resolution-group .ms-shape__label {
@@ -942,7 +961,7 @@ textarea.control {
   width: 44px;
   min-width: 44px;
   padding: 0;
-  font-size: 20px;
+  font-size: 1.25rem;
 }
 
 /* Create ▸ File under — what an automatic route dropped. A warning, not an
@@ -971,7 +990,7 @@ textarea.control {
   border: 0;
   background: transparent;
   color: var(--mold-warning);
-  font-size: 15px;
+  font-size: 0.9375rem;
   padding: 0 4px;
 }
 
@@ -1100,7 +1119,7 @@ textarea.control {
 .mobile-style-kicker {
   flex: none;
   font-family: var(--font-utility);
-  font-size: 11px;
+  font-size: 0.6875rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--mold-text-dim);
@@ -1138,7 +1157,7 @@ textarea.control {
   padding: 5px 12px;
   background: transparent;
   color: var(--mold-text-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   white-space: nowrap;
 }
 
@@ -1155,7 +1174,7 @@ textarea.control {
   padding: 0 16px;
   background: transparent;
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
 
@@ -1402,7 +1421,7 @@ textarea.control {
   content: "+";
   grid-column: 3;
   color: var(--mold-text-dim);
-  font-size: 20px;
+  font-size: 1.25rem;
 }
 
 .mobile-native-disclosure[open] > summary::after {
@@ -1668,7 +1687,7 @@ textarea.control {
   border: 0;
   background: transparent;
   color: var(--mold-blue);
-  font-size: 24px;
+  font-size: 1.5rem;
 }
 
 .mobile-generate-stepper-value {
@@ -1956,7 +1975,7 @@ button.mobile-generate-disclosure {
   border-radius: 50%;
   background: color-mix(in srgb, var(--mold-text) 9%, transparent);
   color: var(--mold-text-2);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .mobile-advanced-sheet-close:active {
@@ -2087,7 +2106,7 @@ button.mobile-generate-disclosure {
   position: relative;
   display: grid;
   min-height: 46px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10em), 1fr));
   align-items: center;
   gap: 10px;
   box-sizing: border-box;
@@ -2162,7 +2181,7 @@ button.mobile-generate-disclosure {
 
 .mobile-lora-row-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10em), 1fr));
   align-items: center;
   gap: 10px;
 }
@@ -2245,7 +2264,7 @@ button.mobile-generate-disclosure {
 
 .mobile-create-action {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10em), 1fr));
   align-items: center;
   gap: 10px;
   padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
@@ -2268,8 +2287,11 @@ button.mobile-generate-disclosure {
 }
 
 .mobile-create-action .primary-button {
-  width: auto;
-  min-width: 128px;
+  font-size: min(var(--text-body), 24px);
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
   min-height: 48px;
   padding-inline: 18px;
 }
@@ -2336,18 +2358,18 @@ button.mobile-generate-disclosure {
   align-items: center;
   justify-content: center;
   gap: 9px;
-  font-size: 16px;
+  font-size: 1rem;
 }
 
 .mobile-pair-button span {
-  font-size: 22px;
+  font-size: 1.375rem;
   line-height: 1;
 }
 
 .mobile-pair-note {
   margin: 8px 0 16px;
   color: var(--mold-text-dim);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: center;
 }
 
@@ -2482,12 +2504,12 @@ button:disabled {
 }
 
 .mobile-generation-held-error {
-  display: block !important;
+  display: -webkit-box !important;
   margin-top: 6px !important;
   color: var(--mold-error) !important;
   font-family: var(--font-utility);
   font-size: var(--text-edge-code) !important;
-  -webkit-line-clamp: initial !important;
+  -webkit-line-clamp: 3 !important;
 }
 
 /* Live develop bed — the active print forming over its latent preview.
@@ -2617,10 +2639,10 @@ button:disabled {
 }
 
 .mobile-library-heading {
-  position: sticky;
-  top: -16px;
-  z-index: 9;
+  /* A scaled heading must scroll away so it cannot cover the entire library. */
+  position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
@@ -2630,6 +2652,12 @@ button:disabled {
   background: color-mix(in srgb, var(--mold-bg-deep) 94%, transparent);
   box-shadow: 0 8px 18px color-mix(in srgb, var(--mold-bg-deep) 72%, transparent);
   backdrop-filter: blur(16px);
+}
+
+.mobile-library-heading > div:first-child {
+  min-width: 0;
+  flex: 1 1 15rem;
+  overflow-wrap: anywhere;
 }
 
 .mobile-library-heading .section-note {
@@ -2769,7 +2797,7 @@ button:disabled {
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.68);
   color: #f5efff;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1;
   text-indent: 2px;
   backdrop-filter: blur(8px);
@@ -2788,7 +2816,7 @@ button:disabled {
   background: var(--mold-blue);
   color: var(--mold-on-accent);
   font-family: var(--font-utility);
-  font-size: 9px;
+  font-size: 0.5625rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   line-height: 1;
@@ -2814,7 +2842,7 @@ button:disabled {
   background: rgba(0, 0, 0, 0.62);
   color: #f5efff;
   font-family: var(--font-utility);
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 750;
   backdrop-filter: blur(8px);
 }
@@ -2957,7 +2985,7 @@ button:disabled {
 
 .gallery-viewer-close > span:first-child {
   font-family: var(--font-body);
-  font-size: 24px;
+  font-size: 1.5rem;
   font-weight: 300;
   line-height: 1;
 }
@@ -3237,7 +3265,7 @@ button:disabled {
   background: color-mix(in srgb, var(--mold-text) 88%, black);
   color: var(--mold-on-accent);
   font-family: var(--font-utility);
-  font-size: 9px;
+  font-size: 0.5625rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   line-height: 1;
@@ -3280,9 +3308,16 @@ button:disabled {
 
 .mobile-catalog-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.mobile-catalog-header > div {
+  min-width: 0;
+  flex: 1 1 15rem;
+  overflow-wrap: anywhere;
 }
 
 .mobile-catalog-header .section-note {
@@ -3291,7 +3326,9 @@ button:disabled {
 
 .mobile-catalog-host-picker {
   display: grid;
-  flex: 0 1 150px;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 10rem;
   gap: 4px;
   color: var(--mold-text-dim);
   font-family: var(--font-utility);
@@ -3775,7 +3812,7 @@ button:disabled {
   border-radius: 4px;
   padding: 2px 6px;
   color: var(--mold-text-2);
-  font-size: 11px;
+  font-size: 0.6875rem;
   white-space: nowrap;
 }
 
@@ -3820,7 +3857,7 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--mold-text-2);
 }
 
@@ -3857,7 +3894,7 @@ button:disabled {
   padding: 0;
   background: transparent;
   color: var(--mold-blue);
-  font-size: 24px;
+  font-size: 1.5rem;
 }
 
 .mobile-catalog-detail-header button span,
@@ -4235,12 +4272,13 @@ button:disabled {
 
 .mobile-inline-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .mobile-inline-actions > button {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 8em;
 }
 
 .host-row-button {
@@ -4255,6 +4293,7 @@ button:disabled {
 
 .host-row-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -4262,11 +4301,13 @@ button:disabled {
 
 .host-row-head > :first-child {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 12em;
+  overflow-wrap: anywhere;
 }
 
 .host-row-state .host-chip {
-  max-width: none;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .host-name {
@@ -4285,6 +4326,8 @@ button:disabled {
 
 .host-row-state {
   display: flex;
+  max-width: 100%;
+  min-width: 0;
   flex: none;
   align-items: center;
   gap: 8px;
@@ -4368,7 +4411,7 @@ button:disabled {
 .mobile-back-button > span {
   margin-right: 3px;
   font-family: var(--font-body);
-  font-size: 28px;
+  font-size: 1.75rem;
   font-weight: 300;
   line-height: 0;
   vertical-align: -2px;
@@ -4649,7 +4692,7 @@ button:disabled {
   border-radius: 50%;
   background: transparent;
   color: var(--mold-error);
-  font-size: 20px;
+  font-size: 1.25rem;
 }
 
 .mobile-danger-zone {
@@ -4755,7 +4798,7 @@ button:disabled {
 
   .mobile-host-form {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16em), 1fr));
     align-items: end;
     gap: 0 18px;
     margin-top: 20px;
@@ -4859,6 +4902,8 @@ button:disabled {
 
 .mobile-library-heading-actions {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   flex: none;
   align-items: center;
   gap: 8px;
@@ -4868,8 +4913,7 @@ button:disabled {
    grid's own two-finger pinch is never intercepted by the scope row. */
 .mobile-library-scope {
   display: grid;
-  grid-auto-columns: 1fr;
-  grid-auto-flow: column;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7em), 1fr));
   margin-top: 10px;
   border: 1px solid var(--mold-border-control);
   border-radius: var(--mold-radius-2);
@@ -4900,7 +4944,7 @@ button:disabled {
 .mobile-library-scope-count {
   color: var(--mold-text-dim);
   font-family: var(--font-utility);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .mobile-library-scope button[data-on] .mobile-library-scope-count {
@@ -4952,7 +4996,7 @@ button:disabled {
 .mobile-library-chip-count {
   color: var(--mold-text-dim);
   font-family: var(--font-utility);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .mobile-library-chip[data-on] .mobile-library-chip-count {
@@ -4960,7 +5004,7 @@ button:disabled {
 }
 
 .mobile-library-chip-heart {
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1;
 }
 
@@ -4975,7 +5019,7 @@ button:disabled {
   border-radius: var(--mold-radius-2);
   background: var(--mold-bg);
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   padding: 10px 12px;
 }
 
@@ -5012,7 +5056,7 @@ button:disabled {
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.68);
   color: #f5efff;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1;
   backdrop-filter: blur(8px);
 }
@@ -5075,7 +5119,7 @@ button:disabled {
   border-radius: var(--mold-radius-2);
   background: var(--mold-media-bed);
   color: var(--mold-text-dim);
-  font-size: 20px;
+  font-size: 1.25rem;
 }
 
 .mobile-collection-cover img {
@@ -5100,7 +5144,7 @@ button:disabled {
 
 .mobile-collection-copy > span {
   color: var(--mold-text-dim);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .mobile-collection-copy > .mobile-collection-hidden {
@@ -5118,7 +5162,7 @@ button:disabled {
 
 .mobile-collection-chevron {
   color: var(--mold-text-dim);
-  font-size: 20px;
+  font-size: 1.25rem;
 }
 
 .mobile-collection-menu-button {
@@ -5132,7 +5176,7 @@ button:disabled {
   border: 0;
   background: transparent;
   color: var(--mold-text-dim);
-  font-size: 18px;
+  font-size: 1.125rem;
   transform: translateY(-50%);
 }
 
@@ -5171,7 +5215,7 @@ button:disabled {
 
 .mobile-collection-drillin-title > span {
   color: var(--mold-text-dim);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 /* Danger-tinted secondary action (two-step inline confirms). */
@@ -5347,7 +5391,7 @@ button:disabled {
   border: 0;
   background: transparent;
   color: var(--mold-text-dim);
-  font-size: 17px;
+  font-size: 1.0625rem;
 }
 
 /* Collection checklist (Add to collection / viewer info sheet). */
@@ -5382,7 +5426,7 @@ button:disabled {
   border: 1px solid var(--mold-border-control);
   border-radius: 8px;
   color: var(--mold-blue);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .mobile-library-checklist > li > button[aria-checked="true"] .mobile-library-check {
@@ -5563,7 +5607,7 @@ button:disabled {
 .mobile-queue-group h3 {
   display: flex;
   justify-content: space-between;
-  font-size: 16px;
+  font-size: 1rem;
   margin: 0 0 12px;
 }
 .mobile-queue-group h3 span {
@@ -5588,7 +5632,7 @@ button:disabled {
 }
 .mobile-finished-job span {
   color: var(--mold-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .mobile-queue-detail-prompt {
   white-space: pre-wrap;
@@ -5599,6 +5643,11 @@ button:disabled {
   gap: 12px;
   margin-top: 20px;
 }
+.mobile-queue-detail-error {
+  color: var(--mold-error);
+  overflow-wrap: anywhere;
+}
+
 .mobile-queue-detail-actions button {
   min-height: var(--mobile-touch-target, 44px);
 }
@@ -5651,8 +5700,11 @@ button:disabled {
     padding-block: 4px;
   }
   .mobile-shell.is-keyboard-open .mobile-prompt-field textarea {
-    min-height: 44px;
-    height: 56px;
+    font-size: clamp(16px, 1rem, 32px) !important;
+    min-height: max(56px, calc(1.1em + 10px));
+    height: max(56px, calc(1.1em + 10px));
+    padding-block: 4px;
+    line-height: 1.1;
   }
   .mobile-shell.is-keyboard-open .mobile-create-action {
     padding-block: 4px;
@@ -5681,7 +5733,7 @@ button:disabled {
 .mobile-generation-queue-list .mobile-queue-group > h3 {
   margin: 0 0 4px;
   padding-inline: 12px;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 .mobile-generation-queue-list .mobile-queue-group:last-child {
   padding-bottom: 4px;
@@ -5701,4 +5753,71 @@ button:disabled {
 .mobile-library-search .control {
   width: 100%;
   min-height: var(--mobile-touch-target, 44px);
+}
+
+/* Preserve editing room while the keyboard owns most of a small display. */
+.mobile-shell.is-keyboard-open .mobile-create-action .mobile-estimate {
+  display: none;
+}
+.mobile-shell.is-keyboard-open .mobile-create-action .primary-button {
+  font-size: min(1rem, 24px);
+}
+
+/* Navigation chrome remains bounded; content and controls follow Dynamic Type. */
+.mobile-settings-back {
+  font-size: min(var(--text-body), 20px);
+}
+.mobile-surface .ms-seg {
+  flex-wrap: wrap;
+}
+.mobile-surface .ms-seg .ms-seg__btn {
+  min-width: 0;
+  min-height: 44px;
+  height: auto;
+  flex: 1 1 auto;
+  white-space: normal;
+}
+.mobile-surface .ms-seg__label {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.mobile-shell.is-keyboard-open .ms-action-blocker__copy {
+  font-size: min(0.6875rem, 14px);
+}
+
+.mobile-surface .ms-action-blocker__mark {
+  font-size: 12px;
+}
+
+.mobile-create-action .mobile-estimate p {
+  font-size: min(var(--text-body), 16px);
+  margin: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Keep the persistent action from consuming a short landscape viewport when
+   Dynamic Type is enlarged; the main form continues at the requested size. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .mobile-create-action {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .mobile-create-action .mobile-estimate p {
+    font-size: min(var(--text-body), 16px);
+  }
+  .mobile-create-action .primary-button {
+    font-size: min(var(--text-body), 24px);
+  }
+  .mobile-create-action .ms-action-blocker__copy {
+    font-size: min(var(--text-body), 14px);
+  }
+}
+
+/* A tall tablet rail groups destinations instead of stretching each tab
+   through one fifth of the entire screen. Short phone rails retain their fit. */
+@media (min-width: 640px) and (min-height: 700px) {
+  .mobile-tabs {
+    grid-template-rows: repeat(5, minmax(64px, max-content));
+    align-content: start;
+  }
 }

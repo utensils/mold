@@ -238,7 +238,7 @@ function percentage(done: number, total: number): number {
 
 .h3-inventory__header h2,
 .h3-host__header h3 {
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 700;
 }
 
@@ -248,13 +248,13 @@ function percentage(done: number, total: number): number {
 .h3-components > header span,
 .h3-component__copy > span {
   color: var(--color-ink-2, var(--mold-text-2, #667085));
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
 }
 
 .h3-inventory__header > span {
   color: var(--color-ink-2, var(--mold-text-2, #667085));
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .h3-host {
@@ -284,7 +284,7 @@ function percentage(done: number, total: number): number {
 
 .h3-qualification dt {
   color: var(--color-ink-2, var(--mold-text-2, #667085));
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -293,7 +293,7 @@ function percentage(done: number, total: number): number {
 .h3-qualification dd {
   margin: 2px 0 0;
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -313,7 +313,7 @@ function percentage(done: number, total: number): number {
 
 .h3-task__eyebrow {
   color: var(--color-ink-2, var(--mold-text-2, #667085));
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
   letter-spacing: 0.08em;
 }
@@ -321,7 +321,7 @@ function percentage(done: number, total: number): number {
 .h3-task h4,
 .h3-components h4 {
   margin-top: 2px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .h3-task :deep(.model-metadata-badges) {
@@ -331,7 +331,7 @@ function percentage(done: number, total: number): number {
 .h3-task__plan {
   display: block;
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .h3-components {
@@ -360,7 +360,7 @@ function percentage(done: number, total: number): number {
 
 .h3-component__copy strong {
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .h3-component__error {
@@ -393,7 +393,7 @@ function percentage(done: number, total: number): number {
   border-radius: 999px;
   background: var(--color-bath, var(--mold-bg-deep, rgba(127, 127, 127, 0.12)));
   color: var(--color-ink-2, var(--mold-text-2, #667085));
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
   text-transform: uppercase;
 }

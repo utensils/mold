@@ -116,11 +116,11 @@ describe("mobile editable controls", () => {
       /input,\s*textarea,\s*select,\s*\[contenteditable="true"\]\s*\{([^}]*)\}/s,
     );
 
-    expect(editables?.[1]).toMatch(/font-size:\s*16px\s*;/);
+    expect(editables?.[1]).toMatch(/font-size:\s*max\(16px, 1rem\)\s*!important\s*;/);
   });
 
-  it("keeps prepared editors at 16px and their actions at least 44pt", () => {
-    expect(preparedComponent).toMatch(/\.mobile-prepared-editor\s*\{[^}]*font-size:\s*16px/s);
+  it("keeps prepared editors scalable and their actions at least 44pt", () => {
+    expect(preparedComponent).toMatch(/\.mobile-prepared-editor\s*\{[^}]*font-size:\s*1rem/s);
     expect(preparedComponent).toMatch(/\.mobile-touch-action\s*\{[^}]*min-height:\s*44px/s);
     expect(pullComponent).toMatch(/\.mobile-touch-action\s*\{[^}]*min-height:\s*44px/s);
   });
@@ -164,7 +164,7 @@ describe("mobile scrolling", () => {
     expect(tablet?.[1]).toMatch(
       /\.mobile-tabs\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
     );
-    expect(tablet?.[1]).toMatch(/\.mobile-host-form\s*\{[\s\S]*repeat\(2,/);
+    expect(tablet?.[1]).toMatch(/\.mobile-host-form\s*\{[\s\S]*repeat\(auto-fit,/);
     expect(tablet?.[1]).toMatch(
       /\.mobile-catalog-detail-scroll\s*\{[\s\S]*padding-right:\s*env\(safe-area-inset-right\)[\s\S]*padding-left:\s*env\(safe-area-inset-left\)/,
     );
@@ -222,7 +222,9 @@ describe("mobile navigation", () => {
     const actionButton = css.match(/\.mobile-create-action \.primary-button\s*\{([^}]*)\}/s);
 
     expect(shell?.[1]).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\) auto auto\s*;/);
-    expect(action?.[1]).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto\s*;/);
+    expect(action?.[1]).toMatch(
+      /grid-template-columns:\s*repeat\(auto-fit, minmax\(min\(100%, 10em\), 1fr\)\)\s*;/,
+    );
     expect(action?.[1]).toContain("env(safe-area-inset-left)");
     expect(action?.[1]).toContain("env(safe-area-inset-right)");
     expect(css).toMatch(
@@ -428,14 +430,14 @@ describe("mobile safe areas", () => {
     expect(value?.[1]).not.toMatch(/text-overflow:\s*ellipsis\s*;/);
   });
 
-  it("gives shared desktop shape choices a uniform mobile touch tile", () => {
+  it("lets shape tiles grow for larger labels while preserving the touch floor", () => {
     const group = css.match(/\.mobile-resolution-group \.ms-shape\s*\{([^}]*)\}/s);
     const choice = css.match(/\.mobile-resolution-group \.ms-shape__btn\s*\{([^}]*)\}/s);
 
     expect(group?.[1]).toMatch(/gap:\s*7px\s*;/);
     expect(choice?.[1]).toMatch(/min-width:\s*60px\s*;/);
     expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
-    expect(choice?.[1]).toMatch(/flex:\s*1 1 60px\s*;/);
+    expect(choice?.[1]).toMatch(/flex:\s*1 1 max-content\s*;/);
   });
 
   it("keeps the kit tier segments at touch size with legible sublabels", () => {
@@ -635,12 +637,11 @@ describe("mobile gallery viewer", () => {
 });
 
 describe("mobile Library organization", () => {
-  it("keeps the Library heading and Select action reachable while the grid scrolls", () => {
+  it("lets large Library headings scroll away and wraps their actions", () => {
     const heading = css.match(/\.mobile-library-heading\s*\{([^}]*)\}/s);
 
-    expect(heading?.[1]).toMatch(/position:\s*sticky\s*;/);
-    expect(heading?.[1]).toMatch(/top:\s*-16px\s*;/);
-    expect(heading?.[1]).toMatch(/z-index:\s*9\s*;/);
+    expect(heading?.[1]).toMatch(/position:\s*relative\s*;/);
+    expect(heading?.[1]).toMatch(/flex-wrap:\s*wrap\s*;/);
     expect(heading?.[1]).toMatch(/background:/);
     expect(heading?.[1]).toMatch(/backdrop-filter:\s*blur\(/);
   });

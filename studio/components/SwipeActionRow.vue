@@ -200,7 +200,7 @@ defineExpose({ close });
   border: 0;
   background: var(--mold-surface, transparent);
   color: var(--mold-text);
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 .swipe-row__action--danger {
   background: var(--mold-error);
@@ -226,7 +226,7 @@ defineExpose({ close });
   border: 0;
   background: none;
   color: var(--mold-text-dim, currentColor);
-  font-size: 16px;
+  font-size: 1rem;
 }
 @media (prefers-reduced-motion: reduce) {
   .swipe-row__surface--settling {

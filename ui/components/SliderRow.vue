@@ -305,7 +305,7 @@ function onPointerCancel() {
 
 .ms-slider__mark b {
   order: 1;
-  font-size: 8px; /* literal: tick captions ride a 4px track and collide at micro */
+  font-size: 0.5rem; /* literal: tick captions ride a 4px track and collide at micro */
   font-weight: 500;
   line-height: 1;
 }

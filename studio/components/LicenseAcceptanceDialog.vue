@@ -141,7 +141,7 @@ function openTerms(event: MouseEvent, url: string) {
 .license-machine {
   margin: 8px 0 16px;
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .license-bundle {
   margin-top: 12px;
@@ -163,12 +163,12 @@ article + article {
 h3 {
   margin: 0;
   color: var(--mold-text);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 article p {
   margin: 6px 0 0;
   color: var(--mold-text-2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
 }
 .license-links {
@@ -180,7 +180,7 @@ a {
 }
 .license-error {
   color: var(--mold-error);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .license-progress {
   display: flex;
