@@ -6377,10 +6377,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(contextual.task, Some(ExpandTask::ImageToVideo));
-        assert!(serde_json::to_string(&legacy)
-            .unwrap()
-            .find("task")
-            .is_none());
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("task"));
     }
 
     #[test]
