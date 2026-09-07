@@ -455,6 +455,8 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   border-radius: 50%;
   background: var(--mold-blue);
   color: var(--mold-on-accent);
+  font-size: min(0.875rem, 18px);
+  line-height: 1;
   font-weight: 700;
 }
 
