@@ -3095,9 +3095,10 @@ button:disabled {
   max-height: 68%;
   flex-direction: column;
   box-sizing: border-box;
-  border-top: 1px solid rgba(245, 239, 255, 0.12);
+  border-top: 1px solid var(--mold-border);
   border-radius: 18px 18px 0 0;
-  background: #12101d;
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   transform: translateY(calc(100% - var(--viewer-peek) + var(--viewer-sheet-drag, 0px)));
   transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
 }
@@ -3133,7 +3134,7 @@ button:disabled {
   border: 0;
   padding: 9px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
   background: transparent;
-  color: #f5efff;
+  color: var(--mold-text);
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
 }
@@ -3144,7 +3145,7 @@ button:disabled {
   height: 4px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: rgba(245, 239, 255, 0.34);
+  background: var(--mold-text-dim);
 }
 
 .gallery-viewer-sheet-peek {
@@ -3160,7 +3161,7 @@ button:disabled {
 .gallery-viewer-kind {
   flex: 0 0 auto;
   border-radius: 5px;
-  background: rgba(245, 239, 255, 0.14);
+  background: var(--mold-surface);
   padding: 3px 7px;
   font-size: var(--mold-fs-micro);
   font-weight: 700;
@@ -3178,12 +3179,12 @@ button:disabled {
 
 .gallery-viewer-peek-fact {
   flex: 0 1 auto;
-  color: rgba(245, 239, 255, 0.86);
+  color: var(--mold-text-2);
 }
 
 .gallery-viewer-peek-host {
   flex: 1 1 auto;
-  color: rgba(245, 239, 255, 0.6);
+  color: var(--mold-text-dim);
   text-align: right;
 }
 
@@ -3215,7 +3216,7 @@ button:disabled {
 }
 
 .gallery-viewer-prompt > span {
-  color: rgba(245, 239, 255, 0.62);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -3226,7 +3227,7 @@ button:disabled {
   display: -webkit-box;
   overflow: hidden;
   margin: 5px 0 0;
-  color: #f5efff;
+  color: var(--mold-text);
   font-size: var(--text-body-lg);
   line-height: 1.4;
   overflow-wrap: anywhere;
@@ -3237,7 +3238,7 @@ button:disabled {
 .gallery-viewer-prompt .gallery-viewer-reuse-error {
   display: block;
   margin-top: 8px;
-  color: #ffb4ab;
+  color: var(--mold-error);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
