@@ -501,9 +501,7 @@ describe("MobileSharedParams mesh controls", () => {
       required: false,
     };
     expect(
-      mountMesh(meshForm(), meshModel(recipe))
-        .find("[data-test='mobile-mesh-delight']")
-        .exists(),
+      mountMesh(meshForm(), meshModel(recipe)).find("[data-test='mobile-mesh-delight']").exists(),
     ).toBe(false);
   });
 
