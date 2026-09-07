@@ -259,7 +259,12 @@ describe("restoring a mesh print", () => {
   it("applyMetadataToForm restores the mesh controls and pins glb", () => {
     const form = newGenerateForm();
     applyMetadataToForm(form, metadata, [hunyuanModel()]);
-    expect(form.mesh).toEqual({ octreeResolution: 320, threshold: 0.55, targetFaces: 40_000 });
+    expect(form.mesh).toEqual({
+      octreeResolution: 320,
+      threshold: 0.55,
+      targetFaces: 40_000,
+      matting: "off",
+    });
     expect(form.outputFormat).toBe("glb");
     expect(form.width).toBe(0);
     expect(form.height).toBe(0);
@@ -280,7 +285,12 @@ describe("restoring a mesh print", () => {
       },
       [hunyuanModel()],
     );
-    expect(form.mesh).toEqual({ octreeResolution: 192, threshold: null, targetFaces: null });
+    expect(form.mesh).toEqual({
+      octreeResolution: 192,
+      threshold: null,
+      targetFaces: null,
+      matting: "off",
+    });
     expect(form.outputFormat).toBe("glb");
   });
 

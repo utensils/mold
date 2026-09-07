@@ -205,6 +205,18 @@ struct MeshArgs {
     /// Requires --texture.
     #[arg(long, value_name = "N", requires = "texture", help_heading = "3D")]
     texture_resolution: Option<u32>,
+
+    /// Background removal before shape conditioning: auto preserves useful
+    /// alpha, on recomputes it, and off keeps the original background.
+    #[arg(long, value_enum, help_heading = "3D")]
+    matting: Option<MeshMattingArg>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum MeshMattingArg {
+    Auto,
+    On,
+    Off,
 }
 
 impl MeshArgs {
@@ -219,6 +231,11 @@ impl MeshArgs {
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
+            matting: self.matting.map(|value| match value {
+                MeshMattingArg::Auto => mold_core::MeshMattingMode::Auto,
+                MeshMattingArg::On => mold_core::MeshMattingMode::On,
+                MeshMattingArg::Off => mold_core::MeshMattingMode::Off,
+            }),
         }
     }
 }
@@ -3605,6 +3622,33 @@ mod tests {
             "right.png",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn run_accepts_exact_background_matting_values() {
+        for value in ["auto", "on", "off"] {
+            assert!(
+                try_parse(&[
+                    "run",
+                    "hunyuan3d:fp16",
+                    "--image",
+                    "chair.png",
+                    "--matting",
+                    value
+                ])
+                .is_ok(),
+                "{value}"
+            );
+        }
+        assert!(try_parse(&[
+            "run",
+            "hunyuan3d:fp16",
+            "--image",
+            "chair.png",
+            "--matting",
+            "sometimes"
+        ])
+        .is_err());
     }
 
     #[test]

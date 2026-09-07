@@ -633,6 +633,7 @@ describe("applyMobileGalleryMetadata on a mesh print", () => {
       octreeResolution: 384,
       threshold: 0.42,
       targetFaces: 25_000,
+      matting: "off",
     });
 
     form.sourceImage = "c291cmNl";
@@ -646,6 +647,7 @@ describe("applyMobileGalleryMetadata on a mesh print", () => {
       octree_resolution: 384,
       threshold: 0.42,
       target_faces: 25_000,
+      matting: "off",
     });
   });
 

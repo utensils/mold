@@ -115,6 +115,13 @@ fn downloadable_role(role: &str) -> bool {
     )
 }
 
+fn reusable_role(role: &str) -> bool {
+    !matches!(
+        role,
+        "matting_processed_source_image" | "matting_processed_references"
+    )
+}
+
 fn member_id(
     media_set: &crate::queue_media_store::MediaSetRef,
     pin_id: &str,
@@ -385,6 +392,13 @@ fn selected_members(
             .iter()
             .find(|member| member.member.member_id == *requested_id)
             .ok_or_else(|| ApiError::not_found("retained source-media member was not found"))?;
+        if !reusable_role(&member.member.role) {
+            return Err(ApiError::with_code(
+                "processed matting media is available for download but cannot be reused as generation input",
+                "RETAINED_MEDIA_REUSE_ROLE_UNSUPPORTED",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ));
+        }
         total_bytes = total_bytes
             .checked_add(member.member.size_bytes)
             .ok_or_else(|| ApiError::validation("selected retained media is too large"))?;
@@ -910,6 +924,40 @@ mod tests {
         ] {
             assert!(!downloadable_role(role), "{role}");
         }
+        for role in [
+            "matting_processed_source_image",
+            "matting_processed_references",
+        ] {
+            assert!(downloadable_role(role), "{role}");
+            assert!(!reusable_role(role), "{role}");
+        }
+    }
+
+    #[test]
+    fn processed_mattes_can_be_downloaded_but_cannot_mint_a_reuse_session() {
+        let member = ResolvedMember {
+            media_set: crate::queue_media_store::MediaSetRef {
+                owner_id: "owner".into(),
+                job_id: "job-derived-matting_processed".into(),
+                set_id: "set".into(),
+            },
+            pin_id: "a".repeat(64),
+            index: 0,
+            position: "front".into(),
+            member: Member {
+                member_id: "processed-front".into(),
+                role: "matting_processed_references".into(),
+                display_name: "front".into(),
+                size_bytes: 3,
+            },
+        };
+        let resolved = ResolvedGalleryMedia {
+            archive_identity_sha256: "identity".into(),
+            members: vec![member],
+            legacy: false,
+            corrupt: false,
+        };
+        assert!(selected_members(&resolved, &["processed-front".into()]).is_err());
     }
 
     #[test]

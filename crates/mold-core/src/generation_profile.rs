@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     validation, GenerationImageReferenceRole, GuidanceCapabilities, Ltx2PipelineMode,
-    MeshReferenceFormat, MeshUpAxis, OutputFormat, Scheduler, SourceImageCapability,
+    MeshMattingMode, MeshReferenceFormat, MeshUpAxis, OutputFormat, Scheduler,
+    SourceImageCapability,
 };
 
 pub const GENERATION_PROFILE_SCHEMA_VERSION: u32 = 1;
@@ -226,6 +227,16 @@ pub struct FeatureControlProfile {
     pub reason: Option<String>,
 }
 
+/// Background-removal policy exposed by a mesh recipe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct MeshMattingControlProfile {
+    pub mode: ControlMode,
+    pub default: MeshMattingMode,
+    pub choices: Vec<MeshMattingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// How a recipe treats `GenerateRequest.prompt`.
 ///
 /// The profile is the SINGLE authority for this. Before it existed, each
@@ -317,7 +328,7 @@ pub struct MeshCapabilitiesProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_view_count: Option<IntegerControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matting: Option<FeatureControlProfile>,
+    pub matting: Option<MeshMattingControlProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delight: Option<FeatureControlProfile>,
     /// Complete workflows executable by this recipe in this build.
@@ -1007,6 +1018,19 @@ pub fn validate_mesh_against_recipe(
              omit mesh.texture to render geometry only"
                 .to_string()
         }));
+    }
+    if options.matting.is_some() {
+        let available = mesh
+            .matting
+            .as_ref()
+            .is_some_and(|control| matches!(control.mode, ControlMode::Adjustable));
+        if !available {
+            return Err(mesh
+                .matting
+                .as_ref()
+                .and_then(|control| control.reason.clone())
+                .unwrap_or_else(|| "Background matting is not available for this recipe".into()));
+        }
     }
     Ok(())
 }
@@ -2272,9 +2296,25 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
             mode: ControlMode::Fixed,
             note: Some("Hunyuan3D Paint renders six canonical views".to_string()),
         }),
-        matting: Some(unavailable(
-            "Background matting is not executable by this build",
-        )),
+        matting: Some(MeshMattingControlProfile {
+            mode: if cfg!(feature = "mesh-matting") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            },
+            default: MeshMattingMode::Auto,
+            choices: if cfg!(feature = "mesh-matting") {
+                vec![
+                    MeshMattingMode::Auto,
+                    MeshMattingMode::On,
+                    MeshMattingMode::Off,
+                ]
+            } else {
+                Vec::new()
+            },
+            reason: (!cfg!(feature = "mesh-matting"))
+                .then(|| "Background matting requires the mesh-matting build feature".to_string()),
+        }),
         delight: Some(unavailable("Delighting is not executable by this build")),
         workflow_modes: if multiview {
             vec![MeshWorkflowMode::MultiviewToMesh]
@@ -3033,6 +3073,28 @@ mod tests {
         assert_eq!(
             mesh_caps.mesh_input.as_ref().map(|input| input.mode),
             Some(ControlMode::Hidden)
+        );
+        assert_eq!(
+            mesh_caps.matting.as_ref().map(|control| control.mode),
+            Some(if cfg!(feature = "mesh-matting") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            })
+        );
+        let matting = mesh_caps.matting.as_ref().unwrap();
+        assert_eq!(matting.default, MeshMattingMode::Auto);
+        assert_eq!(
+            matting.choices,
+            if cfg!(feature = "mesh-matting") {
+                vec![
+                    MeshMattingMode::Auto,
+                    MeshMattingMode::On,
+                    MeshMattingMode::Off,
+                ]
+            } else {
+                Vec::new()
+            }
         );
     }
 

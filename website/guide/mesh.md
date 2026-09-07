@@ -292,10 +292,12 @@ itself from the model's generation profile rather than from its name:
   and choosing one form clears the other. Strength, Mask and the
   Negative prompt disappear because the profile advertises no strength
   (`supports_strength` is false), a hidden mask, and no negative prompt.
-- **Advanced ▸ 3-D mesh** appears with three rows — **Octree** (`◀▶` walks
+- **Advanced ▸ 3-D mesh** appears with four rows — **Octree** (`◀▶` walks
   the advertised allowlist), **Iso threshold** (0.05 per press inside the
   advertised range) and **Target faces** (10 000 per press; stepping below
-  the minimum turns decimation off). Each row reads `default` until touched,
+  the minimum turns decimation off), and **Remove background** (Auto, On, or
+  Off from the advertised profile). Auto preserves useful supplied alpha and
+  runs the pinned U²-Net pre-stage for opaque inputs. Each row reads `default` until touched,
   showing the profile's own default, and an untouched row sends nothing so
   the recipe's defaults apply.
 - **Format** is pinned to `glb`; `◀▶` cannot walk it onto a raster container
@@ -332,7 +334,7 @@ the gallery file is untouched.
 attach any non-empty subset of `front`, `left`, `back`, and `right` for a 2mv
 model. When `model` is omitted, single-view input selects the ordinary default
 and named views select `hunyuan3d-2mv-turbo:fp16`. The command also exposes
-seed, texture, octree, threshold, and target-face controls. `/generate` with a
+seed, texture, matting, octree, threshold, and target-face controls. `/generate` with a
 Hunyuan3D `model` and `source_image` remains available for compatibility. Its
 `prompt` option is optional whenever a source image is attached
 (Discord cannot make an option optional per model, and a source image is
@@ -354,7 +356,8 @@ draw glTF bytes as a picture.
 
 ## What is not supported yet
 
-Multi-view input, text-to-3D, matting, delight and supplied-mesh retexturing
-are tracked in [#1496](https://github.com/utensils/mold/issues/1496). PBR
-painting is available from the CLI, server API and desktop app on CUDA builds
-that include `mesh-texture`.
+Text-to-3D, delight and supplied-mesh retexturing are tracked in
+[#1496](https://github.com/utensils/mold/issues/1496). Named multiview input
+and background matting are available on every authoring surface. PBR painting
+is available from the CLI, server API and desktop app on CUDA builds that
+include `mesh-texture`.

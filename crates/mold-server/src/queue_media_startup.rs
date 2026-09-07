@@ -36,6 +36,13 @@ pub(crate) struct MediaObligation {
     /// `gc_pending` obligations outlive the deleted queue row and therefore do
     /// not carry a job id.
     pub job_id: Option<String>,
+    /// Authenticated job identity inside the encrypted store. Primary media
+    /// uses the queue job id; a derived purpose uses its own store-local id
+    /// because the store permits one bundle per owner/job pair.
+    pub storage_job_id: Option<String>,
+    /// `None` is the singular authored bundle; derived purposes are unique
+    /// per live queue job.
+    pub kind: Option<String>,
     pub set_id: String,
     pub state: ObligationState,
 }
@@ -302,6 +309,8 @@ fn reconcile_claimed_owner_inner(
         .iter()
         .filter(|obligation| obligation.state == ObligationState::Active)
         .filter_map(|obligation| obligation.job_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
 
     let initialization = if obligations.is_empty() {
@@ -349,15 +358,16 @@ fn reconcile_claimed_owner_inner(
     // otherwise a stale GC row could delete a set still required by active
     // work, or one job could ambiguously claim two independent sets.
     let mut obligations_by_set: BTreeMap<&str, Vec<&MediaObligation>> = BTreeMap::new();
-    let mut obligations_by_job: BTreeMap<&str, Vec<&MediaObligation>> = BTreeMap::new();
+    let mut obligations_by_job_slot: BTreeMap<(&str, Option<&str>), Vec<&MediaObligation>> =
+        BTreeMap::new();
     for obligation in &obligations {
         obligations_by_set
             .entry(&obligation.set_id)
             .or_default()
             .push(obligation);
         if let Some(job_id) = &obligation.job_id {
-            obligations_by_job
-                .entry(job_id)
+            obligations_by_job_slot
+                .entry((job_id, obligation.kind.as_deref()))
                 .or_default()
                 .push(obligation);
         }
@@ -377,13 +387,13 @@ fn reconcile_claimed_owner_inner(
                 .push(format!("media set {set_id} has conflicting DB obligations"));
         }
     }
-    for (job_id, matching) in &obligations_by_job {
+    for ((job_id, kind), matching) in &obligations_by_job_slot {
         if matching.len() > 1 {
             conflicting_jobs.insert(*job_id);
             conflicting_sets.extend(matching.iter().map(|obligation| obligation.set_id.as_str()));
-            report
-                .issues
-                .push(format!("media job {job_id} has conflicting DB obligations"));
+            report.issues.push(format!(
+                "media job {job_id} purpose {kind:?} has conflicting DB obligations"
+            ));
         }
     }
 
@@ -453,17 +463,19 @@ fn reconcile_claimed_owner_inner(
                     );
                     continue;
                 }
-                let expected_job_id = obligation
+                let queue_job_id = obligation
                     .job_id
                     .as_deref()
                     .expect("active obligations were validated above");
-                if unique.is_some_and(|entry| entry.job_id != expected_job_id) {
+                let expected_store_job_id =
+                    obligation.storage_job_id.as_deref().unwrap_or(queue_job_id);
+                if unique.is_some_and(|entry| entry.job_id != expected_store_job_id) {
                     let entry = unique.expect("mismatched job came from a unique entry");
                     report.issues.push(format!(
-                        "active media obligation {} belongs to job {expected_job_id}, but its authenticated bundle belongs to job {}",
+                        "active media obligation {} belongs to queue job {queue_job_id} and store job {expected_store_job_id}, but its authenticated bundle belongs to job {}",
                         obligation.set_id, entry.job_id
                     ));
-                    jobs_to_hold.insert(expected_job_id.to_string());
+                    jobs_to_hold.insert(queue_job_id.to_string());
                     continue;
                 }
                 match unique.map(|entry| entry.state) {
@@ -870,6 +882,8 @@ mod tests {
             &owner,
             vec![MediaObligation {
                 job_id: Some("media-job".to_string()),
+                storage_job_id: None,
+                kind: None,
                 set_id: "set-a".to_string(),
                 state: ObligationState::Active,
             }],
@@ -904,26 +918,36 @@ mod tests {
             vec![
                 MediaObligation {
                     job_id: Some("active".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "active-set".to_string(),
                     state: ObligationState::Active,
                 },
                 MediaObligation {
                     job_id: Some("restored".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "retired-active-set".to_string(),
                     state: ObligationState::Active,
                 },
                 MediaObligation {
                     job_id: None,
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "gc-set".to_string(),
                     state: ObligationState::GcPending,
                 },
                 MediaObligation {
                     job_id: None,
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "unsafe-set".to_string(),
                     state: ObligationState::GcPending,
                 },
                 MediaObligation {
                     job_id: None,
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "hintless-set".to_string(),
                     state: ObligationState::GcPending,
                 },
@@ -1018,6 +1042,8 @@ mod tests {
             &first_owner,
             vec![MediaObligation {
                 job_id: None,
+                storage_job_id: None,
+                kind: None,
                 set_id: "foreign-set".to_string(),
                 state: ObligationState::GcPending,
             }],
@@ -1051,21 +1077,29 @@ mod tests {
             vec![
                 MediaObligation {
                     job_id: Some("active-job".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "shared-set".to_string(),
                     state: ObligationState::Active,
                 },
                 MediaObligation {
                     job_id: None,
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "shared-set".to_string(),
                     state: ObligationState::GcPending,
                 },
                 MediaObligation {
                     job_id: Some("ambiguous-job".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "first-set".to_string(),
                     state: ObligationState::Active,
                 },
                 MediaObligation {
                     job_id: Some("ambiguous-job".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "second-set".to_string(),
                     state: ObligationState::Active,
                 },
@@ -1112,6 +1146,8 @@ mod tests {
             &owner,
             vec![MediaObligation {
                 job_id: Some("media-job".to_string()),
+                storage_job_id: None,
+                kind: None,
                 set_id: "expected-set".to_string(),
                 state: ObligationState::Active,
             }],
@@ -1153,11 +1189,15 @@ mod tests {
             vec![
                 MediaObligation {
                     job_id: Some("active-job".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "active-set".to_string(),
                     state: ObligationState::Active,
                 },
                 MediaObligation {
                     job_id: Some("restore-job".to_string()),
+                    storage_job_id: None,
+                    kind: None,
                     set_id: "retired-set".to_string(),
                     state: ObligationState::Active,
                 },

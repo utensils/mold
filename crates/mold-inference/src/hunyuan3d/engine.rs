@@ -35,9 +35,13 @@ use mold_core::{
     GenerateRequest, GenerateResponse, GenerationReference, GenerationReferenceAuthority, MeshData,
     ModelPaths, OutputFormat,
 };
+#[cfg(feature = "mesh-matting")]
+use mold_core::{GenerationImageReferenceRole, MeshDerivedMedia, MeshMattingMode};
 
 use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
+#[cfg(feature = "mesh-matting")]
+use crate::progress::ProgressReporter;
 use crate::progress::{ProgressEvent, ProgressPhase};
 
 use super::dino2::{Dinov2Config, Dinov2Model};
@@ -86,6 +90,81 @@ const POSTER_SIZE: u32 = 512;
 /// How many chunks to decode before emitting a progress tick. One event per
 /// chunk at 17M points would be ~2,100 SSE frames for a single stage.
 const DECODE_TICKS: usize = 64;
+
+#[cfg(feature = "mesh-matting")]
+fn matte_images<'a>(
+    images: impl IntoIterator<
+        Item = (
+            Option<GenerationImageReferenceRole>,
+            &'a mut image::RgbaImage,
+        ),
+    >,
+    policy: MeshMattingMode,
+    model_path: Option<&std::path::Path>,
+    gpu_ordinal: usize,
+    progress: &ProgressReporter,
+) -> Result<Vec<MeshDerivedMedia>> {
+    let mut images = images.into_iter().collect::<Vec<_>>();
+    let should_run = images
+        .iter()
+        .map(|(_, image)| match policy {
+            MeshMattingMode::Off => false,
+            MeshMattingMode::On => true,
+            MeshMattingMode::Auto => !super::background_matting::has_useful_alpha(image),
+        })
+        .collect::<Vec<_>>();
+    let total = should_run.iter().filter(|run| **run).count();
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+
+    let total_pixels = images
+        .iter()
+        .zip(&should_run)
+        .filter(|(_, run)| **run)
+        .try_fold(0_u64, |sum, ((_, image), _)| {
+            sum.checked_add(u64::from(image.width()) * u64::from(image.height()))
+        })
+        .context("matting input pixel count overflowed")?;
+    anyhow::ensure!(
+        total_pixels <= super::background_matting::MAX_MATTING_PIXELS,
+        "combined matting inputs exceed {} pixels",
+        super::background_matting::MAX_MATTING_PIXELS
+    );
+
+    progress.stage_start("Removing background");
+    let started = std::time::Instant::now();
+    let path = model_path.context(
+        "background matting was requested but the U²-Net dependency was not materialized",
+    )?;
+    let device = crate::device::create_device(gpu_ordinal, progress)?;
+    let network = super::background_matting::U2Net::load(path, &device)?;
+    let mut artifacts = Vec::with_capacity(total);
+    for ((role, image), run) in images.iter_mut().zip(should_run) {
+        if !run {
+            continue;
+        }
+        **image = network.matte(image)?;
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8((*image).clone())
+            .write_to(&mut output, image::ImageFormat::Png)
+            .context("encode the processed matting image")?;
+        artifacts.push(MeshDerivedMedia {
+            role: *role,
+            data: output.into_inner(),
+        });
+        progress.stage_progress("Removing background", artifacts.len(), total);
+    }
+    // Drop all graph tensors before the shape checkpoint is loaded.
+    drop(network);
+    progress.stage_done("Removing background", started.elapsed());
+    Ok(artifacts)
+}
+
+enum DecodedConditioning {
+    Single(image::RgbaImage),
+    Multi(Vec<(mold_core::GenerationImageReferenceRole, image::RgbaImage)>),
+}
 
 /// The two edge lengths a source image passes through on its way to the
 /// vision tower.
@@ -154,6 +233,7 @@ struct Loaded {
 pub struct Hunyuan3dEngine {
     base: EngineBase<Loaded>,
     paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
+    matting_asset: Option<std::path::PathBuf>,
 }
 
 impl Hunyuan3dEngine {
@@ -166,7 +246,13 @@ impl Hunyuan3dEngine {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             paint_assets: None,
+            matting_asset: None,
         }
+    }
+
+    pub fn with_matting_asset(mut self, asset: Option<std::path::PathBuf>) -> Self {
+        self.matting_asset = asset;
+        self
     }
 
     pub fn with_paint_assets(
@@ -273,16 +359,6 @@ impl Hunyuan3dEngine {
         bindings: &[GenerationReferenceBinding],
     ) -> Result<GenerateResponse> {
         let started = std::time::Instant::now();
-        if self.base.loaded.is_none() {
-            let loaded = self.load_inner()?;
-            self.base.loaded = Some(loaded);
-        }
-        let loaded = self
-            .base
-            .loaded
-            .as_ref()
-            .expect("just loaded above or already present");
-
         let options = req.mesh.clone().unwrap_or_default();
         let octree = options
             .octree_resolution
@@ -296,15 +372,12 @@ impl Hunyuan3dEngine {
             bail!("PBR texture generation requires the mesh-texture build feature");
         }
 
-        // ── Conditioning ────────────────────────────────────────────────
+        // Decode and matte before the shape checkpoint is loaded. On a cold
+        // engine this guarantees U²-Net tensors are released before DINO, the
+        // DiT, and the shape VAE take the accelerator. A warm resident engine
+        // retains its shape weights by policy, but never retains U²-Net.
         let multiview = mold_core::manifest::hunyuan3d_multiview_model(&self.base.model_name);
-        self.base.progress.stage_start(if multiview {
-            "Encoding views"
-        } else {
-            "Encoding image"
-        });
-        let phase_started = std::time::Instant::now();
-        let (cond, source_rgba) = if multiview {
+        let (decoded, derived_media) = if multiview {
             anyhow::ensure!(
                 req.source_image
                     .as_deref()
@@ -323,7 +396,6 @@ impl Hunyuan3dEngine {
                 bindings.is_empty() || bindings.len() == references.len(),
                 "Hunyuan3D 2mv resolved binding count differs from its named views"
             );
-
             let mut views = Vec::with_capacity(references.len());
             for (index, reference) in references.iter().enumerate() {
                 self.base.progress.checkpoint()?;
@@ -348,24 +420,17 @@ impl Hunyuan3dEngine {
                 views.push((*role, rgba));
             }
             views.sort_by_key(|(role, _)| super::multiview::view_slot(*role));
-            let source_rgba = views[0].1.clone();
-            let mut encoded = Vec::with_capacity(views.len());
-            for (role, rgba) in views {
-                self.base.progress.checkpoint()?;
-                let image = image::DynamicImage::ImageRgba8(rgba);
-                let pixels = super::dino2::preprocess(
-                    &image,
-                    loaded.conditioning.letterbox,
-                    loaded.conditioning.encoder,
-                    &loaded.device,
-                    loaded.dtype,
-                )?;
-                encoded.push((role, loaded.vision.forward(&pixels)?));
-            }
-            (
-                super::multiview::compose_view_conditioning(encoded)?,
-                source_rgba,
-            )
+            #[cfg(feature = "mesh-matting")]
+            let derived_media = matte_images(
+                views.iter_mut().map(|(role, image)| (Some(*role), image)),
+                options.matting.unwrap_or_default(),
+                self.matting_asset.as_deref(),
+                self.base.gpu_ordinal,
+                &self.base.progress,
+            )?;
+            #[cfg(not(feature = "mesh-matting"))]
+            let derived_media = Vec::new();
+            (DecodedConditioning::Multi(views), derived_media)
         } else {
             anyhow::ensure!(
                 bindings.is_empty(),
@@ -376,18 +441,67 @@ impl Hunyuan3dEngine {
                 .as_deref()
                 .filter(|bytes| !bytes.is_empty())
                 .context("3-D generation requires a source image")?;
-            // RGBA, not RGB: alpha is the SUBJECT MASK here, not decoration.
-            let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
+            let image = crate::img_utils::decode_oriented_srgb_rgba(source)
                 .context("decode the source image")?;
-            let image = image::DynamicImage::ImageRgba8(source_rgba.clone());
-            let pixels = super::dino2::preprocess(
-                &image,
-                loaded.conditioning.letterbox,
-                loaded.conditioning.encoder,
-                &loaded.device,
-                loaded.dtype,
-            )?;
-            (loaded.vision.forward(&pixels)?, source_rgba)
+            #[cfg(feature = "mesh-matting")]
+            let (image, derived_media) = {
+                let mut image = image;
+                let derived_media = matte_images(
+                    std::iter::once((None, &mut image)),
+                    options.matting.unwrap_or_default(),
+                    self.matting_asset.as_deref(),
+                    self.base.gpu_ordinal,
+                    &self.base.progress,
+                )?;
+                (image, derived_media)
+            };
+            #[cfg(not(feature = "mesh-matting"))]
+            let derived_media = Vec::new();
+            (DecodedConditioning::Single(image), derived_media)
+        };
+
+        if self.base.loaded.is_none() {
+            let loaded = self.load_inner()?;
+            self.base.loaded = Some(loaded);
+        }
+        let loaded = self.base.loaded.as_ref().expect("loaded above");
+
+        self.base.progress.stage_start(if multiview {
+            "Encoding views"
+        } else {
+            "Encoding image"
+        });
+        let phase_started = std::time::Instant::now();
+        let (cond, source_rgba) = match decoded {
+            DecodedConditioning::Multi(views) => {
+                let source_rgba = views[0].1.clone();
+                let mut encoded = Vec::with_capacity(views.len());
+                for (role, rgba) in views {
+                    self.base.progress.checkpoint()?;
+                    let pixels = super::dino2::preprocess(
+                        &image::DynamicImage::ImageRgba8(rgba),
+                        loaded.conditioning.letterbox,
+                        loaded.conditioning.encoder,
+                        &loaded.device,
+                        loaded.dtype,
+                    )?;
+                    encoded.push((role, loaded.vision.forward(&pixels)?));
+                }
+                (
+                    super::multiview::compose_view_conditioning(encoded)?,
+                    source_rgba,
+                )
+            }
+            DecodedConditioning::Single(source_rgba) => {
+                let pixels = super::dino2::preprocess(
+                    &image::DynamicImage::ImageRgba8(source_rgba.clone()),
+                    loaded.conditioning.letterbox,
+                    loaded.conditioning.encoder,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                (loaded.vision.forward(&pixels)?, source_rgba)
+            }
         };
         self.base.progress.stage_complete(
             ProgressPhase::PromptEncode,
@@ -471,6 +585,7 @@ impl Hunyuan3dEngine {
                     poster,
                     poster_width: POSTER_SIZE,
                     poster_height: POSTER_SIZE,
+                    derived_media,
                 }),
                 generation_time_ms: started.elapsed().as_millis() as u64,
                 model: self.base.model_name.clone(),
@@ -505,6 +620,7 @@ impl Hunyuan3dEngine {
                 poster,
                 poster_width: POSTER_SIZE,
                 poster_height: POSTER_SIZE,
+                derived_media,
             }),
             generation_time_ms: started.elapsed().as_millis() as u64,
             model: self.base.model_name.clone(),

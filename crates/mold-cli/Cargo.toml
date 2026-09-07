@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [features]
 mesh-texture = ["mold-inference/mesh-texture", "mold-server/mesh-texture", "mold-tui?/mesh-texture"]
+mesh-matting = ["mold-core/mesh-matting", "mold-inference/mesh-matting", "mold-server/mesh-matting", "mold-tui?/mesh-matting"]
 default = []
 cuda = ["mold-server/cuda", "mold-inference/cuda", "mold-tui?/cuda", "nvml"]
 cudnn = ["cuda", "mold-server/cudnn", "mold-inference/cudnn", "mold-tui?/cudnn"]

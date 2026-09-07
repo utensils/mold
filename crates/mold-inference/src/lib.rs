@@ -23,8 +23,8 @@ mod h3_factory;
 /// Hunyuan3D 2.0 image-to-3D shape generation (#1495).
 pub mod hunyuan3d;
 /// PuLID face detection and identity embedding (#1222). Gated on the
-/// `pulid` feature, which is what pulls `candle-onnx` into the build.
-#[cfg(feature = "pulid")]
+/// `pulid` feature, or by mesh matting which reuses its secure ONNX loader.
+#[cfg(any(feature = "pulid", feature = "mesh-matting"))]
 pub mod identity;
 mod image;
 pub(crate) mod img2img;

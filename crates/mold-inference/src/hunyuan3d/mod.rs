@@ -23,6 +23,8 @@
 //!     per-checkpoint `config.yaml` shipped beside each weights file.
 
 pub mod backend;
+#[cfg(feature = "mesh-matting")]
+pub mod background_matting;
 pub mod dino2;
 pub mod engine;
 pub mod glb;

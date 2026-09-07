@@ -656,6 +656,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 34,
         kind: MigrationKind::Sql(V34_VIDEO_UPSCALE_JOBS),
     },
+    Migration {
+        version: 35,
+        kind: MigrationKind::Sql(V35_GENERATION_QUEUE_DERIVED_MEDIA),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -702,6 +706,64 @@ CREATE TABLE video_upscale_jobs (
 );
 CREATE INDEX video_upscale_jobs_state_created
     ON video_upscale_jobs(state, created_at_ms);
+"#;
+
+/// Encrypted media produced from private request inputs while a durable job
+/// runs. The authored bundle stays on `generation_queue.media_set_id`; these
+/// purpose-keyed sets are additional obligations that must be handed to the
+/// same gallery output before the queue row can settle.
+const V35_GENERATION_QUEUE_DERIVED_MEDIA: &str = r#"
+CREATE TABLE generation_queue_derived_media (
+    job_id         TEXT NOT NULL REFERENCES generation_queue(id) ON DELETE CASCADE,
+    owner_uuid     TEXT NOT NULL CHECK (length(owner_uuid) > 0),
+    kind           TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 64),
+    storage_job_id TEXT NOT NULL CHECK (length(storage_job_id) > 0),
+    media_set_id   TEXT NOT NULL UNIQUE REFERENCES generation_queue_media(media_set_id),
+    PRIMARY KEY (job_id, kind)
+);
+
+CREATE INDEX generation_queue_derived_media_owner
+ON generation_queue_derived_media(owner_uuid, job_id, kind);
+
+CREATE TRIGGER generation_queue_derived_media_insert_guard
+BEFORE INSERT ON generation_queue_derived_media
+WHEN NOT EXISTS (
+        SELECT 1 FROM generation_queue AS queue
+         WHERE queue.id = NEW.job_id
+           AND queue.owner_uuid = NEW.owner_uuid
+     )
+  OR NOT EXISTS (
+        SELECT 1 FROM generation_queue_media AS media
+         WHERE media.media_set_id = NEW.media_set_id
+           AND media.owner_uuid = NEW.owner_uuid
+           AND media.state = 'active'
+     )
+BEGIN
+    SELECT RAISE(ABORT, 'derived queue media is not active for this owner and job');
+END;
+
+CREATE TRIGGER generation_queue_derived_media_immutable
+BEFORE UPDATE ON generation_queue_derived_media
+BEGIN
+    SELECT RAISE(ABORT, 'derived queue media mapping is immutable');
+END;
+
+CREATE TRIGGER generation_queue_derived_media_retire
+BEFORE DELETE ON generation_queue
+BEGIN
+    UPDATE generation_queue_media
+       SET state = 'gc_pending',
+           updated_at_ms = MAX(
+               updated_at_ms,
+               CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)
+           )
+     WHERE media_set_id IN (
+         SELECT media_set_id
+           FROM generation_queue_derived_media
+          WHERE job_id = OLD.id AND owner_uuid = OLD.owner_uuid
+     )
+       AND state = 'active';
+END;
 "#;
 
 /// Repairable SQLite projection of encrypted gallery-owned source-media
@@ -805,7 +867,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 34;
+pub const SCHEMA_VERSION: i64 = 35;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -1507,7 +1569,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 34);
+        assert_eq!(SCHEMA_VERSION, 35);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1661,7 +1723,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 34);
+        assert_eq!(SCHEMA_VERSION, 35);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1798,7 +1860,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 34);
+        assert_eq!(SCHEMA_VERSION, 35);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2060,7 +2122,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 34);
+        assert_eq!(SCHEMA_VERSION, 35);
     }
 
     #[test]

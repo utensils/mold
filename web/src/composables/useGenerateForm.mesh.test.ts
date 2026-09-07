@@ -211,6 +211,7 @@ describe("useGenerateForm mesh recipes", () => {
       octreeResolution: 384,
       threshold: 0.42,
       targetFaces: 20_000,
+      matting: "off",
     });
   });
 

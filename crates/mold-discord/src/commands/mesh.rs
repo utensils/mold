@@ -29,6 +29,7 @@ pub async fn mesh(
     #[description = "Shape query-grid resolution"] octree: Option<u32>,
     #[description = "Surface iso threshold"] threshold: Option<f64>,
     #[description = "Approximate triangle target"] target_faces: Option<u32>,
+    #[description = "Background removal: auto, on, or off"] matting: Option<String>,
 ) -> Result<()> {
     let named = [
         (GenerationImageReferenceRole::Front, front.as_ref()),
@@ -87,6 +88,18 @@ pub async fn mesh(
         .or(fallback_defaults.as_ref());
 
     let user_id = ctx.author().id.get();
+    let matting = match parse_matting(matting.as_deref()) {
+        Ok(matting) => matting,
+        Err(message) => {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(message)
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     if let AuthResult::Denied(message) = checks::check_generate_auth(&ctx).await {
         ctx.send(
             poise::CreateReply::default()
@@ -133,13 +146,15 @@ pub async fn mesh(
         request.mesh = (texture.is_some()
             || octree.is_some()
             || threshold.is_some()
-            || target_faces.is_some())
+            || target_faces.is_some()
+            || matting.is_some())
         .then_some(MeshRequestOptions {
             octree_resolution: octree,
             threshold: threshold.map(|value| value as f32),
             target_faces,
             texture,
             texture_resolution: None,
+            matting,
         });
         handler::run_generation(ctx, request).await
     }
@@ -153,6 +168,16 @@ pub async fn mesh(
         }
     }
     Ok(())
+}
+
+fn parse_matting(value: Option<&str>) -> Result<Option<mold_core::MeshMattingMode>, &'static str> {
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        None => Ok(None),
+        Some("auto") => Ok(Some(mold_core::MeshMattingMode::Auto)),
+        Some("on") => Ok(Some(mold_core::MeshMattingMode::On)),
+        Some("off") => Ok(Some(mold_core::MeshMattingMode::Off)),
+        Some(_) => Err("Matting must be `auto`, `on`, or `off`."),
+    }
 }
 
 async fn autocomplete_mesh_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
@@ -256,6 +281,20 @@ mod tests {
         );
         assert_eq!(conditioning_error("hunyuan3d-2mv:fp16", false, 1), None);
         assert_eq!(conditioning_error("hunyuan3d-2.1:fp16", true, 0), None);
+    }
+
+    #[test]
+    fn omitted_matting_stays_absent_and_explicit_values_are_preserved() {
+        assert_eq!(parse_matting(None), Ok(None));
+        assert_eq!(
+            parse_matting(Some("AUTO")),
+            Ok(Some(mold_core::MeshMattingMode::Auto))
+        );
+        assert_eq!(
+            parse_matting(Some("off")),
+            Ok(Some(mold_core::MeshMattingMode::Off))
+        );
+        assert!(parse_matting(Some("maybe")).is_err());
     }
 
     #[test]
