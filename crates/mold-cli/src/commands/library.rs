@@ -480,7 +480,7 @@ async fn library_export(
     // worse than one that is refused with the formats it applies to.
     if !format.is_animation() && options.turntable != mold_core::MeshTurntableOptions::default() {
         bail!(
-            "--playback, --repeat, --max-dimension, --frames and --fps shape a turntable; they apply to --format gif, apng, or webp, not {format}"
+            "--playback, --repeat, --max-dimension, --frames, --fps and --transparent shape a turntable; they apply to --format gif, apng, or webp, not {format}"
         );
     }
     let asked_for_geometry = options.geometry != mold_core::MeshGeometryOptions::default();

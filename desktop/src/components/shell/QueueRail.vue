@@ -18,6 +18,7 @@ import {
   batchPositionLabel,
   railStatusLine,
   rowGlyph,
+  rowProgressFraction,
   rowTitle,
   rowTone,
 } from "../../lib/queueRows";
@@ -88,10 +89,8 @@ function libraryThumb(row: QueueRow) {
     : null;
 }
 function progressPct(row: QueueRow): number | null {
-  if (row.kind === "print" && row.print.status === "denoising" && row.print.total > 0) {
-    return Math.round((row.print.step / row.print.total) * 100);
-  }
-  return null;
+  const fraction = rowProgressFraction(row);
+  return fraction === null ? null : Math.round(fraction * 100);
 }
 </script>
 

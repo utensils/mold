@@ -111,13 +111,7 @@ async fn build_row(
     } else {
         None
     };
-    let wait = resolve_listed_wait(
-        plan,
-        &entry.id,
-        Some(entry.position),
-        entry.state == STATE_PAUSED,
-        entry.state == STATE_HELD,
-    );
+    let wait = resolve_listed_wait(plan, &entry, Some(entry.position));
     QueueRow {
         entry,
         wait,
@@ -174,13 +168,7 @@ async fn queue_show(client: &MoldClient, job_id: &str, json: bool) -> Result<()>
         work_items: vec![item],
         ..Default::default()
     });
-    let wait = resolve_listed_wait(
-        plan.as_ref(),
-        &detail.job.id,
-        Some(detail.job.position),
-        detail.job.state == STATE_PAUSED,
-        detail.job.state == STATE_HELD,
-    );
+    let wait = resolve_listed_wait(plan.as_ref(), &detail.job, Some(detail.job.position));
     let row = QueueRow {
         entry: detail.job.clone(),
         wait,
@@ -463,9 +451,9 @@ pub(crate) fn state_label(row: &QueueRow) -> String {
     if row.entry.state == STATE_HELD {
         return "Held".to_string();
     }
-    if row.entry.state == STATE_PAUSED {
-        return "Paused after restart".to_string();
-    }
+    // Paused is `wait`'s to say: it is the half that knows whether SOMEONE
+    // paused this row or a restart parked the whole queue, and a second
+    // sentence here could only ever contradict it.
     queue_wait_label(&row.wait)
 }
 
@@ -798,12 +786,37 @@ mod tests {
         );
     }
 
+    /// `mold queue pause <id>` pauses ONE row, so `mold queue list` must not
+    /// then caption it as though the whole queue had been parked by a
+    /// restart. The CLI used to short-circuit every paused row to that one
+    /// sentence before `wait` — which knows the difference — was consulted.
+    #[test]
+    fn the_state_column_tells_the_two_pauses_apart() {
+        assert_eq!(
+            state_label(&row(
+                entry("mine", "paused", 1),
+                QueueWaitStatus::Paused { explicit: true },
+            )),
+            "Paused"
+        );
+        assert_eq!(
+            state_label(&row(
+                entry("parked", "paused", 1),
+                QueueWaitStatus::Paused { explicit: false },
+            )),
+            "Paused after restart"
+        );
+    }
+
     #[test]
     fn cancel_all_counts_only_what_that_call_removes() {
         let rows = vec![
             row(entry("running", "running", 0), QueueWaitStatus::Next),
             row(entry("queued", "queued", 1), QueueWaitStatus::Position(1)),
-            row(entry("paused", "paused", 1), QueueWaitStatus::Paused),
+            row(
+                entry("paused", "paused", 1),
+                QueueWaitStatus::Paused { explicit: true },
+            ),
             row(entry("held", "held", 2), QueueWaitStatus::Position(2)),
         ];
         assert_eq!(cancellable_by_cancel_all(&rows), 2);

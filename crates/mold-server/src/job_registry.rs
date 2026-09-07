@@ -134,6 +134,26 @@ pub struct JobEntry {
     /// `GenerationBatchChild::index` reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_index: Option<u32>,
+    /// For a `paused` job: whether SOMEONE paused this one row, as opposed to
+    /// the restart sweep parking the whole queue.
+    ///
+    /// Both wear `state: "paused"`, and a client that could not tell them
+    /// apart captioned a job the user had just paused "Paused after restart" —
+    /// one row's pause reading as the whole queue stopping. Additive: absent
+    /// means the host does not distinguish them, which for every server built
+    /// before per-job pause is the truthful answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicitly_paused: Option<bool>,
+}
+
+/// A HYDRATED row only ever reaches [`JobLifecycle::Paused`] through
+/// [`JobRegistry::finish_queue_patch_state`], which is the per-job pause and
+/// nothing else — the restart sweep parks rows that were never hydrated, and
+/// those are described from the durable projection instead. So a live paused
+/// row is an explicitly paused one, and every other state has no pause to
+/// explain.
+fn explicit_pause(state: JobLifecycle) -> Option<bool> {
+    (state == JobLifecycle::Paused).then_some(true)
 }
 
 /// Whole-queue listing returned by `GET /api/queue`. Wrapped in a struct so
@@ -850,6 +870,7 @@ impl JobRegistry {
                 batch_id: None,
                 client_batch_id: None,
                 batch_index: None,
+                explicitly_paused: explicit_pause(e.state),
             })
         })
     }
@@ -982,6 +1003,7 @@ impl JobRegistry {
                 batch_id: None,
                 client_batch_id: None,
                 batch_index: None,
+                explicitly_paused: explicit_pause(e.state),
             })
             .collect();
         QueueListing {
@@ -1165,6 +1187,7 @@ mod tests {
                 batch_id: None,
                 client_batch_id: None,
                 batch_index: None,
+                explicitly_paused: None,
             })
             .collect::<Vec<_>>();
         assign_positions(&mut entries, 0);

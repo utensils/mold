@@ -180,6 +180,7 @@ mold library export chair.glb --format gif                       # chair.gif: 36
 mold library export chair.glb --format gif --playback bounce --repeat once
 mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768
 mold library export chair.glb --format apng -o chair-turntable.png
+mold library export chair.glb --format apng --transparent            # no backdrop
 ```
 
 | Flag              | Values            | Default   | Meaning                                                                                    |
@@ -189,6 +190,7 @@ mold library export chair.glb --format apng -o chair-turntable.png
 | `--max-dimension` | 240 to 2048       | 512       | Frame edge in pixels; frames are square like the poster.                                   |
 | `--frames`        | 8 to 180          | 36        | Views rendered around the mesh. 36 is a 10° step; 72 is smoother and twice the size.       |
 | `--fps`           | 1 to 30           | 10        | Playback rate. 36 frames at 10 fps is a 3.6 s turn.                                        |
+| `--transparent`   | flag              | off       | Render the object over nothing instead of the slate backdrop.                              |
 
 The two sweeps are shaped for how the encoders play them back. A **loop**
 renders one full turn whose last frame stops one step short of the first, so
@@ -202,12 +204,21 @@ exactly as they are for a video export. A turntable is a **render**, not the
 mesh: it carries no geometry, and the flags are refused on a geometry format
 rather than ignored.
 
+`--transparent` leaves the backdrop out so the turn can be dropped onto a
+slide, a README, or any page that is not slate blue. APNG and WebP carry the
+full alpha channel, so the object keeps the soft outline it was rendered with;
+a GIF has one transparent colour rather than a channel, so its outline is a
+hard cut. Transparency belongs to a turntable alone — a geometry container has
+no backdrop and a video's frames already exist, so the option is refused on
+both rather than ignored.
+
 The same options are on `POST /api/gallery/export/:filename` (`playback`,
-`repeat`, `max_dimension`, `frames`, `fps`, the video export's own field
-names), the `export_mesh` MCP tool, and the apps: the web, desktop and iPhone
-export menu shows an **Export turntable…** entry whenever the host advertises
-an animated container, and it opens the same options sheet a video export
-uses. A host lists `gif`, `apng` and — on a build with the `webp` feature —
+`repeat`, `max_dimension`, `frames`, `fps`, `transparent` — the video export's
+own field names plus the one only a render has), the `export_mesh` MCP tool,
+and the apps: the web, desktop and iPhone export menu shows an **Export
+turntable…** entry whenever the host advertises an animated container, and it
+opens the same options sheet a video export uses, with a **Background ·
+Transparent** checkbox that is remembered for the next export. A host lists `gif`, `apng` and — on a build with the `webp` feature —
 `webp` in `capabilities.mesh.export_formats` beside the geometry containers,
 so a client learns what it can ask for without trying. Rendering is pure CPU
 on the serving host; 36 frames at 512 px take well under a second, and the

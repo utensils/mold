@@ -51,10 +51,14 @@ function waitStatus(job: Job, context?: QueueRowContext): string {
     position: live?.position ?? job.queuePosition,
     blockedReason: live?.blockedReason,
     preparation: live?.preparation,
+    explicitlyPaused: live?.explicitlyPaused,
   });
   switch (wait.kind) {
+    // One row someone paused and a whole queue parked by a restart both wear
+    // `state: "paused"`, and saying "after restart" for the first made pausing
+    // one job read as stopping everything.
     case "paused":
-      return "Paused after restart";
+      return wait.explicit ? "Paused" : "Paused after restart";
     case "held":
       return "Held";
     case "next":
@@ -102,6 +106,37 @@ export function rowStatusLine(row: QueueRow, context?: QueueRowContext): string 
     case "shared":
       return activeWorkPhaseLabel(row.shared);
   }
+}
+
+/**
+ * How far a running row has got, 0 to 1, or `null` when nothing measures it.
+ *
+ * The meter and the caption must read the SAME counter. `rowStatusLine` gives
+ * a shared row its sentence through `activeWorkPhaseLabel`, which reads the
+ * host's `current`/`total`; a meter that understood only a print row's
+ * denoise step had no answer for a shared row and drew a hard-coded stub
+ * beside a caption that said "Generating PBR views · 11/15".
+ *
+ * A shared row's counter is the LOCAL one — steps inside the stage the host
+ * has named, not a fraction of the whole render. That is the same figure the
+ * caption states, so the meter agrees with the words beside it; neither
+ * claims to know how much of the job is left, because the host never says.
+ */
+export function rowProgressFraction(row: QueueRow): number | null {
+  switch (row.kind) {
+    case "print":
+      return row.print.status === "denoising" && row.print.total > 0
+        ? clampFraction(row.print.step / row.print.total)
+        : null;
+    case "shared": {
+      const { current, total } = row.shared;
+      return current != null && total != null && total > 0 ? clampFraction(current / total) : null;
+    }
+  }
+}
+
+function clampFraction(value: number): number | null {
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
 }
 
 /** The same sentence in the rail's tighter idiom, where a dash reads as a gap. */

@@ -21,6 +21,9 @@ export interface QueueStatus {
   blockedReason: string | null;
   /** What a preparing job is working through, when its host reports it. */
   preparation: QueuePreparation | null;
+  /** For a paused row: whether the host says someone paused THIS row. Null
+   * when the host does not distinguish the two pauses. */
+  explicitlyPaused: boolean | null;
 }
 
 /** Progress of a job the host is still preparing (weights, references, admission). */
@@ -304,6 +307,10 @@ export function buildQueueStatusIndex(
             ? "queue_paused"
             : planBlockedReason(source.plan, entry.id),
         preparation: planPreparation(source.plan, entry.id),
+        explicitlyPaused:
+          typeof entry.explicitly_paused === "boolean"
+            ? entry.explicitly_paused
+            : null,
       });
     }
   }
@@ -340,8 +347,15 @@ export function queuePositionLabel(
  * queued jobs three different ways.
  */
 export type QueueWaitStatus =
-  /** Recovered after restart and waiting for an explicit queue resume. */
-  | { kind: "paused" }
+  /**
+   * Not dispatching. `explicit` separates the two reasons a row wears
+   * `state: "paused"`: someone paused THIS row, or the restart sweep parked
+   * the whole queue. They read completely differently to an operator — one is
+   * something they just did to one job, the other is the queue standing still
+   * until it is resumed — and a host too old to distinguish them says
+   * `explicit: false`, which is what it always meant.
+   */
+  | { kind: "paused"; explicit: boolean }
   /** Parked by the host: never dispatched on its own, so never "in line". */
   | { kind: "held" }
   /** An actionable reason outranks the position: say what to fix. */
@@ -364,13 +378,21 @@ export interface QueueWaitInput {
   position?: number | null | undefined;
   blockedReason?: string | null | undefined;
   preparation?: QueuePreparation | null | undefined;
+  /**
+   * The host's `explicitly_paused` for a paused row. Absent means the host
+   * does not distinguish the two pauses, and every server that predates
+   * per-job pause could only ever have parked at restart.
+   */
+  explicitlyPaused?: boolean | null | undefined;
 }
 
 /** Resolve one waiting row. Absent evidence degrades to a plain "Queued". */
 export function resolveQueueWait(
   input: QueueWaitInput | null | undefined,
 ): QueueWaitStatus {
-  if (input?.state === "paused") return { kind: "paused" };
+  if (input?.state === "paused") {
+    return { kind: "paused", explicit: input.explicitlyPaused === true };
+  }
   if (input?.state === "held") return { kind: "held" };
   if (input?.blockedReason === "preparing") {
     return { kind: "blocked", label: preparationLabel(input.preparation) };
@@ -386,7 +408,7 @@ export function resolveQueueWait(
 export function queueWaitLabel(wait: QueueWaitStatus): string {
   switch (wait.kind) {
     case "paused":
-      return "Paused after restart";
+      return wait.explicit ? "Paused" : "Paused after restart";
     case "held":
       return "Held";
     case "blocked":

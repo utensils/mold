@@ -26,7 +26,7 @@ import {
 } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
 import { normalizeTargetHost } from "../../lib/hosts";
-import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { capabilitiesForCreateForm } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
@@ -40,15 +40,8 @@ import { advancedActiveCount } from "../../lib/advancedCount";
 import { activeQualityPreset, qualityPresets, type QualityPreset } from "../../lib/qualityPresets";
 import { meshDetailLadder } from "../../lib/meshDetailLadder";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
-import {
-  intentForCanvas,
-  resolveOutputShape,
-  sizeForFamily,
-  SOURCE_FAMILY_ID,
-  type CanvasIntent,
-  type OutputShapeInput,
-} from "@studio/lib/outputShape";
-import { resolveSourceResolution } from "@studio/lib/sourceResolution";
+import { type CanvasIntent } from "@studio/lib/outputShape";
+import { useOutputShape } from "../../composables/useOutputShape";
 import {
   meshTargetFacesError,
   profileStepsValidationError,
@@ -215,19 +208,9 @@ function onInspectorReset() {
   void appPrefs.update({ generateParamsWidth: null });
 }
 
-const caps = computed(() =>
-  generationCapabilitiesForFamily(
-    props.form.family,
-    props.form.model,
-    props.form.pipeline,
-    contractModel.value?.guidance_capabilities,
-    // Per-model source-image contract (#772): the picked row when we have it,
-    // otherwise the form's snapshot of it. Without this the Source image well
-    // would render for a text-to-video wan checkpoint that rejects one.
-    contractModel.value?.source_image ?? props.form.sourceImageCapability,
-    effectiveGenerationRecipe(contractModel.value, props.form.pipeline),
-  ),
-);
+// Shared with the composer's Shape chip, which answers for the same form: two
+// readings of one checkpoint's contract is how the two controls diverged.
+const caps = computed(() => capabilitiesForCreateForm(props.form, contractModel.value));
 /** The model's image-attachment shape — one shared policy, never a local
  * heuristic. Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
@@ -388,58 +371,32 @@ function setPredictDuration(value: boolean) {
   }
 }
 // ── Shape + resolution projection ────────────────────────────────────────────
-const sourceDimensions = computed(() => {
-  if (!caps.value.supportsSourceImage) return null;
+// Shared with the composer's Shape chip, which is the same decision reached
+// by a different door: two copies of this could disagree, and did.
+const {
+  outputShape,
+  sourceResolution,
+  followsSource,
+  shapeOptions,
+  shapeId,
+  shapeApproximate,
+  resolutionRatio,
+  resolutionOptions,
+  resolutionSizeId,
+  onShape,
+  onResolution,
+  matchSource,
+} = useOutputShape({
+  form: () => props.form,
+  canvasIntent: () => props.canvasIntent,
+  contractModel: () => contractModel.value,
   // Keep a parked image and its dimensions intact across model switches, but
   // do not let them project Source shape/resolution controls for a checkpoint
   // whose request cannot carry that image. Switching back recomputes these
   // controls from the retained dimensions without destructive cleanup.
-  return props.form.sourceImageWidth && props.form.sourceImageHeight
-    ? {
-        width: props.form.sourceImageWidth,
-        height: props.form.sourceImageHeight,
-      }
-    : null;
+  supportsSourceImage: () => caps.value.supportsSourceImage,
+  onCanvasIntent: (intent) => emit("canvas-intent", intent),
 });
-const sourceResolution = computed(() =>
-  sourceDimensions.value
-    ? resolveSourceResolution(
-        sourceDimensions.value,
-        contractModel.value ?? props.form.family,
-        props.form.pipeline,
-      )
-    : null,
-);
-/** One resolver drives the chips, the pills, the badge and the sentence. */
-const shapeInput = computed<OutputShapeInput>(() => ({
-  model: contractModel.value ?? null,
-  family: props.form.family,
-  pipeline: props.form.pipeline,
-  width: props.form.width,
-  height: props.form.height,
-  source: sourceDimensions.value,
-  intent: props.canvasIntent,
-}));
-const outputShape = computed(() => resolveOutputShape(shapeInput.value));
-const followsSource = computed(
-  () =>
-    outputShape.value.state === "follows-source" || outputShape.value.state === "matches-source",
-);
-const shapeOptions = computed(() => outputShape.value.families);
-const shapeId = computed(() => outputShape.value.selectedFamilyId);
-const shapeApproximate = computed(() => outputShape.value.approximate);
-const resolutionRatio = computed(() => props.form.width / props.form.height);
-const resolutionOptions = computed(() =>
-  outputShape.value.sizes.map((size) => ({
-    id: size.id,
-    mp: (size.width * size.height) / 1_000_000,
-    label: size.label,
-    sub: size.mark ? `${size.megapixels} · ${size.mark}` : size.megapixels,
-    width: size.width,
-    height: size.height,
-  })),
-);
-const resolutionSizeId = computed(() => outputShape.value.selectedSizeId);
 const resolutionWarning = computed(() =>
   resolutionValidationWarning(
     props.form.width,
@@ -459,28 +416,6 @@ const resolutionError = computed(() =>
 const stepsError = computed(() =>
   profileStepsValidationError(props.form.steps, contractModel.value, props.form.pipeline),
 );
-
-function onShape(id: string) {
-  const size = sizeForFamily(id, shapeInput.value);
-  if (!size) return;
-  emit("canvas-intent", id === SOURCE_FAMILY_ID ? "source" : "manual");
-  props.form.width = size.width;
-  props.form.height = size.height;
-}
-function matchSource() {
-  const source = sourceResolution.value;
-  if (!source) return;
-  emit("canvas-intent", "source-exact");
-  props.form.width = source.output.width;
-  props.form.height = source.output.height;
-}
-function onResolution(id: string | number) {
-  const size = outputShape.value.sizes.find((candidate) => candidate.id === id);
-  if (!size) return;
-  emit("canvas-intent", intentForCanvas(shapeInput.value, size));
-  props.form.width = size.width;
-  props.form.height = size.height;
-}
 
 // ── Seed (mode is UI-owned to avoid focus loss — see the previous ParamPanel) ─
 const uiSeedMode = ref<"random" | "fixed">(seedMode(props.form.seed));
@@ -854,7 +789,10 @@ function resetSettings() {
             <label class="ms-field__label ms-field__label--inline" for="mesh-target-faces">
               Simplify to
             </label>
-            <p class="ms-field__hint">Fewer faces load faster in other apps</p>
+            <p class="ms-field__hint">
+              Merges flat areas down to this many triangles. Creases and color survive; the file
+              just opens faster elsewhere.
+            </p>
           </div>
           <input
             id="mesh-target-faces"
@@ -1227,6 +1165,12 @@ function resetSettings() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+}
+/* The label and its hint are what gives, not the control: without this the
+   text column's `min-width: auto` floor squeezes the field beside it. */
+.ms-field--row > div {
+  min-width: 0;
 }
 .ms-field__label {
   font-size: var(--mold-fs-xs);
@@ -1276,10 +1220,18 @@ function resetSettings() {
    bare `.ms-card__faces` lost its width and height and the face budget
    rendered as a full-width 32px seed field. */
 /* Sized to its own placeholder ("keep every detail", 17 mono characters)
-   plus padding and WebKit's spin button, as the mock draws it — a fixed cap
-   clipped the words at the larger type scales. */
+   plus padding, WebKit's spin button, and a character of slack so the words
+   are not flush against the border — a fixed cap clipped them at the larger
+   type scales.
+
+   `flex: none` is the half that made the width stick. `.ms-seed__input` sets
+   `min-width: 0`, so inside `.ms-field--row`'s flex the field lost every
+   shrink contest to the label column beside it (a flex item with
+   `min-width: auto` refuses to go under its own longest word) and rendered
+   narrower than declared however wide the declaration was. */
 .ms-seed__input.ms-card__faces {
-  width: calc(17ch + 16px + 18px);
+  flex: none;
+  width: calc(18ch + 16px + 18px);
   max-width: 100%;
   height: var(--mold-ctl-md);
 }

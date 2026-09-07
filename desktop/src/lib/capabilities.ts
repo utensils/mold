@@ -33,8 +33,9 @@ import {
   type PromptRequirement,
 } from "@studio/lib/generationProfile";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { coerceOutputFormatForRecipe, type OutputFormatRecipe } from "@studio/lib/outputFormat";
-import type { GenerateRequest, OutputFormat, Scheduler } from "./api/types";
+import type { GenerateRequest, ModelEntry, OutputFormat, Scheduler } from "./api/types";
 
 export type { SourceImageMode } from "@studio/lib/generationCapabilities";
 export { isQwenImageEditFamily, MAX_LORA_STACK };
@@ -48,6 +49,38 @@ export interface GenerationCapabilities extends Omit<
   /** LTX-2 only — the pipeline/keyframe/upscale/retake surface. `ltx-video`
    * is a plain video family and does NOT get these. */
   supportsAdvancedVideo: boolean;
+}
+
+/**
+ * The capabilities of a Create form, resolved from the catalog row it picked.
+ *
+ * The six arguments were written out at each control that needed them, and
+ * they did not all agree: the view read `form.sourceImageCapability` while the
+ * rail read `model?.source_image ?? form.sourceImageCapability`, so two
+ * controls over one canvas could differ about whether the checkpoint takes a
+ * source image at all — and whether the shape ladder therefore offers Source.
+ * Every control that answers for the SAME form reads this.
+ */
+export function capabilitiesForCreateForm(
+  form: {
+    family: string;
+    model: string;
+    pipeline: string | null;
+    sourceImageCapability?: string | null | undefined;
+  },
+  model: ModelEntry | null | undefined,
+): GenerationCapabilities {
+  return generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    model?.guidance_capabilities,
+    // Per-model source-image contract (#772): the picked row when we have it,
+    // otherwise the form's snapshot of it. Without this a source-image control
+    // would render for a text-to-video wan checkpoint that rejects one.
+    model?.source_image ?? form.sourceImageCapability,
+    effectiveGenerationRecipe(model ?? null, form.pipeline),
+  );
 }
 
 export function generationCapabilitiesForFamily(

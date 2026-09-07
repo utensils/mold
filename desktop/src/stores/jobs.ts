@@ -49,6 +49,11 @@ export interface QueueEntry {
   durable?: boolean | null;
   replayed?: boolean | null;
   dispatch_attempts?: number | null;
+  /** For a `paused` row: whether SOMEONE paused this one row, as opposed to
+   * the restart sweep parking the whole queue. Both wear `state: "paused"`,
+   * and absent means the host does not distinguish them (every server built
+   * before per-job pause could only ever have parked at restart). */
+  explicitly_paused?: boolean | null;
 }
 
 /** Queue controls a host supports (from `GET /api/capabilities`). */
@@ -418,7 +423,12 @@ export const useJobsStore = defineStore("jobs", {
       const snapshot = this.queues[hostId];
       const apply = (entries: QueueEntry[] | undefined) => {
         const entry = entries?.find(({ id }) => id === jobId);
-        if (entry) entry.state = paused ? "paused" : "queued";
+        if (!entry) return;
+        entry.state = paused ? "paused" : "queued";
+        // Optimistically WHY, not just that: a row that flipped to "paused"
+        // with no reason attached read as "Paused after restart" until the
+        // next refresh landed.
+        entry.explicitly_paused = paused ? true : null;
       };
       apply(snapshot?.entries);
       apply(snapshot?.tailEntries);

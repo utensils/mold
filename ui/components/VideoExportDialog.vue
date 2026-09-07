@@ -7,6 +7,10 @@ import type {
   VideoExportFormat,
   VideoExportOptions,
 } from "@studio/lib/videoExport";
+import {
+  loadTurntableTransparency,
+  saveTurntableTransparency,
+} from "@studio/lib/turntableTransparency";
 
 /** One place an export can go, when the caller offers more than one. */
 export interface ExportDestination {
@@ -30,8 +34,18 @@ const props = withDefaults(
      * carries the options only, exactly as before.
      */
     destinations?: ExportDestination[];
+    /**
+     * Offer a transparent backdrop. True only for a mesh TURNTABLE, which is
+     * rendered here and so can leave its backdrop out; a video re-encode has
+     * frames that already exist, and the host refuses the key on one.
+     *
+     * The checkbox's own value is remembered across exports rather than reset
+     * with the sheet — someone who wants their turntables cut out wants that
+     * every time.
+     */
+    transparency?: boolean;
   }>(),
-  { busy: false, error: "", destinations: () => [] },
+  { busy: false, error: "", destinations: () => [], transparency: false },
 );
 
 const emit = defineEmits<{
@@ -45,6 +59,7 @@ const repeat = ref<GifRepeat>("forever");
 const maxDimension = ref<number | null>(720);
 const fps = ref<number | null>(12);
 const destination = ref<string>("");
+const transparent = ref(loadTurntableTransparency());
 const isGif = computed(() => format.value === "gif");
 const offersDestinations = computed(() => props.destinations.length > 1);
 
@@ -70,6 +85,13 @@ function submit(): void {
     max_dimension: maxDimension.value,
     fps: fps.value,
   };
+  if (props.transparency) {
+    // Remembered either way, but sent only when it is on: an untouched
+    // turntable posts the body it always did, which keeps a repeat export
+    // matching the one a client already has.
+    saveTurntableTransparency(transparent.value);
+    if (transparent.value) options.transparent = true;
+  }
   if (offersDestinations.value) emit("export", options, destination.value);
   else emit("export", options);
 }
@@ -201,6 +223,30 @@ function submit(): void {
             <span>{{ choice ? `${choice} fps` : "Original" }}</span>
           </label>
         </div>
+      </fieldset>
+
+      <fieldset v-if="transparency">
+        <legend>Background</legend>
+        <!-- A checkbox wearing the sheet's own pill, so it reads as one
+             more choice rather than a stray control. -->
+        <div class="video-export-options">
+          <label>
+            <input
+              v-model="transparent"
+              type="checkbox"
+              name="export-transparent"
+              data-test="export-transparent"
+            />
+            <span>Transparent</span>
+          </label>
+        </div>
+        <p>
+          {{
+            isGif
+              ? "A GIF has one transparent colour, so the outline is a hard cut."
+              : "Keeps the object's soft outline."
+          }}
+        </p>
       </fieldset>
 
       <fieldset v-if="offersDestinations">

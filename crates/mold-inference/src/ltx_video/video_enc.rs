@@ -235,6 +235,164 @@ pub fn encode_gif_with_options(
     Ok(buf)
 }
 
+/// [`encode_gif_with_options`] for frames that carry their own alpha.
+///
+/// GIF transparency is one palette index, not a channel, so the alpha is
+/// thresholded: a pixel the caller left fully clear becomes the transparent
+/// index and everything else is opaque. That is why the mesh turntable
+/// renders its silhouette antialiased and then hard-cuts here — a GIF cannot
+/// hold the soft edge, and dithering coverage would fringe it.
+///
+/// Every frame disposes to the background. With the opaque encoder's
+/// `DisposalMethod::Any` a cleared pixel would keep whatever the previous
+/// frame drew there, so a spinning object would smear its own trail across
+/// the transparent area.
+pub fn encode_gif_rgba_with_options(
+    frames: &[image::RgbaImage],
+    fps: u32,
+    bounce: bool,
+    repeat_forever: bool,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+    anyhow::ensure!(fps > 0, "GIF frame rate must be greater than zero");
+
+    let (width, height) = (frames[0].width() as u16, frames[0].height() as u16);
+    let delay_cs = (100.0 / fps as f64).round() as u16;
+
+    let mut buf = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut buf, width, height, &[])
+            .context("failed to create GIF encoder")?;
+        encoder
+            .set_repeat(if repeat_forever {
+                gif::Repeat::Infinite
+            } else {
+                gif::Repeat::Finite(0)
+            })
+            .context("failed to set GIF repeat")?;
+
+        let mut write_frame = |frame_img: &image::RgbaImage| -> Result<()> {
+            let mut pixels = frame_img.as_raw().clone();
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                if pixel[3] >= ALPHA_CUTOFF {
+                    pixel[3] = 255;
+                } else {
+                    // Cleared pixels are stamped with ONE colour so the
+                    // transparent palette entry is deterministic:
+                    // `Frame::from_rgba_speed` takes its transparent colour
+                    // from the LAST sub-cutoff pixel in scan order, and the
+                    // renderer only writes a bare `[0, 0, 0, 0]` for fully
+                    // cleared pixels — the antialiased edge arrives carrying
+                    // the object's own RGB under a low alpha. Left alone,
+                    // which colour ends up standing for "transparent" depends
+                    // on where the silhouette happens to end.
+                    *pixel = CLEAR_SENTINEL;
+                }
+            }
+            let mut gif_frame = gif::Frame::from_rgba_speed(width, height, &mut pixels, 10);
+            gif_frame.delay = delay_cs;
+            gif_frame.dispose = gif::DisposalMethod::Background;
+
+            encoder
+                .write_frame(&gif_frame)
+                .context("failed to write GIF frame")?;
+            Ok(())
+        };
+
+        for frame_img in frames {
+            write_frame(frame_img)?;
+        }
+        if bounce && frames.len() > 1 {
+            let reverse_start = usize::from(repeat_forever);
+            for frame_img in frames[reverse_start..frames.len() - 1].iter().rev() {
+                write_frame(frame_img)?;
+            }
+        }
+    }
+    Ok(buf)
+}
+
+/// Alpha at or above which a GIF pixel is drawn rather than left clear.
+///
+/// The midpoint: the rasterizer's antialiased silhouette is symmetric about
+/// it, so a hard cut here keeps the object the size it was rendered at
+/// instead of eroding or dilating its outline.
+const ALPHA_CUTOFF: u8 = 128;
+
+/// The RGBA a cleared pixel is stamped with before quantization.
+///
+/// Transparent black, which is what [`Backdrop::Transparent`] already writes
+/// for a fully cleared pixel, so this only restates it for the antialiased
+/// edge. It is NOT a garish sentinel on purpose: the entry is never drawn by
+/// a decoder that honours transparency, but one that ignores it composites
+/// this colour, and black is the backdrop the poster would have used anyway.
+///
+/// [`Backdrop::Transparent`]: crate::hunyuan3d::poster::Backdrop
+const CLEAR_SENTINEL: [u8; 4] = [0, 0, 0, 0];
+
+/// [`encode_apng`] for frames that carry their own alpha. APNG holds the full
+/// channel, so the antialiased silhouette survives intact.
+pub fn encode_apng_rgba(frames: &[image::RgbaImage], fps: u32) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+
+    let (width, height) = (frames[0].width(), frames[0].height());
+    let num_frames = frames.len() as u32;
+
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_animated(num_frames, 0)?;
+        encoder.set_frame_delay(1, fps as u16)?;
+
+        let mut writer = encoder
+            .write_header()
+            .context("failed to write APNG header")?;
+
+        for (i, frame) in frames.iter().enumerate() {
+            if i > 0 {
+                // Replace rather than blend, and clear first: a transparent
+                // pixel must show through to the page, not to frame i - 1.
+                writer.set_blend_op(png::BlendOp::Source)?;
+                writer.set_dispose_op(png::DisposeOp::Background)?;
+            }
+            writer
+                .write_image_data(frame.as_raw())
+                .with_context(|| format!("failed to write APNG frame {i}"))?;
+        }
+
+        writer.finish().context("failed to finalize APNG")?;
+    }
+    Ok(buf)
+}
+
+/// [`encode_webp`] for frames that carry their own alpha.
+#[cfg(feature = "webp")]
+pub fn encode_webp_rgba(frames: &[image::RgbaImage], fps: u32) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+
+    let (width, height) = (frames[0].width(), frames[0].height());
+    let frame_duration_ms = (1000.0 / fps as f64).round() as i32;
+
+    let mut encoder = webp_animation::Encoder::new((width, height))
+        .map_err(|e| anyhow::anyhow!("failed to create WebP encoder: {e}"))?;
+
+    for (i, frame_img) in frames.iter().enumerate() {
+        let timestamp_ms = i as i32 * frame_duration_ms;
+        encoder
+            .add_frame(frame_img.as_raw(), timestamp_ms)
+            .map_err(|e| anyhow::anyhow!("failed to add WebP frame {i}: {e}"))?;
+    }
+
+    let final_timestamp_ms = frames.len() as i32 * frame_duration_ms;
+    let webp_data = encoder
+        .finalize(final_timestamp_ms)
+        .map_err(|e| anyhow::anyhow!("failed to finalize WebP animation: {e}"))?;
+
+    Ok(webp_data.to_vec())
+}
+
 /// Extract the first frame as a PNG thumbnail.
 pub fn first_frame_png(frames: &[RgbImage]) -> Result<Vec<u8>> {
     anyhow::ensure!(!frames.is_empty(), "no frames for thumbnail");
@@ -1322,5 +1480,49 @@ mod tests {
                 sps.len()
             );
         }
+    }
+
+    /// A transparent GIF must not eat the object it is cutting out.
+    ///
+    /// `Frame::from_rgba_speed` picks the transparent palette entry by nearest
+    /// neighbour over RGBA. When a cleared pixel was left transparent BLACK,
+    /// the near-black texels of a dark PAINTED mesh were the nearest thing to
+    /// it and got mapped onto that entry — which is never drawn — so the mesh
+    /// came out with holes punched through it. Hence [`CLEAR_SENTINEL`].
+    #[test]
+    fn a_transparent_gif_keeps_the_dark_pixels_of_a_painted_mesh() {
+        // A near-black object on a cleared (transparent black) background,
+        // which is exactly what the turntable renderer hands the encoder.
+        let mut frame = image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 0, 0]));
+        for y in 8..24 {
+            for x in 8..24 {
+                frame.put_pixel(x, y, image::Rgba([6, 6, 8, 255]));
+            }
+        }
+        let data = encode_gif_rgba_with_options(&[frame], 10, false, false).unwrap();
+
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(std::io::Cursor::new(data)).unwrap();
+        let decoded = decoder.read_next_frame().unwrap().unwrap();
+
+        // Every pixel of the object survives opaque, and the background is
+        // still cut away — a fix that simply stopped clearing would pass the
+        // first assertion and fail the second.
+        let px = |x: usize, y: usize| {
+            let i = (y * 32 + x) * 4;
+            &decoded.buffer[i..i + 4]
+        };
+        for y in 8..24 {
+            for x in 8..24 {
+                assert_eq!(
+                    px(x, y)[3],
+                    255,
+                    "object pixel ({x}, {y}) was punched out of the mesh"
+                );
+            }
+        }
+        assert_eq!(px(0, 0)[3], 0, "background should still be transparent");
+        assert_eq!(px(31, 31)[3], 0, "background should still be transparent");
     }
 }

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import VideoExportDialog from "./VideoExportDialog.vue";
 
 describe("VideoExportDialog", () => {
@@ -30,6 +30,73 @@ describe("VideoExportDialog", () => {
         fps: 12,
       },
     ]);
+  });
+
+  /**
+   * Transparency belongs to a mesh TURNTABLE, which is rendered on request
+   * and so can leave its backdrop out. A video re-encode has frames that
+   * already exist, and the host refuses `transparent` on one — so the key
+   * must be absent from that request, not merely false.
+   */
+  it("offers a transparent backdrop only for a turntable, and remembers the choice", async () => {
+    const values: Record<string, string> = {};
+    const storage = {
+      getItem: (key: string) => values[key] ?? null,
+      setItem: (key: string, value: string) => {
+        values[key] = value;
+      },
+      removeItem: (key: string) => {
+        delete values[key];
+      },
+    };
+    vi.stubGlobal("localStorage", storage);
+
+    const video = mount(VideoExportDialog, {
+      props: { open: true, filename: "rain.mp4", formats: ["gif"] },
+    });
+    expect(video.find('[data-test="export-transparent"]').exists()).toBe(false);
+    await video.get("form").trigger("submit");
+    expect(video.emitted("export")?.[0]?.[0]).not.toHaveProperty("transparent");
+
+    const turntable = () =>
+      mount(VideoExportDialog, {
+        props: {
+          open: true,
+          filename: "armchair.glb",
+          formats: ["gif", "apng"],
+          transparency: true,
+        },
+      });
+
+    const first = turntable();
+    const checkbox = first.get('[data-test="export-transparent"]');
+    expect((checkbox.element as HTMLInputElement).checked).toBe(false);
+    // Off sends nothing at all, so an untouched turntable posts the body it
+    // always did.
+    await first.get("form").trigger("submit");
+    expect(first.emitted("export")?.[0]?.[0]).not.toHaveProperty("transparent");
+
+    await checkbox.setValue(true);
+    await first.get("form").trigger("submit");
+    expect(first.emitted("export")?.[1]?.[0]).toMatchObject({
+      transparent: true,
+    });
+
+    // The next export opens already checked: someone who wants their
+    // turntables cut out wants that every time.
+    const second = turntable();
+    expect(
+      (
+        second.get('[data-test="export-transparent"]')
+          .element as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    await second.get("form").trigger("submit");
+    expect(second.emitted("export")?.[0]?.[0]).toMatchObject({
+      transparent: true,
+    });
+
+    vi.unstubAllGlobals();
   });
 
   /**

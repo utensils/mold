@@ -10,8 +10,6 @@ import {
   videoFrameStep,
   type VideoFrameContract,
 } from "@studio/lib/videoDuration";
-import { outputFamilyLabel } from "@studio/lib/outputShape";
-import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import Icon from "@ui/components/Icon.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import Stepper from "@ui/components/Stepper.vue";
@@ -98,9 +96,6 @@ const emit = defineEmits<{
   /** The Length chip's new frame count, already on the family's grid. */
   "update:lengthFrames": [frames: number];
   "update:remixSource": [value: "original" | "current"];
-  /** The Shape chip is a door to the inspector's Settings tab. Style is not:
-   *  its chip opens the picker itself, in the `style` slot. */
-  "open-shape": [];
 }>();
 
 // Disabled state and corrective guidance are intentionally separate: obvious
@@ -131,16 +126,6 @@ const promptText = computed({
 const transformBlockedReason = computed(() =>
   promptTransformBlockedReason(props.form.recipeCapabilities?.promptMode),
 );
-
-/** "Square · 1024" — the canvas as a chip; a 3-D style has no canvas. */
-const shapeLabel = computed(() => {
-  const canvasless = props.form.recipeCapabilities?.canvasless ?? isMeshFamily(props.form.family);
-  if (canvasless) return null;
-  const { width, height } = props.form;
-  const family = outputFamilyLabel(width, height);
-  const size = width === height ? `${width}` : `${width}×${height}`;
-  return `${family === "1:1" ? "Square" : family} · ${size}`;
-});
 
 /*
  * Length — the clip as a chip. Every bound comes from the shared video-duration
@@ -275,16 +260,11 @@ defineExpose({ focus, expand, record });
              it opens its menu in place rather than being a door to a second
              selector in the inspector. Shape keeps its door. -->
         <slot name="style" />
-        <button
-          v-if="shapeLabel"
-          type="button"
-          data-test="shape-chip"
-          class="ms-chip"
-          title="Shape and size"
-          @click="emit('open-shape')"
-        >
-          {{ shapeLabel }} <span class="ms-chip__caret">▼</span>
-        </button>
+        <!-- Shape is the same: its chip IS the picker (ShapeChip.vue, filled
+             by the view), reading and writing the one output-shape resolver
+             the inspector's rail reads. It used to be a door whose only
+             handler set the inspector tab it was already on. -->
+        <slot name="shape" />
         <span v-if="lengthContract" class="ms-chip ms-chip--slider" data-test="length-chip">
           <span>Length</span>
           <input

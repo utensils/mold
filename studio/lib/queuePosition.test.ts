@@ -196,6 +196,32 @@ describe("buildQueueStatusIndex", () => {
     expect(queueStatusFor(index, "", "job-1")).toBeNull();
   });
 
+  it("carries the pause reason a host reports, and null when it reports none", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        entries: [
+          { id: "mine", state: "paused", position: 0, explicitly_paused: true },
+          {
+            id: "parked",
+            state: "paused",
+            position: 1,
+            explicitly_paused: false,
+          },
+          // An older host sends no such key at all.
+          { id: "legacy", state: "paused", position: 2 },
+        ] as never,
+      },
+    ]);
+    expect(queueStatusFor(index, "alpha", "mine")?.explicitlyPaused).toBe(true);
+    expect(queueStatusFor(index, "alpha", "parked")?.explicitlyPaused).toBe(
+      false,
+    );
+    expect(
+      queueStatusFor(index, "alpha", "legacy")?.explicitlyPaused,
+    ).toBeNull();
+  });
+
   it("ignores a non-numeric position rather than rendering NaN", () => {
     const broken = {
       ...entry("job-1", 0),
@@ -206,6 +232,7 @@ describe("buildQueueStatusIndex", () => {
     ]);
     expect(queueStatusFor(index, "alpha", "job-1")).toEqual({
       state: "running",
+      explicitlyPaused: null,
       position: null,
       blockedReason: null,
       preparation: null,
@@ -378,9 +405,42 @@ describe("resolveQueueWait", () => {
 
   it("reads a restart-paused row as paused instead of in line", () => {
     const wait = resolveQueueWait({ state: "paused", position: 0 });
-    expect(wait).toEqual({ kind: "paused" });
+    expect(wait).toEqual({ kind: "paused", explicit: false });
     expect(queueWaitLabel(wait)).toBe("Paused after restart");
     expect(queueWaitCode(wait)).toBe("PAUSED");
+  });
+
+  /*
+   * `state: "paused"` covers two different events: someone paused THIS row,
+   * or a restart parked the whole queue. Reporting both as "Paused after
+   * restart" made pausing one job read as stopping everything.
+   */
+  it("separates a row someone paused from a queue parked by a restart", () => {
+    const explicit = resolveQueueWait({
+      state: "paused",
+      position: 3,
+      explicitlyPaused: true,
+    });
+    expect(explicit).toEqual({ kind: "paused", explicit: true });
+    expect(queueWaitLabel(explicit)).toBe("Paused");
+    // Out of line either way: a paused row never reports a place in line.
+    expect(queueWaitCode(explicit)).toBe("PAUSED");
+
+    const parked = resolveQueueWait({
+      state: "paused",
+      position: 3,
+      explicitlyPaused: false,
+    });
+    expect(parked).toEqual({ kind: "paused", explicit: false });
+    expect(queueWaitLabel(parked)).toBe("Paused after restart");
+
+    // A host that does not send the bit only ever parked at restart, so it
+    // keeps the sentence it has always had.
+    expect(
+      queueWaitLabel(
+        resolveQueueWait({ state: "paused", explicitlyPaused: null }),
+      ),
+    ).toBe("Paused after restart");
   });
 
   it("names the head of the line rather than staying silent", () => {

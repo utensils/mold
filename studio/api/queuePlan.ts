@@ -43,6 +43,11 @@ export interface QueueEntry {
   batch_id?: string | null;
   client_batch_id?: string | null;
   batch_index?: number | null;
+  /** For a `paused` row: whether SOMEONE paused this one row, as opposed to
+   * the restart sweep parking the whole queue. Both wear `state: "paused"`,
+   * and absent means the host does not distinguish them (every server built
+   * before per-job pause could only ever have parked at restart). */
+  explicitly_paused?: boolean | null;
 }
 
 export interface QueueJobEntry {

@@ -1162,6 +1162,11 @@ pub struct TurntableArgs {
     /// Playback rate, 1 to 30 (default 10).
     #[arg(long, value_name = "N", help_heading = "Turntable")]
     fps: Option<u32>,
+    /// Render the object over nothing instead of the slate backdrop. APNG and
+    /// WebP keep the antialiased edge; a GIF's single transparent palette
+    /// index makes it a hard cut.
+    #[arg(long, help_heading = "Turntable")]
+    transparent: bool,
 }
 
 impl From<TurntableArgs> for mold_core::MeshTurntableOptions {
@@ -1172,6 +1177,7 @@ impl From<TurntableArgs> for mold_core::MeshTurntableOptions {
             max_dimension: args.max_dimension,
             frames: args.frames,
             fps: args.fps,
+            transparent: args.transparent.then_some(true),
         }
     }
 }
@@ -4537,6 +4543,7 @@ mod tests {
             "24",
             "--fps",
             "12",
+            "--transparent",
         ])
         .command
         {
@@ -4550,6 +4557,9 @@ mod tests {
                     max_dimension: Some(480),
                     frames: Some(24),
                     fps: Some(12),
+                    // A flag absent means the server's default, so the flag
+                    // has to send Some(true) rather than Some(false).
+                    transparent: Some(true),
                 }
             ),
             _ => panic!("expected Library export"),

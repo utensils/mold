@@ -360,8 +360,16 @@ export function queueEntryDetailModel(
   const { entry, hostLabel, modelLabel, nowMs } = input;
   const running = entry.state === "running";
   const held = entry.state === "held";
+  const paused = entry.state === "paused";
   const item = queueWorkItemFor(input.plan, entry.id);
+  // The row's own lifecycle goes in, not just its position: without it a
+  // paused row resolved from its listing position alone and this panel told
+  // the operator it was "#3 in line" while the row it was opened from said
+  // Paused. `held` is read separately below, so passing `state` changes
+  // nothing for a held row.
   const wait = resolveQueueWait({
+    state: entry.state,
+    explicitlyPaused: entry.explicitly_paused,
     position: entry.position,
     blockedReason: item?.blocked_reason ?? item?.reason,
     preparation: item ? preparationForWorkItem(item) : null,
@@ -468,7 +476,13 @@ export function queueEntryDetailModel(
     modelId: entry.model,
     modelLabel,
     hostLabel,
-    stateLabel: running ? "Running" : held ? "Held" : "Queued",
+    stateLabel: running
+      ? "Running"
+      : held
+        ? "Held"
+        : paused
+          ? "Paused"
+          : "Queued",
     stateCode: running
       ? entry.gpu != null
         ? `RUNNING · GPU ${entry.gpu}`

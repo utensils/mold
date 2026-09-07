@@ -16,7 +16,7 @@
 //! ordinary serialization, not faults, so a row carrying one keeps counting
 //! its place in line.
 
-use crate::types::{QueueBlockedReason, QueuePlan, QueueWorkItem};
+use crate::types::{QueueBlockedReason, QueueJobEntryWire, QueuePlan, QueueWorkItem};
 
 /// Copy the whole fleet says for a reason nobody has taught it yet. Never a
 /// raw underscored identifier, and never nothing.
@@ -145,8 +145,14 @@ pub fn queue_work_item_reason(work: &QueueWorkItem) -> Option<&str> {
 /// decides the vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueWaitStatus {
-    /// Recovered after restart and waiting for explicit resume.
-    Paused,
+    /// Not dispatching. `true` means SOMEONE paused this one row; `false`
+    /// means the restart sweep parked the whole queue.
+    ///
+    /// They read completely differently to an operator — one is something
+    /// they just did to one job, the other is the queue standing still until
+    /// it is resumed — and a host too old to distinguish them says `false`,
+    /// which is what a paused row always meant.
+    Paused { explicit: bool },
     /// Parked by the host: never dispatched on its own, so never "in line".
     Held,
     /// An actionable reason outranks the position: say what to fix.
@@ -163,6 +169,9 @@ pub enum QueueWaitStatus {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QueueWaitInput<'a> {
     pub paused: bool,
+    /// The host's `explicitly_paused` for a paused row. `false` where the
+    /// host does not distinguish the two pauses.
+    pub explicitly_paused: bool,
     /// The row is `held`. It still carries a listing position, and reading
     /// that as a place in line is how a parked job rendered as "Next up".
     pub held: bool,
@@ -174,7 +183,9 @@ pub struct QueueWaitInput<'a> {
 /// Resolve one waiting row. Absent evidence degrades to a plain `Queued`.
 pub fn resolve_queue_wait(input: &QueueWaitInput<'_>) -> QueueWaitStatus {
     if input.paused {
-        return QueueWaitStatus::Paused;
+        return QueueWaitStatus::Paused {
+            explicit: input.explicitly_paused,
+        };
     }
     if input.held {
         return QueueWaitStatus::Held;
@@ -246,7 +257,7 @@ fn plan_reason_for_job(
 /// puts the next runnable job at "#1 in line". A held row keeps the position
 /// of the next runnable row so the field stays a plain index; every renderer
 /// reads the state first.
-pub fn assign_listed_positions(entries: &mut [crate::QueueJobEntryWire]) {
+pub fn assign_listed_positions(entries: &mut [QueueJobEntryWire]) {
     let mut next = 0;
     for entry in entries.iter_mut() {
         entry.position = next;
@@ -261,20 +272,26 @@ pub fn assign_listed_positions(entries: &mut [crate::QueueJobEntryWire]) {
 /// `position` is the row's own 0-based dispatch order. A host that reported
 /// no plan contributes no reason, which is exactly right: absence of a plan
 /// is absence of evidence, never a fault.
+///
+/// Takes the whole listed row rather than a run of bare booleans: the two
+/// pauses a row can be in are told apart by a THIRD flag, and a caller that
+/// had to remember its position among `paused` and `held` would sooner or
+/// later hand over the wrong one.
 pub fn resolve_listed_wait(
     plan: Option<&QueuePlan>,
-    job_id: &str,
+    entry: &QueueJobEntryWire,
     position: Option<usize>,
-    paused: bool,
-    held: bool,
 ) -> QueueWaitStatus {
     let (reason, preparation) = match plan {
-        Some(plan) => plan_reason_for_job(plan, job_id),
+        Some(plan) => plan_reason_for_job(plan, &entry.id),
         None => (None, None),
     };
     resolve_queue_wait(&QueueWaitInput {
-        paused,
-        held,
+        paused: entry.state == "paused",
+        // Absent means the host does not distinguish them, and every server
+        // built before per-job pause could only have parked at restart.
+        explicitly_paused: entry.explicitly_paused.unwrap_or(false),
+        held: entry.state == "held",
         position,
         blocked_reason: reason.as_ref(),
         preparation,
@@ -284,7 +301,12 @@ pub fn resolve_listed_wait(
 /// Sentence-case copy, the idiom every list and pill uses.
 pub fn queue_wait_label(wait: &QueueWaitStatus) -> String {
     match wait {
-        QueueWaitStatus::Paused => "Paused after restart".to_string(),
+        QueueWaitStatus::Paused { explicit } => if *explicit {
+            "Paused"
+        } else {
+            "Paused after restart"
+        }
+        .to_string(),
         QueueWaitStatus::Held => "Held".to_string(),
         QueueWaitStatus::Blocked(label) => label.clone(),
         QueueWaitStatus::Next => "Next up".to_string(),
@@ -296,7 +318,7 @@ pub fn queue_wait_label(wait: &QueueWaitStatus) -> String {
 /// Compact uppercase code, for surfaces whose existing idiom is a code column.
 pub fn queue_wait_code(wait: &QueueWaitStatus) -> String {
     match wait {
-        QueueWaitStatus::Paused => "PAUSED".to_string(),
+        QueueWaitStatus::Paused { .. } => "PAUSED".to_string(),
         QueueWaitStatus::Held => "HELD".to_string(),
         QueueWaitStatus::Blocked(label) => label.to_uppercase(),
         QueueWaitStatus::Next => "NEXT UP".to_string(),
@@ -312,7 +334,7 @@ mod tests {
 
     #[test]
     fn a_merged_walk_numbers_only_rows_that_can_run() {
-        let row = |id: &str, state: &str| crate::QueueJobEntryWire {
+        let row = |id: &str, state: &str| QueueJobEntryWire {
             id: id.to_string(),
             state: state.to_string(),
             position: 99,
@@ -342,18 +364,43 @@ mod tests {
         );
     }
 
+    /// A paused row is out of line either way, and SAYS which pause it is in.
+    /// Reporting both as "Paused after restart" made a job the operator had
+    /// just paused read as the whole queue stopping.
     #[test]
-    fn a_restart_paused_row_never_reads_as_waiting_in_line() {
-        let paused = resolve_listed_wait(None, "job", Some(7), true, false);
-        assert_eq!(paused, QueueWaitStatus::Paused);
-        assert_eq!(queue_wait_label(&paused), "Paused after restart");
-        assert_eq!(queue_wait_code(&paused), "PAUSED");
+    fn a_paused_row_names_its_pause_and_never_reads_as_waiting_in_line() {
+        let listed = |explicitly_paused: Option<bool>| {
+            resolve_listed_wait(
+                None,
+                &QueueJobEntryWire {
+                    id: "job".into(),
+                    state: "paused".into(),
+                    explicitly_paused,
+                    ..Default::default()
+                },
+                Some(7),
+            )
+        };
+
+        let parked = listed(Some(false));
+        assert_eq!(parked, QueueWaitStatus::Paused { explicit: false });
+        assert_eq!(queue_wait_label(&parked), "Paused after restart");
+        assert_eq!(queue_wait_code(&parked), "PAUSED");
+
+        let mine = listed(Some(true));
+        assert_eq!(mine, QueueWaitStatus::Paused { explicit: true });
+        assert_eq!(queue_wait_label(&mine), "Paused");
+        assert_eq!(queue_wait_code(&mine), "PAUSED");
+
+        // A host that does not send the bit only ever parked at restart.
+        assert_eq!(queue_wait_label(&listed(None)), "Paused after restart");
     }
 
     #[test]
     fn a_held_row_is_held_whatever_position_the_listing_gave_it() {
         let held = resolve_queue_wait(&QueueWaitInput {
             paused: false,
+            explicitly_paused: false,
             held: true,
             position: Some(0),
             blocked_reason: Some(&QueueBlockedReason::InsufficientVram),
@@ -363,11 +410,27 @@ mod tests {
         assert_eq!(queue_wait_label(&held), "Held");
         assert_eq!(queue_wait_code(&held), "HELD");
         assert_eq!(
-            resolve_listed_wait(None, "job", Some(0), false, true),
+            resolve_listed_wait(
+                None,
+                &QueueJobEntryWire {
+                    id: "job".into(),
+                    state: "held".into(),
+                    ..Default::default()
+                },
+                Some(0)
+            ),
             QueueWaitStatus::Held
         );
         assert_eq!(
-            resolve_listed_wait(None, "job", Some(0), false, false),
+            resolve_listed_wait(
+                None,
+                &QueueJobEntryWire {
+                    id: "job".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
+                Some(0)
+            ),
             QueueWaitStatus::Next
         );
     }
@@ -375,6 +438,7 @@ mod tests {
     fn wait(position: Option<usize>, reason: Option<QueueBlockedReason>) -> QueueWaitStatus {
         resolve_queue_wait(&QueueWaitInput {
             paused: false,
+            explicitly_paused: false,
             held: false,
             position,
             blocked_reason: reason.as_ref(),
@@ -490,18 +554,42 @@ mod tests {
             item("job-1", Some("model_not_installed")),
         ]);
         assert_eq!(
-            resolve_listed_wait(Some(&plan), "job-1", Some(2), false, false),
+            resolve_listed_wait(
+                Some(&plan),
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
+                Some(2)
+            ),
             QueueWaitStatus::Blocked("Model not installed".into())
         );
         // A benign reason on the plan still leaves the row counting.
         let benign = plan_with(vec![item("job-1", Some("no_idle_device"))]);
         assert_eq!(
-            resolve_listed_wait(Some(&benign), "job-1", Some(2), false, false),
+            resolve_listed_wait(
+                Some(&benign),
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
+                Some(2)
+            ),
             QueueWaitStatus::Position(2)
         );
         // No plan is absence of evidence, never a fault.
         assert_eq!(
-            resolve_listed_wait(None, "job-1", Some(0), false, false),
+            resolve_listed_wait(
+                None,
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
+                Some(0)
+            ),
             QueueWaitStatus::Next
         );
     }
@@ -512,7 +600,15 @@ mod tests {
         child.parent_id = "job-1".to_string();
         let plan = plan_with(vec![child]);
         assert_eq!(
-            resolve_listed_wait(Some(&plan), "job-1", Some(1), false, false),
+            resolve_listed_wait(
+                Some(&plan),
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
+                Some(1)
+            ),
             QueueWaitStatus::Blocked("Waiting for GPU memory".into())
         );
     }
@@ -524,10 +620,12 @@ mod tests {
         assert_eq!(
             resolve_listed_wait(
                 Some(&plan_with(vec![legacy])),
-                "job-1",
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
                 Some(1),
-                false,
-                false,
             ),
             QueueWaitStatus::Blocked("Device turned off".into())
         );
@@ -538,10 +636,12 @@ mod tests {
         assert_eq!(
             resolve_listed_wait(
                 Some(&plan_with(vec![assignment])),
-                "job-1",
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
                 Some(1),
-                false,
-                false,
             ),
             QueueWaitStatus::Position(1)
         );
@@ -559,10 +659,12 @@ mod tests {
         assert_eq!(
             resolve_listed_wait(
                 Some(&plan_with(vec![preparing])),
-                "job-1",
+                &QueueJobEntryWire {
+                    id: "job-1".into(),
+                    state: "queued".into(),
+                    ..Default::default()
+                },
                 Some(0),
-                false,
-                false,
             ),
             QueueWaitStatus::Blocked("Preparing · MiniMax H3 artifacts 25%".into())
         );
@@ -572,6 +674,7 @@ mod tests {
     fn preparing_names_its_component_and_percentage() {
         let status = resolve_queue_wait(&QueueWaitInput {
             paused: false,
+            explicitly_paused: false,
             held: false,
             position: Some(0),
             blocked_reason: Some(&QueueBlockedReason::Preparing),

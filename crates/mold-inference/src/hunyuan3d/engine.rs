@@ -568,7 +568,16 @@ impl Hunyuan3dEngine {
             }
             .generate(&mesh, &source_rgba, texture_size, seed)?;
             let (bounds_min, bounds_max) = textured.mesh.bounds();
-            let poster = super::poster::render_poster(&textured.mesh, POSTER_SIZE)
+            // The poster is read back out of the GLB that was just written
+            // rather than shaded off `textured.mesh`, so the tile saved at
+            // generation time is the same picture the server derives from the
+            // stored file later — baked baseColorTexture and all.
+            let poster = super::glb::read_glb_scene(&textured.glb)
+                .context("read back the textured mesh for its poster")
+                .and_then(|scene| {
+                    let (mesh, appearance) = scene.split();
+                    super::poster::render_poster_with(&mesh, &appearance, POSTER_SIZE)
+                })
                 .context("render the gallery poster")?;
             return Ok(GenerateResponse {
                 images: Vec::new(),
