@@ -1088,13 +1088,19 @@ describe("MobileApp generation lifecycle", () => {
     expect(text.indexOf("newer developing print")).toBeLessThan(text.indexOf("older queued print"));
   });
 
-  it.each([true, false])(
-    "uses shared running queue details and gates cancellation (%s)",
-    async (cooperative) => {
+  it.each([
+    { cooperative: true, replaced: false },
+    { cooperative: false, replaced: false },
+    { cooperative: true, replaced: true },
+  ])(
+    "gates shared cancellation with capability $cooperative and replacement $replaced",
+    async ({ cooperative, replaced }) => {
+      let reportedInstance = status.instance_id;
       apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/models") return Promise.resolve([model]);
         if (path === "/api/gallery") return Promise.resolve([print]);
-        if (path === "/api/status") return Promise.resolve({ ...status, queue_capacity: 2 });
+        if (path === "/api/status")
+          return Promise.resolve({ ...status, instance_id: reportedInstance, queue_capacity: 2 });
         if (path === "/api/capabilities")
           return Promise.resolve({
             queue: { cooperative_cancellation: cooperative, heterogeneous_batch_max_outputs: 8 },
@@ -1154,11 +1160,21 @@ describe("MobileApp generation lifecycle", () => {
       if (cooperative) {
         await cancel.trigger("click");
         expect(cancel.text()).toBe("Cancel job?");
+        if (replaced) reportedInstance = "replacement-machine";
         await cancel.trigger("click");
         await flushPromises();
-        expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-running", {
-          method: "DELETE",
-        });
+        if (replaced) {
+          expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/foreign-running", {
+            method: "DELETE",
+          });
+          expect(wrapper.get("[data-test='mobile-queue-details']").text()).toContain(
+            "different Mold server identity",
+          );
+        } else {
+          expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-running", {
+            method: "DELETE",
+          });
+        }
       }
     },
   );

@@ -57,7 +57,7 @@ instead.
 The primary tabs are Make, Queue, Images, Styles, and Machines. Settings is a
 pushed screen opened from the header.
 
-- **Make** picks where work lands. With one connected machine the Host
+- **Make** picks where work lands. With one connected machine the Machine
   control behaves exactly as before. Once two or more connected machines are
   reachable it also offers **Auto** (the least busy machine that already has
   the model) and **Most capable** (the strongest GPU that has it — CUDA before
