@@ -28,7 +28,6 @@ pub enum ShapeQuantization {
     Q5,
     Q4,
     Q3,
-    Q2,
 }
 
 impl ShapeQuantization {
@@ -39,7 +38,6 @@ impl ShapeQuantization {
             Self::Q5 => "q5",
             Self::Q4 => "q4",
             Self::Q3 => "q3",
-            Self::Q2 => "q2",
         }
     }
 
@@ -50,7 +48,6 @@ impl ShapeQuantization {
             Self::Q5 => GgmlDType::Q5K,
             Self::Q4 => GgmlDType::Q4K,
             Self::Q3 => GgmlDType::Q3K,
-            Self::Q2 => GgmlDType::Q2K,
         }
     }
 }
@@ -71,9 +68,8 @@ impl FromStr for ShapeQuantization {
             "q5" | "q5_k_m" => Ok(Self::Q5),
             "q4" | "q4_k_m" => Ok(Self::Q4),
             "q3" | "q3_k_m" => Ok(Self::Q3),
-            "q2" | "q2_k" => Ok(Self::Q2),
             other => bail!(
-                "unsupported Hunyuan3D quantization {other}; expected q8, q6, q5, q4, q3, or q2"
+                "unsupported Hunyuan3D quantization {other}; expected q8, q6, q5, q4, or q3"
             ),
         }
     }
@@ -345,7 +341,6 @@ mod tests {
             (ShapeQuantization::Q5, GgmlDType::Q5K),
             (ShapeQuantization::Q4, GgmlDType::Q4K),
             (ShapeQuantization::Q3, GgmlDType::Q3K),
-            (ShapeQuantization::Q2, GgmlDType::Q2K),
         ];
         for (tier, expected) in tiers {
             assert_eq!(
@@ -354,6 +349,12 @@ mod tests {
             );
             assert_eq!(tier.to_string().parse::<ShapeQuantization>().unwrap(), tier);
         }
+    }
+
+    #[test]
+    fn q2_is_below_the_qualified_shape_quality_floor() {
+        let error = "q2".parse::<ShapeQuantization>().unwrap_err();
+        assert!(error.to_string().contains("expected q8, q6, q5, q4, or q3"));
     }
 
     #[test]
