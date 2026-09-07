@@ -1,0 +1,1 @@
+- Keep mobile text, numeric, and organization fields visible above the keyboard, including iPhone rotation; make Done and machine-setup Next actions work consistently, keep sheet exits visible, and dismiss Android viewer and style panels in order.

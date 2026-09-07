@@ -26,6 +26,7 @@ select,
 [contenteditable="true"] {
   /* iOS WebKit magnifies focused editable controls below 16 CSS pixels. */
   font-size: 16px;
+  scroll-margin-block: 12px;
 }
 
 button {
@@ -2891,7 +2892,8 @@ button:disabled {
      dialog's UA inline placement when an explicit 100% width is combined
      with `inset: 0`, shifting a viewport-wide stage to the right. */
   width: auto;
-  height: auto;
+  height: var(--mobile-visual-viewport-height, 100dvh);
+  transform: translateY(var(--mobile-visual-viewport-page-top, 0px));
   max-width: none;
   max-height: none;
   /* The media is the page. The header floats over its top edge and the
@@ -5210,7 +5212,10 @@ button:disabled {
   position: relative;
   display: flex;
   min-height: 0;
-  max-height: min(86dvh, var(--mobile-visual-viewport-height, 100dvh));
+  max-height: min(
+    86dvh,
+    calc(var(--mobile-visual-viewport-height, 100dvh) - env(safe-area-inset-top))
+  );
   flex-direction: column;
   border-top: 1px solid var(--mold-border);
   border-radius: 18px 18px 0 0;
@@ -5270,6 +5275,9 @@ button:disabled {
 }
 
 .mobile-library-sheet-done {
+  flex: 0 0 auto;
+  margin: 4px max(18px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom))
+    max(18px, env(safe-area-inset-left));
   min-height: 46px;
   min-height: var(--mobile-sheet-touch-target, 46px);
   margin-top: 2px;
@@ -5612,4 +5620,28 @@ button:disabled {
 }
 .mobile-add-machine[open] > summary {
   margin-bottom: 12px;
+}
+
+/* In landscape the IME can leave less than 150px. Give that space to the
+   editor and its primary action; the system keyboard still provides Done. */
+@media (orientation: landscape) {
+  .mobile-shell.is-keyboard-open .mobile-header {
+    display: none;
+  }
+  .mobile-shell.is-keyboard-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas: "content" "action";
+    padding-top: 0;
+  }
+  .mobile-shell.is-keyboard-open .mobile-content {
+    padding-block: 4px;
+  }
+  .mobile-shell.is-keyboard-open .mobile-prompt-field textarea {
+    min-height: 44px;
+    height: 56px;
+  }
+  .mobile-shell.is-keyboard-open .mobile-create-action {
+    padding-block: 4px;
+  }
 }

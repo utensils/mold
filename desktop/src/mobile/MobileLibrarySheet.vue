@@ -202,16 +202,16 @@ function onKeydown(event: KeyboardEvent): void {
       <div ref="body" class="mobile-library-sheet-body">
         <p class="mobile-library-sheet-head" :data-test="`${testId}-head`">{{ title }}</p>
         <slot />
-        <button
-          class="mobile-library-sheet-done"
-          type="button"
-          data-sheet-close
-          :data-test="`${testId}-done`"
-          @click="emit('close')"
-        >
-          {{ doneLabel }}
-        </button>
       </div>
+      <button
+        class="mobile-library-sheet-done"
+        type="button"
+        data-sheet-close
+        :data-test="`${testId}-done`"
+        @click="emit('close')"
+      >
+        {{ doneLabel }}
+      </button>
     </div>
   </div>
 </template>

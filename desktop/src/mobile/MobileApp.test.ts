@@ -1,3 +1,4 @@
+import { nextTick } from "vue";
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7014,6 +7015,34 @@ describe("MobileApp foreground resume", () => {
     },
   };
 
+  it("moves machine setup through Name, Address and API key without submitting early", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    const name = wrapper.get("input[placeholder='Studio Mac (optional)']");
+    const address = wrapper.get("input[autocomplete='url']");
+    const key = wrapper.get("input[placeholder='If required']");
+    const addressFocus = vi.spyOn(address.element as HTMLElement, "focus");
+    const keyFocus = vi.spyOn(key.element as HTMLElement, "focus");
+    await name.trigger("keydown", { key: "Enter" });
+    expect(addressFocus).toHaveBeenCalledOnce();
+    await address.trigger("keydown", { key: "Enter" });
+    expect(keyFocus).toHaveBeenCalledOnce();
+    expect(address.attributes("inputmode")).toBe("url");
+    expect(key.attributes("enterkeyhint")).toBe("done");
+    expect(key.attributes("spellcheck")).toBe("false");
+  });
+
+  it("ends Title editing on Done without submitting a generation", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const title = wrapper.get("[data-test='mobile-create-title']");
+    const blur = vi.spyOn(title.element as HTMLElement, "blur");
+    await title.trigger("keydown", { key: "Enter" });
+    expect(title.attributes("enterkeyhint")).toBe("done");
+    expect(blur).toHaveBeenCalledOnce();
+  });
+
   it("restores the native WKWebView frame on launch and after a picker resume", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {},
@@ -7091,16 +7120,15 @@ describe("MobileApp foreground resume", () => {
       await flushPromises();
 
       const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
-      const promptField = prompt.closest<HTMLElement>(".field")!;
       const scrollIntoView = vi.fn();
-      Object.defineProperty(promptField, "scrollIntoView", {
+      Object.defineProperty(prompt, "scrollIntoView", {
         configurable: true,
         value: scrollIntoView,
       });
 
       prompt.focus();
       await vi.advanceTimersByTimeAsync(0);
-      expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
 
       await vi.advanceTimersByTimeAsync(400);
       expect(scrollIntoView).toHaveBeenCalledTimes(2);
@@ -7108,6 +7136,29 @@ describe("MobileApp foreground resume", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["text", "number", "password", "search", "url"])(
+    "reveals a focused %s editor after keyboard layout settles",
+    async (type) => {
+      vi.useFakeTimers();
+      try {
+        wrapper = mountMobileApp();
+        await flushPromises();
+        const editor = document.createElement("input");
+        editor.type = type;
+        wrapper.get(".mobile-content").element.append(editor);
+        const reveal = vi.fn();
+        editor.scrollIntoView = reveal;
+        editor.focus();
+        await vi.advanceTimersByTimeAsync(400);
+        expect(reveal).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+        expect(reveal).toHaveBeenCalledTimes(2);
+        editor.remove();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("tracks the visual viewport so sheets clear the keyboard and the header stays put", async () => {
     const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
@@ -7142,6 +7193,49 @@ describe("MobileApp foreground resume", () => {
       wrapper = null;
       if (originalViewport) Object.defineProperty(window, "visualViewport", originalViewport);
       else Reflect.deleteProperty(window, "visualViewport");
+    }
+  });
+
+  it("keeps keyboard chrome hidden when UIKit resizes the WebView and resets after rotation", async () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const originalHeight = window.innerHeight;
+    const originalWidth = window.innerWidth;
+    const viewport = Object.assign(new EventTarget(), { pageTop: 0, height: 844 });
+    Object.defineProperty(window, "visualViewport", { value: viewport, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 844, configurable: true });
+    Object.defineProperty(window, "innerWidth", { value: 393, configurable: true });
+    try {
+      wrapper = mountMobileApp();
+      await flushPromises();
+      viewport.height = 450;
+      viewport.dispatchEvent(new Event("resize"));
+      await nextTick();
+      expect(wrapper.classes()).toContain("is-keyboard-open");
+      Object.defineProperty(window, "innerHeight", { value: 450, configurable: true });
+      viewport.dispatchEvent(new Event("resize"));
+      await nextTick();
+      expect(wrapper.classes()).toContain("is-keyboard-open");
+      const prompt = wrapper.get("#mobile-prompt");
+      (prompt.element as HTMLElement).focus();
+      viewport.height = 150;
+      Object.defineProperty(window, "innerWidth", { value: 844, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 150, configurable: true });
+      viewport.dispatchEvent(new Event("resize"));
+      await nextTick();
+      expect(wrapper.classes()).toContain("is-keyboard-open");
+      (prompt.element as HTMLElement).blur();
+      viewport.height = 393;
+      Object.defineProperty(window, "innerHeight", { value: 393, configurable: true });
+      viewport.dispatchEvent(new Event("resize"));
+      await nextTick();
+      expect(wrapper.classes()).not.toContain("is-keyboard-open");
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      if (originalViewport) Object.defineProperty(window, "visualViewport", originalViewport);
+      else Reflect.deleteProperty(window, "visualViewport");
+      Object.defineProperty(window, "innerHeight", { value: originalHeight, configurable: true });
+      Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
     }
   });
 
@@ -13018,7 +13112,12 @@ describe("MobileApp identity photo", () => {
         output_format: "png",
       },
     };
-    const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    const historyBack = vi.spyOn(window.history, "go").mockImplementation(() => {
+      queueMicrotask(() => {
+        window.history.replaceState(null, "");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+    });
     serveIdentity([identityModel], [androidPrint]);
     wrapper = mountMobileApp();
     await flushPromises();
@@ -13046,7 +13145,7 @@ describe("MobileApp identity photo", () => {
     );
     expect(historyBack).toHaveBeenCalledTimes(1);
 
-    // The real browser removes the marker when history.back() lands.
+    // The programmatic traversal removes the marker without dismissing another surface.
     window.history.replaceState(null, "");
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
@@ -13057,6 +13156,7 @@ describe("MobileApp identity photo", () => {
     });
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
 
+    window.history.replaceState(null, "");
     window.dispatchEvent(new PopStateEvent("popstate"));
     await flushPromises();
 

@@ -98,6 +98,7 @@ function newSeed(): void {
         type="text"
         inputmode="numeric"
         enterkeyhint="done"
+        @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
         pattern="[0-9]*"
         autocomplete="off"
         autocapitalize="none"

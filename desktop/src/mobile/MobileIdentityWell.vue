@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import IdentityPhotoWell from "@studio/components/IdentityPhotoWell.vue";
 import type { GenerateForm } from "../lib/generateForm";
@@ -32,7 +32,6 @@ import { isNativeAndroidRuntime } from "./platform";
 const props = defineProps<{ form: GenerateForm }>();
 const androidNativeRuntime = isNativeAndroidRuntime();
 const pickerOpen = ref(false);
-const PICKER_HISTORY_KEY = "moldIdentityPicker";
 
 /** A local read/format refusal, cleared by the next successful pick. */
 const ingestError = ref<string | null>(null);
@@ -82,15 +81,9 @@ interface NativeIdentityPhoto {
 
 function openNativePicker(): void {
   pickerOpen.value = true;
-  window.history.pushState({ ...(window.history.state ?? {}), [PICKER_HISTORY_KEY]: true }, "");
 }
 
 function dismissNativePicker(): void {
-  pickerOpen.value = false;
-  if (window.history.state?.[PICKER_HISTORY_KEY]) window.history.back();
-}
-
-function onHistoryPop(): void {
   pickerOpen.value = false;
 }
 
@@ -136,9 +129,6 @@ function onClear(): void {
   ingestError.value = null;
   props.form.identityImage = null;
 }
-
-onMounted(() => window.addEventListener("popstate", onHistoryPop));
-onBeforeUnmount(() => window.removeEventListener("popstate", onHistoryPop));
 </script>
 
 <template>

@@ -1143,7 +1143,7 @@ onBeforeUnmount(() => {
     <form v-if="renaming" class="mobile-inline-form" @submit.prevent="saveRename">
       <label class="field">
         <span>Host name</span>
-        <input v-model="renameValue" class="control" autocomplete="off" />
+        <input v-model="renameValue" class="control" autocomplete="off" enterkeyhint="done" />
       </label>
       <div class="row-actions">
         <button class="primary-button" type="submit">Save name</button>
