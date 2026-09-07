@@ -1,0 +1,1 @@
+- Keep mobile Library selection actions readable without breaking collection labels into fragments or covering the grid at enlarged text sizes.
