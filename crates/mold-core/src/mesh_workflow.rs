@@ -62,6 +62,24 @@ impl MeshWorkflowJobState {
     }
 }
 
+impl std::str::FromStr for MeshWorkflowJobState {
+    type Err = MoldError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "paused" => Ok(Self::Paused),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(MoldError::Validation(format!(
+                "unknown mesh workflow job state '{value}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshWorkflowStageKind {
@@ -73,6 +91,37 @@ pub enum MeshWorkflowStageKind {
     Finalize,
 }
 
+impl MeshWorkflowStageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Matting => "matting",
+            Self::Delight => "delight",
+            Self::Shape => "shape",
+            Self::Paint => "paint",
+            Self::Finalize => "finalize",
+        }
+    }
+}
+
+impl std::str::FromStr for MeshWorkflowStageKind {
+    type Err = MoldError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "image" => Ok(Self::Image),
+            "matting" => Ok(Self::Matting),
+            "delight" => Ok(Self::Delight),
+            "shape" => Ok(Self::Shape),
+            "paint" => Ok(Self::Paint),
+            "finalize" => Ok(Self::Finalize),
+            _ => Err(MoldError::Validation(format!(
+                "unknown mesh workflow stage kind '{value}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshWorkflowStageState {
@@ -80,6 +129,33 @@ pub enum MeshWorkflowStageState {
     Running,
     Completed,
     Failed,
+}
+
+impl MeshWorkflowStageState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::str::FromStr for MeshWorkflowStageState {
+    type Err = MoldError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            _ => Err(MoldError::Validation(format!(
+                "unknown mesh workflow stage state '{value}'"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
