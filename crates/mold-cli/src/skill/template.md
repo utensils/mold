@@ -16,8 +16,11 @@ mold server status
   task, output type, source media, and destination. Always read the shared
   guide and exactly one family base below. Add a task leaf only when the
   selected H3, Wan, or LTX-2 task requires it.
-- For a 3-D mesh (`hunyuan3d`), the input is one image and the output is a
-  GLB: there is no prompt to write, and `mold expand` / `mold remix` answer
+- For a 3-D mesh (`hunyuan3d`), the input is one image or an advertised set of
+  named front/left/back/right views and the output is a GLB. Use `--matting
+  auto` to preserve useful alpha and remove opaque backgrounds, `on` to
+  recompute every supplied cutout, or `off` to keep the pixels unchanged.
+  There is no prompt to write, and `mold expand` / `mold remix` answer
   with image advice instead of a rewrite. OBJ, STL and PLY are gallery-side
   exports of the stored GLB, never generation targets, and take optional
   `--size-mm`/`--up-axis`/`--origin` to make the export print-ready; a

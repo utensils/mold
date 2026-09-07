@@ -4832,11 +4832,28 @@ fn hydrated_output_metadata(
 
 fn finish_generation_success(
     job: GpuJob,
-    response: mold_core::GenerateResponse,
+    mut response: mold_core::GenerateResponse,
     image: ImageData,
     original_image: Option<ImageData>,
     prepared_metadata: Option<OutputMetadata>,
 ) {
+    if let Some(mesh) = response.mesh.as_mut() {
+        let derived = std::mem::take(&mut mesh.derived_media);
+        if !derived.is_empty() {
+            if let Some(ticket) = job.journal.as_ref() {
+                if let Err(error) = ticket.persist_mesh_derived_media(derived) {
+                    let message = format!("processed mesh inputs could not be retained: {error:#}");
+                    tracing::error!(job_id = %job.id, %message);
+                    durable_generation_settlement::fail_blocking(
+                        job,
+                        DurableDisposition::Hold { retryable: true },
+                        message,
+                    );
+                    return;
+                }
+            }
+        }
+    }
     match job.registry.claim_completion(&job.id) {
         crate::job_registry::CompletionClaim::Claimed => {}
         crate::job_registry::CompletionClaim::UserCancelled => {

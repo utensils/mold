@@ -588,6 +588,8 @@ pub enum ParamField {
     MeshThreshold,
     /// Decimation target; off keeps the raw surface.
     TargetFaces,
+    /// Background-removal policy before shape conditioning.
+    Matting,
     // Advanced — Identity (PuLID)
     IdentityImage,
     IdentityWeight,
@@ -665,6 +667,7 @@ impl ParamField {
             Self::Octree => "Octree",
             Self::MeshThreshold => "Iso threshold",
             Self::TargetFaces => "Target faces",
+            Self::Matting => "Remove bg",
             // These three live inside the "Identity photo" section, so they
             // are named for their role there — `LABEL_W` is 16 columns and a
             // repeated "Identity " prefix would not fit any of them.
@@ -1128,6 +1131,11 @@ impl GenerateParams {
                 .target_faces
                 .map(crate::ui::preview::format_thousands)
                 .unwrap_or_else(|| "off \u{00b7} raw surface".to_string()),
+            ParamField::Matting => match self.mesh.matting.unwrap_or_default() {
+                mold_core::MeshMattingMode::Auto => "auto".to_string(),
+                mold_core::MeshMattingMode::On => "on".to_string(),
+                mold_core::MeshMattingMode::Off => "off".to_string(),
+            },
             ParamField::MaskImage => self
                 .mask_image_path
                 .as_deref()
@@ -6295,6 +6303,22 @@ impl App {
                     );
                 }
             }
+            ParamField::Matting => {
+                if let Some(control) = mesh_profile
+                    .as_ref()
+                    .and_then(|profile| profile.matting.as_ref())
+                    .filter(|control| {
+                        control.mode == mold_core::ControlMode::Adjustable
+                            && !control.choices.is_empty()
+                    })
+                {
+                    let choices = &control.choices;
+                    let current = p.mesh.matting.unwrap_or(control.default);
+                    let index = choices.iter().position(|choice| *choice == current).unwrap_or(0);
+                    let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+                    p.mesh.matting = Some(choices[next]);
+                }
+            }
             ParamField::IdentityWeight => {
                 // The range is `mold_core::identity`'s, never a local copy.
                 // Rounding to one decimal keeps repeated ◀▶ presses from
@@ -6772,6 +6796,12 @@ impl App {
         // leaves the rows at the recipe's defaults rather than carrying the
         // previous form's values into a print they never shaped.
         self.generate.params.mesh = meta.mesh.clone().unwrap_or_default();
+        // Mesh metadata predating the matting field rendered with the old
+        // background-preserving path. Restore that as explicit `off` so
+        // Reuse settings reproduces the print after `auto` became default.
+        if meta.mesh.is_some() && self.generate.params.mesh.matting.is_none() {
+            self.generate.params.mesh.matting = Some(mold_core::MeshMattingMode::Off);
+        }
         // The print's own source image, never the previous form's file: the
         // row starts as "attach again" with the recorded name, and the
         // restore below replaces that with the file when the host (or the
@@ -15350,6 +15380,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn matting_row_uses_the_profile_choice_order_and_respects_fixed_mode() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        let mesh = app
+            .generate
+            .capabilities
+            .mesh
+            .as_mut()
+            .expect("the built-in profile carries the mesh block");
+        mesh.matting = Some(mold_core::generation_profile::MeshMattingControlProfile {
+            mode: mold_core::ControlMode::Adjustable,
+            default: mold_core::MeshMattingMode::Off,
+            choices: vec![
+                mold_core::MeshMattingMode::Off,
+                mold_core::MeshMattingMode::On,
+            ],
+            reason: None,
+        });
+        app.generate.params.mesh.matting = None;
+        app.adjust_field(ParamField::Matting, 1);
+        assert_eq!(
+            app.generate.params.mesh.matting,
+            Some(mold_core::MeshMattingMode::On),
+            "the profile's restricted order must win over a client allowlist"
+        );
+
+        app.generate
+            .capabilities
+            .mesh
+            .as_mut()
+            .unwrap()
+            .matting
+            .as_mut()
+            .unwrap()
+            .mode = mold_core::ControlMode::Fixed;
+        app.adjust_field(ParamField::Matting, 1);
+        assert_eq!(
+            app.generate.params.mesh.matting,
+            Some(mold_core::MeshMattingMode::On),
+            "a fixed control is display-only"
+        );
+    }
+
     /// A recipe whose profile says `prompt.mode == ignored` admits an empty
     /// prompt at Generate. The refusal, when any, must be about something
     /// else (here: the missing source image).
@@ -15422,6 +15498,7 @@ mod tests {
                     poster: poster.clone(),
                     poster_width: 32,
                     poster_height: 24,
+                    derived_media: Vec::new(),
                 }),
                 generation_time_ms: 4_000,
                 model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),
@@ -15687,12 +15764,18 @@ mod tests {
             target_faces: Some(50_000),
             texture: None,
             texture_resolution: None,
+            matting: None,
         });
         app.gallery.selected = 0;
         app.load_gallery_into_generate();
         assert_eq!(app.generate.params.mesh.octree_resolution, Some(320));
         assert_eq!(app.generate.params.mesh.threshold, Some(0.55));
         assert_eq!(app.generate.params.mesh.target_faces, Some(50_000));
+        assert_eq!(
+            app.generate.params.mesh.matting,
+            Some(mold_core::MeshMattingMode::Off),
+            "a pre-matting mesh print restores the historical path"
+        );
         app.active_view = View::Library;
         app.gallery.selected = 1;
         app.load_gallery_into_generate();

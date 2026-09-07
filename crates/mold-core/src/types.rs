@@ -2848,6 +2848,21 @@ pub struct AudioData {
 ///
 /// Every field is optional: absent means the checkpoint's own default, which
 /// is what `manifest.rs` and the upstream `config.yaml` agree on.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum MeshMattingMode {
+    /// Preserve useful alpha; run the remover only for effectively opaque input.
+    #[default]
+    Auto,
+    /// Always run the remover, replacing any supplied alpha.
+    On,
+    /// Preserve the supplied pixels and alpha without segmentation.
+    Off,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MeshRequestOptions {
     /// Resolution of the cubic query grid the shape VAE's occupancy field is
@@ -2872,6 +2887,10 @@ pub struct MeshRequestOptions {
     /// Edge length of the generated texture atlas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_resolution: Option<u32>,
+    /// Background-removal policy applied before Hunyuan3D conditioning.
+    /// Absent resolves to `auto` for backward-compatible requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matting: Option<MeshMattingMode>,
 }
 
 impl MeshRequestOptions {
@@ -2925,6 +2944,14 @@ impl MeshRequestOptions {
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
+            // Provenance records what this binary can actually execute. An
+            // older/feature-off host performs the historical no-matting path
+            // even when an old client omitted this additive field.
+            matting: Some(if cfg!(feature = "mesh-matting") {
+                self.matting.unwrap_or(MeshMattingMode::Auto)
+            } else {
+                MeshMattingMode::Off
+            }),
         }
     }
 }
@@ -2941,6 +2968,15 @@ impl MeshRequestOptions {
 /// `poster` is the mesh counterpart of [`AudioData::thumbnail`]: a rendered
 /// still that grids and the TUI cell can lay out without a 3-D renderer.
 /// Only the lightbox loads the geometry itself.
+#[derive(Debug, Clone)]
+pub struct MeshDerivedMedia {
+    /// Semantic camera role for multiview conditioning; absent for the
+    /// ordinary single source image.
+    pub role: Option<GenerationImageReferenceRole>,
+    /// Deterministic PNG bytes after background removal.
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MeshData {
     /// Encoded mesh bytes. Always an [`OutputFormat::is_mesh`] variant.
@@ -2969,6 +3005,12 @@ pub struct MeshData {
     pub poster_width: u32,
     #[schema(example = 512)]
     pub poster_height: u32,
+    /// Attempt-local transport into the encrypted durable media store. These
+    /// private source-derived bytes are never serialized into an API response
+    /// or exposed as part of the public GLB.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub derived_media: Vec<MeshDerivedMedia>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -5947,6 +5989,14 @@ mod tests {
             "no decimation IS the rendered choice"
         );
         assert_eq!(mesh.texture, None);
+        assert_eq!(
+            mesh.matting,
+            Some(if cfg!(feature = "mesh-matting") {
+                MeshMattingMode::Auto
+            } else {
+                MeshMattingMode::Off
+            })
+        );
 
         // Touched: the request's own values win, and the rest still fills.
         let mut touched: GenerateRequest = serde_json::from_str(json).unwrap();
@@ -5956,6 +6006,7 @@ mod tests {
             target_faces: Some(50_000),
             texture: None,
             texture_resolution: None,
+            matting: Some(MeshMattingMode::Off),
         });
         let mesh = OutputMetadata::from_generate_request(&touched, 1, None, "test")
             .mesh
@@ -5966,6 +6017,22 @@ mod tests {
             Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)
         );
         assert_eq!(mesh.target_faces, Some(50_000));
+        assert_eq!(mesh.matting, Some(MeshMattingMode::Off));
+
+        touched.mesh.as_mut().unwrap().matting = Some(MeshMattingMode::On);
+        let effective = OutputMetadata::from_generate_request(&touched, 1, None, "test")
+            .mesh
+            .unwrap()
+            .matting;
+        assert_eq!(
+            effective,
+            Some(if cfg!(feature = "mesh-matting") {
+                MeshMattingMode::On
+            } else {
+                MeshMattingMode::Off
+            }),
+            "feature-off provenance must describe the historical no-matting path"
+        );
 
         let mut multiview = untouched.clone();
         multiview.model = crate::manifest::HUNYUAN3D_2MV_TURBO_MODEL.into();
@@ -5997,6 +6064,26 @@ mod tests {
         let meta = OutputMetadata::from_generate_request(&raster, 1, None, "test");
         assert!(meta.mesh.is_none());
         assert!(!serde_json::to_string(&meta).unwrap().contains("\"mesh\""));
+    }
+
+    #[test]
+    fn mesh_matting_modes_have_a_stable_wire_contract() {
+        assert_eq!(
+            serde_json::to_string(&MeshMattingMode::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MeshMattingMode::On).unwrap(),
+            "\"on\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MeshMattingMode::Off).unwrap(),
+            "\"off\""
+        );
+        assert_eq!(
+            serde_json::from_str::<MeshMattingMode>("\"auto\"").unwrap(),
+            MeshMattingMode::Auto
+        );
     }
 
     /// The field is additive: metadata saved before it existed (no `mesh`

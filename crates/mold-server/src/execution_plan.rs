@@ -652,6 +652,7 @@ impl ExecutionSemanticConfig {
             // the selected encoder artifacts above.
             identity_assets: _,
             paint_assets,
+            matting_asset: _,
             h3_factory_authority,
             // The resolved override is already represented in runtime_environment.
             request_offload: _,
@@ -4889,6 +4890,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_umt5_path,
             identity_assets,
             paint_assets,
+            matting_asset,
             h3_factory_authority,
             // The resolved override is already represented in runtime_environment.
             request_offload: _,
@@ -4932,6 +4934,9 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
         // distinct execution identity.
         if let Some(paint) = paint_assets {
             debug.field("paint_assets", paint);
+        }
+        if let Some(matting) = matting_asset {
+            debug.field("matting_asset", matting);
         }
         if let Some(authority) = h3_factory_authority {
             debug.field("h3_factory_authority", &authority.identity_sha256());
@@ -8102,6 +8107,7 @@ mod tests {
             selected_umt5_path: None,
             identity_assets: None,
             paint_assets: None,
+            matting_asset: None,
             h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,

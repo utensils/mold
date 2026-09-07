@@ -1,5 +1,13 @@
 # Third-Party Notices
 
+## U²-Net background matting
+
+`src/hunyuan3d/background_matting.rs` independently ports U²-Net from
+`xuebinqin/U-2-Net` commit `ac7e1c817ecab7c7dff5ce6b1abba61cd213ff29`
+(Apache-2.0), with preprocessing behavior from `danielgatis/rembg` commit
+`030a9ed79dbfcf8c58a1dc15a8dca3ccd2355709` (MIT). The ONNX weights remain a
+downloaded model artifact and are not included in this crate.
+
 ## Diffusers paint UNet
 
 `src/hunyuan3d/paint_conv.rs`, `src/hunyuan3d/paint_unet.rs` and

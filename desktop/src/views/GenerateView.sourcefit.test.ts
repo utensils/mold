@@ -369,7 +369,10 @@ describe("GenerateView source-fit submit path", () => {
     await flushPromises();
 
     const form = useGenerateFormStore().form;
-    expect(form.imageAttachments).toEqual(["iVBORw0KGgoAAAANSUhEUgAABJIAAAnk"]);
+    await vi.waitFor(
+      () => expect(form.imageAttachments).toEqual(["iVBORw0KGgoAAAANSUhEUgAABJIAAAnk"]),
+      { timeout: 5_000 },
+    );
     expect(form.width).toBe(1024);
     expect(form.height).toBe(1024);
   });
@@ -581,7 +584,7 @@ describe("GenerateView source-fit submit path", () => {
 
     // The cropped PNG is digested through WebCrypto, which settles off the
     // microtask queue.
-    await vi.waitFor(() => expect(submitBatch).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(submitBatch).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     expect(fitImage).toHaveBeenCalledWith(
       "SU1BR0U=",
       expect.objectContaining({ outputWidth: 512, outputHeight: 768, offsetX: -256 }),

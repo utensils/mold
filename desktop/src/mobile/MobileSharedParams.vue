@@ -113,6 +113,13 @@ const thresholdNote = computed(() => controlNote(thresholdControl.value));
 const thresholdValue = computed(
   () => meshForm.value.threshold ?? thresholdControl.value?.default ?? 0,
 );
+const mattingControl = computed(() => meshCaps.value?.matting ?? null);
+const mattingValue = computed(
+  () => meshForm.value.matting ?? mattingControl.value?.default ?? "auto",
+);
+function setMatting(event: Event): void {
+  writableMeshForm().matting = (event.target as HTMLSelectElement).value as "auto" | "on" | "off";
+}
 
 function setOctreeResolution(value: string | number): void {
   writableMeshForm().octreeResolution = Number(value);
@@ -331,6 +338,21 @@ const sourceDimensions = computed(() =>
     >
       {{ targetFacesError }}
     </p>
+    <label v-if="mattingControl?.mode !== 'hidden' && mattingControl?.choices.length" class="field">
+      <span>Remove background</span>
+      <select
+        class="control"
+        :value="mattingValue"
+        data-test="mobile-mesh-matting"
+        :disabled="mattingControl.mode === 'fixed'"
+        @change="setMatting"
+      >
+        <option v-for="choice in mattingControl.choices" :key="choice" :value="choice">
+          {{ choice === "auto" ? "Auto" : choice === "on" ? "On" : "Off" }}
+        </option>
+      </select>
+      <small class="mobile-generate-hint">Auto preserves a useful existing cutout.</small>
+    </label>
   </fieldset>
   <MobileSeedPicker
     :model-value="form.seed"

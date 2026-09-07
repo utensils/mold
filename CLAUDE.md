@@ -123,6 +123,8 @@ the model controls, and the length slider. A sequence is now something you scrip
 
 ## 3-D generation
 
+- **Background matting is profile-driven and its transformed inputs are durable private media.** `capabilities.mesh.matting` is the one Auto/On/Off contract every authoring surface reads. Auto preserves useful alpha and otherwise runs the pinned pure-Rust U²-Net stage before shape weights load; On always recomputes and Off preserves the historical pixels. Processed PNGs never enter the public response or GLB: a durable job seals them under its purpose-keyed `generation_queue_derived_media` obligation before gallery publication, hands every authored and derived set to the same archive identity, and exposes the processed roles for authenticated download while refusing them for request reuse so matting cannot be applied twice. Cancellation, held-row retention, startup reconciliation, gallery deletion, and queue settlement cover all attached sets.
+
 - **Paint shares the SD VAE implementation.** `mold_candle::stable_diffusion::vae`
   owns the VAE used by SD1.5, SDXL, SD3 and Hunyuan3D paint. The original posterior
   API preserves SD behavior; paint opts into Diffusers' log-variance bounds and

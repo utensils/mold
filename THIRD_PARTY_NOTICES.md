@@ -100,6 +100,16 @@ LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
 OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 
+## U²-Net background matting
+
+The Hunyuan3D background-matting stage is a pure Rust/Candle implementation of
+the U²-Net architecture from `xuebinqin/U-2-Net`, pinned at commit
+`ac7e1c817ecab7c7dff5ce6b1abba61cd213ff29`. Its preprocessing and mask
+normalization follow `danielgatis/rembg`, pinned at commit
+`030a9ed79dbfcf8c58a1dc15a8dca3ccd2355709`. U²-Net is Apache-2.0 licensed;
+rembg is MIT licensed. Mold downloads the ONNX weights and does not vendor
+either upstream project's source.
+
 ## torchaudio sinc resampling algorithm
 
 The pure-Rust MiniMax H3 reference-audio resampler in

@@ -133,16 +133,21 @@ state. Do so only when requested, and verify health plus the selected host
 afterward. For MCP async generation, keep the returned job ID and poll the same
 job; retry only when the status explicitly marks it retryable.
 
-`generate_mesh` is the one MCP generate tool whose schema requires `image`
-rather than `prompt`: the 3-D family has no text encoder, so there is nothing
-for a prompt to do. `mold run hunyuan3d-mini-turbo --image chair.png` is
-likewise a complete CLI request with no prompt at all. `hunyuan3d-2.1` uses
-the same image-only contract and requires the separate `tencent-hunyuan3d-2.1`
-licence acceptance. It returns a rendered
+`generate_mesh` is the one MCP generate tool whose schema requires image
+conditioning rather than `prompt`: the 3-D family has no text encoder, so
+there is nothing for a prompt to do. `mold run hunyuan3d-mini-turbo --image
+chair.png --matting auto` is likewise a complete CLI request with no prompt
+at all. A 2mv recipe instead accepts any non-empty semantic subset through
+`--front`, `--left`, `--back`, and `--right`; never renumber a missing view.
+`--matting auto` preserves useful alpha and removes opaque backgrounds, `on`
+recomputes every supplied cutout, and `off` keeps the original pixels.
+`hunyuan3d-2.1` uses the same single-image contract and requires the separate
+`tencent-hunyuan3d-2.1` licence acceptance. It returns a rendered
 poster plus mesh statistics; the glTF itself lands in the gallery and is
 fetched by filename. Its optional `octree` (the advertised allowlist; cost is
 cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and
-`target_faces` mirror `--octree`, `--mesh-threshold`, and `--target-faces`;
+`target_faces` and `matting` mirror `--octree`, `--mesh-threshold`,
+`--target-faces`, and `--matting`;
 omit them for the recipe's defaults. The older `octree_resolution` and
 `mesh_threshold` names are declared in the schema as deprecated aliases.
 

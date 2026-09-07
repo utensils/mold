@@ -118,6 +118,7 @@ tauri-winrt-notification = "0.7"
 
 [features]
 mesh-texture = ["mold-server/mesh-texture"]
+mesh-matting = ["mold-core/mesh-matting", "mold-server/mesh-matting"]
 default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build
 # turn on the native GPU backend for real generation.

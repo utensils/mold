@@ -253,9 +253,9 @@ if wants rust; then
   step "rust: optional feature check" \
     cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
   step "rust: mesh preparation tests" \
-    cargo test -p mold-ai-inference --features mesh-texture --lib hunyuan3d
+    cargo test -p mold-ai-inference --features mesh-texture,mesh-matting --lib hunyuan3d
   step "rust: mesh preparation clippy" \
-    cargo clippy -p mold-ai-inference --features mesh-texture --all-targets -- -D warnings
+    cargo clippy -p mold-ai-inference --features mesh-texture,mesh-matting --all-targets -- -D warnings
   step "rust: mDNS clippy" \
     cargo clippy -p mold-ai-server --features mdns --all-targets -- -D warnings
   step "rust: mDNS tests" \

@@ -694,6 +694,7 @@ pub struct MeshFlags {
     pub target_faces: Option<u32>,
     pub texture: bool,
     pub texture_resolution: Option<u32>,
+    pub matting: Option<mold_core::MeshMattingMode>,
 }
 
 impl MeshFlags {
@@ -747,6 +748,7 @@ impl MeshFlags {
             && self.target_faces.is_none()
             && !self.texture
             && self.texture_resolution.is_none()
+            && self.matting.is_none()
         {
             return None;
         }
@@ -759,6 +761,7 @@ impl MeshFlags {
             // making the request look like it opted out of something.
             texture: self.texture.then_some(true),
             texture_resolution: self.texture_resolution,
+            matting: self.matting,
         })
     }
 }

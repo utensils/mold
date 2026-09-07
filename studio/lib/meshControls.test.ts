@@ -87,6 +87,23 @@ describe("meshRequestFromForm", () => {
       ),
     ).toEqual({ texture: true, texture_resolution: 4096 });
   });
+
+  it("serializes only an advertised non-default matting policy", () => {
+    const mattingCaps = {
+      ...caps(),
+      matting: {
+        mode: "adjustable" as const,
+        default: "auto" as const,
+        choices: ["auto", "on", "off"] as ("auto" | "on" | "off")[],
+      },
+    };
+    expect(
+      meshRequestFromForm({ ...emptyMeshForm(), matting: "auto" }, mattingCaps),
+    ).toBeUndefined();
+    expect(
+      meshRequestFromForm({ ...emptyMeshForm(), matting: "off" }, mattingCaps),
+    ).toEqual({ matting: "off" });
+  });
 });
 
 describe("meshFormFromMetadata", () => {
@@ -98,6 +115,7 @@ describe("meshFormFromMetadata", () => {
         target_faces: 40_000,
         texture: true,
         texture_resolution: 4096,
+        matting: "on",
       }),
     ).toEqual({
       octreeResolution: 320,
@@ -105,15 +123,19 @@ describe("meshFormFromMetadata", () => {
       targetFaces: 40_000,
       texture: true,
       textureResolution: 4096,
+      matting: "on",
     });
   });
 
   it("reads absent, null, and non-mesh metadata as an empty form", () => {
     expect(meshFormFromMetadata(undefined)).toEqual(emptyMeshForm());
     expect(meshFormFromMetadata(null)).toEqual(emptyMeshForm());
+  });
+
+  it("restores pre-matting mesh metadata through the historical off path", () => {
     expect(
       meshFormFromMetadata({ octree_resolution: null, threshold: null }),
-    ).toEqual(emptyMeshForm());
+    ).toEqual({ ...emptyMeshForm(), matting: "off" });
   });
 });
 

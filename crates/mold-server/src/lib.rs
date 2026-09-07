@@ -56,6 +56,7 @@ pub mod job_registry;
 pub mod job_supervisor;
 pub mod logging;
 mod ltx2_admission;
+mod matting_dependencies;
 #[cfg(feature = "mdns")]
 pub mod mdns;
 mod memory_preflight;
