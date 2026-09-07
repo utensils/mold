@@ -29,8 +29,20 @@ describe("desktop named mesh views", () => {
       },
     };
     form.namedViews = {
-      right: { base64: "RIGHT", filename: "right.jpg", mimeType: "image/jpeg", width: 8, height: 9 },
-      front: { base64: "FRONT", filename: "front.png", mimeType: "image/png", width: 10, height: 11 },
+      right: {
+        base64: "RIGHT",
+        filename: "right.jpg",
+        mimeType: "image/jpeg",
+        width: 8,
+        height: 9,
+      },
+      front: {
+        base64: "FRONT",
+        filename: "front.png",
+        mimeType: "image/png",
+        width: 10,
+        height: 11,
+      },
     };
 
     expect(buildRequest(form).references).toEqual([
@@ -42,7 +54,13 @@ describe("desktop named mesh views", () => {
   it("keeps parked named views off recipes that do not advertise them", () => {
     const form = newGenerateForm();
     form.namedViews = {
-      front: { base64: "FRONT", filename: "front.png", mimeType: "image/png", width: 10, height: 11 },
+      front: {
+        base64: "FRONT",
+        filename: "front.png",
+        mimeType: "image/png",
+        width: 10,
+        height: 11,
+      },
     };
     expect(buildRequest(form).references).toBeUndefined();
   });
@@ -74,7 +92,13 @@ describe("desktop named mesh views", () => {
       },
     };
     form.namedViews = {
-      front: { base64: "FRONT", filename: "front.png", mimeType: "image/png", width: 10, height: 11 },
+      front: {
+        base64: "FRONT",
+        filename: "front.png",
+        mimeType: "image/png",
+        width: 10,
+        height: 11,
+      },
       back: { base64: "BACK", filename: "back.jpg", mimeType: "image/jpeg", width: 12, height: 13 },
     };
     const request = buildRequest(form);

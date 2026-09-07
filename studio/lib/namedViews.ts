@@ -105,7 +105,11 @@ export function deserializeNamedViews(
 ): NamedViewsState {
   const restored: NamedViewsState = {};
   for (const reference of references ?? []) {
-    if (reference.kind !== "named_image" || reference.media.authority !== "inline") continue;
+    if (
+      reference.kind !== "named_image" ||
+      reference.media.authority !== "inline"
+    )
+      continue;
     restored[reference.role] = {
       base64: reference.media.data,
       filename: reference.provenance?.name ?? `${reference.role}.png`,

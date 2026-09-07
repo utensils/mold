@@ -138,10 +138,7 @@ export function inlineGenerationMediaBytes(
 }
 
 export function namedViewsValidationError(form: GenerateForm): string | null {
-  return namedViewValidationError(
-    form.namedViews,
-    form.recipeCapabilities?.mesh?.named_views,
-  );
+  return namedViewValidationError(form.namedViews, form.recipeCapabilities?.mesh?.named_views);
 }
 
 export function mobileMediaBudgetValidationError(form: GenerateForm): string | null {
