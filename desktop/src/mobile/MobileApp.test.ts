@@ -5653,7 +5653,12 @@ describe("MobileApp generation queue", () => {
     expect(liveForm.model).toBe(meshModel.name);
     expect(liveForm.sourceImage).toBe(PNG_1170x2532);
     expect(liveForm.sourceImageWidth).toBe(1170);
-    expect(liveForm.mesh).toEqual({ octreeResolution: 320, threshold: 0.55, targetFaces: 40_000 });
+    expect(liveForm.mesh).toEqual({
+      octreeResolution: 320,
+      threshold: 0.55,
+      targetFaces: 40_000,
+      matting: "off",
+    });
     expect(liveForm.outputFormat).toBe("glb");
     expect(liveForm.width).toBe(0);
     expect(liveForm.height).toBe(0);
