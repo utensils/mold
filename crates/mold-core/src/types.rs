@@ -2968,6 +2968,15 @@ impl MeshRequestOptions {
 /// `poster` is the mesh counterpart of [`AudioData::thumbnail`]: a rendered
 /// still that grids and the TUI cell can lay out without a 3-D renderer.
 /// Only the lightbox loads the geometry itself.
+#[derive(Debug, Clone)]
+pub struct MeshDerivedMedia {
+    /// Semantic camera role for multiview conditioning; absent for the
+    /// ordinary single source image.
+    pub role: Option<GenerationImageReferenceRole>,
+    /// Deterministic PNG bytes after background removal.
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MeshData {
     /// Encoded mesh bytes. Always an [`OutputFormat::is_mesh`] variant.
@@ -2996,6 +3005,12 @@ pub struct MeshData {
     pub poster_width: u32,
     #[schema(example = 512)]
     pub poster_height: u32,
+    /// Attempt-local transport into the encrypted durable media store. These
+    /// private source-derived bytes are never serialized into an API response
+    /// or exposed as part of the public GLB.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub derived_media: Vec<MeshDerivedMedia>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

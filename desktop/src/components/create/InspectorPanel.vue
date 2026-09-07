@@ -911,6 +911,7 @@ function resetSettings() {
             :options="mattingOptions"
             label="Remove background"
             data-test="mesh-matting"
+            :disabled="mattingControl.mode === 'fixed'"
             @update:model-value="form.mesh.matting = $event"
           />
           <p class="ms-field__hint">

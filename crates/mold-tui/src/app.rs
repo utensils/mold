@@ -15493,6 +15493,7 @@ mod tests {
                     poster: poster.clone(),
                     poster_width: 32,
                     poster_height: 24,
+                    derived_media: Vec::new(),
                 }),
                 generation_time_ms: 4_000,
                 model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),

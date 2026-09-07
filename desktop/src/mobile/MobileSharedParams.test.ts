@@ -417,6 +417,31 @@ describe("MobileSharedParams mesh controls", () => {
     expect(form.mesh.threshold).toBe(0.42);
   });
 
+  it("renders and writes the advertised background-removal policies", async () => {
+    const form = meshForm();
+    const wrapper = mountMesh(form);
+    const matting = wrapper.get<HTMLSelectElement>("[data-test='mobile-mesh-matting']");
+    expect(matting.element.value).toBe("auto");
+    expect(matting.findAll("option").map((option) => option.text())).toEqual(["Auto", "On", "Off"]);
+    await matting.setValue("off");
+    expect(form.mesh.matting).toBe("off");
+  });
+
+  it("disables a fixed background-removal policy", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.matting = {
+      mode: "fixed",
+      default: "off",
+      choices: ["off"],
+      reason: "This build keeps the supplied background.",
+    };
+    const matting = mountMesh(meshForm(), meshModel(recipe)).get<HTMLSelectElement>(
+      "[data-test='mobile-mesh-matting']",
+    );
+    expect(matting.element.value).toBe("off");
+    expect(matting.attributes("disabled")).toBeDefined();
+  });
+
   it("disables a fixed threshold and shows the host's own note", () => {
     const recipe = hunyuan3dRecipe();
     recipe.capabilities.mesh = {

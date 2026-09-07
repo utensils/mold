@@ -34,8 +34,8 @@ use candle_core::{DType, Device, Tensor};
 #[cfg(feature = "mesh-matting")]
 use mold_core::MeshMattingMode;
 use mold_core::{
-    GenerateRequest, GenerateResponse, GenerationReference, GenerationReferenceAuthority, MeshData,
-    ModelPaths, OutputFormat,
+    GenerateRequest, GenerateResponse, GenerationImageReferenceRole, GenerationReference,
+    GenerationReferenceAuthority, MeshData, MeshDerivedMedia, ModelPaths, OutputFormat,
 };
 
 use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
@@ -93,38 +93,72 @@ const DECODE_TICKS: usize = 64;
 
 #[cfg(feature = "mesh-matting")]
 fn matte_images<'a>(
-    images: impl IntoIterator<Item = &'a mut image::RgbaImage>,
+    images: impl IntoIterator<
+        Item = (
+            Option<GenerationImageReferenceRole>,
+            &'a mut image::RgbaImage,
+        ),
+    >,
     policy: MeshMattingMode,
     model_path: Option<&std::path::Path>,
     gpu_ordinal: usize,
     progress: &ProgressReporter,
-) -> Result<()> {
-    let mut network = None;
-    let mut processed = 0;
-    for image in images {
-        let should_run = match policy {
+) -> Result<Vec<MeshDerivedMedia>> {
+    let mut images = images.into_iter().collect::<Vec<_>>();
+    let should_run = images
+        .iter()
+        .map(|(_, image)| match policy {
             MeshMattingMode::Off => false,
             MeshMattingMode::On => true,
             MeshMattingMode::Auto => !super::background_matting::has_useful_alpha(image),
-        };
-        if !should_run {
+        })
+        .collect::<Vec<_>>();
+    let total = should_run.iter().filter(|run| **run).count();
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+
+    let total_pixels = images
+        .iter()
+        .zip(&should_run)
+        .filter(|(_, run)| **run)
+        .try_fold(0_u64, |sum, ((_, image), _)| {
+            sum.checked_add(u64::from(image.width()) * u64::from(image.height()))
+        })
+        .context("matting input pixel count overflowed")?;
+    anyhow::ensure!(
+        total_pixels <= super::background_matting::MAX_MATTING_PIXELS,
+        "combined matting inputs exceed {} pixels",
+        super::background_matting::MAX_MATTING_PIXELS
+    );
+
+    progress.stage_start("Removing background");
+    let started = std::time::Instant::now();
+    let path = model_path.context(
+        "background matting was requested but the U²-Net dependency was not materialized",
+    )?;
+    let device = crate::device::create_device(gpu_ordinal, progress)?;
+    let network = super::background_matting::U2Net::load(path, &device)?;
+    let mut artifacts = Vec::with_capacity(total);
+    for ((role, image), run) in images.iter_mut().zip(should_run) {
+        if !run {
             continue;
         }
-        if network.is_none() {
-            progress.stage_start("Removing background");
-            let path = model_path.context(
-                "background matting was requested but the U²-Net dependency was not materialized",
-            )?;
-            let device = crate::device::create_device(gpu_ordinal, progress)?;
-            network = Some(super::background_matting::U2Net::load(path, &device)?);
-        }
-        *image = network.as_ref().expect("initialized above").matte(image)?;
-        processed += 1;
-        progress.stage_progress("Removing background", processed, processed);
+        **image = network.matte(image)?;
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8((*image).clone())
+            .write_to(&mut output, image::ImageFormat::Png)
+            .context("encode the processed matting image")?;
+        artifacts.push(MeshDerivedMedia {
+            role: *role,
+            data: output.into_inner(),
+        });
+        progress.stage_progress("Removing background", artifacts.len(), total);
     }
     // Drop all graph tensors before the shape checkpoint is loaded.
     drop(network);
-    Ok(())
+    progress.stage_done("Removing background", started.elapsed());
+    Ok(artifacts)
 }
 
 enum DecodedConditioning {
@@ -343,7 +377,7 @@ impl Hunyuan3dEngine {
         // DiT, and the shape VAE take the accelerator. A warm resident engine
         // retains its shape weights by policy, but never retains U²-Net.
         let multiview = mold_core::manifest::hunyuan3d_multiview_model(&self.base.model_name);
-        let decoded = if multiview {
+        let (decoded, derived_media) = if multiview {
             anyhow::ensure!(
                 req.source_image
                     .as_deref()
@@ -387,14 +421,16 @@ impl Hunyuan3dEngine {
             }
             views.sort_by_key(|(role, _)| super::multiview::view_slot(*role));
             #[cfg(feature = "mesh-matting")]
-            matte_images(
-                views.iter_mut().map(|(_, image)| image),
+            let derived_media = matte_images(
+                views.iter_mut().map(|(role, image)| (Some(*role), image)),
                 options.matting.unwrap_or_default(),
                 self.matting_asset.as_deref(),
                 self.base.gpu_ordinal,
                 &self.base.progress,
             )?;
-            DecodedConditioning::Multi(views)
+            #[cfg(not(feature = "mesh-matting"))]
+            let derived_media = Vec::new();
+            (DecodedConditioning::Multi(views), derived_media)
         } else {
             anyhow::ensure!(
                 bindings.is_empty(),
@@ -408,18 +444,20 @@ impl Hunyuan3dEngine {
             let image = crate::img_utils::decode_oriented_srgb_rgba(source)
                 .context("decode the source image")?;
             #[cfg(feature = "mesh-matting")]
-            let image = {
+            let (image, derived_media) = {
                 let mut image = image;
-                matte_images(
-                    std::iter::once(&mut image),
+                let derived_media = matte_images(
+                    std::iter::once((None, &mut image)),
                     options.matting.unwrap_or_default(),
                     self.matting_asset.as_deref(),
                     self.base.gpu_ordinal,
                     &self.base.progress,
                 )?;
-                image
+                (image, derived_media)
             };
-            DecodedConditioning::Single(image)
+            #[cfg(not(feature = "mesh-matting"))]
+            let derived_media = Vec::new();
+            (DecodedConditioning::Single(image), derived_media)
         };
 
         if self.base.loaded.is_none() {
@@ -547,6 +585,7 @@ impl Hunyuan3dEngine {
                     poster,
                     poster_width: POSTER_SIZE,
                     poster_height: POSTER_SIZE,
+                    derived_media,
                 }),
                 generation_time_ms: started.elapsed().as_millis() as u64,
                 model: self.base.model_name.clone(),
@@ -581,6 +620,7 @@ impl Hunyuan3dEngine {
                 poster,
                 poster_width: POSTER_SIZE,
                 poster_height: POSTER_SIZE,
+                derived_media,
             }),
             generation_time_ms: started.elapsed().as_millis() as u64,
             model: self.base.model_name.clone(),

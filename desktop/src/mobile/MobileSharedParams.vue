@@ -337,15 +337,13 @@ const sourceDimensions = computed(() =>
     >
       {{ targetFacesError }}
     </p>
-    <label
-      v-if="mattingControl?.mode !== 'hidden' && mattingControl?.choices.length"
-      class="field"
-    >
+    <label v-if="mattingControl?.mode !== 'hidden' && mattingControl?.choices.length" class="field">
       <span>Remove background</span>
       <select
         class="control"
         :value="mattingValue"
         data-test="mobile-mesh-matting"
+        :disabled="mattingControl.mode === 'fixed'"
         @change="setMatting"
       >
         <option v-for="choice in mattingControl.choices" :key="choice" :value="choice">

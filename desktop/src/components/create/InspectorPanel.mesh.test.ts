@@ -384,6 +384,36 @@ describe("InspectorPanel — Mesh group", () => {
     expect(form.mesh.threshold).toBe(0.42);
   });
 
+  it("renders and writes the advertised background-removal policies", async () => {
+    const { form, wrapper } = mountFor(meshModel());
+    await flushPromises();
+    const matting = wrapper.getComponent("[data-test='mesh-matting']");
+    expect(matting.props("modelValue")).toBe("auto");
+    expect(matting.props("options")).toEqual([
+      { value: "auto", label: "Auto" },
+      { value: "on", label: "On" },
+      { value: "off", label: "Off" },
+    ]);
+    matting.vm.$emit("update:modelValue", "on");
+    await flushPromises();
+    expect(form.mesh.matting).toBe("on");
+  });
+
+  it("disables a fixed background-removal policy", async () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.matting = {
+      mode: "fixed",
+      default: "off",
+      choices: ["off"],
+      reason: "This build keeps the supplied background.",
+    };
+    const { wrapper } = mountFor(modelWith("hunyuan3d-fixed:fp16", "hunyuan3d", recipe));
+    await flushPromises();
+    const matting = wrapper.getComponent("[data-test='mesh-matting']");
+    expect(matting.props("modelValue")).toBe("off");
+    expect(matting.props("disabled")).toBe(true);
+  });
+
   it("disables a fixed threshold and shows the profile's own note", async () => {
     const recipe = hunyuan3dRecipe();
     recipe.capabilities.mesh!.threshold = {

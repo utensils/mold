@@ -3625,6 +3625,33 @@ mod tests {
     }
 
     #[test]
+    fn run_accepts_exact_background_matting_values() {
+        for value in ["auto", "on", "off"] {
+            assert!(
+                try_parse(&[
+                    "run",
+                    "hunyuan3d:fp16",
+                    "--image",
+                    "chair.png",
+                    "--matting",
+                    value
+                ])
+                .is_ok(),
+                "{value}"
+            );
+        }
+        assert!(try_parse(&[
+            "run",
+            "hunyuan3d:fp16",
+            "--image",
+            "chair.png",
+            "--matting",
+            "sometimes"
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn skill_install_requires_an_explicit_target_mode() {
         assert!(try_parse(&["skill", "install"]).is_err());
     }

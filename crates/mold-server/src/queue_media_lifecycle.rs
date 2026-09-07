@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context as _;
 use mold_db::generation_queue;
+use mold_db::generation_queue_derived_media;
 use mold_db::generation_queue_media::{
     self, ActiveQueueMediaObligation, QueueMediaObligationState,
 };
@@ -165,6 +167,68 @@ impl QueueMediaLifecycle {
         self.runtime_store()?.delete(media_set)
     }
 
+    /// Seal one deterministic stage output before gallery publication and
+    /// bind it to the live queue row. Replays accept only the exact operation
+    /// fingerprint already registered for this purpose.
+    pub(crate) fn persist_derived_media(
+        &self,
+        job_id: &str,
+        kind: &str,
+        fingerprint: &QueueMediaOperationFingerprint,
+        media: Vec<SealMedia>,
+    ) -> anyhow::Result<()> {
+        if let Some(existing) = generation_queue_derived_media::for_job_kind(
+            self.db().map_err(|error| anyhow::anyhow!(error))?,
+            &self.owner_uuid,
+            job_id,
+            kind,
+        )? {
+            let media_set = MediaSetRef {
+                owner_id: existing.owner_uuid,
+                job_id: existing.storage_job_id,
+                set_id: existing.obligation.media_set_id,
+            };
+            let manifest = self.runtime_store()?.load(&media_set)?;
+            anyhow::ensure!(
+                manifest.operation_fingerprint.as_ref() == Some(fingerprint),
+                "durable derived media for {kind} differs from the registered attempt"
+            );
+            return Ok(());
+        }
+
+        let storage_job_id = format!("{job_id}-derived-{kind}");
+        let store = self.runtime_store()?;
+        let media_set = store.seal_v2_with_operation_fingerprint(
+            &self.owner_uuid,
+            &storage_job_id,
+            fingerprint,
+            &QueueMediaProjection::default(),
+            media,
+        )?;
+        let now = now_ms();
+        let binding = generation_queue_derived_media::DerivedQueueMediaBinding {
+            job_id: job_id.to_string(),
+            owner_uuid: self.owner_uuid.clone(),
+            kind: kind.to_string(),
+            storage_job_id,
+            obligation: generation_queue_media::QueueMediaObligation {
+                media_set_id: media_set.set_id.clone(),
+                owner_uuid: self.owner_uuid.clone(),
+                state: QueueMediaObligationState::Active,
+                created_at_ms: now,
+                updated_at_ms: now,
+            },
+        };
+        if let Err(error) = generation_queue_derived_media::register(
+            self.db().map_err(|error| anyhow::anyhow!(error))?,
+            &binding,
+        ) {
+            let _ = store.delete(&media_set);
+            return Err(error).context("registering durable derived media");
+        }
+        Ok(())
+    }
+
     pub(crate) fn candidate_for_ref(
         &self,
         media_set: MediaSetRef,
@@ -203,17 +267,28 @@ impl QueueMediaLifecycle {
         Ok(Arc::new(store))
     }
 
-    pub(crate) fn candidate_for_job(
+    pub(crate) fn candidates_for_job(
         &self,
         job_id: &str,
-    ) -> Result<Option<QueueMediaGcCandidate>, AdapterError> {
+    ) -> Result<Vec<QueueMediaGcCandidate>, AdapterError> {
         let joined = generation_queue_media::active_queue_obligation_for_job(
             self.db()?,
             &self.owner_uuid,
             job_id,
         )
         .map_err(db_error)?;
-        Ok(joined.map(|joined| candidate_from_joined(&joined)))
+        let mut candidates = joined
+            .as_ref()
+            .map(candidate_from_joined)
+            .into_iter()
+            .collect::<Vec<_>>();
+        candidates.extend(
+            generation_queue_derived_media::active_for_job(self.db()?, &self.owner_uuid, job_id)
+                .map_err(db_error)?
+                .iter()
+                .map(candidate_from_derived),
+        );
+        Ok(candidates)
     }
 
     /// Create encrypted per-output pins, commit their exact archive bindings,
@@ -225,23 +300,27 @@ impl QueueMediaLifecycle {
         output_dir: &std::path::Path,
         gate: &crate::batch_transaction::GalleryPublicationGate,
     ) -> anyhow::Result<()> {
-        let Some(candidate) = self
-            .candidate_for_job(job_id)
-            .map_err(|error| anyhow::anyhow!(error))?
-        else {
+        let candidates = self
+            .candidates_for_job(job_id)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if candidates.is_empty() {
             return Ok(());
-        };
+        }
         let store = self.runtime_store()?;
-        let media_set = candidate.media_set.clone();
-        let bindings =
-            gate.bind_retained_media_for_job(output_dir, job_id, &media_set, |pin_id| {
-                store
-                    .pin_for_gallery_item(&media_set, pin_id)
-                    .map(|_| ())
-                    .map_err(Into::into)
-            })?;
+        let mut filenames = BTreeSet::new();
+        for candidate in candidates {
+            let media_set = candidate.media_set;
+            let bindings =
+                gate.bind_retained_media_for_job(output_dir, job_id, &media_set, |pin_id| {
+                    store
+                        .pin_for_gallery_item(&media_set, pin_id)
+                        .map(|_| ())
+                        .map_err(Into::into)
+                })?;
+            filenames.extend(bindings.into_iter().map(|(filename, _)| filename));
+        }
         let canonical = std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.into());
-        for (filename, _) in bindings {
+        for filename in filenames {
             let retained = gate
                 .retained_media_for_item(&canonical, &filename)?
                 .map(|(_, pins)| pins)
@@ -364,9 +443,19 @@ impl QueueMediaLifecycle {
     }
 
     pub(crate) fn active_candidates(&self) -> Result<Vec<QueueMediaGcCandidate>, AdapterError> {
-        generation_queue_media::list_active_queue_obligations(self.db()?, &self.owner_uuid)
-            .map(|joined| joined.iter().map(candidate_from_joined).collect())
-            .map_err(db_error)
+        let mut candidates =
+            generation_queue_media::list_active_queue_obligations(self.db()?, &self.owner_uuid)
+                .map_err(db_error)?
+                .iter()
+                .map(candidate_from_joined)
+                .collect::<Vec<_>>();
+        candidates.extend(
+            generation_queue_derived_media::list_active(self.db()?, &self.owner_uuid)
+                .map_err(db_error)?
+                .iter()
+                .map(candidate_from_derived),
+        );
+        Ok(candidates)
     }
 
     /// Clean only after the DB trigger proves the queue row was deleted.
@@ -445,6 +534,8 @@ impl QueueMediaStartupAdapter for QueueMediaLifecycle {
         .map_err(db_error)?;
         let joined = generation_queue_media::list_active_queue_obligations(db, owner_uuid)
             .map_err(db_error)?;
+        let derived =
+            generation_queue_derived_media::list_active(db, owner_uuid).map_err(db_error)?;
         let referenced = generation_queue_media::list_referenced_media_set_ids(db, owner_uuid)
             .map_err(db_error)?;
         let active_ids: HashSet<&str> =
@@ -453,12 +544,20 @@ impl QueueMediaStartupAdapter for QueueMediaLifecycle {
             .iter()
             .map(|row| row.obligation.media_set_id.as_str())
             .collect();
-        let joined_jobs: HashSet<&str> = joined.iter().map(|row| row.job_id.as_str()).collect();
+        let derived_ids: HashSet<&str> = derived
+            .iter()
+            .map(|row| row.obligation.media_set_id.as_str())
+            .collect();
+        let mapped_ids = joined_ids
+            .iter()
+            .copied()
+            .chain(derived_ids.iter().copied())
+            .collect::<HashSet<_>>();
         if active_ids.len() != active.len()
             || joined_ids.len() != joined.len()
-            || joined_jobs.len() != joined.len()
+            || derived_ids.len() != derived.len()
             || active_ids != referenced.iter().map(String::as_str).collect()
-            || joined_ids != active_ids
+            || mapped_ids != active_ids
         {
             return Err(AdapterError::new(
                 AdapterFailureKind::Invariant,
@@ -470,10 +569,19 @@ impl QueueMediaStartupAdapter for QueueMediaLifecycle {
             .into_iter()
             .map(|joined| MediaObligation {
                 job_id: Some(joined.job_id),
+                storage_job_id: None,
+                kind: None,
                 set_id: joined.obligation.media_set_id,
                 state: ObligationState::Active,
             })
             .collect::<Vec<_>>();
+        obligations.extend(derived.into_iter().map(|derived| MediaObligation {
+            job_id: Some(derived.job_id),
+            storage_job_id: Some(derived.storage_job_id),
+            kind: Some(derived.kind),
+            set_id: derived.obligation.media_set_id,
+            state: ObligationState::Active,
+        }));
         obligations.extend(
             generation_queue_media::list_obligations(
                 db,
@@ -484,6 +592,8 @@ impl QueueMediaStartupAdapter for QueueMediaLifecycle {
             .into_iter()
             .map(|row| MediaObligation {
                 job_id: None,
+                storage_job_id: None,
+                kind: None,
                 set_id: row.media_set_id,
                 state: ObligationState::GcPending,
             }),
@@ -624,6 +734,18 @@ fn candidate_from_joined(joined: &ActiveQueueMediaObligation) -> QueueMediaGcCan
             owner_id: joined.obligation.owner_uuid.clone(),
             job_id: joined.job_id.clone(),
             set_id: joined.obligation.media_set_id.clone(),
+        },
+    }
+}
+
+fn candidate_from_derived(
+    derived: &generation_queue_derived_media::DerivedQueueMediaBinding,
+) -> QueueMediaGcCandidate {
+    QueueMediaGcCandidate {
+        media_set: MediaSetRef {
+            owner_id: derived.owner_uuid.clone(),
+            job_id: derived.storage_job_id.clone(),
+            set_id: derived.obligation.media_set_id.clone(),
         },
     }
 }
@@ -939,7 +1061,11 @@ mod tests {
         let report = reconcile_claimed_owner(&journal, lifecycle.as_ref()).unwrap();
         assert!(report.durable_media_ready);
 
-        let candidate = lifecycle.candidate_for_job("media-job").unwrap().unwrap();
+        let candidate = lifecycle
+            .candidates_for_job("media-job")
+            .unwrap()
+            .pop()
+            .unwrap();
         assert_eq!(
             lifecycle
                 .cleanup_after_committed_delete(&candidate)
@@ -977,6 +1103,227 @@ mod tests {
             .inspect_owner(&owner)
             .active
             .is_empty());
+    }
+
+    #[test]
+    fn derived_media_is_restart_durable_and_retires_with_its_queue_job() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "instance-a",
+        ));
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let mut row = queue_row(&owner, "derived-job", "unused");
+        row.media_set_id = None;
+        generation_queue::insert(db.as_ref().as_ref().unwrap(), &row).unwrap();
+
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &journal);
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(b"two exact mattes");
+        lifecycle
+            .persist_derived_media(
+                "derived-job",
+                "matting_processed",
+                &fingerprint,
+                vec![
+                    SealMedia::bytes("matting_processed_references", "front", vec![1, 2, 3]),
+                    SealMedia::bytes("matting_processed_references", "left", vec![4, 5, 6]),
+                ],
+            )
+            .unwrap();
+        let candidates = lifecycle.candidates_for_job("derived-job").unwrap();
+        assert_eq!(candidates.len(), 1);
+        drop(lifecycle);
+
+        let restarted =
+            QueueMediaLifecycle::new(db.clone(), home.path().to_path_buf(), owner.clone());
+        let report = reconcile_claimed_owner(&journal, &restarted).unwrap();
+        assert!(report.durable_media_ready);
+        assert!(report.held_jobs.is_empty());
+        let binding = generation_queue_derived_media::for_job_kind(
+            db.as_ref().as_ref().unwrap(),
+            &owner,
+            "derived-job",
+            "matting_processed",
+        )
+        .unwrap()
+        .unwrap();
+        let manifest = restarted
+            .opened_store()
+            .unwrap()
+            .load(&MediaSetRef {
+                owner_id: owner.clone(),
+                job_id: binding.storage_job_id,
+                set_id: binding.obligation.media_set_id,
+            })
+            .unwrap();
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .map(|member| (member.role.as_str(), member.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("matting_processed_references", "front"),
+                ("matting_processed_references", "left")
+            ]
+        );
+
+        assert!(generation_queue::delete(db.as_ref().as_ref().unwrap(), "derived-job").unwrap());
+        for candidate in candidates {
+            assert_eq!(
+                restarted
+                    .cleanup_after_committed_delete(&candidate)
+                    .unwrap(),
+                CleanupOutcome::Deleted
+            );
+        }
+        assert!(restarted
+            .opened_store()
+            .unwrap()
+            .inspect_owner(&owner)
+            .active
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn gallery_handoff_binds_authored_and_derived_sets_with_exact_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "instance-a",
+        ));
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let primary = QueueMediaStore::open(home.path())
+            .unwrap()
+            .store
+            .seal_v2_with_operation_fingerprint(
+                &owner,
+                "gallery-job",
+                &QueueMediaOperationFingerprint::sha256_v1(b"gallery source"),
+                &QueueMediaProjection {
+                    source_image: true,
+                    ..QueueMediaProjection::default()
+                },
+                vec![SealMedia::bytes("source_image", "scalar", vec![9])],
+            )
+            .unwrap();
+        generation_queue::insert_with_media(
+            db.as_ref().as_ref().unwrap(),
+            &queue_row(&owner, "gallery-job", &primary.set_id),
+            &obligation(&owner, &primary.set_id),
+        )
+        .unwrap();
+        let lifecycle = install_and_reconcile(home.path(), db.clone(), &journal);
+        lifecycle
+            .persist_derived_media(
+                "gallery-job",
+                "matting_processed",
+                &QueueMediaOperationFingerprint::sha256_v1(b"front matte"),
+                vec![SealMedia::bytes(
+                    "matting_processed_references",
+                    "front",
+                    vec![1, 2, 3],
+                )],
+            )
+            .unwrap();
+
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "",
+            "model": "hunyuan3d-2mv:fp16",
+            "width": 0,
+            "height": 0,
+            "steps": 5,
+            "guidance": 5.0,
+            "batch_size": 1,
+            "output_format": "glb"
+        }))
+        .unwrap();
+        let mut metadata =
+            mold_core::OutputMetadata::from_generate_request(&request, 7, None, "test");
+        metadata.job_id = Some("gallery-job".into());
+        let record = mold_db::GenerationRecord::from_save(
+            gallery.path(),
+            "mesh.glb",
+            mold_core::OutputFormat::Glb,
+            metadata,
+            mold_db::RecordSource::Server,
+            1,
+        );
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let mut publication = crate::batch_transaction::GalleryImportTransaction::begin(
+            gallery.path(),
+            "publication",
+            0,
+            serde_json::json!({"kind": "derived-media-test"}),
+            record,
+        )
+        .unwrap();
+        std::fs::write(publication.staging_path(), b"mesh bytes").unwrap();
+        publication.seal_staged_file().unwrap();
+        publication.mark_prepared().unwrap();
+        publication.commit(&gate, db.clone()).await.unwrap();
+        lifecycle
+            .handoff_to_gallery("gallery-job", gallery.path(), &gate)
+            .unwrap();
+
+        let (_, pins) = crate::batch_transaction::GalleryPublicationGate::default()
+            .retained_media_for_item(gallery.path(), "mesh.glb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pins.len(), 2);
+        assert_eq!(
+            mold_db::gallery_media::list_for_item(
+                db.as_ref().as_ref().unwrap(),
+                &std::fs::canonicalize(gallery.path())
+                    .unwrap()
+                    .to_string_lossy(),
+                "mesh.glb",
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+        let mut retained = Vec::new();
+        for pin in &pins {
+            let manifest = lifecycle
+                .gallery_manifest(pin.media_set.clone(), pin.pin_id.clone())
+                .unwrap();
+            retained.push((
+                manifest.entries[0].role.clone(),
+                lifecycle
+                    .gallery_member_bytes(pin.media_set.clone(), pin.pin_id.clone(), 0)
+                    .unwrap(),
+            ));
+        }
+        retained.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            retained,
+            vec![
+                ("matting_processed_references".into(), vec![1, 2, 3]),
+                ("source_image".into(), vec![9]),
+            ]
+        );
+
+        let candidates = lifecycle.candidates_for_job("gallery-job").unwrap();
+        assert!(generation_queue::delete(db.as_ref().as_ref().unwrap(), "gallery-job").unwrap());
+        for candidate in candidates {
+            assert_eq!(
+                lifecycle
+                    .cleanup_after_committed_delete(&candidate)
+                    .unwrap(),
+                CleanupOutcome::Deleted
+            );
+        }
+        for pin in pins {
+            assert!(lifecycle
+                .gallery_member_bytes(pin.media_set, pin.pin_id, 0)
+                .is_ok());
+        }
     }
 
     #[test]

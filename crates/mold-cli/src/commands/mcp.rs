@@ -169,6 +169,7 @@ async fn response_from_canonical_bytes(
                 // as they describe the waveform on an audio one.
                 poster_width: metadata.width,
                 poster_height: metadata.height,
+                derived_media: Vec::new(),
             }),
             generation_time_ms,
             model: metadata.model,

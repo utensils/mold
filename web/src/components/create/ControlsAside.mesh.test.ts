@@ -31,7 +31,7 @@ vi.mock("../machines/hostClient", () => ({
   hostDevices: () => Promise.reject(new Error("offline in tests")),
 }));
 
-function meshModel(): ModelInfoExtended {
+function meshModel(recipe = hunyuan3dRecipe()): ModelInfoExtended {
   return {
     name: "hunyuan3d-mini-turbo:fp16",
     family: "hunyuan3d",
@@ -51,7 +51,7 @@ function meshModel(): ModelInfoExtended {
       profile_id: "hunyuan3d",
       profile_hash: "h3d",
       default_recipe_id: "default",
-      recipes: [hunyuan3dRecipe()],
+      recipes: [recipe],
     },
   } as ModelInfoExtended;
 }
@@ -88,7 +88,10 @@ function baseForm(
   return { ...state, ...overrides };
 }
 
-function mountMesh(overrides: Partial<GenerateFormState> = {}) {
+function mountMesh(
+  overrides: Partial<GenerateFormState> = {},
+  model = meshModel(),
+) {
   return mount(ControlsAside, {
     props: {
       modelValue: baseForm({
@@ -101,7 +104,7 @@ function mountMesh(overrides: Partial<GenerateFormState> = {}) {
         ...overrides,
       }),
       family: "hunyuan3d",
-      model: meshModel(),
+      model,
       advCount: 0,
     },
   });
@@ -162,6 +165,37 @@ describe("ControlsAside 3-D mesh", () => {
     expect(emitted).toBeTruthy();
     const next = emitted!.at(-1)![0] as GenerateFormState;
     expect(next.mesh?.octreeResolution).toBe(384);
+  });
+
+  it("renders and writes the advertised background-removal policies", async () => {
+    const wrapper = mountMesh();
+    const matting = wrapper.getComponent("[data-test='mesh-matting']");
+    expect(matting.props("modelValue")).toBe("auto");
+    expect(matting.props("options")).toEqual([
+      { value: "auto", label: "Auto" },
+      { value: "on", label: "On" },
+      { value: "off", label: "Off" },
+    ]);
+    matting.vm.$emit("update:modelValue", "off");
+    const next = wrapper
+      .emitted("update:modelValue")!
+      .at(-1)![0] as GenerateFormState;
+    expect(next.mesh?.matting).toBe("off");
+  });
+
+  it("disables a fixed background-removal policy", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.matting = {
+      mode: "fixed",
+      default: "off",
+      choices: ["off"],
+      reason: "This build keeps the supplied background.",
+    };
+    const matting = mountMesh({}, meshModel(recipe)).getComponent(
+      "[data-test='mesh-matting']",
+    );
+    expect(matting.props("modelValue")).toBe("off");
+    expect(matting.props("disabled")).toBe(true);
   });
 
   it("binds the iso-threshold slider to the recipe's float control", () => {
