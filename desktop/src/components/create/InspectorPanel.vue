@@ -844,7 +844,10 @@ function resetSettings() {
             <label class="ms-field__label ms-field__label--inline" for="mesh-target-faces">
               Simplify to
             </label>
-            <p class="ms-field__hint">Fewer faces load faster in other apps</p>
+            <p class="ms-field__hint">
+              Merges flat areas down to this many triangles. Creases and color survive; the file
+              just opens faster elsewhere.
+            </p>
           </div>
           <input
             id="mesh-target-faces"
@@ -1200,6 +1203,12 @@ function resetSettings() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+}
+/* The label and its hint are what gives, not the control: without this the
+   text column's `min-width: auto` floor squeezes the field beside it. */
+.ms-field--row > div {
+  min-width: 0;
 }
 .ms-field__label {
   font-size: var(--mold-fs-xs);
@@ -1249,10 +1258,18 @@ function resetSettings() {
    bare `.ms-card__faces` lost its width and height and the face budget
    rendered as a full-width 32px seed field. */
 /* Sized to its own placeholder ("keep every detail", 17 mono characters)
-   plus padding and WebKit's spin button, as the mock draws it — a fixed cap
-   clipped the words at the larger type scales. */
+   plus padding, WebKit's spin button, and a character of slack so the words
+   are not flush against the border — a fixed cap clipped them at the larger
+   type scales.
+
+   `flex: none` is the half that made the width stick. `.ms-seed__input` sets
+   `min-width: 0`, so inside `.ms-field--row`'s flex the field lost every
+   shrink contest to the label column beside it (a flex item with
+   `min-width: auto` refuses to go under its own longest word) and rendered
+   narrower than declared however wide the declaration was. */
 .ms-seed__input.ms-card__faces {
-  width: calc(17ch + 16px + 18px);
+  flex: none;
+  width: calc(18ch + 16px + 18px);
   max-width: 100%;
   height: var(--mold-ctl-md);
 }
