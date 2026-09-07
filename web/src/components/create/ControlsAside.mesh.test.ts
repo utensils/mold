@@ -169,14 +169,19 @@ describe("ControlsAside 3-D mesh", () => {
 
   it("renders and writes the advertised background-removal policies", async () => {
     const wrapper = mountMesh();
-    const matting = wrapper.getComponent("[data-test='mesh-matting']");
-    expect(matting.props("modelValue")).toBe("auto");
-    expect(matting.props("options")).toEqual([
-      { value: "auto", label: "Auto" },
-      { value: "on", label: "On" },
-      { value: "off", label: "Off" },
+    const matting = wrapper.get("[data-test='mesh-matting']");
+    const choices = matting.findAll("[role='radio']");
+    expect(choices.map((choice) => choice.text())).toEqual([
+      "Auto",
+      "On",
+      "Off",
     ]);
-    matting.vm.$emit("update:modelValue", "off");
+    expect(choices.map((choice) => choice.attributes("aria-checked"))).toEqual([
+      "true",
+      "false",
+      "false",
+    ]);
+    await choices[2]!.trigger("click");
     const next = wrapper
       .emitted("update:modelValue")!
       .at(-1)![0] as GenerateFormState;
@@ -191,11 +196,18 @@ describe("ControlsAside 3-D mesh", () => {
       choices: ["off"],
       reason: "This build keeps the supplied background.",
     };
-    const matting = mountMesh({}, meshModel(recipe)).getComponent(
+    const matting = mountMesh({}, meshModel(recipe)).get(
       "[data-test='mesh-matting']",
     );
-    expect(matting.props("modelValue")).toBe("off");
-    expect(matting.props("disabled")).toBe(true);
+    expect(matting.attributes("aria-disabled")).toBe("true");
+    expect(matting.get("[role='radio']").attributes("aria-checked")).toBe(
+      "true",
+    );
+    expect(
+      matting
+        .findAll("[role='radio']")
+        .every((choice) => choice.attributes("disabled") !== undefined),
+    ).toBe(true);
   });
 
   it("binds the iso-threshold slider to the recipe's float control", () => {

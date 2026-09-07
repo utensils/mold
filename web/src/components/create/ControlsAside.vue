@@ -481,7 +481,7 @@ function lockLastSeed() {
         :model-value="mattingValue"
         :options="mattingOptions"
         label="Remove background"
-        :disabled="mattingControl.mode === 'fixed'"
+        :disabled="mattingControl?.mode === 'fixed'"
         @update:model-value="patchMesh({ matting: $event })"
       />
     </div>
