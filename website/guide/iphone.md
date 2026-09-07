@@ -484,11 +484,10 @@ Update the remote Mold host. Current authenticated video playback needs the
 short-lived gallery media-ticket endpoint so iOS can make native Range requests
 without exposing the API key.
 
-
 ### Mobile redesign foundation
 
 The phone uses **Make, Queue, Images, Styles, and Machines**. Make shares the
- desktop’s Still picture, Short clip, and 3-D object sections and remembers the
+desktop’s Still picture, Short clip, and 3-D object sections and remembers the
 style last used in each. Prompt and required photos stay on the main screen;
 Detail, guidance, seed, mesh controls and other secondary controls live in
 **More settings**. Shape and Length remain in the main flow. Name and organize

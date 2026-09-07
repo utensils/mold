@@ -11,3 +11,4 @@ export * from "./lib/starterModels";
 export * from "./lib/generationLifecycle";
 export * from "./lib/generationMedia";
 export * from "./lib/targetStreamSlots";
+export * from "./lib/outputKind";

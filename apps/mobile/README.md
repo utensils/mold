@@ -826,11 +826,10 @@ budget. Kernel changes are local-only `mold system metal-memory` commands on
 that Mac; the app has no remote privileged control. See the
 [Metal memory guide](../../website/guide/metal-memory.md).
 
-
 ### Mobile redesign foundation
 
 The phone uses **Make, Queue, Images, Styles, and Machines**. Make shares the
- desktop’s Still picture, Short clip, and 3-D object sections and remembers the
+desktop’s Still picture, Short clip, and 3-D object sections and remembers the
 style last used in each. Prompt and required photos stay on the main screen;
 Detail, guidance, seed, mesh controls and other secondary controls live in
 **More settings**. Shape and Length remain in the main flow. Name and organize
