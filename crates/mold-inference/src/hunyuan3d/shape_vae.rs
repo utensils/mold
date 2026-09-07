@@ -68,6 +68,11 @@ use candle_nn::{
 
 use crate::attention::attention;
 
+mod encoder;
+pub use encoder::{
+    farthest_point_indices, sample_mesh_surface, ShapeVaeEncoderConfig, SurfacePoint,
+};
+
 /// LayerNorm epsilon used by every `norm_layer(...)` inside the blocks.
 ///
 /// `vae.py` passes `eps=1e-6` explicitly at every block-level call site
