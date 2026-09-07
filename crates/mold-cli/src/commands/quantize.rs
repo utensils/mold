@@ -13,8 +13,9 @@ pub fn run(
     let source_name = resolve_model_name(model);
     let mut config = Config::load_or_default();
     let manifest = find_manifest(&source_name);
-    let configured = config.models.get(&source_name);
+    let configured = config.models.get(&source_name).cloned();
     let family = configured
+        .as_ref()
         .and_then(|entry| entry.family.as_deref())
         .or_else(|| manifest.map(|entry| entry.family.as_str()));
     if family != Some(HUNYUAN3D_FAMILY) {
@@ -55,7 +56,19 @@ pub fn run(
         tier,
     )?;
 
-    let mut derived = configured.cloned().unwrap_or_default();
+    // Quantization can take several minutes. Reload immediately before the
+    // write so another completed conversion is not erased by this process's
+    // stale pre-conversion snapshot.
+    config = Config::load_or_default();
+    if config.models.contains_key(&derived_name) {
+        bail!(
+            "model `{derived_name}` was registered while quantization was running; \
+             the completed GGUF was retained at {}",
+            output.display()
+        );
+    }
+
+    let mut derived = configured.unwrap_or_default();
     if let Some(manifest) = manifest {
         derived.default_steps.get_or_insert(manifest.defaults.steps);
         derived
