@@ -5827,3 +5827,22 @@ button:disabled {
     align-content: start;
   }
 }
+
+/* Native selects may truncate their selected option. Keep its exact identity
+   readable beneath it and the current-kind browse door within easy reach. */
+.mobile-style-details {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: -8px;
+}
+
+.mobile-style-id {
+  flex: 1 1 12em;
+  min-width: 0;
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  overflow-wrap: anywhere;
+}

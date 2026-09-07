@@ -223,3 +223,9 @@ TestFlight **0.28.0.1310** from main `0ac3dc9e` is VALID with Mold Internal test
 ### Library selection acceptance follow-up
 
 Native selection of the UAT still, confirmation to move it to Trash, and Restore completed successfully; the print returned to the Library and no other print was changed. Selection actions now wrap by their label widths, preserving “Add to collection” instead of splitting its last letter onto a separate line. Persistent action text is capped at 24px (status at 20px) so maximum Dynamic Type leaves the grid reachable. The favorite icon and selection check are bounded within their fixed targets. Native maximum-text scrolling, the selected-still action set, and the final selection-check glyph cap were verified in rebuilt simulator apps.
+
+### Style picker completion
+
+The native Style picker now presents the server’s friendly description before the runnable model ID, falling back to the shared display/family label for older or unavailable entries. A wrapping selected-ID line remains readable when the native select truncates its option. Browse more is always reachable and explicitly opens the current output kind; the separate failed-kind notice still browses the attempted unavailable kind.
+
+Native iPhone checks verified the descriptions in the system menu, dismissal without selection changes, Browse more opening 3-D discovery, and returning to the same Make selection and scroll position. All 404 mobile app, style-label, and layout tests pass, including image/video/mesh browse routing and the stale attempted-kind regression. The simulator build and formatting checks pass; independent review found no behavioral blockers.

@@ -4023,7 +4023,7 @@ describe("MobileApp generation queue", () => {
     expect(
       fieldControl("Style")
         .findAll("option")
-        .map((option) => option.text()),
+        .map((option) => option.attributes("value")),
     ).toEqual([imageModel.name]);
     expect(wrapper.get("[data-test='mobile-upscale']").text()).toContain(upscaler.name);
     expect(
@@ -10733,7 +10733,7 @@ describe("MobileApp host and catalog coordination", () => {
 
     const options = fieldControl("Style")
       .findAll("option")
-      .map((option) => option.text());
+      .map((option) => option.attributes("value"));
     expect(options).toContain(pulledModel.name);
   });
 
@@ -13669,6 +13669,61 @@ describe("MobileApp identity photo", () => {
 });
 
 describe("MobileApp output kinds", () => {
+  it.each([
+    [stillModel, "Still picture"],
+    [model, "Short clip"],
+    [meshModel, "3-D object"],
+  ] as const)("browses styles for the selected %s kind", async (selected, label) => {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path, init) =>
+      path === "/api/models"
+        ? Promise.resolve([stillModel, model, meshModel])
+        : base(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await selectStyle(selected.name);
+    const option = fieldControl("Style")
+      .findAll("option")
+      .find((entry) => entry.attributes("value") === selected.name)!;
+    expect(option.text().indexOf(selected.description!)).toBeLessThan(
+      option.text().indexOf(selected.name),
+    );
+    expect(wrapper.get(".mobile-style-id").text()).toBe(selected.name);
+    await wrapper.get("[data-test='mobile-style-browse']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-discover']").attributes("aria-pressed"),
+    ).toBe("true");
+    const active = wrapper
+      .get(".mobile-catalog-media")
+      .findAll("button")
+      .find((button) => button.attributes("aria-pressed") === "true");
+    expect(active?.text()).toBe(label);
+  });
+
+  it("browses the current style kind after an unavailable kind was attempted", async () => {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path, init) =>
+      path === "/api/models" ? Promise.resolve([stillModel]) : base(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper
+      .get("[data-test='mobile-output-kind']")
+      .findAll("button")
+      .find((button) => button.text() === "3-D object")!
+      .trigger("click");
+    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(stillModel.name);
+    await wrapper.get("[data-test='mobile-style-browse']").trigger("click");
+    await flushPromises();
+    const active = wrapper
+      .get(".mobile-catalog-media")
+      .findAll("button")
+      .find((button) => button.attributes("aria-pressed") === "true");
+    expect(active?.text()).toBe("Still picture");
+  });
+
   it("filters styles by kind and restores the remembered style without losing the prompt", async () => {
     const secondStill = { ...stillModel, name: "still-alternative:q8" };
     const base = apiJsonTo.getMockImplementation()!;
