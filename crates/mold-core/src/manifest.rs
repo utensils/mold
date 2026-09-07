@@ -283,6 +283,16 @@ impl ModelManifest {
         !self.is_upscaler() && !self.is_files_only_bundle() && !self.is_auxiliary()
     }
 
+    /// True for hidden, runnable image preprocessors used only as durable
+    /// mesh-workflow stages. They have generation profiles for scheduling,
+    /// but no user prompt and therefore no prompting-corpus family.
+    pub(crate) fn is_mesh_preprocessor(&self) -> bool {
+        matches!(
+            self.family.as_str(),
+            HUNYUAN3D_MATTING_FAMILY | HUNYUAN3D_DELIGHT_FAMILY
+        )
+    }
+
     /// True if any file in this model requires HuggingFace authentication.
     pub fn is_gated(&self) -> bool {
         self.files.iter().any(|f| f.gated)
@@ -9390,7 +9400,9 @@ mod tests {
         // Hunyuan3D 2.1 shape: one additional self-contained checkpoint.
         // Hunyuan3D multiview: +2 self-contained normal and five-step Turbo
         // checkpoints, each carrying its DiT, shape VAE and DINO tower.
-        assert_eq!(known_manifests().len(), 206);
+        // Mesh preprocessing: +3 hidden runnable workers — auto/forced U²-Net
+        // matting aliases and the Delight diffusion pipeline.
+        assert_eq!(known_manifests().len(), 208);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
@@ -10349,6 +10361,7 @@ mod tests {
                 && !manifest.is_auxiliary()
                 && manifest.family != "ltx2"
                 && manifest.family != HUNYUAN3D_FAMILY
+                && manifest.family != HUNYUAN3D_MATTING_FAMILY
             {
                 assert!(
                     components.contains(&ModelComponent::Vae),

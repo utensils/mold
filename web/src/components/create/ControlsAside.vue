@@ -491,7 +491,9 @@ function lockLastSeed() {
         class="controls__toggle"
         data-test="mesh-delight"
       >
-        <span class="controls__label controls__label--inline">Remove lighting</span>
+        <span class="controls__label controls__label--inline"
+          >Remove lighting</span
+        >
         <SwitchToggle
           :model-value="delightEnabled"
           label="Remove lighting and highlights before texturing"

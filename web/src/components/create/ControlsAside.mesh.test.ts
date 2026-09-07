@@ -228,7 +228,9 @@ describe("ControlsAside 3-D mesh", () => {
       required: false,
     };
     expect(
-      mountMesh({}, meshModel(recipe)).find("[data-test='mesh-delight']").exists(),
+      mountMesh({}, meshModel(recipe))
+        .find("[data-test='mesh-delight']")
+        .exists(),
     ).toBe(false);
   });
 

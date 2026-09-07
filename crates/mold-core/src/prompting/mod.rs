@@ -905,7 +905,10 @@ mod tests {
     fn generation_manifests() -> Vec<&'static crate::manifest::ModelManifest> {
         crate::manifest::known_manifests()
             .iter()
-            .filter(|manifest| manifest.is_generation_model() || manifest.is_upscaler())
+            .filter(|manifest| {
+                (manifest.is_generation_model() || manifest.is_upscaler())
+                    && !manifest.is_mesh_preprocessor()
+            })
             .collect()
     }
 
