@@ -4386,6 +4386,16 @@ pub struct QueueJobEntryWire {
     /// One-based position of this row within its batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_index: Option<u32>,
+    /// For a `"paused"` row: whether SOMEONE paused this one row, as opposed
+    /// to the restart sweep parking the whole queue.
+    ///
+    /// Both wear `state: "paused"`, so a client without this bit had to
+    /// caption them identically — and it captioned a job the user had just
+    /// paused "Paused after restart", making one row's pause read as the whole
+    /// queue stopping. Additive: absent means the host does not distinguish
+    /// them, which for every server built before per-job pause is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicitly_paused: Option<bool>,
 }
 
 impl QueueJobEntryWire {

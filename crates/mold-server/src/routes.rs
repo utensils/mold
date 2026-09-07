@@ -7011,6 +7011,11 @@ fn job_entry_from_durable_projection(
         batch_id: row.batch_id,
         client_batch_id: row.client_batch_id,
         batch_index: row.batch_index,
+        // Only a paused row has a pause to explain, and the durable column is
+        // the only thing that tells the restart sweep's parking apart from a
+        // pause someone asked for.
+        explicitly_paused: (state == crate::job_registry::JobLifecycle::Paused)
+            .then_some(row.explicitly_paused),
     }
 }
 

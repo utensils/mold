@@ -4799,6 +4799,31 @@ mod tests {
                 ),
             ]
         );
+        // The listing has to SAY which pause this is. A restart-parked row and
+        // a row someone paused both wear `state: "paused"`, so a client
+        // without this bit captioned the second one "Paused after restart" —
+        // one job's pause reading as the whole queue stopping.
+        let listing = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let entries = listing["entries"].as_array().unwrap();
+        let row = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is missing from the listing"))
+                .clone()
+        };
+        assert_eq!(row("selected")["state"], "paused");
+        assert_eq!(row("selected")["explicitly_paused"], true);
+        // A queued row has no pause to explain, so it says nothing at all
+        // rather than `false`.
+        assert_eq!(row("sibling")["state"], "queued");
+        assert!(row("sibling").get("explicitly_paused").is_none());
 
         for path in ["/api/queue/pause", "/api/queue/resume"] {
             let response = app
@@ -4817,6 +4842,7 @@ mod tests {
         );
 
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/api/queue/selected/resume")
                     .body(Body::empty())
@@ -4832,6 +4858,67 @@ mod tests {
                 .state,
             mold_db::generation_queue::QueueRowState::Queued
         );
+        // And a global pause still moves NO row: it closes the dispatch gate,
+        // which is a different thing from parking rows.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .queue_journal
+                .list_all()
+                .into_iter()
+                .map(|row| row.state)
+                .collect::<Vec<_>>(),
+            [
+                mold_db::generation_queue::QueueRowState::Queued,
+                mold_db::generation_queue::QueueRowState::Queued,
+            ],
+            "a whole-queue pause parks no individual row"
+        );
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["queue_paused"], true);
+    }
+
+    /// A restart-parked row is the OTHER pause, and must not claim someone
+    /// asked for it: the two sentences a client shows are chosen by this bit.
+    #[tokio::test]
+    async fn a_restart_parked_row_is_not_reported_as_explicitly_paused() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "parked",
+            mold_db::generation_queue::QueueRowState::Paused,
+            1,
+            0,
+        );
+        let listing = json_body(
+            app_with_state(state)
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let row = &listing["entries"][0];
+        assert_eq!(row["id"], "parked");
+        assert_eq!(row["state"], "paused");
+        assert_eq!(row["explicitly_paused"], false);
     }
 
     #[tokio::test]

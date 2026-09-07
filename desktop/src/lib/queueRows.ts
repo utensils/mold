@@ -51,10 +51,14 @@ function waitStatus(job: Job, context?: QueueRowContext): string {
     position: live?.position ?? job.queuePosition,
     blockedReason: live?.blockedReason,
     preparation: live?.preparation,
+    explicitlyPaused: live?.explicitlyPaused,
   });
   switch (wait.kind) {
+    // One row someone paused and a whole queue parked by a restart both wear
+    // `state: "paused"`, and saying "after restart" for the first made pausing
+    // one job read as stopping everything.
     case "paused":
-      return "Paused after restart";
+      return wait.explicit ? "Paused" : "Paused after restart";
     case "held":
       return "Held";
     case "next":

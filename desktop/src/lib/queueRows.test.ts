@@ -9,7 +9,9 @@ import {
   rowStatusLine,
   rowTitle,
   rowTone,
+  type QueueRowContext,
 } from "./queueRows";
+import type { QueueStatus } from "@studio/lib/queuePosition";
 import type { QueueRow } from "../composables/useQueueActivity";
 import type { Job } from "./generationJob";
 
@@ -110,37 +112,53 @@ describe("queue rows speak the lexicon", () => {
 
   it("says what a parked row is parked on, not a bare Waiting", () => {
     const waiting = print({ status: "queued", queuePosition: 2 });
+    const wait = (part: Partial<QueueStatus>): QueueRowContext => ({
+      wait: {
+        state: "queued",
+        position: 2,
+        blockedReason: null,
+        preparation: null,
+        explicitlyPaused: null,
+        ...part,
+      },
+    });
     expect(rowStatusLine(waiting)).toBe("Waiting — #2 in line");
+    expect(rowStatusLine(waiting, wait({ state: "held" }))).toBe("Held");
     expect(
-      rowStatusLine(waiting, {
-        wait: { state: "paused", position: 2, blockedReason: null, preparation: null },
-      }),
-    ).toBe("Paused after restart");
-    expect(
-      rowStatusLine(waiting, {
-        wait: { state: "held", position: 2, blockedReason: null, preparation: null },
-      }),
-    ).toBe("Held");
-    expect(
-      rowStatusLine(waiting, {
-        wait: {
-          state: "queued",
-          position: 2,
+      rowStatusLine(
+        waiting,
+        wait({
           blockedReason: "preparing",
           preparation: { component: "flux weights", fraction: 0.42, elapsedMs: null },
-        },
-      }),
+        }),
+      ),
     ).toBe("Getting a style ready · 42%");
-    expect(
-      rowStatusLine(waiting, {
-        wait: {
-          state: "queued",
-          position: 2,
-          blockedReason: "model_not_installed",
-          preparation: null,
-        },
-      }),
-    ).toBe("Waiting — model not installed");
+    expect(rowStatusLine(waiting, wait({ blockedReason: "model_not_installed" }))).toBe(
+      "Waiting — model not installed",
+    );
+  });
+
+  /*
+   * A row someone paused and a whole queue parked by a restart both arrive as
+   * `state: "paused"`. Saying "after restart" for the first is what made
+   * pausing ONE job read as the entire queue stopping.
+   */
+  it("tells a job someone paused apart from a queue parked by a restart", () => {
+    const waiting = print({ status: "queued", queuePosition: 2 });
+    const paused = (explicitlyPaused: boolean | null): QueueRowContext => ({
+      wait: {
+        state: "paused",
+        position: 2,
+        blockedReason: null,
+        preparation: null,
+        explicitlyPaused,
+      },
+    });
+    expect(rowStatusLine(waiting, paused(true))).toBe("Paused");
+    expect(rowStatusLine(waiting, paused(false))).toBe("Paused after restart");
+    // A host too old to distinguish them only ever parked at restart, so its
+    // rows keep the sentence they have always had.
+    expect(rowStatusLine(waiting, paused(null))).toBe("Paused after restart");
   });
 
   /** `POST /api/queue/pause` holds DISPATCH; the job already on the GPU
