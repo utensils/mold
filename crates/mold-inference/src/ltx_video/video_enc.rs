@@ -1472,4 +1472,48 @@ mod tests {
             );
         }
     }
+
+    /// A transparent GIF must not eat the object it is cutting out.
+    ///
+    /// `Frame::from_rgba_speed` picks the transparent palette entry by nearest
+    /// neighbour over RGBA. When a cleared pixel was left transparent BLACK,
+    /// the near-black texels of a dark PAINTED mesh were the nearest thing to
+    /// it and got mapped onto that entry — which is never drawn — so the mesh
+    /// came out with holes punched through it. Hence [`CLEAR_SENTINEL`].
+    #[test]
+    fn a_transparent_gif_keeps_the_dark_pixels_of_a_painted_mesh() {
+        // A near-black object on a cleared (transparent black) background,
+        // which is exactly what the turntable renderer hands the encoder.
+        let mut frame = image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 0, 0]));
+        for y in 8..24 {
+            for x in 8..24 {
+                frame.put_pixel(x, y, image::Rgba([6, 6, 8, 255]));
+            }
+        }
+        let data = encode_gif_rgba_with_options(&[frame], 10, false, false).unwrap();
+
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(std::io::Cursor::new(data)).unwrap();
+        let decoded = decoder.read_next_frame().unwrap().unwrap();
+
+        // Every pixel of the object survives opaque, and the background is
+        // still cut away — a fix that simply stopped clearing would pass the
+        // first assertion and fail the second.
+        let px = |x: usize, y: usize| {
+            let i = (y * 32 + x) * 4;
+            &decoded.buffer[i..i + 4]
+        };
+        for y in 8..24 {
+            for x in 8..24 {
+                assert_eq!(
+                    px(x, y)[3],
+                    255,
+                    "object pixel ({x}, {y}) was punched out of the mesh"
+                );
+            }
+        }
+        assert_eq!(px(0, 0)[3], 0, "background should still be transparent");
+        assert_eq!(px(31, 31)[3], 0, "background should still be transparent");
+    }
 }
