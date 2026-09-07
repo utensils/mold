@@ -13731,6 +13731,58 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "h3", feature = "mesh-texture"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn hunyuan3d_mesh_descriptor_reaches_the_upload_session_handler() {
+        let (home, _guard) = license_home();
+        mold_core::license_acceptance::record_acceptance(
+            home.path(),
+            &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0,
+        )
+        .unwrap();
+        let (state, _rx) =
+            AppState::with_engine_and_queue(MockEngine::ready_for_model("hunyuan3d:fp16"));
+        let app = keyed_app(state);
+        let response = app
+            .oneshot(keyed_json_request(
+                "POST",
+                "/api/generate/reference-upload-sessions",
+                serde_json::json!({
+                    "request": {
+                        "prompt": "",
+                        "model": "hunyuan3d:fp16",
+                        "width": 0,
+                        "height": 0,
+                        "steps": 1,
+                        "guidance": 5.0,
+                        "seed": 1,
+                        "batch_size": 1,
+                        "output_format": "glb",
+                        "source_image": base64::engine::general_purpose::STANDARD.encode(minimal_png()),
+                        "mesh": { "texture": true, "texture_resolution": 1024 },
+                        "references": [{
+                            "kind": "mesh",
+                            "media": { "authority": "descriptor" },
+                            "provenance": { "name": "source.glb" },
+                            "mime_type": "model/gltf-binary",
+                            "format": "glb",
+                            "byte_length": 12,
+                            "coordinates": { "up_axis": "y", "meters_per_unit": 1.0 }
+                        }]
+                    },
+                    "upload_references": [1]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            json_body(response).await
+        );
+    }
+
     /// A host with API-key auth disabled admits an inline Ref2VA set on the
     /// durable path and refuses an upload handle it has no identity to bind;
     /// a keyed host refuses the keyless submission outright.

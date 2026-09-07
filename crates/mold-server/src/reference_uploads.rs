@@ -1644,6 +1644,15 @@ fn validate_session_descriptors(
     ))
 }
 
+fn supports_reference_upload_session(model: &str) -> bool {
+    if minimax_h3::resolve_model_name(model).is_some() {
+        return true;
+    }
+    let canonical = mold_core::manifest::resolve_model_name(model);
+    mold_core::manifest::find_manifest(&canonical)
+        .is_some_and(|model| model.family == mold_core::manifest::HUNYUAN3D_FAMILY)
+}
+
 fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReference {
     match reference {
         GenerationReference::Image {
@@ -2511,9 +2520,9 @@ pub(crate) async fn create_reference_upload_session(
     // Activation policy must run before directory/session allocation or download.
     crate::routes::require_server_generation_request_activation(&state, &payload.request, None)
         .await?;
-    if minimax_h3::resolve_model_name(&payload.request.model).is_none() {
+    if !supports_reference_upload_session(&payload.request.model) {
         return Err(ApiError::validation(
-            "reference upload sessions are only valid for MiniMax H3",
+            "reference upload sessions require a supported reference-bearing model",
         ));
     }
     let response = state

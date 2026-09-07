@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+pub const DELETION_CLAIM_ERROR: &str = "__mold_mesh_workflow_deleting_v1__";
+
 use anyhow::{Context, Result};
 use mold_core::mesh_workflow::{
     MeshWorkflowArtifact, MeshWorkflowJobState, MeshWorkflowStageKind, MeshWorkflowStageState,
@@ -422,12 +424,53 @@ pub fn cancel_job(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
     )
 }
 
-pub fn delete_settled_job(db: &MetadataDb, id: &str) -> Result<bool> {
+/// Atomically fences resume/cancel by turning any settled workflow into a
+/// cancelled deletion claim. Repeating the claim is idempotent so cleanup can
+/// resume after a process or filesystem failure.
+pub fn claim_settled_deletion(
+    db: &MetadataDb,
+    id: &str,
+    now_ms: i64,
+) -> Result<Option<MeshWorkflowJobRow>> {
+    db.with_conn(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        let state = transaction
+            .query_row(
+                "SELECT state FROM mesh_workflow_jobs WHERE id=?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        let state =
+            MeshWorkflowJobState::from_str(&state).map_err(|error| anyhow::anyhow!(error))?;
+        if !state.is_settled() {
+            return Ok(None);
+        }
+        transaction.execute(
+            "UPDATE mesh_workflow_jobs
+             SET state='cancelled',error=?2,updated_at_ms=MAX(updated_at_ms,?3)
+             WHERE id=?1 AND state IN ('completed','failed','cancelled')",
+            params![id, DELETION_CLAIM_ERROR, now_ms],
+        )?;
+        let row = transaction.query_row(
+            &format!("SELECT {JOB_COLUMNS} FROM mesh_workflow_jobs WHERE id=?1"),
+            [id],
+            job_from_row,
+        )?;
+        transaction.commit()?;
+        Ok(Some(row))
+    })
+}
+
+pub fn delete_claimed_job(db: &MetadataDb, id: &str) -> Result<bool> {
     db.with_conn(|connection| {
         Ok(connection.execute(
             "DELETE FROM mesh_workflow_jobs
-             WHERE id=?1 AND state IN ('completed','failed','cancelled')",
-            [id],
+             WHERE id=?1 AND state='cancelled' AND error=?2",
+            params![id, DELETION_CLAIM_ERROR],
         )? == 1)
     })
 }
@@ -692,9 +735,21 @@ mod tests {
             }],
         )
         .unwrap();
-        assert!(!delete_settled_job(&db, &row.id).unwrap());
-        assert!(cancel_job(&db, &row.id, 2).unwrap());
-        assert!(delete_settled_job(&db, &row.id).unwrap());
+        assert!(claim_settled_deletion(&db, &row.id, 2).unwrap().is_none());
+        assert!(transition(
+            &db,
+            &row.id,
+            &[MeshWorkflowJobState::Running],
+            MeshWorkflowJobState::Failed,
+            Some("retryable"),
+            2,
+        )
+        .unwrap());
+        let claimed = claim_settled_deletion(&db, &row.id, 3).unwrap().unwrap();
+        assert_eq!(claimed.error.as_deref(), Some(DELETION_CLAIM_ERROR));
+        assert!(!resume_job(&db, &row.id, 4).unwrap());
+        assert!(claim_settled_deletion(&db, &row.id, 5).unwrap().is_some());
+        assert!(delete_claimed_job(&db, &row.id).unwrap());
         assert!(get_job(&db, &row.id).unwrap().is_none());
         assert!(stages_for_job(&db, &row.id).unwrap().is_empty());
     }

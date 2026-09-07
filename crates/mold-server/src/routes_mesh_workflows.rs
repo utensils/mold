@@ -463,6 +463,11 @@ pub(crate) async fn resume_mesh_workflow(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let existing = load_detail(&state, &id)?;
+    if existing.summary.error.as_deref() == Some(mesh_workflow_jobs::DELETION_CLAIM_ERROR) {
+        return Err(ApiError::validation(
+            "mesh workflow deletion is already in progress",
+        ));
+    }
     if !matches!(
         existing.summary.state,
         MeshWorkflowJobState::Paused | MeshWorkflowJobState::Failed
@@ -534,6 +539,11 @@ pub(crate) async fn cancel_mesh_workflow(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let existing = load_detail(&state, &id)?;
+    if existing.summary.error.as_deref() == Some(mesh_workflow_jobs::DELETION_CLAIM_ERROR) {
+        return Err(ApiError::validation(
+            "mesh workflow deletion is already in progress",
+        ));
+    }
     let changed = mesh_workflow_jobs::cancel_job(db(&state)?, &id, now_ms()).map_err(|error| {
         ApiError::internal(format!("cancelling mesh workflow failed: {error:#}"))
     })?;
@@ -585,28 +595,30 @@ pub(crate) async fn delete_mesh_workflow(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let detail = load_detail(&state, &id)?;
-    if !matches!(
-        detail.summary.state,
-        MeshWorkflowJobState::Completed
-            | MeshWorkflowJobState::Failed
-            | MeshWorkflowJobState::Cancelled
-    ) {
-        return Err(ApiError::validation(
-            "cancel or wait for the mesh workflow before deleting it",
-        ));
-    }
-    let root = workflows_root()?;
-    let workflow_dir = root.join(&id);
-    let release_root = root.clone();
-    let release_dir = workflow_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::mesh_workflow_media::release_all(&release_root, &release_dir)?;
-        match std::fs::remove_dir_all(&release_dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+    let row = match mesh_workflow_jobs::claim_settled_deletion(db(&state)?, &id, now_ms()).map_err(
+        |error| ApiError::internal(format!("claiming workflow deletion failed: {error:#}")),
+    )? {
+        Some(row) => row,
+        None => {
+            return match mesh_workflow_jobs::get_job(db(&state)?, &id).map_err(|error| {
+                ApiError::internal(format!("loading workflow failed: {error:#}"))
+            })? {
+                Some(_) => Err(ApiError::validation(
+                    "cancel or wait for the mesh workflow before deleting it",
+                )),
+                None => Err(ApiError::with_code(
+                    "mesh workflow not found",
+                    NOT_FOUND,
+                    StatusCode::NOT_FOUND,
+                )),
+            };
         }
+    };
+    let root = workflows_root()?;
+    let release_root = root.clone();
+    let release_dir = row.work_dir;
+    tokio::task::spawn_blocking(move || {
+        crate::mesh_workflow_media::purge_claimed(&release_root, &release_dir)
     })
     .await
     .map_err(|error| ApiError::internal(format!("workflow deletion task failed: {error}")))?
@@ -615,11 +627,8 @@ pub(crate) async fn delete_mesh_workflow(
             "releasing mesh workflow artifacts failed: {error:#}"
         ))
     })?;
-    if !mesh_workflow_jobs::delete_settled_job(db(&state)?, &id)
-        .map_err(|error| ApiError::internal(format!("deleting mesh workflow failed: {error:#}")))?
-    {
-        return Err(ApiError::validation("mesh workflow is no longer settled"));
-    }
+    let _ = mesh_workflow_jobs::delete_claimed_job(db(&state)?, &id)
+        .map_err(|error| ApiError::internal(format!("deleting mesh workflow failed: {error:#}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

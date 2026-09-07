@@ -46,6 +46,17 @@ pub fn startup_reconcile(
     let paused = mesh_workflow_jobs::pause_unfinished_for_recovery(db, now_ms())?;
     let mut repaired = 0;
     for row in mesh_workflow_jobs::list_jobs(db)? {
+        if row.error.as_deref() == Some(mesh_workflow_jobs::DELETION_CLAIM_ERROR) {
+            match crate::mesh_workflow_media::purge_claimed(workflows_root, &row.work_dir)
+                .and_then(|()| mesh_workflow_jobs::delete_claimed_job(db, &row.id).map(|_| ()))
+            {
+                Ok(()) => repaired += 1,
+                Err(error) => {
+                    tracing::warn!(workflow_id = %row.id, %error, "claimed mesh workflow deletion remains pending")
+                }
+            }
+            continue;
+        }
         let manifest = match MeshWorkflowManifest::read_from_dir(&row.work_dir) {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -670,5 +681,53 @@ mod tests {
             NextAction::Finalize { batch_id } if batch_id == "batch"
         ));
         assert_eq!(mesh_artifact(&stages).unwrap().role, "final_glb");
+    }
+
+    #[test]
+    fn startup_finishes_a_claimed_deletion_with_no_manifest() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("mesh-workflows");
+        let work_dir = root.join("workflow");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::fs::write(work_dir.join("partial"), b"cleanup-me").unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let request = CreateMeshWorkflowRequest::MeshTexture {
+            texture_request: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "prompt": "", "model": "test", "width": 0, "height": 0,
+                    "steps": 1, "guidance": 1.0, "seed": 1, "output_format": "glb"
+                }))
+                .unwrap(),
+            ),
+        };
+        let row = MeshWorkflowJobRow {
+            id: "workflow".into(),
+            state: MeshWorkflowJobState::Cancelled,
+            request_json: serde_json::to_string(&request).unwrap(),
+            work_dir: work_dir.clone(),
+            stage_count: 1,
+            current_stage: 0,
+            output_filename: None,
+            error: Some(mesh_workflow_jobs::DELETION_CLAIM_ERROR.into()),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        mesh_workflow_jobs::insert_job_with_stages(
+            &db,
+            &row,
+            &[stage(
+                0,
+                MeshWorkflowStageKind::Paint,
+                MeshWorkflowStageState::Failed,
+                None,
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(startup_reconcile(&db, &root).unwrap(), (0, 1));
+        assert!(mesh_workflow_jobs::get_job(&db, "workflow")
+            .unwrap()
+            .is_none());
+        assert!(!work_dir.exists());
     }
 }

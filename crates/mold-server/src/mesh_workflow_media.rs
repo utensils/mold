@@ -167,6 +167,18 @@ pub(crate) fn release_all(workflows_root: &Path, workflow_dir: &Path) -> anyhow:
     Ok(())
 }
 
+pub(crate) fn purge_claimed(workflows_root: &Path, workflow_dir: &Path) -> anyhow::Result<()> {
+    if workflow_dir.parent() != Some(workflows_root) {
+        bail!("mesh workflow directory is outside its storage root");
+    }
+    release_all(workflows_root, workflow_dir)?;
+    match std::fs::remove_dir_all(workflow_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("removing claimed mesh workflow directory"),
+    }
+}
+
 fn reference_media_mut(reference: &mut GenerationReference) -> &mut GenerationReferenceAuthority {
     match reference {
         GenerationReference::Image { media, .. }
