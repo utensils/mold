@@ -32,6 +32,20 @@ export function apiHeaders(target: ApiTarget, extra?: HeadersInit): Headers {
   return headers;
 }
 
+async function throwApiError(response: Response): Promise<never> {
+  let body: unknown = null;
+  try {
+    body = await response.clone().json();
+  } catch {
+    // Non-JSON failures still retain their HTTP status and status text.
+  }
+  const detail =
+    typeof body === "object" && body !== null && "error" in body
+      ? String((body as { error: unknown }).error)
+      : response.statusText;
+  throw new ApiError(detail, response.status, body);
+}
+
 export async function apiFetchTo(
   target: ApiTarget,
   path: string,
@@ -41,19 +55,7 @@ export async function apiFetchTo(
     ...init,
     headers: apiHeaders(target, init.headers),
   });
-  if (!response.ok) {
-    let body: unknown = null;
-    try {
-      body = await response.clone().json();
-    } catch {
-      // Non-JSON failures still retain their HTTP status and status text.
-    }
-    const detail =
-      typeof body === "object" && body !== null && "error" in body
-        ? String((body as { error: unknown }).error)
-        : response.statusText;
-    throw new ApiError(detail, response.status, body);
-  }
+  if (!response.ok) await throwApiError(response);
   return response;
 }
 
@@ -89,19 +91,7 @@ export async function conditionalApiJsonTo<T>(
     headers,
   });
   if (response.status === 304 && cached) return cached.value as T;
-  if (!response.ok) {
-    let body: unknown = null;
-    try {
-      body = await response.clone().json();
-    } catch {
-      // Preserve non-JSON failures below.
-    }
-    const detail =
-      typeof body === "object" && body !== null && "error" in body
-        ? String((body as { error: unknown }).error)
-        : response.statusText;
-    throw new ApiError(detail, response.status, body);
-  }
+  if (!response.ok) await throwApiError(response);
   const value = (await response.json()) as T;
   const etag = response.headers.get("ETag");
   if (etag) conditionalJsonCache.set(key, { etag, value });

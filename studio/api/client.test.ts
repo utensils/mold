@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ApiError,
   IncompatibleHostError,
   apiFetchTo,
   conditionalApiJsonTo,
@@ -7,6 +8,25 @@ import {
 } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
+
+const failureReaders = [
+  {
+    name: "ordinary",
+    read: () =>
+      apiFetchTo(
+        { baseUrl: "http://failure-test:7680", apiKey: null },
+        "/api/status",
+      ),
+  },
+  {
+    name: "conditional",
+    read: () =>
+      conditionalApiJsonTo(
+        { baseUrl: "http://failure-test:7680", apiKey: null },
+        "/api/gallery",
+      ),
+  },
+] as const;
 
 describe("target-explicit Studio API", () => {
   it("keeps durable API keys in headers and out of URLs", async () => {
@@ -33,6 +53,56 @@ describe("target-explicit Studio API", () => {
       IncompatibleHostError,
     );
   });
+
+  it.each(failureReaders)(
+    "preserves structured HTTP errors for $name requests",
+    async ({ read }) => {
+      const body = { error: "invalid request", code: "INVALID_REQUEST" };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify(body), {
+            status: 422,
+            statusText: "Unprocessable Content",
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      );
+
+      await expect(read()).rejects.toEqual(
+        expect.objectContaining<ApiError>({
+          name: "ApiError",
+          message: "invalid request",
+          status: 422,
+          body,
+        }),
+      );
+    },
+  );
+
+  it.each(failureReaders)(
+    "falls back to status text for non-JSON $name failures",
+    async ({ read }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response("bad gateway", {
+            status: 502,
+            statusText: "Bad Gateway",
+          }),
+        ),
+      );
+
+      await expect(read()).rejects.toEqual(
+        expect.objectContaining<ApiError>({
+          name: "ApiError",
+          message: "Bad Gateway",
+          status: 502,
+          body: null,
+        }),
+      );
+    },
+  );
 
   it("reuses an unchanged gallery snapshot on 304", async () => {
     const rows = [{ filename: "cat.png" }];
