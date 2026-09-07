@@ -115,6 +115,7 @@ import {
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 import {
+  deserializeNamedViews,
   emptyNamedViews,
   serializeNamedViews,
   type NamedViewsState,
@@ -1661,6 +1662,7 @@ export function applyRequestToForm(
   form.identityWeight = request.id_weight ?? null;
   form.identityStartStep = request.id_start_step ?? null;
   form.imageAttachments = [...(request.edit_images ?? [])];
+  form.namedViews = deserializeNamedViews(request.references);
   form.maskImage = request.mask_image ?? null;
   form.controlImage = request.control_image ?? null;
   form.controlModel = request.control_model ?? "";

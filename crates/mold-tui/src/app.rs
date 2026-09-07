@@ -9659,7 +9659,7 @@ impl App {
                             batch_index: submitted_params.batch_index,
                             batch_count: submitted_params.batch_count,
                             output_mode: Some(mold_core::GenerationOutputMode::OneShot),
-                            model: actual_model,
+                            model: actual_model.clone(),
                             seed: response.seed_used,
                             steps: submitted_params.steps,
                             guidance: submitted_params.guidance,
@@ -9669,10 +9669,11 @@ impl App {
                             // A local mesh save records the controls that
                             // rendered, resolved with the engine's defaults
                             // exactly as the server's own save does.
-                            mesh: response
-                                .mesh
-                                .as_ref()
-                                .map(|_| submitted_params.mesh.resolved_with_defaults()),
+                            mesh: response.mesh.as_ref().map(|_| {
+                                submitted_params
+                                    .mesh
+                                    .resolved_with_defaults_for_model(&actual_model)
+                            }),
                             generation_height: Some(entry_height),
                             strength: if submitted_params.source_image_path.is_some() {
                                 Some(submitted_params.strength)

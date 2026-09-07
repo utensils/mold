@@ -1533,3 +1533,15 @@ the remaining P8-P15 features, and every client surface.
   marching-cubes level after mold's `(logit + 1) / 2` occupancy projection.
   Existing single-view recipes keep ComfyUI's 0.6 default. Profile, client and
   execution defaults derive from the same model-aware function.
+- The isolated durable-server run on an NVIDIA L40S accepted the same three
+  named views over the remote CLI, sealed them into encrypted queue media,
+  hydrated them for inference, and published a gallery GLB in 21.7 seconds.
+  The downloaded `remote-turbo-provenance-fixed.glb` is byte-identical to the
+  direct CUDA result above. After a full server restart, startup reconciliation
+  retained one gallery media pin and the source-media API still exposed all
+  three inputs. The retained server database, encrypted media set, logs, and
+  remote GLBs live under `p9-multiview/server-durable-v1/`. The final gallery
+  row records threshold 0.5 and all three named roles. Four-view admission now
+  prices the concatenated DiT context while keeping the per-view DINO peak
+  sequential, and exact/retained request restoration preserves inline named
+  views across a desktop/mobile form round trip.

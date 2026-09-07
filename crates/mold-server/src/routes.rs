@@ -1360,7 +1360,10 @@ async fn prepare_generation_inner(
     if !private_h3_ingress {
         require_server_generation_request_activation(state, request, family.as_deref()).await?;
     }
-    if let Some(references) = request.references.as_deref() {
+    if let (Some(mold_core::minimax_h3::Task::Ref2va), Some(references)) = (
+        mold_core::minimax_h3::task_for_model(&request.model),
+        request.references.as_deref(),
+    ) {
         // Admission resolved every public authority before the row was
         // acknowledged; what reaches preparation is the descriptor list whose
         // media the consumer hydrates under its own lease. Anything else here

@@ -1388,7 +1388,15 @@ impl ReferenceUploadStore {
             .filter(|identity| identity.admits(&references))
             .ok_or_else(reference_media_requires_api_key)?
             .identity_str();
-        minimax_h3::validate_references(&references).map_err(ApiError::reference)?;
+        // MiniMax H3 owns the heterogeneous Ref2VA contract. Hunyuan3D uses
+        // this same durable media resolver for semantically named views (and
+        // mesh-input texturing), whose contract was already validated by the
+        // family validator at admission. Applying Ref2VA's kind allowlist to
+        // every request rejected a valid `NamedImage` before it could be
+        // sealed into the durable media set.
+        if minimax_h3::task_for_model(&request.model).is_some() {
+            minimax_h3::validate_references(&references).map_err(ApiError::reference)?;
+        }
         let (session_digest, upload_sources) = self
             .upload_sources_for_request(&identity, request, frozen_scope_sha256)
             .await?;
@@ -3359,6 +3367,52 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn hunyuan_named_views_resolve_without_entering_the_ref2va_kind_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let bytes = png_bytes();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let mut request = request(GenerationReference::NamedImage {
+            role: mold_core::GenerationImageReferenceRole::Front,
+            media: GenerationReferenceAuthority::Inline { data: bytes },
+            provenance: GenerationReferenceProvenance {
+                name: Some("front.png".into()),
+                sha256: Some(digest),
+                crop: None,
+            },
+            mime_type: "image/png".into(),
+            width: 2,
+            height: 2,
+        });
+        request.model = mold_core::manifest::HUNYUAN3D_2MV_MODEL.into();
+        request.prompt.clear();
+        request.width = 0;
+        request.height = 0;
+        request.frames = None;
+        request.fps = None;
+        request.output_format = Some(mold_core::OutputFormat::Glb);
+        let identity = ReferenceIdentity::AuthDisabled {
+            instance_id: "instance-a".into(),
+        };
+
+        let staged = store
+            .resolve_request(Some(&identity), &mut request, &[], None)
+            .await
+            .expect("named Hunyuan view should use the shared durable resolver")
+            .expect("named Hunyuan view should produce staged media");
+
+        assert_eq!(staged.entries().len(), 1);
+        assert!(matches!(
+            request.references.as_ref().unwrap()[0],
+            GenerationReference::NamedImage {
+                role: mold_core::GenerationImageReferenceRole::Front,
+                media: GenerationReferenceAuthority::Descriptor,
+                ..
+            }
+        ));
     }
 
     #[cfg(unix)]

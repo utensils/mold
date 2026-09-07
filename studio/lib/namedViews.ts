@@ -96,3 +96,23 @@ export function serializeNamedViews(
       : [];
   });
 }
+
+/** Restore named views whose media bytes are present on an exact or retained
+ * request. Descriptor-only rows intentionally stay absent: their bytes remain
+ * server-owned until the retained-media flow hydrates them to `inline`. */
+export function deserializeNamedViews(
+  references: GenerationReference[] | null | undefined,
+): NamedViewsState {
+  const restored: NamedViewsState = {};
+  for (const reference of references ?? []) {
+    if (reference.kind !== "named_image" || reference.media.authority !== "inline") continue;
+    restored[reference.role] = {
+      base64: reference.media.data,
+      filename: reference.provenance?.name ?? `${reference.role}.png`,
+      mimeType: reference.mime_type,
+      width: reference.width,
+      height: reference.height,
+    };
+  }
+  return restored;
+}

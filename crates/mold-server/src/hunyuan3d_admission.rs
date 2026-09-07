@@ -58,6 +58,10 @@ pub struct Hunyuan3dShape {
     pub num_latents: u64,
     /// Attention heads in the selected vision encoder.
     pub vision_heads: u64,
+    /// Number of independently encoded named views concatenated into the DiT
+    /// conditioning sequence. Vision encoding remains sequential, so this
+    /// scales the DiT peak but not the vision-tower peak.
+    pub conditioning_views: u64,
     /// Query-grid resolution.
     pub octree_resolution: u32,
     /// Query points per decode chunk.
@@ -70,6 +74,7 @@ impl Default for Hunyuan3dShape {
             conditioning_size: 512,
             num_latents: NUM_LATENTS,
             vision_heads: VISION_HEADS,
+            conditioning_views: 1,
             octree_resolution: 256,
             // Upstream's `num_chunks` and the engine's CUDA/CPU default. The
             // Metal engine defaults to 32,000 (measured: 19% off the decode
@@ -100,6 +105,19 @@ impl Hunyuan3dShape {
             },
             num_latents: geometry.num_latents,
             vision_heads: geometry.vision_heads,
+            conditioning_views: req
+                .references
+                .as_deref()
+                .map(|references| {
+                    references
+                        .iter()
+                        .filter(|reference| {
+                            matches!(reference, mold_core::GenerationReference::NamedImage { .. })
+                        })
+                        .count() as u64
+                })
+                .filter(|count| *count > 0)
+                .unwrap_or(1),
             octree_resolution: req
                 .mesh
                 .as_ref()
@@ -145,7 +163,9 @@ pub fn activation_peak_bytes(shape: Hunyuan3dShape) -> u64 {
         .saturating_mul(shape.vision_heads)
         .saturating_mul(ACTIVATION_BYTES);
 
-    let dit_tokens = shape.num_latents.saturating_add(vision_tokens);
+    let dit_tokens = shape
+        .num_latents
+        .saturating_add(vision_tokens.saturating_mul(shape.conditioning_views));
     let dit = dit_tokens
         .saturating_mul(dit_tokens)
         .saturating_mul(DIT_HEADS)
@@ -307,5 +327,42 @@ mod tests {
         assert_eq!(shape.num_latents, 4096);
         assert_eq!(shape.vision_heads, 16);
         assert!(activation_peak_bytes(shape) > activation_peak_bytes(Hunyuan3dShape::default()));
+    }
+
+    #[test]
+    fn four_named_views_scale_the_dit_context_but_not_the_sequential_vision_peak() {
+        let one = Hunyuan3dShape {
+            conditioning_views: 1,
+            ..Hunyuan3dShape::default()
+        };
+        let four = Hunyuan3dShape {
+            conditioning_views: 4,
+            ..one
+        };
+        assert_eq!(one.vision_tokens(), four.vision_tokens());
+        assert!(activation_peak_bytes(four) > activation_peak_bytes(one));
+
+        let mut req = request(0, serde_json::Value::Null);
+        req.model = "hunyuan3d-2mv:fp16".into();
+        req.source_image = None;
+        req.references = Some(
+            [
+                mold_core::GenerationImageReferenceRole::Front,
+                mold_core::GenerationImageReferenceRole::Left,
+                mold_core::GenerationImageReferenceRole::Back,
+                mold_core::GenerationImageReferenceRole::Right,
+            ]
+            .into_iter()
+            .map(|role| mold_core::GenerationReference::NamedImage {
+                role,
+                media: mold_core::GenerationReferenceAuthority::Descriptor,
+                provenance: Default::default(),
+                mime_type: "image/png".into(),
+                width: 1024,
+                height: 1024,
+            })
+            .collect(),
+        );
+        assert_eq!(Hunyuan3dShape::from_request(&req).conditioning_views, 4);
     }
 }
