@@ -29,12 +29,14 @@ const props = withDefaults(
     target: ApiTarget | null;
     gallerySources?: MobileGallerySource[];
     title?: string;
+    initialTab?: "file" | "gallery";
     multiple?: boolean;
     maxBytes?: number;
     oversizeMessage?: string;
   }>(),
   {
     title: "Opening image",
+    initialTab: "file",
     multiple: false,
     gallerySources: () => [],
     maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
@@ -48,7 +50,13 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const tab = ref<"file" | "gallery">("file");
+const tab = ref<"file" | "gallery">(props.initialTab);
+watch(
+  () => props.open,
+  (open) => {
+    if (open) tab.value = props.initialTab;
+  },
+);
 const input = ref<HTMLInputElement | null>(null);
 const entries = ref<MobileGalleryEntry[]>([]);
 const loading = ref(false);

@@ -233,3 +233,7 @@ Native iPhone checks verified the descriptions in the system menu, dismissal wit
 ### Fixed tile markers at accessibility sizes
 
 Bound video/mesh, favorite, and ordered-image marker glyphs to 18px inside their existing 28–32px circles; surrounding text still follows Dynamic Type. The iPhone simulator rebuild passes, and maximum-text Library inspection confirms media markers fit. On relaunch with hosts unavailable, cached thumbnails remained visible with the explicit saved-Library notice. Screenshot: external evidence `ios-tile-badges-max-text.jpg`. Existing CSS and image-picker suites pass (65 tests), formatting is clean, and independent review found no blocker. Picker order and favorite caps are source-verified; physical gesture and VoiceOver acceptance remain open.
+
+### Gallery entry destination
+
+Native visual testing found that Choose from gallery opened Local file. Source/edit-target and first/last-frame gallery actions now declare Gallery as the initial tab and restore it on each reopen; generic ordered-reference addition keeps its file-first default. The simulator verifies Gallery → Local file → Done → Choose from gallery returns to Gallery with real host thumbnails. 98 focused tests, formatting, native rebuild, and independent review pass. No generation was launched for this UI check.

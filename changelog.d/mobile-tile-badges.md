@@ -1,1 +1,2 @@
 - Keep mobile video, favorite, and image selection markers inside their badges at large accessibility text sizes.
+- Open mobile source and frame gallery actions directly on the Gallery tab.
