@@ -1,0 +1,2 @@
+- Keep mobile Library selection actions readable without breaking collection labels into fragments or covering the grid at enlarged text sizes.
+- Show friendly descriptions and exact model IDs in the mobile Style picker, with Browse more opening the current output kind.

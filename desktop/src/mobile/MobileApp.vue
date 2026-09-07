@@ -195,7 +195,8 @@ import { upscaleImage } from "../lib/api/upscale";
 import { openExternal } from "../lib/openExternal";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { conditioningForRequest, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
-import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
+import { modelDisplayNameForId } from "../lib/models";
+import { mobileStyleLabel } from "./styleLabel";
 import type {
   CompleteEvent,
   DownloadJob,
@@ -1821,8 +1822,9 @@ const outputOptions = computed(() =>
 );
 const outputKindNotice = ref("");
 const requestedBrowseKind = ref<OutputKind | null>(null);
-async function browseOutputStyles(): Promise<void> {
-  const kind = requestedBrowseKind.value ?? selectedOutputKind.value;
+async function browseOutputStyles(
+  kind: OutputKind = requestedBrowseKind.value ?? selectedOutputKind.value,
+): Promise<void> {
   openCatalog();
   await nextTick();
   catalogView.value?.browseKind(kind === "still" ? "image" : kind === "clip" ? "video" : "mesh");
@@ -11506,7 +11508,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           />
           <p v-if="outputKindNotice" class="section-note" role="status">
             {{ outputKindNotice }}
-            <button type="button" class="mobile-text-action" @click="browseOutputStyles">
+            <button type="button" class="mobile-text-action" @click="browseOutputStyles()">
               Browse styles
             </button>
           </p>
@@ -11867,16 +11869,32 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 {{ loadingModels ? "Loading models…" : "No generation models available" }}
               </option>
               <option v-if="form.model && !selectedModelInstalled" :value="form.model" disabled>
-                {{ modelLabel(form.model) }} · not installed
+                {{
+                  mobileStyleLabel(
+                    selectedGenerationModel ?? { name: form.model, family: form.family },
+                  )
+                }}
+                · not installed
               </option>
               <option v-for="model in pickerModels" :key="model.name" :value="model.name">
-                {{ modelDisplayName(model)
+                {{ mobileStyleLabel(model)
                 }}{{
                   modelAvailabilityTag(model.name) ? ` · ${modelAvailabilityTag(model.name)}` : ""
                 }}
               </option>
             </select>
           </label>
+          <div class="mobile-style-details">
+            <code v-if="form.model" class="mobile-style-id">{{ form.model }}</code>
+            <button
+              type="button"
+              class="mobile-text-action"
+              data-test="mobile-style-browse"
+              @click="browseOutputStyles(selectedOutputKind)"
+            >
+              Browse more
+            </button>
+          </div>
           <ErrorNotice
             v-if="modelLoadError"
             class="mobile-model-state is-error"

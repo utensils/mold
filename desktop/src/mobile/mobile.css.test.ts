@@ -722,7 +722,11 @@ describe("mobile Library organization", () => {
 
     expect(selectingTile?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
     expect(actions?.[1]).toMatch(/flex-shrink:\s*0\s*;/);
-    expect(actions?.[1]).toMatch(/grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)/);
+    expect(actions?.[1]).toMatch(/display:\s*flex\s*;/);
+    expect(actions?.[1]).toMatch(/flex-wrap:\s*wrap\s*;/);
+    expect(actionButton?.[1]).toMatch(/flex:\s*1 1 auto\s*;/);
+    expect(actionButton?.[1]).toMatch(/max-width:\s*100%\s*;/);
+    expect(actionButton?.[1]).toContain("font-size: min(var(--text-body), 24px)");
     expect(actionButton?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
     expect(actionButton?.[1]).toMatch(/overflow-wrap:\s*anywhere\s*;/);
     expect(actionButton?.[1]).toMatch(/white-space:\s*normal\s*;/);
