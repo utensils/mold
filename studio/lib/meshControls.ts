@@ -112,7 +112,9 @@ export function meshFormFromMetadata(
     targetFaces: explicit(mesh?.target_faces),
     ...(texture ? { texture: true } : {}),
     ...(textureResolution !== null ? { textureResolution } : {}),
-    ...(mesh?.matting ? { matting: mesh.matting } : {}),
+    // A mesh print with no matting field predates the pre-stage and rendered
+    // with its background intact. Preserve that behavior on Reuse settings.
+    ...(mesh ? { matting: mesh.matting ?? "off" } : {}),
   };
 }
 

@@ -130,9 +130,12 @@ describe("meshFormFromMetadata", () => {
   it("reads absent, null, and non-mesh metadata as an empty form", () => {
     expect(meshFormFromMetadata(undefined)).toEqual(emptyMeshForm());
     expect(meshFormFromMetadata(null)).toEqual(emptyMeshForm());
+  });
+
+  it("restores pre-matting mesh metadata through the historical off path", () => {
     expect(
       meshFormFromMetadata({ octree_resolution: null, threshold: null }),
-    ).toEqual(emptyMeshForm());
+    ).toEqual({ ...emptyMeshForm(), matting: "off" });
   });
 });
 

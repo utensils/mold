@@ -2944,7 +2944,14 @@ impl MeshRequestOptions {
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
-            matting: self.matting.or(Some(MeshMattingMode::Auto)),
+            // Provenance records what this binary can actually execute. An
+            // older/feature-off host performs the historical no-matting path
+            // even when an old client omitted this additive field.
+            matting: Some(if cfg!(feature = "mesh-matting") {
+                self.matting.unwrap_or(MeshMattingMode::Auto)
+            } else {
+                MeshMattingMode::Off
+            }),
         }
     }
 }
@@ -5957,7 +5964,14 @@ mod tests {
             "no decimation IS the rendered choice"
         );
         assert_eq!(mesh.texture, None);
-        assert_eq!(mesh.matting, Some(MeshMattingMode::Auto));
+        assert_eq!(
+            mesh.matting,
+            Some(if cfg!(feature = "mesh-matting") {
+                MeshMattingMode::Auto
+            } else {
+                MeshMattingMode::Off
+            })
+        );
 
         // Touched: the request's own values win, and the rest still fills.
         let mut touched: GenerateRequest = serde_json::from_str(json).unwrap();
@@ -5979,6 +5993,21 @@ mod tests {
         );
         assert_eq!(mesh.target_faces, Some(50_000));
         assert_eq!(mesh.matting, Some(MeshMattingMode::Off));
+
+        touched.mesh.as_mut().unwrap().matting = Some(MeshMattingMode::On);
+        let effective = OutputMetadata::from_generate_request(&touched, 1, None, "test")
+            .mesh
+            .unwrap()
+            .matting;
+        assert_eq!(
+            effective,
+            Some(if cfg!(feature = "mesh-matting") {
+                MeshMattingMode::On
+            } else {
+                MeshMattingMode::Off
+            }),
+            "feature-off provenance must describe the historical no-matting path"
+        );
 
         let mut multiview = untouched.clone();
         multiview.model = crate::manifest::HUNYUAN3D_2MV_TURBO_MODEL.into();
