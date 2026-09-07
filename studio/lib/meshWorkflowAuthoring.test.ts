@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildMeshRoundtripWorkflow,
   buildMeshTextureWorkflow,
   buildTextToMeshWorkflow,
   meshWorkflowModes,
@@ -108,5 +109,32 @@ describe("mesh workflow authoring", () => {
       provenance: { name: "large.glb" },
     });
     expect(JSON.stringify(request)).not.toContain("meshBase64");
+  });
+
+  it("authors a promptless 2.1 mesh round-trip without appearance conditioning", () => {
+    const request = buildMeshRoundtripWorkflow({
+      meshModel: model("hunyuan3d-2.1:fp16", "hunyuan3d", ["mesh_roundtrip"]),
+      meshBase64: "Z2xi",
+      meshName: "scan.glb",
+      meshByteLength: 3,
+      meshSha256: "cd".repeat(32),
+      meshFormat: "glb",
+      upAxis: "y",
+      metersPerUnit: 1,
+    });
+    expect(request).toMatchObject({
+      mode: "mesh_roundtrip",
+      roundtrip_request: {
+        prompt: "",
+        model: "hunyuan3d-2.1:fp16",
+        width: 0,
+        height: 0,
+        batch_size: 1,
+        output_format: "glb",
+        mesh: { texture: false },
+      },
+    });
+    expect(request.roundtrip_request.source_image).toBeUndefined();
+    expect(request.roundtrip_request.references).toHaveLength(1);
   });
 });

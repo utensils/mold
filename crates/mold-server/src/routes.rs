@@ -3745,12 +3745,12 @@ async fn enforce_source_image_capability(
     };
     let capability =
         mold_core::validation::source_image_capability_for_engine(resolved_family, capability);
-    // Keyframes (#779) and an extend (#783) carry the source frames too, so
-    // the shared predicate owns the whole list — an extend's first frames come
-    // from the tail of the clip it continues, and counting only an image left
-    // admission refusing every Wan I2V continuation with the very contract
-    // that makes the checkpoint extend-capable.
-    let has_source = mold_core::validation::request_carries_source_frames(request);
+    // Keyframes (#779), an extend (#783), and Hunyuan3D 2.1's validated mesh
+    // round-trip path can satisfy an otherwise required source-image contract.
+    // The latter never invokes the image encoder: its mesh is the Shape VAE's
+    // complete input.
+    let has_source =
+        mold_core::validation::request_satisfies_source_requirement(request, resolved_family);
     match mold_core::validation::source_image_contract_violation(
         resolved_family,
         &request.model,
@@ -11923,6 +11923,36 @@ mod tests {
         enforce_source_image_capability(&state, &plain, Some("wan"))
             .await
             .expect("an ordinary text-to-video render carries no source frames");
+    }
+
+    #[tokio::test]
+    async fn admission_accepts_hunyuan3d_21_mesh_conditioning_without_an_image() {
+        let state = AppState::for_tests();
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "",
+            "model": "hunyuan3d-2.1:fp16",
+            "width": 0,
+            "height": 0,
+            "steps": 30,
+            "guidance": 5.0,
+            "seed": 15111496,
+            "batch_size": 1,
+            "output_format": "glb",
+            "mesh": { "texture": false },
+            "references": [{
+                "kind": "mesh",
+                "media": { "authority": "inline", "data": "Z2xURg==" },
+                "mime_type": "model/gltf-binary",
+                "format": "glb",
+                "byte_length": 4,
+                "coordinates": { "up_axis": "y", "meters_per_unit": 1.0 }
+            }]
+        }))
+        .unwrap();
+
+        enforce_source_image_capability(&state, &request, Some("hunyuan3d"))
+            .await
+            .expect("the supplied mesh is the Shape VAE's complete conditioning input");
     }
 
     /// The overlap admission materializes is what saved provenance records.

@@ -55,6 +55,7 @@ fn now_ms() -> i64 {
 fn mode(request: &CreateMeshWorkflowRequest) -> MeshWorkflowMode {
     match request {
         CreateMeshWorkflowRequest::TextToMesh { .. } => MeshWorkflowMode::TextToMesh,
+        CreateMeshWorkflowRequest::MeshRoundtrip { .. } => MeshWorkflowMode::MeshRoundtrip,
         CreateMeshWorkflowRequest::MeshTexture { .. } => MeshWorkflowMode::MeshTexture,
     }
 }
@@ -63,6 +64,7 @@ fn mode_name(mode: MeshWorkflowMode) -> &'static str {
     match mode {
         MeshWorkflowMode::ImageToMesh => "image_to_mesh",
         MeshWorkflowMode::MultiviewToMesh => "multiview_to_mesh",
+        MeshWorkflowMode::MeshRoundtrip => "mesh_roundtrip",
         MeshWorkflowMode::MeshTexture => "mesh_texture",
         MeshWorkflowMode::TextToMesh => "text_to_mesh",
     }
@@ -197,6 +199,14 @@ async fn validate_workflow_models(
         CreateMeshWorkflowRequest::MeshTexture { texture_request } => {
             validate_stage_model(state, texture_request, Some(MeshWorkflowMode::MeshTexture)).await
         }
+        CreateMeshWorkflowRequest::MeshRoundtrip { roundtrip_request } => {
+            validate_stage_model(
+                state,
+                roundtrip_request,
+                Some(MeshWorkflowMode::MeshRoundtrip),
+            )
+            .await
+        }
     }
 }
 
@@ -303,6 +313,33 @@ pub(crate) async fn create_mesh_workflow(
             })?;
             CreateMeshWorkflowRequest::MeshTexture {
                 texture_request: Box::new(texture),
+            }
+        }
+        CreateMeshWorkflowRequest::MeshRoundtrip {
+            mut roundtrip_request,
+        } => {
+            let staged = state
+                .reference_uploads
+                .resolve_request(
+                    identity.as_ref(),
+                    roundtrip_request.as_mut(),
+                    &media_roots,
+                    None,
+                )
+                .await?;
+            let roundtrip = crate::mesh_workflow_media::persist_request(
+                &root,
+                &workflow_dir,
+                &id,
+                "roundtrip",
+                *roundtrip_request,
+                staged.as_ref(),
+            )
+            .map_err(|error| {
+                ApiError::internal(format!("persisting round-trip stage failed: {error:#}"))
+            })?;
+            CreateMeshWorkflowRequest::MeshRoundtrip {
+                roundtrip_request: Box::new(roundtrip),
             }
         }
     };

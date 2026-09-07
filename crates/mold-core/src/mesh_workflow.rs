@@ -32,6 +32,10 @@ pub enum CreateMeshWorkflowRequest {
     MeshTexture {
         texture_request: Box<GenerateRequest>,
     },
+    /// Reconstruct a supplied mesh through the 2.1 shape-VAE latent space.
+    MeshRoundtrip {
+        roundtrip_request: Box<GenerateRequest>,
+    },
 }
 
 impl CreateMeshWorkflowRequest {
@@ -98,6 +102,10 @@ impl CreateMeshWorkflowRequest {
                 ]);
                 stages
             }
+            Self::MeshRoundtrip { .. } => vec![
+                MeshWorkflowStageKind::Shape,
+                MeshWorkflowStageKind::Finalize,
+            ],
         }
     }
 }
@@ -482,6 +490,7 @@ fn ensure_request_media_is_sealed(request: &CreateMeshWorkflowRequest) -> MoldRe
             mesh_request,
         } => vec![image_request, mesh_request],
         CreateMeshWorkflowRequest::MeshTexture { texture_request } => vec![texture_request],
+        CreateMeshWorkflowRequest::MeshRoundtrip { roundtrip_request } => vec![roundtrip_request],
     };
     for request in requests {
         if request.source_image.is_some()
@@ -595,6 +604,36 @@ pub fn validate_create_mesh_workflow(request: &CreateMeshWorkflowRequest) -> Res
             }
             require_glb(texture_request)
         }
+        CreateMeshWorkflowRequest::MeshRoundtrip { roundtrip_request } => {
+            if roundtrip_request.model.trim().is_empty() {
+                return Err("mesh-roundtrip requires an explicit Hunyuan3D 2.1 model".into());
+            }
+            if !crate::manifest::hunyuan3d_shape21_model(&roundtrip_request.model) {
+                return Err("mesh-roundtrip requires a Hunyuan3D 2.1 shape checkpoint".into());
+            }
+            if !roundtrip_request.prompt.trim().is_empty() {
+                return Err("mesh-roundtrip does not accept a prompt".into());
+            }
+            if roundtrip_request.source_image.is_some() {
+                return Err("mesh-roundtrip does not accept an appearance image".into());
+            }
+            let references = roundtrip_request.references.as_deref().unwrap_or_default();
+            if references.len() != 1 || !matches!(references[0], GenerationReference::Mesh { .. }) {
+                return Err("mesh-roundtrip requires exactly one GLB or OBJ mesh reference".into());
+            }
+            if roundtrip_request.batch_size != 1 {
+                return Err("mesh workflows require batch_size 1 for every stage".into());
+            }
+            if roundtrip_request
+                .mesh
+                .as_ref()
+                .and_then(|mesh| mesh.texture)
+                .unwrap_or(false)
+            {
+                return Err("mesh-roundtrip cannot request texture generation".into());
+            }
+            require_glb(roundtrip_request)
+        }
     }
 }
 
@@ -704,6 +743,26 @@ mod tests {
                 texture_request: Box::new(texture),
             }),
             Err("mesh-texture requires an appearance source_image".into())
+        );
+    }
+
+    #[test]
+    fn supplied_mesh_roundtrip_has_shape_and_finalize_stages() {
+        let mut roundtrip = mesh_request();
+        roundtrip.model = crate::manifest::HUNYUAN3D_21_MODEL.into();
+        roundtrip.source_image = None;
+        roundtrip.references = Some(vec![mesh_reference()]);
+        roundtrip.mesh.as_mut().unwrap().texture = Some(false);
+        let request = CreateMeshWorkflowRequest::MeshRoundtrip {
+            roundtrip_request: Box::new(roundtrip),
+        };
+        assert_eq!(validate_create_mesh_workflow(&request), Ok(()));
+        assert_eq!(
+            request.planned_stage_kinds(),
+            vec![
+                MeshWorkflowStageKind::Shape,
+                MeshWorkflowStageKind::Finalize
+            ]
         );
     }
 

@@ -1,4 +1,4 @@
-//! Hunyuan3D 2.0 "vecset" shape VAE — **decode only**.
+//! Hunyuan3D 2.x "vecset" shape VAE.
 //!
 //! This VAE does not decode to pixels. It decodes to a *function*: given the
 //! 1-D latent token sequence the DiT denoised (`[B, embed_dim, num_latents]`,
@@ -7,13 +7,14 @@
 //! evaluates that function on a dense `(res + 1)^3` grid to obtain an occupancy
 //! field, which [`super::mesh`] then turns into triangles.
 //!
-//! # Why decode only
+//! # Encoder availability
 //!
-//! The encoder (`PointCrossAttention`, farthest-point sampling, sharp-edge
-//! sampling) exists to turn a *mesh* into latents. Image-to-3D never has a mesh
-//! to encode — the latents come out of the flow-matching DiT — so the encoder
-//! is dead weight and is deliberately not ported. `pre_kl` and the diagonal
-//! Gaussian are part of that same encode path and are likewise absent.
+//! Tencent's packaged 2.0 checkpoints carry only the decoder because ordinary
+//! image-to-3D receives its latents from the flow-matching DiT. The published
+//! 2.1 checkpoint also carries the point encoder and `pre_kl`, enabling
+//! mesh-to-latent round trips. [`ShapeVaeEncoder`] implements that optional
+//! side with deterministic surface/FPS sampling; the decoder below remains
+//! shared by generation and round trips.
 //!
 //! # Shape of the computation
 //!
@@ -67,6 +68,12 @@ use candle_nn::{
 };
 
 use crate::attention::attention;
+
+mod encoder;
+pub use encoder::{
+    farthest_point_indices, sample_mesh_sharp_edges, sample_mesh_surface, EncodedShapeLatents,
+    ShapeVaeEncoder, ShapeVaeEncoderConfig, SurfacePoint,
+};
 
 /// LayerNorm epsilon used by every `norm_layer(...)` inside the blocks.
 ///
@@ -170,6 +177,13 @@ impl ShapeVaeConfig {
     /// Per-head dimension. The q/k LayerNorms are sized by this.
     pub fn head_dim(&self) -> usize {
         self.width / self.heads
+    }
+
+    /// Tencent 2.1 runs the VAE through PyTorch CUDA SDPA, whose math backend
+    /// upcasts half-precision attention intermediates to F32. The 2.0 decoder
+    /// remains on its separately qualified ComfyUI/Candle arithmetic.
+    const fn uses_upcast_attention(&self) -> bool {
+        self.num_latents == 4096
     }
 }
 
@@ -354,6 +368,20 @@ fn from_bhnd(xs: &Tensor) -> Result<Tensor> {
     xs.transpose(1, 2)?.contiguous()?.reshape((b, n, h * d))
 }
 
+/// PyTorch's CUDA SDPA math backend keeps half-precision attention
+/// intermediates in F32. The 2.1 encoder and decoder opt into that arithmetic;
+/// the separately qualified 2.0 ComfyUI decoder retains its existing dtype.
+fn attention_upcast(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    let dtype = q.dtype();
+    attention(
+        &q.to_dtype(DType::F32)?,
+        &k.to_dtype(DType::F32)?,
+        &v.to_dtype(DType::F32)?,
+        scale,
+    )?
+    .to_dtype(dtype)
+}
+
 /// `MultiheadAttention` + `QKVMultiheadAttention` (`vae.py:723-778`).
 #[derive(Debug)]
 struct SelfAttention {
@@ -382,6 +410,14 @@ impl SelfAttention {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_impl(xs, false)
+    }
+
+    fn forward_upcast(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_impl(xs, true)
+    }
+
+    fn forward_impl(&self, xs: &Tensor, upcast: bool) -> Result<Tensor> {
         let (b, n, _) = xs.dims3()?;
         let qkv = self.c_qkv.forward(xs)?;
         let width = qkv.dim(D::Minus1)?;
@@ -398,7 +434,14 @@ impl SelfAttention {
         let v = qkv.narrow(3, 2 * head_dim, head_dim)?.contiguous()?;
 
         let scale = 1.0 / (head_dim as f64).sqrt();
-        let out = attention(&to_bhnd(&q)?, &to_bhnd(&k)?, &to_bhnd(&v)?, scale as f32)?;
+        let q = to_bhnd(&q)?;
+        let k = to_bhnd(&k)?;
+        let v = to_bhnd(&v)?;
+        let out = if upcast {
+            attention_upcast(&q, &k, &v, scale as f32)?
+        } else {
+            attention(&q, &k, &v, scale as f32)?
+        };
         self.c_proj.forward(&from_bhnd(&out)?)
     }
 }
@@ -424,6 +467,11 @@ impl ResidualAttentionBlock {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = (xs + self.attn.forward(&self.ln_1.forward(xs)?)?)?;
+        &xs + self.mlp.forward(&self.ln_2.forward(&xs)?)?
+    }
+
+    fn forward_upcast(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = (xs + self.attn.forward_upcast(&self.ln_1.forward(xs)?)?)?;
         &xs + self.mlp.forward(&self.ln_2.forward(&xs)?)?
     }
 }
@@ -475,6 +523,14 @@ impl CrossAttention {
     /// `x` is `[B, Nq, width]`, `kv` is a [`Self::project_kv`] output
     /// `[B, Nd, 2 * width]`.
     fn forward_with_kv(&self, xs: &Tensor, kv: &Tensor) -> Result<Tensor> {
+        self.forward_with_kv_impl(xs, kv, false)
+    }
+
+    fn forward_with_kv_upcast(&self, xs: &Tensor, kv: &Tensor) -> Result<Tensor> {
+        self.forward_with_kv_impl(xs, kv, true)
+    }
+
+    fn forward_with_kv_impl(&self, xs: &Tensor, kv: &Tensor, upcast: bool) -> Result<Tensor> {
         let (b, n_ctx, _) = xs.dims3()?;
         let (_, n_data, kv_width) = kv.dims3()?;
         let head_dim = kv_width / self.heads / 2;
@@ -491,7 +547,14 @@ impl CrossAttention {
         let v = kv.narrow(3, head_dim, head_dim)?.contiguous()?;
 
         let scale = 1.0 / (head_dim as f64).sqrt();
-        let out = attention(&to_bhnd(&q)?, &to_bhnd(&k)?, &to_bhnd(&v)?, scale as f32)?;
+        let q = to_bhnd(&q)?;
+        let k = to_bhnd(&k)?;
+        let v = to_bhnd(&v)?;
+        let out = if upcast {
+            attention_upcast(&q, &k, &v, scale as f32)?
+        } else {
+            attention(&q, &k, &v, scale as f32)?
+        };
         self.c_proj.forward(&from_bhnd(&out)?)
     }
 }
@@ -540,6 +603,14 @@ impl ResidualCrossAttentionBlock {
         let xs = (xs + self.attn.forward_with_kv(&self.ln_1.forward(xs)?, kv)?)?;
         &xs + self.mlp.forward(&self.ln_3.forward(&xs)?)?
     }
+
+    fn forward_with_kv_upcast(&self, xs: &Tensor, kv: &Tensor) -> Result<Tensor> {
+        let xs = (xs
+            + self
+                .attn
+                .forward_with_kv_upcast(&self.ln_1.forward(xs)?, kv)?)?;
+        &xs + self.mlp.forward(&self.ln_3.forward(&xs)?)?
+    }
 }
 
 /// `CrossAttentionDecoder` (`vae.py:846-896`), minus the `downsample_ratio != 1`
@@ -579,7 +650,7 @@ impl GeoDecoder {
     }
 }
 
-/// Hunyuan3D 2.0 shape VAE decoder.
+/// Hunyuan3D 2.x shape VAE decoder.
 #[derive(Debug)]
 pub struct ShapeVae {
     cfg: ShapeVaeConfig,
@@ -653,7 +724,11 @@ impl ShapeVae {
         let xs = latents.transpose(D::Minus2, D::Minus1)?.contiguous()?;
         let mut xs = self.post_kl.forward(&xs)?;
         for block in &self.resblocks {
-            xs = block.forward(&xs)?;
+            xs = if self.cfg.uses_upcast_attention() {
+                block.forward_upcast(&xs)?
+            } else {
+                block.forward(&xs)?
+            };
         }
         Ok(xs)
     }
@@ -687,7 +762,12 @@ impl ShapeVae {
         // — vae.py:888.
         let embedded = geo.fourier.forward(queries)?.to_dtype(cross_kv.dtype())?;
         let xs = geo.query_proj.forward(&embedded)?;
-        let xs = geo.cross_attn_decoder.forward_with_kv(&xs, cross_kv)?;
+        let xs = if self.cfg.uses_upcast_attention() {
+            geo.cross_attn_decoder
+                .forward_with_kv_upcast(&xs, cross_kv)?
+        } else {
+            geo.cross_attn_decoder.forward_with_kv(&xs, cross_kv)?
+        };
         let xs = match &geo.ln_post {
             Some(ln) => ln.forward(&xs)?,
             None => xs,
@@ -831,6 +911,12 @@ pub fn query_grid(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn v21_decoder_uses_pytorch_sdpa_precision() {
+        assert!(ShapeVaeConfig::v2_1().uses_upcast_attention());
+        assert!(!ShapeVaeConfig::v2_0().uses_upcast_attention());
+    }
 
     /// Deterministic small pseudo-random values; no external rng dependency and
     /// no reliance on a device-side seed.

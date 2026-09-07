@@ -13,6 +13,7 @@ import {
   type MeshWorkflowJobSummary,
 } from "../api/meshWorkflows";
 import {
+  buildMeshRoundtripWorkflow,
   buildMeshTextureWorkflow,
   buildTextToMeshWorkflow,
   isTextImageWorkflowModel,
@@ -34,7 +35,9 @@ const models = ref<WorkflowModel[]>([]);
 const jobs = ref<MeshWorkflowJobSummary[]>([]);
 const detail = ref<MeshWorkflowJobDetail<WorkflowGenerateRequest> | null>(null);
 const selectedId = ref("");
-const mode = ref<"text_to_mesh" | "mesh_texture">("text_to_mesh");
+const mode = ref<"text_to_mesh" | "mesh_roundtrip" | "mesh_texture">(
+  "text_to_mesh",
+);
 const imageModelName = ref("");
 const meshModelName = ref("");
 const prompt = ref("");
@@ -62,7 +65,7 @@ const meshModels = computed(() =>
       model.runtime_available !== false &&
       model.family === "hunyuan3d" &&
       meshWorkflowModes(model).some((value) =>
-        ["text_to_mesh", "mesh_texture"].includes(value),
+        ["text_to_mesh", "mesh_roundtrip", "mesh_texture"].includes(value),
       ),
   ),
 );
@@ -95,9 +98,9 @@ const canSubmit = computed(() => {
     );
   }
   return (
-    selectedModes.value.includes("mesh_texture") &&
+    selectedModes.value.includes(mode.value) &&
     meshFile.value !== null &&
-    appearanceFile.value !== null &&
+    (mode.value !== "mesh_texture" || appearanceFile.value !== null) &&
     Number.isFinite(metersPerUnit.value) &&
     metersPerUnit.value > 0
   );
@@ -229,37 +232,49 @@ async function submit(): Promise<void> {
           })
         : await (async () => {
             const mesh = meshFile.value!;
-            const appearance = appearanceFile.value!;
             const useUpload =
               referenceUploads.value?.available === true &&
               Boolean(props.target.apiKey?.trim());
-            const appearancePayload = await filePayload(appearance);
             const meshPayload = useUpload ? null : await filePayload(mesh);
-            const meshFormat = mesh.name.toLowerCase().endsWith(".obj")
+            const meshFormat: "glb" | "obj" = mesh.name
+              .toLowerCase()
+              .endsWith(".obj")
               ? "obj"
               : "glb";
-            return buildMeshTextureWorkflow({
+            const shared = {
               meshModel,
               ...(meshPayload ? { meshBase64: meshPayload.base64 } : {}),
               meshName: mesh.name,
               meshByteLength: mesh.size,
               ...(meshPayload ? { meshSha256: meshPayload.sha256 } : {}),
               meshFormat,
-              appearanceBase64: appearancePayload.base64,
               upAxis: upAxis.value,
               metersPerUnit: metersPerUnit.value,
+            };
+            if (mode.value === "mesh_roundtrip") {
+              return buildMeshRoundtripWorkflow(shared);
+            }
+            const appearancePayload = await filePayload(appearanceFile.value!);
+            return buildMeshTextureWorkflow({
+              ...shared,
+              appearanceBase64: appearancePayload.base64,
               textureResolution: textureResolution.value,
               delight: delightAvailable.value && delight.value,
             });
           })();
+    const meshRequest =
+      request.mode === "mesh_texture"
+        ? request.texture_request
+        : request.mode === "mesh_roundtrip"
+          ? request.roundtrip_request
+          : null;
     const directMeshUpload =
-      request.mode === "mesh_texture" &&
-      request.texture_request.references?.[0]?.media.authority === "descriptor";
+      meshRequest?.references?.[0]?.media.authority === "descriptor";
     if (
-      request.mode === "mesh_texture" &&
+      meshRequest &&
       (directMeshUpload ||
         requestShouldUseReferenceUploads(
-          request.texture_request,
+          meshRequest,
           props.target,
           referenceUploads.value,
         ))
@@ -268,12 +283,16 @@ async function submit(): Promise<void> {
         target: props.target,
         expectedInstanceId: instanceId.value,
         capabilities: referenceUploads.value,
-        request: request.texture_request,
+        request: meshRequest,
         ...(directMeshUpload
           ? { uploadBodies: new Map([[1, meshFile.value!]]) }
           : {}),
       });
-      request = { ...request, texture_request: uploadLease.request };
+      if (request.mode === "mesh_texture") {
+        request = { ...request, texture_request: uploadLease.request };
+      } else if (request.mode === "mesh_roundtrip") {
+        request = { ...request, roundtrip_request: uploadLease.request };
+      }
     }
     const created = await createMeshWorkflow(props.target, request);
     uploadLease = null;
@@ -363,7 +382,9 @@ watch(meshModelName, () => {
   if (!selectedModes.value.includes(mode.value)) {
     mode.value = selectedModes.value.includes("text_to_mesh")
       ? "text_to_mesh"
-      : "mesh_texture";
+      : selectedModes.value.includes("mesh_roundtrip")
+        ? "mesh_roundtrip"
+        : "mesh_texture";
   }
 });
 watch(selectedId, () => void refreshSelected());
@@ -392,7 +413,14 @@ onBeforeUnmount(() => {
       <select v-model="selectedId" aria-label="Previous 3-D workflow">
         <option value="">New workflow</option>
         <option v-for="job in jobs" :key="job.id" :value="job.id">
-          {{ job.mode === "text_to_mesh" ? "Text to 3-D" : "Texture mesh" }} ·
+          {{
+            job.mode === "text_to_mesh"
+              ? "Text to 3-D"
+              : job.mode === "mesh_roundtrip"
+                ? "Rebuild mesh"
+                : "Texture mesh"
+          }}
+          ·
           {{ job.state }}
         </option>
       </select>
@@ -408,6 +436,15 @@ onBeforeUnmount(() => {
           role="tablist"
           aria-label="Workflow type"
         >
+          <button
+            type="button"
+            :aria-selected="mode === 'mesh_roundtrip'"
+            :class="{ active: mode === 'mesh_roundtrip' }"
+            :disabled="!selectedModes.includes('mesh_roundtrip')"
+            @click="mode = 'mesh_roundtrip'"
+          >
+            Rebuild a mesh
+          </button>
           <button
             type="button"
             :aria-selected="mode === 'text_to_mesh'"
@@ -481,7 +518,7 @@ onBeforeUnmount(() => {
             />
             <span>{{ meshFile?.name || "Choose a mesh" }}</span>
           </label>
-          <label class="mesh-studio__file">
+          <label v-if="mode === 'mesh_texture'" class="mesh-studio__file">
             Appearance image
             <input
               type="file"
@@ -514,7 +551,9 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
-        <label v-if="texture || mode === 'mesh_texture'">
+        <label
+          v-if="(mode === 'text_to_mesh' && texture) || mode === 'mesh_texture'"
+        >
           Texture size
           <select v-model.number="textureResolution">
             <option :value="1024">1024</option>
@@ -522,7 +561,10 @@ onBeforeUnmount(() => {
             <option :value="4096">4096</option>
           </select>
         </label>
-        <label v-if="delightAvailable" class="mesh-studio__check">
+        <label
+          v-if="delightAvailable && mode !== 'mesh_roundtrip'"
+          class="mesh-studio__check"
+        >
           <input v-model="delight" type="checkbox" />
           Remove baked lighting and highlights before building the mesh
         </label>
@@ -536,7 +578,9 @@ onBeforeUnmount(() => {
               ? "Preparing…"
               : mode === "text_to_mesh"
                 ? "Build 3-D object"
-                : "Paint mesh"
+                : mode === "mesh_roundtrip"
+                  ? "Rebuild mesh"
+                  : "Paint mesh"
           }}
         </button>
       </form>
@@ -637,7 +681,7 @@ onBeforeUnmount(() => {
   font: 700 var(--mold-fs-micro) var(--mold-font-mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--mold-accent) !important;
+  color: var(--mold-blue) !important;
 }
 .mesh-studio__grid {
   display: grid;
@@ -681,7 +725,7 @@ onBeforeUnmount(() => {
 }
 .mesh-studio__tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   padding: 4px;
   background: var(--mold-bg);
@@ -722,7 +766,7 @@ onBeforeUnmount(() => {
 .mesh-studio__primary {
   margin-top: auto;
   border-radius: var(--mold-radius-1);
-  background: var(--mold-accent);
+  background: var(--mold-blue);
   color: var(--mold-on-accent);
   padding: 12px 16px;
   font-weight: 750;
@@ -783,9 +827,9 @@ onBeforeUnmount(() => {
   border-radius: 50%;
 }
 .mesh-studio__progress li[data-state="running"] .mesh-studio__dot {
-  border-color: var(--mold-accent);
-  background: var(--mold-accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--mold-accent) 18%, transparent);
+  border-color: var(--mold-blue);
+  background: var(--mold-blue);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--mold-blue) 18%, transparent);
 }
 .mesh-studio__progress li[data-state="completed"] .mesh-studio__dot {
   border-color: var(--mold-success);

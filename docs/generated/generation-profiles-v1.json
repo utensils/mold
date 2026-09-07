@@ -3303,7 +3303,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2.1",
-        "profile_hash": "b97d45c55281c198506f0b7603477f18ee6d404016446b7188891feb8d91700f",
+        "profile_hash": "69b77ba5c2e76fd3a9f357570154d7bb69253c3902c1f2a3ea1ee97e2496ae77",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3453,20 +3453,19 @@
                   "reason": "Named camera views require a Hunyuan3D 2mv checkpoint"
                 },
                 "mesh_input": {
-                  "mode": "hidden",
+                  "mode": "adjustable",
                   "formats": [
                     "glb",
                     "obj"
                   ],
-                  "max_count": 0,
+                  "max_count": 1,
                   "max_bytes": 268435456,
                   "up_axes": [
                     "y",
                     "z"
                   ],
                   "meters_per_unit_min": 1e-6,
-                  "meters_per_unit_max": 1000000.0,
-                  "reason": "Supplied-mesh texturing requires the mesh-texture build feature"
+                  "meters_per_unit_max": 1000000.0
                 },
                 "texture_resolutions": [
                   1024,
@@ -3495,7 +3494,8 @@
                 },
                 "workflow_modes": [
                   "image_to_mesh",
-                  "text_to_mesh"
+                  "text_to_mesh",
+                  "mesh_roundtrip"
                 ]
               }
             },
@@ -3522,7 +3522,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2mv-turbo",
-        "profile_hash": "0964cd58d238ac1b8d71579fa6e91d75a67cf39e7ad3c4d420032d9bd506514b",
+        "profile_hash": "2bbd3aba897dfa38a3218058d89030d17ed92021f81ee663f734d3d88b67b1b3",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3684,7 +3684,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Supplied-mesh texturing requires the mesh-texture build feature"
+                  "reason": "Mesh input requires Hunyuan3D 2.1 round-trip weights or the mesh-texture build feature"
                 },
                 "texture_resolutions": [
                   1024,
@@ -3739,7 +3739,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2mv",
-        "profile_hash": "f09463bb4fda26fe9a4657d9252a05f9f7baac667d9771fa5c0c43d06694cea4",
+        "profile_hash": "829f00018baa826b268579aa64b0b1d57ac7d89d5746e8973c02780abf24700c",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3901,7 +3901,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Supplied-mesh texturing requires the mesh-texture build feature"
+                  "reason": "Mesh input requires Hunyuan3D 2.1 round-trip weights or the mesh-texture build feature"
                 },
                 "texture_resolutions": [
                   1024,
@@ -3956,7 +3956,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-mini-turbo",
-        "profile_hash": "6bc4e0a2d418b2ed8100839ba1f33b0da0467434345419b66848392b5c7cb05d",
+        "profile_hash": "7ac10d864c3e04ebdeb4aafe8a84f3c9918c825ad205f85f4ac6e38d0dd9888e",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4119,7 +4119,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Supplied-mesh texturing requires the mesh-texture build feature"
+                  "reason": "Mesh input requires Hunyuan3D 2.1 round-trip weights or the mesh-texture build feature"
                 },
                 "texture_resolutions": [
                   1024,
@@ -4175,7 +4175,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-turbo",
-        "profile_hash": "c9935625530299be771196f7301a41224649245c056b632c3442daa5a734ee5f",
+        "profile_hash": "edc9d0c9a0cd71f3725941186d8189895cb267f83563f6cf4ffd3b458e53122a",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4338,7 +4338,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Supplied-mesh texturing requires the mesh-texture build feature"
+                  "reason": "Mesh input requires Hunyuan3D 2.1 round-trip weights or the mesh-texture build feature"
                 },
                 "texture_resolutions": [
                   1024,
@@ -4394,7 +4394,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d",
-        "profile_hash": "250ec0726c11db4aca825877e3f8e1d05235f6a9a279faa3354d73393bc43057",
+        "profile_hash": "07f5676273b1c849a7e3b804aaaf466e8f1766112296e3dbf6a14487333ea3e7",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4557,7 +4557,7 @@
                   ],
                   "meters_per_unit_min": 1e-6,
                   "meters_per_unit_max": 1000000.0,
-                  "reason": "Supplied-mesh texturing requires the mesh-texture build feature"
+                  "reason": "Mesh input requires Hunyuan3D 2.1 round-trip weights or the mesh-texture build feature"
                 },
                 "texture_resolutions": [
                   1024,

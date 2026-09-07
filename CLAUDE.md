@@ -123,6 +123,17 @@ the model controls, and the length slider. A sequence is now something you scrip
 
 ## 3-D generation
 
+- **Hunyuan3D 2.1 can round-trip a supplied mesh through its Shape VAE.** The
+  `mesh_roundtrip` durable workflow is advertised only by a 2.1 recipe and
+  accepts exactly one GLB/OBJ mesh reference with declared coordinates, no
+  prompt or appearance image, batch size 1, GLB output, and texture disabled.
+  Inference normalizes the source into Hunyuan3D space, performs Tencent's
+  deterministic 81,920-point surface/edge sampling and farthest-point
+  selection, encodes to 4,096x64 latents, samples the posterior from the request
+  seed, then decodes and extracts a new surface. The web and desktop 3-D Studio
+  submit the same durable request and use reference-upload leases for large
+  meshes. This path is independent of the optional `mesh-texture` feature.
+
 - **Background matting is profile-driven and its transformed inputs are durable private media.** `capabilities.mesh.matting` is the one Auto/On/Off contract every authoring surface reads. Auto preserves useful alpha and otherwise runs the pinned pure-Rust U²-Net stage before shape weights load; On always recomputes and Off preserves the historical pixels. Processed PNGs never enter the public response or GLB: a durable job seals them under its purpose-keyed `generation_queue_derived_media` obligation before gallery publication, hands every authored and derived set to the same archive identity, and exposes the processed roles for authenticated download while refusing them for request reuse so matting cannot be applied twice. Cancellation, held-row retention, startup reconciliation, gallery deletion, and queue settlement cover all attached sets.
 
 - **Delight is a fixed durable preprocessing stage.** `capabilities.mesh.delight` is the only client gate. When true, the scheduler runs the hidden `hunyuan3d-delight:fp16` worker after matting and before shape or paint, using Tencent's exact 512²/50-step Euler ancestral/seed-42/guidance-1 InstructPix2Pix recipe. Its eight-channel UNet concatenates the unscaled VAE posterior mode with the noisy latent; applying the VAE decode scale to that conditioning erases the source. The delighted PNG is retained as its own `delighted_image` artifact and becomes the sole image handed to the next stage. Direct Hunyuan3D requests run the same matting-then-delight order before loading shape or paint weights.

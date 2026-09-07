@@ -33,12 +33,10 @@ use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use mold_core::{
     GenerateRequest, GenerateResponse, GenerationReference, GenerationReferenceAuthority, MeshData,
-    ModelPaths, OutputFormat,
+    MeshReferenceFormat, MeshUpAxis, ModelPaths, OutputFormat,
 };
 #[cfg(feature = "mesh-matting")]
 use mold_core::{GenerationImageReferenceRole, MeshDerivedMedia, MeshMattingMode};
-#[cfg(feature = "mesh-texture")]
-use mold_core::{MeshReferenceFormat, MeshUpAxis};
 
 use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
@@ -50,7 +48,7 @@ use super::dino2::{Dinov2Config, Dinov2Model};
 use super::glb::{write_glb, GlbMaterial};
 use super::mesh::{Mesh, MeshAlgorithm, OccupancyGrid};
 use super::sampler::{self, SamplingPlan};
-use super::shape_vae::{ShapeVae, ShapeVaeConfig};
+use super::shape_vae::{ShapeVae, ShapeVaeConfig, ShapeVaeEncoder, ShapeVaeEncoderConfig};
 use super::transformer::{Config as DitConfig, Hunyuan3dDit};
 use super::transformer21::{Config as Dit21Config, Hunyuan3dDit21};
 
@@ -93,7 +91,6 @@ const POSTER_SIZE: u32 = 512;
 /// chunk at 17M points would be ~2,100 SSE frames for a single stage.
 const DECODE_TICKS: usize = 64;
 
-#[cfg(feature = "mesh-texture")]
 fn normalize_supplied_mesh_coordinates(
     mesh: &mut Mesh,
     up_axis: MeshUpAxis,
@@ -444,12 +441,23 @@ impl Hunyuan3dEngine {
             bail!("PBR texture generation requires the mesh-texture build feature");
         }
         #[cfg(feature = "mesh-texture")]
-        if req.references.as_deref().is_some_and(|references| {
+        let has_mesh_reference = req.references.as_deref().is_some_and(|references| {
             references
                 .iter()
                 .any(|reference| matches!(reference, GenerationReference::Mesh { .. }))
-        }) {
-            return self.generate_supplied_mesh_texture(req, bindings, &options, started);
+        });
+        #[cfg(not(feature = "mesh-texture"))]
+        let has_mesh_reference = req.references.as_deref().is_some_and(|references| {
+            references
+                .iter()
+                .any(|reference| matches!(reference, GenerationReference::Mesh { .. }))
+        });
+        if has_mesh_reference {
+            #[cfg(feature = "mesh-texture")]
+            if options.texture == Some(true) {
+                return self.generate_supplied_mesh_texture(req, bindings, &options, started);
+            }
+            return self.generate_supplied_mesh_roundtrip(req, bindings, &options, started);
         }
 
         // Decode and matte before the shape checkpoint is loaded. On a cold
@@ -741,6 +749,198 @@ impl Hunyuan3dEngine {
             gpu: Some(self.base.gpu_ordinal),
             request_warnings: Vec::new(),
         })
+    }
+
+    fn generate_supplied_mesh_roundtrip(
+        &mut self,
+        req: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+        options: &mold_core::MeshRequestOptions,
+        started: std::time::Instant,
+    ) -> Result<GenerateResponse> {
+        anyhow::ensure!(
+            options.texture != Some(true),
+            "mesh round-trip cannot request texture generation"
+        );
+        anyhow::ensure!(
+            req.source_image
+                .as_deref()
+                .is_none_or(|bytes| bytes.is_empty()),
+            "mesh round-trip does not accept an appearance image"
+        );
+        let references = req
+            .references
+            .as_deref()
+            .context("mesh round-trip requires a mesh reference")?;
+        anyhow::ensure!(
+            references.len() == 1,
+            "mesh round-trip requires exactly one mesh reference"
+        );
+        let GenerationReference::Mesh {
+            media,
+            format,
+            coordinates,
+            ..
+        } = &references[0]
+        else {
+            bail!("mesh round-trip accepts a mesh reference only")
+        };
+        anyhow::ensure!(
+            bindings.is_empty() || bindings.len() == 1,
+            "mesh round-trip binding count differs from its request"
+        );
+        let mesh_bytes = if let Some(binding) = bindings.first() {
+            anyhow::ensure!(
+                binding.metadata().kind == mold_core::GenerationReferenceKind::Mesh,
+                "mesh round-trip binding changed kind before inference"
+            );
+            crate::reference_media::read_verified_binding(binding, &mut || {
+                Ok(self.base.progress.checkpoint()?)
+            })?
+        } else {
+            let GenerationReferenceAuthority::Inline { data } = media else {
+                bail!("non-inline mesh round-trip requires a resolved server binding")
+            };
+            data.clone()
+        };
+        let mut source = match format {
+            MeshReferenceFormat::Glb => super::glb::read_glb(&mesh_bytes)
+                .map_err(|error| anyhow::anyhow!(error))
+                .context("parse round-trip GLB")?,
+            MeshReferenceFormat::Obj => {
+                let text = std::str::from_utf8(&mesh_bytes)
+                    .context("round-trip OBJ must be UTF-8 text")?;
+                super::obj::read_obj(text).context("parse round-trip OBJ")?
+            }
+        };
+        normalize_supplied_mesh_coordinates(
+            &mut source,
+            coordinates.up_axis,
+            coordinates.meters_per_unit,
+        )?;
+
+        let checkpoint = self.base.paths.transformer.clone();
+        let header = mold_core::safetensors_probe::read_safetensors_header(&checkpoint)
+            .with_context(|| format!("read safetensors header at {}", checkpoint.display()))?;
+        anyhow::ensure!(
+            detect_shape21_config(&header)?.is_some()
+                && header
+                    .tensor_names
+                    .iter()
+                    .any(|name| name == "vae.encoder.input_proj.weight")
+                && header
+                    .tensor_names
+                    .iter()
+                    .any(|name| name == "vae.pre_kl.weight"),
+            "mesh round-trip requires a Hunyuan3D 2.1 checkpoint with shape-VAE encoder weights"
+        );
+
+        let resident = self.base.loaded.take();
+        drop(resident);
+        let _ = crate::device::post_drop_free_vram_bytes(self.base.gpu_ordinal);
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let dtype = super::backend::compute_dtype(&device);
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&checkpoint),
+            dtype,
+            &device,
+            "Hunyuan3D 2.1 shape VAE",
+            &self.base.progress,
+        )?;
+        let encoder = ShapeVaeEncoder::new(&ShapeVaeEncoderConfig::v2_1(), vb.pp(VAE_PREFIX))?;
+        let decoder = ShapeVae::new(&ShapeVaeConfig::v2_1(), vb.pp(VAE_PREFIX))?;
+        let seed = req.seed.unwrap_or_else(rand_seed);
+        self.base.progress.stage_start("Encoding mesh");
+        let phase = std::time::Instant::now();
+        let encoded = encoder.encode_mesh_sampled(&source, seed, 64)?;
+        self.base
+            .progress
+            .stage_done("Encoding mesh", phase.elapsed());
+
+        let octree = options
+            .octree_resolution
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_OCTREE_RESOLUTION);
+        let grid = self.decode_roundtrip_occupancy(
+            &decoder,
+            &device,
+            dtype,
+            &encoded.for_decoder()?,
+            octree,
+        )?;
+        let threshold = options.threshold.unwrap_or(0.5);
+        let mesh = self.extract_surface(&grid, threshold, options.target_faces)?;
+        let (bounds_min, bounds_max) = mesh.bounds();
+        let glb = write_glb(&mesh, &GlbMaterial::default(), None)?;
+        let poster = super::poster::render_poster(&mesh, POSTER_SIZE)?;
+        Ok(GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            audio: None,
+            mesh: Some(MeshData {
+                data: glb,
+                format: OutputFormat::Glb,
+                vertex_count: mesh.vertex_count() as u32,
+                face_count: mesh.face_count() as u32,
+                bounds_min,
+                bounds_max,
+                textured: false,
+                poster,
+                poster_width: POSTER_SIZE,
+                poster_height: POSTER_SIZE,
+                derived_media: Vec::new(),
+            }),
+            generation_time_ms: started.elapsed().as_millis() as u64,
+            model: self.base.model_name.clone(),
+            seed_used: seed,
+            gpu: Some(self.base.gpu_ordinal),
+            request_warnings: Vec::new(),
+        })
+    }
+
+    fn decode_roundtrip_occupancy(
+        &self,
+        vae: &ShapeVae,
+        device: &Device,
+        dtype: DType,
+        latents: &Tensor,
+        octree: usize,
+    ) -> Result<OccupancyGrid> {
+        self.base.progress.stage_start("Decoding volume");
+        let prepared = vae.prepare_latents(latents)?;
+        let cross_kv = vae.prepare_cross_kv(&prepared)?;
+        let total = super::shape_vae::query_grid_len(octree);
+        let chunk = Self::decode_chunk(device);
+        let mut logits = Vec::with_capacity(total);
+        for start in (0..total).step_by(chunk) {
+            self.base.progress.checkpoint()?;
+            let len = chunk.min(total - start);
+            let queries = super::shape_vae::query_grid_chunk(
+                octree,
+                QUERY_BOUNDS,
+                start,
+                len,
+                device,
+                dtype,
+            )?
+            .unsqueeze(0)?;
+            logits.extend(
+                vae.decode_queries_cached(&queries, &cross_kv)?
+                    .flatten_all()?
+                    .to_dtype(DType::F32)?
+                    .to_vec1::<f32>()?,
+            );
+            self.base
+                .progress
+                .stage_progress("Decoding volume", start + len, total);
+        }
+        let dim = octree + 1;
+        let flat = Tensor::from_vec(logits, (1, total), &Device::Cpu)?;
+        let mut ordered = ShapeVae::reshape_grid_logits(&flat, octree)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        occupancy_from_logits(&mut ordered);
+        OccupancyGrid::new(ordered, [dim, dim, dim])
     }
 
     #[cfg(feature = "mesh-texture")]

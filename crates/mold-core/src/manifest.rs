@@ -23,6 +23,11 @@ pub fn hunyuan3d_multiview_model(model: &str) -> bool {
     )
 }
 
+pub fn hunyuan3d_shape21_model(model: &str) -> bool {
+    let canonical = resolve_model_name(model);
+    canonical.split(':').next() == Some("hunyuan3d-2.1")
+}
+
 /// Recipe geometry needed before loading the checkpoint. This is shared by
 /// admission callers so a canvasless request still prices its actual encoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

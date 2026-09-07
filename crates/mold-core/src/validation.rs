@@ -1754,6 +1754,21 @@ pub fn request_carries_source_frames(req: &GenerateRequest) -> bool {
         || req.is_extend()
 }
 
+/// Whether a request satisfies a model's otherwise-required source-image
+/// contract through an alternate, explicitly validated conditioning path.
+/// Hunyuan3D 2.1 mesh round-trips consume the supplied mesh in the Shape VAE
+/// and never invoke the image encoder, so requiring an unrelated image after
+/// mesh-family validation has accepted that path would make it unreachable.
+pub fn request_satisfies_source_requirement(req: &GenerateRequest, family: Option<&str>) -> bool {
+    request_carries_source_frames(req)
+        || (family == Some(crate::manifest::HUNYUAN3D_FAMILY)
+            && req.references.as_deref().is_some_and(|references| {
+                references
+                    .iter()
+                    .any(|reference| matches!(reference, crate::GenerationReference::Mesh { .. }))
+            }))
+}
+
 /// The one wording for a source-image contract violation (#772), shared by
 /// server admission, the CLI preflight, and the Discord preflight so the
 /// rejection reads identically wherever it lands.
@@ -2470,15 +2485,16 @@ fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
         if references.len() != 1
             || !matches!(references[0], crate::GenerationReference::Mesh { .. })
         {
-            return Err("mesh-input texturing requires exactly one mesh reference".to_string());
+            return Err("mesh input requires exactly one mesh reference".to_string());
         }
-        if req.mesh.as_ref().and_then(|mesh| mesh.texture) != Some(true) {
-            return Err("a mesh reference requires mesh.texture = true".to_string());
-        }
-        if !source_present {
-            return Err(
-                "mesh-input texturing requires an appearance image in source_image".to_string(),
-            );
+        if req.mesh.as_ref().and_then(|mesh| mesh.texture) == Some(true) {
+            if !source_present {
+                return Err(
+                    "mesh-input texturing requires an appearance image in source_image".to_string(),
+                );
+            }
+        } else if source_present {
+            return Err("mesh round trips do not accept an appearance image".to_string());
         }
     } else {
         if !references.is_empty() {
@@ -5961,6 +5977,30 @@ mod tests {
         // An ordinary render still carries nothing.
         let plain = valid_req();
         assert!(!request_carries_source_frames(&plain));
+    }
+
+    #[test]
+    fn hunyuan3d_mesh_roundtrip_satisfies_the_source_contract_without_an_image() {
+        let mut req = valid_req();
+        req.model = crate::manifest::HUNYUAN3D_21_MODEL.into();
+        req.references = Some(vec![crate::GenerationReference::Mesh {
+            media: crate::GenerationReferenceAuthority::Inline {
+                data: b"glTF".to_vec(),
+            },
+            provenance: crate::GenerationReferenceProvenance::default(),
+            mime_type: "model/gltf-binary".into(),
+            format: crate::MeshReferenceFormat::Glb,
+            byte_length: 4,
+            coordinates: crate::MeshReferenceCoordinates {
+                up_axis: crate::MeshUpAxis::Y,
+                meters_per_unit: 1.0,
+            },
+        }]);
+        assert!(request_satisfies_source_requirement(
+            &req,
+            Some(crate::manifest::HUNYUAN3D_FAMILY)
+        ));
+        assert!(!request_carries_source_frames(&req));
     }
 
     /// The overlap default is a property of the family's carryover, not a
