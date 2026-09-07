@@ -3082,6 +3082,20 @@ mod tests {
                 ControlMode::Hidden
             })
         );
+        let matting = mesh_caps.matting.as_ref().unwrap();
+        assert_eq!(matting.default, MeshMattingMode::Auto);
+        assert_eq!(
+            matting.choices,
+            if cfg!(feature = "mesh-matting") {
+                vec![
+                    MeshMattingMode::Auto,
+                    MeshMattingMode::On,
+                    MeshMattingMode::Off,
+                ]
+            } else {
+                Vec::new()
+            }
+        );
     }
 
     #[test]

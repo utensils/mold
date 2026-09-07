@@ -32,12 +32,13 @@ pub const MAX_MATTING_PIXELS: u64 = 64 * 1024 * 1024;
 /// and a non-opaque background. Fully transparent placeholders and fully
 /// opaque images still need a prediction.
 pub fn has_useful_alpha(image: &RgbaImage) -> bool {
-    let mut transparent = false;
-    let mut visible = false;
+    let needed = (image.len() / 4 / 1_000).max(1);
+    let mut transparent = 0;
+    let mut visible = 0;
     for pixel in image.pixels() {
-        transparent |= pixel[3] < 250;
-        visible |= pixel[3] > 5;
-        if transparent && visible {
+        transparent += usize::from(pixel[3] < 250);
+        visible += usize::from(pixel[3] > 5);
+        if transparent >= needed && visible >= needed {
             return true;
         }
     }
@@ -345,6 +346,10 @@ mod tests {
         let mut cutout = RgbaImage::from_pixel(2, 2, Rgba([1, 2, 3, 255]));
         cutout.put_pixel(0, 0, Rgba([1, 2, 3, 0]));
         assert!(has_useful_alpha(&cutout));
+
+        let mut noisy = RgbaImage::from_pixel(100, 100, Rgba([1, 2, 3, 255]));
+        noisy.put_pixel(0, 0, Rgba([1, 2, 3, 0]));
+        assert!(!has_useful_alpha(&noisy));
     }
 
     #[test]

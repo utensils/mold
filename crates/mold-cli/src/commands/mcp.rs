@@ -3765,6 +3765,7 @@ mod tests {
             octree: None,
             threshold: None,
             target_faces: None,
+            matting: None,
         })
         .unwrap_err();
         assert!(bad.contains("valid base64"), "{bad}");
@@ -3781,6 +3782,7 @@ mod tests {
             octree: None,
             threshold: None,
             target_faces: None,
+            matting: None,
         })
         .unwrap_err();
         assert!(empty.contains("must not be empty"), "{empty}");
@@ -3801,6 +3803,7 @@ mod tests {
             octree: Some(320),
             threshold: Some(0.55),
             target_faces: Some(50_000),
+            matting: Some(mold_core::MeshMattingMode::On),
         })
         .expect("a well-formed mesh request builds");
 
@@ -3819,6 +3822,7 @@ mod tests {
         assert_eq!(mesh.octree_resolution, Some(320));
         assert_eq!(mesh.threshold, Some(0.55));
         assert_eq!(mesh.target_faces, Some(50_000));
+        assert_eq!(mesh.matting, Some(mold_core::MeshMattingMode::On));
         // Texturing is not available; the tool must not ask for it.
         assert_eq!(mesh.texture, None);
         assert_eq!(req.seed, Some(42));
