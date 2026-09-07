@@ -7459,6 +7459,21 @@ describe("MobileApp primary navigation", () => {
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
   });
 
+  it.each(["hosts", "gallery"])("shows only Settings when opened from %s", async (destination) => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get(`[data-test='mobile-tab-${destination}']`).trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    expect(wrapper.find("[data-test='mobile-host-row']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-add-machine']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-gallery-grid']").exists()).toBe(false);
+    await wrapper.get("[data-test='mobile-settings-back']").trigger("click");
+    expect(wrapper.get(`[data-test='mobile-tab-${destination}']`).attributes("aria-current")).toBe(
+      "page",
+    );
+  });
+
   it("ignores left swipes in Settings and returns to the same underlying tab", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -11419,7 +11434,7 @@ describe("MobileApp routing target consistency", () => {
     if (!renderRow) throw new Error("Missing Render host row");
     const useForGenerations = renderRow
       .findAll("button")
-      .find((button) => button.text() === "Use host");
+      .find((button) => button.text() === "Use machine");
     if (!useForGenerations) throw new Error("Missing use-for-generations action");
     await useForGenerations.trigger("click");
     await flushPromises();

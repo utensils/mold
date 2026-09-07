@@ -8,7 +8,8 @@
  * never vanish the way SheetPanel's `full` variant drops its #header slot.
  */
 import { useMobileBack } from "./useMobileBack";
-import { computed, onBeforeUnmount, ref, watch, toRef } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch, toRef } from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
 
 const props = withDefaults(
   defineProps<{
@@ -37,6 +38,7 @@ const emit = defineEmits<{ close: [] }>();
 
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
+const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-library-sheet");
 const body = ref<HTMLElement | null>(null);
 const dragOffset = ref(0);
 const dragging = ref(false);
@@ -61,12 +63,13 @@ function resetDrag(): void {
 
 watch(
   () => props.open,
-  (open) => {
+  async (open) => {
     if (open) {
       restoreFocus = document.activeElement as HTMLElement | null;
       // Editing sheets may raise the keyboard immediately. Read-first sheets
       // focus the panel so the keyboard waits for an explicit field tap.
-      queueMicrotask(() => {
+      await nextTick();
+      if (props.open && isTop()) {
         if (!props.focusFirstControl) {
           panel.value?.focus?.();
           return;
@@ -75,13 +78,14 @@ watch(
           "input, textarea, select, button:not([data-sheet-close])",
         );
         (first ?? panel.value)?.focus?.();
-      });
+      }
     } else {
       resetDrag();
       restoreFocus?.focus?.();
       restoreFocus = null;
     }
   },
+  { immediate: true },
 );
 
 onBeforeUnmount(() => {
@@ -130,9 +134,33 @@ function finishDismiss(): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (!props.open || !isTop()) return;
   if (event.key === "Escape") {
     event.preventDefault();
+    event.stopImmediatePropagation();
     emit("close");
+  } else if (event.key === "Tab") {
+    const controls = [
+      ...(panel.value?.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']",
+      ) ?? []),
+    ].filter((node) => !node.closest("[inert]") && node.getClientRects().length > 0);
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (
+      !first ||
+      (event.shiftKey &&
+        (document.activeElement === first || document.activeElement === panel.value))
+    ) {
+      event.preventDefault();
+      (last ?? panel.value)?.focus();
+    } else if (
+      !event.shiftKey &&
+      (document.activeElement === last || document.activeElement === panel.value)
+    ) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 }
 </script>
@@ -143,6 +171,7 @@ function onKeydown(event: KeyboardEvent): void {
     :class="{ 'is-open': open }"
     role="dialog"
     aria-modal="true"
+    :inert="!open"
     :aria-label="title"
     :aria-hidden="open ? undefined : 'true'"
     :data-test="testId"

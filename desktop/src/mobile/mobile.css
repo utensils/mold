@@ -42,7 +42,9 @@ button {
   transform: translateY(var(--mobile-visual-viewport-page-top, 0px));
   min-height: 0;
   box-sizing: border-box;
-  overflow: hidden;
+  /* Only .mobile-content scrolls. Hidden overflow still permits focus-driven
+     shell scrolling, which can move the header offscreen after theme changes. */
+  overflow: clip;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   background: var(--mold-bg-deep);
@@ -5592,4 +5594,22 @@ button:disabled {
 }
 .mobile-shell.is-keyboard-open .mobile-create-action {
   padding-bottom: 8px;
+}
+
+/* Pairing is primary on first launch; saved machines lead on later visits. */
+.mobile-add-machine {
+  margin-block: 20px;
+  padding: 16px;
+  border: 1px solid var(--mold-border);
+  border-radius: 12px;
+  background: var(--mold-surface);
+}
+.mobile-add-machine > summary {
+  min-height: var(--mobile-touch-target, 44px);
+  align-content: center;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mobile-add-machine[open] > summary {
+  margin-bottom: 12px;
 }

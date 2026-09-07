@@ -682,6 +682,7 @@ const catalogView = ref<
 const hostDetailView = ref<RefreshableMobileView | null>(null);
 const createHeading = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
+useMobileBack(settingsOpen, closeSettings);
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsBackButton = ref<HTMLButtonElement | null>(null);
 const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
@@ -874,6 +875,12 @@ const advancedActiveCount = computed(() => {
       count += 1;
     if (form.mesh.threshold != null && form.mesh.threshold !== mesh.threshold.default) count += 1;
     if (form.mesh.targetFaces != null) count += 1;
+    if (
+      mesh.matting?.mode === "adjustable" &&
+      form.mesh.matting != null &&
+      form.mesh.matting !== mesh.matting.default
+    )
+      count += 1;
   }
   // Differs-from-default (#787): an untouched wan default is not "active",
   // while an explicit clear (the empty-uncond opt-out) is.
@@ -11201,7 +11208,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </div>
       <footer class="mobile-pair-scanner-foot">
         <strong>Point your camera at the QR code</strong>
-        <span>On your host, open Settings → Mobile pairing.</span>
+        <span>On your machine, open Settings → Mobile pairing.</span>
       </footer>
     </section>
     <header v-if="settingsOpen" class="mobile-header mobile-settings-nav">
@@ -11994,7 +12001,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </template>
       </template>
 
-      <template v-else-if="tab === 'gallery'">
+      <template v-else-if="!settingsOpen && tab === 'gallery'">
         <div class="mobile-library-heading">
           <div>
             <h1 class="section-title">My images</h1>
@@ -12752,7 +12759,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </MobileLibrarySheet>
       </template>
 
-      <template v-else-if="tab === 'hosts'">
+      <template v-else-if="!settingsOpen && tab === 'hosts'">
         <MobileHostDetail
           v-if="hostDetail"
           ref="hostDetailView"
@@ -12782,105 +12789,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ MOBILE_CAPABLE_ROUTING_HINT }}
           </p>
-          <button
-            class="primary-button mobile-pair-button"
-            type="button"
-            :disabled="pairing"
-            data-test="mobile-scan-pairing"
-            @click="scanPairingCode"
-          >
-            <span aria-hidden="true">▦</span>
-            {{ pairing ? "Opening camera…" : "Scan pairing code" }}
-          </button>
-          <p class="mobile-pair-note">On your host, open Settings → Mobile pairing.</p>
-          <button
-            class="secondary-button"
-            type="button"
-            :disabled="discovering"
-            data-test="mobile-discover-hosts"
-            @click="discoverHosts"
-          >
-            {{ discovering ? "Scanning…" : "Discover nearby" }}
-          </button>
-          <div
-            v-for="host in discovered"
-            :key="`${host.host}:${host.port}`"
-            class="host-row"
-            data-test="mobile-discovered-host"
-          >
-            <div class="host-row-head">
-              <div>
-                <div class="host-name">{{ host.name }}</div>
-                <div class="host-url">{{ host.host }}:{{ host.port }}</div>
-              </div>
-              <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
-                Connect
-              </button>
-            </div>
-          </div>
-          <form
-            v-if="selectedDiscovered"
-            style="margin-top: 20px"
-            data-test="mobile-discovered-key-prompt"
-            @submit.prevent="connectHost(hostInput.address, hostInput.name)"
-          >
-            <div class="host-row">
-              <div class="host-name">{{ selectedDiscovered.name }}</div>
-              <div class="host-url">
-                {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
-              </div>
-            </div>
-            <label class="field"
-              ><span>API key</span
-              ><input
-                ref="discoveredApiKeyInput"
-                v-model="hostInput.apiKey"
-                class="control"
-                type="password"
-                placeholder="Required by this machine"
-                autocomplete="off"
-                data-test="mobile-discovered-api-key"
-                required
-            /></label>
-            <p class="section-note">This machine requires its own API key.</p>
-            <div class="mobile-inline-actions">
-              <button class="secondary-button" type="button" @click="clearDiscoveredHost">
-                Choose another
-              </button>
-              <button class="primary-button" type="submit">Test and save</button>
-            </div>
-          </form>
-          <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
-            <label class="field"
-              ><span>Name</span
-              ><input
-                v-model="hostInput.name"
-                class="control"
-                placeholder="Studio Mac (optional)"
-                autocomplete="off"
-            /></label>
-            <label class="field"
-              ><span>Address or MagicDNS name</span
-              ><input
-                v-model="hostInput.address"
-                class="control"
-                placeholder="studio.tailnet.ts.net or 192.168.1.20"
-                autocapitalize="none"
-                autocomplete="url"
-                required
-            /></label>
-            <label class="field"
-              ><span>API key</span
-              ><input
-                v-model="hostInput.apiKey"
-                class="control"
-                type="password"
-                placeholder="If required"
-                autocomplete="off"
-            /></label>
-            <button class="primary-button" type="submit">Test and save</button>
-          </form>
-          <p v-if="hostError" class="status-line error-text">{{ hostError }}</p>
           <div v-for="host in hosts" :key="host.id" class="host-row">
             <button
               class="host-row-button"
@@ -12942,11 +12850,117 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     ? "Disconnected"
                     : host.id === selectedHostId
                       ? "Active"
-                      : "Use host"
+                      : "Use machine"
                 }}
               </button>
             </div>
           </div>
+          <details
+            class="mobile-add-machine"
+            :open="hosts.length === 0"
+            data-test="mobile-add-machine"
+          >
+            <summary>Add a machine</summary>
+            <button
+              class="primary-button mobile-pair-button"
+              type="button"
+              :disabled="pairing"
+              data-test="mobile-scan-pairing"
+              @click="scanPairingCode"
+            >
+              <span aria-hidden="true">▦</span>
+              {{ pairing ? "Opening camera…" : "Scan pairing code" }}
+            </button>
+            <p class="mobile-pair-note">On your machine, open Settings → Mobile pairing.</p>
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="discovering"
+              data-test="mobile-discover-hosts"
+              @click="discoverHosts"
+            >
+              {{ discovering ? "Scanning…" : "Discover nearby" }}
+            </button>
+            <div
+              v-for="host in discovered"
+              :key="`${host.host}:${host.port}`"
+              class="host-row"
+              data-test="mobile-discovered-host"
+            >
+              <div class="host-row-head">
+                <div>
+                  <div class="host-name">{{ host.name }}</div>
+                  <div class="host-url">{{ host.host }}:{{ host.port }}</div>
+                </div>
+                <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
+                  Connect
+                </button>
+              </div>
+            </div>
+            <form
+              v-if="selectedDiscovered"
+              style="margin-top: 20px"
+              data-test="mobile-discovered-key-prompt"
+              @submit.prevent="connectHost(hostInput.address, hostInput.name)"
+            >
+              <div class="host-row">
+                <div class="host-name">{{ selectedDiscovered.name }}</div>
+                <div class="host-url">
+                  {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
+                </div>
+              </div>
+              <label class="field"
+                ><span>API key</span
+                ><input
+                  ref="discoveredApiKeyInput"
+                  v-model="hostInput.apiKey"
+                  class="control"
+                  type="password"
+                  placeholder="Required by this machine"
+                  autocomplete="off"
+                  data-test="mobile-discovered-api-key"
+                  required
+              /></label>
+              <p class="section-note">This machine requires its own API key.</p>
+              <div class="mobile-inline-actions">
+                <button class="secondary-button" type="button" @click="clearDiscoveredHost">
+                  Choose another
+                </button>
+                <button class="primary-button" type="submit">Test and save</button>
+              </div>
+            </form>
+            <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
+              <label class="field"
+                ><span>Name</span
+                ><input
+                  v-model="hostInput.name"
+                  class="control"
+                  placeholder="Studio Mac (optional)"
+                  autocomplete="off"
+              /></label>
+              <label class="field"
+                ><span>Address or MagicDNS name</span
+                ><input
+                  v-model="hostInput.address"
+                  class="control"
+                  placeholder="studio.tailnet.ts.net or 192.168.1.20"
+                  autocapitalize="none"
+                  autocomplete="url"
+                  required
+              /></label>
+              <label class="field"
+                ><span>API key</span
+                ><input
+                  v-model="hostInput.apiKey"
+                  class="control"
+                  type="password"
+                  placeholder="If required"
+                  autocomplete="off"
+              /></label>
+              <button class="primary-button" type="submit">Test and save</button>
+            </form>
+          </details>
+          <p v-if="hostError" class="status-line error-text" role="alert">{{ hostError }}</p>
         </template>
       </template>
 
