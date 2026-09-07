@@ -34,6 +34,25 @@ describe("MobileImagePickerSheet", () => {
     });
   });
 
+  it("opens gallery actions on Gallery again after a local-file visit", async () => {
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: { open: true, target, initialTab: "gallery" },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-image-picker-gallery-tab']").attributes("aria-selected"),
+    ).toBe("true");
+    expect(wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")).toHaveLength(2);
+    await wrapper.get("[data-test='mobile-image-picker-file-tab']").trigger("click");
+    await wrapper.setProps({ open: false });
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-image-picker-gallery-tab']").attributes("aria-selected"),
+    ).toBe("true");
+  });
+
   it("offers local PNG/JPEG input and filters the remote gallery", async () => {
     const wrapper = mount(MobileImagePickerSheet, {
       props: { open: true, target },

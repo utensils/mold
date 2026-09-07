@@ -251,6 +251,7 @@ describe("MobileSourceControls", () => {
       target,
       gallerySources,
       title: "Source image",
+      initialTab: "gallery",
       maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - 7,
     });
 
@@ -671,6 +672,7 @@ describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
     const sheet = wrapper.getComponent(MobileImagePickerSheet);
     expect(sheet.props("open")).toBe(true);
     expect(sheet.props("title")).toBe("First frame");
+    expect(sheet.props("initialTab")).toBe("gallery");
     sheet.vm.$emit("pick", {
       filename: "opening.png",
       base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",

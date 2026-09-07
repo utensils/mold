@@ -2797,7 +2797,7 @@ button:disabled {
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.68);
   color: #f5efff;
-  font-size: 0.8125rem;
+  font-size: min(0.8125rem, 18px);
   line-height: 1;
   text-indent: 2px;
   backdrop-filter: blur(8px);
@@ -5062,7 +5062,7 @@ button:disabled {
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.68);
   color: #f5efff;
-  font-size: 0.8125rem;
+  font-size: min(0.8125rem, 18px);
   line-height: 1;
   backdrop-filter: blur(8px);
 }

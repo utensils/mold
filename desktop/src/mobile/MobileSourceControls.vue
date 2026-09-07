@@ -694,6 +694,7 @@ function applyMask(mask: string): void {
     </fieldset>
     <MobileImagePickerSheet
       :open="h3PickerTarget !== null"
+      initial-tab="gallery"
       :target="target"
       :gallery-sources="gallerySources"
       :title="h3PickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
@@ -1086,6 +1087,7 @@ function applyMask(mask: string): void {
     <MobileImagePickerSheet
       v-if="!isAttachmentMode || (plan.kind === 'attachments' && plan.primary === 'target')"
       :open="sourcePickerOpen"
+      initial-tab="gallery"
       :target="target"
       :gallery-sources="gallerySources"
       :title="isAttachmentMode ? 'Edit target' : 'Source image'"
@@ -1097,6 +1099,7 @@ function applyMask(mask: string): void {
     <MobileImagePickerSheet
       v-if="!isAttachmentMode && caps.supportsEndFrame"
       :open="endFramePickerOpen"
+      initial-tab="gallery"
       :target="target"
       :gallery-sources="gallerySources"
       title="End frame"

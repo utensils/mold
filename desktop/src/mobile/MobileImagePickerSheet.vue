@@ -29,12 +29,14 @@ const props = withDefaults(
     target: ApiTarget | null;
     gallerySources?: MobileGallerySource[];
     title?: string;
+    initialTab?: "file" | "gallery";
     multiple?: boolean;
     maxBytes?: number;
     oversizeMessage?: string;
   }>(),
   {
     title: "Opening image",
+    initialTab: "file",
     multiple: false,
     gallerySources: () => [],
     maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
@@ -48,7 +50,13 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const tab = ref<"file" | "gallery">("file");
+const tab = ref<"file" | "gallery">(props.initialTab);
+watch(
+  () => props.open,
+  (open) => {
+    if (open) tab.value = props.initialTab;
+  },
+);
 const input = ref<HTMLInputElement | null>(null);
 const entries = ref<MobileGalleryEntry[]>([]);
 const loading = ref(false);
@@ -455,6 +463,8 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   border-radius: 50%;
   background: var(--mold-blue);
   color: var(--mold-on-accent);
+  font-size: min(0.875rem, 18px);
+  line-height: 1;
   font-weight: 700;
 }
 
