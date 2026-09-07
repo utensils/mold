@@ -18,7 +18,8 @@ use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
 use candle_core::{DType, Device};
 use sha2::{Digest, Sha256};
 
-pub const POLICY_VERSION: &str = "hunyuan3d-shape-linear-v1";
+pub const POLICY_VERSION: &str = "hunyuan3d-shape-linear-v2";
+pub const SUPPORTED_POLICY_VERSIONS: &[&str] = &["hunyuan3d-shape-linear-v1", POLICY_VERSION];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShapeQuantization {
@@ -91,6 +92,24 @@ fn is_router(name: &str) -> bool {
     name.ends_with(".moe.gate.weight") || name.contains(".moe.gate.")
 }
 
+fn is_precision_sensitive(name: &str) -> bool {
+    [
+        "model.latent_in.",
+        "model.cond_in.",
+        "model.time_in.",
+        "model.guidance_in.",
+        "model.x_embedder.",
+        "model.t_embedder.",
+        "model.final_layer.",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+        || name.contains(".img_mod.")
+        || name.contains(".txt_mod.")
+        || name.contains(".modulation.")
+        || name.contains(".adaLN_modulation.")
+}
+
 fn storage_dtype(
     name: &str,
     dims: &[usize],
@@ -102,6 +121,7 @@ fn storage_dtype(
         && name.ends_with(".weight")
         && dims.len() == 2
         && !is_router(name)
+        && !is_precision_sensitive(name)
         && dims[1].is_multiple_of(quantized.block_size());
     if eligible {
         Ok(quantized)
@@ -305,6 +325,9 @@ mod tests {
                 &[1024, 1024][..],
             ),
             ("model.blocks.0.norm1.weight", &[2048][..]),
+            ("model.latent_in.weight", &[1024, 64][..]),
+            ("model.blocks.0.img_mod.lin.weight", &[6144, 1024][..]),
+            ("model.final_layer.linear.weight", &[64, 1024][..]),
         ] {
             assert_eq!(
                 storage_dtype(name, dims, DType::F16, ShapeQuantization::Q8).unwrap(),

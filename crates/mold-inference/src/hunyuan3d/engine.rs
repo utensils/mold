@@ -47,7 +47,7 @@ use crate::progress::{ProgressEvent, ProgressPhase};
 use super::dino2::{Dinov2Config, Dinov2Model};
 use super::glb::{write_glb, GlbMaterial};
 use super::mesh::{Mesh, MeshAlgorithm, OccupancyGrid};
-use super::quantization::POLICY_VERSION;
+use super::quantization::SUPPORTED_POLICY_VERSIONS;
 use super::sampler::{self, SamplingPlan};
 use super::shape_vae::{ShapeVae, ShapeVaeConfig, ShapeVaeEncoder, ShapeVaeEncoderConfig};
 use super::transformer::{Config as DitConfig, Hunyuan3dDit};
@@ -83,7 +83,7 @@ fn checkpoint_header(
         "GGUF architecture is not Hunyuan3D"
     );
     anyhow::ensure!(
-        string("mold.quantization.policy")? == POLICY_VERSION,
+        SUPPORTED_POLICY_VERSIONS.contains(&string("mold.quantization.policy")?),
         "Hunyuan3D GGUF uses an unsupported quantization policy"
     );
     let _: super::quantization::ShapeQuantization = string("mold.quantization.tier")?.parse()?;
