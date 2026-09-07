@@ -193,7 +193,7 @@ onBeforeUnmount(() => window.removeEventListener("popstate", onHistoryPop));
 }
 .mobile-identity-picker-actions button {
   min-height: 48px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 10px;
   background: var(--print-surface);
   color: var(--ink);

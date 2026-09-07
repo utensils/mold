@@ -27,7 +27,7 @@ watch(seed, (next) => {
 const seedNote = computed(() => {
   if (uiMode.value === "random") return "New seed for every print.";
   const raw = seed.value.trim();
-  if (raw === "") return "Enter a whole number, or choose Random.";
+  if (raw === "") return "Enter a whole number, or choose Surprise me.";
   if (!/^\d+$/.test(raw)) return "Use a whole number, 0 or higher.";
   if (!Number.isSafeInteger(Number(raw))) return "Seed is too large to reproduce exactly.";
   return "Repeat this seed for matching results.";
@@ -65,8 +65,8 @@ function newSeed(): void {
 
 <template>
   <fieldset class="mobile-seed-picker" :disabled="disabled">
-    <legend class="mobile-seed-legend">Seed</legend>
-    <div class="mobile-seed-modes" role="group" aria-label="Seed mode">
+    <legend class="mobile-seed-legend">Repeat this look</legend>
+    <div class="mobile-seed-modes" role="group" aria-label="Repeat this look">
       <button
         type="button"
         class="mobile-seed-mode"
@@ -75,7 +75,7 @@ function newSeed(): void {
         data-test="mobile-seed-mode-random"
         @click="setMode('random')"
       >
-        Random
+        Surprise me
       </button>
       <button
         type="button"
@@ -85,7 +85,7 @@ function newSeed(): void {
         data-test="mobile-seed-mode-fixed"
         @click="setMode('fixed')"
       >
-        Fixed
+        Keep
       </button>
     </div>
 

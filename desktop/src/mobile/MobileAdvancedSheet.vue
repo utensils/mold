@@ -1,13 +1,65 @@
 <script setup lang="ts">
-defineProps<{
+import { useMobileBack } from "./useMobileBack";
+import { ref, toRef, watch, nextTick, onBeforeUnmount } from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
+
+const props = defineProps<{
   open: boolean;
   count: number;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   (event: "close"): void;
   (event: "reset"): void;
 }>();
+useMobileBack(toRef(props, "open"), () => emit("close"));
+const panel = ref<HTMLElement | null>(null);
+const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-more-settings");
+let previousFocus: HTMLElement | null = null;
+watch(
+  () => props.open,
+  async (open) => {
+    if (open) {
+      previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      await nextTick();
+      if (props.open) panel.value?.focus();
+    } else {
+      previousFocus?.focus();
+      previousFocus = null;
+    }
+  },
+  { immediate: true },
+);
+function onKeydown(event: KeyboardEvent): void {
+  if (!props.open || !isTop()) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    emit("close");
+  } else if (event.key === "Tab") {
+    const controls = [
+      ...(panel.value?.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']",
+      ) ?? []),
+    ].filter((node) => !node.closest("[inert]") && node.getClientRects().length > 0);
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (
+      !first ||
+      (event.shiftKey &&
+        (document.activeElement === first || document.activeElement === panel.value))
+    ) {
+      event.preventDefault();
+      (last ?? panel.value)?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+}
+onBeforeUnmount(() => {
+  previousFocus = null;
+});
 </script>
 
 <template>
@@ -18,16 +70,21 @@ defineEmits<{
     only toggles visibility.
   -->
   <div
+    ref="panel"
+    tabindex="-1"
     class="mobile-advanced-sheet"
+    :inert="!open"
+    aria-modal="true"
+    @keydown="onKeydown"
     :class="{ 'is-open': open }"
     role="dialog"
-    aria-label="Advanced settings"
+    aria-label="More settings"
     :aria-hidden="open ? undefined : 'true'"
     data-test="mobile-advanced-sheet"
   >
     <header class="mobile-advanced-sheet-head">
       <div class="mobile-advanced-sheet-title">
-        <strong>Advanced</strong>
+        <strong>More settings</strong>
         <span
           v-if="count > 0"
           class="mobile-advanced-sheet-badge"
@@ -48,11 +105,11 @@ defineEmits<{
         <button
           class="mobile-advanced-sheet-close"
           type="button"
-          aria-label="Close advanced settings"
+          aria-label="Done with more settings"
           data-test="mobile-advanced-close"
           @click="$emit('close')"
         >
-          <span aria-hidden="true">✕</span>
+          Done
         </button>
       </div>
     </header>

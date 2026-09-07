@@ -1,28 +1,22 @@
-/*
- * LEGACY — the iPhone/Android surface still speaks the pre-redesign token
- * vocabulary. ui/tokens.css's LEGACY BRIDGE keeps those custom properties
- * alive and this file keeps the handful of Tailwind utilities they pair with.
- * Delete both, and import ../styles/base.css instead, when the mobile surface
- * is redesigned.
- */
+/* Shared mobile foundation: theme tokens plus native interaction rules. */
 @import "tailwindcss";
 @import "../../../ui/tokens.css";
 @import "../../../ui/fonts/fonts.css";
 @import "../../../ui/kit.css";
 
 @theme {
-  --font-display: var(--f-display);
-  --font-body: var(--f-body);
-  --font-utility: var(--f-mono);
+  --font-display: var(--mold-font-sans);
+  --font-body: var(--mold-font-sans);
+  --font-utility: var(--mold-font-mono);
 
   --text-display-lg: 2.125rem;
   --text-display: 1.375rem;
   --text-display-sm: 1.125rem;
   --text-body-lg: 0.9375rem;
-  --text-body: 0.8125rem;
-  --text-caption: 0.6875rem;
+  --text-body: var(--mold-fs-base);
+  --text-caption: var(--mold-fs-xs);
   --text-data: 0.75rem;
-  --text-edge-code: 0.65625rem;
+  --text-edge-code: var(--mold-fs-micro);
 }
 
 /* Native-app feel: no WebKit elastic rubber-banding anywhere. The document
@@ -36,9 +30,9 @@ body,
 }
 
 body {
-  background: var(--bath);
-  color: var(--rebate);
-  font-family: var(--f-body);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
   font-size: var(--text-body);
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
@@ -63,27 +57,27 @@ video::-webkit-media-controls-picture-in-picture-button {
 }
 
 :focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--safelight) 35%, transparent);
+  background: color-mix(in srgb, var(--mold-blue) 35%, transparent);
 }
 
 /* Utility type roles the mobile views still compose with. */
 .edge-code {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: var(--text-edge-code);
   font-stretch: 87.5%;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   white-space: nowrap;
 }
 
 .data-mono {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-size: var(--text-data);
   font-variant-numeric: tabular-nums;
 }

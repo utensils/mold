@@ -103,9 +103,9 @@ const presentation = computed(() =>
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
   font-size: 0.875rem;
 }
 .mobile-expansion-pull > span {
@@ -119,12 +119,12 @@ const presentation = computed(() =>
   height: 6px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 .mobile-expansion-progress [role="progressbar"] span {
   display: block;
   height: 100%;
-  background: var(--safelight);
+  background: var(--mold-blue);
   transition: width 180ms ease-out;
 }
 .mobile-expansion-progress p {
@@ -132,7 +132,7 @@ const presentation = computed(() =>
   flex-wrap: wrap;
   gap: 4px 12px;
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .mobile-touch-action {
   min-height: 44px;

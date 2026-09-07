@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useMobileBack } from "./useMobileBack";
+import { MOBILE_QUEUE_SECTIONS, mobileQueueSection } from "./queueSections";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -10,6 +12,8 @@ import {
 } from "@tauri-apps/plugin-barcode-scanner";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
+import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
+import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 import { promptRecipeFromForm } from "../lib/promptRecipe";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -125,7 +129,6 @@ import {
 } from "./generateTarget";
 import {
   activityAnnouncement,
-  activityCountLabel,
   mergeActivity,
   withLiveQueueStatus,
   type ActivityJobVM,
@@ -148,6 +151,7 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import {
+  cancelQueueJob,
   findQueueEntryById,
   listQueue,
   mergeQueueEntries,
@@ -421,6 +425,7 @@ import MobileBatchControl from "./MobileBatchControl.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileFileUnder from "./MobileFileUnder.vue";
+import { buildFileUnderRequestFields } from "@studio/lib/fileUnder";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
@@ -434,6 +439,18 @@ import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixR
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSharedParams from "./MobileSharedParams.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
+import {
+  outputKindFor,
+  outputKindForModel,
+  modelsForOutputKind,
+  OUTPUT_KIND_LABEL,
+  OUTPUT_KIND_TITLE,
+  type OutputKind,
+} from "@studio/lib/outputKind";
+import MobileNavigation from "./MobileNavigation.vue";
+import { MOBILE_TABS, type MobileTab } from "./navigation";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
@@ -513,7 +530,7 @@ import {
 } from "./mobileGenerationOutcome";
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
-type Tab = "generate" | "gallery" | "catalog" | "hosts";
+type Tab = MobileTab;
 type RefreshableMobileView = { refresh(): Promise<void> };
 
 /** Deep-link payload for the Discover shelf; `token` re-fires the intent even
@@ -656,12 +673,19 @@ const MOBILE_MACHINES_SCROLL_KEY = "mobile:machines";
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const androidNativeRuntime = isNativeAndroidRuntime();
 const tab = ref<Tab>("generate");
+function selectMobileTab(next: MobileTab): void {
+  if (next === "catalog") openCatalog();
+  else tab.value = next;
+}
 const licenseAcceptance = useLicenseAcceptance();
 const mobileContent = ref<HTMLElement | null>(null);
-const catalogView = ref<RefreshableMobileView | null>(null);
+const catalogView = ref<
+  (RefreshableMobileView & { browseKind(kind: "all" | "image" | "video" | "mesh"): void }) | null
+>(null);
 const hostDetailView = ref<RefreshableMobileView | null>(null);
 const createHeading = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
+useMobileBack(settingsOpen, closeSettings);
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsBackButton = ref<HTMLButtonElement | null>(null);
 const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
@@ -843,6 +867,24 @@ const advancedSheetOpen = ref(false);
  * "Advanced" trigger badge and the sheet header badge. */
 const advancedActiveCount = computed(() => {
   let count = 0;
+  const model = selectedGenerationModel.value;
+  const recipe = effectiveGenerationRecipe(model, form.pipeline);
+  if (model && form.steps !== (recipe?.steps.default ?? model.default_steps)) count += 1;
+  if (model && form.guidance !== (recipe?.guidance.default ?? model.default_guidance)) count += 1;
+  if (form.seed.trim()) count += 1;
+  const mesh = recipe?.capabilities.mesh;
+  if (mesh && form.mesh) {
+    if (form.mesh.octreeResolution != null && form.mesh.octreeResolution !== mesh.octree_default)
+      count += 1;
+    if (form.mesh.threshold != null && form.mesh.threshold !== mesh.threshold.default) count += 1;
+    if (form.mesh.targetFaces != null) count += 1;
+    if (
+      mesh.matting?.mode === "adjustable" &&
+      form.mesh.matting != null &&
+      form.mesh.matting !== mesh.matting.default
+    )
+      count += 1;
+  }
   // Differs-from-default (#787): an untouched wan default is not "active",
   // while an explicit clear (the empty-uncond opt-out) is.
   if (
@@ -1002,7 +1044,7 @@ const VIEW_PULL_MAX = 112;
 let viewPullTouchId: number | null = null;
 let viewPullStartX = 0;
 let viewPullStartY = 0;
-const MAJOR_TABS: readonly Tab[] = ["generate", "gallery", "catalog", "hosts"];
+const MAJOR_TABS: readonly Tab[] = MOBILE_TABS.map((item) => item.id);
 const MAJOR_SWIPE_DISTANCE = 64;
 const MAJOR_SWIPE_INTENT_RATIO = 1.2;
 let majorSwipeTouchId: number | null = null;
@@ -1090,6 +1132,9 @@ const printTitle = computed({
   },
 });
 const generatedViewerOpen = ref(false);
+useMobileBack(generatedViewerOpen, () => {
+  generatedViewerOpen.value = false;
+});
 const reusingPrint = ref(false);
 const usingPrintAsSource = ref(false);
 const reusePrintError = ref("");
@@ -1355,10 +1400,10 @@ const headerTargetLabel = computed(() =>
 );
 const developOnNote = computed(() => {
   if (!automaticRouting.value)
-    return `Develop on ${selectedHost.value ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value) : "this machine"}`;
+    return `Generate on ${selectedHost.value ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value) : "this machine"}`;
   return generateTarget.value === CAPABLE_TARGET_ID
-    ? "Develop on the most capable machine"
-    : "Develop on the least busy machine";
+    ? "Generate on the most capable machine"
+    : "Generate on the least busy machine";
 });
 /** Where the Create empty states say a model is (or is not) installed. */
 const modelScopeLabel = computed(() =>
@@ -1759,8 +1804,60 @@ function modelAvailabilityTag(name: string): string | null {
   if (!automaticRouting.value) return null;
   return mobileModelAvailabilityTag(modelHostIds(name), connectedHosts.value);
 }
-/** Every downloaded generation model is offered; Create has one output. */
-const pickerModels = computed(() => generationModels.value);
+const lastUsedStyles = useLastUsedStylesStore();
+const selectedOutputKind = computed(() => outputKindFor(form.family));
+const outputOptions = computed(() =>
+  (["still", "clip", "mesh"] as const).map((value) => ({ value, label: OUTPUT_KIND_LABEL[value] })),
+);
+const outputKindNotice = ref("");
+const requestedBrowseKind = ref<OutputKind | null>(null);
+async function browseOutputStyles(): Promise<void> {
+  const kind = requestedBrowseKind.value ?? selectedOutputKind.value;
+  openCatalog();
+  await nextTick();
+  catalogView.value?.browseKind(kind === "still" ? "image" : kind === "clip" ? "video" : "mesh");
+}
+const organizationSummary = computed(() => {
+  const fields = fileUnderEnabled.value
+    ? buildFileUnderRequestFields(
+        form.fileUnder,
+        printTitle.value,
+        mobileSettings.autoTagTitle,
+        fileUnderCollections.value,
+      )
+    : {};
+  return (
+    [printTitle.value, ...(fields.tags ?? []).map((tag) => `#${tag}`), fields.collection?.name]
+      .filter(Boolean)
+      .join(" · ") || "Optional"
+  );
+});
+let fallbackStyleName: string | null = null;
+const pickerModels = computed(() =>
+  modelsForOutputKind(generationModels.value, selectedOutputKind.value),
+);
+function selectOutputKind(value: string | number): void {
+  const kind = value as OutputKind;
+  if (kind === selectedOutputKind.value) return;
+  const model = lastUsedStyles.pick(kind, modelsForOutputKind(generationModels.value, kind));
+  if (!model) {
+    requestedBrowseKind.value = kind;
+    outputKindNotice.value = `Get a ${OUTPUT_KIND_LABEL[kind].toLowerCase()} style ready on a machine first.`;
+    return;
+  }
+  outputKindNotice.value = "";
+  const remembered = lastUsedStyles.bySection[kind];
+  fallbackStyleName = remembered && remembered !== model.name ? model.name : null;
+  applyModelDefaults(form, model);
+}
+watch(
+  () => [form.model, generationModels.value] as const,
+  ([name, entries]) => {
+    const entry = entries.find((model) => model.name === name);
+    if (entry && name !== fallbackStyleName)
+      lastUsedStyles.remember(outputKindForModel(entry), name);
+  },
+);
 const modelLabel = (name: string) => modelDisplayNameForId(name, generationModels.value);
 const upscalers = computed(() =>
   models.value.filter((model) => model.family === "upscaler" || model.family === "real-esrgan"),
@@ -2667,6 +2764,196 @@ const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
     })),
   ].sort(compareNewestSubmitted),
 );
+const mobileQueueGroups = computed(() =>
+  MOBILE_QUEUE_SECTIONS.map((section) => ({
+    ...section,
+    rows: mobileActivityRows.value.filter((entry) => {
+      if (entry.kind === "shared")
+        return mobileQueueSection(entry.shared.phase, entry.shared.stale) === section.id;
+      const host = connectedHosts.value.find((host) => host.id === activityRowHostId(entry.local));
+      return (
+        mobileQueueSection(
+          entry.local.queueState ?? mobilePrintPhase(entry.local.print, entry.local.live),
+          !host?.online || !!host.stale,
+          entry.local.blockedReason || !!durableHold(entry.local.print),
+        ) === section.id
+      );
+    }),
+  })).filter((section) => section.rows.length),
+);
+const finishedQueueJobs = computed(() =>
+  allGenerationJobs.value
+    .filter((job) => job.status === "complete" || job.status === "error")
+    .sort((a, b) => b.submittedAtUnixMs - a.submittedAtUnixMs)
+    .slice(0, 20),
+);
+const queueDetailKey = ref<string | null>(null);
+const queueDetailEntry = computed(() =>
+  mobileActivityRows.value.find((row) => row.key === queueDetailKey.value),
+);
+const queueDetailJob = computed(() =>
+  queueDetailEntry.value?.kind === "local"
+    ? queueDetailEntry.value.local.print
+    : finishedQueueJobs.value.find((job) => `finished:${job.clientId}` === queueDetailKey.value),
+);
+const queueDetailHost = computed(() =>
+  connectedHosts.value.find(
+    (host) =>
+      host.id ===
+      (queueDetailJob.value?.hostId ??
+        (queueDetailEntry.value?.kind === "shared" ? queueDetailEntry.value.shared.hostId : null)),
+  ),
+);
+const queueDetailRow = computed(() => {
+  const entry = queueDetailEntry.value;
+  const host = queueDetailHost.value;
+  const id = entry?.kind === "local" ? activityRowJobId(entry.local) : entry?.shared.id;
+  return host && id
+    ? (liveQueues.value[host.id]?.entries.find((row) => row.id === id) ?? null)
+    : null;
+});
+const queueDetailModel = computed(() => {
+  const row = queueDetailRow.value;
+  const host = queueDetailHost.value;
+  if (!row || !host) return null;
+  const job = queueDetailJob.value;
+  const request = job && !presentationStubClientIds.has(job.clientId) ? job.request : null;
+  const model = queueEntryDetailModel({
+    entry: row,
+    hostLabel: host.name,
+    modelLabel: modelLabel(row.model),
+    nowMs: Date.now(),
+    plan: liveQueues.value[host.id]?.plan ?? null,
+    metadata: row.metadata as QueueDetailMetadata | null,
+    localMetadata: request
+      ? {
+          ...request,
+          lora: request.lora?.path ?? null,
+          lora_scale: request.lora?.scale ?? null,
+          collection: request.collection?.name ?? request.collection?.id ?? null,
+        }
+      : null,
+    retryAuthority: job ? durableRecoveryForJob(job) : null,
+    mine: !!queueDetailJob.value,
+    canCancelRunning: serverCapabilities[host.id]?.queue?.cooperative_cancellation === true,
+  });
+  if (!host.online || host.stale) {
+    for (const action of [model.cancel, model.retry, model.reuse]) {
+      action.available = false;
+      action.blockedReason = "Reconnect this machine first.";
+    }
+  }
+  return model;
+});
+const queueDetailPreview = ref<QueueJobProgress | null>(null);
+watch(
+  () =>
+    [
+      queueDetailRow.value?.id,
+      queueDetailRow.value?.state,
+      queueDetailHost.value?.baseUrl,
+      queueDetailHost.value?.online,
+      queueDetailHost.value?.stale,
+    ] as const,
+  (_, __, cleanup) => {
+    queueDetailPreview.value = null;
+    const row = queueDetailRow.value;
+    const host = queueDetailHost.value;
+    if (!row || row.state !== "running" || !host?.online || host.stale) return;
+    const stop = watchSelectedQueuePreview(
+      mobileHostTarget(host),
+      row.id,
+      (preview) => {
+        queueDetailPreview.value = preview;
+      },
+      750,
+      () => {
+        queueDetailPreview.value = null;
+      },
+    );
+    cleanup(stop);
+  },
+);
+async function cancelQueueDetail(): Promise<void> {
+  const entry = queueDetailEntry.value;
+  const row = queueDetailRow.value;
+  if (!entry || !row || !queueDetailModel.value?.cancel.available || queueDetailBusy.value) return;
+  if (entry.kind === "local") {
+    await onMobileQueueRowAction(entry.local, "cancel");
+    return;
+  }
+  const authority = fleetQueueAuthority(entry.shared);
+  if (!authority) return;
+  queueDetailBusy.value = true;
+  queueDetailError.value = "";
+  try {
+    const status = await apiJsonTo<ServerStatus>(authority.target, "/api/status");
+    if (status.instance_id?.trim() !== authority.expectedInstanceId)
+      throw new Error("This address now reports a different Mold server identity.");
+    await cancelQueueJob(authority.target, row.id);
+    await refreshMobileActivity();
+  } catch (error) {
+    queueDetailError.value = describeTransportError(error, authority.host.name);
+  } finally {
+    queueDetailBusy.value = false;
+  }
+}
+const queueDetailError = ref("");
+const queueDetailBusy = ref(false);
+function inspectQueueEntry(key: string): void {
+  queueDetailError.value = "";
+  queueDetailKey.value = key;
+}
+function inspectSharedQueueEntry(row: FleetActiveWork): void {
+  inspectQueueEntry(`shared:${row.key}`);
+}
+async function restoreQueueDetailSettings(): Promise<void> {
+  const entry = queueDetailEntry.value;
+  const job = queueDetailJob.value;
+  queueDetailBusy.value = true;
+  try {
+    if (job) await selectMobilePrint(job);
+    else if (entry?.kind === "shared") await openMobileLiveWork(entry.shared);
+    if (!queueDetailError.value) {
+      queueDetailKey.value = null;
+      await nextTick();
+      if (tab.value === "generate") createHeading.value?.focus({ preventScroll: true });
+    }
+  } finally {
+    queueDetailBusy.value = false;
+  }
+}
+async function viewFinishedQueueResult(): Promise<void> {
+  const job = queueDetailJob.value;
+  const host = queueDetailHost.value;
+  const filename = job?.result?.filename;
+  if (!job || !host || !filename) return;
+  queueDetailBusy.value = true;
+  queueDetailError.value = "";
+  try {
+    const target = mobileHostTarget(host);
+    const items = await apiJsonTo<GalleryImage[]>(
+      target,
+      `/api/gallery?filename=${encodeURIComponent(filename)}`,
+    );
+    const item = items.find((item) => item.filename === filename);
+    if (!item) throw new Error("This result is no longer in the machine's library.");
+    queueDetailKey.value = null;
+    openPrint({
+      ...item,
+      hostId: host.id,
+      cacheKey: host.id,
+      hostName: host.name,
+      target,
+      thumbnailUrl: "",
+      thumbnailPending: false,
+    });
+  } catch (error) {
+    queueDetailError.value = describeTransportError(error, host.name);
+  } finally {
+    queueDetailBusy.value = false;
+  }
+}
 let mobilePrintSelectionEpoch = 0;
 const selectedQueueRender = ref<{
   hostId: string;
@@ -2886,7 +3173,9 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
     showHostDetail(host.id);
   } catch (error) {
     if (epoch !== mobileLiveWorkSelectionEpoch) return;
-    setGenerationStatus(describeTransportError(error, host.name), true);
+    const message = describeTransportError(error, host.name);
+    setGenerationStatus(message, true);
+    if (queueDetailKey.value) queueDetailError.value = message;
   }
 }
 /**
@@ -3052,6 +3341,20 @@ function canUpscalePrint(print: GalleryPrint | null): boolean {
  * that conditions on one — resolved against the machine that rendered it, so
  * the Create viewer offers "Use as source" exactly when the Library one does.
  */
+const generatedResultPrint = computed<GalleryPrint | null>(() => {
+  const item = generatedPreviewItem.value;
+  const host = generatedPreviewHost.value;
+  if (!item || !host) return null;
+  return {
+    ...item,
+    hostId: host.id,
+    cacheKey: host.id,
+    hostName: host.name,
+    target: mobileHostTarget(host),
+    thumbnailUrl: resultPoster.value || resultUrl.value,
+    thumbnailPending: false,
+  };
+});
 const generatedSourcePrint = computed<GalleryPrint | null>(() => {
   const item = generatedPreviewItem.value;
   const host = generatedPreviewHost.value;
@@ -3091,7 +3394,7 @@ const developButtonLabel = computed(() =>
     ? generationSubmissionPhase.value === "placement"
       ? "Cancel · Checking placement…"
       : "Cancel · Preparing source…"
-    : `${form.batchSize > 1 ? `Develop ${form.batchSize} prints` : "Develop print"}${
+    : `${form.batchSize > 1 ? `Generate ${form.batchSize}` : "Generate"}${
         queuedJobs.value.length > 0 ? ` (+${queuedJobs.value.length} queued)` : ""
       }`,
 );
@@ -4456,7 +4759,12 @@ async function refreshModels(): Promise<boolean> {
     if (selectedEntry) {
       reconcileModelCapabilities(form, selectedEntry);
     } else if (generationModels.value[0]) {
-      applyModelDefaults(form, generationModels.value[0]);
+      const section = !form.model ? lastUsedStyles.lastSection : null;
+      const rememberedName = section ? lastUsedStyles.bySection[section] : null;
+      const remembered = generationModels.value.find((entry) => entry.name === rememberedName);
+      const initial = remembered ?? generationModels.value[0];
+      fallbackStyleName = rememberedName && !remembered ? initial.name : null;
+      applyModelDefaults(form, initial);
     }
     return true;
   } catch (error) {
@@ -4907,7 +5215,7 @@ async function pullMissingGenerationModel(): Promise<void> {
       return;
     }
     setGenerationStatus(
-      `Downloading ${pending.model} on ${pending.route.label}. Press Develop again once it is ready.`,
+      `Downloading ${pending.model} on ${pending.route.label}. Press Generate again once it is ready.`,
     );
     generationAnnouncement.value = `Download queued on ${pending.route.label}.`;
   } catch (error) {
@@ -4921,6 +5229,8 @@ async function pullMissingGenerationModel(): Promise<void> {
 }
 
 function changeModel(): void {
+  fallbackStyleName = null;
+  outputKindNotice.value = "";
   const model = generationModels.value.find((entry) => entry.name === form.model);
   if (model) applyModelDefaults(form, model);
 }
@@ -9609,6 +9919,12 @@ function openViewerUpscale(): Promise<void> {
  * runs, on the print that just rendered. The viewer closes only once the
  * bytes are actually attached, so a refusal stays visible where it happened.
  */
+async function reuseGeneratedPrint(): Promise<void> {
+  const print = generatedResultPrint.value;
+  if (!print) return;
+  await reusePrint(print);
+  if (!reusePrintError.value) generatedViewerOpen.value = false;
+}
 async function useGeneratedPrintAsSource(): Promise<void> {
   const print = generatedSourcePrint.value;
   if (!print) return;
@@ -10378,7 +10694,14 @@ watch(
   { flush: "sync" },
 );
 
+const tabScrollPositions = new Map<Tab, { top: number; left: number }>();
 watch(tab, (next, previous) => {
+  if (mobileContent.value) {
+    tabScrollPositions.set(previous, {
+      top: mobileContent.value.scrollTop,
+      left: mobileContent.value.scrollLeft,
+    });
+  }
   if (previous === "gallery" && mobileContent.value) {
     rememberSessionScroll(MOBILE_LIBRARY_SCROLL_KEY, {
       top: mobileContent.value.scrollTop,
@@ -10393,15 +10716,14 @@ watch(tab, (next, previous) => {
   } else {
     cancelMobileGalleryPrewarm();
     pendingLibraryScrollRestore = null;
-    // The primary destinations share this one WebView scroller. Non-Library
-    // destinations still start at the top rather than inheriting its offset.
+    // Each destination owns its scroll even though the WebView has one scroller.
     void nextTick(() => {
       if (!mobileContent.value) return;
-      mobileContent.value.scrollTop = 0;
-      mobileContent.value.scrollLeft = 0;
+      const position = tabScrollPositions.get(next);
+      mobileContent.value.scrollTop = position?.top ?? 0;
+      mobileContent.value.scrollLeft = position?.left ?? 0;
     });
   }
-  if (next !== "hosts") hostDetailId.value = "";
 });
 
 // One failed model load must not become a manual-Retry dead end: the 10s
@@ -10476,14 +10798,15 @@ function handleForegroundResume(): void {
 }
 
 const currentRefreshLabel = computed(() => {
-  if (tab.value === "gallery") return "Library";
-  if (tab.value === "catalog") return "Models";
+  if (tab.value === "gallery") return "My images";
+  if (tab.value === "queue") return "Queue";
+  if (tab.value === "catalog") return "Styles";
   if (tab.value === "hosts") return hostDetail.value ? hostDetail.value.name : "Machines";
   return "";
 });
 
 const pullRefreshAvailable = computed(
-  () => !settingsOpen.value && ["gallery", "catalog", "hosts"].includes(tab.value),
+  () => !settingsOpen.value && ["gallery", "catalog", "hosts", "queue"].includes(tab.value),
 );
 
 async function refreshCurrentView(): Promise<void> {
@@ -10493,6 +10816,10 @@ async function refreshCurrentView(): Promise<void> {
   }
   if (tab.value === "catalog") {
     await catalogView.value?.refresh();
+    return;
+  }
+  if (tab.value === "queue") {
+    await Promise.all(connectedHosts.value.map((host) => probeHost(host)));
     return;
   }
   if (tab.value !== "hosts") return;
@@ -10664,8 +10991,10 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
   return !NON_KEYBOARD_INPUT_TYPES.has(target.type.toLowerCase());
 }
 
+const keyboardVisible = ref(false);
 function syncVisualViewportOffset(): void {
   const viewport = window.visualViewport;
+  keyboardVisible.value = !!viewport && window.innerHeight - viewport.height > 120;
   const pageTop = viewport?.pageTop ?? window.scrollY;
   document.documentElement.style.setProperty(
     "--mobile-visual-viewport-page-top",
@@ -10938,7 +11267,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
 <template>
   <main
     class="mobile-shell"
-    :class="{ 'is-settings-open': settingsOpen, 'is-pair-scanning': pairingScannerOpen }"
+    :class="{
+      'is-settings-open': settingsOpen,
+      'is-pair-scanning': pairingScannerOpen,
+      'is-keyboard-open': keyboardVisible,
+    }"
+    :data-mobile-platform="androidNativeRuntime ? 'android' : 'ios'"
   >
     <section
       v-if="pairingScannerOpen"
@@ -10972,7 +11306,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </div>
       <footer class="mobile-pair-scanner-foot">
         <strong>Point your camera at the QR code</strong>
-        <span>On your host, open Settings → Mobile pairing.</span>
+        <span>On your machine, open Settings → Mobile pairing.</span>
       </footer>
     </section>
     <header v-if="settingsOpen" class="mobile-header mobile-settings-nav">
@@ -11053,9 +11387,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <template v-if="!settingsOpen && tab === 'generate'">
         <div v-if="!selectedHost" class="empty-state">
           <div>
-            <h1 class="section-title">Connect a host</h1>
-            <p>Generation runs on a remote Mold engine.</p>
-            <button class="primary-button" type="button" @click="tab = 'hosts'">Add host</button>
+            <h1 class="section-title">Connect a machine</h1>
+            <p>Connect to a machine running Mold to make your first image.</p>
+            <button class="primary-button" type="button" @click="tab = 'hosts'">
+              Connect a machine
+            </button>
           </div>
         </div>
         <template v-else>
@@ -11066,7 +11402,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               tabindex="-1"
               data-test="mobile-create-heading"
             >
-              Create
+              {{ OUTPUT_KIND_TITLE[selectedOutputKind] }}
             </h1>
             <button
               class="mobile-settings-reset"
@@ -11080,7 +11416,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           </div>
           <p class="section-note">{{ developOnNote }}</p>
           <label v-if="connectedHosts.length > 1" class="field">
-            <span>Host</span>
+            <span>Machine</span>
             <select
               class="control"
               :value="generateTarget"
@@ -11103,87 +11439,88 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ routingHint }}
           </p>
-          <label class="field">
-            <span>Model</span>
-            <select
-              v-model="form.model"
-              class="control"
-              :disabled="loadingModels || pickerModels.length === 0"
-              @change="changeModel"
+          <SegmentedControl
+            class="mobile-output-kinds"
+            :model-value="selectedOutputKind"
+            :options="outputOptions"
+            label="What to make"
+            data-test="mobile-output-kind"
+            @update:model-value="selectOutputKind"
+          />
+          <p v-if="outputKindNotice" class="section-note" role="status">
+            {{ outputKindNotice }}
+            <button type="button" class="mobile-text-action" @click="browseOutputStyles">
+              Browse styles
+            </button>
+          </p>
+          <div v-if="resultUrl || resultMeshSrc" class="mobile-make-result">
+            <!-- 3-D lands first: a mesh carries neither frames nor samples,
+               so any wider arm above it would draw glTF into an <img>. -->
+            <figure
+              v-if="resultIsMesh && resultMeshSrc"
+              class="result-mesh"
+              data-test="mobile-generated-mesh"
             >
-              <option v-if="!form.model" value="" disabled>
-                {{ loadingModels ? "Loading models…" : "No generation models available" }}
-              </option>
-              <option v-if="form.model && !selectedModelInstalled" :value="form.model" disabled>
-                {{ modelLabel(form.model) }} · not installed
-              </option>
-              <option v-for="model in pickerModels" :key="model.name" :value="model.name">
-                {{ modelDisplayName(model)
-                }}{{
-                  modelAvailabilityTag(model.name) ? ` · ${modelAvailabilityTag(model.name)}` : ""
-                }}
-              </option>
-            </select>
-          </label>
-          <ErrorNotice
-            v-if="modelLoadError"
-            class="mobile-model-state is-error"
-            data-test="mobile-model-error"
-            :message="modelLoadError"
-          >
-            <template #actions>
-              <button
-                class="secondary-button"
-                type="button"
-                data-test="mobile-model-retry"
-                @click="refreshModels"
+              <MeshViewer
+                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+                class="result-media"
+                :src="resultMeshSrc"
+                :poster="resultPoster"
+                :alt="latestResultJob?.prompt || 'Generated 3-D print'"
+                auto-rotate
+                expandable
+                @ready="generatedMediaReady"
+                @fail="recoverGeneratedMedia"
+              />
+              <figcaption
+                v-if="resultMeshStats"
+                class="status-line"
+                data-test="mobile-generated-mesh-stats"
               >
-                Retry
-              </button>
-            </template>
-          </ErrorNotice>
-          <div
-            v-else-if="!loadingModels && generationModels.length === 0"
-            class="mobile-model-state"
-            data-test="mobile-model-empty"
-          >
-            <p>No downloaded generation model is available on {{ modelScopeLabel }}.</p>
-            <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
-              Open Catalog
+                {{ resultMeshStats }}
+              </figcaption>
+            </figure>
+            <video
+              v-else-if="resultUrl && resultIsVideo"
+              :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+              class="result-media"
+              :src="resultUrl"
+              controls
+              playsinline
+              preload="metadata"
+              @play="renewGeneratedResult(false)"
+              @loadedmetadata="generatedMediaReady"
+              @error="recoverGeneratedMedia"
+            />
+            <button
+              v-else-if="resultUrl"
+              class="result-media-button"
+              type="button"
+              data-test="mobile-generated-result"
+              aria-label="Expand generated print"
+              @click="generatedViewerOpen = true"
+            >
+              <img
+                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+                class="result-media"
+                :src="resultUrl"
+                alt="Generated print"
+                draggable="false"
+                @load="generatedMediaReady"
+                @error="recoverGeneratedMedia"
+                @contextmenu.prevent
+              />
+            </button>
+            <button
+              v-if="generatedPreviewItem"
+              type="button"
+              class="secondary-button mobile-result-actions"
+              data-test="mobile-result-actions"
+              @click="generatedViewerOpen = true"
+            >
+              View result · Save and share
             </button>
           </div>
-
-          <label class="field">
-            <span>Title</span>
-            <input
-              id="mobile-print-title"
-              v-model="printTitle"
-              class="control"
-              autocomplete="off"
-              enterkeyhint="next"
-              placeholder="Untitled print"
-              data-test="mobile-create-title"
-            />
-          </label>
-          <p
-            v-if="printTitleError"
-            class="status-line error-text"
-            role="alert"
-            data-test="mobile-create-title-error"
-          >
-            {{ printTitleError }}
-          </p>
-          <MobileFileUnder
-            v-if="fileUnderEnabled"
-            v-model:state="form.fileUnder"
-            :title="printTitle"
-            :auto-tag-title="mobileSettings.autoTagTitle"
-            :tags="mergedTags"
-            :collections="fileUnderCollections"
-            :model="form.model"
-            :extension="form.outputFormat"
-            :batch-size="effectiveBatchSize"
-          />
           <!-- Persistent inline, never a toast: iPhone has no transient
                chrome, and an outcome the user did not choose has to stay
                readable until they retire it. -->
@@ -11218,7 +11555,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             </button>
           </div>
 
-          <label class="field">
+          <p v-if="caps.promptMode === 'ignored'" class="section-note">
+            {{ promptFieldPlaceholder }}
+          </p>
+          <label v-show="caps.promptMode !== 'ignored'" class="field mobile-prompt-field">
             <span>Prompt</span>
             <textarea
               id="mobile-prompt"
@@ -11228,26 +11568,32 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               @input="onPromptAuthored(($event.target as HTMLTextAreaElement).value)"
             />
           </label>
-          <MobileStyleChips v-model="form.stylePreset" />
-          <MobilePromptTools
-            v-if="selectedTarget"
-            :form="form"
-            :model="selectedGenerationModel"
-            :target="selectedTarget"
-            :running="expansionRunning"
-            :can-undo="quickExpansionOriginal !== null || remixUndo !== null"
-            :blocked="!!preparedBatch || !!remixReview"
-            :models="generationModels"
-            :remix-source="remixSource"
-            :remix-dimensions="remixDimensions"
-            :task="currentExpansionTask"
-            :blocked-reason="promptTransformBlocked"
-            @expand="expandForCurrentBatch()"
-            @remix="remixCurrent()"
-            @undo="undoPromptPreparation"
-            @update:remix-source="remixSource = $event"
-            @update:remix-dimensions="remixDimensions = $event"
-          />
+          <details v-show="caps.promptMode !== 'ignored'" class="mobile-prompt-modifiers">
+            <summary>
+              Prompt extras <span>{{ form.stylePreset || "Optional" }}</span>
+            </summary>
+            <MobileStyleChips v-model="form.stylePreset" />
+            <MobilePromptTools
+              v-if="selectedTarget"
+              v-show="caps.promptMode !== 'ignored'"
+              :form="form"
+              :model="selectedGenerationModel"
+              :target="selectedTarget"
+              :running="expansionRunning"
+              :can-undo="quickExpansionOriginal !== null || remixUndo !== null"
+              :blocked="!!preparedBatch || !!remixReview"
+              :models="generationModels"
+              :remix-source="remixSource"
+              :remix-dimensions="remixDimensions"
+              :task="currentExpansionTask"
+              :blocked-reason="promptTransformBlocked"
+              @expand="expandForCurrentBatch()"
+              @remix="remixCurrent()"
+              @undo="undoPromptPreparation"
+              @update:remix-source="remixSource = $event"
+              @update:remix-dimensions="remixDimensions = $event"
+            />
+          </details>
           <div
             v-if="quickStaleReasons.length"
             class="mobile-generate-validation"
@@ -11290,7 +11636,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
                 @click="recoverQuickPromptTransform"
               >
-                {{ appliedRemix ? "Re-remix" : "Re-expand and Develop" }}
+                {{ appliedRemix ? "Re-remix" : "Re-expand and Generate" }}
               </button>
               <button
                 class="secondary-button mobile-touch-action"
@@ -11299,7 +11645,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 :disabled="expansionRunning || preparedSubmitting || !!promptTransformBlocked"
                 @click="developExpandedAnyway"
               >
-                Develop anyway
+                Generate anyway
               </button>
               <button
                 class="secondary-button mobile-touch-action"
@@ -11452,7 +11798,58 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                a checkpoint that loses it is parked, not discarded. -->
           <MobileIdentityWell v-if="showIdentity" :form="form" />
 
+          <label class="field mobile-style-picker">
+            <span>Style</span>
+            <select
+              v-model="form.model"
+              class="control"
+              :disabled="loadingModels || pickerModels.length === 0"
+              @change="changeModel"
+            >
+              <option v-if="!form.model" value="" disabled>
+                {{ loadingModels ? "Loading models…" : "No generation models available" }}
+              </option>
+              <option v-if="form.model && !selectedModelInstalled" :value="form.model" disabled>
+                {{ modelLabel(form.model) }} · not installed
+              </option>
+              <option v-for="model in pickerModels" :key="model.name" :value="model.name">
+                {{ modelDisplayName(model)
+                }}{{
+                  modelAvailabilityTag(model.name) ? ` · ${modelAvailabilityTag(model.name)}` : ""
+                }}
+              </option>
+            </select>
+          </label>
+          <ErrorNotice
+            v-if="modelLoadError"
+            class="mobile-model-state is-error"
+            data-test="mobile-model-error"
+            :message="modelLoadError"
+          >
+            <template #actions>
+              <button
+                class="secondary-button"
+                type="button"
+                data-test="mobile-model-retry"
+                @click="refreshModels"
+              >
+                Retry
+              </button>
+            </template>
+          </ErrorNotice>
+          <div
+            v-else-if="!loadingModels && generationModels.length === 0"
+            class="mobile-model-state"
+            data-test="mobile-model-empty"
+          >
+            <p>No downloaded generation model is available on {{ modelScopeLabel }}.</p>
+            <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
+              Open Catalog
+            </button>
+          </div>
+
           <MobileSharedParams
+            section="primary"
             :form="form"
             :model="selectedGenerationModel"
             :duration-model="selectedGenerationModel"
@@ -11488,6 +11885,42 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             {{ generatedAudioUnavailableReason }}
           </p>
 
+          <details class="mobile-organize" data-test="mobile-organize">
+            <summary>
+              Name and organize <span>{{ organizationSummary }}</span>
+            </summary>
+            <label class="field">
+              <span>Title</span>
+              <input
+                id="mobile-print-title"
+                v-model="printTitle"
+                class="control"
+                autocomplete="off"
+                enterkeyhint="next"
+                placeholder="Untitled print"
+                data-test="mobile-create-title"
+              />
+            </label>
+            <p
+              v-if="printTitleError"
+              class="status-line error-text"
+              role="alert"
+              data-test="mobile-create-title-error"
+            >
+              {{ printTitleError }}
+            </p>
+            <MobileFileUnder
+              v-if="fileUnderEnabled"
+              v-model:state="form.fileUnder"
+              :title="printTitle"
+              :auto-tag-title="mobileSettings.autoTagTitle"
+              :tags="mergedTags"
+              :collections="fileUnderCollections"
+              :model="form.model"
+              :extension="form.outputFormat"
+              :batch-size="effectiveBatchSize"
+            />
+          </details>
           <div class="mobile-advanced-row">
             <button
               class="mobile-advanced-trigger"
@@ -11498,7 +11931,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 6h16M4 12h16M4 18h16" />
               </svg>
-              <span>Advanced (sampler, LoRA, format)</span>
+              <span>More settings</span>
               <span
                 v-if="advancedActiveCount > 0"
                 class="mobile-advanced-trigger-badge"
@@ -11514,6 +11947,20 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             @close="closeAdvancedSheet"
             @reset="resetAdvancedSettings"
           >
+            <MobileSharedParams
+              section="details"
+              :form="form"
+              :model="selectedGenerationModel"
+              :duration-model="selectedGenerationModel"
+              :last-seed="generation.lastSeedUsed"
+              :disabled="loadingModels"
+              :steps-error="stepsError"
+              :guidance-error="guidanceError"
+              :canvas-intent="canvasIntent"
+              @resolution-validity="resolutionValid = $event"
+              @seed-validity="seedValid = $event"
+              @canvas-intent="setCanvasIntent"
+            />
             <MobileGenerateParameters
               :form="form"
               :target="generationTarget"
@@ -11634,130 +12081,28 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               </button>
             </template>
           </ErrorNotice>
-          <!-- 3-D lands first: a mesh carries neither frames nor samples,
-               so any wider arm above it would draw glTF into an <img>. -->
-          <figure
-            v-if="resultIsMesh && resultMeshSrc"
-            class="result-mesh"
-            data-test="mobile-generated-mesh"
-          >
-            <MeshViewer
-              :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-              class="result-media"
-              :src="resultMeshSrc"
-              :poster="resultPoster"
-              :alt="latestResultJob?.prompt || 'Generated 3-D print'"
-              auto-rotate
-              expandable
-              @ready="generatedMediaReady"
-              @fail="recoverGeneratedMedia"
-            />
-            <figcaption
-              v-if="resultMeshStats"
-              class="status-line"
-              data-test="mobile-generated-mesh-stats"
-            >
-              {{ resultMeshStats }}
-            </figcaption>
-          </figure>
-          <video
-            v-else-if="resultUrl && resultIsVideo"
-            :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-            class="result-media"
-            :src="resultUrl"
-            controls
-            playsinline
-            preload="metadata"
-            @play="renewGeneratedResult(false)"
-            @loadedmetadata="generatedMediaReady"
-            @error="recoverGeneratedMedia"
-          />
-          <button
-            v-else-if="resultUrl"
-            class="result-media-button"
-            type="button"
-            data-test="mobile-generated-result"
-            aria-label="Expand generated print"
-            @click="generatedViewerOpen = true"
-          >
-            <img
-              :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-              class="result-media"
-              :src="resultUrl"
-              alt="Generated print"
-              draggable="false"
-              @load="generatedMediaReady"
-              @error="recoverGeneratedMedia"
-              @contextmenu.prevent
-            />
-          </button>
 
-          <!-- ONE queue: this session's prints and the machines' own live
-               work land in the same list (mockup 1c). -->
-          <section
+          <button
             v-if="mobileActivityRows.length"
-            class="mobile-generation-queue"
-            aria-label="Generation queue"
-            data-test="mobile-generation-queue"
+            class="mobile-queue-peek"
+            type="button"
+            data-test="mobile-queue-peek"
+            @click="tab = 'queue'"
           >
-            <div class="mobile-generation-queue-head">
-              <h2>Queue</h2>
-              <span data-test="mobile-queue-count">{{ activityCountLabel(activityCounts) }}</span>
-            </div>
-            <div class="mobile-generation-queue-list">
-              <template v-for="entry in mobileActivityRows" :key="entry.key">
-                <div v-if="entry.kind === 'local'" class="mobile-generation-row">
-                  <SwipeActionRow
-                    :actions="mobileQueueRowActions(entry.local)"
-                    :label="entry.local.print.prompt"
-                    :disabled="
-                      entry.local.print.cancelling === true ||
-                      queueControlHostIds.has(activityRowHostId(entry.local))
-                    "
-                    data-test="mobile-generation-job"
-                    @act="onMobileQueueRowAction(entry.local, $event)"
-                  >
-                    <MobileGenerationQueueCard
-                      :title="entry.local.print.prompt"
-                      :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
-                      :status="activityRowStatus(entry.local)"
-                      :detail="durableHold(entry.local.print)?.error ?? null"
-                      :cancelling="entry.local.print.cancelling === true"
-                      :aria-label="entry.local.print.prompt"
-                      @activate="selectMobilePrint(entry.local.print)"
-                    />
-                  </SwipeActionRow>
-                </div>
-                <LiveActivityList
-                  v-else
-                  :rows="[entry.shared]"
-                  interactive
-                  swipe-actions
-                  :can-swipe="canPauseFleetActivity"
-                  @select="openMobileLiveWork"
-                >
-                  <template #actions="{ row }">
-                    <button
-                      type="button"
-                      data-test="mobile-fleet-queue-control"
-                      :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
-                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
-                    >
-                      {{ fleetQueueControlLabel(row) }}
-                    </button>
-                  </template>
-                </LiveActivityList>
-              </template>
-            </div>
-          </section>
+            <span>Queue</span>
+            <span
+              >{{ mobileActivityRows.length }}
+              {{ mobileActivityRows.length === 1 ? "item" : "items" }}</span
+            >
+            <span aria-hidden="true">›</span>
+          </button>
         </template>
       </template>
 
-      <template v-else-if="tab === 'gallery'">
+      <template v-else-if="!settingsOpen && tab === 'gallery'">
         <div class="mobile-library-heading">
           <div>
-            <h1 class="section-title">Library</h1>
+            <h1 class="section-title">My images</h1>
             <p class="section-note" data-test="mobile-library-note">
               {{
                 gallerySelectMode
@@ -12512,7 +12857,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </MobileLibrarySheet>
       </template>
 
-      <template v-else-if="tab === 'hosts'">
+      <template v-else-if="!settingsOpen && tab === 'hosts'">
         <MobileHostDetail
           v-if="hostDetail"
           ref="hostDetailView"
@@ -12542,105 +12887,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ MOBILE_CAPABLE_ROUTING_HINT }}
           </p>
-          <button
-            class="primary-button mobile-pair-button"
-            type="button"
-            :disabled="pairing"
-            data-test="mobile-scan-pairing"
-            @click="scanPairingCode"
-          >
-            <span aria-hidden="true">▦</span>
-            {{ pairing ? "Opening camera…" : "Scan pairing code" }}
-          </button>
-          <p class="mobile-pair-note">On your host, open Settings → Mobile pairing.</p>
-          <button
-            class="secondary-button"
-            type="button"
-            :disabled="discovering"
-            data-test="mobile-discover-hosts"
-            @click="discoverHosts"
-          >
-            {{ discovering ? "Scanning…" : "Discover nearby" }}
-          </button>
-          <div
-            v-for="host in discovered"
-            :key="`${host.host}:${host.port}`"
-            class="host-row"
-            data-test="mobile-discovered-host"
-          >
-            <div class="host-row-head">
-              <div>
-                <div class="host-name">{{ host.name }}</div>
-                <div class="host-url">{{ host.host }}:{{ host.port }}</div>
-              </div>
-              <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
-                Connect
-              </button>
-            </div>
-          </div>
-          <form
-            v-if="selectedDiscovered"
-            style="margin-top: 20px"
-            data-test="mobile-discovered-key-prompt"
-            @submit.prevent="connectHost(hostInput.address, hostInput.name)"
-          >
-            <div class="host-row">
-              <div class="host-name">{{ selectedDiscovered.name }}</div>
-              <div class="host-url">
-                {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
-              </div>
-            </div>
-            <label class="field"
-              ><span>API key</span
-              ><input
-                ref="discoveredApiKeyInput"
-                v-model="hostInput.apiKey"
-                class="control"
-                type="password"
-                placeholder="Required by this machine"
-                autocomplete="off"
-                data-test="mobile-discovered-api-key"
-                required
-            /></label>
-            <p class="section-note">This machine requires its own API key.</p>
-            <div class="mobile-inline-actions">
-              <button class="secondary-button" type="button" @click="clearDiscoveredHost">
-                Choose another
-              </button>
-              <button class="primary-button" type="submit">Test and save</button>
-            </div>
-          </form>
-          <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
-            <label class="field"
-              ><span>Name</span
-              ><input
-                v-model="hostInput.name"
-                class="control"
-                placeholder="Studio Mac (optional)"
-                autocomplete="off"
-            /></label>
-            <label class="field"
-              ><span>Address or MagicDNS name</span
-              ><input
-                v-model="hostInput.address"
-                class="control"
-                placeholder="studio.tailnet.ts.net or 192.168.1.20"
-                autocapitalize="none"
-                autocomplete="url"
-                required
-            /></label>
-            <label class="field"
-              ><span>API key</span
-              ><input
-                v-model="hostInput.apiKey"
-                class="control"
-                type="password"
-                placeholder="If required"
-                autocomplete="off"
-            /></label>
-            <button class="primary-button" type="submit">Test and save</button>
-          </form>
-          <p v-if="hostError" class="status-line error-text">{{ hostError }}</p>
           <div v-for="host in hosts" :key="host.id" class="host-row">
             <button
               class="host-row-button"
@@ -12702,11 +12948,117 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     ? "Disconnected"
                     : host.id === selectedHostId
                       ? "Active"
-                      : "Use host"
+                      : "Use machine"
                 }}
               </button>
             </div>
           </div>
+          <details
+            class="mobile-add-machine"
+            :open="hosts.length === 0"
+            data-test="mobile-add-machine"
+          >
+            <summary>Add a machine</summary>
+            <button
+              class="primary-button mobile-pair-button"
+              type="button"
+              :disabled="pairing"
+              data-test="mobile-scan-pairing"
+              @click="scanPairingCode"
+            >
+              <span aria-hidden="true">▦</span>
+              {{ pairing ? "Opening camera…" : "Scan pairing code" }}
+            </button>
+            <p class="mobile-pair-note">On your machine, open Settings → Mobile pairing.</p>
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="discovering"
+              data-test="mobile-discover-hosts"
+              @click="discoverHosts"
+            >
+              {{ discovering ? "Scanning…" : "Discover nearby" }}
+            </button>
+            <div
+              v-for="host in discovered"
+              :key="`${host.host}:${host.port}`"
+              class="host-row"
+              data-test="mobile-discovered-host"
+            >
+              <div class="host-row-head">
+                <div>
+                  <div class="host-name">{{ host.name }}</div>
+                  <div class="host-url">{{ host.host }}:{{ host.port }}</div>
+                </div>
+                <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
+                  Connect
+                </button>
+              </div>
+            </div>
+            <form
+              v-if="selectedDiscovered"
+              style="margin-top: 20px"
+              data-test="mobile-discovered-key-prompt"
+              @submit.prevent="connectHost(hostInput.address, hostInput.name)"
+            >
+              <div class="host-row">
+                <div class="host-name">{{ selectedDiscovered.name }}</div>
+                <div class="host-url">
+                  {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
+                </div>
+              </div>
+              <label class="field"
+                ><span>API key</span
+                ><input
+                  ref="discoveredApiKeyInput"
+                  v-model="hostInput.apiKey"
+                  class="control"
+                  type="password"
+                  placeholder="Required by this machine"
+                  autocomplete="off"
+                  data-test="mobile-discovered-api-key"
+                  required
+              /></label>
+              <p class="section-note">This machine requires its own API key.</p>
+              <div class="mobile-inline-actions">
+                <button class="secondary-button" type="button" @click="clearDiscoveredHost">
+                  Choose another
+                </button>
+                <button class="primary-button" type="submit">Test and save</button>
+              </div>
+            </form>
+            <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
+              <label class="field"
+                ><span>Name</span
+                ><input
+                  v-model="hostInput.name"
+                  class="control"
+                  placeholder="Studio Mac (optional)"
+                  autocomplete="off"
+              /></label>
+              <label class="field"
+                ><span>Address or MagicDNS name</span
+                ><input
+                  v-model="hostInput.address"
+                  class="control"
+                  placeholder="studio.tailnet.ts.net or 192.168.1.20"
+                  autocapitalize="none"
+                  autocomplete="url"
+                  required
+              /></label>
+              <label class="field"
+                ><span>API key</span
+                ><input
+                  v-model="hostInput.apiKey"
+                  class="control"
+                  type="password"
+                  placeholder="If required"
+                  autocomplete="off"
+              /></label>
+              <button class="primary-button" type="submit">Test and save</button>
+            </form>
+          </details>
+          <p v-if="hostError" class="status-line error-text" role="alert">{{ hostError }}</p>
         </template>
       </template>
 
@@ -12720,7 +13072,236 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @models-changed="catalogModelsChanged"
         />
       </KeepAlive>
+      <section v-show="!settingsOpen && tab === 'queue'" data-test="mobile-queue-view">
+        <div class="mobile-create-head"><h1 class="section-title">Queue</h1></div>
+        <p class="section-note">Work continues on your machines when you leave this screen.</p>
+        <!-- ONE queue: this session's prints and the machines' own live
+               work land in the same list (mockup 1c). -->
+        <section
+          v-if="mobileActivityRows.length"
+          class="mobile-generation-queue"
+          aria-label="Generation queue"
+          data-test="mobile-generation-queue"
+        >
+          <div class="mobile-generation-queue-head">
+            <h2>Queue</h2>
+            <span data-test="mobile-queue-count"
+              >{{ mobileActivityRows.length }}
+              {{ mobileActivityRows.length === 1 ? "item" : "items" }}</span
+            >
+          </div>
+          <div class="mobile-generation-queue-list">
+            <section
+              v-for="group in mobileQueueGroups"
+              :key="group.id"
+              class="mobile-queue-group"
+              :data-test="`mobile-queue-${group.id}`"
+            >
+              <h3>
+                {{ group.label }} <span>{{ group.rows.length }}</span>
+              </h3>
+              <template v-for="entry in group.rows" :key="entry.key">
+                <div v-if="entry.kind === 'local'" class="mobile-generation-row">
+                  <SwipeActionRow
+                    :actions="mobileQueueRowActions(entry.local)"
+                    :label="entry.local.print.prompt"
+                    :disabled="
+                      entry.local.print.cancelling === true ||
+                      queueControlHostIds.has(activityRowHostId(entry.local))
+                    "
+                    data-test="mobile-generation-job"
+                    @act="onMobileQueueRowAction(entry.local, $event)"
+                  >
+                    <MobileGenerationQueueCard
+                      :title="entry.local.print.prompt"
+                      :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
+                      :status="activityRowStatus(entry.local)"
+                      :detail="durableHold(entry.local.print)?.error ?? null"
+                      :cancelling="entry.local.print.cancelling === true"
+                      :aria-label="entry.local.print.prompt"
+                      @activate="inspectQueueEntry(entry.key)"
+                    />
+                  </SwipeActionRow>
+                </div>
+                <LiveActivityList
+                  v-else
+                  :rows="[entry.shared]"
+                  interactive
+                  swipe-actions
+                  :can-swipe="canPauseFleetActivity"
+                  @select="inspectSharedQueueEntry"
+                >
+                  <template #actions="{ row }">
+                    <button
+                      type="button"
+                      data-test="mobile-fleet-queue-control"
+                      :disabled="queueControlHostIds.has(row.hostId)"
+                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
+                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
+                    >
+                      {{ fleetQueueControlLabel(row) }}
+                    </button>
+                  </template>
+                </LiveActivityList>
+              </template>
+            </section>
+          </div>
+        </section>
+        <section
+          v-if="finishedQueueJobs.length"
+          class="mobile-queue-group"
+          data-test="mobile-queue-finished"
+        >
+          <h3>
+            Finished <span>{{ finishedQueueJobs.length }}</span>
+          </h3>
+          <p class="section-note">Recent work from this phone. Saved results stay in My images.</p>
+          <button
+            v-for="job in finishedQueueJobs"
+            :key="job.clientId"
+            type="button"
+            class="mobile-finished-job"
+            @click="inspectQueueEntry(`finished:${job.clientId}`)"
+          >
+            <strong>{{ job.prompt || modelLabel(job.model) }}</strong>
+            <span
+              >{{ job.hostLabel }} ·
+              {{ job.status === "complete" ? "Complete" : "Stopped with an error" }}</span
+            >
+          </button>
+        </section>
+        <div
+          v-if="!mobileActivityRows.length && !finishedQueueJobs.length"
+          class="mobile-queue-empty"
+          data-test="mobile-queue-empty"
+        >
+          <h2>Nothing waiting</h2>
+          <p>Choose a style and make something. Your progress will appear here.</p>
+          <button class="secondary-button" type="button" @click="tab = 'generate'">
+            New image
+          </button>
+        </div>
+      </section>
     </section>
+
+    <MobileLibrarySheet
+      :open="queueDetailKey !== null"
+      title="Queue details"
+      :focus-first-control="false"
+      test-id="mobile-queue-details"
+      @close="queueDetailKey = null"
+    >
+      <QueueEntryDetail
+        v-if="queueDetailModel"
+        :key="queueDetailModel.jobId"
+        :model="queueDetailModel"
+        :preview="queueDetailPreview"
+        :cancelling="queueDetailBusy || !!queueDetailJob?.cancelling"
+        :retrying="queueDetailJob ? durableHeldIsRetrying(queueDetailJob) : false"
+        :error="queueDetailError"
+        confirm="inline"
+        compact
+        @close="queueDetailKey = null"
+        @reuse="restoreQueueDetailSettings"
+        @cancel="cancelQueueDetail"
+        @retry="queueDetailJob && retryHeldGeneration(queueDetailJob)"
+      />
+      <template v-else>
+        <p class="section-note">{{ queueDetailHost?.name ?? "Machine unavailable" }}</p>
+        <p v-if="queueDetailJob" class="mobile-queue-detail-prompt">{{ queueDetailJob.prompt }}</p>
+        <p v-if="queueDetailEntry?.kind === 'local'">
+          {{ activityRowStatus(queueDetailEntry.local) }}
+        </p>
+        <p v-else-if="queueDetailEntry?.kind === 'shared'">
+          {{ activeWorkPhaseLabel(queueDetailEntry.shared) }}
+        </p>
+        <p v-else-if="queueDetailJob">
+          {{ queueDetailJob.status === "complete" ? "Complete" : "Stopped with an error" }}
+        </p>
+        <p v-else>This item has left the live queue. Saved results are in My images.</p>
+        <p v-if="queueDetailEntry?.kind === 'shared'">
+          Activity summary only. Open this machine for full work details and controls.
+        </p>
+      </template>
+      <p v-if="!queueDetailHost?.online || queueDetailHost?.stale" role="status">
+        Last known state. Reconnect this machine before changing its work.
+      </p>
+      <p v-if="queueDetailError" role="alert">{{ queueDetailError }}</p>
+      <div class="mobile-queue-detail-actions">
+        <button
+          v-if="!queueDetailModel && queueDetailEntry?.kind === 'shared'"
+          type="button"
+          class="secondary-button"
+          @click="
+            tab = 'hosts';
+            showHostDetail(queueDetailEntry.shared.hostId);
+            queueDetailKey = null;
+          "
+        >
+          Open machine details
+        </button>
+        <button
+          v-if="queueDetailJob?.result?.filename"
+          type="button"
+          class="primary-button"
+          :disabled="queueDetailBusy || !queueDetailHost?.online || queueDetailHost.stale"
+          @click="viewFinishedQueueResult"
+        >
+          View result
+        </button>
+        <button
+          v-if="!queueDetailModel && (queueDetailJob || queueDetailEntry?.kind === 'shared')"
+          type="button"
+          class="secondary-button"
+          data-test="mobile-queue-use-settings"
+          :disabled="queueDetailBusy || !queueDetailHost?.online || queueDetailHost.stale"
+          @click="restoreQueueDetailSettings"
+        >
+          {{
+            queueDetailEntry?.kind === "shared" &&
+            (queueDetailEntry.shared.kind !== "generation" ||
+              queueDetailEntry.shared.execution === "chain")
+              ? "Show on machine"
+              : "Use these settings in Make"
+          }}
+        </button>
+        <template v-if="queueDetailEntry?.kind === 'local'">
+          <button
+            v-for="action in mobileQueueRowActions(queueDetailEntry.local).filter(
+              (action) => !queueDetailModel || !['cancel', 'retry'].includes(action.id),
+            )"
+            :key="action.id"
+            type="button"
+            class="secondary-button"
+            :disabled="
+              queueDetailBusy ||
+              !queueDetailHost?.online ||
+              queueDetailHost.stale ||
+              queueControlHostIds.has(queueDetailHost.id)
+            "
+            @click="onMobileQueueRowAction(queueDetailEntry.local, action.id)"
+          >
+            {{ action.label }}
+          </button>
+        </template>
+        <button
+          v-if="
+            queueDetailEntry?.kind === 'shared' && canPauseFleetActivity(queueDetailEntry.shared)
+          "
+          type="button"
+          class="secondary-button"
+          :disabled="queueControlHostIds.has(queueDetailEntry.shared.hostId)"
+          @click="
+            setFleetJobPaused(
+              queueDetailEntry.shared,
+              !fleetQueueResumeNeeded(queueDetailEntry.shared),
+            )
+          "
+        >
+          {{ fleetQueueControlLabel(queueDetailEntry.shared) }}
+        </button>
+      </div>
+    </MobileLibrarySheet>
 
     <div
       v-if="!settingsOpen && tab === 'generate' && selectedHost && !preparedBatch"
@@ -12827,7 +13408,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :reuse-error="reusePrintError"
       :generation-announcement="generationAnnouncement"
       @close="generatedViewerOpen = false"
-      @reuse="generatedViewerOpen = false"
+      @reuse="reuseGeneratedPrint"
       @use-source="useGeneratedPrintAsSource"
       @upscale="openGeneratedUpscale"
     />
@@ -12870,60 +13451,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
 
     <LicenseAcceptanceDialog :open-external="openExternal" />
 
-    <nav v-if="!settingsOpen" class="mobile-tabs" aria-label="Primary">
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'generate' ? 'page' : undefined"
-        data-test="mobile-tab-generate"
-        @click="tab = 'generate'"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" />
-        </svg>
-        <span>Create</span>
-      </button>
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'gallery' ? 'page' : undefined"
-        data-test="mobile-tab-gallery"
-        @click="tab = 'gallery'"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="3" width="7.5" height="7.5" rx="1.5" />
-          <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" />
-          <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" />
-          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" />
-        </svg>
-        <span>Library</span>
-      </button>
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'catalog' ? 'page' : undefined"
-        data-test="mobile-tab-catalog"
-        @click="openCatalog()"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 3l8.5 4.3-8.5 4.3L3.5 7.3z" />
-          <path d="M3.5 12L12 16.3 20.5 12" />
-        </svg>
-        <span>Models</span>
-      </button>
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'hosts' ? 'page' : undefined"
-        data-test="mobile-tab-hosts"
-        @click="tab = 'hosts'"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="4" width="18" height="7" rx="2" />
-          <rect x="3" y="13" width="18" height="7" rx="2" />
-        </svg>
-        <span>Machines</span>
-      </button>
-    </nav>
+    <MobileNavigation
+      v-if="!settingsOpen"
+      :model-value="tab"
+      :queue-count="mobileActivityRows.length"
+      @update:model-value="selectMobileTab"
+    />
   </main>
 </template>

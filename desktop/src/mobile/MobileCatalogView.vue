@@ -50,7 +50,7 @@ import {
   type ModelInstallPlan,
 } from "@studio/lib/modelInstallTargets";
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
-import { isVideoFamily } from "../lib/capabilities";
+import { outputKindForModel, OUTPUT_KIND_LABEL } from "@studio/lib/outputKind";
 import { useInfiniteScrollSentinel } from "../lib/useInfiniteScrollSentinel";
 import { formatCount, formatGB, percent } from "../lib/format";
 import {
@@ -76,7 +76,7 @@ import {
   type MobilePullStatus,
 } from "./mobileDownloads";
 
-type MediaType = "all" | "image" | "video";
+type MediaType = "all" | "image" | "video" | "mesh";
 type CatalogSource = "all" | "hf" | "civitai" | "installed";
 
 type MobileCatalogEntry = CatalogEntry & {
@@ -319,7 +319,10 @@ function sourceMatches(entry: CatalogEntry): boolean {
 function mediaMatches(entry: CatalogEntry): boolean {
   if (mediaType.value === "all") return true;
   if (isUtilityModel({ family: entry.family } as ModelEntry)) return false;
-  return isVideoFamily(entry.family) === (mediaType.value === "video");
+  return (
+    outputKindForModel(entry) ===
+    (mediaType.value === "image" ? "still" : mediaType.value === "video" ? "clip" : "mesh")
+  );
 }
 
 const safeLiveEntries = computed(() => {
@@ -801,7 +804,13 @@ async function refreshCatalog(): Promise<void> {
   );
 }
 
-defineExpose({ refresh: refreshCatalog });
+defineExpose({
+  refresh: refreshCatalog,
+  browseKind(value: MediaType) {
+    mediaType.value = value;
+    showDiscoverModels();
+  },
+});
 
 function handleDownloadEvent({
   host,
@@ -1225,8 +1234,8 @@ onBeforeUnmount(() => {
   <section ref="catalogRoot" class="mobile-catalog" aria-labelledby="mobile-catalog-title">
     <header class="mobile-catalog-header">
       <div>
-        <h1 id="mobile-catalog-title" class="section-title">Catalog</h1>
-        <p class="section-note">Models for your remote Mold hosts</p>
+        <h1 id="mobile-catalog-title" class="section-title">Styles</h1>
+        <p class="section-note">Find a look for your next picture, clip, or 3-D object</p>
       </div>
       <label v-if="hosts.length > 1" class="mobile-catalog-host-picker">
         <span>Browse on</span>
@@ -1250,7 +1259,7 @@ onBeforeUnmount(() => {
     </p>
 
     <div v-if="!selectedHost" class="mobile-catalog-empty empty-state">
-      Add and select a remote host to browse its catalog.
+      Connect a machine to browse and get styles ready there.
     </div>
 
     <template v-else>
@@ -1329,7 +1338,7 @@ onBeforeUnmount(() => {
           data-test="mobile-catalog-segment-installed"
           @click="showInstalledModels"
         >
-          Installed
+          Ready to use
         </button>
         <button
           type="button"
@@ -1337,19 +1346,25 @@ onBeforeUnmount(() => {
           data-test="mobile-catalog-segment-discover"
           @click="showDiscoverModels"
         >
-          Discover
+          Browse more
         </button>
       </div>
 
       <div class="mobile-catalog-media" role="group" aria-label="Media type">
         <button
-          v-for="option in ['all', 'image', 'video'] as const"
+          v-for="option in ['all', 'image', 'video', 'mesh'] as const"
           :key="option"
           type="button"
           :aria-pressed="mediaType === option"
           @click="mediaType = option"
         >
-          {{ option === "all" ? "All" : option === "image" ? "Images" : "Video" }}
+          {{
+            option === "all"
+              ? "All"
+              : OUTPUT_KIND_LABEL[
+                  option === "image" ? "still" : option === "video" ? "clip" : "mesh"
+                ]
+          }}
         </button>
       </div>
 
@@ -1564,7 +1579,7 @@ onBeforeUnmount(() => {
             aria-label="Close model details"
             @click="closeDetail"
           >
-            ‹ <span>Catalog</span>
+            ‹ <span>Styles</span>
           </button>
           <strong id="mobile-catalog-detail-heading">Model details</strong>
           <span aria-hidden="true" />

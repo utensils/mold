@@ -243,7 +243,7 @@ onBeforeUnmount(() => {
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-theme-title">
       <div class="mobile-settings-section-copy">
         <h1 id="mobile-settings-theme-title">Theme</h1>
-        <p>Change the chrome without changing the color of your prints or videos.</p>
+        <p>Choose a look for Mold. Your images and videos keep their original colors.</p>
       </div>
 
       <fieldset class="mobile-settings-fieldset">
@@ -270,7 +270,7 @@ onBeforeUnmount(() => {
             </span>
             <span class="mobile-theme-option-copy">
               <strong>{{ meta.label }}</strong>
-              <small>{{ meta.tone }} · {{ meta.type }}</small>
+              <small>{{ meta.toneLabel }} · {{ meta.type }}</small>
             </span>
             <span class="mobile-settings-check" aria-hidden="true">✓</span>
           </label>
@@ -288,7 +288,7 @@ onBeforeUnmount(() => {
             @change="emit('update', { matchSystem: ($event.target as HTMLInputElement).checked })"
           />
           <strong>Match phone</strong>
-          <small>Swap to the paired light or dark look with iOS</small>
+          <small>Follow your phone’s light or dark appearance</small>
         </label>
       </fieldset>
     </section>
@@ -296,14 +296,14 @@ onBeforeUnmount(() => {
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-photos-title">
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-photos-title">Photos</h2>
-        <p>Keep newly generated images in your phone’s photo library as well as Mold Library.</p>
+        <p>Keep newly generated images in your phone’s photo library as well as My images.</p>
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>Generated images</legend>
         <label class="mobile-photo-setting">
           <span>
             <strong>Save to Photos automatically</strong>
-            <small>Videos remain in Mold Library and can be streamed from their host.</small>
+            <small>Videos stay in My images. Open one to watch or save it.</small>
           </span>
           <input
             name="mobile-auto-save-photos"
@@ -325,7 +325,7 @@ onBeforeUnmount(() => {
       </div>
       <LicenseSettingsPanel
         :target="host ? mobileHostTarget(host) : null"
-        :host-label="host?.name ?? 'Selected host'"
+        :host-label="host?.name ?? 'Selected machine'"
         :open-external="openExternal"
       />
     </section>
@@ -336,8 +336,8 @@ onBeforeUnmount(() => {
       data-test="mobile-settings-library"
     >
       <div class="mobile-settings-section-copy">
-        <h2 id="mobile-settings-library-title">Library</h2>
-        <p>How a new print is filed the moment it is developed.</p>
+        <h2 id="mobile-settings-library-title">My images</h2>
+        <p>Choose how new results are organized.</p>
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>File under</legend>
@@ -346,7 +346,10 @@ onBeforeUnmount(() => {
             <!-- Never a silent write: the tag this files is always shown on
                  Create as the removable ghost chip, before Generate. -->
             <strong>Tag new prints with their title</strong>
-            <small>Shown on Create as a removable chip — remove it to opt one print out.</small>
+            <small
+              >Shown in Make under Name and organize. Remove the tag there to skip it for one
+              result.</small
+            >
           </span>
           <input
             name="mobile-auto-tag-title"
@@ -364,12 +367,12 @@ onBeforeUnmount(() => {
 
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-hosts-title">
       <div class="mobile-settings-section-copy">
-        <h2 id="mobile-settings-hosts-title">Remote hosts</h2>
+        <h2 id="mobile-settings-hosts-title">Machines</h2>
         <p>
           {{
             hostCount === 0
-              ? "No hosts saved."
-              : `${hostCount} host${hostCount === 1 ? "" : "s"} saved. API keys stay in secure device storage.`
+              ? "No machines saved."
+              : `${hostCount} machine${hostCount === 1 ? "" : "s"} saved. API keys stay in secure device storage.`
           }}
         </p>
         <!-- Create only offers these while two or more machines are
@@ -386,7 +389,7 @@ onBeforeUnmount(() => {
         type="button"
         @click="emit('manage-hosts')"
       >
-        Manage hosts
+        Manage machines
       </button>
     </section>
 
@@ -426,7 +429,7 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <dt>Processing</dt>
-          <dd>Remote hosts only</dd>
+          <dd>Connected machines only</dd>
         </div>
         <div>
           <dt>Updates</dt>

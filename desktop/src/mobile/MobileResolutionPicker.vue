@@ -29,9 +29,11 @@ const props = withDefaults(
     /** Why the canvas holds its current size — the shape resolver's authority. */
     canvasIntent?: CanvasIntent;
     disabled?: boolean;
+    compact?: boolean;
   }>(),
   {
     disabled: false,
+    compact: false,
     model: null,
     pipeline: null,
     sourceDimensions: null,
@@ -166,115 +168,125 @@ function matchSource(): void {
 
 <template>
   <fieldset v-if="!canvasless" class="mobile-resolution-picker" :disabled="disabled">
-    <legend class="mobile-resolution-legend">Resolution</legend>
+    <legend class="mobile-resolution-legend">Shape and size</legend>
+    <details :open="!compact || !!resolutionError" class="mobile-size-disclosure">
+      <summary>
+        <span>{{ currentAspect }}</span
+        ><small>{{ width }} × {{ height }} px</small>
+      </summary>
 
-    <p
-      class="sr-only"
-      data-test="mobile-resolution-announcement"
-      aria-live="polite"
-      aria-atomic="true"
-    >
-      Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
-      {{ currentOrientation }}.
-    </p>
-
-    <div
-      v-if="sourceResolution"
-      class="mobile-resolution-source"
-      data-test="mobile-source-resolution-status"
-      role="status"
-    >
-      <strong>{{ outputShape.badge }}</strong>
-      <span>{{ outputShape.status }}</span>
-      <button
-        v-if="!followsSource"
-        type="button"
-        class="secondary-button"
-        data-test="mobile-match-source-resolution"
-        @click="matchSource"
+      <p
+        class="sr-only"
+        data-test="mobile-resolution-announcement"
+        aria-live="polite"
+        aria-atomic="true"
       >
-        Match source
-      </button>
-    </div>
-
-    <div class="mobile-resolution-group">
-      <span class="mobile-resolution-label">Shape</span>
-      <ShapePicker
-        :model-value="shapeId"
-        :options="shapeOptions"
-        :approximate="shapeApproximate"
-        :disabled="disabled"
-        label="Aspect ratio"
-        data-test="mobile-resolution-shape"
-        @update:model-value="setShape"
-      />
-    </div>
-
-    <div v-if="hasLadder" class="mobile-resolution-group mobile-resolution-tier">
-      <span class="mobile-resolution-label">Size</span>
-      <SegmentedControl
-        data-test="mobile-resolution-tier"
-        wrap
-        :model-value="outputShape.selectedSizeId"
-        :options="sizeSegments"
-        label="Size"
-        @update:model-value="setSize"
-      />
-      <p class="mobile-resolution-tier-dims" data-test="mobile-resolution-tier-dims">
-        {{ width }} × {{ height }} px
+        Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
+        {{ currentOrientation }}.
       </p>
-    </div>
 
-    <button
-      v-if="onLadder"
-      type="button"
-      class="secondary-button mobile-resolution-custom-toggle"
-      data-test="mobile-resolution-custom-toggle"
-      :aria-expanded="manualOpen"
-      @click="manualOpen = !manualOpen"
-    >
-      {{ manualOpen ? "Hide custom size" : "Custom size" }}
-    </button>
-
-    <div v-if="customVisible" class="mobile-resolution-custom" data-test="mobile-resolution-custom">
-      <label class="field">
-        <span>Width</span>
-        <input
-          v-model.number="width"
-          class="control"
-          type="number"
-          inputmode="numeric"
-          min="64"
-          :step="alignment"
-          aria-label="Custom width"
-          @change="snapWidth"
-        />
-      </label>
-      <button
-        type="button"
-        class="secondary-button mobile-resolution-swap"
-        aria-label="Swap width and height"
-        @click="swapDimensions"
+      <div
+        v-if="sourceResolution"
+        class="mobile-resolution-source"
+        data-test="mobile-source-resolution-status"
+        role="status"
       >
-        ⇄
-      </button>
-      <label class="field">
-        <span>Height</span>
-        <input
-          v-model.number="height"
-          class="control"
-          type="number"
-          inputmode="numeric"
-          min="64"
-          :step="alignment"
-          aria-label="Custom height"
-          @change="snapHeight"
+        <strong>{{ outputShape.badge }}</strong>
+        <span>{{ outputShape.status }}</span>
+        <button
+          v-if="!followsSource"
+          type="button"
+          class="secondary-button"
+          data-test="mobile-match-source-resolution"
+          @click="matchSource"
+        >
+          Match source
+        </button>
+      </div>
+
+      <div class="mobile-resolution-group">
+        <span class="mobile-resolution-label">Shape</span>
+        <ShapePicker
+          :model-value="shapeId"
+          :options="shapeOptions"
+          :approximate="shapeApproximate"
+          :disabled="disabled"
+          label="Aspect ratio"
+          data-test="mobile-resolution-shape"
+          @update:model-value="setShape"
         />
-      </label>
-    </div>
-    <p v-if="customVisible" class="mobile-resolution-note">
-      Custom dimensions snap to multiples of {{ alignment }} for model compatibility.
-    </p>
+      </div>
+
+      <div v-if="hasLadder" class="mobile-resolution-group mobile-resolution-tier">
+        <span class="mobile-resolution-label">Size</span>
+        <SegmentedControl
+          data-test="mobile-resolution-tier"
+          wrap
+          :model-value="outputShape.selectedSizeId"
+          :options="sizeSegments"
+          label="Size"
+          @update:model-value="setSize"
+        />
+        <p class="mobile-resolution-tier-dims" data-test="mobile-resolution-tier-dims">
+          {{ width }} × {{ height }} px
+        </p>
+      </div>
+
+      <button
+        v-if="onLadder"
+        type="button"
+        class="secondary-button mobile-resolution-custom-toggle"
+        data-test="mobile-resolution-custom-toggle"
+        :aria-expanded="manualOpen"
+        @click="manualOpen = !manualOpen"
+      >
+        {{ manualOpen ? "Hide custom size" : "Custom size" }}
+      </button>
+
+      <div
+        v-if="customVisible"
+        class="mobile-resolution-custom"
+        data-test="mobile-resolution-custom"
+      >
+        <label class="field">
+          <span>Width</span>
+          <input
+            v-model.number="width"
+            class="control"
+            type="number"
+            inputmode="numeric"
+            min="64"
+            :step="alignment"
+            aria-label="Custom width"
+            @change="snapWidth"
+          />
+        </label>
+        <button
+          type="button"
+          class="secondary-button mobile-resolution-swap"
+          aria-label="Swap width and height"
+          @click="swapDimensions"
+        >
+          ⇄
+        </button>
+        <label class="field">
+          <span>Height</span>
+          <input
+            v-model.number="height"
+            class="control"
+            type="number"
+            inputmode="numeric"
+            min="64"
+            :step="alignment"
+            aria-label="Custom height"
+            @change="snapHeight"
+          />
+        </label>
+      </div>
+      <p v-if="customVisible" class="mobile-resolution-note">
+        Custom dimensions snap to multiples of {{ alignment }} for model compatibility.
+      </p>
+    </details>
     <p
       v-if="resolutionError"
       class="mobile-generate-validation"

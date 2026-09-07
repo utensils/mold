@@ -166,7 +166,7 @@ function edit(id: string, event: Event): void {
   display: grid;
   gap: 12px;
   padding: 14px 0;
-  border-block: 1px solid var(--edge);
+  border-block: 1px solid var(--mold-border);
 }
 .mobile-remix-review header,
 .mobile-remix-review footer,
@@ -186,17 +186,17 @@ function edit(id: string, event: Event): void {
 }
 .mobile-remix-blocked {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 .mobile-remix-review header p,
 .mobile-remix-source-preview {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 .mobile-remix-source-preview p {
   margin-top: 8px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   overflow-wrap: anywhere;
 }
 .mobile-remix-review > ol {
@@ -223,7 +223,7 @@ function edit(id: string, event: Event): void {
   height: 20px;
 }
 .mobile-remix-select span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 .mobile-remix-editor {
@@ -242,10 +242,10 @@ function edit(id: string, event: Event): void {
   list-style: none;
 }
 .mobile-remix-dimension-tags li {
-  border: 1px solid var(--control-edge);
+  border: 1px solid var(--mold-border-control);
   border-radius: 999px;
   padding: 3px 7px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   text-transform: capitalize;
 }

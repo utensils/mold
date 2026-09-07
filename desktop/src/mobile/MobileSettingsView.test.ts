@@ -112,8 +112,8 @@ describe("MobileSettingsView", () => {
     });
 
     expect(wrapper.findAll("fieldset")).toHaveLength(4);
-    expect(wrapper.text()).toContain("Change the chrome without changing the color of your prints");
-    expect(wrapper.text()).toContain("2 hosts saved");
+    expect(wrapper.text()).toContain("Your images and videos keep their original colors");
+    expect(wrapper.text()).toContain("2 machines saved");
     expect(wrapper.text()).toContain("0.18.0");
     expect(wrapper.text()).toContain("James Brink");
     expect(wrapper.text()).toContain("Jeffrey Dilley");
@@ -166,7 +166,7 @@ describe("MobileSettingsView", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("No hosts saved");
+    expect(wrapper.text()).toContain("No machines saved");
     await wrapper.get(".mobile-settings-manage").trigger("click");
     expect(wrapper.emitted("manage-hosts")).toHaveLength(1);
   });

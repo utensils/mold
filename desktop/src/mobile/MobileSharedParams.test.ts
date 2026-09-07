@@ -262,8 +262,8 @@ describe("MobileSharedParams fixed-control notes", () => {
     // Each note lives INSIDE its own field, directly under that field's input,
     // so it reads as an explanation of that control rather than as trailing
     // prose after the whole two-column grid.
-    const stepsField = fieldFor(wrapper, "Steps");
-    const guidanceField = fieldFor(wrapper, "Guidance");
+    const stepsField = fieldFor(wrapper, "Detail");
+    const guidanceField = fieldFor(wrapper, "Stick to my words");
     expect(stepsField.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(true);
     expect(stepsField.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
     expect(guidanceField.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(true);
@@ -298,8 +298,8 @@ describe("MobileSharedParams fixed-control notes", () => {
 
     expect(wrapper.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
-    expect(fieldFor(wrapper, "Steps").classes()).not.toContain("field--with-note");
-    expect(fieldFor(wrapper, "Guidance").classes()).not.toContain("field--with-note");
+    expect(fieldFor(wrapper, "Detail").classes()).not.toContain("field--with-note");
+    expect(fieldFor(wrapper, "Stick to my words").classes()).not.toContain("field--with-note");
   });
 
   it("invents no copy when a fixed control carries no note (older host)", () => {

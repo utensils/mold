@@ -90,7 +90,7 @@ describe("MobileSeedPicker", () => {
       "true",
     );
     expect(wrapper.get("[data-test='mobile-seed-note']").text()).toBe(
-      "Enter a whole number, or choose Random.",
+      "Enter a whole number, or choose Surprise me.",
     );
 
     state.seed = "not-a-number";
