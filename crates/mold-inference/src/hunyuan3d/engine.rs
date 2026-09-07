@@ -31,12 +31,12 @@
 
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
-#[cfg(feature = "mesh-matting")]
-use mold_core::MeshMattingMode;
 use mold_core::{
-    GenerateRequest, GenerateResponse, GenerationImageReferenceRole, GenerationReference,
-    GenerationReferenceAuthority, MeshData, MeshDerivedMedia, ModelPaths, OutputFormat,
+    GenerateRequest, GenerateResponse, GenerationReference, GenerationReferenceAuthority, MeshData,
+    ModelPaths, OutputFormat,
 };
+#[cfg(feature = "mesh-matting")]
+use mold_core::{GenerationImageReferenceRole, MeshDerivedMedia, MeshMattingMode};
 
 use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
