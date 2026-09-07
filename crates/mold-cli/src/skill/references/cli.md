@@ -169,9 +169,12 @@ The same tool and command take `gif`, `apng`, or `webp` to render a
 view spun a full turn around the mesh, the way to show a mesh anywhere a
 `.glb` cannot open. Its optional `playback` (`loop` | `bounce`), `repeat`
 (`forever` | `once`), `max_dimension` (240–2048, default 512), `frames`
-(8–180, default 36) and `fps` (1–30, default 10) mirror `--playback`,
-`--repeat`, `--max-dimension`, `--frames` and `--fps`; bounce and once are GIF
-only, and the flags are refused on a geometry format. Only the formats the
+(8–180, default 36), `fps` (1–30, default 10) and `transparent` mirror
+`--playback`, `--repeat`, `--max-dimension`, `--frames`, `--fps` and
+`--transparent`; bounce and once are GIF only, and the flags are refused on a
+geometry format. `transparent` renders the object over nothing instead of the
+slate backdrop — APNG and WebP keep the antialiased edge, while a GIF's single
+transparent palette index makes it a hard cut. Only the formats the
 host lists in `capabilities.mesh.export_formats` succeed (`webp` needs a build
 with the `webp` feature).
 

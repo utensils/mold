@@ -18,12 +18,12 @@
 use std::ops::RangeInclusive;
 
 use anyhow::{bail, Result};
-use image::RgbImage;
+use image::{RgbImage, RgbaImage};
 
 use crate::hunyuan3d::mesh::Mesh;
 use crate::hunyuan3d::poster::{
-    render_sequence_frame_rgb_with, turntable_cameras, Appearance, MAX_POSTER_SIZE,
-    POSTER_ELEVATION_DEG,
+    render_sequence_frame_rgb_with, render_sequence_frame_rgba_with, turntable_cameras, Appearance,
+    MAX_POSTER_SIZE, POSTER_ELEVATION_DEG,
 };
 use crate::hunyuan3d::raster::{sweep_fit_for, Camera};
 use crate::ltx_video::video_enc;
@@ -63,6 +63,12 @@ pub struct TurntableOptions {
     /// `false` plays once and rests on the final frame. GIF only — APNG and
     /// WebP animations loop.
     pub repeat_forever: bool,
+    /// Render the object over nothing instead of the poster's slate ramp.
+    ///
+    /// APNG and WebP carry the antialiased silhouette as it was rendered. GIF
+    /// has one transparent palette index rather than a channel, so its edge is
+    /// thresholded — a coarser cut-out, but still a cut-out.
+    pub transparent: bool,
 }
 
 impl Default for TurntableOptions {
@@ -73,6 +79,7 @@ impl Default for TurntableOptions {
             size: DEFAULT_SIZE,
             bounce: false,
             repeat_forever: true,
+            transparent: false,
         }
     }
 }
@@ -87,10 +94,13 @@ impl Default for TurntableOptions {
 /// checked `frames` or `size` against their ranges gets a refusal, never an
 /// overflow, because the product saturates instead of wrapping.
 pub fn check_frame_budget(options: &TurntableOptions) -> std::result::Result<(), String> {
+    // A transparent sweep keeps its coverage, so its frames are RGBA all the
+    // way to the encoder rather than RGB with a per-frame copy.
+    let channels = if options.transparent { 4 } else { 3 };
     let bytes = (options.frames as u64)
         .saturating_mul(u64::from(options.size))
         .saturating_mul(u64::from(options.size))
-        .saturating_mul(3);
+        .saturating_mul(channels);
     if bytes > MAX_TURNTABLE_RGB_BYTES {
         return Err(format!(
             "{} frames at {} px need {} MiB of frame buffer, over the {} MiB export budget; lower frames or max_dimension",
@@ -161,6 +171,27 @@ pub fn render_turntable_with(
     appearance: &Appearance,
     options: &TurntableOptions,
 ) -> Result<Vec<RgbImage>> {
+    render_sweep(mesh, options, |mesh, camera| {
+        render_sequence_frame_rgb_with(mesh, appearance, camera, options.size)
+    })
+}
+
+/// [`render_turntable_with`] over a transparent backdrop.
+pub fn render_turntable_rgba_with(
+    mesh: &Mesh,
+    appearance: &Appearance,
+    options: &TurntableOptions,
+) -> Result<Vec<RgbaImage>> {
+    render_sweep(mesh, options, |mesh, camera| {
+        render_sequence_frame_rgba_with(mesh, appearance, camera, options.size)
+    })
+}
+
+/// The bounds every sweep is checked against, and the cameras it walks.
+fn render_sweep<F, T>(mesh: &Mesh, options: &TurntableOptions, frame: F) -> Result<Vec<T>>
+where
+    F: Fn(&Mesh, &Camera) -> Result<T>,
+{
     if !FRAMES_RANGE.contains(&options.frames) {
         bail!(
             "frames must be between {} and {}",
@@ -179,7 +210,7 @@ pub fn render_turntable_with(
     }
     turntable_frame_cameras(mesh, options.frames, options.bounce)
         .iter()
-        .map(|camera| render_sequence_frame_rgb_with(mesh, appearance, camera, options.size))
+        .map(|camera| frame(mesh, camera))
         .collect()
 }
 
@@ -227,6 +258,9 @@ pub fn export_turntable_with(
             FPS_RANGE.end()
         );
     }
+    if options.transparent {
+        return encode_transparent(mesh, appearance, format, options);
+    }
     let frames = render_turntable_with(mesh, appearance, options)?;
     match format {
         OutputFormat::Gif => video_enc::encode_gif_with_options(
@@ -240,6 +274,37 @@ pub fn export_turntable_with(
             #[cfg(feature = "webp")]
             {
                 video_enc::encode_webp(&frames, options.fps)
+            }
+            #[cfg(not(feature = "webp"))]
+            {
+                bail!("WebP export requires a mold build with the webp feature")
+            }
+        }
+        _ => unreachable!("refused above"),
+    }
+}
+
+/// [`export_turntable_with`] over a transparent backdrop.
+fn encode_transparent(
+    mesh: &Mesh,
+    appearance: &Appearance,
+    format: mold_core::OutputFormat,
+    options: &TurntableOptions,
+) -> Result<Vec<u8>> {
+    use mold_core::OutputFormat;
+    let frames = render_turntable_rgba_with(mesh, appearance, options)?;
+    match format {
+        OutputFormat::Gif => video_enc::encode_gif_rgba_with_options(
+            &frames,
+            options.fps,
+            options.bounce,
+            options.repeat_forever,
+        ),
+        OutputFormat::Apng => video_enc::encode_apng_rgba(&frames, options.fps),
+        OutputFormat::Webp => {
+            #[cfg(feature = "webp")]
+            {
+                video_enc::encode_webp_rgba(&frames, options.fps)
             }
             #[cfg(not(feature = "webp"))]
             {
@@ -364,6 +429,124 @@ mod tests {
                 "frame {index} lost the texture's red: {centre:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_transparent_sweep_cuts_the_backdrop_out() {
+        let mesh = cube();
+        let options = TurntableOptions {
+            frames: 8,
+            size: 64,
+            transparent: true,
+            ..TurntableOptions::default()
+        };
+        let frames =
+            render_turntable_rgba_with(&mesh, &Appearance::default(), &options).expect("render");
+        assert_eq!(frames.len(), 8);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!((frame.width(), frame.height()), (64, 64));
+            // The corners are outside any silhouette this sweep produces.
+            for (x, y) in [(0, 0), (63, 0), (0, 63), (63, 63)] {
+                assert_eq!(
+                    frame.get_pixel(x, y).0[3],
+                    0,
+                    "frame {index} kept a backdrop at ({x}, {y})"
+                );
+            }
+            let centre = frame.get_pixel(32, 32).0;
+            assert_eq!(centre[3], 255, "frame {index} lost the object");
+            // A cleared subpixel must not be averaged into its neighbours as
+            // black: the object stays as bright as it renders on slate.
+            assert!(
+                centre[0] > 100,
+                "frame {index} darkened the surface: {centre:?}"
+            );
+        }
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.pixels().any(|pixel| (1..255).contains(&pixel.0[3]))),
+            "the silhouette is antialiased, not a hard mask"
+        );
+    }
+
+    #[test]
+    fn transparency_reaches_every_animation_container() {
+        let mesh = cube();
+        let options = TurntableOptions {
+            frames: 8,
+            size: 48,
+            transparent: true,
+            ..TurntableOptions::default()
+        };
+        for format in [
+            mold_core::OutputFormat::Gif,
+            mold_core::OutputFormat::Apng,
+            #[cfg(feature = "webp")]
+            mold_core::OutputFormat::Webp,
+        ] {
+            let transparent = export_turntable(&mesh, format, &options).expect("transparent");
+            let opaque = export_turntable(
+                &mesh,
+                format,
+                &TurntableOptions {
+                    transparent: false,
+                    ..options
+                },
+            )
+            .expect("opaque");
+            assert_ne!(
+                transparent, opaque,
+                "{format:?} encoded the same bytes either way"
+            );
+        }
+    }
+
+    /// A transparent GIF must clear the canvas between frames. With the
+    /// opaque encoder's `DisposalMethod::Any` a cleared pixel keeps whatever
+    /// the previous frame drew there, so a turning object smears a trail
+    /// through its own transparent area.
+    #[test]
+    fn a_transparent_gif_disposes_to_the_background() {
+        let bytes = export_turntable(
+            &cube(),
+            mold_core::OutputFormat::Gif,
+            &TurntableOptions {
+                frames: 8,
+                size: 48,
+                transparent: true,
+                ..TurntableOptions::default()
+            },
+        )
+        .expect("encode");
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::Indexed);
+        let mut decoder = options.read_info(std::io::Cursor::new(bytes)).unwrap();
+        let mut seen = 0;
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            assert_eq!(frame.dispose, gif::DisposalMethod::Background);
+            assert!(frame.transparent.is_some(), "no transparent palette index");
+            seen += 1;
+        }
+        assert_eq!(seen, 8);
+    }
+
+    /// The GIF budget is about decoded frame bytes, and a transparent sweep
+    /// carries a fourth channel all the way to the encoder.
+    #[test]
+    fn the_frame_budget_charges_the_alpha_channel() {
+        let options = TurntableOptions {
+            frames: 180,
+            size: 640,
+            transparent: false,
+            ..TurntableOptions::default()
+        };
+        assert!(check_frame_budget(&options).is_ok());
+        assert!(check_frame_budget(&TurntableOptions {
+            transparent: true,
+            ..options
+        })
+        .is_err());
     }
 
     /// The GIF carries exactly the frames the sweep implies: N for a loop,

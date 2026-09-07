@@ -909,10 +909,11 @@ impl McpServer {
             max_dimension: args.max_dimension,
             frames: args.frames,
             fps: args.fps,
+            transparent: args.transparent,
         };
         if !format.is_animation() && turntable != mold_core::MeshTurntableOptions::default() {
             return Err(format!(
-                "playback, repeat, max_dimension, frames and fps shape a turntable; they apply to format gif, apng, or webp, not {format}"
+                "playback, repeat, max_dimension, frames, fps and transparent shape a turntable; they apply to format gif, apng, or webp, not {format}"
             ));
         }
         let geometry = mold_core::MeshGeometryOptions {
@@ -1411,6 +1412,7 @@ struct ExportMeshArgs {
     max_dimension: Option<u32>,
     frames: Option<u32>,
     fps: Option<u32>,
+    transparent: Option<bool>,
     size_mm: Option<f64>,
     up_axis: Option<String>,
     origin: Option<String>,
@@ -3412,6 +3414,10 @@ fn builtin_tool_definitions() -> Value {
                         "minimum": 1,
                         "maximum": 30,
                         "description": "Turntable playback rate. Default 10."
+                    },
+                    "transparent": {
+                        "type": "boolean",
+                        "description": "Turntable only. Render the object over nothing instead of the slate backdrop. Default false. APNG and WebP keep the antialiased edge; a GIF's single transparent palette index makes it a hard cut."
                     },
                     "size_mm": {
                         "type": "number",

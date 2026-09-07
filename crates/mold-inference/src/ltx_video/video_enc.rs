@@ -235,6 +235,140 @@ pub fn encode_gif_with_options(
     Ok(buf)
 }
 
+/// [`encode_gif_with_options`] for frames that carry their own alpha.
+///
+/// GIF transparency is one palette index, not a channel, so the alpha is
+/// thresholded: a pixel the caller left fully clear becomes the transparent
+/// index and everything else is opaque. That is why the mesh turntable
+/// renders its silhouette antialiased and then hard-cuts here — a GIF cannot
+/// hold the soft edge, and dithering coverage would fringe it.
+///
+/// Every frame disposes to the background. With the opaque encoder's
+/// `DisposalMethod::Any` a cleared pixel would keep whatever the previous
+/// frame drew there, so a spinning object would smear its own trail across
+/// the transparent area.
+pub fn encode_gif_rgba_with_options(
+    frames: &[image::RgbaImage],
+    fps: u32,
+    bounce: bool,
+    repeat_forever: bool,
+) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+    anyhow::ensure!(fps > 0, "GIF frame rate must be greater than zero");
+
+    let (width, height) = (frames[0].width() as u16, frames[0].height() as u16);
+    let delay_cs = (100.0 / fps as f64).round() as u16;
+
+    let mut buf = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut buf, width, height, &[])
+            .context("failed to create GIF encoder")?;
+        encoder
+            .set_repeat(if repeat_forever {
+                gif::Repeat::Infinite
+            } else {
+                gif::Repeat::Finite(0)
+            })
+            .context("failed to set GIF repeat")?;
+
+        let mut write_frame = |frame_img: &image::RgbaImage| -> Result<()> {
+            let mut pixels = frame_img.as_raw().clone();
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel[3] = if pixel[3] >= ALPHA_CUTOFF { 255 } else { 0 };
+            }
+            let mut gif_frame = gif::Frame::from_rgba_speed(width, height, &mut pixels, 10);
+            gif_frame.delay = delay_cs;
+            gif_frame.dispose = gif::DisposalMethod::Background;
+
+            encoder
+                .write_frame(&gif_frame)
+                .context("failed to write GIF frame")?;
+            Ok(())
+        };
+
+        for frame_img in frames {
+            write_frame(frame_img)?;
+        }
+        if bounce && frames.len() > 1 {
+            let reverse_start = usize::from(repeat_forever);
+            for frame_img in frames[reverse_start..frames.len() - 1].iter().rev() {
+                write_frame(frame_img)?;
+            }
+        }
+    }
+    Ok(buf)
+}
+
+/// Alpha at or above which a GIF pixel is drawn rather than left clear.
+///
+/// The midpoint: the rasterizer's antialiased silhouette is symmetric about
+/// it, so a hard cut here keeps the object the size it was rendered at
+/// instead of eroding or dilating its outline.
+const ALPHA_CUTOFF: u8 = 128;
+
+/// [`encode_apng`] for frames that carry their own alpha. APNG holds the full
+/// channel, so the antialiased silhouette survives intact.
+pub fn encode_apng_rgba(frames: &[image::RgbaImage], fps: u32) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+
+    let (width, height) = (frames[0].width(), frames[0].height());
+    let num_frames = frames.len() as u32;
+
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_animated(num_frames, 0)?;
+        encoder.set_frame_delay(1, fps as u16)?;
+
+        let mut writer = encoder
+            .write_header()
+            .context("failed to write APNG header")?;
+
+        for (i, frame) in frames.iter().enumerate() {
+            if i > 0 {
+                // Replace rather than blend, and clear first: a transparent
+                // pixel must show through to the page, not to frame i - 1.
+                writer.set_blend_op(png::BlendOp::Source)?;
+                writer.set_dispose_op(png::DisposeOp::Background)?;
+            }
+            writer
+                .write_image_data(frame.as_raw())
+                .with_context(|| format!("failed to write APNG frame {i}"))?;
+        }
+
+        writer.finish().context("failed to finalize APNG")?;
+    }
+    Ok(buf)
+}
+
+/// [`encode_webp`] for frames that carry their own alpha.
+#[cfg(feature = "webp")]
+pub fn encode_webp_rgba(frames: &[image::RgbaImage], fps: u32) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+
+    let (width, height) = (frames[0].width(), frames[0].height());
+    let frame_duration_ms = (1000.0 / fps as f64).round() as i32;
+
+    let mut encoder = webp_animation::Encoder::new((width, height))
+        .map_err(|e| anyhow::anyhow!("failed to create WebP encoder: {e}"))?;
+
+    for (i, frame_img) in frames.iter().enumerate() {
+        let timestamp_ms = i as i32 * frame_duration_ms;
+        encoder
+            .add_frame(frame_img.as_raw(), timestamp_ms)
+            .map_err(|e| anyhow::anyhow!("failed to add WebP frame {i}: {e}"))?;
+    }
+
+    let final_timestamp_ms = frames.len() as i32 * frame_duration_ms;
+    let webp_data = encoder
+        .finalize(final_timestamp_ms)
+        .map_err(|e| anyhow::anyhow!("failed to finalize WebP animation: {e}"))?;
+
+    Ok(webp_data.to_vec())
+}
+
 /// Extract the first frame as a PNG thumbnail.
 pub fn first_frame_png(frames: &[RgbImage]) -> Result<Vec<u8>> {
     anyhow::ensure!(!frames.is_empty(), "no frames for thumbnail");

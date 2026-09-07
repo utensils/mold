@@ -19,7 +19,7 @@
 //! G-buffer contract.
 
 use anyhow::{bail, Context};
-use image::{ImageFormat, RgbImage};
+use image::{ImageFormat, RgbImage, RgbaImage};
 
 use crate::hunyuan3d::mesh::Mesh;
 use crate::hunyuan3d::raster::{render_gbuffers, sweep_fit_for, Camera, GBuffers};
@@ -221,8 +221,32 @@ fn render_frame(
         bail!("cannot render a poster: the mesh projects to nothing from this view");
     }
 
-    let shaded = shade(&gb, camera, mesh, appearance);
+    let shaded = shade(&gb, camera, mesh, appearance, Backdrop::Ramp);
     Ok(downsample(&shaded, ss, size))
+}
+
+/// [`render_sequence_frame_rgb_with`] on nothing: the mesh over a fully
+/// transparent backdrop, its silhouette carried as antialiased alpha.
+///
+/// A turntable of a 3-D object is exactly the thing people drop onto a slide,
+/// a README or a page that is not slate blue, and a baked-in background is
+/// what stops them.
+pub fn render_sequence_frame_rgba_with(
+    mesh: &Mesh,
+    appearance: &Appearance,
+    camera: &Camera,
+    size: u32,
+) -> anyhow::Result<RgbaImage> {
+    if mesh.is_empty() {
+        bail!("cannot render a poster: the mesh has no geometry");
+    }
+    if size == 0 || size > MAX_POSTER_SIZE {
+        bail!("poster size {size} is outside 1..={MAX_POSTER_SIZE}");
+    }
+    let ss = size * SUPERSAMPLE;
+    let gb = render_gbuffers(mesh, camera, ss, ss);
+    let shaded = shade(&gb, camera, mesh, appearance, Backdrop::Transparent);
+    Ok(downsample_rgba(&shaded, ss, size))
 }
 
 /// The cameras of a `frames`-long turntable, starting at [`poster_camera`].
@@ -274,8 +298,28 @@ pub fn turntable_cameras(frames: usize, bounce: bool) -> Vec<Camera> {
         .collect()
 }
 
+/// What an uncovered pixel becomes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backdrop {
+    /// The slate ramp the placeholder SVG uses. Opaque.
+    Ramp,
+    /// Nothing at all, so the mesh can be composited onto whatever the frame
+    /// is dropped into.
+    Transparent,
+}
+
 /// Shade the G-buffers into a supersampled sRGB image.
-fn shade(gb: &GBuffers, camera: &Camera, mesh: &Mesh, appearance: &Appearance) -> Vec<[u8; 3]> {
+///
+/// Always RGBA so the two backdrops share one loop; an opaque render throws
+/// the alpha away in [`downsample`] and is byte-for-byte what it was when the
+/// shader worked in RGB.
+fn shade(
+    gb: &GBuffers,
+    camera: &Camera,
+    mesh: &Mesh,
+    appearance: &Appearance,
+    backdrop: Backdrop,
+) -> Vec<[u8; 4]> {
     let (right, up, to_eye) = camera.basis();
     // Lights are defined in the camera's frame, not the world's, so every view
     // is lit the same way: a key over the viewer's left shoulder and a dim fill
@@ -295,7 +339,13 @@ fn shade(gb: &GBuffers, camera: &Camera, mesh: &Mesh, appearance: &Appearance) -
 
     let mut out = Vec::with_capacity(gb.len());
     for y in 0..gb.height {
-        let bg = background(y, gb.height);
+        let bg = match backdrop {
+            Backdrop::Ramp => {
+                let [r, g, b] = background(y, gb.height);
+                [r, g, b, 255]
+            }
+            Backdrop::Transparent => [0, 0, 0, 0],
+        };
         for x in 0..gb.width {
             let i = y as usize * gb.width as usize + x as usize;
             if !gb.mask[i] {
@@ -310,7 +360,8 @@ fn shade(gb: &GBuffers, camera: &Camera, mesh: &Mesh, appearance: &Appearance) -
             }
             let lit = AMBIENT + KEY * dot(n, key).max(0.0) + FILL * dot(n, fill).max(0.0);
             let l = lit * occlusion(gb, x, y, ao_radius);
-            out.push(surface.pixel(gb, i, l));
+            let [r, g, b] = surface.pixel(gb, i, l);
+            out.push([r, g, b, 255]);
         }
     }
     out
@@ -572,7 +623,7 @@ fn background(y: u32, height: u32) -> [u8; 3] {
 ///
 /// `ss` is always an exact multiple of `size` ([`SUPERSAMPLE`] is the ratio),
 /// so this is a plain block average with no resampling weights to get wrong.
-fn downsample(src: &[[u8; 3]], ss: u32, size: u32) -> RgbImage {
+fn downsample(src: &[[u8; 4]], ss: u32, size: u32) -> RgbImage {
     let factor = (ss / size) as usize;
     let n = (factor * factor) as u32;
     RgbImage::from_fn(size, size, |x, y| {
@@ -587,6 +638,41 @@ fn downsample(src: &[[u8; 3]], ss: u32, size: u32) -> RgbImage {
             }
         }
         image::Rgb([(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8])
+    })
+}
+
+/// [`downsample`] keeping coverage as alpha.
+///
+/// Averages in PREMULTIPLIED space and un-premultiplies once. A silhouette
+/// subpixel that missed the mesh has no colour of its own, and averaging its
+/// zero straight into the neighbours' would darken every edge toward black —
+/// the halo a naive alpha downsample leaves around a cut-out.
+fn downsample_rgba(src: &[[u8; 4]], ss: u32, size: u32) -> RgbaImage {
+    let factor = (ss / size) as usize;
+    let n = (factor * factor) as u32;
+    RgbaImage::from_fn(size, size, |x, y| {
+        let mut acc = [0u32; 4];
+        for sy in 0..factor {
+            let row = (y as usize * factor + sy) * ss as usize;
+            for sx in 0..factor {
+                let p = src[row + x as usize * factor + sx];
+                let a = u32::from(p[3]);
+                for k in 0..3 {
+                    acc[k] += u32::from(p[k]) * a;
+                }
+                acc[3] += a;
+            }
+        }
+        if acc[3] == 0 {
+            return image::Rgba([0, 0, 0, 0]);
+        }
+        let alpha = acc[3] / n;
+        image::Rgba([
+            (acc[0] / acc[3]) as u8,
+            (acc[1] / acc[3]) as u8,
+            (acc[2] / acc[3]) as u8,
+            alpha as u8,
+        ])
     })
 }
 

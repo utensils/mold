@@ -16572,6 +16572,63 @@ mod tests {
 
     /// Every turntable bound is a 422 at the door, in the `max_dimension`
     /// message style, and the frame budget is refused before a frame renders.
+    /// A turntable can be asked for over nothing, and only a turntable can.
+    #[tokio::test]
+    async fn a_transparent_turntable_is_encoded_and_refused_where_it_cannot_apply() {
+        let (app, _output_dir) = gallery_export_app(&[
+            ("mesh.glb", gallery_glb_fixture()),
+            // Never decoded: every refusal below happens before the
+            // source is opened.
+            ("clip.mp4", b"not a real mp4".to_vec()),
+        ]);
+
+        let request = |transparent: bool| serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 240, "transparent": transparent });
+        let opaque = export_gallery_file_with(&app, "mesh.glb", request(false)).await;
+        assert_eq!(opaque.status(), StatusCode::OK);
+        let transparent = export_gallery_file_with(&app, "mesh.glb", request(true)).await;
+        assert_eq!(transparent.status(), StatusCode::OK);
+        let bytes = |response: axum::response::Response| async move {
+            axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+                .await
+                .unwrap()
+        };
+        assert_ne!(
+            bytes(opaque).await,
+            bytes(transparent).await,
+            "the backdrop was encoded either way"
+        );
+
+        // Absent is opaque, so a client built before the field is unchanged.
+        let older = export_gallery_file_with(
+            &app,
+            "mesh.glb",
+            serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 240 }),
+        )
+        .await;
+        assert_eq!(older.status(), StatusCode::OK);
+
+        // A geometry transcode has no backdrop and a video's frames already
+        // exist: both are a real client mistake, refused rather than ignored.
+        for (name, body) in [
+            (
+                "mesh.glb",
+                serde_json::json!({ "format": "stl", "transparent": true }),
+            ),
+            (
+                "clip.mp4",
+                serde_json::json!({ "format": "gif", "transparent": true }),
+            ),
+        ] {
+            let refused = export_gallery_file_with(&app, name, body.clone()).await;
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(
+                json_body(refused).await["error"].as_str().unwrap(),
+                "transparent is only supported for a mesh turntable",
+                "{body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn turntable_bounds_are_refused_with_the_bound_named() {
         let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);

@@ -6316,6 +6316,7 @@ mod tests {
             max_dimension: Some(480),
             frames: Some(24),
             fps: Some(12),
+            transparent: Some(true),
         };
         assert_eq!(
             serde_json::to_value(options).unwrap(),
@@ -6324,7 +6325,8 @@ mod tests {
                 "repeat": "once",
                 "max_dimension": 480,
                 "frames": 24,
-                "fps": 12
+                "fps": 12,
+                "transparent": true
             })
         );
         for (raw, expected) in [
@@ -11843,6 +11845,13 @@ pub struct MeshTurntableOptions {
     pub frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// Render the object over nothing instead of the poster's slate ramp.
+    ///
+    /// Absent is opaque, so an older client's request is unchanged. APNG and
+    /// WebP keep the antialiased silhouette; a GIF's one transparent palette
+    /// index makes its edge a hard cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent: Option<bool>,
 }
 
 /// Which world axis points up in an exported geometry file.

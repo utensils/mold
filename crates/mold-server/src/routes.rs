@@ -9164,6 +9164,12 @@ pub(crate) struct GalleryExportRequest {
     /// bounding box. Refused on `glb`, on a turntable, and on a video.
     #[serde(default)]
     pub(crate) origin: Option<mold_core::MeshExportOrigin>,
+    /// Mesh turntables only: render the object over nothing instead of the
+    /// poster's slate ramp. Refused on a geometry container and on a video —
+    /// a transcode has no backdrop to drop, and a video's frames already
+    /// exist. Absent is opaque, so an older client is unchanged.
+    #[serde(default)]
+    pub(crate) transparent: Option<bool>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -9635,6 +9641,15 @@ async fn export_gallery_media(
     // export has made a real mistake and must hear about it.
     let _: Option<mold_core::MeshExportGeometry> =
         geometry_options_for(&request, request.format.mesh_format())?;
+    // A video's frames already exist and carry no coverage, so there is no
+    // backdrop to leave out. `geometry_options_for` lets it through here
+    // because the requested container IS an animation; only the source tells
+    // the two apart.
+    if request.transparent.is_some() {
+        return Err(ApiError::validation(
+            "transparent is only supported for a mesh turntable",
+        ));
+    }
     let bounce = matches!(request.playback, GalleryGifPlayback::Bounce);
     if bounce && !matches!(request.format, GalleryExportFormat::Gif) {
         return Err(ApiError::validation(
@@ -9735,6 +9750,11 @@ pub(crate) fn geometry_options_for(
     request: &GalleryExportRequest,
     format: mold_core::MeshExportFormat,
 ) -> Result<Option<mold_core::MeshExportGeometry>, ApiError> {
+    if request.transparent.is_some() && !format.is_animation() {
+        return Err(ApiError::validation(
+            "transparent is only supported for a mesh turntable",
+        ));
+    }
     let options = mold_core::MeshGeometryOptions {
         size_mm: request.size_mm,
         up_axis: request.up_axis,
@@ -9795,6 +9815,7 @@ pub(crate) fn turntable_options_for(
         size: request.max_dimension.unwrap_or(DEFAULT_SIZE),
         bounce,
         repeat_forever: matches!(request.repeat, GalleryGifRepeat::Forever),
+        transparent: request.transparent.unwrap_or(false),
     };
     // Refused here, before the file is even read, so the budget is a
     // request error and not a render failure half-way through.

@@ -282,9 +282,15 @@ async function runMeshExport(
   }
 }
 
+/** True while the open export sheet is a mesh TURNTABLE rather than a video
+ * re-encode. Only a turntable is rendered here, so only it can leave its
+ * backdrop out; the host refuses `transparent` on anything else. */
+const exportIsTurntable = ref(false);
+
 function openMeshAnimationExport() {
   menuOpen.value = false;
   exportError.value = "";
+  exportIsTurntable.value = true;
   exportCapabilities.value = {
     ...DEFAULT_VIDEO_EXPORT_CAPABILITIES,
     formats: meshAnimationExports.value,
@@ -569,6 +575,7 @@ async function exportFetch(
 async function openVideoExport() {
   exportOpen.value = true;
   exportError.value = "";
+  exportIsTurntable.value = false;
   try {
     exportCapabilities.value = (await (
       await exportFetch("/api/gallery/export-options")
@@ -1304,6 +1311,7 @@ async function performVideoExport(options: VideoExportOptions) {
         :open="exportOpen"
         :filename="item.filename"
         :formats="exportCapabilities.formats"
+        :transparency="exportIsTurntable"
         :busy="exportBusy"
         :error="exportError"
         @close="exportOpen = false"
