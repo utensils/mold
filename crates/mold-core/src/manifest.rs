@@ -9217,7 +9217,9 @@ mod tests {
         // the shared UMT5 and the 2.2 VAE the other 5B tiers already pull, so
         // it too is exactly one manifest.
         // Hunyuan3D 2.1 shape: one additional self-contained checkpoint.
-        assert_eq!(known_manifests().len(), 203);
+        // Hunyuan3D multiview: +2 self-contained normal and five-step Turbo
+        // checkpoints, each carrying its DiT, shape VAE and DINO tower.
+        assert_eq!(known_manifests().len(), 205);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
