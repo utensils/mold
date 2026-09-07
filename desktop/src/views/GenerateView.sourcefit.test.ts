@@ -82,6 +82,11 @@ vi.mock("@studio/lib/sourceFitCanvas", () => ({
   },
 }));
 
+vi.mock("@studio/lib/base64Digest", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/lib/base64Digest")>()),
+  sha256PaddedBase64: vi.fn(async () => "c".repeat(64)),
+}));
+
 const model: ModelEntry = {
   name: "sd15:fp16",
   family: "sd15",
@@ -582,8 +587,7 @@ describe("GenerateView source-fit submit path", () => {
     useUiStore().generateTick++;
     await flushPromises();
 
-    // The cropped PNG is digested through WebCrypto, which settles off the
-    // microtask queue.
+    // Cropping and digesting settle asynchronously before placement.
     await vi.waitFor(() => expect(submitBatch).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     expect(fitImage).toHaveBeenCalledWith(
       "SU1BR0U=",
