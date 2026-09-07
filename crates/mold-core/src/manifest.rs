@@ -283,16 +283,6 @@ impl ModelManifest {
         !self.is_upscaler() && !self.is_files_only_bundle() && !self.is_auxiliary()
     }
 
-    /// True for hidden, runnable image preprocessors used only as durable
-    /// mesh-workflow stages. They have generation profiles for scheduling,
-    /// but no user prompt and therefore no prompting-corpus family.
-    pub(crate) fn is_mesh_preprocessor(&self) -> bool {
-        matches!(
-            self.family.as_str(),
-            HUNYUAN3D_MATTING_FAMILY | HUNYUAN3D_DELIGHT_FAMILY
-        )
-    }
-
     /// True if any file in this model requires HuggingFace authentication.
     pub fn is_gated(&self) -> bool {
         self.files.iter().any(|f| f.gated)
