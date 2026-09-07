@@ -24,7 +24,7 @@ const read = (relative: string) => readFileSync(resolve(root, relative), "utf8")
 const IMPORTERS = [
   "desktop/src/styles/base.css",
   "web/src/style.css",
-  "desktop/src/mobile/legacy.css",
+  "desktop/src/mobile/foundation.css",
 ];
 
 describe("ui/kit.css cascade layer", () => {

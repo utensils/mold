@@ -235,11 +235,11 @@ describe("mobile navigation", () => {
     expect(css).not.toMatch(/\.mobile-tab\[aria-selected="true"\]\s*\{/);
   });
 
-  it("gives every tab a Mold Studio icon column and a 10px monospace caption", () => {
+  it("gives every tab a Mold Studio icon column and a readable caption", () => {
     const tab = css.match(/\.mobile-tab\s*\{([^}]*)\}/s);
     const icon = css.match(/\.mobile-tab svg\s*\{([^}]*)\}/s);
     expect(tab?.[1]).toMatch(/flex-direction:\s*column\s*;/);
-    expect(tab?.[1]).toMatch(/font-size:\s*10px\s*;/);
+    expect(tab?.[1]).toMatch(/font-size:\s*var\(--mold-fs-micro\)\s*;/);
     expect(tab?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
     expect(icon?.[1]).toMatch(/width:\s*22px\s*;/);
   });
@@ -279,13 +279,13 @@ describe("mobile advanced sheet", () => {
     expect(count?.[1]).toMatch(/font-family:\s*var\(--font-utility\)\s*;/);
   });
 
-  it("keeps four primary tabs and gives Settings a full-size header control", () => {
+  it("keeps five primary tabs and gives Settings a full-size header control", () => {
     const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
     const settingsControls = css.match(
       /\.mobile-settings-button,\s*\.mobile-settings-back\s*\{([^}]*)\}/s,
     );
 
-    expect(tabs?.[1]).toMatch(/grid-template-columns:\s*repeat\(4,\s*1fr\)\s*;/);
+    expect(tabs?.[1]).toMatch(/grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)\s*;/);
     expect(settingsControls?.[1]).toMatch(/min-width:\s*44px\s*;/);
     expect(settingsControls?.[1]).toMatch(/min-height:\s*44px\s*;/);
   });
@@ -301,7 +301,7 @@ describe("mobile style row", () => {
     expect(styleComponent).toMatch(/class="mobile-style-value"/);
     const value = css.match(/\.mobile-style-value\s*\{([^}]*)\}/s);
     expect(value?.[1]).not.toMatch(/min-height/);
-    expect(value?.[1]).toMatch(/border-radius:\s*var\(--radius-pill\)\s*;/);
+    expect(value?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-2\)\s*;/);
     // The whole-row head keeps the 44pt target; expanded presets stay 44pt.
     const head = css.match(/\.mobile-style-head\s*\{([^}]*)\}/s);
     expect(head?.[1]).toMatch(/min-height:\s*44px\s*;/);
@@ -401,11 +401,11 @@ describe("mobile safe areas", () => {
     expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
     expect(containers?.[1]).toMatch(/gap:\s*8px/);
     expect(buttons?.[1]).toMatch(/min-width:\s*0/);
-    expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--control-edge\)/);
-    expect(buttons?.[1]).toMatch(/background:\s*var\(--bench\)/);
+    expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--mold-border-control\)/);
+    expect(buttons?.[1]).toMatch(/background:\s*var\(--mold-bg\)/);
     expect(buttons?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
-    expect(selected?.[1]).toContain("color-mix(in srgb, var(--safelight) 11%, var(--bench))");
-    expect(selected?.[1]).toMatch(/color:\s*var\(--safelight\)/);
+    expect(selected?.[1]).toContain("color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg))");
+    expect(selected?.[1]).toMatch(/color:\s*var\(--mold-blue\)/);
   });
 
   it("keeps catalog filters readable on narrow iPhones", () => {
@@ -445,9 +445,9 @@ describe("mobile safe areas", () => {
     const dims = css.match(/\.mobile-resolution-tier-dims\s*\{([^}]*)\}/s);
 
     expect(button?.[1]).toMatch(/min-height:\s*44px\s*;/);
-    expect(sub?.[1]).toMatch(/font-size:\s*10px\s*;/);
+    expect(sub?.[1]).toMatch(/font-size:\s*var\(--mold-fs-micro\)\s*;/);
     expect(dims?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
-    expect(dims?.[1]).toMatch(/color:\s*var\(--ink-3\)/);
+    expect(dims?.[1]).toMatch(/color:\s*var\(--mold-text-dim\)/);
   });
 
   it("allocates separate disclosure columns for title, filename, and toggle", () => {
@@ -733,8 +733,8 @@ describe("mobile Library organization", () => {
     const chip = css.match(/\.mobile-library-chip\s*\{([^}]*)\}/s);
     const cover = css.match(/\.mobile-collection-cover\s*\{([^}]*)\}/s);
     const row = css.match(/\.mobile-collection-row\s*\{([^}]*)\}/s);
-    expect(chip?.[1]).toMatch(/border-radius:\s*var\(--radius-pill\)\s*;/);
-    expect(cover?.[1]).toMatch(/border-radius:\s*var\(--radius-media\)\s*;/);
-    expect(row?.[1]).toMatch(/border-radius:\s*var\(--radius-card\)\s*;/);
+    expect(chip?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-2\)\s*;/);
+    expect(cover?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-2\)\s*;/);
+    expect(row?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-3\)\s*;/);
   });
 });

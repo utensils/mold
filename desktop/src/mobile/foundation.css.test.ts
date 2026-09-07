@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /*
- * `legacy.css` is the phone surface's whole global sheet — it stands in for
+ * `foundation.css` is the phone surface's whole global sheet — it stands in for
  * `styles/base.css`, which the phone deliberately does not import. Four rules
  * in that sheet are not decoration but behaviour, and dropping them turned the
  * app back into a web page: elastic rubber-banding at every scroll limit, a
@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
  * button on every video, and full-speed animation for someone who asked the
  * system for less motion.
  */
-const css = readFileSync("src/mobile/legacy.css", "utf8");
+const css = readFileSync("src/mobile/foundation.css", "utf8");
 
 describe("the phone's global rules", () => {
   it("honours the system's reduced-motion setting", () => {

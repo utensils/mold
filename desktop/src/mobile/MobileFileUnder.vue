@@ -474,15 +474,15 @@ const previewStem = computed(() =>
 .mobile-file-under {
   display: grid;
   gap: 6px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 16px;
-  background: var(--bench);
+  background: var(--mold-bg);
   padding: 10px 12px 12px;
 }
 
 .mobile-file-under-kicker {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   letter-spacing: 0.05em;
@@ -498,22 +498,22 @@ const previewStem = computed(() =>
 }
 
 .mobile-file-under-label {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 14px;
 }
 
 .mobile-file-under-value {
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: 15px;
 }
 
 .mobile-file-under-none {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 15px;
 }
 
 .mobile-file-under-match {
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -531,10 +531,10 @@ const previewStem = computed(() =>
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-pill);
-  background: var(--bath);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   padding: 0 2px 0 12px;
@@ -544,11 +544,11 @@ const previewStem = computed(() =>
    removable so the print can opt out before Generate. */
 .mobile-file-under-chip.is-ghost {
   border-style: dashed;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .mobile-file-under-chip-source {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -561,7 +561,7 @@ const previewStem = computed(() =>
   place-items: center;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 15px;
 }
 
@@ -572,7 +572,7 @@ const previewStem = computed(() =>
   gap: 4px;
   border: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 15px;
   padding: 0 2px;
 }
@@ -587,7 +587,7 @@ const previewStem = computed(() =>
   gap: 8px;
   border: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   text-align: left;
 }
 
@@ -598,14 +598,14 @@ const previewStem = computed(() =>
   place-items: center;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 15px;
 }
 
 .mobile-file-under-filename {
   margin: 0;
   overflow-wrap: anywhere;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: 11px;
   line-height: 1.5;
@@ -618,7 +618,7 @@ const previewStem = computed(() =>
 }
 
 .mobile-file-under-filename-slug {
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-weight: 600;
 }
 
@@ -634,17 +634,17 @@ const previewStem = computed(() =>
   min-height: 44px;
   align-items: center;
   gap: 8px;
-  border: 1px dashed var(--control-edge);
+  border: 1px dashed var(--mold-border-control);
   border-radius: 12px;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 15px;
   padding: 0 14px;
 }
 
 .mobile-file-under-note {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 13px;
 }
 

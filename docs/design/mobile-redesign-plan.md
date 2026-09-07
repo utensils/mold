@@ -1,5 +1,7 @@
 # Mobile redesign plan — iOS first, shared with Android
 
+Tracking: [#1628](https://github.com/utensils/mold/issues/1628).
+
 Status: locked after independent peer review; implementation underway on `feat/mobile-studio-redesign`.
 Baseline: `c38d569d5d2ef14ea60adb05cc81a2e95f126c13`, verified against remote main on 2026-09-06.
 
@@ -152,10 +154,12 @@ Independent review: GPT-5.6 Sol, medium reasoning, `plan_review`. All seven find
 - [x] Research current history, desktop, and attached references.
 - [x] Independent plan review; resolve findings and lock plan.
 - [x] Baseline mobile tests: 52 files / 1,068 tests pass. Browser baseline at 393×852.
-- [ ] Milestone 1: working five-tab shell, initial Queue destination, tokens and vocabulary.
+- [x] Milestone 1: working five-tab navigation, initial Queue destination, direct theme tokens and navigation vocabulary. Later screen-specific vocabulary remains in milestones 2–4.
 - [ ] Milestone 2: Make, three output kinds, style memory, consolidated settings.
 - [ ] Milestone 3: Queue sections, details, safe offline state, exact-machine actions.
 - [ ] Milestone 4: Images, Styles, Machines, Settings.
 - [ ] Milestone 5: full regression, visual comparison, native iOS acceptance, Android acceptance.
 
 Sync baseline: `origin/main` remains `c38d569d` at plan lock; no new main commits.
+
+Milestone 1: functional five-tab navigation with existing queue rows/actions, compact Make link, per-destination scroll, direct mobile theme tokens, shared icons, My images/Styles headings, Generate wording. Mobile production build and frontend architecture pass. Mobile regression: 1,077 tests passed; one remaining obsolete CSS-token assertion corrected; focused regression passes (including Queue draft/scroll preservation). Browser: 393×852 navigation, empty Queue, Images, Styles, and return to Make verified. Native runtime acceptance remains open. Main checked again: still `c38d569d`. Plan push: `1c67ab3d`.

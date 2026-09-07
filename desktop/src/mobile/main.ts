@@ -1,7 +1,7 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import App from "./MobileApp.vue";
-import "./legacy.css";
+import "./foundation.css";
 import "./mobile.css";
 import { installSystemThemeSync } from "../lib/theme";
 import { applyMobileSettings, loadMobileSettings } from "./settings";

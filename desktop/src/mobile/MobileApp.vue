@@ -125,7 +125,6 @@ import {
 } from "./generateTarget";
 import {
   activityAnnouncement,
-  activityCountLabel,
   mergeActivity,
   withLiveQueueStatus,
   type ActivityJobVM,
@@ -434,6 +433,8 @@ import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixR
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSharedParams from "./MobileSharedParams.vue";
+import MobileNavigation from "./MobileNavigation.vue";
+import { MOBILE_TABS, type MobileTab } from "./navigation";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
@@ -513,7 +514,7 @@ import {
 } from "./mobileGenerationOutcome";
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
-type Tab = "generate" | "gallery" | "catalog" | "hosts";
+type Tab = MobileTab;
 type RefreshableMobileView = { refresh(): Promise<void> };
 
 /** Deep-link payload for the Discover shelf; `token` re-fires the intent even
@@ -656,6 +657,10 @@ const MOBILE_MACHINES_SCROLL_KEY = "mobile:machines";
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const androidNativeRuntime = isNativeAndroidRuntime();
 const tab = ref<Tab>("generate");
+function selectMobileTab(next: MobileTab): void {
+  if (next === "catalog") openCatalog();
+  else tab.value = next;
+}
 const licenseAcceptance = useLicenseAcceptance();
 const mobileContent = ref<HTMLElement | null>(null);
 const catalogView = ref<RefreshableMobileView | null>(null);
@@ -1002,7 +1007,7 @@ const VIEW_PULL_MAX = 112;
 let viewPullTouchId: number | null = null;
 let viewPullStartX = 0;
 let viewPullStartY = 0;
-const MAJOR_TABS: readonly Tab[] = ["generate", "gallery", "catalog", "hosts"];
+const MAJOR_TABS: readonly Tab[] = MOBILE_TABS.map((item) => item.id);
 const MAJOR_SWIPE_DISTANCE = 64;
 const MAJOR_SWIPE_INTENT_RATIO = 1.2;
 let majorSwipeTouchId: number | null = null;
@@ -3091,7 +3096,7 @@ const developButtonLabel = computed(() =>
     ? generationSubmissionPhase.value === "placement"
       ? "Cancel · Checking placement…"
       : "Cancel · Preparing source…"
-    : `${form.batchSize > 1 ? `Develop ${form.batchSize} prints` : "Develop print"}${
+    : `${form.batchSize > 1 ? `Generate ${form.batchSize}` : "Generate"}${
         queuedJobs.value.length > 0 ? ` (+${queuedJobs.value.length} queued)` : ""
       }`,
 );
@@ -10377,7 +10382,14 @@ watch(
   { flush: "sync" },
 );
 
+const tabScrollPositions = new Map<Tab, { top: number; left: number }>();
 watch(tab, (next, previous) => {
+  if (mobileContent.value) {
+    tabScrollPositions.set(previous, {
+      top: mobileContent.value.scrollTop,
+      left: mobileContent.value.scrollLeft,
+    });
+  }
   if (previous === "gallery" && mobileContent.value) {
     rememberSessionScroll(MOBILE_LIBRARY_SCROLL_KEY, {
       top: mobileContent.value.scrollTop,
@@ -10392,15 +10404,14 @@ watch(tab, (next, previous) => {
   } else {
     cancelMobileGalleryPrewarm();
     pendingLibraryScrollRestore = null;
-    // The primary destinations share this one WebView scroller. Non-Library
-    // destinations still start at the top rather than inheriting its offset.
+    // Each destination owns its scroll even though the WebView has one scroller.
     void nextTick(() => {
       if (!mobileContent.value) return;
-      mobileContent.value.scrollTop = 0;
-      mobileContent.value.scrollLeft = 0;
+      const position = tabScrollPositions.get(next);
+      mobileContent.value.scrollTop = position?.top ?? 0;
+      mobileContent.value.scrollLeft = position?.left ?? 0;
     });
   }
-  if (next !== "hosts") hostDetailId.value = "";
 });
 
 // One failed model load must not become a manual-Retry dead end: the 10s
@@ -10475,14 +10486,15 @@ function handleForegroundResume(): void {
 }
 
 const currentRefreshLabel = computed(() => {
-  if (tab.value === "gallery") return "Library";
-  if (tab.value === "catalog") return "Models";
+  if (tab.value === "gallery") return "My images";
+  if (tab.value === "queue") return "Queue";
+  if (tab.value === "catalog") return "Styles";
   if (tab.value === "hosts") return hostDetail.value ? hostDetail.value.name : "Machines";
   return "";
 });
 
 const pullRefreshAvailable = computed(
-  () => !settingsOpen.value && ["gallery", "catalog", "hosts"].includes(tab.value),
+  () => !settingsOpen.value && ["gallery", "catalog", "hosts", "queue"].includes(tab.value),
 );
 
 async function refreshCurrentView(): Promise<void> {
@@ -10492,6 +10504,10 @@ async function refreshCurrentView(): Promise<void> {
   }
   if (tab.value === "catalog") {
     await catalogView.value?.refresh();
+    return;
+  }
+  if (tab.value === "queue") {
+    await Promise.all(connectedHosts.value.map((host) => probeHost(host)));
     return;
   }
   if (tab.value !== "hosts") return;
@@ -10938,6 +10954,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
   <main
     class="mobile-shell"
     :class="{ 'is-settings-open': settingsOpen, 'is-pair-scanning': pairingScannerOpen }"
+    :data-mobile-platform="androidNativeRuntime ? 'android' : 'ios'"
   >
     <section
       v-if="pairingScannerOpen"
@@ -11052,9 +11069,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <template v-if="!settingsOpen && tab === 'generate'">
         <div v-if="!selectedHost" class="empty-state">
           <div>
-            <h1 class="section-title">Connect a host</h1>
-            <p>Generation runs on a remote Mold engine.</p>
-            <button class="primary-button" type="button" @click="tab = 'hosts'">Add host</button>
+            <h1 class="section-title">Connect a machine</h1>
+            <p>Connect to a machine running Mold to make your first image.</p>
+            <button class="primary-button" type="button" @click="tab = 'hosts'">
+              Connect a machine
+            </button>
           </div>
         </div>
         <template v-else>
@@ -11065,7 +11084,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               tabindex="-1"
               data-test="mobile-create-heading"
             >
-              Create
+              New image
             </h1>
             <button
               class="mobile-settings-reset"
@@ -11691,72 +11710,27 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             />
           </button>
 
-          <!-- ONE queue: this session's prints and the machines' own live
-               work land in the same list (mockup 1c). -->
-          <section
+          <button
             v-if="mobileActivityRows.length"
-            class="mobile-generation-queue"
-            aria-label="Generation queue"
-            data-test="mobile-generation-queue"
+            class="mobile-queue-peek"
+            type="button"
+            data-test="mobile-queue-peek"
+            @click="tab = 'queue'"
           >
-            <div class="mobile-generation-queue-head">
-              <h2>Queue</h2>
-              <span data-test="mobile-queue-count">{{ activityCountLabel(activityCounts) }}</span>
-            </div>
-            <div class="mobile-generation-queue-list">
-              <template v-for="entry in mobileActivityRows" :key="entry.key">
-                <div v-if="entry.kind === 'local'" class="mobile-generation-row">
-                  <SwipeActionRow
-                    :actions="mobileQueueRowActions(entry.local)"
-                    :label="entry.local.print.prompt"
-                    :disabled="
-                      entry.local.print.cancelling === true ||
-                      queueControlHostIds.has(activityRowHostId(entry.local))
-                    "
-                    data-test="mobile-generation-job"
-                    @act="onMobileQueueRowAction(entry.local, $event)"
-                  >
-                    <MobileGenerationQueueCard
-                      :title="entry.local.print.prompt"
-                      :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
-                      :status="activityRowStatus(entry.local)"
-                      :detail="durableHold(entry.local.print)?.error ?? null"
-                      :cancelling="entry.local.print.cancelling === true"
-                      :aria-label="entry.local.print.prompt"
-                      @activate="selectMobilePrint(entry.local.print)"
-                    />
-                  </SwipeActionRow>
-                </div>
-                <LiveActivityList
-                  v-else
-                  :rows="[entry.shared]"
-                  interactive
-                  swipe-actions
-                  :can-swipe="canPauseFleetActivity"
-                  @select="openMobileLiveWork"
-                >
-                  <template #actions="{ row }">
-                    <button
-                      type="button"
-                      data-test="mobile-fleet-queue-control"
-                      :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
-                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
-                    >
-                      {{ fleetQueueControlLabel(row) }}
-                    </button>
-                  </template>
-                </LiveActivityList>
-              </template>
-            </div>
-          </section>
+            <span>Queue</span>
+            <span
+              >{{ mobileActivityRows.length }}
+              {{ mobileActivityRows.length === 1 ? "item" : "items" }}</span
+            >
+            <span aria-hidden="true">›</span>
+          </button>
         </template>
       </template>
 
       <template v-else-if="tab === 'gallery'">
         <div class="mobile-library-heading">
           <div>
-            <h1 class="section-title">Library</h1>
+            <h1 class="section-title">My images</h1>
             <p class="section-note" data-test="mobile-library-note">
               {{
                 gallerySelectMode
@@ -12719,6 +12693,83 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @models-changed="catalogModelsChanged"
         />
       </KeepAlive>
+      <section v-show="!settingsOpen && tab === 'queue'" data-test="mobile-queue-view">
+        <div class="mobile-create-head"><h1 class="section-title">Queue</h1></div>
+        <p class="section-note">Work continues on your machines when you leave this screen.</p>
+        <!-- ONE queue: this session's prints and the machines' own live
+               work land in the same list (mockup 1c). -->
+        <section
+          v-if="mobileActivityRows.length"
+          class="mobile-generation-queue"
+          aria-label="Generation queue"
+          data-test="mobile-generation-queue"
+        >
+          <div class="mobile-generation-queue-head">
+            <h2>Queue</h2>
+            <span data-test="mobile-queue-count"
+              >{{ mobileActivityRows.length }}
+              {{ mobileActivityRows.length === 1 ? "item" : "items" }}</span
+            >
+          </div>
+          <div class="mobile-generation-queue-list">
+            <template v-for="entry in mobileActivityRows" :key="entry.key">
+              <div v-if="entry.kind === 'local'" class="mobile-generation-row">
+                <SwipeActionRow
+                  :actions="mobileQueueRowActions(entry.local)"
+                  :label="entry.local.print.prompt"
+                  :disabled="
+                    entry.local.print.cancelling === true ||
+                    queueControlHostIds.has(activityRowHostId(entry.local))
+                  "
+                  data-test="mobile-generation-job"
+                  @act="onMobileQueueRowAction(entry.local, $event)"
+                >
+                  <MobileGenerationQueueCard
+                    :title="entry.local.print.prompt"
+                    :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
+                    :status="activityRowStatus(entry.local)"
+                    :detail="durableHold(entry.local.print)?.error ?? null"
+                    :cancelling="entry.local.print.cancelling === true"
+                    :aria-label="entry.local.print.prompt"
+                    @activate="selectMobilePrint(entry.local.print)"
+                  />
+                </SwipeActionRow>
+              </div>
+              <LiveActivityList
+                v-else
+                :rows="[entry.shared]"
+                interactive
+                swipe-actions
+                :can-swipe="canPauseFleetActivity"
+                @select="openMobileLiveWork"
+              >
+                <template #actions="{ row }">
+                  <button
+                    type="button"
+                    data-test="mobile-fleet-queue-control"
+                    :disabled="queueControlHostIds.has(row.hostId)"
+                    :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
+                    @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
+                  >
+                    {{ fleetQueueControlLabel(row) }}
+                  </button>
+                </template>
+              </LiveActivityList>
+            </template>
+          </div>
+        </section>
+        <div
+          v-if="!mobileActivityRows.length"
+          class="mobile-queue-empty"
+          data-test="mobile-queue-empty"
+        >
+          <h2>Nothing waiting</h2>
+          <p>Choose a style and make something. Your progress will appear here.</p>
+          <button class="secondary-button" type="button" @click="tab = 'generate'">
+            New image
+          </button>
+        </div>
+      </section>
     </section>
 
     <div
@@ -12869,60 +12920,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
 
     <LicenseAcceptanceDialog :open-external="openExternal" />
 
-    <nav v-if="!settingsOpen" class="mobile-tabs" aria-label="Primary">
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'generate' ? 'page' : undefined"
-        data-test="mobile-tab-generate"
-        @click="tab = 'generate'"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" />
-        </svg>
-        <span>Create</span>
-      </button>
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'gallery' ? 'page' : undefined"
-        data-test="mobile-tab-gallery"
-        @click="tab = 'gallery'"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="3" width="7.5" height="7.5" rx="1.5" />
-          <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" />
-          <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" />
-          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" />
-        </svg>
-        <span>Library</span>
-      </button>
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'catalog' ? 'page' : undefined"
-        data-test="mobile-tab-catalog"
-        @click="openCatalog()"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 3l8.5 4.3-8.5 4.3L3.5 7.3z" />
-          <path d="M3.5 12L12 16.3 20.5 12" />
-        </svg>
-        <span>Models</span>
-      </button>
-      <button
-        class="mobile-tab"
-        type="button"
-        :aria-current="tab === 'hosts' ? 'page' : undefined"
-        data-test="mobile-tab-hosts"
-        @click="tab = 'hosts'"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="4" width="18" height="7" rx="2" />
-          <rect x="3" y="13" width="18" height="7" rx="2" />
-        </svg>
-        <span>Machines</span>
-      </button>
-    </nav>
+    <MobileNavigation
+      v-if="!settingsOpen"
+      :model-value="tab"
+      :queue-count="mobileActivityRows.length"
+      @update:model-value="selectMobileTab"
+    />
   </main>
 </template>

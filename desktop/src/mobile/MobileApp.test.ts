@@ -1688,7 +1688,7 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
       "Encoding video · 15/20",
     );
-    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active");
+    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 item");
   });
 
   it("confirms and tracks the exact model download when a pinned v2 host is missing it", async () => {
@@ -2823,7 +2823,7 @@ describe("MobileApp generation queue", () => {
       JSON.stringify({ type: "job_started", id: "durable-job-1", model: model.name }),
     );
     await vi.waitFor(() =>
-      expect(wrapper!.get("[data-test='mobile-queue-count']").text()).toBe("1 active"),
+      expect(wrapper!.get("[data-test='mobile-queue-count']").text()).toBe("1 item"),
     );
 
     phase = "complete";
@@ -3910,7 +3910,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("three variations of a storm");
-    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe("Develop 3 prints");
+    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe("Generate 3");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
@@ -3923,7 +3923,7 @@ describe("MobileApp generation queue", () => {
     expect(openStreams.filter((stream) => stream.path !== "/api/events")).toHaveLength(0);
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
-      "Develop 3 prints (+3 queued)",
+      "Generate 3 (+3 queued)",
     );
 
     const requests = admittedRequests();
@@ -5126,9 +5126,7 @@ describe("MobileApp generation queue", () => {
       "second prompt",
     ]);
     expect(admittedRequests().every((request) => request.model === model.name)).toBe(true);
-    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
-      "Develop print (+2 queued)",
-    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe("Generate (+2 queued)");
 
     const rows = wrapper.findAll("[data-test='mobile-generation-job']");
     expect(rows).toHaveLength(2);
@@ -7395,10 +7393,31 @@ describe("MobileApp create settings reset", () => {
 });
 
 describe("MobileApp primary navigation", () => {
-  it("swipes left and right through the four major destinations", async () => {
+  it("opens Queue without losing the Make draft or its scroll position", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("keep these words while checking progress");
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 180;
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-queue-view']").isVisible()).toBe(true);
+    expect(content.scrollTop).toBe(0);
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-queue-view']").isVisible()).toBe(false);
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "keep these words while checking progress",
+    );
+    expect(content.scrollTop).toBe(180);
+  });
+
+  it("swipes left and right through the five major destinations", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
+    await swipeMobileContent(280, 100);
+    expect(wrapper.get("[data-test='mobile-tab-queue']").attributes("aria-current")).toBe("page");
     await swipeMobileContent(280, 100);
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
     await swipeMobileContent(280, 100);
@@ -9930,9 +9949,7 @@ describe("MobileApp gallery", () => {
 
     expect(fieldControl("Model").element).toHaveProperty("value", model.name);
     expect(wrapper.get(".status-line").text()).toBe("Prompt settings restored");
-    const developButton = wrapper
-      .findAll("button")
-      .find((button) => button.text() === "Develop print");
+    const developButton = wrapper.findAll("button").find((button) => button.text() === "Generate");
     expect(developButton?.attributes("disabled")).toBeUndefined();
   }, 15_000);
 });

@@ -33,12 +33,6 @@ button {
 }
 
 .mobile-shell {
-  /* Mold Studio soft-radius scale, scoped to the iPhone shell so the shared
-     desktop/web tokens stay untouched: cards 16, controls 10, pills 20. */
-  --radius-control: 10px;
-  --radius-media: 12px;
-  --radius-card: 16px;
-  --radius-pill: 20px;
   --text-large-title: 1.875rem;
   /* Stay pinned to the unobscured iPhone viewport. WebKit can leave the root
      percentage height at its keyboard-reduced value after dismissal; lvh is
@@ -52,8 +46,8 @@ button {
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   padding-top: env(safe-area-inset-top);
 }
 
@@ -119,7 +113,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   min-height: 44px;
   padding: 0 14px;
   border: 1px solid rgba(255, 255, 255, 0.38);
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   background: rgba(0, 0, 0, 0.36);
   color: #fff;
   font-weight: 700;
@@ -200,8 +194,8 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   justify-content: space-between;
   gap: 12px;
   padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
-  border-bottom: 1px solid var(--edge);
-  background: var(--bench);
+  border-bottom: 1px solid var(--mold-border);
+  background: var(--mold-bg);
 }
 
 .mobile-header-actions {
@@ -222,9 +216,9 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   min-width: 44px;
   min-height: 44px;
   border: 0;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .mobile-settings-button {
@@ -235,8 +229,8 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-settings-button:active,
 .mobile-settings-back:active {
-  background: color-mix(in srgb, var(--safelight) 12%, transparent);
-  color: var(--safelight);
+  background: color-mix(in srgb, var(--mold-blue) 12%, transparent);
+  color: var(--mold-blue);
 }
 
 .mobile-settings-button svg {
@@ -265,7 +259,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   justify-content: flex-start;
   gap: 3px;
   padding: 0 8px 0 2px;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: var(--text-body);
 }
 
@@ -292,7 +286,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   max-width: 58%;
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
-  color: var(--halide);
+  color: var(--mold-sapphire);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -320,7 +314,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   place-items: center;
   min-height: 0;
   overflow: hidden;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   transition: height 140ms ease-out;
@@ -336,11 +330,11 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   padding: 6px max(10px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom))
     max(10px, env(safe-area-inset-left));
-  border-top: 1px solid var(--edge);
-  background: var(--bench);
+  border-top: 1px solid var(--mold-border);
+  background: var(--mold-bg);
 }
 
 .mobile-tab {
@@ -351,11 +345,11 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   justify-content: center;
   gap: 3px;
   border: 0;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.01em;
 }
 
@@ -371,7 +365,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-tab[aria-current="page"] {
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
 .mobile-settings {
@@ -381,7 +375,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-settings-section {
   padding: 22px 0;
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
 }
 
 .mobile-settings-section:first-child {
@@ -399,7 +393,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .mobile-settings-section-copy h1,
 .mobile-settings-section-copy h2 {
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-display);
   font-size: var(--text-display-sm);
   letter-spacing: -0.02em;
@@ -408,7 +402,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .mobile-settings-section-copy p {
   max-width: 54ch;
   margin: 5px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-body);
   line-height: 1.45;
 }
@@ -422,7 +416,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-settings-fieldset legend {
   margin-bottom: 7px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -431,9 +425,9 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-theme-options {
   overflow: hidden;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-theme-option {
@@ -447,16 +441,16 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-theme-option + .mobile-theme-option {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-theme-option[data-selected="true"] {
-  background: color-mix(in srgb, var(--safelight) 10%, transparent);
+  background: color-mix(in srgb, var(--mold-blue) 10%, transparent);
 }
 
 .mobile-theme-option:has(input:focus-visible),
 .mobile-appearance-option:has(input:focus-visible) {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: -2px;
 }
 
@@ -468,7 +462,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   overflow: hidden;
   box-sizing: border-box;
   border: 1px solid color-mix(in srgb, white 18%, transparent);
-  border-radius: var(--radius-media);
+  border-radius: var(--mold-radius-2);
   background: var(--preview-bath);
 }
 
@@ -550,19 +544,19 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-theme-option-copy strong {
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: var(--text-body-lg);
 }
 
 .mobile-theme-option-copy small {
   margin-top: 2px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 
 .mobile-settings-check {
   opacity: 0;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 18px;
   font-weight: 800;
   text-align: center;
@@ -576,9 +570,9 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: hidden;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-appearance-option {
@@ -588,12 +582,12 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   align-content: center;
   gap: 2px;
   padding: 7px 4px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   text-align: center;
 }
 
 .mobile-appearance-option + .mobile-appearance-option {
-  border-left: 1px solid var(--edge);
+  border-left: 1px solid var(--mold-border);
 }
 
 .mobile-appearance-option strong {
@@ -605,8 +599,8 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-appearance-option[data-selected="true"] {
-  background: color-mix(in srgb, var(--safelight) 14%, transparent);
-  color: var(--safelight);
+  background: color-mix(in srgb, var(--mold-blue) 14%, transparent);
+  color: var(--mold-blue);
 }
 
 /* One switch row in Settings. Named for the Photos preference it shipped
@@ -620,10 +614,10 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 10px 12px;
-  background: var(--bench);
+  background: var(--mold-bg);
 }
 
 .mobile-photo-setting strong,
@@ -635,14 +629,14 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-photo-setting strong,
 .mobile-settings-switch strong {
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: var(--text-body);
 }
 
 .mobile-photo-setting small,
 .mobile-settings-switch small {
   margin-top: 3px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   line-height: 1.35;
 }
@@ -651,11 +645,11 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   width: 24px;
   height: 24px;
   margin: 0;
-  accent-color: var(--safelight);
+  accent-color: var(--mold-blue);
 }
 
 .mobile-photo-setting:has(input:focus-visible) {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -666,9 +660,9 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .mobile-settings-about {
   overflow: hidden;
   margin: 0;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-settings-about > div {
@@ -682,17 +676,17 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 }
 
 .mobile-settings-about > div + div {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-settings-about dt {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-body);
 }
 
 .mobile-settings-about dd {
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-align: right;
@@ -704,15 +698,15 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   padding: 8px 11px;
   border: 0;
   background: transparent;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font: inherit;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .mobile-settings-link:focus-visible {
-  border-radius: var(--radius-control);
-  outline: 2px solid var(--safelight);
+  border-radius: var(--mold-radius-2);
+  outline: 2px solid var(--mold-blue);
   outline-offset: -2px;
 }
 
@@ -727,7 +721,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .section-note {
   margin: 2px 0 18px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-body);
 }
 
@@ -766,7 +760,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .field > span {
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -776,10 +770,10 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   width: 100%;
   min-height: 44px;
   padding: 10px 12px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text);
 }
 
 textarea.control {
@@ -820,16 +814,16 @@ textarea.control {
   display: grid;
   gap: 5px;
   padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--safelight) 45%, var(--edge));
+  border: 1px solid color-mix(in srgb, var(--mold-blue) 45%, var(--mold-border));
   border-radius: 12px;
-  background: color-mix(in srgb, var(--safelight) 7%, transparent);
-  color: var(--ink-2);
+  background: color-mix(in srgb, var(--mold-blue) 7%, transparent);
+  color: var(--mold-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
 
 .mobile-resolution-source strong {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .mobile-resolution-source .secondary-button {
@@ -838,7 +832,7 @@ textarea.control {
 
 .mobile-resolution-legend,
 .mobile-resolution-label {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -883,12 +877,12 @@ textarea.control {
 }
 
 .mobile-resolution-tier .ms-seg .ms-seg__sub {
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
 }
 
 .mobile-resolution-tier-dims {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -908,7 +902,7 @@ textarea.control {
 
 .mobile-mesh-legend,
 .mobile-mesh-label {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -957,15 +951,15 @@ textarea.control {
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) auto;
   margin: 0 0 14px;
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--edge));
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--warning) 10%, var(--bench));
+  border: 1px solid color-mix(in srgb, var(--mold-warning) 45%, var(--mold-border));
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-warning) 10%, var(--mold-bg));
   padding: 10px 12px;
 }
 
 .mobile-file-under-dropped p {
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: var(--text-caption);
   line-height: 1.4;
 }
@@ -974,19 +968,19 @@ textarea.control {
   min-height: 44px;
   border: 0;
   background: transparent;
-  color: var(--warning);
+  color: var(--mold-warning);
   font-size: 15px;
   padding: 0 4px;
 }
 
 .mobile-resolution-note {
   margin: 8px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 
 .mobile-resolution-note--warning {
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
 .mobile-seed-picker {
@@ -997,7 +991,7 @@ textarea.control {
 }
 
 .mobile-seed-legend {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -1010,24 +1004,24 @@ textarea.control {
   gap: 2px;
   margin-top: 7px;
   padding: 3px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-seed-mode {
   min-height: 44px;
   border: 0;
-  border-radius: calc(var(--radius-control) - 2px);
+  border-radius: calc(var(--mold-radius-2) - 2px);
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
 
 .mobile-seed-mode.is-selected {
-  background: color-mix(in srgb, var(--safelight) 15%, transparent);
-  color: var(--safelight);
+  background: color-mix(in srgb, var(--mold-blue) 15%, transparent);
+  color: var(--mold-blue);
 }
 
 .mobile-seed-fixed {
@@ -1060,13 +1054,13 @@ textarea.control {
 .mobile-seed-note {
   min-width: 0;
   margin: 7px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   text-wrap: pretty;
 }
 
 .mobile-seed-note.is-error {
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 .mobile-seed-use-last {
@@ -1075,7 +1069,7 @@ textarea.control {
   border: 0;
   padding: 0 2px;
   background: transparent;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-caption);
 }
@@ -1096,7 +1090,7 @@ textarea.control {
   min-height: 44px;
   border: 0;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 2px 0;
   text-align: left;
 }
@@ -1107,7 +1101,7 @@ textarea.control {
   font-size: 11px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-style-spacer {
@@ -1116,7 +1110,7 @@ textarea.control {
 
 .mobile-style-chevron {
   flex: none;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   transition: transform 160ms ease;
 }
 
@@ -1137,46 +1131,46 @@ textarea.control {
 .mobile-style-value {
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-pill);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 5px 12px;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .mobile-style-value[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
-  color: var(--safelight);
+  border-color: color-mix(in srgb, var(--mold-blue) 72%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
 }
 
 .mobile-style-chip {
   min-height: 44px;
-  border: 1px solid var(--control-edge);
+  border: 1px solid var(--mold-border-control);
   border-radius: 22px;
   padding: 0 16px;
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 13px;
   white-space: nowrap;
 }
 
 .mobile-style-chip[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
-  color: var(--safelight);
+  border-color: color-mix(in srgb, var(--mold-blue) 72%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
 }
 
 .mobile-style-chip:not([aria-pressed="true"]):active {
-  background: color-mix(in srgb, var(--safelight) 7%, var(--bench));
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-blue) 7%, var(--mold-bg));
+  color: var(--mold-text);
 }
 
 .mobile-style-head:focus-visible,
 .mobile-style-chip:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -1190,15 +1184,15 @@ textarea.control {
   align-items: center;
   gap: 12px;
   margin: -8px 0 16px;
-  border-left: 2px solid var(--halide);
+  border-left: 2px solid var(--mold-sapphire);
   padding: 2px 0 2px 12px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 
 .mobile-model-state.is-error {
-  border-left-color: var(--stop);
-  color: var(--stop);
+  border-left-color: var(--mold-error);
+  color: var(--mold-error);
 }
 
 .mobile-model-state p {
@@ -1223,17 +1217,17 @@ textarea.control {
 
 .mobile-remix-options {
   margin-top: 8px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 0 10px 10px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 
 .mobile-remix-options > summary {
   min-height: 44px;
   align-content: center;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   cursor: pointer;
 }
 
@@ -1251,7 +1245,7 @@ textarea.control {
 .mobile-remix-dimensions legend {
   width: 100%;
   margin-bottom: 2px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-remix-source label,
@@ -1287,7 +1281,7 @@ textarea.control {
 .mobile-source-legend,
 .mobile-source-subsection > legend,
 .mobile-generate-label {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -1300,22 +1294,22 @@ textarea.control {
   gap: 3px;
   margin-top: 7px;
   padding: 3px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-segmented-control button {
   min-height: 44px;
   border: 0;
-  border-radius: calc(var(--radius-control) - 2px);
+  border-radius: calc(var(--mold-radius-2) - 2px);
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-segmented-control button[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--safelight) 15%, transparent);
-  color: var(--safelight);
+  background: color-mix(in srgb, var(--mold-blue) 15%, transparent);
+  color: var(--mold-blue);
 }
 
 .mobile-full-button {
@@ -1326,16 +1320,16 @@ textarea.control {
 .mobile-source-note,
 .mobile-generate-note {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   line-height: 1.45;
 }
 
 .mobile-option-list {
   overflow: hidden;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-option-list > button {
@@ -1348,12 +1342,12 @@ textarea.control {
   border: 0;
   padding: 9px 11px;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   text-align: left;
 }
 
 .mobile-option-list > button + button {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-option-list > button > span:first-child {
@@ -1363,7 +1357,7 @@ textarea.control {
 }
 
 .mobile-option-list > button > span:last-child {
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -1371,8 +1365,8 @@ textarea.control {
 .mobile-native-disclosure,
 .mobile-generate-disclosure {
   margin: 2px 0 18px;
-  border-top: 1px solid var(--edge);
-  border-bottom: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
+  border-bottom: 1px solid var(--mold-border);
 }
 
 .mobile-native-disclosure > summary,
@@ -1385,7 +1379,7 @@ textarea.control {
   border: 0;
   padding: 4px 2px;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   text-align: left;
@@ -1405,7 +1399,7 @@ textarea.control {
 .mobile-native-disclosure > summary::after {
   content: "+";
   grid-column: 3;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 20px;
 }
 
@@ -1417,7 +1411,7 @@ textarea.control {
 .mobile-disclosure-summary {
   min-width: 0;
   overflow: hidden;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   font-weight: 400;
   text-overflow: ellipsis;
@@ -1476,7 +1470,7 @@ textarea.control {
 .mobile-source-preview-wrap figcaption {
   overflow: hidden;
   margin-top: 5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1487,8 +1481,8 @@ textarea.control {
   width: 100%;
   max-height: 260px;
   object-fit: contain;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-media);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   background: var(--color-print-surface);
 }
 
@@ -1508,7 +1502,7 @@ textarea.control {
   display: grid;
   gap: 2px;
   margin: 14px 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -1527,7 +1521,7 @@ textarea.control {
 
 .mobile-range-field output,
 .mobile-range-field strong {
-  color: var(--rebate);
+  color: var(--mold-text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1535,18 +1529,18 @@ textarea.control {
   width: 100%;
   min-height: 44px;
   margin: 0;
-  accent-color: var(--safelight);
+  accent-color: var(--mold-blue);
 }
 
 .mobile-source-subsection {
   margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-source-error {
   margin: 10px 0 0;
-  color: var(--stop);
+  color: var(--mold-error);
   font-size: var(--text-caption);
 }
 
@@ -1560,9 +1554,9 @@ textarea.control {
 .mobile-attachment-card {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-media);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-attachment-card > img {
@@ -1587,7 +1581,7 @@ textarea.control {
 }
 
 .mobile-attachment-copy strong {
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-transform: uppercase;
@@ -1601,21 +1595,21 @@ textarea.control {
 .mobile-attachment-actions {
   display: grid;
   grid-template-columns: 44px 44px minmax(0, 1fr);
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-media-tile-action {
   min-width: 44px;
   min-height: 44px;
   border: 0;
-  border-right: 1px solid var(--edge);
+  border-right: 1px solid var(--mold-border);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .mobile-media-tile-action.is-danger {
   border-right: 0;
-  color: var(--stop);
+  color: var(--mold-error);
   font-size: var(--text-caption);
 }
 
@@ -1631,7 +1625,7 @@ textarea.control {
 
 .mobile-generate-section {
   padding: 14px 0 0;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-generate-section > .mobile-generate-legend {
@@ -1661,9 +1655,9 @@ textarea.control {
   grid-template-columns: 52px minmax(0, 1fr) 52px;
   margin-top: 7px;
   overflow: hidden;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-generate-stepper-button {
@@ -1671,7 +1665,7 @@ textarea.control {
   min-height: 48px;
   border: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 24px;
 }
 
@@ -1680,13 +1674,13 @@ textarea.control {
   place-items: center;
   width: 100%;
   min-width: 0;
-  border-right: 1px solid var(--edge);
-  border-left: 1px solid var(--edge);
+  border-right: 1px solid var(--mold-border);
+  border-left: 1px solid var(--mold-border);
   border-top: 0;
   border-bottom: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   font-variant-numeric: tabular-nums;
@@ -1707,7 +1701,7 @@ textarea.control {
   align-items: center;
   gap: 14px;
   margin-top: 10px;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .mobile-generate-toggle-row strong,
@@ -1717,7 +1711,7 @@ textarea.control {
 
 .mobile-generate-toggle-row small {
   margin-top: 2px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   font-weight: 400;
 }
@@ -1725,28 +1719,28 @@ textarea.control {
 .mobile-generate-toggle-row input {
   width: 24px;
   height: 24px;
-  accent-color: var(--safelight);
+  accent-color: var(--mold-blue);
 }
 
 .mobile-generate-validation,
 .mobile-generate-callout {
   margin: 8px 0 0;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   padding: 9px 10px;
   font-size: var(--text-caption);
   line-height: 1.45;
 }
 
 .mobile-generate-validation {
-  border: 1px solid color-mix(in srgb, var(--stop) 55%, var(--edge));
-  background: color-mix(in srgb, var(--stop) 8%, transparent);
-  color: var(--stop);
+  border: 1px solid color-mix(in srgb, var(--mold-error) 55%, var(--mold-border));
+  background: color-mix(in srgb, var(--mold-error) 8%, transparent);
+  color: var(--mold-error);
   font-size: var(--text-body);
 }
 
 .mobile-generate-hint {
   margin: 8px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   line-height: 1.45;
 }
@@ -1769,10 +1763,10 @@ textarea.control {
   width: 44px;
   height: 44px;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--stop) 45%, var(--edge));
-  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in srgb, var(--mold-error) 45%, var(--mold-border));
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 .mobile-generate-validation-actions {
@@ -1781,9 +1775,9 @@ textarea.control {
 }
 
 .mobile-generate-callout {
-  border: 1px solid color-mix(in srgb, var(--halide) 45%, var(--edge));
-  background: color-mix(in srgb, var(--halide) 8%, transparent);
-  color: var(--halide);
+  border: 1px solid color-mix(in srgb, var(--mold-sapphire) 45%, var(--mold-border));
+  background: color-mix(in srgb, var(--mold-sapphire) 8%, transparent);
+  color: var(--mold-sapphire);
 }
 
 button.mobile-generate-disclosure {
@@ -1794,7 +1788,7 @@ button.mobile-generate-disclosure {
   align-items: center;
   border: 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   text-align: left;
@@ -1807,7 +1801,7 @@ button.mobile-generate-disclosure {
 .mobile-generate-guidance {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-generate-inline-count {
@@ -1818,8 +1812,8 @@ button.mobile-generate-disclosure {
   justify-content: center;
   margin-left: 6px;
   padding: 0 6px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-pill);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -1840,10 +1834,10 @@ button.mobile-generate-disclosure {
   justify-content: center;
   margin: 4px 0 2px;
   padding: 0 12px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-body);
   font-size: var(--text-body);
   font-weight: 600;
@@ -1851,7 +1845,7 @@ button.mobile-generate-disclosure {
 }
 
 .mobile-settings-reset:active {
-  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 6%, transparent);
 }
 
 .mobile-advanced-trigger {
@@ -1862,10 +1856,10 @@ button.mobile-generate-disclosure {
   justify-content: center;
   gap: 8px;
   margin: 4px 0 2px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-body);
   font-size: var(--text-body-lg);
   font-weight: 600;
@@ -1881,7 +1875,7 @@ button.mobile-generate-disclosure {
 }
 
 .mobile-advanced-trigger:active {
-  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 6%, transparent);
 }
 
 /* Placed after the base rule so the 44pt CSS guard still reads that block. */
@@ -1897,9 +1891,9 @@ button.mobile-generate-disclosure {
   align-items: center;
   justify-content: center;
   padding: 1px 8px;
-  border-radius: var(--radius-pill);
-  background: var(--sel-bg);
-  color: var(--sel-ink);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-accent-tint);
+  color: var(--mold-blue);
   font-family: var(--font-utility);
   font-size: var(--text-caption);
   font-weight: 700;
@@ -1912,8 +1906,8 @@ button.mobile-generate-disclosure {
   height: var(--mobile-visual-viewport-height, 100dvh);
   z-index: 45;
   flex-direction: column;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
 }
 
 .mobile-advanced-sheet.is-open {
@@ -1928,7 +1922,7 @@ button.mobile-generate-disclosure {
   gap: 10px;
   padding: calc(12px + env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 12px
     max(18px, env(safe-area-inset-left));
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
 }
 
 .mobile-advanced-sheet-title {
@@ -1958,13 +1952,13 @@ button.mobile-generate-disclosure {
   place-items: center;
   border: 0;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--rebate) 9%, transparent);
-  color: var(--ink-2);
+  background: color-mix(in srgb, var(--mold-text) 9%, transparent);
+  color: var(--mold-text-2);
   font-size: 15px;
 }
 
 .mobile-advanced-sheet-close:active {
-  background: color-mix(in srgb, var(--rebate) 16%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 16%, transparent);
 }
 
 .mobile-advanced-sheet-body {
@@ -1987,7 +1981,7 @@ button.mobile-generate-disclosure {
   padding: 0 10px;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-body);
   font-size: var(--text-body);
 }
@@ -2028,7 +2022,7 @@ button.mobile-generate-disclosure {
   position: absolute;
   inset: 0;
   border: 0;
-  background: color-mix(in srgb, var(--print) 62%, transparent);
+  background: color-mix(in srgb, var(--mold-media-bed) 62%, transparent);
 }
 
 .mobile-crop-sheet-panel {
@@ -2037,10 +2031,10 @@ button.mobile-generate-disclosure {
   min-height: 0;
   max-height: min(92dvh, var(--mobile-visual-viewport-height, 100dvh));
   flex-direction: column;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   border-radius: 18px 18px 0 0;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   animation: mobile-sheet-in 0.2s ease;
 }
 
@@ -2050,8 +2044,8 @@ button.mobile-generate-disclosure {
   height: 4px;
   flex: 0 0 auto;
   margin: 8px auto 2px;
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--rebate) 22%, transparent);
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-text) 22%, transparent);
 }
 
 .mobile-crop-sheet-body {
@@ -2069,7 +2063,7 @@ button.mobile-generate-disclosure {
 
 .mobile-crop-sheet-head {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.08em;
@@ -2096,11 +2090,11 @@ button.mobile-generate-disclosure {
   gap: 10px;
   box-sizing: border-box;
   margin-top: 7px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 8px 11px;
-  background: var(--bench);
-  color: var(--rebate);
+  background: var(--mold-bg);
+  color: var(--mold-text);
 }
 
 .mobile-generate-file-button input {
@@ -2116,7 +2110,7 @@ button.mobile-generate-disclosure {
   border: 0;
   padding: 0 6px;
   background: transparent;
-  color: var(--stop);
+  color: var(--mold-error);
   font-family: var(--font-utility);
   font-size: var(--text-caption);
 }
@@ -2133,13 +2127,13 @@ button.mobile-generate-disclosure {
   align-items: end;
   gap: 8px;
   padding: 8px 0;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-generate-keyframe label {
   display: grid;
   gap: 4px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-edge-code);
 }
 
@@ -2147,7 +2141,7 @@ button.mobile-generate-disclosure {
   min-width: 0;
   overflow: hidden;
   padding-bottom: 12px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2156,7 +2150,7 @@ button.mobile-generate-disclosure {
 .mobile-lora-row,
 .mobile-template-row {
   padding: 10px 0;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-lora-row:first-child,
@@ -2186,11 +2180,11 @@ button.mobile-generate-disclosure {
 
 .mobile-token-list button {
   min-height: 44px;
-  border: 1px solid var(--control-edge);
+  border: 1px solid var(--mold-border-control);
   border-radius: 999px;
   padding: 6px 11px;
   background: transparent;
-  color: var(--halide);
+  color: var(--mold-sapphire);
 }
 
 .mobile-inline-form {
@@ -2211,13 +2205,13 @@ button.mobile-generate-disclosure {
   border: 0;
   padding: 4px 0;
   background: transparent;
-  color: var(--rebate);
+  color: var(--mold-text);
   text-align: left;
 }
 
 .mobile-template-load span {
   overflow: hidden;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2231,20 +2225,20 @@ button.mobile-generate-disclosure {
 
 .mobile-template-actions button {
   min-height: 44px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .mobile-template-actions .mobile-inline-danger {
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 .mobile-estimate {
   min-height: 24px;
   margin: 4px 0 8px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-create-action {
@@ -2253,8 +2247,8 @@ button.mobile-generate-disclosure {
   align-items: center;
   gap: 10px;
   padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
-  border-top: 1px solid var(--edge);
-  background: color-mix(in srgb, var(--bench) 96%, transparent);
+  border-top: 1px solid var(--mold-border);
+  background: color-mix(in srgb, var(--mold-bg) 96%, transparent);
   box-shadow: 0 -10px 24px color-mix(in srgb, #000 12%, transparent);
   -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
@@ -2313,7 +2307,7 @@ button.mobile-generate-disclosure {
 .secondary-button,
 .danger-button {
   min-height: 46px;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   padding: 10px 14px;
   font-family: var(--font-utility);
   font-size: var(--text-data);
@@ -2322,13 +2316,13 @@ button.mobile-generate-disclosure {
 
 .primary-button {
   width: 100%;
-  border: 1px solid var(--safelight);
-  background: var(--safelight);
-  color: var(--on-accent);
+  border: 1px solid var(--mold-blue);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
 }
 
 .secondary-button {
-  border: 1px solid var(--control-edge);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
 }
 
@@ -2350,15 +2344,15 @@ button.mobile-generate-disclosure {
 
 .mobile-pair-note {
   margin: 8px 0 16px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 12px;
   text-align: center;
 }
 
 .danger-button {
-  border: 1px solid var(--stop);
+  border: 1px solid var(--mold-error);
   background: transparent;
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 button:disabled {
@@ -2367,9 +2361,9 @@ button:disabled {
 
 .mobile-generation-queue {
   margin-top: 16px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--bench) 82%, transparent);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-bg) 82%, transparent);
   overflow: hidden;
 }
 
@@ -2380,8 +2374,8 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   padding: 4px 12px;
-  border-bottom: 1px solid var(--edge);
-  color: var(--ink-3);
+  border-bottom: 1px solid var(--mold-border);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -2413,7 +2407,7 @@ button:disabled {
 }
 
 .mobile-generation-job + .mobile-generation-job {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-generation-job--detailed-status {
@@ -2430,7 +2424,7 @@ button:disabled {
   display: -webkit-box;
   overflow: hidden;
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: var(--text-body);
   line-height: 1.35;
   -webkit-box-orient: vertical;
@@ -2442,7 +2436,7 @@ button:disabled {
   display: block;
   overflow: hidden;
   margin-top: 5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-overflow: ellipsis;
@@ -2458,7 +2452,7 @@ button:disabled {
 .mobile-generation-job-action > span {
   max-width: 100%;
   margin-top: 0;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   line-height: 1.35;
   overflow-wrap: anywhere;
   text-align: right;
@@ -2480,7 +2474,7 @@ button:disabled {
   border: 0;
   padding: 0 4px;
   background: transparent;
-  color: var(--stop);
+  color: var(--mold-error);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -2488,7 +2482,7 @@ button:disabled {
 .mobile-generation-held-error {
   display: block !important;
   margin-top: 6px !important;
-  color: var(--stop) !important;
+  color: var(--mold-error) !important;
   font-family: var(--font-utility);
   font-size: var(--text-edge-code) !important;
   -webkit-line-clamp: initial !important;
@@ -2509,7 +2503,7 @@ button:disabled {
   margin-inline: auto;
   margin-top: 16px;
   background: var(--color-print-surface);
-  border-radius: var(--radius-media);
+  border-radius: var(--mold-radius-2);
 }
 
 .mobile-develop-preview,
@@ -2526,7 +2520,7 @@ button:disabled {
 
 .status-line {
   margin: 14px 0;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -2549,7 +2543,7 @@ button:disabled {
   margin-top: 16px;
   object-fit: contain;
   background: var(--color-print-surface);
-  border-radius: var(--radius-media);
+  border-radius: var(--mold-radius-2);
 }
 
 /*
@@ -2630,9 +2624,9 @@ button:disabled {
   gap: 12px;
   margin: -16px -16px 0;
   padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--edge);
-  background: color-mix(in srgb, var(--bath) 94%, transparent);
-  box-shadow: 0 8px 18px color-mix(in srgb, var(--bath) 72%, transparent);
+  border-bottom: 1px solid var(--mold-border);
+  background: color-mix(in srgb, var(--mold-bg-deep) 94%, transparent);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--mold-bg-deep) 72%, transparent);
   backdrop-filter: blur(16px);
 }
 
@@ -2652,16 +2646,16 @@ button:disabled {
   border: 0;
   padding: 0;
   overflow: hidden;
-  background-color: color-mix(in srgb, var(--color-print-surface) 82%, var(--safelight) 18%);
+  background-color: color-mix(in srgb, var(--color-print-surface) 82%, var(--mold-blue) 18%);
   background-image:
     radial-gradient(
       circle at 28% 24%,
-      color-mix(in srgb, var(--halide) 16%, transparent),
+      color-mix(in srgb, var(--mold-sapphire) 16%, transparent),
       transparent 34%
     ),
     radial-gradient(
       circle at 72% 76%,
-      color-mix(in srgb, var(--safelight) 14%, transparent),
+      color-mix(in srgb, var(--mold-blue) 14%, transparent),
       transparent 38%
     );
   border-radius: 9px;
@@ -2673,8 +2667,8 @@ button:disabled {
 
 .gallery-item-selected {
   box-shadow:
-    0 0 0 3px var(--safelight),
-    0 0 0 5px color-mix(in srgb, var(--bench) 72%, transparent);
+    0 0 0 3px var(--mold-blue),
+    0 0 0 5px color-mix(in srgb, var(--mold-bg) 72%, transparent);
 }
 
 .gallery-item img,
@@ -2708,12 +2702,16 @@ button:disabled {
   background:
     radial-gradient(
       circle at 28% 22%,
-      color-mix(in srgb, var(--safelight) 9%, transparent),
+      color-mix(in srgb, var(--mold-blue) 9%, transparent),
       transparent 44%
     ),
-    linear-gradient(145deg, var(--bench), color-mix(in srgb, var(--bench) 86%, var(--bath)));
-  box-shadow: inset 0 0 0 1px var(--edge);
-  color: var(--ink-3);
+    linear-gradient(
+      145deg,
+      var(--mold-bg),
+      color-mix(in srgb, var(--mold-bg) 86%, var(--mold-bg-deep))
+    );
+  box-shadow: inset 0 0 0 1px var(--mold-border);
+  color: var(--mold-text-dim);
 }
 
 .mobile-media-placeholder::after {
@@ -2722,7 +2720,7 @@ button:disabled {
   background: linear-gradient(
     108deg,
     transparent 28%,
-    color-mix(in srgb, var(--rebate) 8%, transparent) 48%,
+    color-mix(in srgb, var(--mold-text) 8%, transparent) 48%,
     transparent 68%
   );
   content: "";
@@ -2785,8 +2783,8 @@ button:disabled {
 .gallery-new-badge {
   left: 7px;
   border-radius: 5px;
-  background: var(--safelight);
-  color: var(--on-accent);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   font-family: var(--font-utility);
   font-size: 9px;
   font-weight: 700;
@@ -2820,9 +2818,9 @@ button:disabled {
 }
 
 .gallery-item-selected .gallery-selection-indicator {
-  border-color: var(--safelight);
-  background: var(--safelight);
-  color: var(--on-accent);
+  border-color: var(--mold-blue);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
 }
 
 .mobile-gallery-actions {
@@ -2837,9 +2835,9 @@ button:disabled {
   min-height: 56px;
   margin-top: 12px;
   padding: 6px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 14px;
-  background: color-mix(in srgb, var(--bench) 94%, transparent);
+  background: color-mix(in srgb, var(--mold-bg) 94%, transparent);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(16px);
 }
@@ -2848,7 +2846,7 @@ button:disabled {
   min-width: 0;
   grid-column: span 2;
   padding-left: 8px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   overflow-wrap: anywhere;
@@ -2861,8 +2859,8 @@ button:disabled {
   width: 100%;
   min-width: 44px;
   min-height: 44px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 8px 10px;
   background: transparent;
   color: var(--ink);
@@ -2880,8 +2878,8 @@ button:disabled {
 }
 
 .mobile-gallery-actions button.danger {
-  border-color: var(--stop);
-  color: var(--stop);
+  border-color: var(--mold-error);
+  color: var(--mold-error);
 }
 
 .gallery-viewer {
@@ -3037,7 +3035,7 @@ button:disabled {
 .gallery-viewer-error button {
   min-height: 44px;
   border: 1px solid rgba(245, 239, 255, 0.4);
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   padding: 8px 14px;
   background: rgba(245, 239, 255, 0.08);
   color: #f5efff;
@@ -3133,7 +3131,7 @@ button:disabled {
   border-radius: 5px;
   background: rgba(245, 239, 255, 0.14);
   padding: 3px 7px;
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   font-weight: 700;
   letter-spacing: 0.06em;
   line-height: 1.2;
@@ -3233,8 +3231,8 @@ button:disabled {
 .gallery-upscaled-badge,
 .gallery-item .gallery-upscaled-badge {
   border-radius: 5px;
-  background: color-mix(in srgb, var(--rebate) 88%, black);
-  color: var(--on-accent);
+  background: color-mix(in srgb, var(--mold-text) 88%, black);
+  color: var(--mold-on-accent);
   font-family: var(--font-utility);
   font-size: 9px;
   font-weight: 700;
@@ -3246,7 +3244,7 @@ button:disabled {
 
 .gallery-viewer-action-status {
   margin: 8px 0 0;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   text-align: right;
@@ -3267,7 +3265,7 @@ button:disabled {
 .gallery-scroll-sentinel {
   min-height: 1px;
   margin-top: 14px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   text-align: center;
@@ -3292,7 +3290,7 @@ button:disabled {
   display: grid;
   flex: 0 1 150px;
   gap: 4px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-transform: uppercase;
@@ -3304,10 +3302,10 @@ button:disabled {
   box-sizing: border-box;
   width: 100%;
   min-height: 44px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text);
 }
 
 .mobile-catalog-host-picker select,
@@ -3319,9 +3317,9 @@ button:disabled {
 .mobile-catalog-downloads {
   margin: 2px 0 14px;
   overflow: hidden;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-catalog-downloads-head {
@@ -3331,8 +3329,8 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   padding: 0 11px;
-  border-bottom: 1px solid var(--edge);
-  color: var(--ink-3);
+  border-bottom: 1px solid var(--mold-border);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -3341,7 +3339,7 @@ button:disabled {
 
 .mobile-catalog-downloads-head h2 {
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font: inherit;
 }
 
@@ -3362,7 +3360,7 @@ button:disabled {
 }
 
 .mobile-catalog-download + .mobile-catalog-download {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-catalog-download-copy,
@@ -3384,7 +3382,7 @@ button:disabled {
 
 .mobile-catalog-download-copy span,
 .mobile-catalog-download-size {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -3393,7 +3391,7 @@ button:disabled {
   height: 6px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 
 .mobile-catalog-download-progress > span {
@@ -3401,7 +3399,7 @@ button:disabled {
   height: 100%;
   min-width: 2px;
   border-radius: inherit;
-  background: var(--halide);
+  background: var(--mold-sapphire);
 }
 
 .mobile-catalog-download > button {
@@ -3411,7 +3409,7 @@ button:disabled {
   min-height: 44px;
   border: 0;
   background: transparent;
-  color: var(--stop);
+  color: var(--mold-error);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -3422,7 +3420,7 @@ button:disabled {
   z-index: 5;
   margin: 0 -1px;
   padding: 10px 1px 8px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 
 .mobile-catalog-search-row input {
@@ -3450,44 +3448,44 @@ button:disabled {
   gap: 3px;
   margin-bottom: 12px;
   padding: 3px;
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--rebate) 8%, transparent);
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-text) 8%, transparent);
 }
 
 .mobile-catalog-segment button {
   min-width: 0;
   min-height: 44px;
   border: 0;
-  border-radius: calc(var(--radius-control) - 3px);
+  border-radius: calc(var(--mold-radius-2) - 3px);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   line-height: 1.2;
 }
 
 .mobile-catalog-segment button[aria-pressed="true"] {
-  background: var(--bench);
-  color: var(--safelight);
+  background: var(--mold-bg);
+  color: var(--mold-blue);
 }
 
 .mobile-catalog-segment button:not([aria-pressed="true"]):active {
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .mobile-catalog-segment button:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
 .mobile-catalog-media button,
 .mobile-catalog-sources button {
   min-width: 0;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 0 10px;
-  background: var(--bench);
-  color: var(--ink-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   line-height: 1.2;
@@ -3503,20 +3501,20 @@ button:disabled {
 
 .mobile-catalog-media button[aria-pressed="true"],
 .mobile-catalog-sources button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
-  color: var(--safelight);
+  border-color: color-mix(in srgb, var(--mold-blue) 72%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
 }
 
 .mobile-catalog-media button:not([aria-pressed="true"]):active,
 .mobile-catalog-sources button:not([aria-pressed="true"]):active {
-  background: color-mix(in srgb, var(--safelight) 7%, var(--bench));
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-blue) 7%, var(--mold-bg));
+  color: var(--mold-text);
 }
 
 .mobile-catalog-media button:focus-visible,
 .mobile-catalog-sources button:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -3533,10 +3531,10 @@ button:disabled {
   flex: none;
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-pill);
-  background: var(--bench);
-  color: var(--ink-2);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   line-height: 1.2;
@@ -3544,18 +3542,18 @@ button:disabled {
 }
 
 .mobile-catalog-kinds button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
-  color: var(--safelight);
+  border-color: color-mix(in srgb, var(--mold-blue) 72%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
 }
 
 .mobile-catalog-kinds button:not([aria-pressed="true"]):active {
-  background: color-mix(in srgb, var(--safelight) 7%, var(--bench));
-  color: var(--rebate);
+  background: color-mix(in srgb, var(--mold-blue) 7%, var(--mold-bg));
+  color: var(--mold-text);
 }
 
 .mobile-catalog-kinds button:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: 2px;
 }
 
@@ -3570,7 +3568,7 @@ button:disabled {
 .mobile-catalog-filters > label:not(.mobile-catalog-nsfw) {
   display: grid;
   gap: 5px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -3582,14 +3580,14 @@ button:disabled {
   min-height: 44px;
   align-items: center;
   gap: 7px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: var(--text-caption);
 }
 
 .mobile-catalog-nsfw input {
   width: 20px;
   height: 20px;
-  accent-color: var(--safelight);
+  accent-color: var(--mold-blue);
 }
 
 @media (max-width: 430px) {
@@ -3620,14 +3618,14 @@ button:disabled {
 }
 
 .mobile-catalog-warning {
-  color: var(--warning);
+  color: var(--mold-warning);
 }
 
 .mobile-catalog-retry {
   min-width: 72px;
   min-height: 44px;
   border: 1px solid currentcolor;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   padding: 0 12px;
   color: inherit;
   font: inherit;
@@ -3635,20 +3633,20 @@ button:disabled {
 
 .mobile-catalog-action-status {
   overflow-wrap: anywhere;
-  border: 1px solid color-mix(in srgb, var(--halide) 45%, var(--edge));
-  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in srgb, var(--mold-sapphire) 45%, var(--mold-border));
+  border-radius: var(--mold-radius-2);
   padding: 9px 11px;
-  background: color-mix(in srgb, var(--halide) 8%, transparent);
-  color: var(--halide);
+  background: color-mix(in srgb, var(--mold-sapphire) 8%, transparent);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   line-height: 1.45;
 }
 
 .mobile-catalog-action-status.error-text {
-  border-color: color-mix(in srgb, var(--stop) 55%, var(--edge));
-  background: color-mix(in srgb, var(--stop) 9%, transparent);
-  color: var(--stop);
+  border-color: color-mix(in srgb, var(--mold-error) 55%, var(--mold-border));
+  background: color-mix(in srgb, var(--mold-error) 9%, transparent);
+  color: var(--mold-error);
 }
 
 .mobile-catalog-empty {
@@ -3658,9 +3656,9 @@ button:disabled {
 .mobile-catalog-results {
   margin-top: 15px;
   overflow: hidden;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-catalog-card {
@@ -3673,7 +3671,7 @@ button:disabled {
 }
 
 .mobile-catalog-card + .mobile-catalog-card {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-catalog-card-open {
@@ -3695,9 +3693,9 @@ button:disabled {
   height: 68px;
   overflow: hidden;
   place-items: center;
-  border-radius: var(--radius-media);
-  background: var(--bath);
-  color: var(--ink-3);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -3719,7 +3717,7 @@ button:disabled {
 .mobile-catalog-card-title {
   display: -webkit-box;
   overflow: hidden;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: var(--text-body);
   font-weight: 700;
   line-height: 1.25;
@@ -3735,7 +3733,7 @@ button:disabled {
 .mobile-catalog-card-size {
   overflow: hidden;
   margin-top: 4px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-overflow: ellipsis;
@@ -3750,10 +3748,10 @@ button:disabled {
 }
 
 .mobile-catalog-host-labels > span {
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 999px;
   padding: 1px 6px;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -3770,16 +3768,16 @@ button:disabled {
 /* "Download only": this machine cannot run the model behind the row. Shown
    beside Pull rather than in place of it — the model is downloadable (#1276). */
 .mobile-catalog-runtime-badge {
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 4px;
   padding: 2px 6px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 11px;
   white-space: nowrap;
 }
 
 .mobile-catalog-installed {
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-transform: uppercase;
@@ -3788,25 +3786,25 @@ button:disabled {
 .mobile-catalog-pull {
   min-width: 72px;
   min-height: 44px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   padding: 6px 9px;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
 
 .mobile-catalog-pull[data-pull-state],
 .mobile-catalog-detail-action button[data-pull-state] {
-  border-color: var(--halide);
-  background: var(--halide);
-  color: var(--on-accent);
+  border-color: var(--mold-sapphire);
+  background: var(--mold-sapphire);
+  color: var(--mold-on-accent);
   opacity: 1;
 }
 
 .mobile-catalog-target-list > button[data-pull-state] {
-  color: var(--halide);
+  color: var(--mold-sapphire);
   opacity: 1;
 }
 
@@ -3820,7 +3818,7 @@ button:disabled {
   align-items: center;
   justify-content: center;
   font-size: 13px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .mobile-catalog-detail {
@@ -3834,8 +3832,8 @@ button:disabled {
   grid-template-rows: auto minmax(0, 1fr) auto;
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
 }
 
 .mobile-catalog-detail-header {
@@ -3845,8 +3843,8 @@ button:disabled {
   align-items: center;
   gap: 10px;
   padding: 5px max(12px, env(safe-area-inset-right)) 5px max(12px, env(safe-area-inset-left));
-  border-bottom: 1px solid var(--edge);
-  background: var(--bench);
+  border-bottom: 1px solid var(--mold-border);
+  background: var(--mold-bg);
 }
 
 .mobile-catalog-detail-header button {
@@ -3855,7 +3853,7 @@ button:disabled {
   border: 0;
   padding: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 24px;
 }
 
@@ -3880,9 +3878,9 @@ button:disabled {
   max-height: 42vh;
   overflow: hidden;
   place-items: center;
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
   background: var(--color-print-surface);
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-display);
   font-size: var(--text-display);
 }
@@ -3917,12 +3915,12 @@ button:disabled {
 
 .mobile-catalog-detail-title p {
   margin: 4px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-catalog-detail-title > span {
   flex: none;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-transform: uppercase;
@@ -3935,7 +3933,7 @@ button:disabled {
 
 .mobile-catalog-variants h3 {
   margin: 0 0 8px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: var(--text-caption);
 }
 
@@ -3947,22 +3945,22 @@ button:disabled {
 
 .mobile-catalog-variants button {
   min-height: 44px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 22px;
   padding: 0 14px;
-  background: var(--bench);
-  color: var(--ink-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
 }
 
 .mobile-catalog-variants button[aria-pressed="true"] {
-  border-color: var(--safelight);
-  color: var(--rebate);
-  background: color-mix(in srgb, var(--safelight) 12%, var(--bench));
+  border-color: var(--mold-blue);
+  color: var(--mold-text);
+  background: color-mix(in srgb, var(--mold-blue) 12%, var(--mold-bg));
 }
 
 .mobile-catalog-variants button span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-catalog-detail-tiles {
@@ -3973,15 +3971,15 @@ button:disabled {
 
 .mobile-catalog-detail-tile {
   min-width: 0;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   padding: 12px;
-  background: var(--bench);
+  background: var(--mold-bg);
 }
 
 .mobile-catalog-detail-tile span {
   display: block;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.06em;
@@ -4008,14 +4006,14 @@ button:disabled {
 }
 
 .mobile-catalog-detail-meta dt {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 
 .mobile-catalog-detail-meta dd {
   overflow-wrap: anywhere;
   margin: 3px 0 0;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   white-space: normal;
@@ -4024,14 +4022,14 @@ button:disabled {
 .mobile-catalog-detail-description {
   max-width: 70ch;
   margin: 0;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   line-height: 1.5;
   white-space: pre-line;
 }
 
 .mobile-catalog-detail-muted {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-catalog-detail-tags {
@@ -4041,15 +4039,15 @@ button:disabled {
 }
 
 .mobile-catalog-detail-tags span {
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 999px;
   padding: 3px 8px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: var(--text-caption);
 }
 
 .mobile-catalog-detail-section {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   padding-top: 13px;
 }
 
@@ -4067,7 +4065,7 @@ button:disabled {
 }
 
 .mobile-catalog-detail-section-head > span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -4082,13 +4080,13 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-top: 1px solid color-mix(in srgb, var(--edge) 65%, transparent);
-  color: var(--ink-2);
+  border-top: 1px solid color-mix(in srgb, var(--mold-border) 65%, transparent);
+  color: var(--mold-text-2);
   font-size: var(--text-caption);
 }
 
 .mobile-catalog-detail-section li > span:last-child {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   text-align: right;
@@ -4107,11 +4105,11 @@ button:disabled {
   height: 7px;
   margin-right: 5px;
   border-radius: 50%;
-  background: var(--stop);
+  background: var(--mold-error);
 }
 
 .mobile-catalog-component-dot[data-present="true"] {
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .mobile-catalog-installed-actions {
@@ -4122,13 +4120,13 @@ button:disabled {
 
 .mobile-catalog-detail-action {
   padding: 10px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
-  border-top: 1px solid var(--edge);
-  background: var(--bench);
+  border-top: 1px solid var(--mold-border);
+  background: var(--mold-bg);
 }
 
 .mobile-catalog-detail-action p {
   margin: 0 0 8px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   text-align: center;
 }
@@ -4156,9 +4154,9 @@ button:disabled {
   touch-action: manipulation;
   padding: 16px max(16px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
     max(16px, env(safe-area-inset-left));
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   border-radius: 14px 14px 0 0;
-  background: var(--bench);
+  background: var(--mold-bg);
 }
 
 .mobile-catalog-target-panel > header {
@@ -4176,7 +4174,7 @@ button:disabled {
 
 .mobile-catalog-target-panel p {
   margin: 4px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .mobile-catalog-target-panel header button {
@@ -4184,7 +4182,7 @@ button:disabled {
   border: 0;
   padding: 0 4px;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
 }
 
 .mobile-catalog-target-list {
@@ -4199,10 +4197,10 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   padding: 8px 11px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
   text-align: left;
 }
 
@@ -4215,21 +4213,21 @@ button:disabled {
   max-width: 72vw;
   overflow: hidden;
   margin-top: 3px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 /* What picking this machine actually does — install or repair. */
 .mobile-catalog-target-list small.mobile-catalog-target-action {
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
 
 .host-row {
   padding: 14px 0;
-  border-bottom: 1px solid var(--edge);
+  border-bottom: 1px solid var(--mold-border);
 }
 
 .mobile-inline-actions {
@@ -4267,7 +4265,7 @@ button:disabled {
 .host-url {
   display: block;
   margin-top: 3px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   overflow-wrap: anywhere;
@@ -4286,19 +4284,19 @@ button:disabled {
   height: 8px;
   flex: none;
   border-radius: 50%;
-  background: var(--ink-3);
+  background: var(--mold-text-dim);
 }
 
 .status-dot.is-ready {
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .status-dot.is-reconnecting {
-  background: var(--warning);
+  background: var(--mold-warning);
 }
 
 .status-dot.is-error {
-  background: var(--stop);
+  background: var(--mold-error);
 }
 
 .row-actions {
@@ -4317,13 +4315,13 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 6px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
 
 .host-telemetry-mem {
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .host-telemetry-meter {
@@ -4350,7 +4348,7 @@ button:disabled {
   border: 0;
   padding: 0 8px 0 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -4391,9 +4389,9 @@ button:disabled {
 .mobile-inline-form {
   margin-top: 14px;
   padding: 14px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .mobile-inline-form .field {
@@ -4413,8 +4411,8 @@ button:disabled {
   min-height: 32px;
   align-items: center;
   gap: 10px;
-  border-bottom: 1px solid var(--edge);
-  color: var(--ink-3);
+  border-bottom: 1px solid var(--mold-border);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -4423,7 +4421,7 @@ button:disabled {
 
 .mobile-section-head h2 {
   margin: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font: inherit;
 }
 
@@ -4437,7 +4435,7 @@ button:disabled {
   border: 0;
   padding: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font: inherit;
 }
 
@@ -4454,7 +4452,7 @@ button:disabled {
   min-height: 44px;
   border: 0;
   padding: 0 8px;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font: inherit;
 }
 
@@ -4463,9 +4461,9 @@ button:disabled {
   gap: 11px;
   margin-top: 10px;
   padding: 13px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 
 .telemetry-label {
@@ -4485,7 +4483,7 @@ button:disabled {
 
 .telemetry-label span,
 .telemetry-meter-row > span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -4498,7 +4496,7 @@ button:disabled {
 }
 
 .telemetry-meter-row strong {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   font-weight: 500;
@@ -4509,7 +4507,7 @@ button:disabled {
   height: 6px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 
 .meter > span {
@@ -4517,27 +4515,27 @@ button:disabled {
   height: 100%;
   min-width: 2px;
   border-radius: inherit;
-  background: var(--halide);
+  background: var(--mold-sapphire);
   transition: width 180ms ease-out;
 }
 
 /* Host-RAM pressure from the scheduler's ledger. Absent on older servers,
    which leaves the meter its default halide fill. */
 .meter[data-pressure="warn"] > span {
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 
 .meter[data-pressure="critical"] > span {
-  background: var(--stop);
+  background: var(--mold-error);
 }
 
 .mobile-data-list {
   margin: 10px 0 0;
   padding: 0;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
   overflow: hidden;
-  background: var(--bench);
+  background: var(--mold-bg);
   list-style: none;
 }
 
@@ -4551,7 +4549,7 @@ button:disabled {
 }
 
 .mobile-data-list li + li {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-data-list li.mobile-queue-item {
@@ -4577,7 +4575,7 @@ button:disabled {
 
 .mobile-data-list div > span {
   margin-top: 4px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -4593,14 +4591,14 @@ button:disabled {
 
 .status-badge {
   flex: none;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
 
 .mobile-empty-note {
   margin: 10px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-body);
 }
 
@@ -4617,10 +4615,10 @@ button:disabled {
   align-items: center;
   gap: 7px;
   max-width: 100%;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 999px;
   padding: 2px 4px 2px 10px;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
 }
@@ -4638,14 +4636,14 @@ button:disabled {
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: var(--stop);
+  color: var(--mold-error);
   font-size: 20px;
 }
 
 .mobile-danger-zone {
   margin-top: 34px;
   padding-top: 18px;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
 }
 
 .mobile-danger-zone .danger-button {
@@ -4654,7 +4652,7 @@ button:disabled {
 
 .mobile-danger-zone p {
   margin: 8px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
   text-align: center;
 }
@@ -4670,11 +4668,11 @@ button:disabled {
   display: grid;
   align-content: center;
   text-align: center;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .error-text {
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 /*
@@ -4719,13 +4717,13 @@ button:disabled {
   .mobile-tabs {
     grid-area: tabs;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: repeat(4, minmax(72px, 1fr));
+    grid-template-rows: repeat(5, minmax(64px, 1fr));
     align-content: center;
     gap: 8px;
     padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom))
       max(8px, env(safe-area-inset-left));
     border-top: 0;
-    border-right: 1px solid var(--edge);
+    border-right: 1px solid var(--mold-border);
   }
 
   .mobile-tab {
@@ -4734,7 +4732,7 @@ button:disabled {
   }
 
   .mobile-tab[aria-current="page"] {
-    background: color-mix(in srgb, var(--safelight) 10%, transparent);
+    background: color-mix(in srgb, var(--mold-blue) 10%, transparent);
   }
 
   .mobile-create-action {
@@ -4766,8 +4764,8 @@ button:disabled {
   .mobile-catalog-target-panel {
     width: min(720px, calc(100% - 48px));
     align-self: center;
-    border-right: 1px solid var(--edge);
-    border-left: 1px solid var(--edge);
+    border-right: 1px solid var(--mold-border);
+    border-left: 1px solid var(--mold-border);
     border-radius: 18px 18px 0 0;
   }
 
@@ -4813,9 +4811,9 @@ button:disabled {
 
   .mobile-catalog-card,
   .mobile-catalog-card + .mobile-catalog-card {
-    border: 1px solid var(--edge);
-    border-radius: var(--radius-card);
-    background: var(--bench);
+    border: 1px solid var(--mold-border);
+    border-radius: var(--mold-radius-3);
+    background: var(--mold-bg);
   }
 }
 
@@ -4833,7 +4831,7 @@ button:disabled {
     top: 0;
     height: 100%;
     max-height: none;
-    border-right: 1px solid var(--edge);
+    border-right: 1px solid var(--mold-border);
     border-bottom: 0;
   }
 
@@ -4861,9 +4859,9 @@ button:disabled {
   grid-auto-columns: 1fr;
   grid-auto-flow: column;
   margin-top: 10px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
   touch-action: manipulation;
 }
 
@@ -4874,21 +4872,21 @@ button:disabled {
   justify-content: center;
   gap: 6px;
   border: 0;
-  border-radius: calc(var(--radius-control) - 1px);
+  border-radius: calc(var(--mold-radius-2) - 1px);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   font-weight: 650;
 }
 
 .mobile-library-scope button[data-on] {
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
-  color: var(--safelight);
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
 }
 
 .mobile-library-scope-count {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: 11px;
 }
@@ -4924,23 +4922,23 @@ button:disabled {
   flex: none;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-pill);
-  background: var(--bench);
-  color: var(--ink-2);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   padding: 8px 14px;
 }
 
 .mobile-library-chip[data-on] {
-  border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
-  color: var(--safelight);
+  border-color: var(--mold-blue);
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
 }
 
 .mobile-library-chip-count {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: 11px;
 }
@@ -4961,10 +4959,10 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-media);
-  background: var(--bench);
-  color: var(--ink-2);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
   font-size: 13px;
   padding: 10px 12px;
 }
@@ -4975,7 +4973,7 @@ button:disabled {
 
 .mobile-library-mono {
   font-family: var(--font-utility);
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 
 .mobile-library-banner-link {
@@ -4983,7 +4981,7 @@ button:disabled {
   flex: none;
   border: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-family: var(--font-utility);
   font-size: var(--text-data);
 }
@@ -5020,7 +5018,7 @@ button:disabled {
   background: rgba(0, 0, 0, 0.68);
   color: #f5efff;
   font-family: var(--font-utility);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   line-height: 1;
   padding: 4px 6px;
   backdrop-filter: blur(8px);
@@ -5046,10 +5044,10 @@ button:disabled {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
-  background: var(--bench);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg);
+  color: var(--mold-text);
   text-align: left;
   padding: 8px 44px 8px 8px;
 }
@@ -5062,9 +5060,9 @@ button:disabled {
   flex: none;
   place-items: center;
   overflow: hidden;
-  border-radius: var(--radius-media);
-  background: var(--print);
-  color: var(--ink-3);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-media-bed);
+  color: var(--mold-text-dim);
   font-size: 20px;
 }
 
@@ -5089,13 +5087,13 @@ button:disabled {
 }
 
 .mobile-collection-copy > span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 12px;
 }
 
 .mobile-collection-copy > .mobile-collection-hidden {
   font-family: var(--font-utility);
-  font-size: 10px;
+  font-size: var(--mold-fs-micro);
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -5103,11 +5101,11 @@ button:disabled {
 
 .mobile-collection-count {
   font-family: var(--font-utility);
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 
 .mobile-collection-chevron {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 20px;
 }
 
@@ -5121,7 +5119,7 @@ button:disabled {
   place-items: center;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 18px;
   transform: translateY(-50%);
 }
@@ -5130,9 +5128,9 @@ button:disabled {
   display: grid;
   margin-top: 6px;
   gap: 8px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg);
   padding: 10px;
 }
 
@@ -5160,19 +5158,19 @@ button:disabled {
 }
 
 .mobile-collection-drillin-title > span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 12px;
 }
 
 /* Danger-tinted secondary action (two-step inline confirms). */
 .mobile-inline-danger {
-  border-color: var(--stop);
-  color: var(--stop);
+  border-color: var(--mold-error);
+  color: var(--mold-error);
 }
 
 .mobile-inline-danger.is-armed,
 .mobile-library-empty-trash.is-armed {
-  background: color-mix(in srgb, var(--stop) 14%, var(--bench));
+  background: color-mix(in srgb, var(--mold-error) 14%, var(--mold-bg));
 }
 
 /* Host detail Library card row. */
@@ -5203,7 +5201,7 @@ button:disabled {
   position: absolute;
   inset: 0;
   border: 0;
-  background: color-mix(in srgb, var(--print) 62%, transparent);
+  background: color-mix(in srgb, var(--mold-media-bed) 62%, transparent);
   transition: opacity 160ms ease-out;
 }
 
@@ -5213,10 +5211,10 @@ button:disabled {
   min-height: 0;
   max-height: min(86dvh, var(--mobile-visual-viewport-height, 100dvh));
   flex-direction: column;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   border-radius: 18px 18px 0 0;
-  background: var(--bath);
-  color: var(--rebate);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
   animation: mobile-sheet-in 0.2s ease;
   transition: transform 160ms ease-out;
   will-change: transform;
@@ -5232,8 +5230,8 @@ button:disabled {
   height: 4px;
   flex: 0 0 auto;
   margin: 8px auto 2px;
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--rebate) 22%, transparent);
+  border-radius: var(--mold-radius-2);
+  background: color-mix(in srgb, var(--mold-text) 22%, transparent);
 }
 
 .mobile-library-sheet-body {
@@ -5252,7 +5250,7 @@ button:disabled {
 .mobile-library-sheet-head {
   margin: 0;
   overflow: hidden;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.08em;
@@ -5263,7 +5261,7 @@ button:disabled {
 
 .mobile-library-sheet-label {
   margin: 4px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.08em;
@@ -5274,10 +5272,10 @@ button:disabled {
   min-height: 46px;
   min-height: var(--mobile-sheet-touch-target, 46px);
   margin-top: 2px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text);
   font-family: var(--font-body);
   font-size: var(--text-body);
   font-weight: 650;
@@ -5314,10 +5312,10 @@ button:disabled {
   min-height: 44px;
   align-items: center;
   gap: 2px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-pill);
-  background: var(--bench);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-text);
   font-family: var(--font-utility);
   font-size: var(--text-data);
   padding: 0 4px 0 14px;
@@ -5330,7 +5328,7 @@ button:disabled {
   place-items: center;
   border: 0;
   background: transparent;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 17px;
 }
 
@@ -5350,10 +5348,10 @@ button:disabled {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
-  background: var(--bench);
-  color: var(--rebate);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
+  background: var(--mold-bg);
+  color: var(--mold-text);
   text-align: left;
   padding: 8px 12px;
 }
@@ -5363,13 +5361,65 @@ button:disabled {
   width: 26px;
   height: 26px;
   place-items: center;
-  border: 1px solid var(--control-edge);
+  border: 1px solid var(--mold-border-control);
   border-radius: 8px;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font-size: 15px;
 }
 
 .mobile-library-checklist > li > button[aria-checked="true"] .mobile-library-check {
-  border-color: var(--safelight);
-  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  border-color: var(--mold-blue);
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+}
+
+/* Touch metrics belong to the mobile shell, never the compact desktop kit. */
+.mobile-shell {
+  --mobile-touch-target: 44px;
+}
+.mobile-shell[data-mobile-platform="android"] {
+  --mobile-touch-target: 48px;
+}
+.mobile-tab {
+  min-width: 0;
+  font-family: var(--mold-font-sans);
+}
+.mobile-tab-icon {
+  position: relative;
+  display: inline-flex;
+}
+.mobile-tab-dot {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--mold-blue);
+}
+.mobile-queue-peek {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  min-height: var(--mobile-touch-target);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg-deep);
+  text-align: left;
+}
+.mobile-queue-peek > :nth-child(2) {
+  flex: 1;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-sm);
+}
+.mobile-queue-empty {
+  padding: 48px 0;
+}
+.mobile-queue-empty h2 {
+  font-size: var(--mold-fs-lg);
+}
+.mobile-queue-empty p {
+  margin: 8px 0 20px;
+  color: var(--mold-text-dim);
 }

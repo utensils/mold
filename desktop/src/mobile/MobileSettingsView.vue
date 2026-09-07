@@ -270,7 +270,7 @@ onBeforeUnmount(() => {
             </span>
             <span class="mobile-theme-option-copy">
               <strong>{{ meta.label }}</strong>
-              <small>{{ meta.tone }} · {{ meta.type }}</small>
+              <small>{{ meta.toneLabel }} · {{ meta.type }}</small>
             </span>
             <span class="mobile-settings-check" aria-hidden="true">✓</span>
           </label>

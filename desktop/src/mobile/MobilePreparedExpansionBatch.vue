@@ -308,7 +308,7 @@ watch(
   display: grid;
   gap: 12px;
   padding: 14px 0;
-  border-block: 1px solid var(--edge);
+  border-block: 1px solid var(--mold-border);
 }
 .mobile-prepared header,
 .mobile-prepared footer {
@@ -327,7 +327,7 @@ watch(
 }
 .mobile-prepared header p {
   margin-top: 2px;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 .mobile-prepared ol {
@@ -345,7 +345,7 @@ watch(
 }
 .mobile-prepared li > span {
   padding-top: 12px;
-  color: var(--halide);
+  color: var(--mold-sapphire);
   text-align: center;
 }
 .mobile-prepared li > button {
@@ -367,13 +367,13 @@ watch(
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--control-edge);
-  border-radius: var(--radius-control);
-  background: var(--bench);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
 }
 .mobile-prepared-blocked {
   margin: 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: var(--text-caption);
 }
 .mobile-prepared-more {
@@ -382,7 +382,7 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .mobile-prepared-more p {
   flex: 1 1 180px;
@@ -396,10 +396,10 @@ watch(
 .mobile-prepared-stale ul {
   margin: 0;
   padding-left: 20px;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .mobile-collapse-confirm p {
-  color: var(--ink-2);
+  color: var(--mold-text-2);
 }
 .mobile-prepared footer > * {
   flex: 1 1 150px;

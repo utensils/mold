@@ -402,9 +402,9 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   gap: 14px;
   overflow: auto;
   padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 20px 20px 0 0;
-  background: var(--bench);
+  background: var(--mold-bg);
 }
 
 .mobile-image-picker-panel header,
@@ -417,15 +417,15 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
 
 .mobile-image-picker-panel header p {
   margin: 4px 0 0;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 13px;
 }
 
 .mobile-image-picker-tabs {
   padding: 3px;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 12px;
-  background: var(--bath);
+  background: var(--mold-bg-deep);
 }
 
 .mobile-image-picker-tabs button {
@@ -435,12 +435,12 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
 }
 
 .mobile-image-picker-tabs button[aria-selected="true"] {
-  background: var(--safelight);
-  color: var(--on-accent);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
 }
 
 .mobile-image-picker-grid button.is-selected {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-blue);
   outline-offset: -2px;
 }
 
@@ -453,8 +453,8 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: var(--safelight);
-  color: var(--on-accent);
+  background: var(--mold-blue);
+  color: var(--mold-on-accent);
   font-weight: 700;
 }
 
@@ -466,15 +466,15 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   justify-content: space-between;
   gap: 12px;
   padding-top: 12px;
-  border-top: 1px solid var(--edge);
-  background: var(--bench);
+  border-top: 1px solid var(--mold-border);
+  background: var(--mold-bg);
 }
 
 .mobile-image-picker-file {
   display: grid;
   min-height: 160px;
   place-items: center;
-  border: 1px dashed var(--control-edge);
+  border: 1px dashed var(--mold-border-control);
   border-radius: 14px;
 }
 
@@ -489,7 +489,7 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
   min-height: 44px;
   overflow: hidden;
   aspect-ratio: 1;
-  border: 1px solid var(--edge);
+  border: 1px solid var(--mold-border);
   border-radius: 10px;
   background: var(--print-surface);
 }
@@ -515,7 +515,7 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
 
 .mobile-image-picker-error {
   margin: 0;
-  color: var(--stop);
+  color: var(--mold-error);
   font-size: 14px;
 }
 </style>

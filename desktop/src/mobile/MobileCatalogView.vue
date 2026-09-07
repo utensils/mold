@@ -1225,8 +1225,8 @@ onBeforeUnmount(() => {
   <section ref="catalogRoot" class="mobile-catalog" aria-labelledby="mobile-catalog-title">
     <header class="mobile-catalog-header">
       <div>
-        <h1 id="mobile-catalog-title" class="section-title">Catalog</h1>
-        <p class="section-note">Models for your remote Mold hosts</p>
+        <h1 id="mobile-catalog-title" class="section-title">Styles</h1>
+        <p class="section-note">Find a look for your next picture, clip, or 3-D object</p>
       </div>
       <label v-if="hosts.length > 1" class="mobile-catalog-host-picker">
         <span>Browse on</span>
@@ -1250,7 +1250,7 @@ onBeforeUnmount(() => {
     </p>
 
     <div v-if="!selectedHost" class="mobile-catalog-empty empty-state">
-      Add and select a remote host to browse its catalog.
+      Connect a machine to browse and get styles ready there.
     </div>
 
     <template v-else>
@@ -1564,7 +1564,7 @@ onBeforeUnmount(() => {
             aria-label="Close model details"
             @click="closeDetail"
           >
-            ‹ <span>Catalog</span>
+            ‹ <span>Styles</span>
           </button>
           <strong id="mobile-catalog-detail-heading">Model details</strong>
           <span aria-hidden="true" />

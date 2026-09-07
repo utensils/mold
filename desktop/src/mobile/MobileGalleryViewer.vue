@@ -1896,7 +1896,7 @@ onBeforeUnmount(() => {
 }
 
 .gallery-viewer-identity dt {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 13px;
 }
 
@@ -1923,7 +1923,7 @@ onBeforeUnmount(() => {
 .gallery-viewer-info-filename,
 .gallery-viewer-info-version {
   overflow: hidden;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 13px;
   text-overflow: ellipsis;
@@ -1932,7 +1932,7 @@ onBeforeUnmount(() => {
 
 .gallery-viewer-info-prompt {
   min-width: 0;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-size: var(--text-body);
   overflow-wrap: anywhere;
 }
@@ -1954,7 +1954,7 @@ onBeforeUnmount(() => {
 .gallery-viewer-prompt-heading .gallery-viewer-copy-prompt {
   border: 0;
   background: transparent;
-  color: var(--safelight);
+  color: var(--mold-blue);
   font: inherit;
 }
 
@@ -1970,19 +1970,19 @@ onBeforeUnmount(() => {
   display: block;
   overflow: visible;
   margin: 0;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 13px;
   -webkit-line-clamp: unset;
 }
 
 .gallery-viewer-info-secondary {
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   font-size: 13px;
   overflow-wrap: anywhere;
 }
 
 .gallery-viewer-info-secondary span {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 
 .gallery-viewer-info-facts {
@@ -1998,7 +1998,7 @@ onBeforeUnmount(() => {
 }
 
 .gallery-viewer-info-facts dt {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-size: 13px;
 }
 
@@ -2006,7 +2006,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   margin: 0;
   overflow: hidden;
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 13px;
   overflow-wrap: anywhere;
