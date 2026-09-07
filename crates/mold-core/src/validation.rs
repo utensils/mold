@@ -2438,11 +2438,11 @@ fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
         .as_ref()
         .is_some_and(|bytes| !bytes.is_empty());
     let references = req.references.as_deref().unwrap_or_default();
-    if source_present && !references.is_empty() {
-        return Err(
-            "3-D generation cannot combine source_image with named views or a mesh reference"
-                .to_string(),
-        );
+    let has_mesh_reference = references
+        .iter()
+        .any(|reference| matches!(reference, crate::GenerationReference::Mesh { .. }));
+    if source_present && !references.is_empty() && !has_mesh_reference {
+        return Err("3-D generation cannot combine source_image with named views".to_string());
     }
     if crate::manifest::hunyuan3d_multiview_model(&req.model) {
         if references.is_empty() {
@@ -2462,10 +2462,7 @@ fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
                 );
             }
         }
-    } else if references
-        .iter()
-        .any(|reference| matches!(reference, crate::GenerationReference::Mesh { .. }))
-    {
+    } else if has_mesh_reference {
         if references.len() != 1
             || !matches!(references[0], crate::GenerationReference::Mesh { .. })
         {
@@ -2473,6 +2470,11 @@ fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
         }
         if req.mesh.as_ref().and_then(|mesh| mesh.texture) != Some(true) {
             return Err("a mesh reference requires mesh.texture = true".to_string());
+        }
+        if !source_present {
+            return Err(
+                "mesh-input texturing requires an appearance image in source_image".to_string(),
+            );
         }
     } else {
         if !references.is_empty() {
@@ -3589,9 +3591,9 @@ mod tests {
 
     #[cfg(feature = "mesh-texture")]
     #[test]
-    fn texture_only_request_accepts_one_mesh_and_no_source_image() {
+    fn texture_only_request_accepts_one_mesh_with_an_appearance_image() {
         let mut req = crate::test_support::minimal_generate_request("hunyuan3d:fp16");
-        req.source_image = None;
+        req.source_image = Some(vec![0u8; 16]);
         req.mesh = Some(crate::MeshRequestOptions {
             texture: Some(true),
             ..Default::default()
@@ -3612,6 +3614,10 @@ mod tests {
             },
         }]);
         super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap();
+
+        req.source_image = None;
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("appearance image"), "{error}");
     }
 
     #[test]
