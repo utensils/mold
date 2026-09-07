@@ -70,22 +70,22 @@ function newSeed(): void {
       <button
         type="button"
         class="mobile-seed-mode"
-        :class="{ 'is-selected': uiMode === 'random' }"
-        :aria-pressed="uiMode === 'random'"
-        data-test="mobile-seed-mode-random"
-        @click="setMode('random')"
-      >
-        Surprise me
-      </button>
-      <button
-        type="button"
-        class="mobile-seed-mode"
         :class="{ 'is-selected': uiMode === 'fixed' }"
         :aria-pressed="uiMode === 'fixed'"
         data-test="mobile-seed-mode-fixed"
         @click="setMode('fixed')"
       >
         Keep
+      </button>
+      <button
+        type="button"
+        class="mobile-seed-mode"
+        :class="{ 'is-selected': uiMode === 'random' }"
+        :aria-pressed="uiMode === 'random'"
+        data-test="mobile-seed-mode-random"
+        @click="setMode('random')"
+      >
+        Surprise me
       </button>
     </div>
 

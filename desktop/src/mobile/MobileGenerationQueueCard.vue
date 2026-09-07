@@ -20,6 +20,7 @@ const emit = defineEmits<{
   activate: [];
 }>();
 
+const displayTitle = computed(() => props.title.trim() || props.subtitle);
 const detailedStatus = computed(() => props.status.length > 18);
 </script>
 
@@ -29,15 +30,15 @@ const detailedStatus = computed(() => props.status.length > 18);
     :class="{ 'mobile-generation-job--detailed-status': detailedStatus }"
     role="button"
     tabindex="0"
-    :aria-label="ariaLabel"
+    :aria-label="ariaLabel?.trim() || displayTitle"
     data-test="mobile-generation-queue-card"
     @click="emit('activate')"
     @keydown.enter.prevent="emit('activate')"
     @keydown.space.prevent="emit('activate')"
   >
     <div class="mobile-generation-job-copy">
-      <p>{{ title }}</p>
-      <span>{{ subtitle }}</span>
+      <p>{{ displayTitle }}</p>
+      <span v-if="title.trim()">{{ subtitle }}</span>
       <p
         v-if="detail"
         class="mobile-generation-held-error"

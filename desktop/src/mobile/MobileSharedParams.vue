@@ -100,6 +100,19 @@ function writableMeshForm(): NonNullable<GenerateForm["mesh"]> {
   props.form.mesh ??= emptyMeshForm();
   return props.form.mesh;
 }
+const textureControl = computed(() => meshCaps.value?.texture ?? null);
+const textureAvailable = computed(() => textureControl.value?.mode === "adjustable");
+const textureEnabled = computed(() => meshForm.value.texture === true);
+const textureResolution = computed(
+  () => meshForm.value.textureResolution ?? meshCaps.value?.texture_default_resolution ?? 0,
+);
+const textureResolutions = computed(() =>
+  (meshCaps.value?.texture_resolutions ?? []).map((value) => ({ value, label: `${value}px` })),
+);
+function setTexture(enabled: boolean): void {
+  writableMeshForm().texture = enabled ? true : null;
+  if (!enabled) writableMeshForm().textureResolution = null;
+}
 const octreeSegments = computed(() =>
   (meshCaps.value?.octree_resolutions ?? []).map((resolution) => ({
     value: resolution,
@@ -166,6 +179,34 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
 
 <template>
   <template v-if="section !== 'details'">
+    <fieldset
+      v-if="textureAvailable"
+      class="mobile-mesh-materials"
+      :disabled="disabled"
+      data-test="mobile-mesh-materials"
+    >
+      <legend class="mobile-mesh-legend">Color / PBR</legend>
+      <div class="mobile-generate-toggle-row">
+        <span
+          ><strong>PBR materials</strong
+          ><small>Paint color, metal, roughness, and surface detail.</small></span
+        >
+        <SwitchToggle
+          :model-value="textureEnabled"
+          label="Generate PBR materials"
+          data-test="mobile-mesh-texture-toggle"
+          @update:model-value="setTexture"
+        />
+      </div>
+      <SegmentedControl
+        v-if="textureEnabled && textureResolutions.length"
+        :model-value="textureResolution"
+        :options="textureResolutions"
+        label="Texture resolution"
+        data-test="mobile-mesh-texture-resolution"
+        @update:model-value="writableMeshForm().textureResolution = $event"
+      />
+    </fieldset>
     <MobileResolutionPicker
       :compact="section === 'primary'"
       v-model:width="form.width"

@@ -730,6 +730,7 @@ describe("MobileSourceControls on a canvasless recipe", () => {
     expect(wrapper.find("[data-test='mobile-source-strength']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-mask-well']").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Source fit");
+    expect(wrapper.find("[data-test=mobile-source-strength-hint]").exists()).toBe(false);
   });
 
   it("still offers the fit policy on a raster recipe", () => {

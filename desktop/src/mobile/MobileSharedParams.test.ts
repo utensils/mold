@@ -3,7 +3,12 @@ import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
 import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
-import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
+import {
+  applyModelDefaults,
+  buildRequest,
+  newGenerateForm,
+  type GenerateForm,
+} from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileSharedParams from "./MobileSharedParams.vue";
 
@@ -365,6 +370,41 @@ describe("MobileSharedParams mesh controls", () => {
       global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
     });
   }
+
+  it("exposes color PBR on the primary form and serializes the advertised texture size", async () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.texture = { mode: "adjustable", required: false };
+    recipe.capabilities.mesh!.texture_resolutions = [1024, 2048, 4096];
+    recipe.capabilities.mesh!.texture_default_resolution = 2048;
+    const form = meshForm();
+    applyModelDefaults(form, meshModel(recipe));
+    const wrapper = mountMesh(form, meshModel(recipe));
+    await wrapper.setProps({ section: "primary" });
+    expect(wrapper.get("[data-test='mobile-mesh-materials']").text()).toContain("Color / PBR");
+    await wrapper.get("[data-test='mobile-mesh-texture-toggle']").trigger("click");
+    expect(form.mesh.texture).toBe(true);
+    expect(buildRequest(form).mesh).toMatchObject({ texture: true, texture_resolution: 2048 });
+    const options = wrapper.get("[data-test='mobile-mesh-texture-resolution']").findAll("button");
+    await options[2]!.trigger("click");
+    expect(buildRequest(form).mesh).toMatchObject({ texture: true, texture_resolution: 4096 });
+    await wrapper.get("[data-test='mobile-mesh-texture-toggle']").trigger("click");
+    expect(form.mesh.textureResolution).toBeNull();
+    expect(buildRequest(form).mesh?.texture).toBeUndefined();
+    await wrapper.setProps({ section: "details" });
+    expect(wrapper.find("[data-test='mobile-mesh-materials']").exists()).toBe(false);
+  });
+
+  it("does not offer a PBR switch when the host fixes the texture stage", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.texture = { mode: "fixed", required: false };
+    expect(
+      mountMesh(meshForm(), meshModel(recipe)).find("[data-test='mobile-mesh-materials']").exists(),
+    ).toBe(false);
+  });
+
+  it("does not offer color PBR when the recipe hides painting", () => {
+    expect(mountMesh(meshForm()).find("[data-test='mobile-mesh-materials']").exists()).toBe(false);
+  });
 
   it("renders no mesh group for a recipe that advertises none", () => {
     const form = reactive({ ...newGenerateForm(), model: "sdxl:test", family: "sdxl" });

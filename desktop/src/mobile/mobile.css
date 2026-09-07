@@ -5555,7 +5555,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   font-size: 16px;
-  margin-bottom: 12px;
+  margin: 0 0 12px;
 }
 .mobile-queue-group h3 span {
   color: var(--mold-text-muted);
@@ -5644,4 +5644,48 @@ button:disabled {
   .mobile-shell.is-keyboard-open .mobile-create-action {
     padding-block: 4px;
   }
+}
+
+.mobile-mesh-materials {
+  border: 0;
+  padding: 0;
+  margin: 0 0 20px;
+  min-width: 0;
+}
+.mobile-mesh-materials .ms-seg {
+  margin-top: 12px;
+}
+
+/* Group labels align with the queue header and row copy, without stacking
+   section margins inside the already padded card. */
+.mobile-generation-queue-list .mobile-queue-group {
+  margin: 0;
+  padding-block: 12px 0;
+}
+.mobile-generation-queue-list .mobile-queue-group + .mobile-queue-group {
+  border-top: 1px solid var(--mold-border);
+}
+.mobile-generation-queue-list .mobile-queue-group > h3 {
+  margin: 0 0 4px;
+  padding-inline: 12px;
+  font-size: 14px;
+}
+.mobile-generation-queue-list .mobile-queue-group:last-child {
+  padding-bottom: 4px;
+}
+
+.mobile-library-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.mobile-library-search .field {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.mobile-library-search .control {
+  width: 100%;
+  min-height: var(--mobile-touch-target, 44px);
 }

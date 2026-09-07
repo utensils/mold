@@ -25,7 +25,9 @@ class MainActivity : TauriActivity() {
         safeChrome.right,
         maxOf(safeChrome.bottom, keyboard.bottom),
       )
-      insets
+      // This container already applies system and IME insets. Do not pass them
+      // to WebView, which would expose them again through CSS safe-area values.
+      WindowInsetsCompat.CONSUMED
     }
     ViewCompat.requestApplyInsets(content)
   }

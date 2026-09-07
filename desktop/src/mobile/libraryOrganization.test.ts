@@ -9,6 +9,7 @@ import {
   deleteActionCopy,
   fanoutFailureMessage,
   filterLibraryPrints,
+  matchesLibrarySearch,
   libraryOrganizationSupport,
   logicalCopyIndex,
   logicalCopiesOf,
@@ -480,5 +481,40 @@ describe("runOrganizationFanout", () => {
       api,
     );
     expect(missing.failures[0]?.hostId).toBe("gone");
+  });
+});
+
+describe("mobile library search", () => {
+  it("matches words across copy metadata, title, tags and collection names", () => {
+    const copies = [
+      copy("one", "original.png"),
+      copy("two", "copy.png", {
+        metadata: { ...copy("one", "x").metadata, prompt: "A RED lighthouse" },
+      }),
+    ];
+    const organization = {
+      title: "Coast",
+      favorite: false,
+      tags: ["Summer"],
+      collections: ["travel"],
+      trashedAt: null,
+    };
+    const collections = [{ name: "Ocean trips", slug: "travel" }];
+    for (const query of [
+      "RED coast",
+      "summer trips",
+      "COPY.PNG",
+      "flux-dev",
+      "  ＣＯＡＳＴ  ",
+      "",
+    ]) {
+      expect(matchesLibrarySearch(query, copies, organization, collections), query).toBe(true);
+    }
+    expect(matchesLibrarySearch("red mountain", copies, organization, collections)).toBe(false);
+    expect(
+      matchesLibrarySearch("unrelated", copies, organization, [
+        { name: "Unrelated", slug: "other" },
+      ]),
+    ).toBe(false);
   });
 });

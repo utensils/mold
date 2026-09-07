@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 
 describe("MobileGenerationQueueCard", () => {
+  it("gives a prompt-free mesh job a visible and accessible title without an empty text row", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "", subtitle: "Hunyuan3D · plato", status: "Decoding volume", ariaLabel: "" },
+    });
+    expect(view.get(".mobile-generation-job-copy p").text()).toBe("Hunyuan3D · plato");
+    expect(view.find(".mobile-generation-job-copy span").exists()).toBe(false);
+    expect(view.attributes("aria-label")).toBe("Hunyuan3D · plato");
+  });
+
   it("activates with Enter and Space", async () => {
     const view = mount(MobileGenerationQueueCard, {
       props: {

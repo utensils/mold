@@ -367,6 +367,7 @@ import {
   deleteActionCopy,
   fanoutFailureMessage,
   filterLibraryPrints,
+  matchesLibrarySearch,
   libraryOrganizationSupport,
   logicalCopyIndex,
   logicalCopiesOf,
@@ -1074,6 +1075,14 @@ const selectedPrint = ref<GalleryPrint | null>(null);
  * connected host advertises `capabilities.gallery.organize` / `.trash`. */
 const libraryScope = ref<MobileLibraryScope>("prints");
 const libraryFilters = reactive({ ...EMPTY_LIBRARY_FILTERS });
+const librarySearchQuery = ref("");
+watch(librarySearchQuery, (_query, _prior, onCleanup) => {
+  const timer = setTimeout(() => {
+    clearGallerySelection();
+    void requeueGallery();
+  }, 150);
+  onCleanup(() => clearTimeout(timer));
+});
 /** Per-host `/api/gallery/collections` and `/api/gallery/tags` listings. */
 const hostCollections = reactive<Record<string, Collection[]>>({});
 const hostTags = reactive<Record<string, TagCount[]>>({});
@@ -8715,6 +8724,7 @@ const trashRetention = computed(() =>
   trashRetentionSummary(trashRetentionHosts(connectedHosts.value, librarySupport.value)),
 );
 const libraryEmptyCopy = computed(() => {
+  if (librarySearchQuery.value.trim()) return "No prints match your search.";
   if (libraryScope.value === "trash") return "Trash is empty.";
   if (libraryScope.value === "collections" && activeCollection.value) {
     return "No prints in this collection yet. Add some from Select.";
@@ -8817,19 +8827,32 @@ function rebuildGalleryOrganization(): void {
 /** The representatives the grid pages through for the current scope + chips. */
 function visibleRepresentatives(): PendingGalleryPrint[] {
   const copies = scopeCopies();
-  const representatives = groupLogicalGalleryPrints(copies).map((group) => group.representative);
+  const groups = groupLogicalGalleryPrints(copies);
+  const representatives = groups.map((group) => group.representative);
+  const copiesByRepresentative = new Map(
+    groups.map((group) => [group.representative, group.copies]),
+  );
   const filters =
     libraryScope.value === "prints"
       ? { ...libraryFilters, collectionSlug: null }
       : libraryScope.value === "collections"
         ? { ...EMPTY_LIBRARY_FILTERS, collectionSlug: libraryFilters.collectionSlug }
         : { ...EMPTY_LIBRARY_FILTERS };
-  return filterLibraryPrints(
+  const filtered = filterLibraryPrints(
     representatives,
     filters,
     organizationOf,
-    (print) => logicalCopiesOf(copies, print),
+    (print) => copiesByRepresentative.get(print) ?? [print],
     libraryScope.value === "prints" ? hiddenCollectionSlugs.value : new Set(),
+  );
+  if (!librarySearchQuery.value.trim()) return filtered;
+  return filtered.filter((print) =>
+    matchesLibrarySearch(
+      librarySearchQuery.value,
+      copiesByRepresentative.get(print) ?? [print],
+      organizationOf(print),
+      libraryCollectionCards.value,
+    ),
   );
 }
 
@@ -12182,6 +12205,36 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             </button>
           </div>
         </div>
+        <div
+          v-if="libraryScope !== 'collections' || activeCollection"
+          class="mobile-library-search"
+        >
+          <label class="field">
+            <span class="sr-only">Search My images</span>
+            <input
+              v-model="librarySearchQuery"
+              class="control"
+              type="search"
+              placeholder="Search images…"
+              aria-label="Search My images"
+              autocomplete="off"
+              autocapitalize="none"
+              :spellcheck="false"
+              enterkeyhint="search"
+              data-test="mobile-library-search"
+              @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+            />
+          </label>
+          <button
+            v-if="librarySearchQuery"
+            type="button"
+            class="secondary-button"
+            aria-label="Clear image search"
+            @click="librarySearchQuery = ''"
+          >
+            Clear
+          </button>
+        </div>
         <p v-if="emptyTrashConfirming" class="status-line" data-test="mobile-library-empty-prompt">
           Delete everything in the trash forever?
         </p>
@@ -13150,7 +13203,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 <div v-if="entry.kind === 'local'" class="mobile-generation-row">
                   <SwipeActionRow
                     :actions="mobileQueueRowActions(entry.local)"
-                    :label="entry.local.print.prompt"
+                    :label="
+                      entry.local.print.prompt.trim() ||
+                      `${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`
+                    "
                     :disabled="
                       entry.local.print.cancelling === true ||
                       queueControlHostIds.has(activityRowHostId(entry.local))

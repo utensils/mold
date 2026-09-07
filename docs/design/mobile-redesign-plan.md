@@ -154,9 +154,9 @@ Independent review: GPT-5.6 Sol, medium reasoning, `plan_review`. All seven find
 - [x] Independent plan review; resolve findings and lock plan.
 - [x] Baseline mobile tests: 52 files / 1,068 tests pass. Browser baseline at 393×852.
 - [x] Milestone 1: working five-tab navigation, initial Queue destination, direct theme tokens and navigation vocabulary. Later screen-specific vocabulary remains in milestones 2–4.
-- [ ] Milestone 2: Make, three output kinds, style memory, consolidated settings.
-- [ ] Milestone 3: Queue sections, details, safe offline state, exact-machine actions.
-- [ ] Milestone 4: Images, Styles, Machines, Settings.
+- [x] Milestone 2: Make, three output kinds, style memory, consolidated settings.
+- [x] Milestone 3: Queue sections, details, safe offline state, exact-machine actions.
+- [x] Milestone 4: Images, Styles, Machines, Settings.
 - [ ] Milestone 5: full regression, visual comparison, native iOS acceptance, Android acceptance.
 
 Sync baseline: `origin/main` remains `c38d569d` at plan lock; no new main commits.
@@ -184,3 +184,11 @@ The user merged #1629 at `9537a835`; this branch merged that main commit and con
 Expanded native keyboard testing found and fixed low numeric-field occlusion, rotated iPhone editor starvation, viewer viewport/safe-area sizing, and a scrolled-away sheet exit. All software-keyboard editors are revealed after viewport changes. Title and seed Done dismiss editing; manual machine setup traverses Name → Address → API key. Library sheets keep Done outside the scrolling body. Android transient history now handles nested viewer/details, catalog target selection, simultaneous close and reopening; the identity picker no longer double-registers its sheet.
 
 Native iPhone 17 Pro / iOS 26.5 checks cover prompt open/dismiss/rotation, custom Width/Height traversal, title focus, viewer tag and lower collection editors, and persistent sheet exit. Local fixtures handle layout without inference. Full frontend validation passes (Studio 1,694; web 1,757; desktop/shared 6,332 tests and production builds). Native simulator build/install succeeds. Physical iPhone acceptance remains with the user through TestFlight; Android emulator and generation acceptance remain tracked separately.
+
+### Primary controls and spacing follow-up
+
+Color / PBR now sits directly below Style for a host advertising adjustable mesh texture, with its advertised texture sizes. Hidden and fixed texture controls remain unavailable; geometry stays in More settings. Older hosts that advertised a hidden matting placeholder retain their otherwise valid mesh profile, without accepting malformed current matting contracts. Mesh source images no longer carry a misleading strength hint. Repeat this look follows desktop order: Keep, then Surprise me.
+
+My images searches all loaded metadata before thumbnail windowing: filenames, titles, prompts, styles, tags, and collection names, including every physical copy of a logical print. Queue group headings have consistent padding, and prompt-free mesh jobs use a model/machine title and accessible Actions label.
+
+The complete frontend gate passes: Studio 1,695, web 1,757, desktop/shared 6,339 tests, plus production builds. Native iPhone layout checks confirm primary PBR and texture sizes, old-host prompt-free behavior, Queue group spacing, and live filtering against the cached library. Android's initial 21 instrumentation tests passed; a subsequent visual audit found duplicate system insets, now consumed by the native container after it applies them, with all 21 instrumentation tests passing again. The rebuilt Android emulator confirms the gap is gone and the active editor and Generate remain above the software keyboard. No generations were used for these layout checks. Milestones 2–4 describe implemented screens; milestone 5 remains open until its acceptance evidence is complete.

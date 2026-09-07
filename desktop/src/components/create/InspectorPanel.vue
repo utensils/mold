@@ -287,9 +287,7 @@ const thresholdValue = computed(
 );
 const thresholdNote = computed(() => controlNote(thresholdControl.value));
 const textureControl = computed(() => meshProfile.value?.texture ?? null);
-const textureAvailable = computed(
-  () => textureControl.value !== null && textureControl.value.mode !== "hidden",
-);
+const textureAvailable = computed(() => textureControl.value?.mode === "adjustable");
 const textureEnabled = computed(() => props.form.mesh.texture === true);
 const textureResolutionValue = computed(
   () => props.form.mesh.textureResolution ?? meshProfile.value?.texture_default_resolution ?? 0,

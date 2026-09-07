@@ -7015,6 +7015,35 @@ describe("MobileApp foreground resume", () => {
     },
   };
 
+  it("searches library metadata beyond the visible thumbnail window and restores results on clear", async () => {
+    const prints = Array.from({ length: 85 }, (_, index) => ({
+      ...resumedPrint,
+      filename: `search-${index}.png`,
+      timestamp: 1700000000 - index,
+      metadata: {
+        ...resumedPrint.metadata,
+        prompt: index === 84 ? "violet hidden lighthouse" : `ordinary print ${index}`,
+      },
+    }));
+    const previous = apiJsonTo.getMockImplementation();
+    apiJsonTo.mockImplementation((target, path, init) =>
+      path === "/api/gallery" ? Promise.resolve(prints) : previous!(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-library-search']").setValue("LIGHTHOUSE violet");
+    await vi.waitFor(() => expect(wrapper!.findAll("[data-test='gallery-item']")).toHaveLength(1));
+    expect(wrapper.get("[data-test='gallery-item']").attributes("aria-label")).toContain(
+      "violet hidden lighthouse",
+    );
+    await wrapper.get("button[aria-label='Clear image search']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper!.findAll("[data-test='gallery-item']").length).toBeGreaterThan(1),
+    );
+  });
+
   it("moves machine setup through Name, Address and API key without submitting early", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
