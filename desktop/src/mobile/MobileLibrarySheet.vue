@@ -7,7 +7,8 @@
  * every safe-area inset, with the head row rendered in the body so it can
  * never vanish the way SheetPanel's `full` variant drops its #header slot.
  */
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { useMobileBack } from "./useMobileBack";
+import { computed, onBeforeUnmount, ref, watch, toRef } from "vue";
 
 const props = withDefaults(
   defineProps<{
@@ -34,6 +35,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ close: [] }>();
 
+useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
 const body = ref<HTMLElement | null>(null);
 const dragOffset = ref(0);

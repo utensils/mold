@@ -333,13 +333,13 @@ describe("mobile form spacing", () => {
 });
 
 describe("mobile safe areas", () => {
-  it("pins the shell to the unobscured viewport instead of a keyboard-reduced root", () => {
+  it("fits the shell to the visible viewport with a stable full-height fallback", () => {
     const shell = css.match(/\.mobile-shell\s*\{([^}]*)\}/s);
     const header = css.match(/\.mobile-header\s*\{([^}]*)\}/s);
     const content = css.match(/\.mobile-content\s*\{([^}]*)\}/s);
     const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
 
-    expect(shell?.[1]).toMatch(/height:\s*100lvh\s*;/);
+    expect(shell?.[1]).toMatch(/height:\s*var\(--mobile-visual-viewport-height,\s*100lvh\)\s*;/);
     expect(shell?.[1]).not.toMatch(/height:\s*100%\s*;/);
     expect(shell?.[1]).not.toMatch(/height:\s*100svh\s*;/);
     expect(shell?.[1]).not.toMatch(/height:\s*100dvh\s*;/);

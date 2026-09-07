@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useMobileBack } from "./useMobileBack";
 import { ref, toRef, watch, nextTick, onBeforeUnmount } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 
@@ -11,6 +12,7 @@ const emit = defineEmits<{
   (event: "close"): void;
   (event: "reset"): void;
 }>();
+useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-more-settings");
 let previousFocus: HTMLElement | null = null;

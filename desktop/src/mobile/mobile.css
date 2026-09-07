@@ -34,10 +34,9 @@ button {
 
 .mobile-shell {
   --text-large-title: 1.875rem;
-  /* Stay pinned to the unobscured iPhone viewport. WebKit can leave the root
-     percentage height at its keyboard-reduced value after dismissal; lvh is
-     deliberately independent of that transient visual viewport. */
-  height: 100lvh;
+  /* VisualViewport keeps Generate above the software keyboard. The explicit
+     resize listener also restores the full height after WebKit dismisses it. */
+  height: var(--mobile-visual-viewport-height, 100lvh);
   /* Counter WebKit's visual-viewport pan while an editor is focused. Without
      this, keyboard avoidance can move the app header under iOS status chrome. */
   transform: translateY(var(--mobile-visual-viewport-page-top, 0px));
@@ -5537,4 +5536,60 @@ button:disabled {
 }
 .mobile-size-disclosure[open] > summary {
   margin-bottom: 12px;
+}
+
+.mobile-queue-group {
+  margin-block: 20px;
+}
+.mobile-queue-group h3 {
+  display: flex;
+  justify-content: space-between;
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+.mobile-queue-group h3 span {
+  color: var(--mold-text-muted);
+}
+.mobile-finished-job {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  gap: 8px;
+  min-height: var(--mobile-touch-target, 44px);
+  padding: 14px;
+  background: var(--mold-surface);
+  color: var(--mold-text);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius);
+}
+.mobile-finished-job strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mobile-finished-job span {
+  color: var(--mold-text-muted);
+  font-size: 12px;
+}
+.mobile-queue-detail-prompt {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mobile-queue-detail-actions {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+}
+.mobile-queue-detail-actions button {
+  min-height: var(--mobile-touch-target, 44px);
+}
+
+.mobile-shell.is-keyboard-open .mobile-tabs {
+  display: none;
+}
+.mobile-shell.is-keyboard-open .mobile-create-head {
+  display: none;
+}
+.mobile-shell.is-keyboard-open .mobile-create-action {
+  padding-bottom: 8px;
 }

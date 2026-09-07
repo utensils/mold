@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useMobileBack } from "./useMobileBack";
+import { MOBILE_QUEUE_SECTIONS, mobileQueueSection } from "./queueSections";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -1120,6 +1122,9 @@ const printTitle = computed({
   },
 });
 const generatedViewerOpen = ref(false);
+useMobileBack(generatedViewerOpen, () => {
+  generatedViewerOpen.value = false;
+});
 const reusingPrint = ref(false);
 const usingPrintAsSource = ref(false);
 const reusePrintError = ref("");
@@ -2749,6 +2754,102 @@ const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
     })),
   ].sort(compareNewestSubmitted),
 );
+const mobileQueueGroups = computed(() =>
+  MOBILE_QUEUE_SECTIONS.map((section) => ({
+    ...section,
+    rows: mobileActivityRows.value.filter((entry) => {
+      if (entry.kind === "shared")
+        return mobileQueueSection(entry.shared.phase, entry.shared.stale) === section.id;
+      const host = connectedHosts.value.find((host) => host.id === activityRowHostId(entry.local));
+      return (
+        mobileQueueSection(
+          entry.local.queueState ?? mobilePrintPhase(entry.local.print, entry.local.live),
+          !host?.online || !!host.stale,
+          !!entry.local.blockedReason || !!durableHold(entry.local.print),
+        ) === section.id
+      );
+    }),
+  })).filter((section) => section.rows.length),
+);
+const finishedQueueJobs = computed(() =>
+  allGenerationJobs.value
+    .filter((job) => job.status === "complete" || job.status === "error")
+    .sort((a, b) => b.submittedAtUnixMs - a.submittedAtUnixMs)
+    .slice(0, 20),
+);
+const queueDetailKey = ref<string | null>(null);
+const queueDetailEntry = computed(() =>
+  mobileActivityRows.value.find((row) => row.key === queueDetailKey.value),
+);
+const queueDetailJob = computed(() =>
+  queueDetailEntry.value?.kind === "local"
+    ? queueDetailEntry.value.local.print
+    : finishedQueueJobs.value.find((job) => `finished:${job.clientId}` === queueDetailKey.value),
+);
+const queueDetailHost = computed(() =>
+  connectedHosts.value.find(
+    (host) =>
+      host.id ===
+      (queueDetailJob.value?.hostId ??
+        (queueDetailEntry.value?.kind === "shared" ? queueDetailEntry.value.shared.hostId : null)),
+  ),
+);
+const queueDetailError = ref("");
+const queueDetailBusy = ref(false);
+function inspectQueueEntry(key: string): void {
+  queueDetailError.value = "";
+  queueDetailKey.value = key;
+}
+function inspectSharedQueueEntry(row: FleetActiveWork): void {
+  inspectQueueEntry(`shared:${row.key}`);
+}
+async function restoreQueueDetailSettings(): Promise<void> {
+  const entry = queueDetailEntry.value;
+  const job = queueDetailJob.value;
+  queueDetailBusy.value = true;
+  try {
+    if (job) await selectMobilePrint(job);
+    else if (entry?.kind === "shared") await openMobileLiveWork(entry.shared);
+    if (!queueDetailError.value) {
+      queueDetailKey.value = null;
+      await nextTick();
+      if (tab.value === "generate") createHeading.value?.focus({ preventScroll: true });
+    }
+  } finally {
+    queueDetailBusy.value = false;
+  }
+}
+async function viewFinishedQueueResult(): Promise<void> {
+  const job = queueDetailJob.value;
+  const host = queueDetailHost.value;
+  const filename = job?.result?.filename;
+  if (!job || !host || !filename) return;
+  queueDetailBusy.value = true;
+  queueDetailError.value = "";
+  try {
+    const target = mobileHostTarget(host);
+    const items = await apiJsonTo<GalleryImage[]>(
+      target,
+      `/api/gallery?filename=${encodeURIComponent(filename)}`,
+    );
+    const item = items.find((item) => item.filename === filename);
+    if (!item) throw new Error("This result is no longer in the machine's library.");
+    queueDetailKey.value = null;
+    openPrint({
+      ...item,
+      hostId: host.id,
+      cacheKey: host.id,
+      hostName: host.name,
+      target,
+      thumbnailUrl: "",
+      thumbnailPending: false,
+    });
+  } catch (error) {
+    queueDetailError.value = describeTransportError(error, host.name);
+  } finally {
+    queueDetailBusy.value = false;
+  }
+}
 let mobilePrintSelectionEpoch = 0;
 const selectedQueueRender = ref<{
   hostId: string;
@@ -2968,7 +3069,9 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
     showHostDetail(host.id);
   } catch (error) {
     if (epoch !== mobileLiveWorkSelectionEpoch) return;
-    setGenerationStatus(describeTransportError(error, host.name), true);
+    const message = describeTransportError(error, host.name);
+    setGenerationStatus(message, true);
+    if (queueDetailKey.value) queueDetailError.value = message;
   }
 }
 /**
@@ -10783,8 +10886,10 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
   return !NON_KEYBOARD_INPUT_TYPES.has(target.type.toLowerCase());
 }
 
+const keyboardVisible = ref(false);
 function syncVisualViewportOffset(): void {
   const viewport = window.visualViewport;
+  keyboardVisible.value = !!viewport && window.innerHeight - viewport.height > 120;
   const pageTop = viewport?.pageTop ?? window.scrollY;
   document.documentElement.style.setProperty(
     "--mobile-visual-viewport-page-top",
@@ -11057,7 +11162,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
 <template>
   <main
     class="mobile-shell"
-    :class="{ 'is-settings-open': settingsOpen, 'is-pair-scanning': pairingScannerOpen }"
+    :class="{
+      'is-settings-open': settingsOpen,
+      'is-pair-scanning': pairingScannerOpen,
+      'is-keyboard-open': keyboardVisible,
+    }"
     :data-mobile-platform="androidNativeRuntime ? 'android' : 'ios'"
   >
     <section
@@ -12870,54 +12979,87 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             >
           </div>
           <div class="mobile-generation-queue-list">
-            <template v-for="entry in mobileActivityRows" :key="entry.key">
-              <div v-if="entry.kind === 'local'" class="mobile-generation-row">
-                <SwipeActionRow
-                  :actions="mobileQueueRowActions(entry.local)"
-                  :label="entry.local.print.prompt"
-                  :disabled="
-                    entry.local.print.cancelling === true ||
-                    queueControlHostIds.has(activityRowHostId(entry.local))
-                  "
-                  data-test="mobile-generation-job"
-                  @act="onMobileQueueRowAction(entry.local, $event)"
-                >
-                  <MobileGenerationQueueCard
-                    :title="entry.local.print.prompt"
-                    :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
-                    :status="activityRowStatus(entry.local)"
-                    :detail="durableHold(entry.local.print)?.error ?? null"
-                    :cancelling="entry.local.print.cancelling === true"
-                    :aria-label="entry.local.print.prompt"
-                    @activate="selectMobilePrint(entry.local.print)"
-                  />
-                </SwipeActionRow>
-              </div>
-              <LiveActivityList
-                v-else
-                :rows="[entry.shared]"
-                interactive
-                swipe-actions
-                :can-swipe="canPauseFleetActivity"
-                @select="openMobileLiveWork"
-              >
-                <template #actions="{ row }">
-                  <button
-                    type="button"
-                    data-test="mobile-fleet-queue-control"
-                    :disabled="queueControlHostIds.has(row.hostId)"
-                    :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
-                    @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
+            <section
+              v-for="group in mobileQueueGroups"
+              :key="group.id"
+              class="mobile-queue-group"
+              :data-test="`mobile-queue-${group.id}`"
+            >
+              <h3>
+                {{ group.label }} <span>{{ group.rows.length }}</span>
+              </h3>
+              <template v-for="entry in group.rows" :key="entry.key">
+                <div v-if="entry.kind === 'local'" class="mobile-generation-row">
+                  <SwipeActionRow
+                    :actions="mobileQueueRowActions(entry.local)"
+                    :label="entry.local.print.prompt"
+                    :disabled="
+                      entry.local.print.cancelling === true ||
+                      queueControlHostIds.has(activityRowHostId(entry.local))
+                    "
+                    data-test="mobile-generation-job"
+                    @act="onMobileQueueRowAction(entry.local, $event)"
                   >
-                    {{ fleetQueueControlLabel(row) }}
-                  </button>
-                </template>
-              </LiveActivityList>
-            </template>
+                    <MobileGenerationQueueCard
+                      :title="entry.local.print.prompt"
+                      :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
+                      :status="activityRowStatus(entry.local)"
+                      :detail="durableHold(entry.local.print)?.error ?? null"
+                      :cancelling="entry.local.print.cancelling === true"
+                      :aria-label="entry.local.print.prompt"
+                      @activate="inspectQueueEntry(entry.key)"
+                    />
+                  </SwipeActionRow>
+                </div>
+                <LiveActivityList
+                  v-else
+                  :rows="[entry.shared]"
+                  interactive
+                  swipe-actions
+                  :can-swipe="canPauseFleetActivity"
+                  @select="inspectSharedQueueEntry"
+                >
+                  <template #actions="{ row }">
+                    <button
+                      type="button"
+                      data-test="mobile-fleet-queue-control"
+                      :disabled="queueControlHostIds.has(row.hostId)"
+                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
+                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
+                    >
+                      {{ fleetQueueControlLabel(row) }}
+                    </button>
+                  </template>
+                </LiveActivityList>
+              </template>
+            </section>
           </div>
         </section>
+        <section
+          v-if="finishedQueueJobs.length"
+          class="mobile-queue-group"
+          data-test="mobile-queue-finished"
+        >
+          <h3>
+            Finished <span>{{ finishedQueueJobs.length }}</span>
+          </h3>
+          <p class="section-note">Recent work from this phone. Saved results stay in My images.</p>
+          <button
+            v-for="job in finishedQueueJobs"
+            :key="job.clientId"
+            type="button"
+            class="mobile-finished-job"
+            @click="inspectQueueEntry(`finished:${job.clientId}`)"
+          >
+            <strong>{{ job.prompt || modelLabel(job.model) }}</strong>
+            <span
+              >{{ job.hostLabel }} ·
+              {{ job.status === "complete" ? "Complete" : "Stopped with an error" }}</span
+            >
+          </button>
+        </section>
         <div
-          v-if="!mobileActivityRows.length"
+          v-if="!mobileActivityRows.length && !finishedQueueJobs.length"
           class="mobile-queue-empty"
           data-test="mobile-queue-empty"
         >
@@ -12929,6 +13071,92 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
       </section>
     </section>
+
+    <MobileLibrarySheet
+      :open="queueDetailKey !== null"
+      title="Queue details"
+      :focus-first-control="false"
+      test-id="mobile-queue-details"
+      @close="queueDetailKey = null"
+    >
+      <p class="section-note">{{ queueDetailHost?.name ?? "Machine unavailable" }}</p>
+      <p v-if="queueDetailJob" class="mobile-queue-detail-prompt">{{ queueDetailJob.prompt }}</p>
+      <p v-if="queueDetailEntry?.kind === 'local'">
+        {{ activityRowStatus(queueDetailEntry.local) }}
+      </p>
+      <p v-else-if="queueDetailEntry?.kind === 'shared'">
+        {{ queueDetailEntry.shared.phase.replaceAll("_", " ") }} ·
+        {{ queueDetailEntry.shared.model }}
+      </p>
+      <p v-else-if="queueDetailJob">
+        {{ queueDetailJob.status === "complete" ? "Complete" : "Stopped with an error" }}
+      </p>
+      <p v-else>This item has left the live queue. Saved results are in My images.</p>
+      <p v-if="!queueDetailHost?.online || queueDetailHost?.stale" role="status">
+        Last known state. Reconnect this machine before changing its work.
+      </p>
+      <p v-if="queueDetailError" role="alert">{{ queueDetailError }}</p>
+      <div class="mobile-queue-detail-actions">
+        <button
+          v-if="queueDetailJob?.result?.filename"
+          type="button"
+          class="primary-button"
+          :disabled="queueDetailBusy || !queueDetailHost?.online || queueDetailHost.stale"
+          @click="viewFinishedQueueResult"
+        >
+          View result
+        </button>
+        <button
+          v-if="queueDetailJob || queueDetailEntry?.kind === 'shared'"
+          type="button"
+          class="secondary-button"
+          data-test="mobile-queue-use-settings"
+          :disabled="queueDetailBusy || !queueDetailHost?.online || queueDetailHost.stale"
+          @click="restoreQueueDetailSettings"
+        >
+          {{
+            queueDetailEntry?.kind === "shared" &&
+            (queueDetailEntry.shared.kind !== "generation" ||
+              queueDetailEntry.shared.execution === "chain")
+              ? "Show on machine"
+              : "Use these settings in Make"
+          }}
+        </button>
+        <template v-if="queueDetailEntry?.kind === 'local'">
+          <button
+            v-for="action in mobileQueueRowActions(queueDetailEntry.local)"
+            :key="action.id"
+            type="button"
+            class="secondary-button"
+            :disabled="
+              queueDetailBusy ||
+              !queueDetailHost?.online ||
+              queueDetailHost.stale ||
+              queueControlHostIds.has(queueDetailHost.id)
+            "
+            @click="onMobileQueueRowAction(queueDetailEntry.local, action.id)"
+          >
+            {{ action.label }}
+          </button>
+        </template>
+        <button
+          v-if="
+            queueDetailEntry?.kind === 'shared' && canPauseFleetActivity(queueDetailEntry.shared)
+          "
+          type="button"
+          class="secondary-button"
+          :disabled="queueControlHostIds.has(queueDetailEntry.shared.hostId)"
+          @click="
+            setFleetJobPaused(
+              queueDetailEntry.shared,
+              !fleetQueueResumeNeeded(queueDetailEntry.shared),
+            )
+          "
+        >
+          {{ fleetQueueControlLabel(queueDetailEntry.shared) }}
+        </button>
+      </div>
+    </MobileLibrarySheet>
 
     <div
       v-if="!settingsOpen && tab === 'generate' && selectedHost && !preparedBatch"

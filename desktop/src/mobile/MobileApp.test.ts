@@ -1315,9 +1315,14 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
     await flushPromises();
 
+    await fieldControl("Prompt").setValue("My unsent draft");
     const row = wrapper.get("[data-test='live-activity-select-studio-id:generation:foreign-job']");
     expect(row.element.tagName).toBe("BUTTON");
     await row.trigger("click");
+    await flushPromises();
+    expect(fieldControl("Prompt").element).toHaveProperty("value", "My unsent draft");
+    expect(wrapper.get("[data-test='mobile-queue-details']").classes()).toContain("is-open");
+    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
     await flushPromises();
 
     expect(fieldControl("Prompt").element).toHaveProperty(
@@ -1395,6 +1400,8 @@ describe("MobileApp generation lifecycle", () => {
     );
     await autoChainRow.trigger("click");
     await flushPromises();
+    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
+    await flushPromises();
 
     expect(
       apiJsonTo.mock.calls.some(([, path]) => String(path).startsWith("/api/chain-jobs/")),
@@ -1440,6 +1447,8 @@ describe("MobileApp generation lifecycle", () => {
     await wrapper
       .get("[data-test='live-activity-select-studio-id:generation:colliding-job-id']")
       .trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
@@ -2204,6 +2213,8 @@ describe("MobileApp generation queue", () => {
     const rowButton = row.get(".mobile-generation-job");
     (rowButton.element as HTMLElement).focus();
     await rowButton.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
     await flushPromises();
     await flushPromises();
 
