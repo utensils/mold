@@ -18,15 +18,22 @@ fn main() -> Result<()> {
         args.next()
             .context("usage: probe MODEL.onnx INPUT OUTPUT.png")?,
     );
+    let backend = args.next();
     anyhow::ensure!(
         args.next().is_none(),
-        "usage: probe MODEL.onnx INPUT OUTPUT.png"
+        "usage: probe MODEL.onnx INPUT OUTPUT.png [cuda]"
     );
 
     let image = image::open(&input)
         .with_context(|| format!("decode {}", input.display()))?
         .to_rgba8();
-    let network = U2Net::load(&model, &Device::Cpu)?;
+    let device = match backend.as_deref().and_then(|value| value.to_str()) {
+        None | Some("cpu") => Device::Cpu,
+        #[cfg(feature = "cuda")]
+        Some("cuda") => Device::new_cuda(0)?,
+        Some(value) => anyhow::bail!("unknown backend {value}; expected cpu or cuda"),
+    };
+    let network = U2Net::load(&model, &device)?;
     let matte = network.matte(&image)?;
     matte
         .save(&output)
