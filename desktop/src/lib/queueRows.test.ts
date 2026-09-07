@@ -5,6 +5,7 @@ import {
   queueSentence,
   railStatusLine,
   rowGlyph,
+  rowProgressFraction,
   rowStatusLine,
   rowTitle,
   rowTone,
@@ -47,6 +48,26 @@ const print = (part: Partial<Job> = {}): QueueRow => ({
   kind: "print",
   print: job(part),
 });
+
+/** A row the host reports through `/api/activity` rather than one this
+ * client is tracking itself — every fleet row, and every row after a
+ * reconnect. */
+const shared = (part: Record<string, unknown> = {}): QueueRow =>
+  ({
+    key: "shared:1",
+    createdAtMs: 0,
+    kind: "shared",
+    shared: {
+      id: "job-1",
+      kind: "generation",
+      phase: "running",
+      model: "hunyuan3d-2.1:fp16",
+      created_at_unix_ms: 0,
+      updated_at_unix_ms: 0,
+      can_cancel: true,
+      ...part,
+    },
+  }) as unknown as QueueRow;
 
 describe("queue rows speak the lexicon", () => {
   it("titles a print by its words and a clip by its scenes", () => {
@@ -168,5 +189,45 @@ describe("queue rows speak the lexicon", () => {
     expect(queueSentence(1, 3, false)).toBe("1 image being made · 3 waiting");
     expect(queueSentence(2, 0, false)).toBe("2 images being made");
     expect(queueSentence(1, 3, true)).toBe("queue paused · 3 waiting");
+  });
+});
+
+/*
+ * The meter and the sentence beside it read ONE counter.
+ *
+ * `rowStatusLine` gave a shared row "Generating PBR views · 11/15" from the
+ * host's own `current`/`total` while both meters understood only a print
+ * row's denoise step, so the bar fell back to a hard-coded stub and drew ~8%
+ * next to a caption saying 73%.
+ */
+describe("a queue row's meter agrees with its sentence", () => {
+  it("measures a shared row by the same counter its caption states", () => {
+    const row = shared({ stage: "Generating PBR views", current: 11, total: 15 });
+    expect(rowStatusLine(row)).toBe("Generating PBR views · 11/15");
+    expect(rowProgressFraction(row)).toBeCloseTo(11 / 15, 5);
+  });
+
+  it("measures a print row by its denoise pass", () => {
+    expect(rowProgressFraction(print({ status: "denoising", step: 7, total: 28 }))).toBeCloseTo(
+      0.25,
+      5,
+    );
+  });
+
+  it("measures nothing it cannot measure, rather than guessing", () => {
+    expect(rowProgressFraction(print())).toBeNull();
+    expect(rowProgressFraction(print({ status: "loading" }))).toBeNull();
+    expect(rowProgressFraction(print({ status: "denoising", total: 0 }))).toBeNull();
+    // A host that names a stage without counting it still gets a caption.
+    const uncounted = shared({ stage: "Unwrapping mesh" });
+    expect(rowStatusLine(uncounted)).toBe("Unwrapping mesh");
+    expect(rowProgressFraction(uncounted)).toBeNull();
+    expect(rowProgressFraction(shared({ current: 3, total: 0 }))).toBeNull();
+  });
+
+  it("never leaves the meter outside its track", () => {
+    // A host that over-counts its own stage must not draw past the end.
+    expect(rowProgressFraction(shared({ current: 40, total: 15 }))).toBe(1);
+    expect(rowProgressFraction(shared({ current: -2, total: 15 }))).toBe(0);
   });
 });

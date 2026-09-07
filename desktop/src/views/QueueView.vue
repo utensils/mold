@@ -11,7 +11,14 @@ import QueueRowMenu from "../components/shell/QueueRowMenu.vue";
 import { rowSettled, useQueueActivity, type QueueRow } from "../composables/useQueueActivity";
 import { useQueueCommands } from "../composables/useQueueCommands";
 import { useQueueRowContext } from "../composables/useQueueRowContext";
-import { madeTodayCount, rowGlyph, rowStatusLine, rowTitle, rowTone } from "../lib/queueRows";
+import {
+  madeTodayCount,
+  rowGlyph,
+  rowProgressFraction,
+  rowStatusLine,
+  rowTitle,
+  rowTone,
+} from "../lib/queueRows";
 import { formatEta } from "../lib/format";
 import { thumbnailPath } from "../lib/gallery/media";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
@@ -82,9 +89,8 @@ function machine(row: QueueRow): string {
   return hosts.all.find((h) => h.id === row.shared.hostId)?.label ?? row.shared.hostId;
 }
 function progress(row: QueueRow): number | null {
-  if (row.kind === "print" && row.print.status === "denoising" && row.print.total > 0) {
-    return Math.round((row.print.step / row.print.total) * 100);
-  }
+  const fraction = rowProgressFraction(row);
+  if (fraction !== null) return Math.round(fraction * 100);
   // A row waiting on its style has a meter too: the download it is waiting on.
   const preparation = rowContext.contextFor.value(row).wait?.preparation?.fraction;
   return preparation == null ? null : Math.round(preparation * 100);
