@@ -89,11 +89,14 @@ function machine(row: QueueRow): string {
   return hosts.all.find((h) => h.id === row.shared.hostId)?.label ?? row.shared.hostId;
 }
 function progress(row: QueueRow): number | null {
-  const fraction = rowProgressFraction(row);
-  if (fraction !== null) return Math.round(fraction * 100);
-  // A row waiting on its style has a meter too: the download it is waiting on.
+  // A row waiting on its style has a meter too: the download it is waiting
+  // on. It comes FIRST because that is also what its caption is counting —
+  // a preparing row's sentence names the component, not the render's stage,
+  // and a meter measuring the other one would contradict it.
   const preparation = rowContext.contextFor.value(row).wait?.preparation?.fraction;
-  return preparation == null ? null : Math.round(preparation * 100);
+  if (preparation != null) return Math.round(preparation * 100);
+  const fraction = rowProgressFraction(row);
+  return fraction === null ? null : Math.round(fraction * 100);
 }
 /** A meter fills in the accent, or in the blocked tone when it measures a wait. */
 function meterFill(row: QueueRow): string {
