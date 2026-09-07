@@ -93,6 +93,10 @@ pub struct EncodedShapeLatents {
     pub mean: Tensor,
     pub logvar: Tensor,
     pub latents: Tensor,
+    #[cfg(feature = "dev-bins")]
+    pub cross_attention_output: Tensor,
+    #[cfg(feature = "dev-bins")]
+    pub normalized_hidden: Tensor,
 }
 
 impl EncodedShapeLatents {
@@ -176,6 +180,28 @@ impl ShapeVaeEncoder {
         seed: u64,
         query_chunk: usize,
     ) -> Result<EncodedShapeLatents> {
+        self.encode_mesh(mesh, seed, query_chunk, false)
+    }
+
+    /// Sample the posterior with mold's cross-device deterministic RNG.
+    /// Tencent's published minimal round-trip samples rather than taking the
+    /// mode; keeping the noise seed explicit makes that behavior restartable.
+    pub fn encode_mesh_sampled(
+        &self,
+        mesh: &Mesh,
+        seed: u64,
+        query_chunk: usize,
+    ) -> Result<EncodedShapeLatents> {
+        self.encode_mesh(mesh, seed, query_chunk, true)
+    }
+
+    fn encode_mesh(
+        &self,
+        mesh: &Mesh,
+        seed: u64,
+        query_chunk: usize,
+        sample_posterior: bool,
+    ) -> Result<EncodedShapeLatents> {
         if self.cfg.point_feats != 4 {
             return Err(invalid(
                 "mesh encoding requires normal xyz plus the sharp-edge label",
@@ -235,7 +261,24 @@ impl ShapeVaeEncoder {
             &self.device,
         )?
         .to_dtype(self.dtype)?;
-        self.encode_preselected(&points, &features, &selected, None, query_chunk)
+        let posterior_noise = sample_posterior
+            .then(|| {
+                crate::engine::seeded_randn(
+                    seed ^ 0x504f_5354_4552_494f,
+                    &[1, self.cfg.num_latents, self.cfg.embed_dim],
+                    &self.device,
+                    self.dtype,
+                )
+                .map_err(|error| invalid(error.to_string()))
+            })
+            .transpose()?;
+        self.encode_preselected(
+            &points,
+            &features,
+            &selected,
+            posterior_noise.as_ref(),
+            query_chunk,
+        )
     }
 
     /// Encode caller-frozen points and FPS indices.
@@ -303,14 +346,18 @@ impl ShapeVaeEncoder {
         for start in (0..self.cfg.num_latents).step_by(query_chunk) {
             let len = query_chunk.min(self.cfg.num_latents - start);
             let projected = self.input_proj.forward(&query.narrow(1, start, len)?)?;
-            chunks.push(self.cross_attn.forward_with_kv(&projected, &kv)?);
+            chunks.push(self.cross_attn.forward_with_kv_upcast(&projected, &kv)?);
         }
         let chunk_refs: Vec<&Tensor> = chunks.iter().collect();
         let mut latents = Tensor::cat(&chunk_refs, 1)?;
+        #[cfg(feature = "dev-bins")]
+        let cross_attention_output = latents.clone();
         for block in &self.self_attn {
-            latents = block.forward(&latents)?;
+            latents = block.forward_upcast(&latents)?;
         }
         latents = self.ln_post.forward(&latents)?;
+        #[cfg(feature = "dev-bins")]
+        let normalized_hidden = latents.clone();
 
         let moments = self.pre_kl.forward(&latents)?;
         let mean = moments
@@ -337,6 +384,10 @@ impl ShapeVaeEncoder {
             mean,
             logvar,
             latents,
+            #[cfg(feature = "dev-bins")]
+            cross_attention_output,
+            #[cfg(feature = "dev-bins")]
+            normalized_hidden,
         })
     }
 }
@@ -814,6 +865,7 @@ mod tests {
 
         let mesh_mode = encoder.encode_mesh_mode(&tetrahedron(), 42, 1).unwrap();
         let mesh_mode_second = encoder.encode_mesh_mode(&tetrahedron(), 42, 2).unwrap();
+        let mesh_sampled = encoder.encode_mesh_sampled(&tetrahedron(), 42, 1).unwrap();
         assert_eq!(mesh_mode.mean.dims(), &[1, 2, 2]);
         assert_eq!(mesh_mode.for_decoder().unwrap().dims(), &[1, 2, 2]);
         assert_eq!(
@@ -830,6 +882,20 @@ mod tests {
                 .to_vec1::<f32>()
                 .unwrap(),
             "query chunking must not change a deterministic mesh encoding"
+        );
+        assert_ne!(
+            mesh_mode
+                .latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            mesh_sampled
+                .latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
         );
     }
 

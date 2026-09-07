@@ -17,6 +17,7 @@ import logging
 import pathlib
 import subprocess
 import sys
+import time
 import types
 
 import numpy as np
@@ -82,6 +83,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=130013)
     parser.add_argument("--points", type=int, default=1024)
     parser.add_argument("--latents", type=int, default=64)
+    parser.add_argument("--query-chunk", type=int, default=64)
     args = parser.parse_args()
 
     source_commit = subprocess.run(
@@ -152,6 +154,8 @@ def main() -> int:
     query_points = points_t.index_select(1, selected_t)
     query_features = features_t.index_select(1, selected_t)
 
+    torch.cuda.reset_peak_memory_stats(device)
+    started = time.perf_counter()
     with torch.inference_mode(), torch.backends.cuda.sdp_kernel(
         enable_flash=False, enable_math=True, enable_mem_efficient=False
     ):
@@ -159,12 +163,24 @@ def main() -> int:
         query_input = torch.cat([fourier(query_points), query_features], dim=-1)
         data_projected = encoder.input_proj(data_input)
         query_projected = encoder.input_proj(query_input)
-        cross = encoder.cross_attn(query_projected, data_projected)
+        cross = torch.cat(
+            [
+                encoder.cross_attn(
+                    query_projected[:, start : start + args.query_chunk],
+                    data_projected,
+                )
+                for start in range(0, args.latents, args.query_chunk)
+            ],
+            dim=1,
+        )
         hidden = encoder.self_attn(cross)
         hidden = encoder.ln_post(hidden)
         moments = pre_kl(hidden)
         mean, logvar = moments.chunk(2, dim=-1)
         logvar = logvar.clamp(-30.0, 20.0)
+    elapsed_seconds = time.perf_counter() - started
+    peak_allocated_bytes = torch.cuda.max_memory_allocated(device)
+    peak_reserved_bytes = torch.cuda.max_memory_reserved(device)
 
     tensors = {
         "points": torch.from_numpy(points),
@@ -193,8 +209,12 @@ def main() -> int:
         "seed": args.seed,
         "points": args.points,
         "latents": args.latents,
+        "query_chunk": args.query_chunk,
         "attention": "torch SDPA math",
         "encoder_tensor_count": 142,
+        "elapsed_seconds": elapsed_seconds,
+        "peak_allocated_bytes": peak_allocated_bytes,
+        "peak_reserved_bytes": peak_reserved_bytes,
     }
     (args.output / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(json.dumps(metadata, indent=2))

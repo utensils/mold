@@ -379,6 +379,12 @@ def main(argv: list[str]) -> int:
         f"(default {DEFAULT_CHAMFER_MAX})",
     )
     parser.add_argument(
+        "--ignore-face-count",
+        action="store_true",
+        help="report topology counts without gating them (for VAE round trips "
+        "whose extraction resolution differs from the source)",
+    )
+    parser.add_argument(
         "--self-test", action="store_true", help="exercise the reader/writer and exit"
     )
     args = parser.parse_args(argv)
@@ -399,7 +405,10 @@ def main(argv: list[str]) -> int:
             reasons.append(
                 f"extent axis {axis} differs by {ratio:.3f}, tolerance {EXTENT_TOLERANCE}"
             )
-    if not result["face_count_relative_difference"] <= FACE_COUNT_TOLERANCE:
+    if (
+        not args.ignore_face_count
+        and not result["face_count_relative_difference"] <= FACE_COUNT_TOLERANCE
+    ):
         reasons.append(
             "face count differs by "
             f"{result['face_count_relative_difference']:.3f}, "
@@ -446,6 +455,7 @@ def main(argv: list[str]) -> int:
         "extent_tolerance": EXTENT_TOLERANCE,
         "face_count_relative_difference": result["face_count_relative_difference"],
         "face_count_tolerance": FACE_COUNT_TOLERANCE,
+        "face_count_gated": not args.ignore_face_count,
         "chamfer_normalized": result["chamfer_normalized"],
         "chamfer_max": args.chamfer_max,
         "noise_floor": floor,
@@ -541,6 +551,9 @@ def self_test() -> int:
         # tolerances, far outside a 0.02 Chamfer ceiling.
         nudged = write("nudged", vertices + np.float32(0.1 * stats["bbox_diagonal"] / 3.0))
         floor_b = write("floor-b", vertices + np.float32(1e-4))
+        sparse_faces = f"{scratch}/sparse-faces.glb"
+        with open(sparse_faces, "wb") as handle:
+            handle.write(write_glb_bytes(vertices, faces[:1]))
 
         report_path = f"{scratch}/report.json"
         assert main(["--mold", same, "--comfy", reference, "--out", report_path]) == 0
@@ -549,6 +562,19 @@ def self_test() -> int:
         assert passing["pass"] is True, passing
         assert passing["chamfer_max"] == DEFAULT_CHAMFER_MAX, passing
         assert passing["noise_floor"] is None, passing
+
+        assert (
+            main(
+                [
+                    "--mold", sparse_faces, "--comfy", reference,
+                    "--ignore-face-count", "--out", report_path,
+                ]
+            )
+            == 0
+        )
+        with open(report_path, encoding="utf-8") as handle:
+            topology_independent = json.load(handle)
+        assert topology_independent["face_count_gated"] is False
 
         assert main(["--mold", nudged, "--comfy", reference, "--out", report_path]) == 1
         with open(report_path, encoding="utf-8") as handle:
