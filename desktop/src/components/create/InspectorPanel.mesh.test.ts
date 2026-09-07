@@ -387,7 +387,9 @@ describe("InspectorPanel — Mesh group", () => {
   it("renders and writes the advertised background-removal policies", async () => {
     const { form, wrapper } = mountFor(meshModel());
     await flushPromises();
-    const matting = wrapper.getComponent("[data-test='mesh-matting']");
+    const matting = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-matting")!;
     expect(matting.props("modelValue")).toBe("auto");
     expect(matting.props("options")).toEqual([
       { value: "auto", label: "Auto" },
@@ -409,7 +411,9 @@ describe("InspectorPanel — Mesh group", () => {
     };
     const { wrapper } = mountFor(modelWith("hunyuan3d-fixed:fp16", "hunyuan3d", recipe));
     await flushPromises();
-    const matting = wrapper.getComponent("[data-test='mesh-matting']");
+    const matting = wrapper
+      .findAllComponents({ name: "SegmentedControl" })
+      .find((row) => row.attributes("data-test") === "mesh-matting")!;
     expect(matting.props("modelValue")).toBe("off");
     expect(matting.props("disabled")).toBe(true);
   });
