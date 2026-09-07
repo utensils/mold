@@ -70,7 +70,8 @@ use crate::attention::attention;
 
 mod encoder;
 pub use encoder::{
-    farthest_point_indices, sample_mesh_surface, ShapeVaeEncoderConfig, SurfacePoint,
+    farthest_point_indices, sample_mesh_surface, EncodedShapeLatents, ShapeVaeEncoder,
+    ShapeVaeEncoderConfig, SurfacePoint,
 };
 
 /// LayerNorm epsilon used by every `norm_layer(...)` inside the blocks.

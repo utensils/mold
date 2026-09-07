@@ -8,10 +8,16 @@
 //! lives below the deterministic geometry preparation so oracle captures can
 //! freeze the sampled point set independently from framework RNG behavior.
 
-use candle_core::{Error, Result};
+use candle_core::{Error, Result, Tensor, D};
+use candle_nn::{layer_norm, linear, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::hunyuan3d::mesh::Mesh;
+
+use super::{
+    FourierEmbedder, ResidualAttentionBlock, ResidualCrossAttentionBlock, ShapeVaeConfig,
+    LN_POST_EPS,
+};
 
 const NORMALIZED_MESH_SCALE: f32 = 0.9999;
 
@@ -57,6 +63,200 @@ impl ShapeVaeEncoderConfig {
 
     pub const fn input_width(&self) -> usize {
         3 * (2 * self.num_freqs + 1) + self.point_feats
+    }
+
+    fn network_config(&self) -> ShapeVaeConfig {
+        ShapeVaeConfig {
+            num_latents: self.num_latents,
+            embed_dim: self.embed_dim,
+            width: self.width,
+            heads: self.heads,
+            num_decoder_layers: self.num_layers,
+            num_freqs: self.num_freqs,
+            include_pi: false,
+            qkv_bias: false,
+            qk_norm: true,
+            mlp_expand_ratio: 4,
+            geo_decoder_mlp_expand_ratio: 4,
+            geo_decoder_ln_post: true,
+            out_channels: 1,
+            scale_factor: ShapeVaeConfig::v2_1().scale_factor,
+        }
+    }
+}
+
+/// Posterior statistics and the selected latent value in upstream `[B,N,C]`
+/// layout. [`Self::for_decoder`] returns mold's decoder-facing `[B,C,N]`.
+#[derive(Debug)]
+pub struct EncodedShapeLatents {
+    pub mean: Tensor,
+    pub logvar: Tensor,
+    pub latents: Tensor,
+}
+
+impl EncodedShapeLatents {
+    pub fn for_decoder(&self) -> Result<Tensor> {
+        self.latents.transpose(1, 2)?.contiguous()
+    }
+}
+
+/// Point-cross-attention encoder carried by the Hunyuan3D 2.1 shape VAE.
+#[derive(Debug)]
+pub struct ShapeVaeEncoder {
+    cfg: ShapeVaeEncoderConfig,
+    fourier: FourierEmbedder,
+    input_proj: Linear,
+    cross_attn: ResidualCrossAttentionBlock,
+    self_attn: Vec<ResidualAttentionBlock>,
+    ln_post: LayerNorm,
+    pre_kl: Linear,
+}
+
+impl ShapeVaeEncoder {
+    /// `vb` is scoped to the checkpoint's `vae.` prefix.
+    pub fn new(cfg: &ShapeVaeEncoderConfig, vb: VarBuilder) -> Result<Self> {
+        if cfg.num_latents == 0
+            || cfg.width == 0
+            || cfg.heads == 0
+            || !cfg.width.is_multiple_of(cfg.heads)
+            || cfg.pc_size + cfg.pc_sharpedge_size == 0
+            || cfg.downsample_ratio == 0
+        {
+            return Err(invalid("invalid shape-VAE encoder configuration"));
+        }
+        let network = cfg.network_config();
+        let encoder = vb.pp("encoder");
+        let self_blocks = encoder.pp("self_attn").pp("resblocks");
+        let mut self_attn = Vec::with_capacity(cfg.num_layers);
+        for index in 0..cfg.num_layers {
+            self_attn.push(ResidualAttentionBlock::new(
+                &network,
+                self_blocks.pp(index),
+            )?);
+        }
+        Ok(Self {
+            cfg: *cfg,
+            fourier: FourierEmbedder::new(cfg.num_freqs, 3, true, false),
+            input_proj: linear(cfg.input_width(), cfg.width, encoder.pp("input_proj"))?,
+            cross_attn: ResidualCrossAttentionBlock::new(&network, encoder.pp("cross_attn"))?,
+            self_attn,
+            ln_post: layer_norm(
+                cfg.width,
+                LayerNormConfig {
+                    eps: LN_POST_EPS,
+                    remove_mean: true,
+                    affine: true,
+                },
+                encoder.pp("ln_post"),
+            )?,
+            pre_kl: linear(cfg.width, cfg.embed_dim * 2, vb.pp("pre_kl"))?,
+        })
+    }
+
+    pub fn config(&self) -> &ShapeVaeEncoderConfig {
+        &self.cfg
+    }
+
+    /// Encode caller-frozen points and FPS indices.
+    ///
+    /// `points` and `features` are `[B, pc_size + pc_sharpedge_size, 3/point_feats]`.
+    /// `selected` identifies the latent query points in that same input. Passing
+    /// indices explicitly makes the neural comparison independent of PyTorch's
+    /// random permutation and torch-cluster FPS implementation. A supplied
+    /// `posterior_noise` must be `[B, num_latents, embed_dim]`; absent noise uses
+    /// the posterior mode for deterministic mesh round trips.
+    pub fn encode_preselected(
+        &self,
+        points: &Tensor,
+        features: &Tensor,
+        selected: &[usize],
+        posterior_noise: Option<&Tensor>,
+        query_chunk: usize,
+    ) -> Result<EncodedShapeLatents> {
+        let (batch, point_count, point_width) = points.dims3()?;
+        let (feature_batch, feature_count, feature_width) = features.dims3()?;
+        let expected_points = self.cfg.pc_size + self.cfg.pc_sharpedge_size;
+        if point_width != 3
+            || feature_batch != batch
+            || feature_count != point_count
+            || feature_width != self.cfg.point_feats
+            || point_count != expected_points
+        {
+            return Err(invalid(format!(
+                "shape-VAE encoder expects points/features [B,{expected_points},3/{}]",
+                self.cfg.point_feats
+            )));
+        }
+        if selected.len() != self.cfg.num_latents
+            || selected.iter().any(|index| *index >= point_count)
+        {
+            return Err(invalid(format!(
+                "shape-VAE encoder expects {} in-range FPS indices",
+                self.cfg.num_latents
+            )));
+        }
+        if query_chunk == 0 {
+            return Err(invalid("shape-VAE encoder query chunk must be positive"));
+        }
+
+        let selected_u32: Vec<u32> = selected
+            .iter()
+            .map(|index| {
+                u32::try_from(*index)
+                    .map_err(|_| invalid("shape-VAE FPS index exceeds tensor index range"))
+            })
+            .collect::<Result<_>>()?;
+        let ids = Tensor::from_vec(selected_u32, selected.len(), points.device())?;
+        let query_points = points.index_select(&ids, 1)?;
+        let query_features = features.index_select(&ids, 1)?;
+
+        let data = Tensor::cat(&[&self.fourier.forward(points)?, features], D::Minus1)?;
+        let data = self.input_proj.forward(&data)?;
+        let kv = self.cross_attn.project_kv(&data)?;
+
+        let query = Tensor::cat(
+            &[&self.fourier.forward(&query_points)?, &query_features],
+            D::Minus1,
+        )?;
+        let mut chunks = Vec::with_capacity(self.cfg.num_latents.div_ceil(query_chunk));
+        for start in (0..self.cfg.num_latents).step_by(query_chunk) {
+            let len = query_chunk.min(self.cfg.num_latents - start);
+            let projected = self.input_proj.forward(&query.narrow(1, start, len)?)?;
+            chunks.push(self.cross_attn.forward_with_kv(&projected, &kv)?);
+        }
+        let chunk_refs: Vec<&Tensor> = chunks.iter().collect();
+        let mut latents = Tensor::cat(&chunk_refs, 1)?;
+        for block in &self.self_attn {
+            latents = block.forward(&latents)?;
+        }
+        latents = self.ln_post.forward(&latents)?;
+
+        let moments = self.pre_kl.forward(&latents)?;
+        let mean = moments
+            .narrow(D::Minus1, 0, self.cfg.embed_dim)?
+            .contiguous()?;
+        let logvar = moments
+            .narrow(D::Minus1, self.cfg.embed_dim, self.cfg.embed_dim)?
+            .clamp(-30.0f32, 20.0f32)?
+            .contiguous()?;
+        let latents = match posterior_noise {
+            Some(noise) => {
+                if noise.dims() != mean.dims() {
+                    return Err(invalid(format!(
+                        "shape-VAE posterior noise must have shape {:?}",
+                        mean.dims()
+                    )));
+                }
+                let std = (&logvar * 0.5)?.exp()?;
+                (&mean + noise.broadcast_mul(&std)?)?
+            }
+            None => mean.clone(),
+        };
+        Ok(EncodedShapeLatents {
+            mean,
+            logvar,
+            latents,
+        })
     }
 }
 
@@ -229,6 +429,9 @@ pub fn farthest_point_indices(
 mod tests {
     use super::*;
     use crate::hunyuan3d::mesh::Mesh;
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
+    use std::collections::HashMap;
 
     fn tetrahedron() -> Mesh {
         Mesh {
@@ -281,4 +484,178 @@ mod tests {
         assert_eq!(cfg.num_layers, 8);
         assert_eq!(cfg.input_width(), 55);
     }
+
+    #[test]
+    fn tiny_encoder_returns_mode_and_seeded_posterior_in_decoder_layout() {
+        let device = Device::Cpu;
+        let cfg = ShapeVaeEncoderConfig {
+            num_latents: 2,
+            embed_dim: 2,
+            width: 4,
+            heads: 2,
+            num_layers: 1,
+            pc_size: 4,
+            pc_sharpedge_size: 0,
+            point_feats: 4,
+            downsample_ratio: 2,
+            num_freqs: 1,
+        };
+        let weights = synthetic_encoder_weights(&cfg, &device);
+        let encoder =
+            ShapeVaeEncoder::new(&cfg, VarBuilder::from_tensors(weights, DType::F32, &device))
+                .unwrap();
+        let points = Tensor::from_vec(
+            vec![
+                -0.5f32, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, 0.5, 0.0,
+            ],
+            (1, 4, 3),
+            &device,
+        )
+        .unwrap();
+        let features = Tensor::from_vec(
+            vec![
+                0.0f32, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+            ],
+            (1, 4, 4),
+            &device,
+        )
+        .unwrap();
+        let selected = [0usize, 1];
+        let mode = encoder
+            .encode_preselected(&points, &features, &selected, None, 1)
+            .unwrap();
+        assert_eq!(mode.mean.dims(), &[1, 2, 2]);
+        assert_eq!(mode.latents.dims(), &[1, 2, 2]);
+        assert_eq!(mode.for_decoder().unwrap().dims(), &[1, 2, 2]);
+        assert_eq!(
+            mode.mean.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            mode.latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+
+        let noise = Tensor::ones((1, 2, 2), DType::F32, &device).unwrap();
+        let sampled = encoder
+            .encode_preselected(&points, &features, &selected, Some(&noise), 2)
+            .unwrap();
+        assert_ne!(
+            sampled
+                .mean
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            sampled
+                .latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+    }
+
+    fn synthetic_encoder_weights(
+        cfg: &ShapeVaeEncoderConfig,
+        device: &Device,
+    ) -> HashMap<String, Tensor> {
+        synthetic_encoder_weights_impl(cfg, device)
+    }
+}
+
+#[cfg(test)]
+fn synthetic_encoder_weights_impl(
+    cfg: &ShapeVaeEncoderConfig,
+    device: &candle_core::Device,
+) -> std::collections::HashMap<String, Tensor> {
+    use candle_core::DType;
+    use std::collections::HashMap;
+
+    let mut map = HashMap::new();
+    macro_rules! linear {
+        ($prefix:expr, $out:expr, $input:expr, $bias:expr $(,)?) => {{
+            map.insert(
+                format!("{}.weight", $prefix),
+                Tensor::zeros(($out, $input), DType::F32, device).unwrap(),
+            );
+            if $bias {
+                map.insert(
+                    format!("{}.bias", $prefix),
+                    Tensor::zeros($out, DType::F32, device).unwrap(),
+                );
+            }
+        }};
+    }
+    macro_rules! norm {
+        ($prefix:expr, $width:expr $(,)?) => {{
+            map.insert(
+                format!("{}.weight", $prefix),
+                Tensor::ones($width, DType::F32, device).unwrap(),
+            );
+            map.insert(
+                format!("{}.bias", $prefix),
+                Tensor::zeros($width, DType::F32, device).unwrap(),
+            );
+        }};
+    }
+
+    linear!("encoder.input_proj", cfg.width, cfg.input_width(), true);
+    let cross = "encoder.cross_attn";
+    norm!(&format!("{cross}.ln_1"), cfg.width);
+    norm!(&format!("{cross}.ln_2"), cfg.width);
+    norm!(&format!("{cross}.ln_3"), cfg.width);
+    linear!(&format!("{cross}.attn.c_q"), cfg.width, cfg.width, false);
+    linear!(
+        &format!("{cross}.attn.c_kv"),
+        cfg.width * 2,
+        cfg.width,
+        false,
+    );
+    linear!(&format!("{cross}.attn.c_proj"), cfg.width, cfg.width, true);
+    norm!(
+        &format!("{cross}.attn.attention.q_norm"),
+        cfg.width / cfg.heads,
+    );
+    norm!(
+        &format!("{cross}.attn.attention.k_norm"),
+        cfg.width / cfg.heads,
+    );
+    linear!(&format!("{cross}.mlp.c_fc"), cfg.width * 4, cfg.width, true);
+    linear!(
+        &format!("{cross}.mlp.c_proj"),
+        cfg.width,
+        cfg.width * 4,
+        true,
+    );
+    for index in 0..cfg.num_layers {
+        let block = format!("encoder.self_attn.resblocks.{index}");
+        norm!(&format!("{block}.ln_1"), cfg.width);
+        norm!(&format!("{block}.ln_2"), cfg.width);
+        linear!(
+            &format!("{block}.attn.c_qkv"),
+            cfg.width * 3,
+            cfg.width,
+            false,
+        );
+        linear!(&format!("{block}.attn.c_proj"), cfg.width, cfg.width, true);
+        norm!(
+            &format!("{block}.attn.attention.q_norm"),
+            cfg.width / cfg.heads,
+        );
+        norm!(
+            &format!("{block}.attn.attention.k_norm"),
+            cfg.width / cfg.heads,
+        );
+        linear!(&format!("{block}.mlp.c_fc"), cfg.width * 4, cfg.width, true);
+        linear!(
+            &format!("{block}.mlp.c_proj"),
+            cfg.width,
+            cfg.width * 4,
+            true,
+        );
+    }
+    norm!("encoder.ln_post", cfg.width);
+    linear!("pre_kl", cfg.embed_dim * 2, cfg.width, true);
+    map
 }
