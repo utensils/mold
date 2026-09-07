@@ -4342,7 +4342,7 @@ mod tests {
 
         assert_eq!(
             mesh.media_version.as_deref(),
-            Some("1700000000000:4096:p2"),
+            Some("1700000000000:4096:p3"),
             "the announced mesh row does not carry the poster revision"
         );
         assert_eq!(raster.media_version.as_deref(), Some("1700000000000:4096"));

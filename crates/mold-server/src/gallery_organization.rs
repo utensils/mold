@@ -930,7 +930,7 @@ mod tests {
 
         assert_eq!(
             mesh.media_version.as_deref(),
-            Some("1700000000000:4096:p2"),
+            Some("1700000000000:4096:p3"),
             "the mesh row does not carry the poster revision"
         );
         // A raster tile is decoded from bytes that do not change, so its

@@ -451,6 +451,183 @@ pub fn read_glb(bytes: &[u8]) -> Result<Mesh, GlbReadError> {
     scene::read_mesh(&json, bin)
 }
 
+/// A stored `.glb` read back with the surface appearance a renderer needs.
+///
+/// [`read_glb`] answers "what is the geometry". A poster, a turntable frame or
+/// any other picture of the mesh also has to answer "what colour is it", and
+/// for a PAINTED mesh that answer lives in the file's embedded
+/// `baseColorTexture` rather than in any vertex attribute — which is why a
+/// geometry-only reader left every PBR print rendering in the bare placeholder
+/// grey while the interactive viewer showed it in colour.
+///
+/// Mirrors `readBaseColorTexture` in `studio/lib/glb.ts` so the viewer and the
+/// server-side raster take the same image out of the same file.
+pub struct GlbScene {
+    pub mesh: Mesh,
+    /// The decoded `baseColorTexture`, sRGB, sampled through `mesh.uvs`.
+    ///
+    /// `None` when the file embeds no image, when the geometry carries no UVs
+    /// to sample it with, or when the scene's primitives do not all share one
+    /// material: a flattened multi-material scene has no single texture, and
+    /// guessing one would paint the wrong pixels over most of it.
+    pub base_color_texture: Option<image::RgbImage>,
+    /// Linear `baseColorFactor` RGB, which multiplies the texture and the
+    /// mesh's vertex colours. `[1.0; 3]` when the material sets none.
+    ///
+    /// Only meaningful alongside one of those: [`write_glb`] stamps a dark
+    /// `0.22` factor onto BARE geometry to match upstream's viewer default, so
+    /// a renderer that honoured it unconditionally would repaint every
+    /// unpainted poster in the gallery.
+    pub base_color_factor: [f32; 3],
+}
+
+impl GlbScene {
+    /// Split into the geometry and the surface a renderer paints it with.
+    ///
+    /// Every caller that reads a stored `.glb` in order to draw a picture of
+    /// it wants exactly this pair, so the mapping onto the renderer's
+    /// [`Appearance`](crate::hunyuan3d::poster::Appearance) lives here once
+    /// rather than at each of them.
+    pub fn split(self) -> (Mesh, crate::hunyuan3d::poster::Appearance) {
+        (
+            self.mesh,
+            crate::hunyuan3d::poster::Appearance {
+                base_color_texture: self.base_color_texture,
+                base_color_factor: self.base_color_factor,
+            },
+        )
+    }
+}
+
+/// Largest embedded texture edge that is decoded.
+///
+/// A `baseColorTexture` mold writes is at most 4096 square. This bound is
+/// about a FOREIGN file: image headers are caller-supplied, and a poster
+/// render happens inside `spawn_blocking`, where an allocation bomb is a
+/// server incident rather than a bad thumbnail.
+const MAX_TEXTURE_EDGE: u32 = 8192;
+
+/// [`read_glb`] plus the material appearance the file carries.
+///
+/// The appearance is best effort by design: an absent, ambiguous or
+/// undecodable material degrades to no texture, never to an error. The
+/// geometry is still perfectly renderable, and refusing a whole file over its
+/// material would break exports that work today.
+pub fn read_glb_scene(bytes: &[u8]) -> Result<GlbScene, GlbReadError> {
+    let (json, bin) = split_glb_chunks(bytes)?;
+    let mesh = scene::read_mesh(&json, bin)?;
+    let material = sole_material(&json);
+    Ok(GlbScene {
+        base_color_texture: match (mesh.uvs.is_some(), material) {
+            (true, Some(index)) => base_color_texture(&json, bin, index),
+            _ => None,
+        },
+        base_color_factor: material
+            .and_then(|index| base_color_factor(&json, index))
+            .unwrap_or([1.0; 3]),
+        mesh,
+    })
+}
+
+/// The one material every primitive in the file shares, if there is exactly
+/// one.
+///
+/// A flattened scene is a single undifferentiated vertex set with no per-face
+/// material, so a file whose primitives disagree has no single answer and gets
+/// none. mold's own writer emits one primitive with one material, which is the
+/// case this exists to serve.
+fn sole_material(json: &serde_json::Value) -> Option<usize> {
+    let mut shared: Option<usize> = None;
+    for mesh in json.get("meshes")?.as_array()? {
+        for primitive in mesh.get("primitives")?.as_array()? {
+            let index = usize::try_from(primitive.get("material")?.as_u64()?).ok()?;
+            match shared {
+                None => shared = Some(index),
+                Some(seen) if seen == index => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    shared
+}
+
+fn material_pbr(json: &serde_json::Value, material: usize) -> Option<&serde_json::Value> {
+    json.get("materials")?
+        .as_array()?
+        .get(material)?
+        .get("pbrMetallicRoughness")
+}
+
+/// `baseColorFactor` RGB. Alpha is dropped: a poster composites nothing, so a
+/// translucent material still shades as its colour.
+fn base_color_factor(json: &serde_json::Value, material: usize) -> Option<[f32; 3]> {
+    let values = material_pbr(json, material)?
+        .get("baseColorFactor")?
+        .as_array()?;
+    let mut factor = [1.0f32; 3];
+    for (slot, value) in factor.iter_mut().zip(values) {
+        *slot = value.as_f64().filter(|value| value.is_finite())? as f32;
+    }
+    Some(factor)
+}
+
+/// Decode the material's embedded `baseColorTexture`.
+fn base_color_texture(
+    json: &serde_json::Value,
+    bin: &[u8],
+    material: usize,
+) -> Option<image::RgbImage> {
+    let reference = material_pbr(json, material)?.get("baseColorTexture")?;
+    // Only TEXCOORD_0 is read back onto the mesh, so a texture bound to any
+    // other set has no coordinates to sample it with.
+    if reference
+        .get("texCoord")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        != 0
+    {
+        return None;
+    }
+    let texture = json
+        .get("textures")?
+        .as_array()?
+        .get(usize::try_from(reference.get("index")?.as_u64()?).ok()?)?;
+    let image = json
+        .get("images")?
+        .as_array()?
+        .get(usize::try_from(texture.get("source")?.as_u64()?).ok()?)?;
+    // Embedded images only. A `uri` is an external resource, which this reader
+    // refuses for buffers too.
+    let view = usize::try_from(image.get("bufferView")?.as_u64()?).ok()?;
+    decode_texture(buffer_view_bytes(json, bin, view)?)
+}
+
+fn buffer_view_bytes<'a>(json: &serde_json::Value, bin: &'a [u8], view: usize) -> Option<&'a [u8]> {
+    let view = json.get("bufferViews")?.as_array()?.get(view)?;
+    if view.get("buffer").and_then(serde_json::Value::as_u64) != Some(0) {
+        return None;
+    }
+    let offset = view
+        .get("byteOffset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let length = view.get("byteLength").and_then(serde_json::Value::as_u64)?;
+    let end = usize::try_from(offset.checked_add(length)?).ok()?;
+    let offset = usize::try_from(offset).ok()?;
+    (end <= bin.len()).then(|| &bin[offset..end])
+}
+
+fn decode_texture(bytes: &[u8]) -> Option<image::RgbImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_TEXTURE_EDGE);
+    limits.max_image_height = Some(MAX_TEXTURE_EDGE);
+    reader.limits(limits);
+    Some(reader.decode().ok()?.to_rgb8())
+}
+
 fn read_primitive(
     json: &serde_json::Value,
     bin: &[u8],
@@ -1217,6 +1394,119 @@ mod tests {
         // An MR texture makes both factors 1.0 so the texture is unscaled.
         assert_eq!(mat["pbrMetallicRoughness"]["metallicFactor"], 1.0);
         assert_eq!(mat["pbrMetallicRoughness"]["roughnessFactor"], 1.0);
+    }
+
+    /// A solid-colour PNG, for tests that need a texture the reader can
+    /// actually decode.
+    fn solid_png(rgb: [u8; 3], edge: u32) -> Vec<u8> {
+        let image = image::RgbImage::from_pixel(edge, edge, image::Rgb(rgb));
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    #[test]
+    fn a_base_color_texture_survives_the_write_read_round_trip() {
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let material = GlbMaterial {
+            base_color_texture: Some(solid_png([200, 40, 90], 4)),
+            ..GlbMaterial::default()
+        };
+        let bytes = write_glb(&mesh, &material, None).unwrap();
+
+        // The geometry-only reader is unchanged: it still answers geometry.
+        assert!(read_glb(&bytes).unwrap().uvs.is_some());
+
+        let scene = read_glb_scene(&bytes).unwrap();
+        let texture = scene
+            .base_color_texture
+            .expect("the embedded baseColor image is read back");
+        assert_eq!(texture.dimensions(), (4, 4));
+        assert_eq!(texture.get_pixel(1, 2).0, [200, 40, 90]);
+        // A baseColor texture makes the writer's auto factor pass-through
+        // white, so the texture reaches the renderer unscaled.
+        assert_eq!(scene.base_color_factor, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn bare_geometry_reports_no_texture_and_keeps_its_dark_factor() {
+        let bytes = write_glb(&triangle_mesh(), &GlbMaterial::default(), None).unwrap();
+        let scene = read_glb_scene(&bytes).unwrap();
+        assert!(scene.base_color_texture.is_none());
+        // Read faithfully — it is the RENDERER that declines to repaint an
+        // unpainted mesh with upstream's viewer default.
+        assert_eq!(scene.base_color_factor, [0.22, 0.22, 0.22]);
+    }
+
+    #[test]
+    fn a_texture_with_no_uvs_to_sample_it_is_not_reported() {
+        // The writer already drops the image when the mesh has no UVs, so
+        // build the ambiguous file by hand: material and image present,
+        // TEXCOORD_0 absent.
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let material = GlbMaterial {
+            base_color_texture: Some(solid_png([10, 220, 30], 2)),
+            ..GlbMaterial::default()
+        };
+        let bytes = write_glb(&mesh, &material, None).unwrap();
+        let parsed = parse_glb(&bytes);
+        let mut json = parsed.json;
+        json["meshes"][0]["primitives"][0]["attributes"]
+            .as_object_mut()
+            .unwrap()
+            .remove("TEXCOORD_0");
+        let scene = read_glb_scene(&rebuild_glb(&json, &parsed.bin)).unwrap();
+        assert!(scene.mesh.uvs.is_none());
+        assert!(scene.base_color_texture.is_none());
+    }
+
+    #[test]
+    fn an_undecodable_or_ambiguous_material_degrades_to_geometry() {
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let material = GlbMaterial {
+            // Not a real image: the writer stores bytes verbatim.
+            base_color_texture: Some(vec![0xAB; 7]),
+            ..GlbMaterial::default()
+        };
+        let bytes = write_glb(&mesh, &material, None).unwrap();
+        let scene = read_glb_scene(&bytes).expect("the geometry is still readable");
+        assert_eq!(scene.mesh.face_count(), 1);
+        assert!(scene.base_color_texture.is_none());
+    }
+
+    #[test]
+    fn primitives_that_disagree_about_their_material_get_no_texture() {
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let material = GlbMaterial {
+            base_color_texture: Some(solid_png([7, 7, 250], 2)),
+            ..GlbMaterial::default()
+        };
+        let bytes = write_glb(&mesh, &material, None).unwrap();
+        let parsed = parse_glb(&bytes);
+        let mut json = parsed.json;
+        // A second primitive on a second material: the flattened vertex set
+        // has no per-face material, so neither texture can be the answer.
+        let mut second = json["meshes"][0]["primitives"][0].clone();
+        second["material"] = serde_json::json!(1);
+        json["meshes"][0]["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        let mut other = json["materials"][0].clone();
+        other["pbrMetallicRoughness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("baseColorTexture");
+        json["materials"].as_array_mut().unwrap().push(other);
+        let scene = read_glb_scene(&rebuild_glb(&json, &parsed.bin)).unwrap();
+        assert_eq!(scene.mesh.face_count(), 2);
+        assert!(scene.base_color_texture.is_none());
     }
 
     #[test]

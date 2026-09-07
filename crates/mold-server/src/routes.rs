@@ -9815,9 +9815,10 @@ fn render_gallery_turntable(
     options: &mold_inference::hunyuan3d::turntable::TurntableOptions,
 ) -> Result<Vec<u8>, String> {
     let bytes = std::fs::read(source).map_err(|error| format!("cannot read the mesh: {error}"))?;
-    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
-        .map_err(|error| format!("cannot export this mesh: {error}"))?;
-    mold_inference::hunyuan3d::turntable::export_turntable(&mesh, format, options)
+    let (mesh, appearance) = mold_inference::hunyuan3d::glb::read_glb_scene(&bytes)
+        .map_err(|error| format!("cannot export this mesh: {error}"))?
+        .split();
+    mold_inference::hunyuan3d::turntable::export_turntable_with(&mesh, &appearance, format, options)
         .map_err(|error| format!("cannot render a turntable of this mesh: {error:#}"))
 }
 

@@ -22,7 +22,8 @@ use image::RgbImage;
 
 use crate::hunyuan3d::mesh::Mesh;
 use crate::hunyuan3d::poster::{
-    render_sequence_frame_rgb, turntable_cameras, MAX_POSTER_SIZE, POSTER_ELEVATION_DEG,
+    render_sequence_frame_rgb_with, turntable_cameras, Appearance, MAX_POSTER_SIZE,
+    POSTER_ELEVATION_DEG,
 };
 use crate::hunyuan3d::raster::{sweep_fit_for, Camera};
 use crate::ltx_video::video_enc;
@@ -151,6 +152,15 @@ pub fn turntable_frame_cameras(mesh: &Mesh, frames: usize, bounce: bool) -> Vec<
 /// Render every frame of the turntable, in playback order for a loop and in
 /// sweep order for a bounce (the encoder appends the reversal).
 pub fn render_turntable(mesh: &Mesh, options: &TurntableOptions) -> Result<Vec<RgbImage>> {
+    render_turntable_with(mesh, &Appearance::default(), options)
+}
+
+/// [`render_turntable`] of a mesh that carries its own surface colour.
+pub fn render_turntable_with(
+    mesh: &Mesh,
+    appearance: &Appearance,
+    options: &TurntableOptions,
+) -> Result<Vec<RgbImage>> {
     if !FRAMES_RANGE.contains(&options.frames) {
         bail!(
             "frames must be between {} and {}",
@@ -169,7 +179,7 @@ pub fn render_turntable(mesh: &Mesh, options: &TurntableOptions) -> Result<Vec<R
     }
     turntable_frame_cameras(mesh, options.frames, options.bounce)
         .iter()
-        .map(|camera| render_sequence_frame_rgb(mesh, camera, options.size))
+        .map(|camera| render_sequence_frame_rgb_with(mesh, appearance, camera, options.size))
         .collect()
 }
 
@@ -182,6 +192,18 @@ pub fn render_turntable(mesh: &Mesh, options: &TurntableOptions) -> Result<Vec<R
 /// the GIF encoder writes a reversal.
 pub fn export_turntable(
     mesh: &Mesh,
+    format: mold_core::OutputFormat,
+    options: &TurntableOptions,
+) -> Result<Vec<u8>> {
+    export_turntable_with(mesh, &Appearance::default(), format, options)
+}
+
+/// [`export_turntable`] of a mesh that carries its own surface colour, so a
+/// turntable of a painted print spins the painted object rather than a grey
+/// cast of it.
+pub fn export_turntable_with(
+    mesh: &Mesh,
+    appearance: &Appearance,
     format: mold_core::OutputFormat,
     options: &TurntableOptions,
 ) -> Result<Vec<u8>> {
@@ -205,7 +227,7 @@ pub fn export_turntable(
             FPS_RANGE.end()
         );
     }
-    let frames = render_turntable(mesh, options)?;
+    let frames = render_turntable_with(mesh, appearance, options)?;
     match format {
         OutputFormat::Gif => video_enc::encode_gif_with_options(
             &frames,
@@ -309,6 +331,39 @@ mod tests {
         }
         assert_ne!(frames[0], frames[4], "the mesh did not turn");
         assert_ne!(frames[0], frames[7], "a loop's last frame is not the first");
+    }
+
+    #[test]
+    fn every_frame_of_a_painted_mesh_spins_in_its_own_colours() {
+        // The bug this pins: a PBR print exported as a GIF came out grey,
+        // because the turntable read its `.glb` as bare geometry.
+        let mut mesh = cube();
+        mesh.uvs = Some(
+            mesh.vertices
+                .iter()
+                .map(|v| [v[0] + 0.5, v[1] + 0.5])
+                .collect(),
+        );
+        let options = TurntableOptions {
+            frames: 8,
+            size: 48,
+            ..TurntableOptions::default()
+        };
+        let appearance = Appearance {
+            base_color_texture: Some(RgbImage::from_pixel(4, 4, image::Rgb([230, 30, 60]))),
+            base_color_factor: [1.0; 3],
+        };
+        let bare = render_turntable(&mesh, &options).expect("render bare");
+        let painted = render_turntable_with(&mesh, &appearance, &options).expect("render painted");
+        assert_eq!(painted.len(), bare.len());
+        for (index, frame) in painted.iter().enumerate() {
+            assert_ne!(frame, &bare[index], "frame {index} was not painted");
+            let centre = frame.get_pixel(frame.width() / 2, frame.height() / 2).0;
+            assert!(
+                centre[0] > centre[1] && centre[0] > centre[2],
+                "frame {index} lost the texture's red: {centre:?}"
+            );
+        }
     }
 
     /// The GIF carries exactly the frames the sweep implies: N for a loop,

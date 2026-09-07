@@ -50,12 +50,13 @@ pub fn audio_waveform_thumbnail_paths(
 /// `mold_server::thumbnails::MESH_POSTER_REVISION_SUFFIX` is this string with
 /// a leading `:` for the wire, pinned to this one by a test there.
 ///
-/// Bump it in the same change as any alteration to the poster's pixels. `p2`
-/// is the shared sweep framing: the poster is now fit to the
-/// rotation-invariant bound that also frames the turntable and the
-/// interactive viewer, so every mesh print rendered before it is drawn at a
-/// different size.
-pub const MESH_POSTER_REVISION: &str = "p2";
+/// Bump it in the same change as any alteration to the poster's pixels. `p3`
+/// is the painted surface: a mesh whose `.glb` carries a `baseColorTexture`
+/// or vertex colours is now shaded in its own colours instead of the bare
+/// placeholder grey, so every PBR print cached before it holds a tile of a
+/// differently coloured object. (`p2` was the shared sweep framing, which
+/// re-sized every mesh print's poster.)
+pub const MESH_POSTER_REVISION: &str = "p3";
 
 /// Both thumbnail-cache paths a mesh output needs.
 ///
@@ -67,7 +68,7 @@ pub const MESH_POSTER_REVISION: &str = "p2";
 /// which surface will open the print first.
 ///
 /// Where it PARTS from audio is [`MESH_POSTER_REVISION`], which is infixed
-/// into the server's name (`<file>.p2.png`). A waveform is a transcription of
+/// into the server's name (`<file>.p3.png`). A waveform is a transcription of
 /// bytes that do not change; a poster is a render, so a pre-revision sidecar
 /// has to MISS rather than be served verbatim forever. Making the name carry
 /// the revision is what turns "the poster renderer changed" into an ordinary

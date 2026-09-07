@@ -1543,8 +1543,13 @@ pub(crate) fn export_local_mesh(
     use mold_inference::hunyuan3d::{glb, turntable};
     let read = || glb::read_glb(glb).map_err(|e| e.to_string());
     if let Some(output_format) = format.animation_output_format() {
-        return turntable::export_turntable(
-            &read()?,
+        // A turntable is a picture, so it reads the file's material too: a
+        // painted print has to spin in its own colours here exactly as it does
+        // on the server.
+        let (mesh, appearance) = glb::read_glb_scene(glb).map_err(|e| e.to_string())?.split();
+        return turntable::export_turntable_with(
+            &mesh,
+            &appearance,
             output_format,
             &turntable::TurntableOptions::default(),
         )
