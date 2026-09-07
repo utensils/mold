@@ -1,4 +1,4 @@
-//! Hunyuan3D 2.0 "vecset" shape VAE — **decode only**.
+//! Hunyuan3D 2.x "vecset" shape VAE.
 //!
 //! This VAE does not decode to pixels. It decodes to a *function*: given the
 //! 1-D latent token sequence the DiT denoised (`[B, embed_dim, num_latents]`,
@@ -7,13 +7,14 @@
 //! evaluates that function on a dense `(res + 1)^3` grid to obtain an occupancy
 //! field, which [`super::mesh`] then turns into triangles.
 //!
-//! # Why decode only
+//! # Encoder availability
 //!
-//! The encoder (`PointCrossAttention`, farthest-point sampling, sharp-edge
-//! sampling) exists to turn a *mesh* into latents. Image-to-3D never has a mesh
-//! to encode — the latents come out of the flow-matching DiT — so the encoder
-//! is dead weight and is deliberately not ported. `pre_kl` and the diagonal
-//! Gaussian are part of that same encode path and are likewise absent.
+//! Tencent's packaged 2.0 checkpoints carry only the decoder because ordinary
+//! image-to-3D receives its latents from the flow-matching DiT. The published
+//! 2.1 checkpoint also carries the point encoder and `pre_kl`, enabling
+//! mesh-to-latent round trips. [`ShapeVaeEncoder`] implements that optional
+//! side with deterministic surface/FPS sampling; the decoder below remains
+//! shared by generation and round trips.
 //!
 //! # Shape of the computation
 //!
@@ -70,8 +71,8 @@ use crate::attention::attention;
 
 mod encoder;
 pub use encoder::{
-    farthest_point_indices, sample_mesh_surface, EncodedShapeLatents, ShapeVaeEncoder,
-    ShapeVaeEncoderConfig, SurfacePoint,
+    farthest_point_indices, sample_mesh_sharp_edges, sample_mesh_surface, EncodedShapeLatents,
+    ShapeVaeEncoder, ShapeVaeEncoderConfig, SurfacePoint,
 };
 
 /// LayerNorm epsilon used by every `norm_layer(...)` inside the blocks.
@@ -585,7 +586,7 @@ impl GeoDecoder {
     }
 }
 
-/// Hunyuan3D 2.0 shape VAE decoder.
+/// Hunyuan3D 2.x shape VAE decoder.
 #[derive(Debug)]
 pub struct ShapeVae {
     cfg: ShapeVaeConfig,

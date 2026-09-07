@@ -8,9 +8,10 @@
 //! lives below the deterministic geometry preparation so oracle captures can
 //! freeze the sampled point set independently from framework RNG behavior.
 
-use candle_core::{Error, Result, Tensor, D};
+use candle_core::{DType, Device, Error, Result, Tensor, D};
 use candle_nn::{layer_norm, linear, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::prelude::*;
 
 use crate::hunyuan3d::mesh::Mesh;
 
@@ -104,6 +105,8 @@ impl EncodedShapeLatents {
 #[derive(Debug)]
 pub struct ShapeVaeEncoder {
     cfg: ShapeVaeEncoderConfig,
+    dtype: DType,
+    device: Device,
     fourier: FourierEmbedder,
     input_proj: Linear,
     cross_attn: ResidualCrossAttentionBlock,
@@ -125,6 +128,8 @@ impl ShapeVaeEncoder {
             return Err(invalid("invalid shape-VAE encoder configuration"));
         }
         let network = cfg.network_config();
+        let dtype = vb.dtype();
+        let device = vb.device().clone();
         let encoder = vb.pp("encoder");
         let self_blocks = encoder.pp("self_attn").pp("resblocks");
         let mut self_attn = Vec::with_capacity(cfg.num_layers);
@@ -136,6 +141,8 @@ impl ShapeVaeEncoder {
         }
         Ok(Self {
             cfg: *cfg,
+            dtype,
+            device,
             fourier: FourierEmbedder::new(cfg.num_freqs, 3, true, false),
             input_proj: linear(cfg.input_width(), cfg.width, encoder.pp("input_proj"))?,
             cross_attn: ResidualCrossAttentionBlock::new(&network, encoder.pp("cross_attn"))?,
@@ -155,6 +162,80 @@ impl ShapeVaeEncoder {
 
     pub fn config(&self) -> &ShapeVaeEncoderConfig {
         &self.cfg
+    }
+
+    /// Sample and encode a mesh into the deterministic posterior mode.
+    ///
+    /// The seed freezes both geometry sampling and the FPS start points so a
+    /// durable retry produces the same latent sequence. The returned latent
+    /// layout remains `[B,N,C]`; use [`EncodedShapeLatents::for_decoder`] for
+    /// the shape decoder's `[B,C,N]` input.
+    pub fn encode_mesh_mode(
+        &self,
+        mesh: &Mesh,
+        seed: u64,
+        query_chunk: usize,
+    ) -> Result<EncodedShapeLatents> {
+        if self.cfg.point_feats != 4 {
+            return Err(invalid(
+                "mesh encoding requires normal xyz plus the sharp-edge label",
+            ));
+        }
+        if self.cfg.pc_size == 0 {
+            return Err(invalid(
+                "mesh encoding requires at least one regular surface point",
+            ));
+        }
+        let mut samples = sample_mesh_surface(mesh, self.cfg.pc_size, seed)?;
+        let sharp_seed = seed ^ 0x4859_3353_4841_5250;
+        if self.cfg.pc_sharpedge_size > 0 {
+            samples.extend(sample_mesh_sharp_edges(
+                mesh,
+                self.cfg.pc_sharpedge_size,
+                sharp_seed,
+            )?);
+        }
+
+        let total_points = self.cfg.pc_size + self.cfg.pc_sharpedge_size;
+        let regular_latents = self.cfg.pc_size * self.cfg.num_latents / total_points;
+        let sharp_latents = self.cfg.num_latents - regular_latents;
+        let mut rng = StdRng::seed_from_u64(seed ^ 0x4650_5353_5441_5254);
+        let positions: Vec<[f32; 3]> = samples.iter().map(|sample| sample.position).collect();
+        let mut selected = farthest_point_indices(
+            &positions[..self.cfg.pc_size],
+            regular_latents,
+            rng.gen_range(0..self.cfg.pc_size),
+        )?;
+        if sharp_latents > 0 {
+            let sharp = farthest_point_indices(
+                &positions[self.cfg.pc_size..],
+                sharp_latents,
+                rng.gen_range(0..self.cfg.pc_sharpedge_size),
+            )?;
+            selected.extend(sharp.into_iter().map(|index| index + self.cfg.pc_size));
+        }
+
+        let positions: Vec<f32> = samples.iter().flat_map(|sample| sample.position).collect();
+        let features: Vec<f32> = samples
+            .iter()
+            .flat_map(|sample| {
+                [
+                    sample.normal[0],
+                    sample.normal[1],
+                    sample.normal[2],
+                    if sample.sharp_edge { 1.0 } else { 0.0 },
+                ]
+            })
+            .collect();
+        let points = Tensor::from_vec(positions, (1, total_points, 3), &self.device)?
+            .to_dtype(self.dtype)?;
+        let features = Tensor::from_vec(
+            features,
+            (1, total_points, self.cfg.point_feats),
+            &self.device,
+        )?
+        .to_dtype(self.dtype)?;
+        self.encode_preselected(&points, &features, &selected, None, query_chunk)
     }
 
     /// Encode caller-frozen points and FPS indices.
@@ -285,23 +366,18 @@ fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
     (len.is_finite() && len > 0.0).then(|| [v[0] / len, v[1] / len, v[2] / len])
 }
 
-/// Uniformly sample a mesh surface after Tencent's centered 0.9999 scaling.
-///
-/// The seed belongs to mold's durable execution record. Upstream leaves both
-/// trimesh and NumPy sampling process-random; making it explicit here is what
-/// lets restart/retry reuse the same encoder input instead of changing shape.
-pub fn sample_mesh_surface(mesh: &Mesh, count: usize, seed: u64) -> Result<Vec<SurfacePoint>> {
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn normalized_positions(mesh: &Mesh) -> Result<Vec<[f32; 3]>> {
     mesh.validate()
         .map_err(|error| invalid(error.to_string()))?;
-    if count == 0 {
-        return Ok(Vec::new());
-    }
     if mesh.is_empty() {
         return Err(invalid(
             "shape-VAE surface sampling requires a non-empty mesh",
         ));
     }
-
     let (min, max) = mesh.bounds();
     let center = [
         (min[0] + max[0]) * 0.5,
@@ -315,7 +391,7 @@ pub fn sample_mesh_surface(mesh: &Mesh, count: usize, seed: u64) -> Result<Vec<S
         ));
     }
     let scale = 2.0 * NORMALIZED_MESH_SCALE / extent;
-    let positions: Vec<[f32; 3]> = mesh
+    Ok(mesh
         .vertices
         .iter()
         .map(|v| {
@@ -325,7 +401,19 @@ pub fn sample_mesh_surface(mesh: &Mesh, count: usize, seed: u64) -> Result<Vec<S
                 (v[2] - center[2]) * scale,
             ]
         })
-        .collect();
+        .collect())
+}
+
+/// Uniformly sample a mesh surface after Tencent's centered 0.9999 scaling.
+///
+/// The seed belongs to mold's durable execution record. Upstream leaves both
+/// trimesh and NumPy sampling process-random; making it explicit here is what
+/// lets restart/retry reuse the same encoder input instead of changing shape.
+pub fn sample_mesh_surface(mesh: &Mesh, count: usize, seed: u64) -> Result<Vec<SurfacePoint>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let positions = normalized_positions(mesh)?;
 
     let mut cumulative = Vec::with_capacity(mesh.faces.len());
     let mut normals = Vec::with_capacity(mesh.faces.len());
@@ -379,6 +467,111 @@ pub fn sample_mesh_surface(mesh: &Mesh, count: usize, seed: u64) -> Result<Vec<S
     Ok(samples)
 }
 
+/// Sample Tencent's sharp-edge point set after angle-weighted vertex normals.
+///
+/// Upstream first labels a vertex sharp when any incident face normal has a
+/// dot product below `0.985` with its trimesh vertex normal. It then retains
+/// every directed triangle edge whose two endpoints are sharp, including a
+/// triangulation diagonal, and samples those segments by length.
+pub fn sample_mesh_sharp_edges(mesh: &Mesh, count: usize, seed: u64) -> Result<Vec<SurfacePoint>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let positions = normalized_positions(mesh)?;
+    let mut face_normals = Vec::with_capacity(mesh.faces.len());
+    let mut vertex_normal_sums = vec![[0.0f32; 3]; positions.len()];
+    for face in &mesh.faces {
+        let indices = [face[0] as usize, face[1] as usize, face[2] as usize];
+        let vertices = [
+            positions[indices[0]],
+            positions[indices[1]],
+            positions[indices[2]],
+        ];
+        let normal = normalize(cross(
+            sub(vertices[1], vertices[0]),
+            sub(vertices[2], vertices[0]),
+        ))
+        .ok_or_else(|| invalid("shape-VAE sharp-edge sampling rejects degenerate triangles"))?;
+        face_normals.push(normal);
+        for corner in 0..3 {
+            let origin = vertices[corner];
+            let left = normalize(sub(vertices[(corner + 1) % 3], origin)).ok_or_else(|| {
+                invalid("shape-VAE sharp-edge sampling rejects zero-length edges")
+            })?;
+            let right = normalize(sub(vertices[(corner + 2) % 3], origin)).ok_or_else(|| {
+                invalid("shape-VAE sharp-edge sampling rejects zero-length edges")
+            })?;
+            let angle = dot(left, right).clamp(-1.0, 1.0).acos();
+            for axis in 0..3 {
+                vertex_normal_sums[indices[corner]][axis] += normal[axis] * angle;
+            }
+        }
+    }
+    let vertex_normals = vertex_normal_sums
+        .into_iter()
+        .map(|normal| {
+            normalize(normal).ok_or_else(|| {
+                invalid("shape-VAE sharp-edge sampling found an invalid vertex normal")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut minimum_dot = vec![1.0f32; positions.len()];
+    for (face, normal) in mesh.faces.iter().zip(&face_normals) {
+        for index in face {
+            let index = *index as usize;
+            minimum_dot[index] = minimum_dot[index].min(dot(vertex_normals[index], *normal));
+        }
+    }
+    let sharp: Vec<bool> = minimum_dot.into_iter().map(|value| value < 0.985).collect();
+
+    let mut edges = Vec::new();
+    let mut cumulative = Vec::new();
+    let mut total = 0.0f64;
+    for face in &mesh.faces {
+        for (a, b) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+            let a = a as usize;
+            let b = b as usize;
+            if sharp[a] && sharp[b] {
+                let weight = f64::from(length(sub(positions[b], positions[a])));
+                if weight.is_finite() && weight > 0.0 {
+                    total += weight;
+                    edges.push((a, b));
+                    cumulative.push(total);
+                }
+            }
+        }
+    }
+    if edges.is_empty() || !total.is_finite() || total <= 0.0 {
+        return Err(invalid("shape-VAE mesh has no sharp edges to sample"));
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut samples = Vec::with_capacity(count);
+    for _ in 0..count {
+        let pick = rng.gen::<f64>() * total;
+        let edge_index = cumulative
+            .partition_point(|weight| *weight < pick)
+            .min(edges.len() - 1);
+        let (a, b) = edges[edge_index];
+        let weight = rng.gen::<f32>();
+        let inverse = 1.0 - weight;
+        samples.push(SurfacePoint {
+            position: [
+                weight * positions[a][0] + inverse * positions[b][0],
+                weight * positions[a][1] + inverse * positions[b][1],
+                weight * positions[a][2] + inverse * positions[b][2],
+            ],
+            normal: [
+                weight * vertex_normals[a][0] + inverse * vertex_normals[b][0],
+                weight * vertex_normals[a][1] + inverse * vertex_normals[b][1],
+                weight * vertex_normals[a][2] + inverse * vertex_normals[b][2],
+            ],
+            sharp_edge: true,
+        });
+    }
+    Ok(samples)
+}
+
 /// Deterministic farthest-point sampling with PyTorch-compatible earliest
 /// index tie breaking.
 pub fn farthest_point_indices(
@@ -408,10 +601,14 @@ pub fn farthest_point_indices(
     for _ in 0..count {
         selected.push(farthest);
         let centroid = points[farthest];
-        for (distance, point) in distances.iter_mut().zip(points) {
-            let delta = sub(*point, centroid);
-            *distance = distance.min(length(delta));
-        }
+        distances
+            .par_iter_mut()
+            .zip(points.par_iter())
+            .for_each(|(distance, point)| {
+                let delta = sub(*point, centroid);
+                let squared = dot(delta, delta);
+                *distance = distance.min(squared);
+            });
         farthest = distances
             .iter()
             .enumerate()
@@ -471,6 +668,66 @@ mod tests {
                 .all(|v| v.is_finite() && v.abs() <= 0.999_901)
                 && sample.normal.iter().all(|v| v.is_finite())
         }));
+    }
+
+    #[test]
+    fn sharp_edge_sampling_is_seeded_and_marks_cube_edges() {
+        let mesh = Mesh {
+            vertices: vec![
+                [-1.0, -1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
+            ],
+            faces: vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+            ..Mesh::default()
+        };
+        let first = sample_mesh_sharp_edges(&mesh, 128, 9001).unwrap();
+        let second = sample_mesh_sharp_edges(&mesh, 128, 9001).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 128);
+        assert!(first.iter().all(|sample| sample.sharp_edge));
+        assert!(first.iter().all(|sample| {
+            let boundary_axes = sample
+                .position
+                .iter()
+                .filter(|value| (value.abs() - NORMALIZED_MESH_SCALE).abs() < 1e-5)
+                .count();
+            boundary_axes >= 1
+        }));
+    }
+
+    #[test]
+    fn sharp_edge_sampling_refuses_a_coplanar_surface() {
+        let mesh = Mesh {
+            vertices: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            ..Mesh::default()
+        };
+        let error = sample_mesh_sharp_edges(&mesh, 8, 1).unwrap_err();
+        assert!(error.to_string().contains("has no sharp edges"));
     }
 
     #[test]
@@ -553,6 +810,26 @@ mod tests {
                 .unwrap()
                 .to_vec1::<f32>()
                 .unwrap()
+        );
+
+        let mesh_mode = encoder.encode_mesh_mode(&tetrahedron(), 42, 1).unwrap();
+        let mesh_mode_second = encoder.encode_mesh_mode(&tetrahedron(), 42, 2).unwrap();
+        assert_eq!(mesh_mode.mean.dims(), &[1, 2, 2]);
+        assert_eq!(mesh_mode.for_decoder().unwrap().dims(), &[1, 2, 2]);
+        assert_eq!(
+            mesh_mode
+                .mean
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            mesh_mode_second
+                .mean
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            "query chunking must not change a deterministic mesh encoding"
         );
     }
 
