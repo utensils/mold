@@ -10,7 +10,8 @@ use candle_nn::{LayerNorm, Linear, Module, RmsNorm, VarBuilder};
 use crate::attention::{attention_for, AttentionPolicy};
 use crate::quantized_linear::QuantizedLinear;
 
-enum ShapeLinear {
+#[derive(Clone)]
+pub(super) enum ShapeLinear {
     Dense(Linear),
     Quantized(QuantizedLinear),
 }
@@ -25,7 +26,7 @@ impl Module for ShapeLinear {
 }
 
 #[derive(Clone)]
-enum ShapeVarBuilder<'a> {
+pub(super) enum ShapeVarBuilder<'a> {
     Dense(VarBuilder<'a>),
     Quantized {
         builder: mold_candle::quantized::VarBuilder,
@@ -35,7 +36,7 @@ enum ShapeVarBuilder<'a> {
 }
 
 impl<'a> ShapeVarBuilder<'a> {
-    fn pp(&self, segment: impl ToString) -> Self {
+    pub(super) fn pp(&self, segment: impl ToString) -> Self {
         match self {
             Self::Dense(builder) => Self::Dense(builder.pp(segment)),
             Self::Quantized {
@@ -57,7 +58,7 @@ impl<'a> ShapeVarBuilder<'a> {
         }
     }
 
-    fn linear(&self, input: usize, output: usize, bias: bool) -> Result<ShapeLinear> {
+    pub(super) fn linear(&self, input: usize, output: usize, bias: bool) -> Result<ShapeLinear> {
         match self {
             Self::Dense(builder) => {
                 let linear = if bias {
@@ -148,6 +149,25 @@ impl<'a> ShapeVarBuilder<'a> {
                     .to_dtype(*compute_dtype)?;
                 Ok(RmsNorm::new(weight, eps))
             }
+        }
+    }
+
+    pub(super) fn tensor(
+        &self,
+        shape: impl Into<candle_core::Shape>,
+        name: &str,
+    ) -> Result<Tensor> {
+        let shape = shape.into();
+        match self {
+            Self::Dense(builder) => builder.get(shape, name),
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                ..
+            } => builder
+                .get(shape, name)?
+                .dequantize(builder.device())?
+                .to_dtype(*compute_dtype),
         }
     }
 }

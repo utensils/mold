@@ -470,15 +470,19 @@ impl Hunyuan3dEngine {
             Ok(crate::artifact_format::ArtifactStorageFormat::Gguf { .. })
         );
         let (dit, vb) = if quantized {
-            let cfg = dit21_cfg
-                .as_ref()
-                .context("quantized Hunyuan3D 2.0 execution is not yet available")?;
             let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
                 .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
-            let dit = ShapeDit::V21(Box::new(
-                Hunyuan3dDit21::new_quantized(cfg, qvb.pp(DIT_PREFIX), dtype, false)
-                    .context("build the quantized Hunyuan3D 2.1 shape transformer")?,
-            ));
+            let dit = match (&dit20_cfg, &dit21_cfg) {
+                (Some(cfg), None) => ShapeDit::V20(Box::new(
+                    Hunyuan3dDit::new_quantized(cfg, qvb.pp(DIT_PREFIX), dtype, false)
+                        .context("build the quantized Hunyuan3D 2.0 shape transformer")?,
+                )),
+                (None, Some(cfg)) => ShapeDit::V21(Box::new(
+                    Hunyuan3dDit21::new_quantized(cfg, qvb.pp(DIT_PREFIX), dtype, false)
+                        .context("build the quantized Hunyuan3D 2.1 shape transformer")?,
+                )),
+                _ => bail!("ambiguous Hunyuan3D shape architecture"),
+            };
             let dense = dense_components_from_gguf(&qvb, dtype, &device)?;
             (dit, dense)
         } else {

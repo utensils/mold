@@ -39,8 +39,9 @@
 //! last hidden state, CLS token included.
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
-use candle_nn::{Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::{Module, RmsNorm, VarBuilder};
 
+use super::transformer21::{ShapeLinear, ShapeVarBuilder};
 use crate::attention::{attention_for, AttentionPolicy};
 
 /// Geometry of one shape-DiT checkpoint.
@@ -251,9 +252,9 @@ struct QkNorm {
 }
 
 impl QkNorm {
-    fn new(head_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let query = RmsNorm::new(vb.get(head_dim, "query_norm.scale")?, 1e-6);
-        let key = RmsNorm::new(vb.get(head_dim, "key_norm.scale")?, 1e-6);
+    fn new(head_dim: usize, vb: ShapeVarBuilder<'_>) -> Result<Self> {
+        let query = RmsNorm::new(vb.tensor(head_dim, "query_norm.scale")?, 1e-6);
+        let key = RmsNorm::new(vb.tensor(head_dim, "key_norm.scale")?, 1e-6);
         Ok(Self { query, key })
     }
 }
@@ -278,17 +279,17 @@ impl ModulationOut {
 
 /// `Linear(hidden, n * hidden)` behind a SiLU, chunked into `n / 3`
 /// modulation triples.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Modulation {
-    lin: Linear,
+    lin: ShapeLinear,
     chunks: usize,
 }
 
 impl Modulation {
-    fn new(dim: usize, triples: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, triples: usize, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         let chunks = triples * 3;
         Ok(Self {
-            lin: candle_nn::linear(dim, chunks * dim, vb.pp("lin"))?,
+            lin: vb.pp("lin").linear(dim, chunks * dim, true)?,
             chunks,
         })
     }
@@ -338,20 +339,20 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     out.transpose(1, 2)?.reshape((b, l, h * dh))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SelfAttention {
-    qkv: Linear,
+    qkv: ShapeLinear,
     norm: QkNorm,
-    proj: Linear,
+    proj: ShapeLinear,
     num_heads: usize,
 }
 
 impl SelfAttention {
-    fn new(dim: usize, num_heads: usize, qkv_bias: bool, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, qkv_bias: bool, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         Ok(Self {
-            qkv: candle_nn::linear_b(dim, dim * 3, qkv_bias, vb.pp("qkv"))?,
+            qkv: vb.pp("qkv").linear(dim, dim * 3, qkv_bias)?,
             norm: QkNorm::new(dim / num_heads, vb.pp("norm"))?,
-            proj: candle_nn::linear(dim, dim, vb.pp("proj"))?,
+            proj: vb.pp("proj").linear(dim, dim, true)?,
             num_heads,
         })
     }
@@ -370,17 +371,17 @@ impl SelfAttention {
 
 /// `Linear -> GELU(tanh) -> Linear`, stored under the indices `0` and `2`
 /// because upstream builds it as an `nn.Sequential`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Mlp {
-    lin1: Linear,
-    lin2: Linear,
+    lin1: ShapeLinear,
+    lin2: ShapeLinear,
 }
 
 impl Mlp {
-    fn new(dim: usize, mlp_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, mlp_size: usize, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         Ok(Self {
-            lin1: candle_nn::linear(dim, mlp_size, vb.pp("0"))?,
-            lin2: candle_nn::linear(mlp_size, dim, vb.pp("2"))?,
+            lin1: vb.pp("0").linear(dim, mlp_size, true)?,
+            lin2: vb.pp("2").linear(mlp_size, dim, true)?,
         })
     }
 }
@@ -393,7 +394,7 @@ impl Module for Mlp {
 
 /// A two-stream block: latent tokens and conditioning tokens keep separate
 /// weights but attend jointly over the concatenated sequence.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct DoubleStreamBlock {
     img_mod: Modulation,
     img_norm1: AffinelessLayerNorm,
@@ -408,7 +409,7 @@ struct DoubleStreamBlock {
 }
 
 impl DoubleStreamBlock {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         let h = cfg.hidden_size;
         let mlp = cfg.mlp_size();
         Ok(Self {
@@ -463,10 +464,10 @@ impl DoubleStreamBlock {
 
 /// A fused block over the already-concatenated sequence: attention and MLP
 /// share one input projection and one output projection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SingleStreamBlock {
-    linear1: Linear,
-    linear2: Linear,
+    linear1: ShapeLinear,
+    linear2: ShapeLinear,
     norm: QkNorm,
     pre_norm: AffinelessLayerNorm,
     modulation: Modulation,
@@ -476,12 +477,12 @@ struct SingleStreamBlock {
 }
 
 impl SingleStreamBlock {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         let h = cfg.hidden_size;
         let mlp = cfg.mlp_size();
         Ok(Self {
-            linear1: candle_nn::linear(h, h * 3 + mlp, vb.pp("linear1"))?,
-            linear2: candle_nn::linear(h + mlp, h, vb.pp("linear2"))?,
+            linear1: vb.pp("linear1").linear(h, h * 3 + mlp, true)?,
+            linear2: vb.pp("linear2").linear(h + mlp, h, true)?,
             norm: QkNorm::new(cfg.head_dim(), vb.pp("norm"))?,
             pre_norm: AffinelessLayerNorm::new(NORM_EPS),
             modulation: Modulation::new(h, 1, vb.pp("modulation"))?,
@@ -522,22 +523,22 @@ impl SingleStreamBlock {
 
 /// adaLN-Zero output head. `p_sz` is 1 here — there is no patchification,
 /// each token maps straight back to one latent vector.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct LastLayer {
     norm_final: AffinelessLayerNorm,
-    linear: Linear,
-    ada_ln_modulation: Linear,
+    linear: ShapeLinear,
+    ada_ln_modulation: ShapeLinear,
 }
 
 impl LastLayer {
-    fn new(hidden_size: usize, out_channels: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(hidden_size: usize, out_channels: usize, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         Ok(Self {
             norm_final: AffinelessLayerNorm::new(NORM_EPS),
-            linear: candle_nn::linear(hidden_size, out_channels, vb.pp("linear"))?,
-            ada_ln_modulation: candle_nn::linear(
+            linear: vb.pp("linear").linear(hidden_size, out_channels, true)?,
+            ada_ln_modulation: vb.pp("adaLN_modulation.1").linear(
                 hidden_size,
                 2 * hidden_size,
-                vb.pp("adaLN_modulation.1"),
+                true,
             )?,
         })
     }
@@ -553,17 +554,17 @@ impl LastLayer {
 }
 
 /// `Linear -> SiLU -> Linear`, upstream's `MLPEmbedder`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct MlpEmbedder {
-    in_layer: Linear,
-    out_layer: Linear,
+    in_layer: ShapeLinear,
+    out_layer: ShapeLinear,
 }
 
 impl MlpEmbedder {
-    fn new(in_dim: usize, hidden: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_dim: usize, hidden: usize, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         Ok(Self {
-            in_layer: candle_nn::linear(in_dim, hidden, vb.pp("in_layer"))?,
-            out_layer: candle_nn::linear(hidden, hidden, vb.pp("out_layer"))?,
+            in_layer: vb.pp("in_layer").linear(in_dim, hidden, true)?,
+            out_layer: vb.pp("out_layer").linear(hidden, hidden, true)?,
         })
     }
 }
@@ -575,10 +576,10 @@ impl Module for MlpEmbedder {
 }
 
 /// The shape DiT.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Hunyuan3dDit {
-    latent_in: Linear,
-    cond_in: Linear,
+    latent_in: ShapeLinear,
+    cond_in: ShapeLinear,
     time_in: MlpEmbedder,
     guidance_in: Option<MlpEmbedder>,
     double_blocks: Vec<DoubleStreamBlock>,
@@ -590,9 +591,29 @@ pub struct Hunyuan3dDit {
 impl Hunyuan3dDit {
     /// `vb` must already be scoped to the checkpoint's `model.` prefix.
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+        Self::build(cfg, ShapeVarBuilder::Dense(vb))
+    }
+
+    pub fn new_quantized(
+        cfg: &Config,
+        vb: mold_candle::quantized::VarBuilder,
+        compute_dtype: DType,
+        qmatmul_enabled: bool,
+    ) -> Result<Self> {
+        Self::build(
+            cfg,
+            ShapeVarBuilder::Quantized {
+                builder: vb,
+                compute_dtype,
+                qmatmul_enabled,
+            },
+        )
+    }
+
+    fn build(cfg: &Config, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         let h = cfg.hidden_size;
-        let latent_in = candle_nn::linear(cfg.in_channels, h, vb.pp("latent_in"))?;
-        let cond_in = candle_nn::linear(cfg.context_in_dim, h, vb.pp("cond_in"))?;
+        let latent_in = vb.pp("latent_in").linear(cfg.in_channels, h, true)?;
+        let cond_in = vb.pp("cond_in").linear(cfg.context_in_dim, h, true)?;
         let time_in = MlpEmbedder::new(Config::TIME_EMBED_DIM, h, vb.pp("time_in"))?;
         let guidance_in = if cfg.guidance_embed {
             Some(MlpEmbedder::new(
@@ -797,6 +818,55 @@ mod tests {
             qkv_bias: true,
             guidance_embed,
         }
+    }
+
+    #[test]
+    fn q8_tiny_dit_executes_both_streams_and_the_fused_block() -> Result<()> {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use candle_core::quantized::{GgmlDType, QTensor};
+
+        let mut cfg = tiny_config(true);
+        cfg.hidden_size = 32;
+        cfg.num_heads = 2;
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let dense = Hunyuan3dDit::new(&cfg, VarBuilder::from_varmap(&varmap, DType::F32, &device))?;
+        let directory = tempfile::tempdir()?;
+        let checkpoint = directory.path().join("tiny.safetensors");
+        varmap.save(&checkpoint)?;
+        let tensors = candle_core::safetensors::load(&checkpoint, &device)?;
+        let mut quantized = HashMap::new();
+        for (name, tensor) in &tensors {
+            let dtype = if name.ends_with(".weight")
+                && tensor.rank() == 2
+                && tensor.dim(1)?.is_multiple_of(32)
+            {
+                GgmlDType::Q8_0
+            } else {
+                GgmlDType::F32
+            };
+            quantized.insert(
+                name.clone(),
+                Arc::new(QTensor::quantize(&tensor.to_dtype(DType::F32)?, dtype)?),
+            );
+        }
+        let quantized = Hunyuan3dDit::new_quantized(
+            &cfg,
+            mold_candle::quantized::VarBuilder::from_qtensors(quantized, &device),
+            DType::F32,
+            false,
+        )?;
+        let latents = Tensor::randn(0f32, 1.0, (1, cfg.in_channels, 5), &device)?;
+        let timestep = Tensor::new(&[0.3f32], &device)?;
+        let context = Tensor::randn(0f32, 1.0, (1, 3, cfg.context_in_dim), &device)?;
+        let guidance = Tensor::new(&[5f32], &device)?;
+        let expected = dense.forward(&latents, &timestep, &context, Some(&guidance))?;
+        let actual = quantized.forward(&latents, &timestep, &context, Some(&guidance))?;
+        let error = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(error.is_finite() && error < 0.25, "Q8 max error {error}");
+        Ok(())
     }
 
     fn build(cfg: &Config) -> (Hunyuan3dDit, Device) {
