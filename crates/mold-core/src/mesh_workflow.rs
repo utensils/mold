@@ -181,6 +181,72 @@ pub struct MeshWorkflowStageRecord {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshWorkflowJobSummary {
+    pub contract_version: u32,
+    pub id: String,
+    pub state: MeshWorkflowJobState,
+    pub mode: crate::generation_profile::MeshWorkflowMode,
+    pub stage_count: u32,
+    pub current_stage: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_stage_kind: Option<MeshWorkflowStageKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshWorkflowJobDetail {
+    #[serde(flatten)]
+    pub summary: MeshWorkflowJobSummary,
+    pub request: CreateMeshWorkflowRequest,
+    pub stages: Vec<MeshWorkflowStageRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshWorkflowJobListing {
+    pub jobs: Vec<MeshWorkflowJobSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateMeshWorkflowResponse {
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum MeshWorkflowEvent {
+    Snapshot {
+        job: MeshWorkflowJobDetail,
+    },
+    StageStarted {
+        stage_index: u32,
+        kind: MeshWorkflowStageKind,
+    },
+    StageProgress {
+        stage_index: u32,
+        kind: MeshWorkflowStageKind,
+        current: u32,
+        total: u32,
+    },
+    StageCompleted {
+        stage_index: u32,
+        kind: MeshWorkflowStageKind,
+        artifacts: Vec<MeshWorkflowArtifact>,
+    },
+    StateChanged {
+        state: MeshWorkflowJobState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
 /// Portable authority for restart and cross-host workflow recovery. SQLite is
 /// only a queryable index; this manifest wins during reconciliation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

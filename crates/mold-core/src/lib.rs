@@ -95,6 +95,7 @@ pub use generation_profile::{
 };
 pub use install_error::InstallError;
 pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};
+pub use mesh_workflow::*;
 pub use model_policy::{
     is_exact_registered_manifest, is_pinned_unrunnable_minimax_h3_identity,
     model_access_capabilities, model_acquisition, model_acquisition_available, model_activation,
