@@ -15765,6 +15765,7 @@ mod tests {
             texture: None,
             texture_resolution: None,
             matting: None,
+            delight: None,
         });
         app.gallery.selected = 0;
         app.load_gallery_into_generate();

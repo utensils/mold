@@ -251,8 +251,8 @@ fn local_generation_profile(
             // Hidden runnable workers are absent from the public catalog but
             // still need the registry-authored profile for internal UAT and
             // exact-name diagnostics. Activation was checked above.
-            if !mold_core::ltx25_manifest::is_runtime_manifest(&canonical)
-                && !(manifest.hidden && manifest.is_generation_model())
+            if !(mold_core::ltx25_manifest::is_runtime_manifest(&canonical)
+                || manifest.hidden && manifest.is_generation_model())
             {
                 return None;
             }
