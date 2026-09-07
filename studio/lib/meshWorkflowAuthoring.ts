@@ -68,7 +68,7 @@ export function meshWorkflowModes(model: WorkflowModel): MeshWorkflowMode[] {
   );
 }
 
-export function isTextImageWorkflowModel(model: WorkflowModel): boolean {
+function isTextImageWorkflowModel(model: WorkflowModel): boolean {
   const recipe = defaultRecipe(model);
   return (
     model.downloaded &&
