@@ -674,6 +674,102 @@ pub fn farthest_point_indices(
 }
 
 #[cfg(test)]
+fn synthetic_encoder_weights_impl(
+    cfg: &ShapeVaeEncoderConfig,
+    device: &candle_core::Device,
+) -> std::collections::HashMap<String, Tensor> {
+    use candle_core::DType;
+    use std::collections::HashMap;
+
+    let mut map = HashMap::new();
+    macro_rules! linear {
+        ($prefix:expr, $out:expr, $input:expr, $bias:expr $(,)?) => {{
+            map.insert(
+                format!("{}.weight", $prefix),
+                Tensor::zeros(($out, $input), DType::F32, device).unwrap(),
+            );
+            if $bias {
+                map.insert(
+                    format!("{}.bias", $prefix),
+                    Tensor::zeros($out, DType::F32, device).unwrap(),
+                );
+            }
+        }};
+    }
+    macro_rules! norm {
+        ($prefix:expr, $width:expr $(,)?) => {{
+            map.insert(
+                format!("{}.weight", $prefix),
+                Tensor::ones($width, DType::F32, device).unwrap(),
+            );
+            map.insert(
+                format!("{}.bias", $prefix),
+                Tensor::zeros($width, DType::F32, device).unwrap(),
+            );
+        }};
+    }
+
+    linear!("encoder.input_proj", cfg.width, cfg.input_width(), true);
+    let cross = "encoder.cross_attn";
+    norm!(&format!("{cross}.ln_1"), cfg.width);
+    norm!(&format!("{cross}.ln_2"), cfg.width);
+    norm!(&format!("{cross}.ln_3"), cfg.width);
+    linear!(&format!("{cross}.attn.c_q"), cfg.width, cfg.width, false);
+    linear!(
+        &format!("{cross}.attn.c_kv"),
+        cfg.width * 2,
+        cfg.width,
+        false,
+    );
+    linear!(&format!("{cross}.attn.c_proj"), cfg.width, cfg.width, true);
+    norm!(
+        &format!("{cross}.attn.attention.q_norm"),
+        cfg.width / cfg.heads,
+    );
+    norm!(
+        &format!("{cross}.attn.attention.k_norm"),
+        cfg.width / cfg.heads,
+    );
+    linear!(&format!("{cross}.mlp.c_fc"), cfg.width * 4, cfg.width, true);
+    linear!(
+        &format!("{cross}.mlp.c_proj"),
+        cfg.width,
+        cfg.width * 4,
+        true,
+    );
+    for index in 0..cfg.num_layers {
+        let block = format!("encoder.self_attn.resblocks.{index}");
+        norm!(&format!("{block}.ln_1"), cfg.width);
+        norm!(&format!("{block}.ln_2"), cfg.width);
+        linear!(
+            &format!("{block}.attn.c_qkv"),
+            cfg.width * 3,
+            cfg.width,
+            false,
+        );
+        linear!(&format!("{block}.attn.c_proj"), cfg.width, cfg.width, true);
+        norm!(
+            &format!("{block}.attn.attention.q_norm"),
+            cfg.width / cfg.heads,
+        );
+        norm!(
+            &format!("{block}.attn.attention.k_norm"),
+            cfg.width / cfg.heads,
+        );
+        linear!(&format!("{block}.mlp.c_fc"), cfg.width * 4, cfg.width, true);
+        linear!(
+            &format!("{block}.mlp.c_proj"),
+            cfg.width,
+            cfg.width * 4,
+            true,
+        );
+    }
+    norm!("encoder.ln_post", cfg.width);
+    linear!("pre_kl", cfg.embed_dim * 2, cfg.width, true);
+    map
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::hunyuan3d::mesh::Mesh;
@@ -905,100 +1001,4 @@ mod tests {
     ) -> HashMap<String, Tensor> {
         synthetic_encoder_weights_impl(cfg, device)
     }
-}
-
-#[cfg(test)]
-fn synthetic_encoder_weights_impl(
-    cfg: &ShapeVaeEncoderConfig,
-    device: &candle_core::Device,
-) -> std::collections::HashMap<String, Tensor> {
-    use candle_core::DType;
-    use std::collections::HashMap;
-
-    let mut map = HashMap::new();
-    macro_rules! linear {
-        ($prefix:expr, $out:expr, $input:expr, $bias:expr $(,)?) => {{
-            map.insert(
-                format!("{}.weight", $prefix),
-                Tensor::zeros(($out, $input), DType::F32, device).unwrap(),
-            );
-            if $bias {
-                map.insert(
-                    format!("{}.bias", $prefix),
-                    Tensor::zeros($out, DType::F32, device).unwrap(),
-                );
-            }
-        }};
-    }
-    macro_rules! norm {
-        ($prefix:expr, $width:expr $(,)?) => {{
-            map.insert(
-                format!("{}.weight", $prefix),
-                Tensor::ones($width, DType::F32, device).unwrap(),
-            );
-            map.insert(
-                format!("{}.bias", $prefix),
-                Tensor::zeros($width, DType::F32, device).unwrap(),
-            );
-        }};
-    }
-
-    linear!("encoder.input_proj", cfg.width, cfg.input_width(), true);
-    let cross = "encoder.cross_attn";
-    norm!(&format!("{cross}.ln_1"), cfg.width);
-    norm!(&format!("{cross}.ln_2"), cfg.width);
-    norm!(&format!("{cross}.ln_3"), cfg.width);
-    linear!(&format!("{cross}.attn.c_q"), cfg.width, cfg.width, false);
-    linear!(
-        &format!("{cross}.attn.c_kv"),
-        cfg.width * 2,
-        cfg.width,
-        false,
-    );
-    linear!(&format!("{cross}.attn.c_proj"), cfg.width, cfg.width, true);
-    norm!(
-        &format!("{cross}.attn.attention.q_norm"),
-        cfg.width / cfg.heads,
-    );
-    norm!(
-        &format!("{cross}.attn.attention.k_norm"),
-        cfg.width / cfg.heads,
-    );
-    linear!(&format!("{cross}.mlp.c_fc"), cfg.width * 4, cfg.width, true);
-    linear!(
-        &format!("{cross}.mlp.c_proj"),
-        cfg.width,
-        cfg.width * 4,
-        true,
-    );
-    for index in 0..cfg.num_layers {
-        let block = format!("encoder.self_attn.resblocks.{index}");
-        norm!(&format!("{block}.ln_1"), cfg.width);
-        norm!(&format!("{block}.ln_2"), cfg.width);
-        linear!(
-            &format!("{block}.attn.c_qkv"),
-            cfg.width * 3,
-            cfg.width,
-            false,
-        );
-        linear!(&format!("{block}.attn.c_proj"), cfg.width, cfg.width, true);
-        norm!(
-            &format!("{block}.attn.attention.q_norm"),
-            cfg.width / cfg.heads,
-        );
-        norm!(
-            &format!("{block}.attn.attention.k_norm"),
-            cfg.width / cfg.heads,
-        );
-        linear!(&format!("{block}.mlp.c_fc"), cfg.width * 4, cfg.width, true);
-        linear!(
-            &format!("{block}.mlp.c_proj"),
-            cfg.width,
-            cfg.width * 4,
-            true,
-        );
-    }
-    norm!("encoder.ln_post", cfg.width);
-    linear!("pre_kl", cfg.embed_dim * 2, cfg.width, true);
-    map
 }

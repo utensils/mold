@@ -94,7 +94,7 @@ export type NamedViewsProfile = { mode: ControlMode, roles: Array<GenerationImag
 
 export type MeshInputProfile = { mode: ControlMode, formats: Array<MeshReferenceFormat>, max_count: number, max_bytes: number, up_axes: Array<MeshUpAxis>, meters_per_unit_min: number, meters_per_unit_max: number, reason?: string | null, };
 
-export type MeshWorkflowMode = "image_to_mesh" | "multiview_to_mesh" | "mesh_texture" | "text_to_mesh";
+export type MeshWorkflowMode = "image_to_mesh" | "multiview_to_mesh" | "mesh_roundtrip" | "mesh_texture" | "text_to_mesh";
 
 export type MeshMattingMode = "auto" | "on" | "off";
 
