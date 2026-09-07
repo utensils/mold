@@ -230,7 +230,7 @@ function onDrop(event: DragEvent): void {
   border: 1px dashed var(--mold-border, #bbb);
   border-radius: 10px;
   color: var(--mold-text-dim, #737373);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
   text-align: center;
   cursor: pointer;
@@ -274,7 +274,7 @@ function onDrop(event: DragEvent): void {
 .image-well__preview figcaption {
   overflow: hidden;
   color: var(--mold-text-dim, #737373);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -289,7 +289,7 @@ function onDrop(event: DragEvent): void {
   border-radius: 8px;
   background: var(--mold-bg, transparent);
   color: var(--mold-text-dim, #737373);
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 .image-well__action--quiet {
@@ -324,7 +324,7 @@ function onDrop(event: DragEvent): void {
   min-height: var(--image-well-touch-target, 44px);
   color: var(--mold-text);
   font-family: var(--mold-font-mono);
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 700;
   text-decoration: none;
 }

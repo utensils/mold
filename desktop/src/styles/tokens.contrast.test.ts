@@ -123,7 +123,12 @@ function colour(theme: ThemeMap, key: string, over?: string): string {
   return raw;
 }
 
-const px = (value: string) => Number(value.replace(/px$/, ""));
+// Compare the unchanged desktop scale at its standard 16px root.
+const px = (value: string) => {
+  const match = /^(\d+(?:\.\d+)?)(px|rem)$/.exec(value);
+  if (!match) throw new Error(`Expected a px or rem size: ${value}`);
+  return Number(match[1]) * (match[2] === "rem" ? 16 : 1);
+};
 
 /** The planes a text rank sits on. surface-2 is a selected row, where the
  * rank is promoted to --mold-text; surface-3 is a divider, never a plane. */

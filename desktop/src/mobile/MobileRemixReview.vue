@@ -229,7 +229,7 @@ function edit(id: string, event: Event): void {
 .mobile-remix-editor {
   min-height: 104px;
   box-sizing: border-box;
-  font-size: 16px;
+  font-size: 1rem;
   resize: vertical;
 }
 .mobile-remix-dimension-tags {

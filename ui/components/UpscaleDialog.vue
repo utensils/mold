@@ -261,12 +261,12 @@ header {
 }
 h2 {
   margin: 2px 0 0;
-  font-size: 20px;
+  font-size: 1.25rem;
 }
 .upscale-dialog__eyebrow {
   margin: 0;
   color: var(--text-muted, #9da496);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -275,14 +275,14 @@ h2 {
   border: 0;
   color: inherit;
   background: transparent;
-  font-size: 26px;
+  font-size: 1.625rem;
 }
 .upscale-dialog__source {
   overflow: hidden;
   margin: 20px 0 6px;
   color: var(--text-secondary, #c7cbbf);
   font-family: ui-monospace, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -291,7 +291,7 @@ h2 {
   margin: 14px 0 0;
   overflow-wrap: anywhere;
   color: var(--mold-error);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .upscale-dialog__copy {
   margin: 0 0 18px;
@@ -303,7 +303,7 @@ h2 {
   min-width: 0;
   box-sizing: border-box;
   gap: 7px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 650;
 }
 .upscale-dialog__field + .upscale-dialog__field {
@@ -329,7 +329,7 @@ select {
 }
 .upscale-dialog__jobrow {
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 progress {
   width: 100%;

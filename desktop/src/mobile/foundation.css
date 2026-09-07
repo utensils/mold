@@ -4,6 +4,14 @@
 @import "../../../ui/fonts/fonts.css";
 @import "../../../ui/kit.css";
 
+/* WebKit's semantic body style follows iOS Dynamic Type. The theme still
+ * owns font families; rem-based roles inherit the user's preferred size. */
+@supports (font: -apple-system-body) {
+  html.mobile-surface.native-ios {
+    font: -apple-system-body;
+  }
+}
+
 @theme {
   --font-display: var(--mold-font-sans);
   --font-body: var(--mold-font-sans);

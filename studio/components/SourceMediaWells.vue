@@ -253,7 +253,7 @@ const endHint = computed(() =>
 .smw__hint,
 .smw__error {
   margin: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
   color: var(--mold-text-dim, #737373);
 }

@@ -21,7 +21,7 @@ const emit = defineEmits<{
 }>();
 
 const displayTitle = computed(() => props.title.trim() || props.subtitle);
-const detailedStatus = computed(() => props.status.length > 18);
+const detailedStatus = computed(() => props.status.length > 18 || Boolean(props.detail));
 </script>
 
 <template>
@@ -30,7 +30,7 @@ const detailedStatus = computed(() => props.status.length > 18);
     :class="{ 'mobile-generation-job--detailed-status': detailedStatus }"
     role="button"
     tabindex="0"
-    :aria-label="ariaLabel?.trim() || displayTitle"
+    :aria-label="[ariaLabel?.trim() || displayTitle, status, detail].filter(Boolean).join('. ')"
     data-test="mobile-generation-queue-card"
     @click="emit('activate')"
     @keydown.enter.prevent="emit('activate')"

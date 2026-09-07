@@ -355,7 +355,7 @@ watch(
 .mobile-prepared-editor {
   min-height: 88px;
   box-sizing: border-box;
-  font-size: 16px;
+  font-size: 1rem;
   resize: vertical;
 }
 .mobile-touch-action {

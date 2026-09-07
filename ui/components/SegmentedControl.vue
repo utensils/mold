@@ -186,7 +186,7 @@ function onKeydown(event: KeyboardEvent) {
 
 .ms-seg--inline .ms-seg__sub {
   font-family: var(--mold-font-mono);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   color: inherit;
   opacity: 0.8;
 }
@@ -230,7 +230,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .ms-seg__sub {
-  font-size: 9px;
+  font-size: 0.5625rem;
   color: var(--mold-text-dim);
 }
 </style>

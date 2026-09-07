@@ -13,6 +13,12 @@ import { describe, expect, it } from "vitest";
 const css = readFileSync("src/mobile/foundation.css", "utf8");
 
 describe("the phone's global rules", () => {
+  it("uses the system Dynamic Type style only in the native iOS shell", () => {
+    expect(css).toMatch(/html\.mobile-surface\.native-ios\s*\{[^}]*font: -apple-system-body;/s);
+    const entry = readFileSync("src/mobile/main.ts", "utf8");
+    expect(entry).toContain('classList.toggle("native-ios", isNativeIOSRuntime())');
+  });
+
   it("honours the system's reduced-motion setting", () => {
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{/);
     expect(css).toMatch(/animation-duration: 0\.01ms !important;/);

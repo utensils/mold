@@ -397,7 +397,7 @@ function apply(): void {
 .crop-editor__hint {
   margin: 0;
   color: var(--mold-text-dim, #737373);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
 }
 .crop-editor__actions {

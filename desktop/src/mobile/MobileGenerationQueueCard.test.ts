@@ -9,7 +9,17 @@ describe("MobileGenerationQueueCard", () => {
     });
     expect(view.get(".mobile-generation-job-copy p").text()).toBe("Hunyuan3D · plato");
     expect(view.find(".mobile-generation-job-copy span").exists()).toBe(false);
-    expect(view.attributes("aria-label")).toBe("Hunyuan3D · plato");
+    expect(view.attributes("aria-label")).toBe("Hunyuan3D · plato. Decoding volume");
+  });
+
+  it("gives held-error summaries the full row width while retaining their text", () => {
+    const detail = "GPU ran out of memory. Reduce the size before retrying.";
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "Clip", subtitle: "LTX · plato", status: "HELD", detail },
+    });
+    expect(view.classes()).toContain("mobile-generation-job--detailed-status");
+    expect(view.get("[data-test='mobile-generation-held-error']").text()).toBe(detail);
+    expect(view.attributes("aria-label")).toContain(`HELD. ${detail}`);
   });
 
   it("activates with Enter and Space", async () => {

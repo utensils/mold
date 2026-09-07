@@ -205,7 +205,7 @@ function commitTypedSize(event: Event): void {
 legend {
   margin-bottom: 8px;
   font-family: var(--mold-font-mono, monospace);
-  font-size: 11px;
+  font-size: 0.6875rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mold-text-dim, #777078);
@@ -214,7 +214,7 @@ legend {
   margin: 8px 0 0;
   color: var(--mold-text-dim, #777078);
   font-family: var(--mold-font-mono, monospace);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .mesh-geometry-options {
   display: grid;
@@ -238,7 +238,7 @@ legend {
   place-items: center;
   border: 1px solid var(--mold-border, rgb(128 120 140 / 35%));
   border-radius: 10px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 650;
   text-align: center;
 }
@@ -259,7 +259,7 @@ legend {
 }
 .mesh-geometry-custom-label {
   color: var(--mold-text-dim, #777078);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .mesh-geometry-custom input {
   flex: 1;
@@ -271,7 +271,7 @@ legend {
   background: transparent;
   color: inherit;
   font-family: var(--mold-font-mono, monospace);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 fieldset:disabled {
   opacity: 0.55;

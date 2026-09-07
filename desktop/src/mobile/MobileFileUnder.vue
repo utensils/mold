@@ -499,17 +499,17 @@ const previewStem = computed(() =>
 
 .mobile-file-under-label {
   color: var(--mold-text-dim);
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .mobile-file-under-value {
   color: var(--mold-text);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .mobile-file-under-none {
   color: var(--mold-text-dim);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .mobile-file-under-match {
@@ -549,7 +549,7 @@ const previewStem = computed(() =>
 
 .mobile-file-under-chip-source {
   color: var(--mold-text-dim);
-  font-size: 10px;
+  font-size: 0.625rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -562,7 +562,7 @@ const previewStem = computed(() =>
   border: 0;
   background: transparent;
   color: var(--mold-text-dim);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .mobile-file-under-add {
@@ -573,7 +573,7 @@ const previewStem = computed(() =>
   border: 0;
   background: transparent;
   color: var(--mold-blue);
-  font-size: 15px;
+  font-size: 0.9375rem;
   padding: 0 2px;
 }
 
@@ -599,7 +599,7 @@ const previewStem = computed(() =>
   border: 0;
   background: transparent;
   color: var(--mold-text-dim);
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .mobile-file-under-filename {
@@ -607,7 +607,7 @@ const previewStem = computed(() =>
   overflow-wrap: anywhere;
   color: var(--mold-text-dim);
   font-family: var(--font-utility);
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.5;
 }
 
@@ -638,18 +638,18 @@ const previewStem = computed(() =>
   border-radius: 12px;
   background: transparent;
   color: var(--mold-blue);
-  font-size: 15px;
+  font-size: 0.9375rem;
   padding: 0 14px;
 }
 
 .mobile-file-under-note {
   margin: 0;
   color: var(--mold-text-dim);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 /* iOS refuses to leave a focused field alone below 16px. */
 .mobile-file-under input {
-  font-size: 16px;
+  font-size: 1rem;
 }
 </style>

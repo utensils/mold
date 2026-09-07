@@ -2262,6 +2262,9 @@ function durableHeldIsRetrying(job: Job): boolean {
 
 /** Recovered prints whose `request` is still the byte-free presentation stub. */
 const presentationStubClientIds = new Set<number>();
+function queuePrintTitle(job: Job): string {
+  return presentationStubClientIds.has(job.clientId) ? "" : job.prompt;
+}
 
 /**
  * The host's own record of a recovered print: the queue row while it is in
@@ -13204,7 +13207,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   <SwipeActionRow
                     :actions="mobileQueueRowActions(entry.local)"
                     :label="
-                      entry.local.print.prompt.trim() ||
+                      queuePrintTitle(entry.local.print).trim() ||
                       `${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`
                     "
                     :disabled="
@@ -13215,12 +13218,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     @act="onMobileQueueRowAction(entry.local, $event)"
                   >
                     <MobileGenerationQueueCard
-                      :title="entry.local.print.prompt"
+                      :title="queuePrintTitle(entry.local.print)"
                       :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
                       :status="activityRowStatus(entry.local)"
                       :detail="durableHold(entry.local.print)?.error ?? null"
                       :cancelling="entry.local.print.cancelling === true"
-                      :aria-label="entry.local.print.prompt"
+                      :aria-label="queuePrintTitle(entry.local.print)"
                       @activate="inspectQueueEntry(entry.key)"
                     />
                   </SwipeActionRow>
@@ -13265,7 +13268,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             class="mobile-finished-job"
             @click="inspectQueueEntry(`finished:${job.clientId}`)"
           >
-            <strong>{{ job.prompt || modelLabel(job.model) }}</strong>
+            <strong>{{ queuePrintTitle(job) || modelLabel(job.model) }}</strong>
             <span
               >{{ job.hostLabel }} ·
               {{ job.status === "complete" ? "Complete" : "Stopped with an error" }}</span
@@ -13310,7 +13313,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       />
       <template v-else>
         <p class="section-note">{{ queueDetailHost?.name ?? "Machine unavailable" }}</p>
-        <p v-if="queueDetailJob" class="mobile-queue-detail-prompt">{{ queueDetailJob.prompt }}</p>
+        <p v-if="queueDetailJob" class="mobile-queue-detail-prompt">
+          {{ queuePrintTitle(queueDetailJob) || modelLabel(queueDetailJob.model) }}
+        </p>
         <p v-if="queueDetailEntry?.kind === 'local'">
           {{ activityRowStatus(queueDetailEntry.local) }}
         </p>
@@ -13321,6 +13326,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           {{ queueDetailJob.status === "complete" ? "Complete" : "Stopped with an error" }}
         </p>
         <p v-else>This item has left the live queue. Saved results are in My images.</p>
+        <p
+          v-if="queueDetailJob && durableHold(queueDetailJob)?.error"
+          class="mobile-queue-detail-error"
+        >
+          {{ durableHold(queueDetailJob)?.error }}
+        </p>
         <p v-if="queueDetailEntry?.kind === 'shared'">
           Activity summary only. Open this machine for full work details and controls.
         </p>

@@ -131,7 +131,7 @@ function update(frames: number): void {
   margin: 7px 0 0;
   color: var(--mold-text-dim);
   font-family: var(--mold-font-mono);
-  font-size: 10px;
+  font-size: 0.625rem;
   line-height: 1.4;
 }
 

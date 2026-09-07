@@ -1094,7 +1094,7 @@ function onKeydown(event: KeyboardEvent): void {
   padding: 8px 12px;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.55));
   color: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: center;
 }
 .mesh-viewer__controls {
@@ -1109,7 +1109,7 @@ function onKeydown(event: KeyboardEvent): void {
   pointer-events: none;
 }
 .mesh-viewer__stats {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
   opacity: 0.72;
 }
@@ -1126,7 +1126,7 @@ function onKeydown(event: KeyboardEvent): void {
   background: rgba(0, 0, 0, 0.42);
   color: inherit;
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
   pointer-events: auto;
 }
