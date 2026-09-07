@@ -376,6 +376,37 @@ pub(crate) async fn resume_mesh_workflow(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let existing = load_detail(&state, &id)?;
+    if !matches!(
+        existing.summary.state,
+        MeshWorkflowJobState::Paused | MeshWorkflowJobState::Failed
+    ) {
+        return Err(ApiError::validation(format!(
+            "mesh workflow cannot resume from {:?}",
+            existing.summary.state
+        )));
+    }
+    let batches = existing
+        .stages
+        .iter()
+        .filter_map(|stage| stage.execution_batch_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+    for batch_id in batches {
+        let Some(batch) = state
+            .queue_journal
+            .durable_generation_batch(batch_id)
+            .map_err(|error| {
+                ApiError::internal(format!("loading mesh workflow child batch failed: {error}"))
+            })?
+        else {
+            continue;
+        };
+        for child in batch.children {
+            if child.state == "paused" {
+                crate::routes::set_one_queue_job_paused(&state, &child.job_id, false).await?;
+            }
+        }
+    }
     if mesh_workflow_jobs::resume_job(db(&state)?, &id, now_ms())
         .map_err(|error| ApiError::internal(format!("resuming mesh workflow failed: {error:#}")))?
     {
@@ -398,10 +429,9 @@ pub(crate) async fn resume_mesh_workflow(
         }
         Ok(StatusCode::ACCEPTED)
     } else {
-        let detail = load_detail(&state, &id)?;
         Err(ApiError::validation(format!(
             "mesh workflow cannot resume from {:?}",
-            detail.summary.state
+            existing.summary.state
         )))
     }
 }

@@ -2813,6 +2813,7 @@ pub(crate) fn generation_batch_status(
                     "accepted" | "queued" => (State::Accepted, None),
                     "cancelling" => (State::Cancelling, None),
                     "running" => (State::Running, None),
+                    "paused" => (State::Paused, None),
                     "complete" => (State::Complete, None),
                     "failed" => (State::Failed, None),
                     "cancelled" => (State::Cancelled, None),
@@ -7457,7 +7458,7 @@ async fn resume_queue_job(
 /// Change one row's lifecycle without touching `QueuePause`, the host-wide
 /// dispatch gate. The existing PATCH token is the scheduler fence: while the
 /// SQLite transition runs, only this hydrated row is excluded from grants.
-async fn set_one_queue_job_paused(
+pub(crate) async fn set_one_queue_job_paused(
     state: &AppState,
     id: &str,
     paused: bool,
@@ -12517,6 +12518,42 @@ mod tests {
             mold_core::GenerationBatchChildState::Cancelling
         );
         assert_eq!(status.children[0].completed_at_ms, None);
+    }
+
+    #[test]
+    fn durable_status_projects_restart_paused_children_without_corruption() {
+        let detail = mold_db::generation_batches::DurableGenerationBatchDetail {
+            batch: mold_db::generation_batches::GenerationBatchRow {
+                id: "batch-id".to_string(),
+                client_batch_id: "client-id".to_string(),
+                owner_uuid: "owner-id".to_string(),
+                request_sha256: "receipt".to_string(),
+                created_at_ms: 10,
+            },
+            children: vec![
+                mold_db::generation_batches::DurableGenerationBatchChildRow {
+                    batch_id: "batch-id".to_string(),
+                    job_id: "job-id".to_string(),
+                    batch_index: 0,
+                    state: "paused".to_string(),
+                    error: None,
+                    retryable: false,
+                    error_code: None,
+                    updated_at_ms: 20,
+                    revision: 3,
+                    terminal_error_json: None,
+                    result_json: None,
+                    completed_at_ms: None,
+                },
+            ],
+        };
+
+        let status = super::generation_batch_status("instance-id", detail);
+        assert_eq!(
+            status.children[0].state,
+            mold_core::GenerationBatchChildState::Paused
+        );
+        assert_eq!(status.children[0].error, None);
     }
 
     /// A batch child carries its parent's identity advisory, so the same text
