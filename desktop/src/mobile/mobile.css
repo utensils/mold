@@ -4798,7 +4798,7 @@ button:disabled {
 
   .mobile-host-form {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16em), 1fr));
     align-items: end;
     gap: 0 18px;
     margin-top: 20px;
@@ -5810,5 +5810,14 @@ button:disabled {
   }
   .mobile-create-action .ms-action-blocker__copy {
     font-size: min(var(--text-body), 14px);
+  }
+}
+
+/* A tall tablet rail groups destinations instead of stretching each tab
+   through one fifth of the entire screen. Short phone rails retain their fit. */
+@media (min-width: 640px) and (min-height: 700px) {
+  .mobile-tabs {
+    grid-template-rows: repeat(5, minmax(64px, max-content));
+    align-content: start;
   }
 }

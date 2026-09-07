@@ -164,7 +164,7 @@ describe("mobile scrolling", () => {
     expect(tablet?.[1]).toMatch(
       /\.mobile-tabs\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
     );
-    expect(tablet?.[1]).toMatch(/\.mobile-host-form\s*\{[\s\S]*repeat\(2,/);
+    expect(tablet?.[1]).toMatch(/\.mobile-host-form\s*\{[\s\S]*repeat\(auto-fit,/);
     expect(tablet?.[1]).toMatch(
       /\.mobile-catalog-detail-scroll\s*\{[\s\S]*padding-right:\s*env\(safe-area-inset-right\)[\s\S]*padding-left:\s*env\(safe-area-inset-left\)/,
     );
