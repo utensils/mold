@@ -368,57 +368,33 @@ describe("ComposerCard — batch", () => {
   });
 });
 
-// The Shape chip carries the canvas summary the Create header used to print
-// as "1:1 · 1024×1024 · N steps". A canvasless (3-D) recipe renders no pixel
-// canvas — width/height sit at the recipe's zero default — so it shows no
-// chip at all rather than a nonsensical "0×0".
-describe("ComposerCard — shape and style chips", () => {
-  it("names a square canvas once and a rectangular one by family", () => {
-    const square = baseForm();
-    square.width = 1024;
-    square.height = 1024;
-    expect(mountComposer(square).get("[data-test='shape-chip']").text()).toContain("Square · 1024");
-
-    const wide = baseForm();
-    wide.width = 1216;
-    wide.height = 704;
-    expect(mountComposer(wide).get("[data-test='shape-chip']").text()).toContain("16:9 · 1216×704");
-  });
-
-  it("omits the Shape chip for a canvasless (3-D mesh) recipe", () => {
-    const form = baseForm();
-    form.family = "hunyuan3d";
-    form.width = 0;
-    form.height = 0;
-    form.recipeCapabilities = recipeCapabilitiesSnapshot(hunyuan3dRecipe(), "hunyuan3d");
-    const wrapper = mountComposer(form);
-    expect(wrapper.find("[data-test='shape-chip']").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("0×0");
-  });
-
-  it("opens the inspector's settings from the Shape chip", async () => {
-    const wrapper = mountComposer(baseForm());
-    await wrapper.get("[data-test='shape-chip']").trigger("click");
-    expect(wrapper.emitted("open-shape")).toHaveLength(1);
-  });
-
-  /*
-   * Style is no longer a door. Its chip IS the picker (StylePicker.vue), so
-   * the composer stops carrying a `styleLabel`/`styleId` pair and an
-   * `open-style` emit and takes the whole control through a slot — one
-   * selector, opened where the user is looking. The chip's own behaviour is
-   * covered by StylePicker.test.ts; what this component owes is the seat.
-   */
-  it("seats the style picker in the control row rather than a door of its own", () => {
+/*
+ * Neither chip is a door any more. Style has owned its picker since the
+ * redesign, and Shape now does too (ShapeChip.vue) — it used to be a caret
+ * wired to an emit whose only handler set the inspector tab it was already
+ * on, and a label derived from the raw pixels rather than from the resolver
+ * the inspector reads, so the two could state different things about one
+ * canvas. What this component owes either of them is the seat, in order.
+ */
+describe("ComposerCard — the control row seats both pickers", () => {
+  it("seats style then shape, and emits no door event for either", () => {
     const wrapper = mountComposer(baseForm(), undefined, {
       style: '<button data-test="fake-style-chip">Style</button>',
+      shape: '<button data-test="fake-shape-chip">Shape</button>',
     });
     const controls = wrapper.get(".ms-composer__controls");
-    expect(controls.find("[data-test='fake-style-chip']").exists()).toBe(true);
-    // The seat comes first, ahead of Shape — the mock's control row order.
     const order = [...controls.element.children].map((el) => el.getAttribute("data-test"));
-    expect(order.indexOf("fake-style-chip")).toBeLessThan(order.indexOf("shape-chip"));
+    expect(order).toContain("fake-style-chip");
+    expect(order).toContain("fake-shape-chip");
+    expect(order.indexOf("fake-style-chip")).toBeLessThan(order.indexOf("fake-shape-chip"));
     expect(wrapper.emitted("open-style")).toBeUndefined();
+    expect(wrapper.emitted("open-shape")).toBeUndefined();
+  });
+
+  it("renders nothing of its own where a chip is not filled in", () => {
+    const wrapper = mountComposer(baseForm());
+    expect(wrapper.find("[data-test='shape-chip']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("0×0");
   });
 });
 
