@@ -40,6 +40,7 @@ const meshModelName = ref("");
 const prompt = ref("");
 const texture = ref(true);
 const textureResolution = ref(2048);
+const delight = ref(false);
 const meshFile = ref<File | null>(null);
 const appearanceFile = ref<File | null>(null);
 const upAxis = ref<"y" | "z">("y");
@@ -77,6 +78,13 @@ const selectedImageModel = computed(() =>
 const selectedModes = computed(() =>
   selectedMeshModel.value ? meshWorkflowModes(selectedMeshModel.value) : [],
 );
+const delightAvailable = computed(() => {
+  const profile = selectedMeshModel.value?.generation_profile;
+  const recipe = profile?.recipes.find(
+    (value) => value.id === profile.default_recipe_id,
+  );
+  return recipe?.capabilities.mesh?.delight?.mode === "adjustable";
+});
 const canSubmit = computed(() => {
   if (busy.value || !selectedMeshModel.value) return false;
   if (mode.value === "text_to_mesh") {
@@ -217,6 +225,7 @@ async function submit(): Promise<void> {
             meshModel,
             texture: texture.value,
             textureResolution: textureResolution.value,
+            delight: delightAvailable.value && delight.value,
           })
         : await (async () => {
             const mesh = meshFile.value!;
@@ -240,6 +249,7 @@ async function submit(): Promise<void> {
               upAxis: upAxis.value,
               metersPerUnit: metersPerUnit.value,
               textureResolution: textureResolution.value,
+              delight: delightAvailable.value && delight.value,
             });
           })();
     const directMeshUpload =
@@ -511,6 +521,10 @@ onBeforeUnmount(() => {
             <option :value="2048">2048</option>
             <option :value="4096">4096</option>
           </select>
+        </label>
+        <label v-if="delightAvailable" class="mesh-studio__check">
+          <input v-model="delight" type="checkbox" />
+          Remove baked lighting and highlights before building the mesh
         </label>
         <button
           class="mesh-studio__primary"

@@ -919,6 +919,7 @@ mod tests {
             texture: None,
             texture_resolution: None,
             matting: None,
+            delight: None,
         });
         let attempt = AttemptQueueMediaRequest::plain(&mesh_request);
         let mesh = attempt

@@ -587,6 +587,70 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
             "crates/mold-inference/src/hunyuan3d/transformer.rs::forward_preserves_the_channels_before_length_layout",
         ),
     },
+    #[cfg(feature = "mesh-matting")]
+    FamilyBatchCapability {
+        family: "hunyuan3d-matting",
+        aliases: &[],
+        backends: BackendApplicability {
+            cuda: BackendQualification::CorrectnessOnly,
+            metal: BackendQualification::CorrectnessOnly,
+            cpu: BackendQualification::CorrectnessOnly,
+        },
+        placement: ComponentPlacementCapability {
+            text_encoder_cpu: false,
+            vae_cpu: false,
+            audio_components_cpu: false,
+        },
+        block_offload: false,
+        tiled_vae: TiledVaeCapability::Unsupported,
+        execution: SINGLETON,
+        determinism: EXACT,
+        seed_contract: CPU_SEED,
+        media: MediaKind::Image,
+        workflows: WorkflowCapabilities {
+            source: true,
+            edit_references: false,
+            lora: false,
+            generated_audio: false,
+            chain: false,
+        },
+        tier1: TIER1,
+        tier2: deep(
+            "crates/mold-inference/src/hunyuan3d/background_matting.rs::matting_dimensions_are_bounded_before_allocation",
+        ),
+    },
+    #[cfg(feature = "mesh-delight")]
+    FamilyBatchCapability {
+        family: "hunyuan3d-delight",
+        aliases: &[],
+        backends: BackendApplicability {
+            cuda: BackendQualification::CorrectnessOnly,
+            metal: BackendQualification::CorrectnessOnly,
+            cpu: BackendQualification::CorrectnessOnly,
+        },
+        placement: ComponentPlacementCapability {
+            text_encoder_cpu: false,
+            vae_cpu: false,
+            audio_components_cpu: false,
+        },
+        block_offload: false,
+        tiled_vae: TiledVaeCapability::Unsupported,
+        execution: SINGLETON,
+        determinism: EXACT,
+        seed_contract: CPU_SEED,
+        media: MediaKind::Image,
+        workflows: WorkflowCapabilities {
+            source: true,
+            edit_references: false,
+            lora: false,
+            generated_audio: false,
+            chain: false,
+        },
+        tier1: TIER1,
+        tier2: deep(
+            "crates/mold-inference/src/hunyuan3d/delight.rs::alpha_erosion_matches_a_three_by_three_min_filter",
+        ),
+    },
 ];
 
 pub fn production_family_capabilities() -> &'static [FamilyBatchCapability] {

@@ -482,6 +482,31 @@ describe("MobileSharedParams mesh controls", () => {
     expect(matting.attributes("disabled")).toBeDefined();
   });
 
+  it("writes the advertised delight opt-in", async () => {
+    const form = meshForm();
+    const model = meshModel();
+    applyModelDefaults(form, model);
+    const wrapper = mountMesh(form, model);
+    const control = wrapper.get("[data-test='mobile-mesh-delight']");
+    expect(control.text()).toContain("Remove lighting");
+    await control.get("button").trigger("click");
+    expect(form.mesh.delight).toBe(true);
+    expect(buildRequest(form).mesh?.delight).toBe(true);
+  });
+
+  it("hides delight when the host does not advertise it", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.delight = {
+      mode: "hidden",
+      required: false,
+    };
+    expect(
+      mountMesh(meshForm(), meshModel(recipe))
+        .find("[data-test='mobile-mesh-delight']")
+        .exists(),
+    ).toBe(false);
+  });
+
   it("disables a fixed threshold and shows the host's own note", () => {
     const recipe = hunyuan3dRecipe();
     recipe.capabilities.mesh = {

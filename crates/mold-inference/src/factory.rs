@@ -90,6 +90,8 @@ pub struct FrozenEngineConfig {
     /// Exact U²-Net graph materialized for a Hunyuan3D request whose matting
     /// policy may execute before shape conditioning.
     pub matting_asset: Option<PathBuf>,
+    /// Exact Hunyuan3D delight pipeline materialized for a direct mesh request.
+    pub delight_paths: Option<mold_core::ModelPaths>,
     /// Exact contract-only MiniMax H3 admission/factory authority. This is
     /// `None` for every runnable family and cannot activate H3 by itself.
     pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
@@ -154,6 +156,7 @@ impl FrozenEngineConfig {
             identity_assets: None,
             paint_assets: None,
             matting_asset: None,
+            delight_paths: None,
             h3_factory_authority: None,
             runtime_environment,
             // Resolved from the FAMILY, not the image default: a video
@@ -929,7 +932,26 @@ where
                 gpu_ordinal,
             )
             .with_paint_assets(frozen.paint_assets.clone())
-            .with_matting_asset(frozen.matting_asset.clone()),
+            .with_matting_asset(frozen.matting_asset.clone())
+            .with_delight_paths(frozen.delight_paths.clone()),
+        )),
+        #[cfg(feature = "mesh-matting")]
+        "hunyuan3d-matting" => Ok(boxed_inference_engine(
+            crate::hunyuan3d::matting_engine::MattingEngine::new(
+                model_name.to_string(),
+                paths,
+                load_strategy,
+                gpu_ordinal,
+            ),
+        )),
+        #[cfg(feature = "mesh-delight")]
+        "hunyuan3d-delight" => Ok(boxed_inference_engine(
+            crate::hunyuan3d::delight::DelightEngine::new(
+                model_name.to_string(),
+                paths,
+                load_strategy,
+                gpu_ordinal,
+            ),
         )),
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,

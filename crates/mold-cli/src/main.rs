@@ -210,6 +210,10 @@ struct MeshArgs {
     /// alpha, on recomputes it, and off keeps the original background.
     #[arg(long, value_enum, help_heading = "3D")]
     matting: Option<MeshMattingArg>,
+
+    /// Remove baked lighting and highlights before shape/PBR generation.
+    #[arg(long, help_heading = "3D")]
+    delight: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -236,6 +240,7 @@ impl MeshArgs {
                 MeshMattingArg::On => mold_core::MeshMattingMode::On,
                 MeshMattingArg::Off => mold_core::MeshMattingMode::Off,
             }),
+            delight: self.delight,
         }
     }
 }

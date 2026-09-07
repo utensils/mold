@@ -104,6 +104,19 @@ describe("meshRequestFromForm", () => {
       meshRequestFromForm({ ...emptyMeshForm(), matting: "off" }, mattingCaps),
     ).toEqual({ matting: "off" });
   });
+
+  it("serializes delight only when the host advertises it", () => {
+    expect(
+      meshRequestFromForm({ ...emptyMeshForm(), delight: true }, caps()),
+    ).toEqual({ delight: true });
+    const hidden = {
+      ...caps(),
+      delight: { mode: "hidden" as const, required: false },
+    };
+    expect(
+      meshRequestFromForm({ ...emptyMeshForm(), delight: true }, hidden),
+    ).toBeUndefined();
+  });
 });
 
 describe("meshFormFromMetadata", () => {
@@ -116,6 +129,7 @@ describe("meshFormFromMetadata", () => {
         texture: true,
         texture_resolution: 4096,
         matting: "on",
+        delight: true,
       }),
     ).toEqual({
       octreeResolution: 320,
@@ -124,6 +138,7 @@ describe("meshFormFromMetadata", () => {
       texture: true,
       textureResolution: 4096,
       matting: "on",
+      delight: true,
     });
   });
 

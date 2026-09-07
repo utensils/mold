@@ -657,10 +657,10 @@ jobs:
           cargo clippy -p mold-ai-server --features pulid --all-targets -- -D warnings
       - name: Test CPU mesh preparation
         if: env.RUN_RUST_SUITE == 'true'
-        run: cargo test -p mold-ai-inference --features mesh-texture,mesh-matting --lib hunyuan3d
+        run: cargo test -p mold-ai-inference --features mesh-texture,mesh-matting,mesh-delight --lib hunyuan3d
       - name: Clippy CPU mesh preparation
         if: env.RUN_RUST_SUITE == 'true'
-        run: cargo clippy -p mold-ai-inference --features mesh-texture,mesh-matting --all-targets -- -D warnings
+        run: cargo clippy -p mold-ai-inference --features mesh-texture,mesh-matting,mesh-delight --all-targets -- -D warnings
       - name: Test the PuLID identity stack
         if: env.RUN_RUST_SUITE == 'true'
         run: |
@@ -845,9 +845,9 @@ jobs:
         # out to `protoc`.
         run: brew install protobuf
       - name: Clippy Metal forced-local and server paths
-        run: cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
+        run: cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
       - name: Check reviewed H3 Metal server recipe
-        run: cargo check -p mold-ai-server --features h3,mesh-texture,mesh-matting,metal,expand,mdns,metrics,mp4,pulid,webp
+        run: cargo check -p mold-ai-server --features h3,mesh-texture,mesh-matting,mesh-delight,metal,expand,mdns,metrics,mp4,pulid,webp
 
   # Codecov remains a main-branch reporting signal. It is intentionally not a
   # required PR check: the protected Rust job already runs the same tests, and

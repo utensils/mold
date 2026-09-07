@@ -1602,6 +1602,19 @@ pub(crate) async fn prepare_inputs_for_devices(
             }
             Err(error) => Err(error),
         };
+        let materialized = match materialized {
+            Ok(()) => {
+                crate::delight_dependencies::materialize_delight_paths(
+                    &dependency_context,
+                    request,
+                    &family,
+                    &mut frozen,
+                    &mut pending,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         if let Err(error) = materialized {
             failures.insert(device.id, error);
             continue;

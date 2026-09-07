@@ -22,6 +22,7 @@ default = []
 # Narrow native exception: pinned xatlas UV unwrapping, with Rust inference.
 mesh-texture = ["dep:cc", "mold-core/mesh-texture"]
 mesh-matting = ["mold-core/mesh-matting", "dep:candle-onnx", "dep:prost"]
+mesh-delight = ["mesh-matting", "mold-core/mesh-delight"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",

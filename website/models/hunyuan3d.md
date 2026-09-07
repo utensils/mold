@@ -217,12 +217,19 @@ authenticated downloads alongside the original inputs; they survive restart
 and follow the print's permanent-deletion lifecycle, but cannot be selected
 for request reuse because doing so would apply matting twice.
 
+CUDA builds advertise **Remove lighting and highlights** when the pinned
+Hunyuan3D Delight pipeline is linked. Enable it with `--delight` or the Mesh
+switch in web, desktop, and mobile. Mold runs the fixed Tencent recipe after
+matting and before shape or paint, then retains the delighted PNG as its own
+durable stage artifact. The 512px, 50-step Euler ancestral recipe uses seed 42
+and has no adjustable prompt or strength.
+
 CUDA builds with `mesh-texture` can run Hunyuan3D Paint after shape generation
 and embed base color, metallic/roughness and normal textures in the stored GLB.
 Use `--texture [--texture-resolution 1024|2048|4096]` on the CLI, or enable
-**PBR materials** in the desktop Create inspector. Text-to-3D, delight and
-supplied-mesh retexturing remain tracked in
-[#1496](https://github.com/utensils/mold/issues/1496).
+**PBR materials** in the desktop Create inspector. The 3-D Studio also runs
+durable text-to-3D and supplied-mesh retexturing workflows, with optional
+matting and delight preprocessing checkpointed before shape or paint.
 
 ## Accepting the licence from the apps
 

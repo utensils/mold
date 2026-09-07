@@ -19,7 +19,9 @@ mold server status
 - For a 3-D mesh (`hunyuan3d`), the input is one image or an advertised set of
   named front/left/back/right views and the output is a GLB. Use `--matting
   auto` to preserve useful alpha and remove opaque backgrounds, `on` to
-  recompute every supplied cutout, or `off` to keep the pixels unchanged.
+  recompute every supplied cutout, or `off` to keep the pixels unchanged. Add
+  `--delight` when the profile advertises Hunyuan3D lighting and highlight
+  removal; it runs after matting and before shape or paint.
   There is no prompt to write, and `mold expand` / `mold remix` answer
   with image advice instead of a rewrite. OBJ, STL and PLY are gallery-side
   exports of the stored GLB, never generation targets, and take optional
@@ -30,6 +32,7 @@ mold server status
   `capabilities.mesh.workflow_modes`, then use `/api/mesh-workflows`. The
   `text_to_mesh` workflow durably chains an image request into Hunyuan3D;
   `mesh_texture` takes one GLB/OBJ mesh reference and an appearance image.
+  Matting and delight are independent retained stages when enabled.
   List or inspect jobs, follow `/:id/events`, resume or cancel them, and delete
   settled workflow data when it is no longer needed. A server restart parks an
   unfinished workflow without changing its attached child identity.

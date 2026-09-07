@@ -2414,6 +2414,10 @@ fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<
     if options.matting.is_some() {
         return Err("Background matting requires the mesh-matting build feature".to_string());
     }
+    #[cfg(not(feature = "mesh-delight"))]
+    if options.delight == Some(true) {
+        return Err("Delighting requires the mesh-delight build feature".to_string());
+    }
     if let Some(resolution) = options.texture_resolution {
         if !MESH_TEXTURE_RESOLUTIONS.contains(&resolution) {
             return Err(format!(

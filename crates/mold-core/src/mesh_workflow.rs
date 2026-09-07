@@ -41,11 +41,26 @@ impl CreateMeshWorkflowRequest {
     pub fn planned_stage_kinds(&self) -> Vec<MeshWorkflowStageKind> {
         match self {
             Self::TextToMesh { mesh_request, .. } => {
-                let mut stages = vec![
-                    MeshWorkflowStageKind::Image,
-                    MeshWorkflowStageKind::Matting,
-                    MeshWorkflowStageKind::Shape,
-                ];
+                let mut stages = vec![MeshWorkflowStageKind::Image];
+                if cfg!(feature = "mesh-matting")
+                    && mesh_request
+                        .mesh
+                        .as_ref()
+                        .and_then(|mesh| mesh.matting)
+                        .unwrap_or_default()
+                        != crate::MeshMattingMode::Off
+                {
+                    stages.push(MeshWorkflowStageKind::Matting);
+                }
+                if mesh_request
+                    .mesh
+                    .as_ref()
+                    .and_then(|mesh| mesh.delight)
+                    .unwrap_or(false)
+                {
+                    stages.push(MeshWorkflowStageKind::Delight);
+                }
+                stages.push(MeshWorkflowStageKind::Shape);
                 if mesh_request
                     .mesh
                     .as_ref()
@@ -57,11 +72,32 @@ impl CreateMeshWorkflowRequest {
                 stages.push(MeshWorkflowStageKind::Finalize);
                 stages
             }
-            Self::MeshTexture { .. } => vec![
-                MeshWorkflowStageKind::Matting,
-                MeshWorkflowStageKind::Paint,
-                MeshWorkflowStageKind::Finalize,
-            ],
+            Self::MeshTexture { texture_request } => {
+                let mut stages = Vec::new();
+                if cfg!(feature = "mesh-matting")
+                    && texture_request
+                        .mesh
+                        .as_ref()
+                        .and_then(|mesh| mesh.matting)
+                        .unwrap_or_default()
+                        != crate::MeshMattingMode::Off
+                {
+                    stages.push(MeshWorkflowStageKind::Matting);
+                }
+                if texture_request
+                    .mesh
+                    .as_ref()
+                    .and_then(|mesh| mesh.delight)
+                    .unwrap_or(false)
+                {
+                    stages.push(MeshWorkflowStageKind::Delight);
+                }
+                stages.extend([
+                    MeshWorkflowStageKind::Paint,
+                    MeshWorkflowStageKind::Finalize,
+                ]);
+                stages
+            }
         }
     }
 }
@@ -712,6 +748,34 @@ mod tests {
                 MeshWorkflowStageKind::Finalize,
             ]
         );
+
+        let mut delighted = mesh_request();
+        delighted.mesh.as_mut().unwrap().delight = Some(true);
+        let delighted = CreateMeshWorkflowRequest::TextToMesh {
+            image_request: Box::new(image_request()),
+            mesh_request: Box::new(delighted),
+        };
+        assert_eq!(
+            delighted.planned_stage_kinds(),
+            vec![
+                MeshWorkflowStageKind::Image,
+                MeshWorkflowStageKind::Matting,
+                MeshWorkflowStageKind::Delight,
+                MeshWorkflowStageKind::Shape,
+                MeshWorkflowStageKind::Paint,
+                MeshWorkflowStageKind::Finalize,
+            ]
+        );
+
+        let mut no_matting = mesh_request();
+        no_matting.mesh.as_mut().unwrap().matting = Some(crate::MeshMattingMode::Off);
+        let no_matting = CreateMeshWorkflowRequest::TextToMesh {
+            image_request: Box::new(image_request()),
+            mesh_request: Box::new(no_matting),
+        };
+        assert!(!no_matting
+            .planned_stage_kinds()
+            .contains(&MeshWorkflowStageKind::Matting));
     }
 
     #[test]

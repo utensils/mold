@@ -141,13 +141,16 @@ at all. A 2mv recipe instead accepts any non-empty semantic subset through
 `--front`, `--left`, `--back`, and `--right`; never renumber a missing view.
 `--matting auto` preserves useful alpha and removes opaque backgrounds, `on`
 recomputes every supplied cutout, and `off` keeps the original pixels.
+Use `--delight` only when the advertised mesh profile enables it; the host then
+runs the fixed Hunyuan3D lighting and highlight removal stage after matting and
+before shape or paint.
 `hunyuan3d-2.1` uses the same single-image contract and requires the separate
 `tencent-hunyuan3d-2.1` licence acceptance. It returns a rendered
 poster plus mesh statistics; the glTF itself lands in the gallery and is
 fetched by filename. Its optional `octree` (the advertised allowlist; cost is
 cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and
-`target_faces` and `matting` mirror `--octree`, `--mesh-threshold`,
-`--target-faces`, and `--matting`;
+`target_faces`, `matting`, and `delight` mirror `--octree`, `--mesh-threshold`,
+`--target-faces`, `--matting`, and `--delight`;
 omit them for the recipe's defaults. The older `octree_resolution` and
 `mesh_threshold` names are declared in the schema as deprecated aliases.
 

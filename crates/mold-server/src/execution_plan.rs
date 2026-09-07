@@ -27,6 +27,7 @@ const UNKNOWN_ARTIFACT_HOST_CHARGE: u64 = 64 * MIB;
 // whole-process peak. Reserve 40 GiB to include 3,528 MiB of backend and
 // workload headroom over the retained measurement.
 const HUNYUAN3D_PAINT_VRAM_PEAK: u64 = 40 * 1024 * MIB;
+const HUNYUAN3D_DELIGHT_VRAM_PEAK: u64 = 8 * 1024 * MIB;
 
 /// Semantic position of an artifact consumed by one engine execution.
 ///
@@ -90,6 +91,10 @@ pub enum ComponentRole {
     PaintDino,
     /// Real-ESRGAN x4plus used between paint decode and material baking.
     PaintUpscaler,
+    DelightUnet,
+    DelightVae,
+    DelightClip,
+    DelightTokenizer,
 }
 
 impl ComponentRole {
@@ -102,6 +107,7 @@ impl ComponentRole {
                 | Self::QwenShard(_)
                 | Self::GemmaShard(_)
                 | Self::GenericTextEncoderShard(_)
+                | Self::DelightClip
         )
     }
 
@@ -137,6 +143,7 @@ impl ComponentRole {
                 | Self::FaceRecognizer
                 | Self::FaceParser
                 | Self::IdentityVisionEncoder
+                | Self::DelightTokenizer
         )
     }
 }
@@ -527,6 +534,8 @@ pub enum PendingArtifactContainer {
     /// vision tower release), never handed to a tensor loader as-is.
     TorchArchive,
     Onnx,
+    /// A small non-weight artifact such as a tokenizer JSON file.
+    Raw,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -653,6 +662,7 @@ impl ExecutionSemanticConfig {
             identity_assets: _,
             paint_assets,
             matting_asset: _,
+            delight_paths: _,
             h3_factory_authority,
             // The resolved override is already represented in runtime_environment.
             request_offload: _,
@@ -2664,6 +2674,16 @@ fn concrete_artifacts_for_family(
         artifacts.insert(ComponentRole::PaintDino, paint.dino.clone());
         artifacts.insert(ComponentRole::PaintUpscaler, paint.upscaler.clone());
     }
+    if let Some(delight) = &engine_config.delight_paths {
+        artifacts.insert(ComponentRole::DelightUnet, delight.transformer.clone());
+        artifacts.insert(ComponentRole::DelightVae, delight.vae.clone());
+        if let Some(path) = &delight.clip_encoder {
+            artifacts.insert(ComponentRole::DelightClip, path.clone());
+        }
+        if let Some(path) = &delight.clip_tokenizer {
+            artifacts.insert(ComponentRole::DelightTokenizer, path.clone());
+        }
+    }
     artifacts
 }
 
@@ -3168,6 +3188,9 @@ fn build_plan(
                     | ComponentRole::PaintVae
                     | ComponentRole::PaintDino
                     | ComponentRole::PaintUpscaler
+                    | ComponentRole::DelightUnet
+                    | ComponentRole::DelightVae
+                    | ComponentRole::DelightClip
             ) {
                 // The paint runner scopes every network separately, including
                 // two independent VAE loads around UNet denoising.
@@ -3223,15 +3246,20 @@ fn build_plan(
     }
 
     let paint_requested = context.engine_config.paint_assets.is_some();
-    let predicted_vram =
-        memory
-            .peak_memory_bytes
-            .max(pending_dependency_peak)
-            .max(if paint_requested {
-                HUNYUAN3D_PAINT_VRAM_PEAK
-            } else {
-                0
-            });
+    let delight_requested = context.engine_config.delight_paths.is_some();
+    let predicted_vram = memory
+        .peak_memory_bytes
+        .max(pending_dependency_peak)
+        .max(if paint_requested {
+            HUNYUAN3D_PAINT_VRAM_PEAK
+        } else {
+            0
+        })
+        .max(if delight_requested {
+            HUNYUAN3D_DELIGHT_VRAM_PEAK
+        } else {
+            0
+        });
     // A 3-D render's dominant HOST cost is something no component path
     // accounts for: the full occupancy grid, which the decode loop copies back
     // chunk by chunk and accumulates, plus the extracted mesh. At octree 384
@@ -4891,6 +4919,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             identity_assets,
             paint_assets,
             matting_asset,
+            delight_paths,
             h3_factory_authority,
             // The resolved override is already represented in runtime_environment.
             request_offload: _,
@@ -4937,6 +4966,9 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
         }
         if let Some(matting) = matting_asset {
             debug.field("matting_asset", matting);
+        }
+        if let Some(delight) = delight_paths {
+            debug.field("delight_paths", delight);
         }
         if let Some(authority) = h3_factory_authority {
             debug.field("h3_factory_authority", &authority.identity_sha256());
@@ -8108,6 +8140,7 @@ mod tests {
             identity_assets: None,
             paint_assets: None,
             matting_asset: None,
+            delight_paths: None,
             h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,

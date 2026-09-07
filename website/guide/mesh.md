@@ -242,10 +242,10 @@ now — not only the CLI, TUI, and Discord.
 
 Web and desktop include a dedicated **3-D Studio** at `/create/3d`. **Text to
 3-D** first renders a source image with any installed image model, then removes
-its background and builds the Hunyuan3D mesh; it can optionally paint PBR
-materials. **Texture a mesh** accepts GLB or OBJ plus an appearance image and
+its background, optionally removes baked lighting and highlights, and builds
+the Hunyuan3D mesh; it can optionally paint PBR materials. **Texture a mesh** accepts GLB or OBJ plus an appearance image and
 publishes a textured GLB. These are durable server workflows: image, matting,
-shape, paint, and finalization are checkpointed, a shutdown parks unfinished
+delight, shape, paint, and finalization are checkpointed, a shutdown parks unfinished
 work, and **Resume** continues the same child job after restart. Settled
 workflow-owned inputs and stage copies remain available until **Delete workflow
 data** releases them; deleting the Library print remains a separate action.
@@ -268,6 +268,9 @@ data** releases them; deleting the Library print remains a separate action.
    **PBR materials** and the host's 1024/2048/4096 texture atlas choices.
    Enabling it paints base color, metallic/roughness and normal detail into
    the stored GLB after geometry completes.
+   A host that advertises Delight also offers **Remove lighting and
+   highlights**. It runs the fixed 512px Tencent pipeline after background
+   removal and before shape or paint.
 4. **Generate.** The result renders in the same WebGL viewer the Library
    uses, right in the Create result area: it auto-rotates until you touch
    it, honours `prefers-reduced-motion` (and parks or resumes the moment
@@ -375,10 +378,7 @@ TUI cell show that poster; only the lightbox loads the geometry itself. If a
 poster is missing, surfaces fall back to a placeholder rather than trying to
 draw glTF bytes as a picture.
 
-## What is not supported yet
-
-Text-to-3D, delight and supplied-mesh retexturing are tracked in
-[#1496](https://github.com/utensils/mold/issues/1496). Named multiview input
-and background matting are available on every authoring surface. PBR painting
-is available from the CLI, server API and desktop app on CUDA builds that
-include `mesh-texture`.
+Text-to-3D, supplied-mesh retexturing, named multiview input, background
+matting, and delight preprocessing are available through the server-backed
+3-D workflow. PBR painting is available on CUDA builds that include
+`mesh-texture`; delight is available when the host includes `mesh-delight`.

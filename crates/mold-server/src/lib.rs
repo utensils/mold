@@ -43,6 +43,7 @@ pub mod gpu_worker;
 // work holding the RAM gives it back. The module itself is family-blind, so a
 // build without H3 still compiles it and still runs its tests — it just has no
 // caller yet.
+mod delight_dependencies;
 #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
 mod host_reclaim;
 mod identity_dependencies;

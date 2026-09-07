@@ -2891,6 +2891,11 @@ pub struct MeshRequestOptions {
     /// Absent resolves to `auto` for backward-compatible requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matting: Option<MeshMattingMode>,
+    /// Remove baked lighting and specular highlights from the conditioning
+    /// image before shape and paint. This is opt-in because it deliberately
+    /// changes the supplied appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delight: Option<bool>,
 }
 
 impl MeshRequestOptions {
@@ -2952,6 +2957,7 @@ impl MeshRequestOptions {
             } else {
                 MeshMattingMode::Off
             }),
+            delight: self.delight,
         }
     }
 }
@@ -6007,6 +6013,7 @@ mod tests {
             texture: None,
             texture_resolution: None,
             matting: Some(MeshMattingMode::Off),
+            delight: Some(true),
         });
         let mesh = OutputMetadata::from_generate_request(&touched, 1, None, "test")
             .mesh
@@ -6018,6 +6025,7 @@ mod tests {
         );
         assert_eq!(mesh.target_faces, Some(50_000));
         assert_eq!(mesh.matting, Some(MeshMattingMode::Off));
+        assert_eq!(mesh.delight, Some(true));
 
         touched.mesh.as_mut().unwrap().matting = Some(MeshMattingMode::On);
         let effective = OutputMetadata::from_generate_request(&touched, 1, None, "test")
