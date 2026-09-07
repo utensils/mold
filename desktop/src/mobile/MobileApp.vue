@@ -274,7 +274,7 @@ import { meshStatsLabel } from "@studio/lib/meshControls";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 import { isMobileMeshResult, meshResultBlob } from "./meshResult";
 import { parseMissingExpandModel } from "../lib/expandErrors";
-import { resolveExpansionRoute } from "@studio/lib/expansionRouting";
+import { expansionPolicyForSelection, resolveExpansionRoute } from "@studio/lib/expansionRouting";
 import {
   expansionPullJobMatchesModel,
   resolveExpansionPullStatus,
@@ -287,6 +287,7 @@ import {
   createPreparedExpansionBatch,
   preparedExpansionStaleReasons,
   quickExpansionStaleReasons,
+  hostSelectionLabel,
   validateExpandedPrompts,
   type PreparedExpansionBatch as PreparedExpansionBatchState,
   type PreparedExpansionInputs,
@@ -634,6 +635,7 @@ interface MobileRemixReviewState {
   conditioningFingerprint: string;
   selectedHostPolicy: string | null;
   route: HostRoute;
+  expansionRoute?: HostRoute;
   variants: MobileRemixReviewVariant[];
   requestToken: number;
 }
@@ -1393,6 +1395,9 @@ const generateTarget = computed(() =>
     selectedHostId.value,
   ),
 );
+const promptToolHostPolicy = computed(() =>
+  generateTarget.value === AUTO_TARGET_ID ? null : generateTarget.value,
+);
 const automaticRouting = computed(
   () => autoRoutingAvailable.value && isAutomaticTarget(generateTarget.value),
 );
@@ -1634,6 +1639,7 @@ const selectedRoute = computed<HostRoute | null>(() => {
  * ready machine while dropping the previous route/download authority. Reviewed
  * multi-variation batches deliberately keep their original frozen route. */
 function carryQuickTransformToHost(hostId: string): void {
+  if (automaticRouting.value) return;
   const snapshot = quickExpansionSnapshot.value;
   const host = hosts.value.find((candidate) => candidate.id === hostId);
   if (
@@ -1651,7 +1657,7 @@ function carryQuickTransformToHost(hostId: string): void {
   }
   quickExpansionSnapshot.value = {
     ...snapshot,
-    selectedHostPolicy: hostId,
+    selectedHostPolicy: promptToolHostPolicy.value,
     route: routeForMobileHost(host),
   };
   if (expansionRecovery.value?.route.hostId !== hostId) clearExpansionRecovery();
@@ -1710,7 +1716,7 @@ const preparedStaleReasons = computed(() => {
         }
       : {}),
     stylePreset: form.stylePreset || null,
-    selectedHostPolicy: selectedHostId.value || null,
+    selectedHostPolicy: promptToolHostPolicy.value,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
     modelLabels: new Map(models.value.map((model) => [model.name, modelLabel(model.name)])),
@@ -1737,12 +1743,12 @@ const preparedStaleReasons = computed(() => {
 const quickStaleReasons = computed(() => {
   const snapshot = quickExpansionSnapshot.value;
   if (!snapshot) return [];
-  return quickExpansionStaleReasons(snapshot, {
+  const reasons = quickExpansionStaleReasons(snapshot, {
     expandedPrompt: form.prompt,
     model: form.model,
     family: form.family,
     task: expansionTaskForRequest(form.family, buildRequest(form)),
-    selectedHostPolicy: selectedHostId.value || null,
+    selectedHostPolicy: promptToolHostPolicy.value,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
     modelLabels: new Map(models.value.map((model) => [model.name, modelLabel(model.name)])),
@@ -1757,6 +1763,13 @@ const quickStaleReasons = computed(() => {
       ]),
     ),
   });
+  if (snapshot.selectedHostPolicy !== promptToolHostPolicy.value) {
+    const labels = new Map(hosts.value.map((host) => [host.id, host.name]));
+    reasons.push(
+      `Host selection changed from ${hostSelectionLabel(snapshot.selectedHostPolicy, labels)} to ${hostSelectionLabel(promptToolHostPolicy.value, labels)}.`,
+    );
+  }
+  return reasons;
 });
 const remixStaleReasons = computed(() => {
   const review = remixReview.value;
@@ -1775,7 +1788,7 @@ const remixStaleReasons = computed(() => {
     reasons.push("Conditioning media changed after this remix was prepared.");
   if ((form.stylePreset || null) !== review.stylePreset)
     reasons.push("Style changed after this remix was prepared.");
-  if (selectedHostId.value !== review.selectedHostPolicy)
+  if (promptToolHostPolicy.value !== review.selectedHostPolicy)
     reasons.push("Selected machine changed after this remix was prepared.");
   if (JSON.stringify(remixDimensions.value) !== JSON.stringify(review.dimensions))
     reasons.push("Remix dimensions changed after these variants were prepared.");
@@ -5320,7 +5333,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
-    selectedHostPolicy: selectedHostId.value || null,
+    selectedHostPolicy: promptToolHostPolicy.value,
   };
 }
 
@@ -5357,7 +5370,7 @@ function remixInputs(sourceKind: RemixSourceKind = remixSource.value): {
       task: currentExpansionTask.value,
       requestedCount: DEFAULT_REMIX_VARIATIONS,
       stylePreset: form.stylePreset || null,
-      selectedHostPolicy: selectedHostId.value || null,
+      selectedHostPolicy: promptToolHostPolicy.value,
     },
     remix,
     visiblePrompt: form.prompt,
@@ -5368,34 +5381,61 @@ function sameFrozenHost(route: HostRoute, host: MobileHost | undefined): boolean
   return mobileHostMatchesRoute(route, host);
 }
 
-/**
- * The host prompt expansion runs on (shared policy, issue #1162 §5).
- *
- * iPhone pins exactly ONE machine, so the candidate list is that machine and
- * the answer is always the generation route — including when it lacks the
- * expander, where the existing 422 → pull recovery still owns the outcome.
- * The call is shaped so mobile Auto / Most capable (#1163) can hand a real
- * candidate list and ranker here without moving the policy.
- */
-function expansionRouteFor(route: HostRoute): HostRoute {
-  const capability = expandCapabilities[route.hostId];
+interface MobilePromptToolRoutes {
+  route: HostRoute;
+  expansionRoute: HostRoute;
+}
+
+function promptToolProvenance(
+  route: HostRoute,
+  expansionRoute: HostRoute,
+): { expansionRoute?: HostRoute } {
+  return route.hostId === expansionRoute.hostId
+    ? {}
+    : {
+        expansionRoute: { ...expansionRoute, target: { ...expansionRoute.target } },
+      };
+}
+
+/** Resolve a fresh prompt tool request using the active generation policy.
+ * Explicit recovery routes bypass this selection and retain their authority. */
+function currentPromptToolRoutes(): MobilePromptToolRoutes | null {
+  if (!automaticRouting.value) {
+    const host = hosts.value.find((candidate) => candidate.id === generateTarget.value);
+    const route = host ? routeForMobileHost(host) : selectedRoute.value;
+    return route ? { route, expansionRoute: route } : null;
+  }
+  const generationHost = provisionalAutomaticHost(form.model, form.family);
+  const generationRoute = generationHost ? routeForMobileHost(generationHost) : null;
   const decision = resolveExpansionRoute(
-    { kind: "pinned", hostId: route.hostId },
-    { hostId: route.hostId },
-    [
-      {
-        hostId: route.hostId,
+    expansionPolicyForSelection(generateTarget.value, { auto: AUTO_TARGET_ID }),
+    generationHost && expandCapabilities[generationHost.id]?.configured !== false
+      ? generationRoute
+      : null,
+    routingHosts.value.map((host) => {
+      const capability = expandCapabilities[host.id];
+      return {
+        hostId: host.id,
         ready: true,
         ...(capability
           ? { modelPresent: capability.model_present, configured: capability.configured }
           : {}),
-      },
-    ],
-    () => null,
+      };
+    }),
+    (ids) => {
+      const views = routingHosts.value.filter((host) => ids.includes(host.id)).map(routingHostView);
+      const chosen =
+        generateTarget.value === CAPABLE_TARGET_ID
+          ? pickMostCapableHost(views, null, { lowestIdWins: true })
+          : pickAutoHost(views, { lowestIdWins: true });
+      return chosen?.id ?? null;
+    },
   );
-  if (decision.kind !== "reroute") return route;
-  const host = hosts.value.find((candidate) => candidate.id === decision.hostId);
-  return host ? routeForMobileHost(host) : route;
+  if (!generationRoute) return null;
+  if (decision.kind !== "reroute")
+    return { route: generationRoute, expansionRoute: generationRoute };
+  const host = routingHosts.value.find((candidate) => candidate.id === decision.hostId);
+  return host ? { route: generationRoute, expansionRoute: routeForMobileHost(host) } : null;
 }
 
 interface ReplacementFocusOwnership {
@@ -5469,6 +5509,7 @@ function setExpansionFailure(
   requestToken: number,
   replacePrepared: boolean,
   remix: MobileRemixRecoveryPayload | null = null,
+  generationRoute: HostRoute = route,
 ): string {
   const message = error instanceof Error ? error.message : String(error);
   const missingModel = parseMissingExpandModel(message);
@@ -5481,6 +5522,7 @@ function setExpansionFailure(
       model: missingModel,
       inputs,
       route,
+      generationRoute,
       requestToken,
       replacePrepared,
       remix,
@@ -5492,6 +5534,14 @@ function setExpansionFailure(
 }
 
 function recoveryStaleReason(recovery: MobileExpansionRecoveryRecord): string | null {
+  if (
+    !sameFrozenHost(
+      recovery.generationRoute,
+      hosts.value.find((host) => host.id === recovery.generationRoute.hostId),
+    )
+  ) {
+    return `${recovery.generationRoute.label}'s generation connection changed.`;
+  }
   const currentRemix = recovery.remix
     ? mobileRemixRecoveryPayload(recovery.remix.sourceKind)
     : null;
@@ -5550,6 +5600,7 @@ function commitExpandedPrompts(
   requestToken: number,
   replacePrepared: boolean,
   focus: ReplacementFocusOwnership,
+  expansionRoute: HostRoute = route,
 ): void {
   // One result answers a Batch-1 request and is also what a prompt-ignoring
   // recipe returns for any requested count, so the count actually received
@@ -5570,6 +5621,7 @@ function commitExpandedPrompts(
       stylePreset: inputs.stylePreset,
       selectedHostPolicy: inputs.selectedHostPolicy,
       route: { ...route, target: { ...route.target } },
+      ...promptToolProvenance(route, expansionRoute),
     };
     // Bake-and-clear: the rewrite absorbed the style (the server received it
     // as a directive), so the chip clears here — leaving it lit would apply
@@ -5584,7 +5636,10 @@ function commitExpandedPrompts(
     if (replacePrepared) restoreReplacementFocus(focus, "prompt");
     return;
   }
-  preparedBatch.value = createPreparedExpansionBatch(inputs, route, prompts, requestToken);
+  preparedBatch.value = {
+    ...createPreparedExpansionBatch(inputs, route, prompts, requestToken),
+    ...promptToolProvenance(route, expansionRoute),
+  };
   remixUndo.value = null;
   appliedRemix.value = null;
   quickExpansionSnapshot.value = null;
@@ -5607,36 +5662,42 @@ function refusePromptTransform(): boolean {
 
 async function expandForCurrentBatch(
   replacePrepared = false,
-  routeOverride: HostRoute | null = null,
+  routeOverride: MobilePromptToolRoutes | null = null,
 ): Promise<void> {
   if (refusePromptTransform()) return;
   const count = effectiveBatchSize.value;
   const inputs = expansionInputs(count);
-  const host = routeOverride
-    ? hosts.value.find((candidate) => candidate.id === routeOverride.hostId)
-    : selectedHost.value;
-  const route = routeOverride ?? selectedRoute.value;
+  const routes = routeOverride ?? currentPromptToolRoutes();
+  const route = routes?.route;
+  const expandOn = routes?.expansionRoute;
+  const host = route ? hosts.value.find((candidate) => candidate.id === route.hostId) : undefined;
   const replacementFocus = captureReplacementFocus(replacePrepared);
   if (
     !inputs.sourcePrompt ||
     !inputs.model ||
     !host ||
     !route ||
+    !expandOn ||
     expansionRunning.value ||
     (preparedBatch.value && count === 1 && !replacePrepared)
   ) {
     return;
   }
-  if (!sameFrozenHost(route, host)) {
+  if (
+    !sameFrozenHost(route, host) ||
+    !sameFrozenHost(
+      expandOn,
+      hosts.value.find((host) => host.id === expandOn.hostId),
+    )
+  ) {
     expansionError.value = `${route.label} isn't reachable with the frozen connection. Expansion will not fall back.`;
     return;
   }
-  if (expandCapabilities[route.hostId]?.configured === false) {
+  if (expandCapabilities[expandOn.hostId]?.configured === false) {
     expansionError.value = `Prompt expansion isn't configured on ${route.label}. Configure that host before retrying.`;
     clearExpansionRecovery();
     return;
   }
-  const expandOn = expansionRouteFor(route);
 
   clearExpansionRecovery();
   submissionAttempts.invalidate();
@@ -5673,16 +5734,36 @@ async function expandForCurrentBatch(
       current.requestedCount !== inputs.requestedCount ||
       current.stylePreset !== inputs.stylePreset ||
       current.selectedHostPolicy !== inputs.selectedHostPolicy ||
-      !sameFrozenHost(route, currentHost)
+      !sameFrozenHost(route, currentHost) ||
+      !sameFrozenHost(
+        expandOn,
+        hosts.value.find((host) => host.id === expandOn.hostId),
+      )
     ) {
       expansionError.value =
         "The prompt, model, style, Batch, or host changed while expansion was running. Expand again with the current inputs.";
       return;
     }
-    commitExpandedPrompts(inputs, route, prompts, token, replacePrepared, replacementFocus);
+    commitExpandedPrompts(
+      inputs,
+      route,
+      prompts,
+      token,
+      replacePrepared,
+      replacementFocus,
+      expandOn,
+    );
   } catch (error) {
     if (!preparationGuard.isCurrent(token)) return;
-    expansionError.value = setExpansionFailure(error, inputs, route, token, replacePrepared);
+    expansionError.value = setExpansionFailure(
+      error,
+      inputs,
+      expandOn,
+      token,
+      replacePrepared,
+      null,
+      route,
+    );
   } finally {
     if (!unmounted && preparationGuard.isCurrent(token)) expansionRunning.value = false;
   }
@@ -5695,6 +5776,7 @@ function commitRemixReview(
   route: HostRoute,
   variants: ReturnType<typeof validateRemixVariants>,
   requestToken: number,
+  expansionRoute: HostRoute = route,
 ): void {
   remixReview.value = {
     sourcePrompt: remix.sourcePrompt,
@@ -5709,6 +5791,7 @@ function commitRemixReview(
     conditioningFingerprint: remix.conditioningFingerprint,
     selectedHostPolicy: prepared.selectedHostPolicy,
     route: { ...route, target: { ...route.target } },
+    ...promptToolProvenance(route, expansionRoute),
     variants: variants.map((variant, index) => ({
       id: `remix-${requestToken}-${index + 1}`,
       prompt: variant.prompt,
@@ -5721,17 +5804,20 @@ function commitRemixReview(
 }
 
 async function remixCurrent(
-  routeOverride: HostRoute | null = null,
+  routeOverride: MobilePromptToolRoutes | null = null,
   replacePrepared = false,
 ): Promise<void> {
   if (refusePromptTransform()) return;
   const { prepared, remix, visiblePrompt } = remixInputs();
-  const route = routeOverride ?? selectedRoute.value;
+  const routes = routeOverride ?? currentPromptToolRoutes();
+  const route = routes?.route;
+  const expandOn = routes?.expansionRoute;
   const host = route ? hosts.value.find((candidate) => candidate.id === route.hostId) : undefined;
   if (
     !prepared.sourcePrompt ||
     !prepared.model ||
     !route ||
+    !expandOn ||
     !host ||
     remix.dimensions.length === 0 ||
     expansionRunning.value ||
@@ -5739,11 +5825,17 @@ async function remixCurrent(
   ) {
     return;
   }
-  if (!sameFrozenHost(route, host)) {
+  if (
+    !sameFrozenHost(route, host) ||
+    !sameFrozenHost(
+      expandOn,
+      hosts.value.find((host) => host.id === expandOn.hostId),
+    )
+  ) {
     expansionError.value = `${route.label} isn't reachable with the frozen connection. Remix will not fall back.`;
     return;
   }
-  if (expandCapabilities[route.hostId]?.configured === false) {
+  if (expandCapabilities[expandOn.hostId]?.configured === false) {
     expansionError.value = `Prompt tools aren't configured on ${route.label}. Configure that host before retrying.`;
     clearExpansionRecovery();
     return;
@@ -5768,7 +5860,7 @@ async function remixCurrent(
         ...(styleDirective ? { style: styleDirective } : {}),
         dimensions: [...remix.dimensions],
       },
-      route.target,
+      expandOn.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
     if (
@@ -5784,23 +5876,28 @@ async function remixCurrent(
     if (
       JSON.stringify(current.prepared) !== JSON.stringify(prepared) ||
       JSON.stringify(current.remix) !== JSON.stringify(remix) ||
-      !sameFrozenHost(route, currentHost)
+      !sameFrozenHost(route, currentHost) ||
+      !sameFrozenHost(
+        expandOn,
+        hosts.value.find((host) => host.id === expandOn.hostId),
+      )
     ) {
       expansionError.value =
         "The prompt, model, conditioning, dimensions, style, or host changed while Remix was running. Remix again with the current inputs.";
       return;
     }
-    commitRemixReview(prepared, remix, visiblePrompt, route, variants, token);
+    commitRemixReview(prepared, remix, visiblePrompt, route, variants, token, expandOn);
     if (replacePrepared) preparedBatch.value = null;
   } catch (error) {
     if (!preparationGuard.isCurrent(token)) return;
     expansionError.value = setExpansionFailure(
       error,
       prepared,
-      route,
+      expandOn,
       token,
       replacePrepared,
       remix,
+      route,
     )
       .replaceAll("Expansion", "Remix")
       .replaceAll("expansion", "remix");
@@ -5813,14 +5910,24 @@ function replacePreparedPrompts(useFrozenRoute: boolean): void {
   const batch = preparedBatch.value;
   if (!batch) return;
   if (batch.kind !== "remix") {
-    void expandForCurrentBatch(true, useFrozenRoute ? batch.route : null);
+    void expandForCurrentBatch(
+      true,
+      useFrozenRoute
+        ? { route: batch.route, expansionRoute: batch.expansionRoute ?? batch.route }
+        : null,
+    );
     return;
   }
   remixSource.value = batch.sourceKind ?? "current";
   remixDimensions.value = [
     ...(batch.dimensions ?? defaultRemixDimensions(batch.task, Boolean(batch.stylePreset))),
   ];
-  void remixCurrent(useFrozenRoute ? batch.route : null, true);
+  void remixCurrent(
+    useFrozenRoute
+      ? { route: batch.route, expansionRoute: batch.expansionRoute ?? batch.route }
+      : null,
+    true,
+  );
 }
 
 function toggleRemixVariant(id: string): void {
@@ -5869,6 +5976,7 @@ function applyRemixSelection(): void {
       stylePreset: review.stylePreset,
       selectedHostPolicy: review.selectedHostPolicy,
       route: { ...review.route, target: { ...review.route.target } },
+      ...promptToolProvenance(review.route, review.expansionRoute ?? review.route),
     };
     appliedRemix.value = {
       prompt: selected[0]!.prompt.trim(),
@@ -5904,6 +6012,7 @@ function applyRemixSelection(): void {
     review.requestToken,
   );
   Object.assign(preparedBatch.value, {
+    ...promptToolProvenance(review.route, review.expansionRoute ?? review.route),
     remixVariantDimensions: selected.map((variant) => [...variant.dimensions]),
   });
   remixUndo.value = null;
@@ -6277,9 +6386,10 @@ async function retryExpansionAfterPull(): Promise<void> {
           dimensions: [...recovery.remix.dimensions],
         },
         form.prompt,
-        { ...recovery.route, target: { ...recovery.route.target } },
+        { ...recovery.generationRoute, target: { ...recovery.generationRoute.target } },
         variants,
         recovery.requestToken,
+        recovery.route,
       );
       if (recovery.replacePrepared) preparedBatch.value = null;
     } else {
@@ -6288,11 +6398,12 @@ async function retryExpansionAfterPull(): Promise<void> {
       const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
       commitExpandedPrompts(
         { ...recovery.inputs },
-        { ...recovery.route, target: { ...recovery.route.target } },
+        { ...recovery.generationRoute, target: { ...recovery.generationRoute.target } },
         prompts,
         recovery.requestToken,
         recovery.replacePrepared,
         focus,
+        recovery.route,
       );
     }
   } catch (error) {
