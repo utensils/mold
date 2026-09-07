@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use mold_core::manifest::{find_manifest, resolve_model_name, HUNYUAN3D_FAMILY};
-use mold_core::{Config, ModelConfig, ModelPaths};
+use mold_core::{Config, ModelPaths};
 
 pub fn run(
     model: &str,
@@ -55,19 +55,26 @@ pub fn run(
         tier,
     )?;
 
-    let mut derived = configured.cloned().unwrap_or_else(|| {
-        let mut entry = ModelConfig::default();
-        if let Some(manifest) = manifest {
-            entry.default_steps = Some(manifest.defaults.steps);
-            entry.default_guidance = Some(manifest.defaults.guidance);
-            entry.default_width = Some(manifest.defaults.width);
-            entry.default_height = Some(manifest.defaults.height);
-            entry.is_schnell = Some(manifest.defaults.is_schnell);
-            entry.scheduler = manifest.defaults.scheduler;
-            entry.description = Some(manifest.description.clone());
+    let mut derived = configured.cloned().unwrap_or_default();
+    if let Some(manifest) = manifest {
+        derived.default_steps.get_or_insert(manifest.defaults.steps);
+        derived
+            .default_guidance
+            .get_or_insert(manifest.defaults.guidance);
+        derived.default_width.get_or_insert(manifest.defaults.width);
+        derived
+            .default_height
+            .get_or_insert(manifest.defaults.height);
+        derived
+            .is_schnell
+            .get_or_insert(manifest.defaults.is_schnell);
+        if derived.scheduler.is_none() {
+            derived.scheduler = manifest.defaults.scheduler;
         }
-        entry
-    });
+        if derived.description.is_none() {
+            derived.description = Some(manifest.description.clone());
+        }
+    }
     derived.transformer = Some(output.to_string_lossy().into_owned());
     derived.transformer_shards = None;
     derived.vae = Some(String::new());
