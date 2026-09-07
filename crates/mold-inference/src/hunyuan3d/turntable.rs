@@ -425,6 +425,7 @@ mod tests {
         let appearance = Appearance {
             base_color_texture: Some(RgbImage::from_pixel(4, 4, image::Rgb([230, 30, 60]))),
             base_color_factor: [1.0; 3],
+            ..Appearance::default()
         };
         let bare = render_turntable(&mesh, &options).expect("render bare");
         let painted = render_turntable_with(&mesh, &appearance, &options).expect("render painted");

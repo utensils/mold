@@ -67,6 +67,45 @@ const BG_BOTTOM: [u8; 3] = [0x0f, 0x17, 0x2a];
 /// Surface colour, sRGB. `#e2e8f0`, the placeholder's stroke colour.
 const ALBEDO_SRGB: [f32; 3] = [0.886, 0.910, 0.941];
 
+/// How a texture coordinate outside the unit square is resolved.
+///
+/// Read from the material's sampler rather than fixed, because mold's own
+/// paint and a foreign file disagree: `write_glb` writes `CLAMP_TO_EDGE`
+/// and glTF's default for a file that names no sampler is `REPEAT`.
+/// `MIRRORED_REPEAT` and any unknown value resolve as `Repeat` — glTF's
+/// default, and what this renderer did for every file before it read the
+/// sampler at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureWrap {
+    /// glTF's DEFAULT sampler, and what a file that names none asks for.
+    #[default]
+    Repeat,
+    /// `CLAMP_TO_EDGE`, which is what [`write_glb`] stamps onto mold's own
+    /// paint and what `MeshViewer.vue` binds the same texture with.
+    ///
+    /// [`write_glb`]: crate::hunyuan3d::glb::write_glb
+    ClampToEdge,
+}
+
+impl TextureWrap {
+    /// Resolve one texel index against this mode. A zero extent has no texel
+    /// to land on; no decoder produces one, and answering 0 is cheaper than
+    /// making every caller prove it.
+    fn resolve(self, value: i64, extent: u32) -> u32 {
+        if extent == 0 {
+            return 0;
+        }
+        let last = i64::from(extent) - 1;
+        match self {
+            Self::ClampToEdge => value.clamp(0, last) as u32,
+            Self::Repeat => {
+                let extent = i64::from(extent);
+                (((value % extent) + extent) % extent) as u32
+            }
+        }
+    }
+}
+
 /// The surface colour a poster paints onto the geometry.
 ///
 /// Bare geometry has none, and deliberately keeps the placeholder's near-white
@@ -87,6 +126,15 @@ pub struct Appearance {
     /// Read only when there IS one of those to multiply — see
     /// [`crate::hunyuan3d::glb::GlbScene::base_color_factor`].
     pub base_color_factor: [f32; 3],
+    /// The `baseColorTexture` sampler's `wrapS` and `wrapT`.
+    ///
+    /// Read from the file rather than assumed, because the two answers
+    /// disagree at a chart border: mold's own paint declares
+    /// `CLAMP_TO_EDGE`, so wrapping it blends the atlas's opposite edge into
+    /// the poster and the turntable while the viewer — which binds
+    /// `CLAMP_TO_EDGE` — shows neither. That is the one seam where "the
+    /// thumbnail IS the viewer's home frame" could stop being true.
+    pub wrap: [TextureWrap; 2],
 }
 
 impl Default for Appearance {
@@ -95,6 +143,7 @@ impl Default for Appearance {
         Self {
             base_color_texture: None,
             base_color_factor: [1.0; 3],
+            wrap: [TextureWrap::Repeat; 2],
         }
     }
 }
@@ -390,6 +439,9 @@ struct Painted<'a> {
     decode: Vec<f32>,
     /// `linear -> u8 sRGB`, the encode the constant-albedo ramp does not need.
     encode: Vec<u8>,
+    /// The material's own `wrapS`/`wrapT`, carried so [`Painted::sample`]
+    /// resolves a border texel the way the file asked and the viewer does.
+    wrap: [TextureWrap; 2],
 }
 
 impl<'a> Surface<'a> {
@@ -410,6 +462,7 @@ impl<'a> Surface<'a> {
                 .map(|code| srgb_to_linear(code as f32 / 255.0))
                 .collect(),
             encode: srgb_encode_table(),
+            wrap: appearance.wrap,
         })
     }
 
@@ -469,9 +522,10 @@ impl Painted<'_> {
 
     /// Bilinear texel, linear light.
     ///
-    /// glTF's texture origin is the image's top-left corner and the default
-    /// sampler REPEATs, so a coordinate outside the unit square wraps rather
-    /// than clamping. Bilinear rather than nearest because the poster is a
+    /// glTF's texture origin is the image's top-left corner. A coordinate
+    /// outside the unit square is resolved by the material's OWN sampler —
+    /// REPEAT only where the file asks for it (or names none, glTF's
+    /// default); mold's paint asks for `CLAMP_TO_EDGE`. Bilinear rather than nearest because the poster is a
     /// small tile: the parts of a 2048-square texture that magnify into it
     /// would otherwise show their texels.
     fn sample(&self, texture: &RgbImage, uv: [f32; 2]) -> [f32; 3] {
@@ -498,8 +552,8 @@ impl Painted<'_> {
         ] {
             let texel = texture
                 .get_pixel(
-                    wrap(x0.saturating_add(dx), width),
-                    wrap(y0.saturating_add(dy), height),
+                    self.wrap[0].resolve(x0.saturating_add(dx), width),
+                    self.wrap[1].resolve(y0.saturating_add(dy), height),
                 )
                 .0;
             for axis in 0..3 {
@@ -508,18 +562,6 @@ impl Painted<'_> {
         }
         out
     }
-}
-
-/// REPEAT wrap of a texel index, for negative indices too.
-///
-/// A zero-extent image has no texel to wrap onto; no decoder produces one,
-/// and answering 0 is cheaper than making every caller prove it.
-fn wrap(value: i64, extent: u32) -> u32 {
-    if extent == 0 {
-        return 0;
-    }
-    let extent = i64::from(extent);
-    (((value % extent) + extent) % extent) as u32
 }
 
 /// `linear -> sRGB u8` as a table.
@@ -821,6 +863,7 @@ mod tests {
                 &Appearance {
                     base_color_texture: Some(solid_texture([220, 20, 40])),
                     base_color_factor: [1.0; 3],
+                    wrap: [TextureWrap::Repeat; 2],
                 },
                 64,
             )
@@ -856,6 +899,7 @@ mod tests {
                     &Appearance {
                         base_color_texture: Some(solid_texture([255, 255, 255])),
                         base_color_factor: factor,
+                        wrap: [TextureWrap::Repeat; 2],
                     },
                     64,
                 )
@@ -907,10 +951,81 @@ mod tests {
                 &Appearance {
                     base_color_texture: Some(solid_texture([255, 0, 0])),
                     base_color_factor: [1.0; 3],
+                    wrap: [TextureWrap::Repeat; 2],
                 },
                 96,
             )
             .unwrap()
+        );
+    }
+
+    /// The two modes must actually disagree at a border, or honouring the
+    /// sampler is a distinction without a difference.
+    ///
+    /// A two-column texture sampled at the left edge: REPEAT blends the last
+    /// column in, CLAMP_TO_EDGE holds the first. mold's own paint declares
+    /// CLAMP, so REPEAT here is the poster disagreeing with the viewer.
+    #[test]
+    fn the_sampler_decides_what_a_border_texel_blends_with() {
+        let mut texture = RgbImage::new(2, 1);
+        texture.put_pixel(0, 0, image::Rgb([0, 0, 255]));
+        texture.put_pixel(1, 0, image::Rgb([255, 0, 0]));
+
+        let sample = |wrap: TextureWrap| {
+            let appearance = Appearance {
+                base_color_texture: Some(texture.clone()),
+                base_color_factor: [1.0; 3],
+                wrap: [wrap; 2],
+            };
+            // A texture with no coordinates to sample it through is not a
+            // painted surface, so the mesh must carry UVs.
+            let mut mesh = cube(0.5);
+            mesh.uvs = Some(vec![[0.5, 0.5]; mesh.vertices.len()]);
+            let surface = Surface::of(&mesh, &appearance);
+            match surface {
+                // Left edge of the first texel: x = 0*2 - 0.5 = -0.5, so the
+                // bilinear tap reaches index -1.
+                Surface::Painted(p) => p.sample(&texture, [0.0, 0.5]),
+                _ => panic!("expected a painted surface"),
+            }
+        };
+
+        let clamped = sample(TextureWrap::ClampToEdge);
+        let repeated = sample(TextureWrap::Repeat);
+        assert!(
+            clamped[2] > clamped[0],
+            "clamped to the blue first column, got {clamped:?}"
+        );
+        assert!(
+            repeated[0] > clamped[0],
+            "repeat pulls the red last column in; clamp {clamped:?} vs repeat {repeated:?}"
+        );
+    }
+
+    /// The reader and mold's own writer must agree, or every painted poster
+    /// silently samples the wrong way.
+    #[test]
+    fn mold_s_own_glb_is_read_back_as_clamped() {
+        let mut mesh = cube(0.5);
+        mesh.uvs = Some(vec![[0.5, 0.5]; mesh.vertices.len()]);
+        let mut png = std::io::Cursor::new(Vec::new());
+        solid_texture([10, 200, 90])
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode the texture");
+        let glb = crate::hunyuan3d::glb::write_glb(
+            &mesh,
+            &crate::hunyuan3d::glb::GlbMaterial {
+                base_color_texture: Some(png.into_inner()),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("write a painted glb");
+        let scene = crate::hunyuan3d::glb::read_glb_scene(&glb).expect("read it back");
+        assert_eq!(
+            scene.texture_wrap,
+            [TextureWrap::ClampToEdge; 2],
+            "write_glb declares CLAMP_TO_EDGE; the reader must not assume REPEAT"
         );
     }
 
@@ -925,6 +1040,7 @@ mod tests {
             &Appearance {
                 base_color_texture: Some(solid_texture([30, 60, 240])),
                 base_color_factor: [1.0; 3],
+                wrap: [TextureWrap::Repeat; 2],
             },
             48,
         )

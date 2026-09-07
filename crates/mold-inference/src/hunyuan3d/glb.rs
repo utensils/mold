@@ -484,6 +484,9 @@ pub struct GlbScene {
     /// a renderer that honoured it unconditionally would repaint every
     /// unpainted poster in the gallery.
     pub base_color_factor: [f32; 3],
+    /// The `baseColorTexture` sampler's `wrapS`/`wrapT`, as the file declares
+    /// them. `Repeat` when it declares none, which is glTF's default.
+    pub texture_wrap: [crate::hunyuan3d::poster::TextureWrap; 2],
 }
 
 impl GlbScene {
@@ -499,6 +502,7 @@ impl GlbScene {
             crate::hunyuan3d::poster::Appearance {
                 base_color_texture: self.base_color_texture,
                 base_color_factor: self.base_color_factor,
+                wrap: self.texture_wrap,
             },
         )
     }
@@ -533,6 +537,9 @@ pub fn read_glb_scene(bytes: &[u8]) -> Result<GlbScene, GlbReadError> {
         base_color_factor: material
             .and_then(|index| base_color_factor(&json, index))
             .unwrap_or([1.0; 3]),
+        texture_wrap: material
+            .map(|index| base_color_texture_wrap(&json, index))
+            .unwrap_or_default(),
         mesh,
     })
 }
@@ -580,6 +587,42 @@ fn base_color_factor(json: &serde_json::Value, material: usize) -> Option<[f32; 
 }
 
 /// Decode the material's embedded `baseColorTexture`.
+/// glTF sampler wrap modes. `REPEAT` is the spec's default and needs no
+/// constant here: it is what every unrecognized value resolves to.
+const WRAP_MIRRORED_REPEAT: u32 = 33648;
+
+/// The sampler `wrapS`/`wrapT` bound to a material's `baseColorTexture`.
+///
+/// A texture with no `sampler`, a sampler with no wrap field, and a wrap this
+/// renderer does not implement (`MIRRORED_REPEAT`) all answer `Repeat`, which
+/// is glTF's own default for an absent sampler.
+fn base_color_texture_wrap(
+    json: &serde_json::Value,
+    material: usize,
+) -> [crate::hunyuan3d::poster::TextureWrap; 2] {
+    use crate::hunyuan3d::poster::TextureWrap;
+    let read = |axis: &str| -> TextureWrap {
+        let mode = (|| {
+            let reference = material_pbr(json, material)?.get("baseColorTexture")?;
+            let texture = json
+                .get("textures")?
+                .as_array()?
+                .get(usize::try_from(reference.get("index")?.as_u64()?).ok()?)?;
+            let sampler = json
+                .get("samplers")?
+                .as_array()?
+                .get(usize::try_from(texture.get("sampler")?.as_u64()?).ok()?)?;
+            u32::try_from(sampler.get(axis)?.as_u64()?).ok()
+        })();
+        match mode {
+            Some(WRAP_CLAMP_TO_EDGE) => TextureWrap::ClampToEdge,
+            // Named for the reader: this is a deliberate degrade, not a gap.
+            Some(WRAP_MIRRORED_REPEAT) | Some(_) | None => TextureWrap::Repeat,
+        }
+    };
+    [read("wrapS"), read("wrapT")]
+}
+
 fn base_color_texture(
     json: &serde_json::Value,
     bin: &[u8],
