@@ -90,4 +90,23 @@ describe("mesh workflow authoring", () => {
       },
     ]);
   });
+
+  it("can author a payload-free mesh descriptor for streaming upload", () => {
+    const request = buildMeshTextureWorkflow({
+      meshModel: model("h3", "hunyuan3d", ["mesh_texture"]),
+      meshName: "large.glb",
+      meshByteLength: 256 * 1024 * 1024,
+      meshFormat: "glb",
+      appearanceBase64: "cG5n",
+      upAxis: "y",
+      metersPerUnit: 1,
+      textureResolution: 2048,
+    });
+    expect(request.texture_request.references?.[0]).toMatchObject({
+      media: { authority: "descriptor" },
+      byte_length: 256 * 1024 * 1024,
+      provenance: { name: "large.glb" },
+    });
+    expect(JSON.stringify(request)).not.toContain("meshBase64");
+  });
 });

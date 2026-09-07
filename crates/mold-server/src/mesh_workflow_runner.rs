@@ -53,30 +53,14 @@ pub fn startup_reconcile(
                 continue;
             }
         };
-        for stage in &manifest.stages {
-            mesh_workflow_jobs::upsert_stage(
-                db,
-                &MeshWorkflowStageRow {
-                    job_id: row.id.clone(),
-                    stage_index: stage.index,
-                    kind: stage.kind,
-                    state: if stage.state == MeshWorkflowStageState::Running
-                        && stage.execution_batch_id.is_none()
-                    {
-                        MeshWorkflowStageState::Pending
-                    } else {
-                        stage.state
-                    },
-                    execution_batch_id: stage.execution_batch_id.clone(),
-                    artifacts: stage.artifacts.clone(),
-                    error: stage.error.clone(),
-                    updated_at_ms: now_ms(),
-                },
-            )?;
-        }
         if row.request_json != manifest.request_json {
-            tracing::warn!(workflow_id = %row.id, "mesh workflow SQLite request differs from manifest; manifest remains recovery authority");
+            tracing::warn!(workflow_id = %row.id, "mesh workflow SQLite request differs from its portable manifest; refreshing the manifest from execution authority");
         }
+        // SQLite commits the execution claim before the portable manifest is
+        // refreshed. A crash in that narrow window therefore leaves SQLite
+        // ahead; projecting the stale manifest back into the database would
+        // discard the attached child id and admit duplicate GPU work.
+        update_manifest_from_db(db, &row)?;
         repaired += 1;
     }
     std::fs::create_dir_all(workflows_root)?;
@@ -170,13 +154,18 @@ async fn drive_job(
                 )?;
                 let batch_id =
                     admit_child(state, &current.id, "image", attempt_epoch, request).await?;
-                attach_batch(
+                if !attach_batch(
                     db,
                     &current.id,
                     &stages,
                     &[MeshWorkflowStageKind::Image],
                     &batch_id,
-                )?;
+                )? {
+                    crate::routes::cancel_generation_batch_children(state, &batch_id)
+                        .await
+                        .map_err(|error| anyhow!(error.error))?;
+                    continue;
+                }
                 update_manifest_from_db(db, &current)?;
             }
             NextAction::WaitImage { batch_id } => {
@@ -223,7 +212,12 @@ async fn drive_job(
                 let batch_id =
                     admit_child(state, &current.id, "mesh", attempt_epoch, child).await?;
                 let kinds = mesh_execution_kinds(&stages);
-                attach_batch(db, &current.id, &stages, &kinds, &batch_id)?;
+                if !attach_batch(db, &current.id, &stages, &kinds, &batch_id)? {
+                    crate::routes::cancel_generation_batch_children(state, &batch_id)
+                        .await
+                        .map_err(|error| anyhow!(error.error))?;
+                    continue;
+                }
                 update_manifest_from_db(db, &current)?;
             }
             NextAction::WaitMesh { batch_id } => {
@@ -250,7 +244,13 @@ async fn drive_job(
                     &filename,
                 )?;
                 let kinds = mesh_execution_kinds(&stages);
-                complete_kinds(db, &current.id, &stages, &kinds, &[artifact.clone()])?;
+                complete_kinds(
+                    db,
+                    &current.id,
+                    &stages,
+                    &kinds,
+                    std::slice::from_ref(&artifact),
+                )?;
                 update_manifest_from_db(db, &current)?;
             }
             NextAction::Finalize { batch_id } => {
@@ -451,17 +451,13 @@ fn attach_batch(
     stages: &[MeshWorkflowStageRow],
     kinds: &[MeshWorkflowStageKind],
     batch_id: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let stage_indices = stages
         .iter()
         .filter(|stage| kinds.contains(&stage.kind))
         .map(|stage| stage.stage_index)
         .collect::<Vec<_>>();
-    if !mesh_workflow_jobs::attach_stage_executions(db, job_id, &stage_indices, batch_id, now_ms())?
-    {
-        bail!("mesh workflow stage group lost its pending claim");
-    }
-    Ok(())
+    mesh_workflow_jobs::attach_stage_executions(db, job_id, &stage_indices, batch_id, now_ms())
 }
 
 fn complete_kinds(

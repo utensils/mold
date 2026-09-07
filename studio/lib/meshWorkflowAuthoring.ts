@@ -128,10 +128,10 @@ export function buildTextToMeshWorkflow(options: {
 
 export function buildMeshTextureWorkflow(options: {
   meshModel: WorkflowModel;
-  meshBase64: string;
+  meshBase64?: string;
   meshName: string;
   meshByteLength: number;
-  meshSha256: string;
+  meshSha256?: string;
   meshFormat: "glb" | "obj";
   appearanceBase64: string;
   upAxis: "y" | "z";
@@ -154,7 +154,9 @@ export function buildMeshTextureWorkflow(options: {
   request.references = [
     {
       kind: "mesh",
-      media: { authority: "inline", data: options.meshBase64 },
+      media: options.meshBase64
+        ? { authority: "inline", data: options.meshBase64 }
+        : { authority: "descriptor" },
       mime_type:
         options.meshFormat === "glb" ? "model/gltf-binary" : "model/obj",
       format: options.meshFormat,
@@ -163,7 +165,10 @@ export function buildMeshTextureWorkflow(options: {
         up_axis: options.upAxis,
         meters_per_unit: options.metersPerUnit,
       },
-      provenance: { name: options.meshName, sha256: options.meshSha256 },
+      provenance: {
+        name: options.meshName,
+        ...(options.meshSha256 ? { sha256: options.meshSha256 } : {}),
+      },
     },
   ];
   return { mode: "mesh_texture", texture_request: request };

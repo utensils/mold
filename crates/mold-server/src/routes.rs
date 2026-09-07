@@ -390,6 +390,7 @@ use crate::queue::clean_error_message;
         crate::routes_mesh_workflows::mesh_workflow_events,
         crate::routes_mesh_workflows::resume_mesh_workflow,
         crate::routes_mesh_workflows::cancel_mesh_workflow,
+        crate::routes_mesh_workflows::delete_mesh_workflow,
     ),
     components(schemas(
         mold_core::GenerateRequest,
@@ -613,7 +614,8 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/mesh-workflows/:id",
-            get(crate::routes_mesh_workflows::get_mesh_workflow),
+            get(crate::routes_mesh_workflows::get_mesh_workflow)
+                .delete(crate::routes_mesh_workflows::delete_mesh_workflow),
         )
         .route(
             "/api/mesh-workflows/:id/events",
@@ -3080,7 +3082,7 @@ pub(crate) async fn cancel_generation_batch_children(
         .map(|child| child.job_id.clone())
         .collect();
     for job_id in pending {
-        cancel_one_queue_job(&state, &job_id).await?;
+        cancel_one_queue_job(state, &job_id).await?;
     }
     Ok(())
 }

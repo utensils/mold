@@ -770,9 +770,9 @@ BEGIN
 END;
 "#;
 
-/// Queryable projection for portable, durable mesh workflow manifests. The
-/// manifest in `work_dir` remains restart authority; these rows make listing,
-/// claiming, cancellation, and recovery transactional.
+/// Transactional execution authority for portable, durable mesh workflows.
+/// The manifest in `work_dir` is refreshed from these rows and remains the
+/// portable recovery record for inspection and future import/export.
 const V36_MESH_WORKFLOW_JOBS: &str = r#"
 CREATE TABLE mesh_workflow_jobs (
     id              TEXT PRIMARY KEY,

@@ -119,6 +119,15 @@ export async function cancelMeshWorkflow(
   );
 }
 
+export async function deleteMeshWorkflow(
+  target: ApiTarget,
+  id: string,
+): Promise<void> {
+  await apiFetchTo(target, `/api/mesh-workflows/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export function meshWorkflowEventsUrl(target: ApiTarget, id: string): string {
   return `${target.baseUrl}/api/mesh-workflows/${encodeURIComponent(id)}/events`;
 }

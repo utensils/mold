@@ -283,8 +283,9 @@ pub enum MeshWorkflowEvent {
     },
 }
 
-/// Portable authority for restart and cross-host workflow recovery. SQLite is
-/// only a queryable index; this manifest wins during reconciliation.
+/// Portable workflow record. During local execution SQLite is the
+/// transactional authority and refreshes this manifest after every committed
+/// stage transition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshWorkflowManifest {
     pub schema: String,

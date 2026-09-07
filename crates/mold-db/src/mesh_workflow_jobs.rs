@@ -254,7 +254,11 @@ pub fn attach_stage_executions(
             if transaction.execute(
                 "UPDATE mesh_workflow_stages
                  SET state='running',execution_batch_id=?3,error=NULL,updated_at_ms=?4
-                 WHERE job_id=?1 AND stage_index=?2 AND state='pending' AND execution_batch_id IS NULL",
+                 WHERE job_id=?1 AND stage_index=?2 AND state='pending' AND execution_batch_id IS NULL
+                   AND EXISTS (
+                     SELECT 1 FROM mesh_workflow_jobs
+                      WHERE id=?1 AND state='running'
+                   )",
                 params![id, stage_index, batch_id, now_ms],
             )? != 1
             {
@@ -416,6 +420,16 @@ pub fn cancel_job(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
         None,
         now_ms,
     )
+}
+
+pub fn delete_settled_job(db: &MetadataDb, id: &str) -> Result<bool> {
+    db.with_conn(|connection| {
+        Ok(connection.execute(
+            "DELETE FROM mesh_workflow_jobs
+             WHERE id=?1 AND state IN ('completed','failed','cancelled')",
+            [id],
+        )? == 1)
+    })
 }
 
 pub fn upsert_stage(db: &MetadataDb, row: &MeshWorkflowStageRow) -> Result<()> {
@@ -629,6 +643,63 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_parent_fences_late_child_attachment() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let job = job("workflow", MeshWorkflowJobState::Running, 1);
+        let stages = [MeshWorkflowStageKind::Shape, MeshWorkflowStageKind::Paint]
+            .into_iter()
+            .enumerate()
+            .map(|(stage_index, kind)| MeshWorkflowStageRow {
+                job_id: job.id.clone(),
+                stage_index: stage_index as u32,
+                kind,
+                state: MeshWorkflowStageState::Pending,
+                execution_batch_id: None,
+                artifacts: Vec::new(),
+                error: None,
+                updated_at_ms: 1,
+            })
+            .collect::<Vec<_>>();
+        let mut job = job;
+        job.stage_count = 2;
+        insert_job_with_stages(&db, &job, &stages).unwrap();
+        assert!(cancel_job(&db, &job.id, 2).unwrap());
+        assert!(!attach_stage_executions(&db, &job.id, &[0, 1], "late-child", 3).unwrap());
+        assert!(stages_for_job(&db, &job.id)
+            .unwrap()
+            .iter()
+            .all(|stage| stage.state == MeshWorkflowStageState::Pending
+                && stage.execution_batch_id.is_none()));
+    }
+
+    #[test]
+    fn deletion_is_limited_to_settled_workflows_and_cascades_stages() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut row = job("workflow", MeshWorkflowJobState::Running, 1);
+        row.stage_count = 1;
+        insert_job_with_stages(
+            &db,
+            &row,
+            &[MeshWorkflowStageRow {
+                job_id: row.id.clone(),
+                stage_index: 0,
+                kind: MeshWorkflowStageKind::Shape,
+                state: MeshWorkflowStageState::Pending,
+                execution_batch_id: None,
+                artifacts: Vec::new(),
+                error: None,
+                updated_at_ms: 1,
+            }],
+        )
+        .unwrap();
+        assert!(!delete_settled_job(&db, &row.id).unwrap());
+        assert!(cancel_job(&db, &row.id, 2).unwrap());
+        assert!(delete_settled_job(&db, &row.id).unwrap());
+        assert!(get_job(&db, &row.id).unwrap().is_none());
+        assert!(stages_for_job(&db, &row.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn shared_child_attachment_and_completion_are_all_or_nothing() {
         let db = MetadataDb::open_in_memory().unwrap();
         let job = job("workflow", MeshWorkflowJobState::Queued, 1);
@@ -656,6 +727,7 @@ mod tests {
             )
             .unwrap();
         }
+        assert!(claim_job(&db, &job.id, 2).unwrap());
         assert!(attach_stage_executions(&db, &job.id, &[0, 1, 2], "batch", 2).unwrap());
         assert!(!attach_stage_executions(&db, &job.id, &[0, 1, 2], "other", 3).unwrap());
         let artifact = MeshWorkflowArtifact {

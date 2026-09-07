@@ -140,11 +140,7 @@ pub(crate) fn hydrate_for_admission(
     let (mut request, reference_paths) =
         queue_media::rehydrate_request_media(&stored.scope, &stored.request_json, media)
             .context("rehydrating mesh workflow request")?;
-    let references = request
-        .references
-        .as_mut()
-        .map(Vec::as_mut_slice)
-        .unwrap_or(&mut []);
+    let references = request.references.as_deref_mut().unwrap_or(&mut []);
     if references.len() != reference_paths.len() {
         bail!("mesh workflow reference descriptors do not match retained media");
     }

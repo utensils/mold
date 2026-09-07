@@ -5,6 +5,7 @@ import { apiFetchTo, apiJsonTo, type ApiTarget } from "../api/client";
 import {
   cancelMeshWorkflow,
   createMeshWorkflow,
+  deleteMeshWorkflow,
   getMeshWorkflow,
   listMeshWorkflows,
   resumeMeshWorkflow,
@@ -220,19 +221,20 @@ async function submit(): Promise<void> {
         : await (async () => {
             const mesh = meshFile.value!;
             const appearance = appearanceFile.value!;
-            const [meshPayload, appearancePayload] = await Promise.all([
-              filePayload(mesh),
-              filePayload(appearance),
-            ]);
+            const useUpload =
+              referenceUploads.value?.available === true &&
+              Boolean(props.target.apiKey?.trim());
+            const appearancePayload = await filePayload(appearance);
+            const meshPayload = useUpload ? null : await filePayload(mesh);
             const meshFormat = mesh.name.toLowerCase().endsWith(".obj")
               ? "obj"
               : "glb";
             return buildMeshTextureWorkflow({
               meshModel,
-              meshBase64: meshPayload.base64,
+              ...(meshPayload ? { meshBase64: meshPayload.base64 } : {}),
               meshName: mesh.name,
               meshByteLength: mesh.size,
-              meshSha256: meshPayload.sha256,
+              ...(meshPayload ? { meshSha256: meshPayload.sha256 } : {}),
               meshFormat,
               appearanceBase64: appearancePayload.base64,
               upAxis: upAxis.value,
@@ -240,19 +242,26 @@ async function submit(): Promise<void> {
               textureResolution: textureResolution.value,
             });
           })();
+    const directMeshUpload =
+      request.mode === "mesh_texture" &&
+      request.texture_request.references?.[0]?.media.authority === "descriptor";
     if (
       request.mode === "mesh_texture" &&
-      requestShouldUseReferenceUploads(
-        request.texture_request,
-        props.target,
-        referenceUploads.value,
-      )
+      (directMeshUpload ||
+        requestShouldUseReferenceUploads(
+          request.texture_request,
+          props.target,
+          referenceUploads.value,
+        ))
     ) {
       uploadLease = await prepareReferenceUploads({
         target: props.target,
         expectedInstanceId: instanceId.value,
         capabilities: referenceUploads.value,
         request: request.texture_request,
+        ...(directMeshUpload
+          ? { uploadBodies: new Map([[1, meshFile.value!]]) }
+          : {}),
       });
       request = { ...request, texture_request: uploadLease.request };
     }
@@ -288,6 +297,23 @@ async function resume(): Promise<void> {
   try {
     await resumeMeshWorkflow(props.target, selectedId.value);
     await Promise.all([refreshJobs(), refreshSelected()]);
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function remove(): Promise<void> {
+  if (!selectedId.value || !settled.value) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    await deleteMeshWorkflow(props.target, selectedId.value);
+    selectedId.value = "";
+    detail.value = null;
+    revokeResult();
+    await refreshJobs();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
@@ -548,6 +574,14 @@ onBeforeUnmount(() => {
               @click="resume"
             >
               Resume
+            </button>
+            <button
+              v-if="settled"
+              type="button"
+              :disabled="busy"
+              @click="remove"
+            >
+              Delete workflow data
             </button>
           </div>
         </div>

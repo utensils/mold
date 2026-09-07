@@ -59,6 +59,15 @@ fn mode(request: &CreateMeshWorkflowRequest) -> MeshWorkflowMode {
     }
 }
 
+fn mode_name(mode: MeshWorkflowMode) -> &'static str {
+    match mode {
+        MeshWorkflowMode::ImageToMesh => "image_to_mesh",
+        MeshWorkflowMode::MultiviewToMesh => "multiview_to_mesh",
+        MeshWorkflowMode::MeshTexture => "mesh_texture",
+        MeshWorkflowMode::TextToMesh => "text_to_mesh",
+    }
+}
+
 fn stage_records(rows: Vec<MeshWorkflowStageRow>) -> Vec<MeshWorkflowStageRecord> {
     rows.into_iter()
         .map(|row| MeshWorkflowStageRecord {
@@ -115,6 +124,82 @@ fn load_detail(state: &AppState, id: &str) -> Result<MeshWorkflowJobDetail, ApiE
     detail_from_rows(row, stages)
 }
 
+async fn validate_stage_model(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+    workflow_mode: Option<MeshWorkflowMode>,
+) -> Result<(), ApiError> {
+    let family = crate::routes::require_server_model_activation(state, &request.model).await?;
+    let mut validation_request = request.clone();
+    if workflow_mode == Some(MeshWorkflowMode::TextToMesh)
+        && validation_request.source_image.is_none()
+    {
+        // The preceding durable image stage supplies this field. Validation
+        // still needs to exercise the Hunyuan3D image-conditioned recipe.
+        validation_request.source_image = Some(vec![0]);
+    }
+    crate::routes::validate_generate_request(
+        &validation_request,
+        family.as_deref(),
+        mold_core::ReferenceForm::Admitted,
+    )
+    .map_err(ApiError::validation)?;
+    let canonical = mold_core::manifest::resolve_model_name(&request.model);
+    let profile = crate::routes::resolved_generation_profile(state, &request.model, &canonical)
+        .await
+        .ok_or_else(|| {
+            ApiError::validation(format!(
+                "model '{}' has no generation recipe deliverable by this server build",
+                request.model
+            ))
+        })?;
+    mold_core::validate_request_against_generation_profile(&profile, &validation_request)
+        .map_err(ApiError::validation)?;
+    if let Some(workflow_mode) = workflow_mode {
+        let recipe = if let Some(pipeline) = validation_request.pipeline {
+            profile
+                .recipes
+                .iter()
+                .find(|recipe| recipe.request_selector.pipeline == Some(pipeline))
+        } else {
+            profile.default_recipe()
+        }
+        .ok_or_else(|| ApiError::validation("request has no matching generation recipe"))?;
+        let advertised = recipe
+            .capabilities
+            .mesh
+            .as_ref()
+            .is_some_and(|mesh| mesh.workflow_modes.contains(&workflow_mode));
+        if !advertised {
+            return Err(ApiError::validation(format!(
+                "model '{}' does not support the '{}' mesh workflow",
+                request.model,
+                mode_name(workflow_mode)
+            )));
+        }
+    }
+    let _ = crate::model_manager::check_model_available(state, &request.model).await?;
+    Ok(())
+}
+
+async fn validate_workflow_models(
+    state: &AppState,
+    request: &CreateMeshWorkflowRequest,
+) -> Result<(), ApiError> {
+    match request {
+        CreateMeshWorkflowRequest::TextToMesh {
+            image_request,
+            mesh_request,
+        } => {
+            validate_stage_model(state, image_request, None).await?;
+            validate_stage_model(state, mesh_request, Some(MeshWorkflowMode::TextToMesh)).await
+        }
+        CreateMeshWorkflowRequest::MeshTexture { texture_request } => {
+            validate_stage_model(state, texture_request, Some(MeshWorkflowMode::MeshTexture)).await
+        }
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/mesh-workflows",
@@ -129,6 +214,7 @@ pub(crate) async fn create_mesh_workflow(
     Json(request): Json<CreateMeshWorkflowRequest>,
 ) -> Result<(StatusCode, Json<CreateMeshWorkflowResponse>), ApiError> {
     validate_create_mesh_workflow(&request).map_err(ApiError::validation)?;
+    validate_workflow_models(&state, &request).await?;
     let database = db(&state)?;
     let root = workflows_root()?;
     std::fs::create_dir_all(&root).map_err(|error| {
@@ -447,6 +533,17 @@ pub(crate) async fn cancel_mesh_workflow(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let existing = load_detail(&state, &id)?;
+    let changed = mesh_workflow_jobs::cancel_job(db(&state)?, &id, now_ms()).map_err(|error| {
+        ApiError::internal(format!("cancelling mesh workflow failed: {error:#}"))
+    })?;
+    if !changed && existing.summary.state != MeshWorkflowJobState::Cancelled {
+        return Err(ApiError::validation("mesh workflow is already settled"));
+    }
+    // Cancel the parent first. This fences a runner that admitted a child but
+    // has not attached it yet; its conditional attach then loses the claim
+    // and cancels that exact child itself. Loading attached ids after the
+    // fence covers the inverse ordering.
     let detail = load_detail(&state, &id)?;
     let batches = detail
         .stages
@@ -456,9 +553,7 @@ pub(crate) async fn cancel_mesh_workflow(
     for batch_id in batches {
         crate::routes::cancel_generation_batch_children(&state, batch_id).await?;
     }
-    if mesh_workflow_jobs::cancel_job(db(&state)?, &id, now_ms()).map_err(|error| {
-        ApiError::internal(format!("cancelling mesh workflow failed: {error:#}"))
-    })? {
+    if changed || existing.summary.state == MeshWorkflowJobState::Cancelled {
         let row = mesh_workflow_jobs::get_job(db(&state)?, &id)
             .map_err(|error| {
                 ApiError::internal(format!("loading cancelled mesh workflow failed: {error:#}"))
@@ -475,8 +570,57 @@ pub(crate) async fn cancel_mesh_workflow(
         )?;
         Ok(StatusCode::ACCEPTED)
     } else {
-        Err(ApiError::validation("mesh workflow is already settled"))
+        unreachable!("settled states returned before child cancellation")
     }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/mesh-workflows/{id}",
+    tag = "mesh-workflows",
+    params(("id" = String, Path, description = "Mesh workflow id")),
+    responses((status = 204, description = "Settled workflow and retained artifacts deleted"))
+)]
+pub(crate) async fn delete_mesh_workflow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let detail = load_detail(&state, &id)?;
+    if !matches!(
+        detail.summary.state,
+        MeshWorkflowJobState::Completed
+            | MeshWorkflowJobState::Failed
+            | MeshWorkflowJobState::Cancelled
+    ) {
+        return Err(ApiError::validation(
+            "cancel or wait for the mesh workflow before deleting it",
+        ));
+    }
+    let root = workflows_root()?;
+    let workflow_dir = root.join(&id);
+    let release_root = root.clone();
+    let release_dir = workflow_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::mesh_workflow_media::release_all(&release_root, &release_dir)?;
+        match std::fs::remove_dir_all(&release_dir) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("workflow deletion task failed: {error}")))?
+    .map_err(|error: anyhow::Error| {
+        ApiError::internal(format!(
+            "releasing mesh workflow artifacts failed: {error:#}"
+        ))
+    })?;
+    if !mesh_workflow_jobs::delete_settled_job(db(&state)?, &id)
+        .map_err(|error| ApiError::internal(format!("deleting mesh workflow failed: {error:#}")))?
+    {
+        return Err(ApiError::validation("mesh workflow is no longer settled"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

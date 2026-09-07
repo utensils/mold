@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cancelMeshWorkflow,
   createMeshWorkflow,
+  deleteMeshWorkflow,
   getMeshWorkflow,
   listMeshWorkflows,
   meshWorkflowEventsUrl,
@@ -37,6 +38,7 @@ describe("mesh workflow API", () => {
     await getMeshWorkflow(target, "mesh/1");
     await resumeMeshWorkflow(target, "mesh/1");
     await cancelMeshWorkflow(target, "mesh/1");
+    await deleteMeshWorkflow(target, "mesh/1");
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "http://hal:7680/api/mesh-workflows",
@@ -44,6 +46,7 @@ describe("mesh workflow API", () => {
       "http://hal:7680/api/mesh-workflows/mesh%2F1",
       "http://hal:7680/api/mesh-workflows/mesh%2F1/resume",
       "http://hal:7680/api/mesh-workflows/mesh%2F1/cancel",
+      "http://hal:7680/api/mesh-workflows/mesh%2F1",
     ]);
     for (const [, init] of fetchMock.mock.calls) {
       expect(new Headers(init?.headers).get("X-Api-Key")).toBe("secret");
