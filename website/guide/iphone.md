@@ -93,8 +93,8 @@ machine while only one is reachable.
 The form adapts to
 the selected model family and uses the same request contract and model defaults
 as desktop. The primary controls stay on the main screen; deeper options open in
-a full-screen **Advanced** sheet, and prompt **style** presets compose at submit
-without rewriting your prompt text. A **↺ Reset** beside the Advanced trigger
+a full-screen **More settings** sheet, and prompt **style** presets compose at submit
+without rewriting your prompt text. A **↺ Reset** beside the More settings trigger
 restores every generation setting to the selected model's defaults, keeping
 your prompt, model choice, and any prepared batch.
 
@@ -121,7 +121,7 @@ For video-only LTX-2 community checkpoints, **Generate audio** is disabled with
 an explanation when the connected server reports that the installed files lack
 an audio VAE or vocoder. Source-image video generation remains available.
 Empty guidance-override fields preserve the pipeline defaults. Invalid block
-lists or numeric ranges stay in the Advanced sheet with inline feedback and
+lists or numeric ranges stay in the More settings sheet with inline feedback and
 cannot queue a request; **Reset advanced**, templates, and Library reuse share
 the same saved override state as desktop.
 
@@ -147,7 +147,7 @@ away and does not stop you developing: the photo is parked, the request goes
 out without it, and the well comes back with the photo still in it when you
 select a qualified model again.
 
-Two knobs live in the Advanced sheet, count toward its badge, and clear with
+Two knobs live in the More settings sheet, count toward its badge, and clear with
 **Reset**. Both stay absent from the request until you touch them, so the
 server's own defaults keep applying:
 
@@ -445,8 +445,8 @@ changes pass the iOS workflow on `main`. The pipeline validates the bundled
 mobile `index.html`, Mold icon catalog, native archive, App Store Connect
 processing, and internal tester access before it is considered complete.
 
-The iPhone app focuses on remote Create, Library, Models, Machines, and
-appearance settings. Video is a setting inside Create, not a separate screen:
+The iPhone app focuses on remote Make, Queue, Images, Styles, Machines, and
+appearance settings. Video is a section inside Make, not a separate screen:
 pick a clip style, describe the shot, choose the duration, and generate while
 Mold keeps progress and cancellation attached to the exact host. Ask for a clip
 longer than one render and the machine splits, carries, and stitches the work
@@ -483,3 +483,28 @@ controls, see [Feature Support](/guide/feature-matrix).
 Update the remote Mold host. Current authenticated video playback needs the
 short-lived gallery media-ticket endpoint so iOS can make native Range requests
 without exposing the API key.
+
+
+### Mobile redesign foundation
+
+The phone uses **Make, Queue, Images, Styles, and Machines**. Make shares the
+ desktop’s Still picture, Short clip, and 3-D object sections and remembers the
+style last used in each. Prompt and required photos stay on the main screen;
+Detail, guidance, seed, mesh controls and other secondary controls live in
+**More settings**. Shape and Length remain in the main flow. Name and organize
+is optional. Generate stays above the software keyboard.
+
+Queue combines this phone’s work with live work from connected machines.
+Being made, Waiting, and Needs attention use the existing lifecycle and wait
+contracts. Opening details preserves the draft; restoring settings is explicit.
+Full queue records remain in memory. Finished shows at most 20 recent jobs
+known to this phone, not a durable fleet history; saved results remain in
+My images. Offline work is labeled as last known and cannot be changed until
+its machine reconnects.
+
+Saved machines appear before Add a machine, which contains pairing, nearby
+discovery and manual address entry. The connection controls start expanded on
+first setup. This foundation retains the existing Images and Styles workflows;
+further visual refinements and physical-device acceptance remain tracked in
+[issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
+intentionally absent.

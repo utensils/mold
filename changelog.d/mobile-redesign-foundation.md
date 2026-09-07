@@ -1,0 +1,1 @@
+- Begin the shared iOS and Android redesign with Make, Queue, Images, Styles, and Machines; simplify creation into three output kinds with remembered styles and More settings, keep Generate above the iPhone keyboard, and inspect machine-aware Queue details without replacing the draft. This is the first TestFlight milestone; further mobile refinements continue.

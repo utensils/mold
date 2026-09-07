@@ -418,15 +418,40 @@ Views: the five shared Mold Studio workspaces — Create, Library, Models, Machi
 | Area        | Current iPhone contract                                                                                                                                                                                                                                                                                                                                                             |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Processing  | Remote hosts only; no local fallback or embedded engine                                                                                                                                                                                                                                                                                                                             |
-| Navigation  | Create, Library, Models, Machines; header-pushed Settings                                                                                                                                                                                                                                                                                                                           |
+| Navigation  | Make, Queue, Images, Styles, Machines; header-pushed Settings                                                                                                                                                                                                                                                                                                                           |
 | Machines    | Bonjour `_mold._tcp`, IP/DNS/HTTPS, Tailscale MagicDNS, Keychain API keys, detailed telemetry/models/downloads/queue                                                                                                                                                                                                                                                                |
-| Create      | Shared capability/request logic, frozen-host prepared expansion, full-screen Advanced sheet, style presets, proportional resolution controls, Random/Fixed seed, independent sibling queue, current image/video parameters, canvasless Mesh controls (Octree/Iso threshold/Target faces) and promptless generate with a Hunyuan3D model                                             |
-| Library     | All saved hosts merged newest-first, full-screen media with a swipe-up details sheet, Range seeking, horizontal navigation, explicit prompt/source reuse, optional batch/source provenance, orbitable mesh viewer whose GLB / OBJ / STL / PLY / Turntable picker feeds Share… or Save to Mold folder (Files ▸ On My iPhone ▸ Mold after the first save; `Download/Mold` on Android) |
-| Models      | Installed/live union, browse-host/target-host separation, model detail/actions, immediate Connecting/Starting/Queued/Pulling status                                                                                                                                                                                                                                                 |
-| Settings    | Mold Studio families (Mold/Safelight) × System/Dark/Light, host shortcut, version, remote-only policy, TestFlight update channel, and privacy-policy link                                                                                                                                                                                                                           |
+| Make        | Three output kinds with remembered styles; shared capability/request logic, frozen-host prepared expansion, full-screen More settings sheet, style presets, proportional resolution controls, Repeat this look, independent sibling queue, current image/video parameters, canvasless Mesh controls (Octree/Iso threshold/Target faces) and promptless generate with a Hunyuan3D model                                             |
+| Images      | All saved hosts merged newest-first, full-screen media with a swipe-up details sheet, Range seeking, horizontal navigation, explicit prompt/source reuse, optional batch/source provenance, orbitable mesh viewer whose GLB / OBJ / STL / PLY / Turntable picker feeds Share… or Save to Mold folder (Files ▸ On My iPhone ▸ Mold after the first save; `Download/Mold` on Android) |
+| Styles      | Installed/live union, browse-host/target-host separation, model detail/actions, immediate Connecting/Starting/Queued/Pulling status                                                                                                                                                                                                                                                 |
+| Settings    | Six shared themes with Match phone, host shortcut, version, remote-only policy, TestFlight update channel, and privacy-policy link                                                                                                                                                                                                                           |
 | Interaction | Safe areas, 44pt controls, 16px editable text, no WebView document zoom, no shell rubber band, scoped Library swipe                                                                                                                                                                                                                                                                 |
 | Release     | Eligible successful `main` iOS CI → internal/external-eligible TestFlight build → App Store Connect `VALID` → baseline internal tester verification; external groups submit the same build to Beta App Review                                                                                                                                                                       |
 
 Deliberate initial exclusions are the full durable-jobs administration
 workspace, RunPod provisioning, engine configuration, desktop file/clipboard
 actions, and desktop Stable/Nightly self-update controls.
+
+
+### Mobile redesign foundation
+
+The phone uses **Make, Queue, Images, Styles, and Machines**. Make shares the
+ desktop’s Still picture, Short clip, and 3-D object sections and remembers the
+style last used in each. Prompt and required photos stay on the main screen;
+Detail, guidance, seed, mesh controls and other secondary controls live in
+**More settings**. Shape and Length remain in the main flow. Name and organize
+is optional. Generate stays above the software keyboard.
+
+Queue combines this phone’s work with live work from connected machines.
+Being made, Waiting, and Needs attention use the existing lifecycle and wait
+contracts. Opening details preserves the draft; restoring settings is explicit.
+Full queue records remain in memory. Finished shows at most 20 recent jobs
+known to this phone, not a durable fleet history; saved results remain in
+My images. Offline work is labeled as last known and cannot be changed until
+its machine reconnects.
+
+Saved machines appear before Add a machine, which contains pairing, nearby
+discovery and manual address entry. The connection controls start expanded on
+first setup. This foundation retains the existing Images and Styles workflows;
+further visual refinements and physical-device acceptance remain tracked in
+[issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
+intentionally absent.

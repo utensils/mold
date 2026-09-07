@@ -1088,6 +1088,81 @@ describe("MobileApp generation lifecycle", () => {
     expect(text.indexOf("newer developing print")).toBeLessThan(text.indexOf("older queued print"));
   });
 
+  it.each([true, false])(
+    "uses shared running queue details and gates cancellation (%s)",
+    async (cooperative) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/status") return Promise.resolve({ ...status, queue_capacity: 2 });
+        if (path === "/api/capabilities")
+          return Promise.resolve({
+            queue: { cooperative_cancellation: cooperative, heterogeneous_batch_max_outputs: 8 },
+          });
+        if (path === "/api/activity")
+          return Promise.resolve({
+            instance_id: status.instance_id,
+            observed_at_unix_ms: 10,
+            items: [
+              {
+                id: "foreign-running",
+                kind: "generation",
+                phase: "running",
+                model: model.name,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 9,
+                can_cancel: true,
+              },
+            ],
+          });
+        if (path === "/api/queue?limit=2")
+          return Promise.resolve({
+            entries: [
+              {
+                id: "foreign-running",
+                model: model.name,
+                state: "running",
+                started_at_unix_ms: 1,
+                position: 0,
+                seed_pinned: false,
+                metadata: {
+                  prompt: "A shared running print",
+                  model: model.name,
+                  seed: 42,
+                  width: 512,
+                  height: 512,
+                },
+              },
+            ],
+            plan: null,
+          });
+        if (path === "/api/queue/foreign-running/preview")
+          return Promise.resolve({ preview_image: null, step: 1, total: 4 });
+        return durableApiFallback(path, init, callTarget);
+      });
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await wrapper
+        .get("[data-test='live-activity-select-studio-id:generation:foreign-running']")
+        .trigger("click");
+      await flushPromises();
+      expect(wrapper.get("[data-test='queue-detail-prompt']").text()).toBe(
+        "A shared running print",
+      );
+      const cancel = wrapper.get("[data-test='queue-detail-cancel']");
+      expect(cancel.attributes("disabled") !== undefined).toBe(!cooperative);
+      if (cooperative) {
+        await cancel.trigger("click");
+        expect(cancel.text()).toBe("Cancel job?");
+        await cancel.trigger("click");
+        await flushPromises();
+        expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-running", {
+          method: "DELETE",
+        });
+      }
+    },
+  );
+
   it("swipes a queued item from another client to exact-host pause and resume", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status")
@@ -1322,7 +1397,9 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
     expect(fieldControl("Prompt").element).toHaveProperty("value", "My unsent draft");
     expect(wrapper.get("[data-test='mobile-queue-details']").classes()).toContain("is-open");
-    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
+    await wrapper
+      .get("[data-test='mobile-queue-use-settings'], [data-test='queue-detail-reuse']")
+      .trigger("click");
     await flushPromises();
 
     expect(fieldControl("Prompt").element).toHaveProperty(
@@ -1400,7 +1477,9 @@ describe("MobileApp generation lifecycle", () => {
     );
     await autoChainRow.trigger("click");
     await flushPromises();
-    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
+    await wrapper
+      .get("[data-test='mobile-queue-use-settings'], [data-test='queue-detail-reuse']")
+      .trigger("click");
     await flushPromises();
 
     expect(
@@ -1448,7 +1527,9 @@ describe("MobileApp generation lifecycle", () => {
       .get("[data-test='live-activity-select-studio-id:generation:colliding-job-id']")
       .trigger("click");
     await flushPromises();
-    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
+    await wrapper
+      .get("[data-test='mobile-queue-use-settings'], [data-test='queue-detail-reuse']")
+      .trigger("click");
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
@@ -2214,7 +2295,9 @@ describe("MobileApp generation queue", () => {
     (rowButton.element as HTMLElement).focus();
     await rowButton.trigger("keydown", { key: "Enter" });
     await flushPromises();
-    await wrapper.get("[data-test='mobile-queue-use-settings']").trigger("click");
+    await wrapper
+      .get("[data-test='mobile-queue-use-settings'], [data-test='queue-detail-reuse']")
+      .trigger("click");
     await flushPromises();
     await flushPromises();
 

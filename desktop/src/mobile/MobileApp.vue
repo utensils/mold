@@ -12,6 +12,8 @@ import {
 } from "@tauri-apps/plugin-barcode-scanner";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
+import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
+import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 import { promptRecipeFromForm } from "../lib/promptRecipe";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -149,6 +151,7 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import {
+  cancelQueueJob,
   findQueueEntryById,
   listQueue,
   mergeQueueEntries,
@@ -2772,7 +2775,7 @@ const mobileQueueGroups = computed(() =>
         mobileQueueSection(
           entry.local.queueState ?? mobilePrintPhase(entry.local.print, entry.local.live),
           !host?.online || !!host.stale,
-          !!entry.local.blockedReason || !!durableHold(entry.local.print),
+          entry.local.blockedReason || !!durableHold(entry.local.print),
         ) === section.id
       );
     }),
@@ -2801,6 +2804,100 @@ const queueDetailHost = computed(() =>
         (queueDetailEntry.value?.kind === "shared" ? queueDetailEntry.value.shared.hostId : null)),
   ),
 );
+const queueDetailRow = computed(() => {
+  const entry = queueDetailEntry.value;
+  const host = queueDetailHost.value;
+  const id = entry?.kind === "local" ? activityRowJobId(entry.local) : entry?.shared.id;
+  return host && id
+    ? (liveQueues.value[host.id]?.entries.find((row) => row.id === id) ?? null)
+    : null;
+});
+const queueDetailModel = computed(() => {
+  const row = queueDetailRow.value;
+  const host = queueDetailHost.value;
+  if (!row || !host) return null;
+  const job = queueDetailJob.value;
+  const request = job && !presentationStubClientIds.has(job.clientId) ? job.request : null;
+  const model = queueEntryDetailModel({
+    entry: row,
+    hostLabel: host.name,
+    modelLabel: modelLabel(row.model),
+    nowMs: Date.now(),
+    plan: liveQueues.value[host.id]?.plan ?? null,
+    metadata: row.metadata as QueueDetailMetadata | null,
+    localMetadata: request
+      ? {
+          ...request,
+          lora: request.lora?.path ?? null,
+          lora_scale: request.lora?.scale ?? null,
+          collection: request.collection?.name ?? request.collection?.id ?? null,
+        }
+      : null,
+    retryAuthority: job ? durableRecoveryForJob(job) : null,
+    mine: !!queueDetailJob.value,
+    canCancelRunning: serverCapabilities[host.id]?.queue?.cooperative_cancellation === true,
+  });
+  if (!host.online || host.stale) {
+    for (const action of [model.cancel, model.retry, model.reuse]) {
+      action.available = false;
+      action.blockedReason = "Reconnect this machine first.";
+    }
+  }
+  return model;
+});
+const queueDetailPreview = ref<QueueJobProgress | null>(null);
+watch(
+  () =>
+    [
+      queueDetailRow.value?.id,
+      queueDetailRow.value?.state,
+      queueDetailHost.value?.baseUrl,
+      queueDetailHost.value?.online,
+      queueDetailHost.value?.stale,
+    ] as const,
+  (_, __, cleanup) => {
+    queueDetailPreview.value = null;
+    const row = queueDetailRow.value;
+    const host = queueDetailHost.value;
+    if (!row || row.state !== "running" || !host?.online || host.stale) return;
+    const stop = watchSelectedQueuePreview(
+      mobileHostTarget(host),
+      row.id,
+      (preview) => {
+        queueDetailPreview.value = preview;
+      },
+      750,
+      () => {
+        queueDetailPreview.value = null;
+      },
+    );
+    cleanup(stop);
+  },
+);
+async function cancelQueueDetail(): Promise<void> {
+  const entry = queueDetailEntry.value;
+  const row = queueDetailRow.value;
+  if (!entry || !row || !queueDetailModel.value?.cancel.available || queueDetailBusy.value) return;
+  if (entry.kind === "local") {
+    await onMobileQueueRowAction(entry.local, "cancel");
+    return;
+  }
+  const authority = fleetQueueAuthority(entry.shared);
+  if (!authority) return;
+  queueDetailBusy.value = true;
+  queueDetailError.value = "";
+  try {
+    const status = await apiJsonTo<ServerStatus>(authority.target, "/api/status");
+    if (status.instance_id?.trim() !== authority.expectedInstanceId)
+      throw new Error("This address now reports a different Mold server identity.");
+    await cancelQueueJob(authority.target, row.id);
+    await refreshMobileActivity();
+  } catch (error) {
+    queueDetailError.value = describeTransportError(error, authority.host.name);
+  } finally {
+    queueDetailBusy.value = false;
+  }
+}
 const queueDetailError = ref("");
 const queueDetailBusy = ref(false);
 function inspectQueueEntry(key: string): void {
@@ -13093,24 +13190,55 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       test-id="mobile-queue-details"
       @close="queueDetailKey = null"
     >
-      <p class="section-note">{{ queueDetailHost?.name ?? "Machine unavailable" }}</p>
-      <p v-if="queueDetailJob" class="mobile-queue-detail-prompt">{{ queueDetailJob.prompt }}</p>
-      <p v-if="queueDetailEntry?.kind === 'local'">
-        {{ activityRowStatus(queueDetailEntry.local) }}
-      </p>
-      <p v-else-if="queueDetailEntry?.kind === 'shared'">
-        {{ queueDetailEntry.shared.phase.replaceAll("_", " ") }} ·
-        {{ queueDetailEntry.shared.model }}
-      </p>
-      <p v-else-if="queueDetailJob">
-        {{ queueDetailJob.status === "complete" ? "Complete" : "Stopped with an error" }}
-      </p>
-      <p v-else>This item has left the live queue. Saved results are in My images.</p>
+      <QueueEntryDetail
+        v-if="queueDetailModel"
+        :key="queueDetailModel.jobId"
+        :model="queueDetailModel"
+        :preview="queueDetailPreview"
+        :cancelling="queueDetailBusy || !!queueDetailJob?.cancelling"
+        :retrying="queueDetailJob ? durableHeldIsRetrying(queueDetailJob) : false"
+        :error="queueDetailError"
+        confirm="inline"
+        compact
+        @close="queueDetailKey = null"
+        @reuse="restoreQueueDetailSettings"
+        @cancel="cancelQueueDetail"
+        @retry="queueDetailJob && retryHeldGeneration(queueDetailJob)"
+      />
+      <template v-else>
+        <p class="section-note">{{ queueDetailHost?.name ?? "Machine unavailable" }}</p>
+        <p v-if="queueDetailJob" class="mobile-queue-detail-prompt">{{ queueDetailJob.prompt }}</p>
+        <p v-if="queueDetailEntry?.kind === 'local'">
+          {{ activityRowStatus(queueDetailEntry.local) }}
+        </p>
+        <p v-else-if="queueDetailEntry?.kind === 'shared'">
+          {{ activeWorkPhaseLabel(queueDetailEntry.shared) }}
+        </p>
+        <p v-else-if="queueDetailJob">
+          {{ queueDetailJob.status === "complete" ? "Complete" : "Stopped with an error" }}
+        </p>
+        <p v-else>This item has left the live queue. Saved results are in My images.</p>
+        <p v-if="queueDetailEntry?.kind === 'shared'">
+          Activity summary only. Open this machine for full work details and controls.
+        </p>
+      </template>
       <p v-if="!queueDetailHost?.online || queueDetailHost?.stale" role="status">
         Last known state. Reconnect this machine before changing its work.
       </p>
       <p v-if="queueDetailError" role="alert">{{ queueDetailError }}</p>
       <div class="mobile-queue-detail-actions">
+        <button
+          v-if="!queueDetailModel && queueDetailEntry?.kind === 'shared'"
+          type="button"
+          class="secondary-button"
+          @click="
+            tab = 'hosts';
+            showHostDetail(queueDetailEntry.shared.hostId);
+            queueDetailKey = null;
+          "
+        >
+          Open machine details
+        </button>
         <button
           v-if="queueDetailJob?.result?.filename"
           type="button"
@@ -13121,7 +13249,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           View result
         </button>
         <button
-          v-if="queueDetailJob || queueDetailEntry?.kind === 'shared'"
+          v-if="!queueDetailModel && (queueDetailJob || queueDetailEntry?.kind === 'shared')"
           type="button"
           class="secondary-button"
           data-test="mobile-queue-use-settings"
@@ -13138,7 +13266,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </button>
         <template v-if="queueDetailEntry?.kind === 'local'">
           <button
-            v-for="action in mobileQueueRowActions(queueDetailEntry.local)"
+            v-for="action in mobileQueueRowActions(queueDetailEntry.local).filter(
+              (action) => !queueDetailModel || !['cancel', 'retry'].includes(action.id),
+            )"
             :key="action.id"
             type="button"
             class="secondary-button"

@@ -6,6 +6,19 @@ describe("mobile queue sections", () => {
     expect(mobileQueueSection("queued", false, true)).toBe("attention");
     expect(mobileQueueSection("paused")).toBe("attention");
   });
+  it("keeps normal serialization in Waiting and flags actionable or unknown reasons", () => {
+    for (const reason of [
+      "no_schedulable_device",
+      "no_idle_device",
+      "warm_wait",
+      "dependency_wait",
+      "lower_priority_opening",
+    ]) {
+      expect(mobileQueueSection("queued", false, reason)).toBe("waiting");
+    }
+    expect(mobileQueueSection("queued", false, "license_required")).toBe("attention");
+    expect(mobileQueueSection("queued", false, "future_reason")).toBe("attention");
+  });
   it("separates admission and waiting from active preparation or denoising", () => {
     expect(mobileQueueSection("accepted")).toBe("waiting");
     expect(mobileQueueSection("queued")).toBe("waiting");

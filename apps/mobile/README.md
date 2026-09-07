@@ -54,10 +54,10 @@ instead.
 
 ## Current product surface
 
-The primary tabs are Create, Library, Models, and Machines. Settings is a
+The primary tabs are Make, Queue, Images, Styles, and Machines. Settings is a
 pushed screen opened from the header.
 
-- **Create** picks where work lands. With one connected machine the Host
+- **Make** picks where work lands. With one connected machine the Host
   control behaves exactly as before. Once two or more connected machines are
   reachable it also offers **Auto** (the least busy machine that already has
   the model) and **Most capable** (the strongest GPU that has it — CUDA before
@@ -82,7 +82,7 @@ pushed screen opened from the header.
   local templates, independently cancellable siblings, source/edit images,
   masks, ControlNet, LoRA, scheduler and CFG++, post-generation upscaling,
   target-host estimates, proportional resolution choices, and explicit Random
-  or Fixed seeds. Deeper options open in a full-screen **Advanced** sheet, and
+  or Fixed seeds. Deeper options open in a full-screen **More settings** sheet, and
   Which image wells the source section renders is the RECIPE's answer, never a
   model name: `sourceMediaPlan` projects `capabilities.reference_images` into
   one source well, an ordered picture strip (its ceiling and its Target role
@@ -134,7 +134,7 @@ pushed screen opened from the header.
   the form, kept off the wire by `buildRequest`, Develop still enabled — and
   the well returns with it when a qualified checkpoint is selected again.
   **Identity strength** (`0.0`–`3.0`, step `0.05`, default `1.0`) and
-  **Identity start step** live in the Advanced sheet, count toward its badge,
+  **Identity start step** live in the More settings sheet, count toward its badge,
   clear on its Reset (which keeps the attached face), and stay absent from the
   request until touched so the server's defaults remain authoritative. Every
   refusal — a photo with a LoRA or a source image, a knob with no photo, an
@@ -155,9 +155,9 @@ pushed screen opened from the header.
   `@studio/lib/identityConditioning`; `desktop/src/mobile/identity.ts` holds
   only the phone-shaped parts (budget, native ingest, Info rows, reuse
   outcome).
-  A **↺ Reset** beside the Advanced trigger restores every generation setting
+  A **↺ Reset** beside the More settings trigger restores every generation setting
   to the selected model's defaults while preserving the prompt, model choice,
-  and any prepared batch size; the Advanced sheet keeps its narrower
+  and any prepared batch size; the More settings sheet keeps its narrower
   advanced-only Reset.
   For LTX-2 checkpoints, the primary Create settings honor additive
   `supports_audio` model metadata and the resolved recipe: audio-capable host
@@ -217,7 +217,7 @@ pushed screen opened from the header.
   develops in a bed above the status line — the preview sharpens with denoise
   progress under the shared thinning Develop grain, matching the print's
   aspect ratio; without previews the plain status line remains.
-- **Library** merges saved media from every configured host. Its viewer gives
+- **Images** merges saved media from every configured host. Its viewer gives
   the whole screen to the print: the media fills the viewport behind a thin
   translucent header (Close, the title, the position), and every detail and
   action lives in a bottom sheet that peeks one line — the kind badge, what
@@ -368,7 +368,7 @@ pushed screen opened from the header.
   helpers); failures are reported in a persistent inline banner, never a
   toast, and edits patch the offline IndexedDB cache behind its mutation
   fence.
-- **Models** merges installed models with Hugging Face and Civitai results,
+- **Styles** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
   sort (the family list and a failed search reload themselves when the browsed
   host's address, key, or reachability changes; when the host taxonomy cannot
@@ -461,11 +461,11 @@ pushed screen opened from the header.
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
-overscroll. A horizontal swipe moves through Create → Library → Models →
+overscroll. A horizontal swipe moves through Make → Queue → Images → Styles →
 Machines, while a right swipe pops Machine Detail or Settings. Editable
 controls, horizontal scrollers, action rows, dialogs, and the full-screen
 Library viewer retain their own gesture authority. Pulling down at the top
-refreshes Library, Models, Machines, and Machine Detail; Create and Settings
+refreshes Images, Styles, Machines, and Machine Detail; Make and Settings
 stay on their existing live polling/streaming paths so an in-progress form is
 never disrupted. The Library viewer keeps its scoped horizontal swipe gesture,
 and the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`)
@@ -825,3 +825,28 @@ Older hosts omit this section. Shared RAM remains separate from the Metal
 budget. Kernel changes are local-only `mold system metal-memory` commands on
 that Mac; the app has no remote privileged control. See the
 [Metal memory guide](../../website/guide/metal-memory.md).
+
+
+### Mobile redesign foundation
+
+The phone uses **Make, Queue, Images, Styles, and Machines**. Make shares the
+ desktop’s Still picture, Short clip, and 3-D object sections and remembers the
+style last used in each. Prompt and required photos stay on the main screen;
+Detail, guidance, seed, mesh controls and other secondary controls live in
+**More settings**. Shape and Length remain in the main flow. Name and organize
+is optional. Generate stays above the software keyboard.
+
+Queue combines this phone’s work with live work from connected machines.
+Being made, Waiting, and Needs attention use the existing lifecycle and wait
+contracts. Opening details preserves the draft; restoring settings is explicit.
+Full queue records remain in memory. Finished shows at most 20 recent jobs
+known to this phone, not a durable fleet history; saved results remain in
+My images. Offline work is labeled as last known and cannot be changed until
+its machine reconnects.
+
+Saved machines appear before Add a machine, which contains pairing, nearby
+discovery and manual address entry. The connection controls start expanded on
+first setup. This foundation retains the existing Images and Styles workflows;
+further visual refinements and physical-device acceptance remain tracked in
+[issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
+intentionally absent.
