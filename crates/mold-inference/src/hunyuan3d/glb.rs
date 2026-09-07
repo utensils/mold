@@ -460,8 +460,13 @@ pub fn read_glb(bytes: &[u8]) -> Result<Mesh, GlbReadError> {
 /// geometry-only reader left every PBR print rendering in the bare placeholder
 /// grey while the interactive viewer showed it in colour.
 ///
-/// Mirrors `readBaseColorTexture` in `studio/lib/glb.ts` so the viewer and the
-/// server-side raster take the same image out of the same file.
+/// Reads the same field of the same file as `readBaseColorTexture` in
+/// `studio/lib/glb.ts`, but not on the same terms: this reader also requires
+/// every primitive in the file to share one material, refuses a `texCoord`
+/// other than 0, and refuses a buffer other than the embedded one, where the
+/// viewer takes mesh 0 / primitive 0 and asks none of that. Every divergence
+/// is toward grey — a multi-material file the viewer paints renders as bare
+/// geometry here, which is a worse tile but never a wrong one.
 pub struct GlbScene {
     pub mesh: Mesh,
     /// The decoded `baseColorTexture`, sRGB, sampled through `mesh.uvs`.
@@ -501,11 +506,14 @@ impl GlbScene {
 
 /// Largest embedded texture edge that is decoded.
 ///
-/// A `baseColorTexture` mold writes is at most 4096 square. This bound is
-/// about a FOREIGN file: image headers are caller-supplied, and a poster
-/// render happens inside `spawn_blocking`, where an allocation bomb is a
-/// server incident rather than a bad thumbnail.
-const MAX_TEXTURE_EDGE: u32 = 8192;
+/// mold's own paint writes at most 4096 square and a poster is at most 2048,
+/// so this refuses nothing anyone can generate here. The bound is about a
+/// FOREIGN file: image headers are caller-supplied, a poster renders inside
+/// `spawn_blocking`, and `image`'s own limits cover the decode but not the
+/// `to_rgb8` conversion after it — so an 8192-square source would cost a
+/// quarter of a gigabyte to decode and another fifth to convert, per file
+/// being rendered at once.
+const MAX_TEXTURE_EDGE: u32 = 4096;
 
 /// [`read_glb`] plus the material appearance the file carries.
 ///

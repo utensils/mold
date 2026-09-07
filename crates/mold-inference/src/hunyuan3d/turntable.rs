@@ -45,8 +45,10 @@ pub const DEFAULT_SIZE: u32 = 512;
 
 /// Upper bound on the decoded frame buffer, the same figure the video export
 /// holds itself to (`ltx2::media::MAX_ANIMATION_EXPORT_RGB_BYTES`): a
-/// turntable is the same kind of object once rendered, and the GIF encoder
-/// makes an RGBA copy of every frame on top of this.
+/// turntable is the same kind of object once rendered. An opaque sweep is
+/// charged three bytes a pixel and the GIF encoder makes an RGBA copy of each
+/// frame on top of that; a transparent one is charged four, because its
+/// frames are RGBA all the way to the encoder.
 pub const MAX_TURNTABLE_RGB_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How a turntable is rendered and played back.
@@ -102,12 +104,18 @@ pub fn check_frame_budget(options: &TurntableOptions) -> std::result::Result<(),
         .saturating_mul(u64::from(options.size))
         .saturating_mul(channels);
     if bytes > MAX_TURNTABLE_RGB_BYTES {
+        // Transparency is named when it is on, because it is a quarter of the
+        // budget: a sweep that exports fine opaque is refused the moment it is
+        // ticked, and a refusal that listed only frames and size would send
+        // the user to shrink an export that did not need shrinking.
         return Err(format!(
-            "{} frames at {} px need {} MiB of frame buffer, over the {} MiB export budget; lower frames or max_dimension",
+            "{} frames at {} px{} need {} MiB of frame buffer, over the {} MiB export budget; lower frames or max_dimension{}",
             options.frames,
             options.size,
+            if options.transparent { " with a transparent background" } else { "" },
             bytes / (1024 * 1024),
-            MAX_TURNTABLE_RGB_BYTES / (1024 * 1024)
+            MAX_TURNTABLE_RGB_BYTES / (1024 * 1024),
+            if options.transparent { ", or turn transparency off" } else { "" }
         ));
     }
     Ok(())

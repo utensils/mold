@@ -274,7 +274,18 @@ pub fn encode_gif_rgba_with_options(
         let mut write_frame = |frame_img: &image::RgbaImage| -> Result<()> {
             let mut pixels = frame_img.as_raw().clone();
             for pixel in pixels.chunks_exact_mut(4) {
-                pixel[3] = if pixel[3] >= ALPHA_CUTOFF { 255 } else { 0 };
+                if pixel[3] >= ALPHA_CUTOFF {
+                    pixel[3] = 255;
+                } else {
+                    // Cleared pixels are stamped with one colour, and a
+                    // deliberately garish one. `Frame::from_rgba_speed`
+                    // resolves the transparent palette entry by nearest
+                    // neighbour over RGBA, so a cut-out whose clear colour was
+                    // black could pull the darkest pixels of a dark PAINTED
+                    // mesh onto that entry and punch holes in the object. The
+                    // entry is never drawn, so its colour costs nothing.
+                    pixel.copy_from_slice(&CLEAR_SENTINEL);
+                }
             }
             let mut gif_frame = gif::Frame::from_rgba_speed(width, height, &mut pixels, 10);
             gif_frame.delay = delay_cs;
@@ -305,6 +316,10 @@ pub fn encode_gif_rgba_with_options(
 /// it, so a hard cut here keeps the object the size it was rendered at
 /// instead of eroding or dilating its outline.
 const ALPHA_CUTOFF: u8 = 128;
+
+/// The RGBA a cleared pixel is stamped with before quantization: magenta, as
+/// far from any shaded surface as the cube allows.
+const CLEAR_SENTINEL: [u8; 4] = [255, 0, 255, 0];
 
 /// [`encode_apng`] for frames that carry their own alpha. APNG holds the full
 /// channel, so the antialiased silhouette survives intact.

@@ -478,11 +478,17 @@ impl Painted<'_> {
         let (width, height) = (texture.width(), texture.height());
         let x = uv[0] * width as f32 - 0.5;
         let y = uv[1] * height as f32 - 0.5;
-        let (x0, y0) = (x.floor(), y.floor());
-        let (fx, fy) = (x - x0, y - y0);
-        // Rust's float-to-int casts saturate and send NaN to zero, so a
-        // nonfinite UV picks a real texel instead of trapping.
-        let (x0, y0) = (x0 as i64, y0 as i64);
+        // A foreign `.glb` can carry a UV of 1e30 or a NaN. Rust's
+        // float-to-int casts saturate and send NaN to zero, so the index is
+        // always real — but the FRACTIONS would go NaN and take the whole
+        // albedo with them, and `x0 + 1` on a saturated `i64::MAX` panics in
+        // a debug build. Fall back to the texture's origin instead.
+        let (x0, y0, fx, fy) = if x.is_finite() && y.is_finite() {
+            let (x0, y0) = (x.floor(), y.floor());
+            (x0 as i64, y0 as i64, x - x0, y - y0)
+        } else {
+            (0, 0, 0.0, 0.0)
+        };
         let mut out = [0.0f32; 3];
         for (dx, dy, weight) in [
             (0, 0, (1.0 - fx) * (1.0 - fy)),
@@ -491,7 +497,10 @@ impl Painted<'_> {
             (1, 1, fx * fy),
         ] {
             let texel = texture
-                .get_pixel(wrap(x0 + dx, width), wrap(y0 + dy, height))
+                .get_pixel(
+                    wrap(x0.saturating_add(dx), width),
+                    wrap(y0.saturating_add(dy), height),
+                )
                 .0;
             for axis in 0..3 {
                 out[axis] += weight * self.decode[texel[axis] as usize];
@@ -502,7 +511,13 @@ impl Painted<'_> {
 }
 
 /// REPEAT wrap of a texel index, for negative indices too.
+///
+/// A zero-extent image has no texel to wrap onto; no decoder produces one,
+/// and answering 0 is cheaper than making every caller prove it.
 fn wrap(value: i64, extent: u32) -> u32 {
+    if extent == 0 {
+        return 0;
+    }
     let extent = i64::from(extent);
     (((value % extent) + extent) % extent) as u32
 }
@@ -513,8 +528,8 @@ fn wrap(value: i64, extent: u32) -> u32 {
 /// a per-pixel albedo cannot, and a `powf` per channel per supersampled pixel
 /// is exactly the cost [`surface_ramp`] was written to avoid. The table's
 /// steepest region is at black, where the curve's slope is 12.92, so
-/// [`ENCODE_LEN`] buckets keep the quantization under a fifth of an 8-bit
-/// code everywhere.
+/// [`ENCODE_LEN`] buckets keep the quantization inside a quarter of an 8-bit
+/// code everywhere (12.92 x 255 / 16383 = 0.20).
 const ENCODE_LEN: usize = 16384;
 
 fn srgb_encode_table() -> Vec<u8> {
