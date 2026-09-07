@@ -147,6 +147,7 @@ import {
   fpsValidationError,
   identityConditioningValidationError,
   meshTargetFacesValidationError,
+  namedViewsValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   resolutionValidationError,
@@ -920,6 +921,7 @@ const formValidationError = computed(
       form.pipeline,
     ) ??
     meshTargetFacesValidationError(form) ??
+    namedViewsValidationError(form) ??
     (caps.value.supportsVideo
       ? videoFramesError(form.frames, contractEntry.value ?? { family: form.family })
       : null) ??

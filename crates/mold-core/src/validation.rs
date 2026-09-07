@@ -2040,13 +2040,6 @@ pub const MESH_TEXTURE_RESOLUTIONS: &[u32] = &[1024, 2048, 4096];
 /// Maximum staged GLB/OBJ accepted as a mesh workflow input.
 pub const MESH_REFERENCE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-fn hunyuan3d_multiview_model(model: &str) -> bool {
-    matches!(
-        model.split(':').next().unwrap_or(model),
-        "hunyuan3d-2mv" | "hunyuan3d-2mv-turbo"
-    )
-}
-
 fn valid_reference_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -2186,6 +2179,18 @@ pub const MESH_DEFAULT_OCTREE_RESOLUTION: u32 = 256;
 /// `f64` so the advertised control carries the exact decimal a client shows.
 /// Widening an `f32` 0.6 here would put `0.6000000238418579` on the wire.
 pub const MESH_DEFAULT_THRESHOLD: f64 = 0.6;
+/// Tencent's native multiview pipeline extracts the zero logit isosurface.
+/// Mold exposes post-processed occupancy `(logit + 1) / 2`, so its equivalent
+/// threshold is 0.5. Single-view recipes retain ComfyUI's 0.6 default.
+pub const MESH_MULTIVIEW_DEFAULT_THRESHOLD: f64 = 0.5;
+
+pub fn mesh_default_threshold_for_model(model: &str) -> f64 {
+    if crate::manifest::hunyuan3d_multiview_model(model) {
+        MESH_MULTIVIEW_DEFAULT_THRESHOLD
+    } else {
+        MESH_DEFAULT_THRESHOLD
+    }
+}
 
 /// Granularity the iso-level control moves in on every client.
 pub const MESH_THRESHOLD_STEP: f64 = 0.01;
@@ -2435,7 +2440,7 @@ fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if hunyuan3d_multiview_model(&req.model) {
+    if crate::manifest::hunyuan3d_multiview_model(&req.model) {
         if references.is_empty() {
             return Err(
                 "Hunyuan3D 2mv requires at least one named front, left, back, or right view"

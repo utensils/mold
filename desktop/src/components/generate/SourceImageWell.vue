@@ -23,12 +23,20 @@ import { attachPickedImage } from "../../lib/sourceAttachment";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import NamedViewsPanel from "@studio/components/NamedViewsPanel.vue";
 import { resolveExclusiveWells, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import SliderRow from "@ui/components/SliderRow.vue";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  activeNamedViewsProfile,
+  namedViewValidationError,
+  setNamedView,
+  type NamedViewRole,
+} from "@studio/lib/namedViews";
 import {
   coerceSourceFitForMaskless,
   defaultSourceFitPolicy,
@@ -100,6 +108,12 @@ const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single policy every surface
  * renders (`@studio/lib/sourceMediaPlan`). */
 const plan = computed(() => sourceMediaPlan(caps.value));
+const namedViewsProfile = computed(() =>
+  activeNamedViewsProfile(
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline)?.capabilities.mesh
+      ?.named_views,
+  ),
+);
 /** A strip with no primary Target is a pure reference strip (FLUX.2), which
  * changes only the wording — the ceiling and the roles come from the plan. */
 const referencesOnly = computed(
@@ -172,6 +186,7 @@ function openMaskEditor() {
 }
 defineExpose({ maskAvailable, openMaskEditor });
 const h3ReferencePickerOpen = ref(false);
+const namedViewPickerRole = ref<NamedViewRole | null>(null);
 /** Which ordered reference the crop dialog is editing; null when closed. */
 const h3CropIndex = ref<number | null>(null);
 const h3CropTarget = computed(() =>
@@ -202,6 +217,38 @@ function onMaskApplied(mask: string) {
 async function onH3ReferenceImagesPicked(picked: PickedImage[]) {
   const result = await appendMinimaxH3PickedImageReferences(props.form.h3Authoring, picked);
   applyH3(result);
+}
+
+function imageMime(base64: string, declared?: string | null): string {
+  if (declared === "image/png" || declared === "image/jpeg") return declared;
+  return base64.startsWith("iVBOR") ? "image/png" : "image/jpeg";
+}
+
+async function setNamedViewFile(role: NamedViewRole, file: File) {
+  const base64 = await fileToBase64(file);
+  const dimensions = imageDimensionsFromBase64(base64);
+  if (!dimensions) return;
+  props.form.namedViews = setNamedView(props.form.namedViews, role, {
+    base64,
+    filename: file.name || `${role}.png`,
+    mimeType: imageMime(base64, file.type),
+    ...dimensions,
+  });
+}
+
+function onNamedViewPicked(picked: PickedImage[]) {
+  const role = namedViewPickerRole.value;
+  const image = picked[0];
+  if (!role || !image) return;
+  const dimensions = imageDimensionsFromBase64(image.base64);
+  if (!dimensions) return;
+  props.form.namedViews = setNamedView(props.form.namedViews, role, {
+    base64: image.base64,
+    filename: image.filename || `${role}.png`,
+    mimeType: imageMime(image.base64),
+    ...dimensions,
+  });
+  namedViewPickerRole.value = null;
 }
 
 // ── Qwen-edit Target + Reference strip ──────────────────────────────────────
@@ -468,7 +515,25 @@ function setSourceFitMode(e: Event) {
 </script>
 
 <template>
-  <div v-if="plan.kind === 'h3-references'" data-test="h3-reference-controls">
+  <div v-if="namedViewsProfile" data-test="named-view-controls">
+    <NamedViewsPanel
+      :profile="namedViewsProfile"
+      :model-value="form.namedViews"
+      :error="namedViewValidationError(form.namedViews, namedViewsProfile)"
+      @file="setNamedViewFile"
+      @gallery="namedViewPickerRole = $event"
+      @clear="form.namedViews = setNamedView(form.namedViews, $event, null)"
+    />
+    <ImagePickerModal
+      :open="namedViewPickerRole !== null"
+      :multiple="false"
+      :title="`Choose ${namedViewPickerRole ?? 'object'} view`"
+      @pick="onNamedViewPicked"
+      @close="namedViewPickerRole = null"
+    />
+  </div>
+
+  <div v-else-if="plan.kind === 'h3-references'" data-test="h3-reference-controls">
     <div class="mb-2 flex items-center gap-2">
       <span class="font-mono text-micro text-fg-dim whitespace-nowrap">Ordered references</span>
       <div class="border-border h-px flex-1 border-t" />

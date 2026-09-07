@@ -1312,8 +1312,12 @@ struct GenerateImageArgs {
 /// choice, and offering them would advertise knobs the server refuses.
 #[derive(Debug, Clone, Deserialize)]
 struct GenerateMeshArgs {
-    /// Base64-encoded PNG or JPEG. The ONLY conditioning this family has.
-    image: String,
+    /// Base64-encoded PNG or JPEG for a single-view checkpoint.
+    image: Option<String>,
+    front: Option<String>,
+    left: Option<String>,
+    back: Option<String>,
+    right: Option<String>,
     model: Option<String>,
     steps: Option<u32>,
     seed: Option<u64>,
@@ -2663,13 +2667,6 @@ fn resolve_mcp_lora_refs(
 fn build_generate_mesh_request(
     args: GenerateMeshArgs,
 ) -> std::result::Result<GenerateRequest, String> {
-    let image = general_purpose::STANDARD
-        .decode(args.image.trim())
-        .map_err(|error| format!("image is not valid base64: {error}"))?;
-    if image.is_empty() {
-        return Err("image must not be empty".to_string());
-    }
-
     let mut config = Config::load_or_default();
     let model = args
         .model
@@ -2677,6 +2674,79 @@ fn build_generate_mesh_request(
     if crate::catalog_bridge::looks_like_catalog_id(&model) {
         crate::catalog_bridge::install_catalog_model_from_installed_sidecar(&mut config, &model)
             .map_err(|e| format!("failed to resolve installed catalog model '{model}': {e}"))?;
+    }
+    let multiview = mold_core::manifest::hunyuan3d_multiview_model(&model);
+    let decode = |label: &str, value: String| -> std::result::Result<_, String> {
+        let bytes = general_purpose::STANDARD
+            .decode(value.trim())
+            .map_err(|error| format!("{label} is not valid base64: {error}"))?;
+        if bytes.is_empty() {
+            return Err(format!("{label} must not be empty"));
+        }
+        let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|error| format!("{label} is not a PNG or JPEG: {error}"))?;
+        let format = reader.format();
+        let mime = match format {
+            Some(image::ImageFormat::Png) => "image/png",
+            Some(image::ImageFormat::Jpeg) => "image/jpeg",
+            _ => return Err(format!("{label} must be a PNG or JPEG")),
+        };
+        let (width, height) = reader
+            .into_dimensions()
+            .map_err(|error| format!("{label} image dimensions could not be read: {error}"))?;
+        Ok((bytes, mime.to_string(), width, height))
+    };
+    let image = match args.image {
+        Some(value) => Some(decode("image", value)?.0),
+        None => None,
+    };
+    let view_inputs = [
+        (
+            mold_core::GenerationImageReferenceRole::Front,
+            "front",
+            args.front,
+        ),
+        (
+            mold_core::GenerationImageReferenceRole::Left,
+            "left",
+            args.left,
+        ),
+        (
+            mold_core::GenerationImageReferenceRole::Back,
+            "back",
+            args.back,
+        ),
+        (
+            mold_core::GenerationImageReferenceRole::Right,
+            "right",
+            args.right,
+        ),
+    ];
+    let mut references = Vec::new();
+    for (role, label, value) in view_inputs {
+        if let Some(value) = value {
+            let (data, mime_type, width, height) = decode(label, value)?;
+            references.push(mold_core::GenerationReference::NamedImage {
+                role,
+                media: mold_core::GenerationReferenceAuthority::Inline { data },
+                provenance: mold_core::GenerationReferenceProvenance {
+                    name: Some(format!("{label}.png")),
+                    sha256: None,
+                    crop: None,
+                },
+                mime_type,
+                width,
+                height,
+            });
+        }
+    }
+    if multiview {
+        if image.is_some() || references.is_empty() {
+            return Err("a Hunyuan3D 2mv model requires one or more named front/left/back/right views and no image".to_string());
+        }
+    } else if image.is_none() || !references.is_empty() {
+        return Err("a single-view Hunyuan3D model requires image and no named views".to_string());
     }
     let mesh = mold_core::MeshRequestOptions {
         octree_resolution: args.octree,
@@ -2715,7 +2785,8 @@ fn build_generate_mesh_request(
     req.width = 0;
     req.height = 0;
     req.output_format = Some(OutputFormat::Glb);
-    req.source_image = Some(image);
+    req.source_image = image;
+    req.references = (!references.is_empty()).then_some(references);
     req.mesh = Some(mesh);
     Ok(req)
 }
@@ -3222,7 +3293,7 @@ fn builtin_tool_definitions() -> Value {
         {
             "name": "generate_mesh",
             "description": format!(
-                "Generate a 3D mesh from ONE image using the Hunyuan3D family. There is no prompt; the image is the whole conditioning (the family has no text encoder, and the profile advertises prompt.mode = ignored). Best results come from one object, centred, filling most of the frame, on a plain or removed background, seen from a three-quarter angle. The stored artifact is always GLB. Returns a rendered poster image plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, STL, or PLY, call export_mesh with that filename — exports are transcodes of the stored GLB, never generation targets. Defaults: model {}, octree {}, threshold {}.",
+                "Generate a 3D mesh from one image, or from semantically named front/left/back/right images with a Hunyuan3D 2mv model. There is no prompt; the images are the whole conditioning. The stored artifact is always GLB. Returns a rendered poster plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, STL, or PLY, call export_mesh. Defaults: model {}, octree {}, threshold {}.",
                 mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
                 mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION,
                 mold_core::validation::MESH_DEFAULT_THRESHOLD
@@ -3232,8 +3303,12 @@ fn builtin_tool_definitions() -> Value {
                 "properties": {
                     "image": {
                         "type": "string",
-                        "description": "Base64-encoded PNG or JPEG. An image with an alpha channel is the best input — it is letterboxed on its cutout."
+                        "description": "Base64 PNG/JPEG for a single-view model. Mutually exclusive with named views."
                     },
+                    "front": { "type": "string", "description": "Base64 PNG/JPEG front view for a Hunyuan3D 2mv model." },
+                    "left": { "type": "string", "description": "Base64 PNG/JPEG left view for a Hunyuan3D 2mv model." },
+                    "back": { "type": "string", "description": "Base64 PNG/JPEG back view for a Hunyuan3D 2mv model." },
+                    "right": { "type": "string", "description": "Base64 PNG/JPEG right view for a Hunyuan3D 2mv model." },
                     "model": {
                         "type": "string",
                         "description": format!("Model name. Defaults to {}.", mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
@@ -3285,7 +3360,13 @@ fn builtin_tool_definitions() -> Value {
                         "description": "Deprecated alias for threshold."
                     }
                 },
-                "required": ["image"],
+                "anyOf": [
+                    { "required": ["image"] },
+                    { "required": ["front"] },
+                    { "required": ["left"] },
+                    { "required": ["back"] },
+                    { "required": ["right"] }
+                ],
                 "additionalProperties": false
             }
         },
@@ -3654,10 +3735,22 @@ fn handle_protocol_message_for_test(message: Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    fn tiny_png_b64() -> String {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        general_purpose::STANDARD.encode(bytes.into_inner())
+    }
+
     #[test]
     fn mesh_requests_carry_the_image_and_refuse_a_bad_one() {
         let bad = build_generate_mesh_request(GenerateMeshArgs {
-            image: "not base64!!".to_string(),
+            image: Some("not base64!!".to_string()),
+            front: None,
+            left: None,
+            back: None,
+            right: None,
             model: None,
             steps: None,
             seed: None,
@@ -3669,7 +3762,11 @@ mod tests {
         assert!(bad.contains("valid base64"), "{bad}");
 
         let empty = build_generate_mesh_request(GenerateMeshArgs {
-            image: String::new(),
+            image: Some(String::new()),
+            front: None,
+            left: None,
+            back: None,
+            right: None,
             model: None,
             steps: None,
             seed: None,
@@ -3683,9 +3780,13 @@ mod tests {
 
     #[test]
     fn a_mesh_request_defaults_to_the_mini_tier_and_glb() {
-        let png = general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G']);
+        let png = tiny_png_b64();
         let req = build_generate_mesh_request(GenerateMeshArgs {
-            image: png,
+            image: Some(png),
+            front: None,
+            left: None,
+            back: None,
+            right: None,
             model: None,
             steps: Some(5),
             seed: Some(42),
@@ -3697,10 +3798,10 @@ mod tests {
 
         assert_eq!(req.model, mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL);
         assert_eq!(req.output_format, Some(OutputFormat::Glb));
-        assert_eq!(
-            req.source_image.as_deref(),
-            Some(&[0x89, b'P', b'N', b'G'][..])
-        );
+        assert!(req
+            .source_image
+            .as_ref()
+            .is_some_and(|bytes| !bytes.is_empty()));
         // The SAME canonical mesh request the CLI sends: no prompt (the
         // family never reads one) and no canvas (the engine letterboxes the
         // source to the checkpoint's own conditioning size).
@@ -3717,7 +3818,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mesh_tool_is_registered_and_requires_an_image_not_a_prompt() {
+    fn the_mesh_tool_is_registered_and_requires_single_or_named_images_not_a_prompt() {
         let tools = tool_definitions();
         let mesh = tools
             .as_array()
@@ -3725,13 +3826,26 @@ mod tests {
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("generate_mesh"))
             .expect("generate_mesh must be registered");
-        let required = mesh["inputSchema"]["required"]
+        let alternatives = mesh["inputSchema"]["anyOf"]
             .as_array()
-            .expect("required is an array");
-        assert_eq!(required, &[Value::from("image")]);
+            .expect("image alternatives are an array");
+        assert_eq!(
+            alternatives,
+            &[
+                json!({ "required": ["image"] }),
+                json!({ "required": ["front"] }),
+                json!({ "required": ["left"] }),
+                json!({ "required": ["back"] }),
+                json!({ "required": ["right"] }),
+            ]
+        );
         // Every other generate tool requires a prompt; this one must not, or
         // an agent will invent one for a family that never reads it.
-        assert!(!required.contains(&Value::from("prompt")));
+        assert!(alternatives.iter().all(|alternative| {
+            !alternative["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&Value::from("prompt")))
+        }));
     }
 
     /// `export_mesh` offers every container the export route takes — the
@@ -3807,7 +3921,8 @@ mod tests {
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("generate_mesh"))
             .expect("generate_mesh must be registered");
         let description = mesh["description"].as_str().unwrap();
-        assert!(description.contains("There is no prompt; the image is the whole conditioning"));
+        assert!(description.contains("There is no prompt; the images are the whole conditioning"));
+        assert!(description.contains("semantically named front/left/back/right"));
         assert!(description.contains("export_mesh"), "{description}");
 
         let props = &mesh["inputSchema"]["properties"];

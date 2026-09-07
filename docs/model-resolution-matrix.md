@@ -383,6 +383,36 @@ Models: `hunyuan3d-2.1:fp16`.
 
 Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `hunyuan3d-2mv-turbo:fp16`
+
+Schema 1 · hash `b1ed7096f63d34d8a0ab604cbfd432a864bba43af087865a224f7ce176641604` · default recipe `default`
+
+Models: `hunyuan3d-2mv-turbo:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 5 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `hunyuan3d-2mv:fp16`
+
+Schema 1 · hash `07e646031e3817026cc8e4cc460afbd7275f9d0ced2b7f485de668a569ebb65d` · default recipe `default`
+
+Models: `hunyuan3d-2mv:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 30 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### `hunyuan3d-mini-turbo:fp16`
 
 Schema 1 · hash `a6da2e96a5d4eed10d4b7413a2fe2df1c2c7684ea4eecd0e0d5bb644738a44cf` · default recipe `default`

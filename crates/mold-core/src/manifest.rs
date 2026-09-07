@@ -12,6 +12,16 @@ use std::sync::LazyLock;
 /// `ltx2` does.
 pub const HUNYUAN3D_FAMILY: &str = "hunyuan3d";
 pub const HUNYUAN3D_21_MODEL: &str = "hunyuan3d-2.1:fp16";
+pub const HUNYUAN3D_2MV_MODEL: &str = "hunyuan3d-2mv:fp16";
+pub const HUNYUAN3D_2MV_TURBO_MODEL: &str = "hunyuan3d-2mv-turbo:fp16";
+
+pub fn hunyuan3d_multiview_model(model: &str) -> bool {
+    let canonical = resolve_model_name(model);
+    matches!(
+        canonical.split(':').next().unwrap_or(&canonical),
+        "hunyuan3d-2mv" | "hunyuan3d-2mv-turbo"
+    )
+}
 
 /// Recipe geometry needed before loading the checkpoint. This is shared by
 /// admission callers so a canvasless request still prices its actual encoder.
@@ -5027,6 +5037,13 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
         fps: None,
         source_image: Some(crate::types::SourceImageCapability::Required),
     };
+    let multiview_defaults = |steps: u32| {
+        let mut value = defaults(steps, 5.0, 512);
+        // Every image is a semantically named reference. Keeping a second,
+        // unlabeled source_image would make the front slot ambiguous.
+        value.source_image = Some(crate::types::SourceImageCapability::Unsupported);
+        value
+    };
 
     vec![
         // Default: 0.6B DiT, step-distilled, ~5 GB VRAM. Conditions DINOv2 at
@@ -5078,6 +5095,43 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
                 sha256: Some("360bc281fc956d4acac0c3d36d5ec0ebf8cdddbf4b8892e894d12419388d479b"),
             }],
             defaults: defaults(30, 5.0, 512),
+            hidden: false,
+        },
+        // Tencent revision 3a761b539b29fe4ff64714813aa9560fd66f5de0.
+        // The ordinary 2mv tier is undistilled and runs a real CFG branch.
+        ModelManifest {
+            name: HUNYUAN3D_2MV_MODEL.to_string(),
+            family: HUNYUAN3D_FAMILY.to_string(),
+            description: "Hunyuan3D 2mv — shape generation from one to four named views"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "tencent/Hunyuan3D-2mv".to_string(),
+                hf_filename: "hunyuan3d-dit-v2-mv/model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 4_928_151_562,
+                gated: false,
+                sha256: Some("d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c"),
+            }],
+            defaults: multiview_defaults(30),
+            hidden: false,
+        },
+        // Step-distilled 2mv with a guidance embedding and Tencent's
+        // consistency-flow schedule. The five-step recipe is upstream's
+        // `examples/fast_shape_gen_multiview.py`.
+        ModelManifest {
+            name: HUNYUAN3D_2MV_TURBO_MODEL.to_string(),
+            family: HUNYUAN3D_FAMILY.to_string(),
+            description: "Hunyuan3D 2mv Turbo — five-step shape generation from named views"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "tencent/Hunyuan3D-2mv".to_string(),
+                hf_filename: "hunyuan3d-dit-v2-mv-turbo/model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 4_930_777_530,
+                gated: false,
+                sha256: Some("172d7a989b99f66af760da0080d8c6f6350c72609536cf0c55b87a4afa574e45"),
+            }],
+            defaults: multiview_defaults(5),
             hidden: false,
         },
         // 2.1 is a separate MoE architecture with a DINOv2-large conditioner.
@@ -7807,6 +7861,37 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hunyuan3d_multiview_tiers_pin_their_distinct_weights_and_recipes() {
+        let normal = super::find_manifest("hunyuan3d-2mv:fp16").expect("2mv shape recipe");
+        assert_eq!(normal.family, super::HUNYUAN3D_FAMILY);
+        assert_eq!(normal.defaults.steps, 30);
+        assert_eq!(normal.defaults.guidance, 5.0);
+        assert_eq!(
+            normal.defaults.source_image,
+            Some(crate::SourceImageCapability::Unsupported)
+        );
+        assert_eq!(normal.files[0].size_bytes, 4_928_151_562);
+        assert_eq!(
+            normal.files[0].sha256,
+            Some("d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c")
+        );
+
+        let turbo = super::find_manifest("hunyuan3d-2mv-turbo:fp16").expect("2mv Turbo recipe");
+        assert_eq!(turbo.family, super::HUNYUAN3D_FAMILY);
+        assert_eq!(turbo.defaults.steps, 5);
+        assert_eq!(turbo.defaults.guidance, 5.0);
+        assert_eq!(
+            turbo.defaults.source_image,
+            Some(crate::SourceImageCapability::Unsupported)
+        );
+        assert_eq!(turbo.files[0].size_bytes, 4_930_777_530);
+        assert_eq!(
+            turbo.files[0].sha256,
+            Some("172d7a989b99f66af760da0080d8c6f6350c72609536cf0c55b87a4afa574e45")
+        );
+    }
+
     #[test]
     fn hunyuan3d21_is_a_pinned_undistilled_shape_recipe() {
         let model = super::find_manifest("hunyuan3d-2.1:fp16").expect("2.1 shape recipe");

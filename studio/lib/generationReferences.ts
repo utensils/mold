@@ -44,6 +44,12 @@ export type GenerationReference =
       height: number;
     })
   | (GenerationReferenceBase & {
+      kind: "named_image";
+      role: "front" | "left" | "back" | "right";
+      width: number;
+      height: number;
+    })
+  | (GenerationReferenceBase & {
       kind: "video";
       width: number;
       height: number;

@@ -2203,10 +2203,7 @@ fn recipe(
 /// `validation::validate_mesh_request` enforces, so a client that stays inside
 /// the advertised bounds can never be refused by the door it was reading.
 fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
-    let multiview = matches!(
-        model.split(':').next().unwrap_or(model),
-        "hunyuan3d-2mv" | "hunyuan3d-2mv-turbo"
-    );
+    let multiview = crate::manifest::hunyuan3d_multiview_model(model);
     let paint_available = cfg!(feature = "mesh-texture");
     let unavailable = |reason: &str| FeatureControlProfile {
         mode: ControlMode::Hidden,
@@ -2217,7 +2214,7 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
         octree_resolutions: validation::MESH_OCTREE_RESOLUTIONS.to_vec(),
         octree_default: validation::MESH_DEFAULT_OCTREE_RESOLUTION,
         threshold: FloatControl {
-            default: validation::MESH_DEFAULT_THRESHOLD,
+            default: validation::mesh_default_threshold_for_model(model),
             min: 0.0,
             max: 1.0,
             step: validation::MESH_THRESHOLD_STEP,
@@ -3054,6 +3051,10 @@ mod tests {
         let named = mesh.named_views.as_ref().unwrap();
         assert_eq!(named.mode, ControlMode::Adjustable);
         assert_eq!((named.min_count, named.max_count), (1, 4));
+        assert_eq!(
+            mesh.threshold.default,
+            crate::validation::MESH_MULTIVIEW_DEFAULT_THRESHOLD
+        );
         assert_eq!(
             named.roles,
             vec![

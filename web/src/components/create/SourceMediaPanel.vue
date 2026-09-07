@@ -6,6 +6,7 @@ import SourceMediaWells, {
   type SourceMediaSlot,
 } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import NamedViewsPanel from "@studio/components/NamedViewsPanel.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { resolveExclusiveWells } from "@studio/lib/sourceMediaPlan";
@@ -29,6 +30,12 @@ import {
   type MinimaxH3GalleryImageResult,
   type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
+import {
+  activeNamedViewsProfile,
+  namedViewValidationError,
+  setNamedView,
+  type NamedViewRole,
+} from "@studio/lib/namedViews";
 import type {
   GenerateFormState,
   ModelInfoExtended,
@@ -67,6 +74,7 @@ const emit = defineEmits<{
   "open-reference-picker": [];
   /** Open the page-level crop editor for ordered reference `index`. */
   "crop-h3-reference": [index: number];
+  "open-named-view-picker": [role: NamedViewRole];
 }>();
 
 function patch(next: Partial<GenerateFormState>) {
@@ -91,6 +99,12 @@ const caps = computed(() =>
 );
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
+const namedViewsProfile = computed(() =>
+  activeNamedViewsProfile(
+    effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline)?.capabilities.mesh
+      ?.named_views,
+  ),
+);
 /** Family-scoped label for the shared `strength` wire field (#1055). */
 const strength = computed(() => strengthSemantics(props.family));
 /** A strip with no Target is a pure reference strip; the ceiling and the
@@ -130,7 +144,9 @@ const sourceLimitLabel = computed(() =>
 );
 
 const kicker = computed(() =>
-  plan.value.kind === "h3-boundaries"
+  namedViewsProfile.value
+    ? "Object views"
+    : plan.value.kind === "h3-boundaries"
     ? "Frame endpoints"
     : plan.value.kind === "h3-references"
       ? "Ordered references"
@@ -210,6 +226,19 @@ async function onWellFile(slot: SourceMediaSlot, file: File) {
   } else {
     patch({ endFrame: image });
   }
+}
+async function onNamedViewFile(role: NamedViewRole, file: File) {
+  const image = await fileToSourceImage(file);
+  if (!image || !image.width || !image.height || !image.mime) return;
+  patch({
+    namedViews: setNamedView(props.modelValue.namedViews, role, {
+      base64: image.base64,
+      filename: image.filename,
+      mimeType: image.mime,
+      width: image.width,
+      height: image.height,
+    }),
+  });
 }
 /** Drop the exclusive strip; the parked source becomes active again. */
 function clearReferences() {
@@ -361,7 +390,7 @@ function clearControl() {
 
 <template>
   <section
-    v-if="plan.kind !== 'none'"
+    v-if="plan.kind !== 'none' || namedViewsProfile"
     class="smp"
     data-test="source-media-panel"
   >
@@ -369,8 +398,18 @@ function clearControl() {
       <span class="smp__kicker">{{ kicker }}</span>
     </div>
 
+    <NamedViewsPanel
+      v-if="namedViewsProfile"
+      :profile="namedViewsProfile"
+      :model-value="modelValue.namedViews"
+      :error="namedViewValidationError(modelValue.namedViews, namedViewsProfile)"
+      @file="onNamedViewFile"
+      @gallery="emit('open-named-view-picker', $event)"
+      @clear="patch({ namedViews: setNamedView(modelValue.namedViews, $event, null) })"
+    />
+
     <MinimaxH3AuthoringPanel
-      v-if="plan.kind === 'h3-references'"
+      v-else-if="plan.kind === 'h3-references'"
       :model-value="h3Authoring"
       image-picker-available
       @update:model-value="setH3Authoring"

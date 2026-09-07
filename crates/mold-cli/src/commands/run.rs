@@ -685,6 +685,10 @@ fn parse_temporal_upscale(value: Option<Ltx2TemporalUpscaleArg>) -> Option<Ltx2T
 /// of five — the same reason `GuidanceFlags` below exists.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeshFlags {
+    pub front: Option<PathBuf>,
+    pub left: Option<PathBuf>,
+    pub back: Option<PathBuf>,
+    pub right: Option<PathBuf>,
     pub octree: Option<u32>,
     pub threshold: Option<f32>,
     pub target_faces: Option<u32>,
@@ -693,6 +697,44 @@ pub struct MeshFlags {
 }
 
 impl MeshFlags {
+    fn named_view_references(&self, model: &str) -> Result<Vec<mold_core::GenerationReference>> {
+        let inputs = [
+            (
+                mold_core::GenerationImageReferenceRole::Front,
+                self.front.as_deref(),
+            ),
+            (
+                mold_core::GenerationImageReferenceRole::Left,
+                self.left.as_deref(),
+            ),
+            (
+                mold_core::GenerationImageReferenceRole::Back,
+                self.back.as_deref(),
+            ),
+            (
+                mold_core::GenerationImageReferenceRole::Right,
+                self.right.as_deref(),
+            ),
+        ];
+        let any = inputs.iter().any(|(_, path)| path.is_some());
+        if !mold_core::manifest::hunyuan3d_multiview_model(model) {
+            anyhow::ensure!(
+                !any,
+                "--front/--left/--back/--right require a Hunyuan3D 2mv model"
+            );
+            return Ok(Vec::new());
+        }
+        anyhow::ensure!(
+            any,
+            "Hunyuan3D 2mv requires at least one of --front, --left, --back, or --right"
+        );
+        inputs
+            .into_iter()
+            .filter_map(|(role, path)| path.map(|path| (role, path)))
+            .map(|(role, path)| crate::commands::h3::prepare_named_image(path, role))
+            .collect()
+    }
+
     /// Build the wire options, or `None` when the user passed no 3-D flag at
     /// all.
     ///
@@ -1172,6 +1214,14 @@ pub async fn run(
         reference_edit_image_paths(&family, &model, &references, &image)?
     };
     let h3_references: &[ReferenceArg] = if is_h3 { &references } else { &[] };
+    let named_view_references = mesh_flags.named_view_references(&model)?;
+    if !named_view_references.is_empty() {
+        anyhow::ensure!(
+            image.is_empty(),
+            "Hunyuan3D 2mv uses named view flags instead of --image"
+        );
+        anyhow::ensure!(batch == 1, "Hunyuan3D 2mv named views require --batch 1");
+    }
 
     let reference_client =
         (is_h3 && !references.is_empty()).then(|| crate::control::client_for_host(host.as_deref()));
@@ -1854,7 +1904,11 @@ pub async fn run(
             } else {
                 None
             },
-            references: h3_authoring.references,
+            references: if named_view_references.is_empty() {
+                h3_authoring.references
+            } else {
+                Some(named_view_references)
+            },
             reference_uploads: h3_authoring.uploads,
         },
         host,

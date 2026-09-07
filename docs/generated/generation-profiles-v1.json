@@ -3512,6 +3512,438 @@
     {
       "models": [
         {
+          "model": "hunyuan3d-2mv-turbo:fp16",
+          "family": "hunyuan3d",
+          "hidden": false
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "hunyuan3d.hunyuan3d-2mv-turbo",
+        "profile_hash": "b1ed7096f63d34d8a0ab604cbfd432a864bba43af087865a224f7ce176641604",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 0,
+              "height": 0,
+              "steps": 5,
+              "guidance": 5.0
+            },
+            "resolution": {
+              "domain": "none",
+              "alignment": 1,
+              "min_width": 0,
+              "min_height": 0,
+              "max_pixels": 0,
+              "aspect_groups": []
+            },
+            "steps": {
+              "default": 5,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                3,
+                5,
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 5.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": false
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "unsupported",
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": false,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "glb",
+                "formats": [
+                  "glb"
+                ],
+                "audio_requires_mp4": false,
+                "delivery_reason": "3-D delivery uses binary glTF; OBJ, STL and PLY are available as gallery exports."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              },
+              "prompt": {
+                "mode": "ignored",
+                "reason": "This model has no text encoder; the prompt is saved as a note."
+              },
+              "supports_strength": false,
+              "reference_images": {
+                "mode": "hidden",
+                "required": false,
+                "max_count": 0,
+                "primary_is_target": false,
+                "source_relation": "replaces",
+                "reason": "This model does not accept reference images (edit_images)."
+              },
+              "mesh": {
+                "octree_resolutions": [
+                  128,
+                  192,
+                  256,
+                  320,
+                  384
+                ],
+                "octree_default": 256,
+                "threshold": {
+                  "default": 0.5,
+                  "min": 0.0,
+                  "max": 1.0,
+                  "step": 0.01,
+                  "mode": "adjustable"
+                },
+                "target_faces_min": 100,
+                "target_faces_max": 2000000,
+                "texture": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "PBR texture generation requires the mesh-texture build feature"
+                },
+                "named_views": {
+                  "mode": "adjustable",
+                  "roles": [
+                    "front",
+                    "left",
+                    "back",
+                    "right"
+                  ],
+                  "min_count": 1,
+                  "max_count": 4
+                },
+                "mesh_input": {
+                  "mode": "hidden",
+                  "formats": [
+                    "glb",
+                    "obj"
+                  ],
+                  "max_count": 0,
+                  "max_bytes": 268435456,
+                  "up_axes": [
+                    "y",
+                    "z"
+                  ],
+                  "meters_per_unit_min": 1e-6,
+                  "meters_per_unit_max": 1000000.0,
+                  "reason": "Supplied-mesh texturing is not executable by this build"
+                },
+                "texture_resolutions": [
+                  1024,
+                  2048,
+                  4096
+                ],
+                "texture_default_resolution": 2048,
+                "texture_view_count": {
+                  "default": 6,
+                  "min": 6,
+                  "max": 6,
+                  "step": 1,
+                  "mode": "fixed",
+                  "note": "Hunyuan3D Paint renders six canonical views"
+                },
+                "matting": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Background matting is not executable by this build"
+                },
+                "delight": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Delighting is not executable by this build"
+                },
+                "workflow_modes": [
+                  "multiview_to_mesh"
+                ]
+              }
+            },
+            "provenance": [
+              {
+                "kind": "mold-policy",
+                "source": "mold-qualified compatibility profile",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
+          "model": "hunyuan3d-2mv:fp16",
+          "family": "hunyuan3d",
+          "hidden": false
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "hunyuan3d.hunyuan3d-2mv",
+        "profile_hash": "07e646031e3817026cc8e4cc460afbd7275f9d0ced2b7f485de668a569ebb65d",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 0,
+              "height": 0,
+              "steps": 30,
+              "guidance": 5.0
+            },
+            "resolution": {
+              "domain": "none",
+              "alignment": 1,
+              "min_width": 0,
+              "min_height": 0,
+              "max_pixels": 0,
+              "aspect_groups": []
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                15,
+                30,
+                45
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 5.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": false
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "unsupported",
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": false,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "glb",
+                "formats": [
+                  "glb"
+                ],
+                "audio_requires_mp4": false,
+                "delivery_reason": "3-D delivery uses binary glTF; OBJ, STL and PLY are available as gallery exports."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              },
+              "prompt": {
+                "mode": "ignored",
+                "reason": "This model has no text encoder; the prompt is saved as a note."
+              },
+              "supports_strength": false,
+              "reference_images": {
+                "mode": "hidden",
+                "required": false,
+                "max_count": 0,
+                "primary_is_target": false,
+                "source_relation": "replaces",
+                "reason": "This model does not accept reference images (edit_images)."
+              },
+              "mesh": {
+                "octree_resolutions": [
+                  128,
+                  192,
+                  256,
+                  320,
+                  384
+                ],
+                "octree_default": 256,
+                "threshold": {
+                  "default": 0.5,
+                  "min": 0.0,
+                  "max": 1.0,
+                  "step": 0.01,
+                  "mode": "adjustable"
+                },
+                "target_faces_min": 100,
+                "target_faces_max": 2000000,
+                "texture": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "PBR texture generation requires the mesh-texture build feature"
+                },
+                "named_views": {
+                  "mode": "adjustable",
+                  "roles": [
+                    "front",
+                    "left",
+                    "back",
+                    "right"
+                  ],
+                  "min_count": 1,
+                  "max_count": 4
+                },
+                "mesh_input": {
+                  "mode": "hidden",
+                  "formats": [
+                    "glb",
+                    "obj"
+                  ],
+                  "max_count": 0,
+                  "max_bytes": 268435456,
+                  "up_axes": [
+                    "y",
+                    "z"
+                  ],
+                  "meters_per_unit_min": 1e-6,
+                  "meters_per_unit_max": 1000000.0,
+                  "reason": "Supplied-mesh texturing is not executable by this build"
+                },
+                "texture_resolutions": [
+                  1024,
+                  2048,
+                  4096
+                ],
+                "texture_default_resolution": 2048,
+                "texture_view_count": {
+                  "default": 6,
+                  "min": 6,
+                  "max": 6,
+                  "step": 1,
+                  "mode": "fixed",
+                  "note": "Hunyuan3D Paint renders six canonical views"
+                },
+                "matting": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Background matting is not executable by this build"
+                },
+                "delight": {
+                  "mode": "hidden",
+                  "required": false,
+                  "reason": "Delighting is not executable by this build"
+                },
+                "workflow_modes": [
+                  "multiview_to_mesh"
+                ]
+              }
+            },
+            "provenance": [
+              {
+                "kind": "mold-policy",
+                "source": "mold-qualified compatibility profile",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
           "model": "hunyuan3d-mini-turbo:fp16",
           "family": "hunyuan3d",
           "hidden": false

@@ -87,7 +87,7 @@ function metadataFor(
     sha256: reference.provenance?.sha256,
     mime_type: reference.mime_type,
   };
-  if (reference.kind === "image") {
+  if (reference.kind === "image" || reference.kind === "named_image") {
     return { ...base, width: reference.width, height: reference.height };
   }
   if (reference.kind === "audio") {

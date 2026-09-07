@@ -31,9 +31,12 @@
 
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
-use mold_core::{GenerateRequest, GenerateResponse, MeshData, ModelPaths, OutputFormat};
+use mold_core::{
+    GenerateRequest, GenerateResponse, GenerationReference, GenerationReferenceAuthority, MeshData,
+    ModelPaths, OutputFormat,
+};
 
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::progress::{ProgressEvent, ProgressPhase};
 
@@ -264,7 +267,11 @@ impl Hunyuan3dEngine {
         })
     }
 
-    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+    fn generate_inner(
+        &mut self,
+        req: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+    ) -> Result<GenerateResponse> {
         let started = std::time::Instant::now();
         if self.base.loaded.is_none() {
             let loaded = self.load_inner()?;
@@ -281,50 +288,132 @@ impl Hunyuan3dEngine {
             .octree_resolution
             .map(|value| value as usize)
             .unwrap_or(DEFAULT_OCTREE_RESOLUTION);
-        let threshold = options.threshold.unwrap_or(DEFAULT_THRESHOLD);
+        let threshold = options.threshold.unwrap_or_else(|| {
+            mold_core::validation::mesh_default_threshold_for_model(&self.base.model_name) as f32
+        });
         #[cfg(not(feature = "mesh-texture"))]
         if options.texture == Some(true) {
             bail!("PBR texture generation requires the mesh-texture build feature");
         }
 
         // ── Conditioning ────────────────────────────────────────────────
-        self.base.progress.stage_start("Encoding image");
+        let multiview = mold_core::manifest::hunyuan3d_multiview_model(&self.base.model_name);
+        self.base.progress.stage_start(if multiview {
+            "Encoding views"
+        } else {
+            "Encoding image"
+        });
         let phase_started = std::time::Instant::now();
-        let source = req
-            .source_image
-            .as_deref()
-            .filter(|bytes| !bytes.is_empty())
-            .context("3-D generation requires a source image")?;
-        // RGBA, not RGB: alpha is the SUBJECT MASK here, not decoration.
-        // `letterbox_square` crops and centres on the non-zero alpha bounding
-        // box, so flattening first would make a background-removed cutout —
-        // the input the docs recommend as the best one — indistinguishable
-        // from a full opaque frame and condition DINOv2 on the whole canvas,
-        // black transparent pixels included.
-        let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
-            .context("decode the source image")?;
-        let image = image::DynamicImage::ImageRgba8(source_rgba.clone());
-        let pixels = super::dino2::preprocess(
-            &image,
-            loaded.conditioning.letterbox,
-            loaded.conditioning.encoder,
-            &loaded.device,
-            loaded.dtype,
-        )?;
-        let cond = loaded.vision.forward(&pixels)?;
+        let (cond, source_rgba) = if multiview {
+            anyhow::ensure!(
+                req.source_image
+                    .as_deref()
+                    .is_none_or(|bytes| bytes.is_empty()),
+                "Hunyuan3D 2mv cannot combine source_image with named views"
+            );
+            let references = req
+                .references
+                .as_deref()
+                .context("Hunyuan3D 2mv requires named image views")?;
+            anyhow::ensure!(
+                (1..=4).contains(&references.len()),
+                "Hunyuan3D 2mv requires one to four named image views"
+            );
+            anyhow::ensure!(
+                bindings.is_empty() || bindings.len() == references.len(),
+                "Hunyuan3D 2mv resolved binding count differs from its named views"
+            );
+
+            let mut views = Vec::with_capacity(references.len());
+            for (index, reference) in references.iter().enumerate() {
+                self.base.progress.checkpoint()?;
+                let GenerationReference::NamedImage { role, media, .. } = reference else {
+                    bail!("Hunyuan3D 2mv accepts named image views only")
+                };
+                let rgba = if let Some(binding) = bindings.get(index) {
+                    anyhow::ensure!(
+                        binding.metadata().image_role == Some(*role),
+                        "Hunyuan3D 2mv resolved view role changed before inference"
+                    );
+                    crate::reference_media::decode_rgba_image_from_binding(binding, &mut || {
+                        Ok(self.base.progress.checkpoint()?)
+                    })?
+                } else {
+                    let GenerationReferenceAuthority::Inline { data } = media else {
+                        bail!("Hunyuan3D 2mv non-inline views require resolved server bindings")
+                    };
+                    crate::img_utils::decode_oriented_srgb_rgba(data)
+                        .context("decode a named Hunyuan3D view")?
+                };
+                views.push((*role, rgba));
+            }
+            views.sort_by_key(|(role, _)| super::multiview::view_slot(*role));
+            let source_rgba = views[0].1.clone();
+            let mut encoded = Vec::with_capacity(views.len());
+            for (role, rgba) in views {
+                self.base.progress.checkpoint()?;
+                let image = image::DynamicImage::ImageRgba8(rgba);
+                let pixels = super::dino2::preprocess(
+                    &image,
+                    loaded.conditioning.letterbox,
+                    loaded.conditioning.encoder,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                encoded.push((role, loaded.vision.forward(&pixels)?));
+            }
+            (
+                super::multiview::compose_view_conditioning(encoded)?,
+                source_rgba,
+            )
+        } else {
+            anyhow::ensure!(
+                bindings.is_empty(),
+                "single-view Hunyuan3D does not consume generation references"
+            );
+            let source = req
+                .source_image
+                .as_deref()
+                .filter(|bytes| !bytes.is_empty())
+                .context("3-D generation requires a source image")?;
+            // RGBA, not RGB: alpha is the SUBJECT MASK here, not decoration.
+            let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
+                .context("decode the source image")?;
+            let image = image::DynamicImage::ImageRgba8(source_rgba.clone());
+            let pixels = super::dino2::preprocess(
+                &image,
+                loaded.conditioning.letterbox,
+                loaded.conditioning.encoder,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (loaded.vision.forward(&pixels)?, source_rgba)
+        };
         self.base.progress.stage_complete(
             ProgressPhase::PromptEncode,
-            "Encoding image",
+            if multiview {
+                "Encoding views"
+            } else {
+                "Encoding image"
+            },
             phase_started.elapsed(),
         );
+        #[cfg(not(feature = "mesh-texture"))]
+        drop(source_rgba);
 
         // ── Sampling ────────────────────────────────────────────────────
-        let plan = sampler::plan(
-            req.steps as usize,
-            sampler::DEFAULT_SHIFT,
-            req.guidance,
-            loaded.dit.guidance_embed(),
-        );
+        let plan = if self.base.model_name == mold_core::manifest::HUNYUAN3D_2MV_TURBO_MODEL {
+            sampler::multiview_turbo_plan(req.steps as usize, req.guidance)
+        } else if self.base.model_name == mold_core::manifest::HUNYUAN3D_2MV_MODEL {
+            sampler::multiview_plan(req.steps as usize, req.guidance)
+        } else {
+            sampler::plan(
+                req.steps as usize,
+                sampler::DEFAULT_SHIFT,
+                req.guidance,
+                loaded.dit.guidance_embed(),
+            )
+        };
         let seed = req.seed.unwrap_or_else(rand_seed);
         // Named as its own stage. Without it the log jumped from a 0.1 s
         // encode straight to the volume decode, so the whole denoise read as
@@ -812,7 +901,16 @@ fn guidance_tensor(value: f64, device: &Device) -> Result<Tensor> {
 impl InferenceEngine for Hunyuan3dEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
-        self.generate_inner(req)
+        self.generate_inner(req, &[])
+    }
+
+    fn generate_with_reference_bindings(
+        &mut self,
+        req: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+    ) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
+        self.generate_inner(req, bindings)
     }
 
     fn model_name(&self) -> &str {

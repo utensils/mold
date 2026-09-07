@@ -1494,3 +1494,42 @@ the remaining P8-P15 features, and every client surface.
   Commit `198db06e` makes activity prefer named-stage counters and classify
   them as running; `activity-stage-counters-green-v2.log` retains the passing
   route and queue parity regression at `Generating PBR views 7 of 15`.
+
+### Hunyuan3D 2mv normal and Turbo
+
+- Pinned normal and five-step Turbo checkpoints are retained under
+  `/storage/mold/models/hunyuan3d-2mv-fp16` and
+  `/storage/mold/models/hunyuan3d-2mv-turbo-fp16`. Their 4,928,151,562-byte
+  and 4,930,777,530-byte safetensors have SHA-256
+  `d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c`
+  and `172d7a989b99f66af760da0080d8c6f6350c72609536cf0c55b87a4afa574e45`.
+  Header qualification found complete model, VAE and DINO namespaces in each
+  single-file bundle.
+- The executable Tencent oracle at commit
+  `f8db63096c8282cb27354314d896feba5ba6ff8a`, using its official example 11
+  front/left/back images, produces 56,315 vertices and 112,662 faces from the
+  Turbo checkpoint at five steps, seed 25026 and octree 192. The retained
+  `upstream-2mv-turbo-3view-seed25026.log` records the full invocation and
+  timing.
+- The first mold qualification deliberately remains retained as failed
+  evidence: applying Tencent's ascending sigma ladder to mold's ComfyUI-style
+  transformer wrapper produced fragmented normal geometry and a nearly empty
+  Turbo mesh. That wrapper already evaluates the official network at
+  `1 - sigma` and negates its velocity. The corrected plans use the
+  complementary descending ladders, which preserve Tencent's Euler updates
+  exactly after both transformations.
+- With that correction, the native CUDA Turbo run completes in 21.6 seconds
+  with 56,543 vertices and 118,628 triangles. Its 2,781,632-byte GLB has
+  SHA-256
+  `54d6c38753d2be6a74050eb01aa7c5ec2a5daab3d5a38d7b094ffe7ace76ba4f`.
+  The ordinary 30-step run completes in 84.7 seconds with 56,184 vertices and
+  118,644 triangles; its 2,773,212-byte GLB has SHA-256
+  `7f7d4b604dd58c26d0138a62c9e6e2523e48649e2576ad1d099346bb1b05d889`.
+  Both reconstruct the oracle subject as a coherent full-body character, and
+  Khronos glTF Validator 2.0.0-dev.3.10 reports zero errors, warnings, infos,
+  or hints. Logs, GLBs, validator JSON and 512-pixel posters are retained in
+  `p9-multiview/`.
+- The multiview default iso-level is 0.5, equivalent to Tencent's zero-logit
+  marching-cubes level after mold's `(logit + 1) / 2` occupancy projection.
+  Existing single-view recipes keep ComfyUI's 0.6 default. Profile, client and
+  execution defaults derive from the same model-aware function.

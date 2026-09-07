@@ -465,6 +465,36 @@ pub(crate) fn validate_boundary_image_bytes(bytes: &[u8], boundary: &str) -> Res
     Ok(dimensions)
 }
 
+pub(crate) fn prepare_named_image(
+    path: &Path,
+    role: mold_core::GenerationImageReferenceRole,
+) -> Result<GenerationReference> {
+    let label = match role {
+        mold_core::GenerationImageReferenceRole::Front => "front",
+        mold_core::GenerationImageReferenceRole::Left => "left",
+        mold_core::GenerationImageReferenceRole::Back => "back",
+        mold_core::GenerationImageReferenceRole::Right => "right",
+    };
+    let (bytes, (width, height)) = read_boundary_image(path, label)?;
+    let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    Ok(GenerationReference::NamedImage {
+        role,
+        media: GenerationReferenceAuthority::Inline { data: bytes },
+        provenance: GenerationReferenceProvenance {
+            name: display_name(path),
+            sha256: None,
+            crop: None,
+        },
+        mime_type: mime_type.to_string(),
+        width,
+        height,
+    })
+}
+
 fn h3_image_decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(minimax_h3::MAX_REFERENCE_DIMENSION);
@@ -782,6 +812,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn named_view_preparation_preserves_role_bytes_dimensions_and_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("left.png");
+        image::DynamicImage::new_rgba8(32, 16).save(&path).unwrap();
+
+        let reference =
+            prepare_named_image(&path, mold_core::GenerationImageReferenceRole::Left).unwrap();
+        let GenerationReference::NamedImage {
+            role,
+            media,
+            provenance,
+            mime_type,
+            width,
+            height,
+        } = reference
+        else {
+            panic!("named preparation returned another reference kind")
+        };
+        assert_eq!(role, mold_core::GenerationImageReferenceRole::Left);
+        assert!(matches!(media, GenerationReferenceAuthority::Inline { data } if !data.is_empty()));
+        assert_eq!(provenance.name.as_deref(), Some("left.png"));
+        assert_eq!(mime_type, "image/png");
+        assert_eq!((width, height), (32, 16));
     }
 
     /// A bare path is the ordered-reference form of the flag, and an image is

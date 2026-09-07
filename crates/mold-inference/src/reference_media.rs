@@ -58,6 +58,26 @@ pub(crate) fn decode_image_from_binding(
     Ok(image)
 }
 
+pub(crate) fn decode_rgba_image_from_binding(
+    binding: &GenerationReferenceBinding,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<image::RgbaImage> {
+    let bytes = read_verified_binding(binding, checkpoint)?;
+    checkpoint()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(mold_core::minimax_h3::MAX_REFERENCE_DIMENSION);
+    limits.max_image_height = Some(mold_core::minimax_h3::MAX_REFERENCE_DIMENSION);
+    limits.max_alloc = Some(
+        mold_core::minimax_h3::MAX_REFERENCE_IMAGE_PIXELS
+            .checked_mul(4)
+            .context("reference image decode limit overflowed")?,
+    );
+    let image = crate::img_utils::decode_oriented_srgb_rgba_with_limits(&bytes, limits)
+        .context("reference RGBA image decode failed")?;
+    checkpoint()?;
+    Ok(image)
+}
+
 pub(crate) fn decode_video_from_binding(
     binding: &GenerationReferenceBinding,
     selected_source_indices: &[usize],

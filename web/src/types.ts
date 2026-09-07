@@ -19,6 +19,7 @@ import type {
   MeshRequestOptions,
 } from "@studio/lib/meshControls";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
+import type { NamedViewsState } from "@studio/lib/namedViews";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type {
@@ -1215,6 +1216,8 @@ export interface GenerateFormState {
    * Kept separate from legacy edit/source fields so no surface can flatten
    * Ref2VA into image-only editing. */
   h3Authoring?: MinimaxH3AuthoringState;
+  /** Fixed semantic camera slots for Hunyuan3D multiview recipes. */
+  namedViews?: NamedViewsState;
   /** 3-D geometry controls for a mesh recipe. `null` on every field means
    * "use the profile default", which is what keeps an untouched control off
    * the wire; cleared whenever the selected recipe has no `mesh` block.

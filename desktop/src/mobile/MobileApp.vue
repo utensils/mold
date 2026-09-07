@@ -254,6 +254,7 @@ import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets
 import {
   identityConditioningValidationError,
   meshTargetFacesValidationError,
+  namedViewsValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   inlineGenerationMediaBytes,
@@ -2059,8 +2060,13 @@ const guidanceError = computed(() =>
 );
 /** A face budget outside the recipe's advertised bounds is a 422 at admission. */
 const meshTargetFacesError = computed(() => meshTargetFacesValidationError(form));
+const namedViewsError = computed(() => namedViewsValidationError(form));
 const basicParametersValid = computed(
-  () => !stepsError.value && !guidanceError.value && !meshTargetFacesError.value,
+  () =>
+    !stepsError.value &&
+    !guidanceError.value &&
+    !meshTargetFacesError.value &&
+    !namedViewsError.value,
 );
 const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));
 // Desktop parity: a conditioned LTX-2 render may go out undescribed, so the

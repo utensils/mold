@@ -90,6 +90,7 @@ import {
   wanRecipeFromWire,
   wanRecipeToWire,
 } from "@studio/lib/wanRecipe";
+import { emptyNamedViews, serializeNamedViews } from "@studio/lib/namedViews";
 import {
   MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
   emptyMinimaxH3AuthoringState,
@@ -214,6 +215,7 @@ function defaultForm(): GenerateFormState {
     enableAudio: null,
     videoOnly: false,
     h3Authoring: emptyMinimaxH3AuthoringState(),
+    namedViews: emptyNamedViews(),
     mesh: emptyMeshForm(),
   };
 }
@@ -245,6 +247,7 @@ export function sanitizePersistedForm(
     extendVideo,
     keyframes,
     h3Authoring,
+    namedViews,
     ...metadata
   } = state;
   return {
@@ -267,6 +270,12 @@ export function sanitizePersistedForm(
       image: stripMediaBytes(k.image),
     })),
     h3Authoring: stripH3AuthoringMedia(h3Authoring),
+    namedViews: Object.fromEntries(
+      Object.entries(namedViews ?? {}).map(([role, image]) => [
+        role,
+        image ? stripMediaBytes(image) : image,
+      ]),
+    ),
   };
 }
 
@@ -873,6 +882,7 @@ function ensureDraftIds(state: GenerateFormState) {
   ensure(state.sourceVideo);
   ensure(state.extendVideo);
   state.keyframes.forEach((keyframe) => ensure(keyframe.image));
+  Object.values(state.namedViews ?? {}).forEach((image) => ensure(image ?? null));
   const h3 = state.h3Authoring;
   if (!h3) return;
   for (const boundary of [h3.firstFrame, h3.lastFrame]) {
@@ -916,6 +926,7 @@ function mediaFromState(state: GenerateFormState): DraftMediaRecord[] {
     state.sourceVideo,
     state.extendVideo,
     ...state.keyframes.map((k) => k.image),
+    ...Object.values(state.namedViews ?? {}),
   ].filter((m): m is NonNullable<typeof m> => Boolean(m?.base64));
   return [...ordinary, ...h3MediaFromState(state)];
 }
@@ -1013,6 +1024,14 @@ async function hydrateDraftMedia(state: GenerateFormState) {
     )
   ) {
     state.keyframes = keyframes;
+  }
+
+  const namedSnapshot = state.namedViews ?? {};
+  const namedEntries = await Promise.all(
+    Object.entries(namedSnapshot).map(async ([role, image]) => [role, await hydrate(image ?? null)] as const),
+  );
+  if (state.namedViews === namedSnapshot) {
+    state.namedViews = Object.fromEntries(namedEntries);
   }
 
   const h3 = state.h3Authoring;
@@ -1404,6 +1423,13 @@ export function useGenerateForm(): UseGenerateForm {
         mesh: capabilities.mesh
           ? meshRequestFromForm(s.mesh ?? emptyMeshForm(), capabilities.mesh)
           : undefined,
+        references: (() => {
+          const views = serializeNamedViews(
+            s.namedViews,
+            requestRecipe?.capabilities.mesh?.named_views,
+          );
+          return views.length ? views : undefined;
+        })(),
         cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
         // "default" is the picker's omit-sentinel, not a wire variant; a
         // stored sentinel must never reach serde (codex review).
