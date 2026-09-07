@@ -170,7 +170,9 @@ describe("MiniMax H3 reference upload leases", () => {
           expect(payload.request.references?.[0]?.media).toEqual({
             authority: "descriptor",
           });
-          expect(payload.request.references?.[0]?.provenance?.sha256).toBeUndefined();
+          expect(
+            payload.request.references?.[0]?.provenance?.sha256,
+          ).toBeUndefined();
           return Response.json({
             instance_id: INSTANCE_ID,
             expires_at_ms: 20_000,

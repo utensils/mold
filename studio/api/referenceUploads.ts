@@ -432,13 +432,19 @@ function captureReferences(
     }
 
     if (uploadBody) {
-      if (uploadBody.size === 0 || uploadBody.size > capabilities.max_file_bytes) {
+      if (
+        uploadBody.size === 0 ||
+        uploadBody.size > capabilities.max_file_bytes
+      ) {
         protocolError(
           "REFERENCE_UPLOAD_TOO_LARGE",
           `Reference ${oneBased} exceeds this host's per-file upload limit.`,
         );
       }
-      if (reference.kind === "mesh" && reference.byte_length !== uploadBody.size) {
+      if (
+        reference.kind === "mesh" &&
+        reference.byte_length !== uploadBody.size
+      ) {
         protocolError(
           "REFERENCE_UPLOAD_MEDIA_INVALID",
           `Reference ${oneBased} does not match its declared byte length.`,
