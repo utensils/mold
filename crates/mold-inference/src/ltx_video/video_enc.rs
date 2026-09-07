@@ -273,7 +273,7 @@ pub fn encode_gif_rgba_with_options(
 
         let mut write_frame = |frame_img: &image::RgbaImage| -> Result<()> {
             let mut pixels = frame_img.as_raw().clone();
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 if pixel[3] >= ALPHA_CUTOFF {
                     pixel[3] = 255;
                 } else {
@@ -284,7 +284,7 @@ pub fn encode_gif_rgba_with_options(
                     // black could pull the darkest pixels of a dark PAINTED
                     // mesh onto that entry and punch holes in the object. The
                     // entry is never drawn, so its colour costs nothing.
-                    pixel.copy_from_slice(&CLEAR_SENTINEL);
+                    *pixel = CLEAR_SENTINEL;
                 }
             }
             let mut gif_frame = gif::Frame::from_rgba_speed(width, height, &mut pixels, 10);
