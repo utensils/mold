@@ -30,6 +30,7 @@ pulid = []
 # Advertise and admit the native Hunyuan3D PBR paint runtime. Runtime crates
 # forward this only when the xatlas/native paint path is compiled.
 mesh-texture = []
+mesh-matting = []
 
 [dependencies]
 anyhow = "1"

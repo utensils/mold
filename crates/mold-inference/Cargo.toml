@@ -21,6 +21,7 @@ name = "mold_inference"
 default = []
 # Narrow native exception: pinned xatlas UV unwrapping, with Rust inference.
 mesh-texture = ["dep:cc", "mold-core/mesh-texture"]
+mesh-matting = ["mold-core/mesh-matting", "dep:candle-onnx", "dep:prost"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
@@ -87,6 +88,11 @@ required-features = ["dev-bins"]
 name = "ltx2_vae_probe"
 path = "src/bin/ltx2_vae_probe.rs"
 required-features = ["dev-bins", "mp4"]
+
+[[bin]]
+name = "hunyuan3d_matting_probe"
+path = "src/bin/hunyuan3d_matting_probe.rs"
+required-features = ["dev-bins", "mesh-matting"]
 
 [[bin]]
 name = "sd_singlefile_inspect"
@@ -167,7 +173,7 @@ cudarc = { version = "0.19.8", default-features = false, features = ["driver"], 
 # `Tensor` type is identical to ours. A crates.io `candle-flash-attn` depends
 # on the upstream-named `candle-core` and breaks the CUDA build (#1399).
 candle-flash-attn = { git = "https://github.com/utensils/candle.git", rev = "c34de9b7c16aa92ed159982128954562b7c16ab8", optional = true }
-# ONNX evaluation for the InsightFace antelopev2 face models (PuLID only).
+# ONNX protobuf support for the hand-ported U²-Net and InsightFace models.
 # Pinned to the same fork revision as every other candle crate above, so its
 # `Tensor` type is identical to ours. CPU-only by
 # construction: `candle-onnx`'s `get_tensor` materializes every initializer on

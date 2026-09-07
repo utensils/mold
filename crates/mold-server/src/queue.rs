@@ -2536,6 +2536,24 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 }
             }
 
+            if let Some(mesh) = response.mesh.as_mut() {
+                let derived = std::mem::take(&mut mesh.derived_media);
+                if !derived.is_empty() {
+                    if let Some(ticket) = job.journal.as_ref() {
+                        if let Err(error) = ticket.persist_mesh_derived_media_async(derived).await {
+                            drop(request);
+                            durable_generation_settlement::fail_async(
+                                job,
+                                DurableDisposition::Hold { retryable: true },
+                                format!("processed mesh inputs could not be retained: {error:#}"),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+            }
+
             // Publication is a lifecycle claim, not merely the next line of
             // the happy path. DELETE and shutdown cancellation use the same
             // registry lock/token, so whichever won before this point decides

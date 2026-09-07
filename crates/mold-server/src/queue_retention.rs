@@ -146,11 +146,11 @@ pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSwee
             // `None` would purge the row, leave its bytes `gc_pending`, and
             // still report `media_deferred: 0` — the one number that tells
             // an operator startup reconciliation has work left to do.
-            let mut candidate = None;
+            let mut candidates = Vec::new();
             let mut candidate_unresolved = false;
             if let Some(lifecycle) = lifecycle.as_ref() {
-                match lifecycle.candidate_for_job(&row.id) {
-                    Ok(found) => candidate = found,
+                match lifecycle.candidates_for_job(&row.id) {
+                    Ok(found) => candidates = found,
                     Err(error) => {
                         candidate_unresolved = true;
                         tracing::warn!(
@@ -183,14 +183,16 @@ pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSwee
             // The row is gone, so the retire trigger has already moved the
             // obligation to `gc_pending`. Collect the bytes now; if that
             // fails, startup reconciliation still owns it.
-            if let (Some(lifecycle), Some(candidate)) = (lifecycle.as_ref(), candidate) {
-                if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
-                    media_deferred += 1;
-                    tracing::warn!(
-                        job = %row.id,
-                        %error,
-                        "expired held media remains GC-pending until startup reconciliation"
-                    );
+            if let Some(lifecycle) = lifecycle.as_ref() {
+                for candidate in candidates {
+                    if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
+                        media_deferred += 1;
+                        tracing::warn!(
+                            job = %row.id,
+                            %error,
+                            "expired held media remains GC-pending until startup reconciliation"
+                        );
+                    }
                 }
             }
         }

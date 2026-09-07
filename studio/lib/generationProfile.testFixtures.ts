@@ -117,6 +117,12 @@ export function hunyuan3dRecipe(): GenerationRecipeProfile {
           reason:
             "PBR texture generation is not available in this build; omit mesh.texture to render geometry only",
         },
+        matting: {
+          mode: "adjustable",
+          default: "auto",
+          choices: ["auto", "on", "off"],
+          reason: "Auto preserves useful alpha and removes opaque backgrounds.",
+        },
       },
     },
     provenance: [

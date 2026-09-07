@@ -34,6 +34,7 @@ use mold_db::generation_queue::{
     self, GenerationQueueProjectionPage, GenerationQueueRow, QueueProjectionCursor, QueueRowState,
 };
 use mold_db::MetadataDb;
+use sha2::{Digest as _, Sha256};
 
 use crate::state::SseCompletionPayload;
 
@@ -1396,20 +1397,22 @@ impl QueueJournal {
         generation_batches::child_cancel_requested(db, owner, id)
     }
 
-    fn media_candidate(
+    fn media_candidates(
         &self,
         id: &str,
-    ) -> Option<crate::queue_media_lifecycle::QueueMediaGcCandidate> {
-        let lifecycle = self.queue_media_lifecycle.get()?;
-        match lifecycle.candidate_for_job(id) {
-            Ok(candidate) => candidate,
+    ) -> Vec<crate::queue_media_lifecycle::QueueMediaGcCandidate> {
+        let Some(lifecycle) = self.queue_media_lifecycle.get() else {
+            return Vec::new();
+        };
+        match lifecycle.candidates_for_job(id) {
+            Ok(candidates) => candidates,
             Err(error) => {
                 tracing::warn!(
                     job = %id,
                     %error,
                     "could not snapshot queue-media cleanup authority; the DB trigger will retain GC work"
                 );
-                None
+                Vec::new()
             }
         }
     }
@@ -1430,28 +1433,20 @@ impl QueueJournal {
         }
     }
 
-    fn cleanup_media_candidate(
-        &self,
-        candidate: Option<crate::queue_media_lifecycle::QueueMediaGcCandidate>,
-    ) {
-        let (Some(lifecycle), Some(candidate)) = (self.queue_media_lifecycle.get(), candidate)
-        else {
-            return;
-        };
-        if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
-            tracing::warn!(
-                %error,
-                "queue-media cleanup remains GC-pending after terminal queue deletion"
-            );
-        }
-    }
-
     fn cleanup_media_candidates(
         &self,
         candidates: Vec<crate::queue_media_lifecycle::QueueMediaGcCandidate>,
     ) {
+        let Some(lifecycle) = self.queue_media_lifecycle.get() else {
+            return;
+        };
         for candidate in candidates {
-            self.cleanup_media_candidate(Some(candidate));
+            if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
+                tracing::warn!(
+                    %error,
+                    "queue-media cleanup remains GC-pending after terminal queue deletion"
+                );
+            }
         }
     }
 
@@ -1462,9 +1457,9 @@ impl QueueJournal {
         let Some(db) = self.db() else {
             return;
         };
-        let candidate = self.media_candidate(id);
+        let candidates = self.media_candidates(id);
         match generation_queue::delete(db, id) {
-            Ok(true) => self.cleanup_media_candidate(candidate),
+            Ok(true) => self.cleanup_media_candidates(candidates),
             Ok(false) => {}
             Err(error) => {
                 tracing::warn!(
@@ -1492,13 +1487,13 @@ impl QueueJournal {
             result_json: None,
             completed_at_ms: now_ms(),
         };
-        let candidate = self.media_candidate(id);
+        let candidates = self.media_candidates(id);
         let outcome = generation_batches::cancel_owned(db, owner, id, terminal)?;
         if outcome != generation_batches::OwnedCancellation::NotOwned {
             self.cancel_preparation(id);
         }
         if outcome == generation_batches::OwnedCancellation::Settled {
-            self.cleanup_media_candidate(candidate);
+            self.cleanup_media_candidates(candidates);
             if let Some(service) = self.queue_media_admission.get() {
                 service.ingress().cancel(id);
             }
@@ -2052,6 +2047,56 @@ pub struct QueueTicket {
     settled: bool,
 }
 
+fn persist_mesh_derived_media(
+    lifecycle: &crate::queue_media_lifecycle::QueueMediaLifecycle,
+    job_id: &str,
+    derived: Vec<mold_core::MeshDerivedMedia>,
+) -> anyhow::Result<()> {
+    const MAX_DERIVED_BYTES: usize = 512 * 1024 * 1024;
+
+    let total = derived.iter().try_fold(0_usize, |sum, item| {
+        sum.checked_add(item.data.len())
+            .ok_or_else(|| anyhow::anyhow!("derived mesh media size overflowed"))
+    })?;
+    anyhow::ensure!(
+        total <= MAX_DERIVED_BYTES,
+        "derived mesh media exceeds the 512 MiB durable limit"
+    );
+
+    let mut identity = Sha256::new();
+    identity.update(b"mold.mesh-derived-media.v1\0");
+    let mut media = Vec::with_capacity(derived.len());
+    for item in derived {
+        let (role, name) = match item.role {
+            None => ("matting_processed_source_image", "scalar"),
+            Some(mold_core::GenerationImageReferenceRole::Front) => {
+                ("matting_processed_references", "front")
+            }
+            Some(mold_core::GenerationImageReferenceRole::Left) => {
+                ("matting_processed_references", "left")
+            }
+            Some(mold_core::GenerationImageReferenceRole::Back) => {
+                ("matting_processed_references", "back")
+            }
+            Some(mold_core::GenerationImageReferenceRole::Right) => {
+                ("matting_processed_references", "right")
+            }
+        };
+        for component in [role.as_bytes(), name.as_bytes(), item.data.as_slice()] {
+            identity.update((component.len() as u64).to_le_bytes());
+            identity.update(component);
+        }
+        media.push(crate::queue_media_store::SealMedia::bytes(
+            role, name, item.data,
+        ));
+    }
+    let fingerprint =
+        crate::queue_media_store::QueueMediaOperationFingerprint::from_sha256_v1_digest(
+            identity.finalize().into(),
+        );
+    lifecycle.persist_derived_media(job_id, "matting_processed", &fingerprint, media)
+}
+
 impl QueueTicket {
     pub fn id(&self) -> &str {
         &self.id
@@ -2073,6 +2118,43 @@ impl QueueTicket {
             return Ok(());
         };
         lifecycle.handoff_to_gallery(&self.id, output_dir, gate)
+    }
+
+    /// Encrypt source-derived mesh preprocessing outputs and attach them to
+    /// this durable job before any public gallery bytes are written.
+    pub(crate) fn persist_mesh_derived_media(
+        &self,
+        derived: Vec<mold_core::MeshDerivedMedia>,
+    ) -> anyhow::Result<()> {
+        if derived.is_empty() {
+            return Ok(());
+        }
+        let lifecycle = self
+            .journal
+            .queue_media_lifecycle()
+            .ok_or_else(|| anyhow::anyhow!("durable queue-media lifecycle is unavailable"))?;
+        persist_mesh_derived_media(lifecycle.as_ref(), &self.id, derived)
+    }
+
+    /// The single-worker dispatcher returns to Tokio after inference. Keep
+    /// hashing, PNG encryption, and SQLite registration off its async thread.
+    pub(crate) async fn persist_mesh_derived_media_async(
+        &self,
+        derived: Vec<mold_core::MeshDerivedMedia>,
+    ) -> anyhow::Result<()> {
+        if derived.is_empty() {
+            return Ok(());
+        }
+        let lifecycle = self
+            .journal
+            .queue_media_lifecycle()
+            .ok_or_else(|| anyhow::anyhow!("durable queue-media lifecycle is unavailable"))?;
+        let job_id = self.id.clone();
+        tokio::task::spawn_blocking(move || {
+            persist_mesh_derived_media(lifecycle.as_ref(), &job_id, derived)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("processed mesh media task failed: {error}"))?
     }
 
     /// The job produced its output. Delete the row unconditionally — a
@@ -2140,7 +2222,7 @@ impl QueueTicket {
                 error: anyhow::anyhow!("durable generation database is unavailable"),
             };
         };
-        let candidate = self.journal.media_candidate(&self.id);
+        let candidates = self.journal.media_candidates(&self.id);
         match generation_batches::finish_claimed(
             db,
             &self.id,
@@ -2149,7 +2231,7 @@ impl QueueTicket {
             terminal,
         ) {
             Ok(commit) if commit.queue_deleted => {
-                self.journal.cleanup_media_candidate(candidate);
+                self.journal.cleanup_media_candidates(candidates);
                 if commit.batch_child_updated {
                     self.journal.publish_state_committed(&self.id);
                 }
@@ -2512,7 +2594,7 @@ impl QueueTicket {
         else {
             return Ok(generation_batches::OwnedHold::Fenced);
         };
-        let candidate = self.journal.media_candidate(&self.id);
+        let candidates = self.journal.media_candidates(&self.id);
         let outcome = generation_batches::hold_owned(
             db,
             owner,
@@ -2524,7 +2606,7 @@ impl QueueTicket {
             now,
         )?;
         if outcome == generation_batches::OwnedHold::Cancelled {
-            self.journal.cleanup_media_candidate(candidate);
+            self.journal.cleanup_media_candidates(candidates);
         }
         if matches!(
             outcome,
@@ -2544,11 +2626,11 @@ impl QueueTicket {
         let Some(db) = self.journal.db() else {
             return false;
         };
-        let candidate = self.journal.media_candidate(&self.id);
+        let candidates = self.journal.media_candidates(&self.id);
         match generation_batches::finish_claimed(db, &self.id, token, expected, terminal) {
             Ok(commit) => {
                 if commit.queue_deleted {
-                    self.journal.cleanup_media_candidate(candidate);
+                    self.journal.cleanup_media_candidates(candidates);
                 }
                 if commit.batch_child_updated {
                     self.journal.publish_state_committed(&self.id);

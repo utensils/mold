@@ -2410,6 +2410,10 @@ fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<
     if options.texture == Some(true) {
         return Err("PBR texture generation requires the mesh-texture build feature".to_string());
     }
+    #[cfg(not(feature = "mesh-matting"))]
+    if options.matting.is_some() {
+        return Err("Background matting requires the mesh-matting build feature".to_string());
+    }
     if let Some(resolution) = options.texture_resolution {
         if !MESH_TEXTURE_RESOLUTIONS.contains(&resolution) {
             return Err(format!(

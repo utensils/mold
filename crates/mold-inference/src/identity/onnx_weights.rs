@@ -277,6 +277,20 @@ impl<'a> WeightTape<'a> {
         kernel: usize,
         stride: usize,
     ) -> Result<Conv2d> {
+        self.next_conv_dilated(out_channels, in_channels, kernel, stride, 1)
+    }
+
+    /// The next `Conv`, including the dilation used by U²-Net's residual
+    /// U-blocks. The graph remains authoritative for padding and rejects any
+    /// mismatch with the hand-ported architecture.
+    pub fn next_conv_dilated(
+        &mut self,
+        out_channels: usize,
+        in_channels: usize,
+        kernel: usize,
+        stride: usize,
+        dilation: usize,
+    ) -> Result<Conv2d> {
         let node = self.next_node("Conv")?;
         let kernel_shape = Self::ints_attr(node, "kernel_shape").unwrap_or_default();
         if kernel_shape != vec![kernel as i64, kernel as i64] {
@@ -301,10 +315,10 @@ impl<'a> WeightTape<'a> {
         }
         let padding = usize::try_from(pads[0]).context("a negative Conv padding")?;
         let dilations = Self::ints_attr(node, "dilations").unwrap_or_else(|| vec![1, 1]);
-        if dilations != vec![1, 1] {
+        if dilations != vec![dilation as i64, dilation as i64] {
             bail!(
-                "Conv at node {}: dilations {dilations:?} are unsupported",
-                self.cursor - 1
+                "Conv at node {}: dilations {dilations:?}, expected [{dilation}, {dilation}]",
+                self.cursor - 1,
             );
         }
         if Self::int_attr(node, "group").unwrap_or(1) != 1 {
@@ -338,7 +352,7 @@ impl<'a> WeightTape<'a> {
             Conv2dConfig {
                 padding,
                 stride,
-                dilation: 1,
+                dilation,
                 groups: 1,
                 cudnn_fwd_algo: None,
             },

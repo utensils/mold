@@ -243,11 +243,22 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             }
             fields
         }
-        AdvSection::Mesh => vec![
-            ParamField::Octree,
-            ParamField::MeshThreshold,
-            ParamField::TargetFaces,
-        ],
+        AdvSection::Mesh => {
+            let mut fields = vec![
+                ParamField::Octree,
+                ParamField::MeshThreshold,
+                ParamField::TargetFaces,
+            ];
+            if caps
+                .mesh
+                .as_ref()
+                .and_then(|mesh| mesh.matting.as_ref())
+                .is_some_and(|control| control.mode != mold_core::ControlMode::Hidden)
+            {
+                fields.push(ParamField::Matting);
+            }
+            fields
+        }
         AdvSection::Identity => vec![
             ParamField::IdentityImage,
             ParamField::IdentityWeight,
@@ -399,6 +410,16 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
                 parts.push(format!(
                     "{} faces",
                     crate::ui::preview::format_thousands(faces)
+                ));
+            }
+            if let Some(matting) = params.mesh.matting {
+                parts.push(format!(
+                    "matting {}",
+                    match matting {
+                        mold_core::MeshMattingMode::Auto => "auto",
+                        mold_core::MeshMattingMode::On => "on",
+                        mold_core::MeshMattingMode::Off => "off",
+                    }
                 ));
             }
             if parts.is_empty() {

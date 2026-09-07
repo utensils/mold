@@ -131,6 +131,16 @@ const thresholdValue = computed(
 );
 const thresholdNote = computed(() => controlNote(thresholdControl.value));
 const targetFacesValue = computed(() => meshForm.value.targetFaces);
+const mattingControl = computed(() => meshProfile.value?.matting ?? null);
+const mattingOptions = computed(() =>
+  (mattingControl.value?.choices ?? []).map((value) => ({
+    value,
+    label: value === "auto" ? "Auto" : value === "on" ? "On" : "Off",
+  })),
+);
+const mattingValue = computed(
+  () => meshForm.value.matting ?? mattingControl.value?.default ?? "auto",
+);
 /** Advisory only, like the resolution warning: the server is the authority
  * and refuses an out-of-range value at admission (422), so the rail says so
  * here instead of letting Generate fail with no explanation. */
@@ -465,6 +475,15 @@ function lockLastSeed() {
       >
         {{ targetFacesWarning }}
       </p>
+      <SegmentedControl
+        v-if="mattingControl?.mode !== 'hidden' && mattingOptions.length > 0"
+        data-test="mesh-matting"
+        :model-value="mattingValue"
+        :options="mattingOptions"
+        label="Remove background"
+        :disabled="mattingControl?.mode === 'fixed'"
+        @update:model-value="patchMesh({ matting: $event })"
+      />
     </div>
 
     <div v-if="capabilities.supportsVideo" class="controls__group">

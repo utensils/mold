@@ -280,7 +280,11 @@ pub fn list_referenced_media_set_ids(db: &MetadataDb, owner_uuid: &str) -> Resul
         let mut stmt = conn.prepare(
             "SELECT media_set_id
                FROM generation_queue
-              WHERE owner_uuid = ?1 AND media_set_id IS NOT NULL",
+              WHERE owner_uuid = ?1 AND media_set_id IS NOT NULL
+             UNION
+             SELECT media_set_id
+               FROM generation_queue_derived_media
+              WHERE owner_uuid = ?1",
         )?;
         let ids = stmt.query_map(params![owner_uuid], |row| row.get::<_, String>(0))?;
         ids.collect::<rusqlite::Result<HashSet<_>>>()

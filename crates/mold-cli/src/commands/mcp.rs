@@ -169,6 +169,7 @@ async fn response_from_canonical_bytes(
                 // as they describe the waveform on an audio one.
                 poster_width: metadata.width,
                 poster_height: metadata.height,
+                derived_media: Vec::new(),
             }),
             generation_time_ms,
             model: metadata.model,
@@ -1329,6 +1330,7 @@ struct GenerateMeshArgs {
     #[serde(alias = "mesh_threshold")]
     threshold: Option<f32>,
     target_faces: Option<u32>,
+    matting: Option<mold_core::MeshMattingMode>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2754,6 +2756,7 @@ fn build_generate_mesh_request(
         target_faces: args.target_faces,
         texture: None,
         texture_resolution: None,
+        matting: args.matting,
     };
 
     let mut req = build_generate_request(
@@ -3341,6 +3344,12 @@ fn builtin_tool_definitions() -> Value {
                         "maximum": mold_core::validation::MESH_MAX_TARGET_FACES,
                         "description": "Decimate to approximately this many triangles. Omit to keep the raw surface-net output, which is dense and regular."
                     },
+                    "matting": {
+                        "type": "string",
+                        "enum": ["auto", "on", "off"],
+                        "default": "auto",
+                        "description": "Background removal before conditioning. Auto preserves useful existing alpha; on recomputes it; off keeps the input background."
+                    },
                     // The earlier spellings. `additionalProperties: false`
                     // means a schema-validating host refuses anything not
                     // declared here, so an alias that lived only in serde
@@ -3757,6 +3766,7 @@ mod tests {
             octree: None,
             threshold: None,
             target_faces: None,
+            matting: None,
         })
         .unwrap_err();
         assert!(bad.contains("valid base64"), "{bad}");
@@ -3773,6 +3783,7 @@ mod tests {
             octree: None,
             threshold: None,
             target_faces: None,
+            matting: None,
         })
         .unwrap_err();
         assert!(empty.contains("must not be empty"), "{empty}");
@@ -3793,6 +3804,7 @@ mod tests {
             octree: Some(320),
             threshold: Some(0.55),
             target_faces: Some(50_000),
+            matting: Some(mold_core::MeshMattingMode::On),
         })
         .expect("a well-formed mesh request builds");
 
@@ -3811,6 +3823,7 @@ mod tests {
         assert_eq!(mesh.octree_resolution, Some(320));
         assert_eq!(mesh.threshold, Some(0.55));
         assert_eq!(mesh.target_faces, Some(50_000));
+        assert_eq!(mesh.matting, Some(mold_core::MeshMattingMode::On));
         // Texturing is not available; the tool must not ask for it.
         assert_eq!(mesh.texture, None);
         assert_eq!(req.seed, Some(42));

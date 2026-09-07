@@ -1,0 +1,1 @@
+- **Hunyuan3D background removal.** Image-to-mesh and named multiview requests can now apply a pinned pure-Rust U²-Net matte with explicit Auto, On, and Off controls across the CLI, MCP, TUI, Discord, web, desktop, and mobile surfaces ([#1496](https://github.com/utensils/mold/issues/1496)).

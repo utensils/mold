@@ -35,6 +35,9 @@ pub const PUBLIC_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_H3",
     "CARGO_FEATURE_H3_CUDA",
     "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
+    // The public Hunyuan3D profile advertises background removal. Require the
+    // native U2Net engine in every reviewed H3 artifact that can advertise it.
+    "CARGO_FEATURE_MESH_MATTING",
     // Native xatlas baking is part of the public Hunyuan3D PBR deliverable.
     // Keep it required so a release cannot advertise texture controls and
     // then ship a geometry-only backend.
@@ -54,6 +57,7 @@ pub const PUBLIC_H3_METAL_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_H3",
     "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
     "CARGO_FEATURE_METAL",
+    "CARGO_FEATURE_MESH_MATTING",
     "CARGO_FEATURE_MESH_TEXTURE",
     "CARGO_FEATURE_MP4",
 ];

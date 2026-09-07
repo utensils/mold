@@ -560,7 +560,7 @@ describe("prompt, strength, and mesh contract", () => {
         step: 1,
         mode: "fixed",
       },
-      matting: { mode: "hidden", required: false },
+      matting: { mode: "hidden", default: "auto", choices: [] },
       delight: { mode: "hidden", required: false },
       workflow_modes: ["image_to_mesh"],
     });

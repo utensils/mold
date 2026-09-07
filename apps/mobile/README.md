@@ -170,9 +170,9 @@ pushed screen opened from the header.
   The **prompt is optional** for an `ltx2` model once the form
   carries visual conditioning (source image, keyframes, source video, or a
   continuation): Develop enables, the pre-submit guard stops requiring text, and
-  the prompt placeholder says so. Every other model — including image families
-  with a source image, and Hunyuan3D until the GUI release reads the profile's
-  `ignored` prompt mode — still requires a prompt here. This follows the shared
+  the prompt placeholder says so. Every other prompt-reading model — including
+  image families with a source image — still requires a prompt here.
+  Hunyuan3D reads the profile's `ignored` prompt mode. This follows the shared
   `@studio/lib/promptRequirement` rule and its shared copy, so iPhone, desktop,
   and web cannot set different expectations. Legacy
   `ltx-video` remains prompt-required and rejects image conditioning because
@@ -184,15 +184,17 @@ pushed screen opened from the header.
   reads no prompt at all (`prompt.mode: ignored`, not merely optional), so
   Shape/Resolution/exact-size/Fit-to-canvas/Strength/Mask/Negative disappear
   and a **Mesh** control group takes their place — Octree over the advertised
-  allowlist (default 256), an Iso threshold slider, and an optional Target
-  faces field within the advertised bounds that keeps the raw surface when
-  left blank. The prompt field becomes an optional note with placeholder copy
+  allowlist (default 256), an Iso threshold slider, an optional Target faces
+  field within the advertised bounds that keeps the raw surface when left
+  blank, and the advertised Auto/On/Off background-removal policy. Auto
+  preserves useful supplied alpha and runs U²-Net for opaque inputs. The
+  prompt field becomes an optional note with placeholder copy
   explaining the model renders from the source image alone, and Develop
   enables with an empty prompt as long as a source image is attached — a
   source image is still required. The request is pinned to GLB and carries
   only the mesh controls that differ from the advertised defaults; **Use as
-  prompt** restores the recorded octree/threshold/face target from the
-  print's `metadata.mesh`. A finished mesh mounts the same orbitable
+  prompt** restores the recorded octree/threshold/face target and matting
+  policy from the print's `metadata.mesh`. A finished mesh mounts the same orbitable
   `MeshViewer` the Library uses directly in the Create result area, where it
   auto-rotates until touched (the Library viewer sheet does not); the viewer's
   fullscreen toggle is unavailable in iOS WKWebView, which exposes no

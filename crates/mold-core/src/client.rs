@@ -379,6 +379,7 @@ impl MoldClient {
                     poster: Vec::new(),
                     poster_width: meta.poster_width,
                     poster_height: meta.poster_height,
+                    derived_media: Vec::new(),
                 }),
                 images: Vec::new(),
                 video: None,
@@ -715,6 +716,7 @@ impl MoldClient {
                                     // the waveform on an audio one.
                                     poster_width: complete.width,
                                     poster_height: complete.height,
+                                    derived_media: Vec::new(),
                                 }),
                                 generation_time_ms: complete.generation_time_ms,
                                 model,

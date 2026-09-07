@@ -58,6 +58,9 @@ pub fn hunyuan3d_uses_21_license(model: &str) -> bool {
 /// textures a mesh rather than generating one.
 pub const HUNYUAN3D_PAINT_FAMILY: &str = "hunyuan3d-paint";
 pub const HUNYUAN3D_PAINT_MANIFEST: &str = "hunyuan3d-paint";
+/// Apache-2.0 U²-Net weights used by the Hunyuan3D background-matting pre-stage.
+pub const HUNYUAN3D_MATTING_FAMILY: &str = "hunyuan3d-matting";
+pub const HUNYUAN3D_MATTING_MANIFEST: &str = "hunyuan3d-matting";
 /// Untiled 4x upscaler required between paint diffusion and material baking.
 pub const HUNYUAN3D_PAINT_UPSCALER_MANIFEST: &str = "real-esrgan-x4plus:fp16";
 
@@ -82,6 +85,7 @@ pub const AUXILIARY_FAMILIES: &[&str] = &[
     "ltx2-camera-control",
     "pulid",
     HUNYUAN3D_PAINT_FAMILY,
+    HUNYUAN3D_MATTING_FAMILY,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +269,11 @@ impl ModelManifest {
                 && !crate::ltx25_manifest::is_runtime_manifest(&self.name))
             || matches!(
                 self.family.as_str(),
-                "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY | HUNYUAN3D_PAINT_FAMILY
+                "ltx2-control"
+                    | "ltx2-camera-control"
+                    | PULID_FAMILY
+                    | HUNYUAN3D_PAINT_FAMILY
+                    | HUNYUAN3D_MATTING_FAMILY
             )
     }
 
@@ -5169,6 +5177,25 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
             defaults: hunyuan3d_paint_defaults(),
             hidden: true,
         },
+        // rembg's full U²-Net model, used as a bounded pre-stage and never as
+        // a standalone generator. This HF mirror carries the exact bytes from
+        // danielgatis/rembg's v0.0.0 release asset (the SHA-256 and rembg's
+        // published MD5 both match).
+        ModelManifest {
+            name: HUNYUAN3D_MATTING_MANIFEST.to_string(),
+            family: HUNYUAN3D_MATTING_FAMILY.to_string(),
+            description: "U²-Net background matting for Hunyuan3D inputs".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "f5aiteam/rembg".to_string(),
+                hf_filename: "u2net.onnx".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 175_997_641,
+                gated: false,
+                sha256: Some("8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"),
+            }],
+            defaults: hunyuan3d_paint_defaults(),
+            hidden: true,
+        },
     ]
 }
 
@@ -7910,6 +7937,22 @@ mod tests {
         assert_eq!(shape.conditioning_size, 512);
     }
 
+    #[test]
+    fn hunyuan3d_matting_is_a_hidden_pinned_files_only_bundle() {
+        let matting =
+            super::find_manifest(HUNYUAN3D_MATTING_MANIFEST).expect("matting dependency manifest");
+        assert!(matting.hidden);
+        assert!(matting.is_auxiliary());
+        assert!(matting.is_files_only_bundle());
+        assert_eq!(matting.files.len(), 1);
+        let file = &matting.files[0];
+        assert_eq!(file.size_bytes, 175_997_641);
+        assert_eq!(
+            file.sha256,
+            Some("8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491")
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -9219,7 +9262,7 @@ mod tests {
         // Hunyuan3D 2.1 shape: one additional self-contained checkpoint.
         // Hunyuan3D multiview: +2 self-contained normal and five-step Turbo
         // checkpoints, each carrying its DiT, shape VAE and DINO tower.
-        assert_eq!(known_manifests().len(), 205);
+        assert_eq!(known_manifests().len(), 206);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

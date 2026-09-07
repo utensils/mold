@@ -317,6 +317,16 @@ const textureResolutionOptions = computed(() =>
     label: `${resolution}px`,
   })),
 );
+const mattingControl = computed(() => meshProfile.value?.matting ?? null);
+const mattingOptions = computed(() =>
+  (mattingControl.value?.choices ?? []).map((value) => ({
+    value,
+    label: value === "auto" ? "Auto" : value === "on" ? "On" : "Off",
+  })),
+);
+const mattingValue = computed(
+  () => props.form.mesh.matting ?? mattingControl.value?.default ?? "auto",
+);
 function setTexture(enabled: boolean) {
   props.form.mesh.texture = enabled ? true : null;
   if (!enabled) props.form.mesh.textureResolution = null;
@@ -890,6 +900,23 @@ function resetSettings() {
             data-test="mesh-texture-resolution"
             @update:model-value="form.mesh.textureResolution = $event"
           />
+        </div>
+        <div
+          v-if="mattingControl?.mode !== 'hidden' && mattingOptions.length > 0"
+          class="ms-card__row"
+          data-test="mesh-matting-controls"
+        >
+          <SegmentedControl
+            :model-value="mattingValue"
+            :options="mattingOptions"
+            label="Remove background"
+            data-test="mesh-matting"
+            :disabled="mattingControl?.mode === 'fixed'"
+            @update:model-value="form.mesh.matting = $event"
+          />
+          <p class="ms-field__hint">
+            Auto keeps an existing cutout; On recomputes it; Off keeps the original background.
+          </p>
         </div>
         <p class="ms-field__hint">
           Start from a photo of one object. You'll get a turntable preview and can export .obj or

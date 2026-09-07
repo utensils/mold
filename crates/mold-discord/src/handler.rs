@@ -368,6 +368,7 @@ mod tests {
                 poster,
                 poster_width: 512,
                 poster_height: 512,
+                derived_media: Vec::new(),
             }),
             request_warnings: Vec::new(),
             audio: None,
