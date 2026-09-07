@@ -462,16 +462,22 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
   );
 }
 
-function isMeshMattingControl(value: unknown): value is MeshMattingControlProfile {
+function isMeshMattingControl(
+  value: unknown,
+): value is MeshMattingControlProfile {
   return (
     isRecord(value) &&
     ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
     ["auto", "on", "off"].includes(String(value.default)) &&
     Array.isArray(value.choices) &&
-    value.choices.every((choice) => ["auto", "on", "off"].includes(String(choice))) &&
+    value.choices.every((choice) =>
+      ["auto", "on", "off"].includes(String(choice)),
+    ) &&
     new Set(value.choices).size === value.choices.length &&
     (value.mode === "hidden" || value.choices.includes(value.default)) &&
-    (value.reason === undefined || value.reason === null || typeof value.reason === "string")
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
   );
 }
 
