@@ -792,10 +792,14 @@ mod tests {
             sha256: "a".repeat(64),
             byte_length: 1,
         };
-        assert!(
-            complete_stage_execution(&db, &job.id, "batch", std::slice::from_ref(&artifact), 4)
-                .unwrap()
-        );
+        assert!(complete_stage_execution(
+            &db,
+            &job.id,
+            "batch",
+            std::slice::from_ref(&artifact),
+            4
+        )
+        .unwrap());
         let rows = stages_for_job(&db, &job.id).unwrap();
         assert!(rows.iter().all(|stage| {
             stage.state == MeshWorkflowStageState::Completed
