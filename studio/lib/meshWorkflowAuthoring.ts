@@ -2,7 +2,11 @@ import type { CreateMeshWorkflowRequest } from "../api/meshWorkflows";
 import type { GenerationReference } from "./generationReferences";
 
 export type MeshWorkflowMode =
-  "image_to_mesh" | "multiview_to_mesh" | "mesh_texture" | "text_to_mesh";
+  | "image_to_mesh"
+  | "multiview_to_mesh"
+  | "mesh_roundtrip"
+  | "mesh_texture"
+  | "text_to_mesh";
 
 export interface WorkflowModel {
   name: string;
@@ -44,7 +48,7 @@ export interface WorkflowGenerateRequest {
   source_image?: string;
   references?: GenerationReference[];
   mesh?: {
-    texture?: true;
+    texture?: boolean;
     texture_resolution?: number;
     delight?: true;
   };
@@ -66,6 +70,7 @@ export function meshWorkflowModes(model: WorkflowModel): MeshWorkflowMode[] {
     [
       "image_to_mesh",
       "multiview_to_mesh",
+      "mesh_roundtrip",
       "mesh_texture",
       "text_to_mesh",
     ].includes(value),
@@ -182,4 +187,46 @@ export function buildMeshTextureWorkflow(options: {
     },
   ];
   return { mode: "mesh_texture", texture_request: request };
+}
+
+export function buildMeshRoundtripWorkflow(options: {
+  meshModel: WorkflowModel;
+  meshBase64?: string;
+  meshName: string;
+  meshByteLength: number;
+  meshSha256?: string;
+  meshFormat: "glb" | "obj";
+  upAxis: "y" | "z";
+  metersPerUnit: number;
+}): Extract<
+  CreateMeshWorkflowRequest<WorkflowGenerateRequest>,
+  { mode: "mesh_roundtrip" }
+> {
+  const request = requestFor(
+    options.meshModel,
+    "",
+    "glb",
+  ) as WorkflowGenerateRequest;
+  request.mesh = { texture: false };
+  request.references = [
+    {
+      kind: "mesh",
+      media: options.meshBase64
+        ? { authority: "inline", data: options.meshBase64 }
+        : { authority: "descriptor" },
+      mime_type:
+        options.meshFormat === "glb" ? "model/gltf-binary" : "model/obj",
+      format: options.meshFormat,
+      byte_length: options.meshByteLength,
+      coordinates: {
+        up_axis: options.upAxis,
+        meters_per_unit: options.metersPerUnit,
+      },
+      provenance: {
+        name: options.meshName,
+        ...(options.meshSha256 ? { sha256: options.meshSha256 } : {}),
+      },
+    },
+  ];
+  return { mode: "mesh_roundtrip", roundtrip_request: request };
 }

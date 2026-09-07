@@ -32,6 +32,7 @@ export type CreateMeshWorkflowRequest<TRequest = unknown> =
       image_request: TRequest;
       mesh_request: TRequest;
     }
+  | { mode: "mesh_roundtrip"; roundtrip_request: TRequest }
   | { mode: "mesh_texture"; texture_request: TRequest };
 
 export interface CreateMeshWorkflowResponse {
@@ -43,7 +44,7 @@ export interface MeshWorkflowJobSummary {
   contract_version: number;
   id: string;
   state: MeshWorkflowJobState;
-  mode: "text_to_mesh" | "mesh_texture";
+  mode: "text_to_mesh" | "mesh_roundtrip" | "mesh_texture";
   stage_count: number;
   current_stage: number;
   current_stage_kind?: MeshWorkflowStageKind;

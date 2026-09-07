@@ -367,6 +367,7 @@ pub struct MeshInputProfile {
 pub enum MeshWorkflowMode {
     ImageToMesh,
     MultiviewToMesh,
+    MeshRoundtrip,
     MeshTexture,
     TextToMesh,
 }
@@ -2253,6 +2254,7 @@ fn recipe(
 /// the advertised bounds can never be refused by the door it was reading.
 fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
     let multiview = crate::manifest::hunyuan3d_multiview_model(model);
+    let roundtrip_available = crate::manifest::hunyuan3d_shape21_model(model);
     let paint_available = cfg!(feature = "mesh-texture");
     MeshCapabilitiesProfile {
         octree_resolutions: validation::MESH_OCTREE_RESOLUTIONS.to_vec(),
@@ -2302,13 +2304,14 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
                 ControlMode::Hidden
             },
             formats: vec![MeshReferenceFormat::Glb, MeshReferenceFormat::Obj],
-            max_count: u32::from(paint_available),
+            max_count: u32::from(paint_available || roundtrip_available),
             max_bytes: validation::MESH_REFERENCE_MAX_BYTES,
             up_axes: vec![MeshUpAxis::Y, MeshUpAxis::Z],
             meters_per_unit_min: 1.0e-6,
             meters_per_unit_max: 1.0e6,
-            reason: (!paint_available).then(|| {
-                "Supplied-mesh texturing requires the mesh-texture build feature".to_string()
+            reason: (!(paint_available || roundtrip_available)).then(|| {
+                "Mesh input requires Hunyuan3D 2.1 round-trip weights or the mesh-texture build feature"
+                    .to_string()
             }),
         }),
         texture_resolutions: validation::MESH_TEXTURE_RESOLUTIONS.to_vec(),
@@ -2350,6 +2353,9 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
             vec![MeshWorkflowMode::MultiviewToMesh]
         } else {
             let mut modes = vec![MeshWorkflowMode::ImageToMesh, MeshWorkflowMode::TextToMesh];
+            if roundtrip_available {
+                modes.push(MeshWorkflowMode::MeshRoundtrip);
+            }
             if paint_available {
                 modes.push(MeshWorkflowMode::MeshTexture);
             }
@@ -3133,6 +3139,36 @@ mod tests {
                 ]
             } else {
                 Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn hunyuan3d_21_advertises_shape_vae_mesh_roundtrip_without_paint() {
+        let mut mesh = input("hunyuan3d-2.1:fp16", "hunyuan3d");
+        mesh.source_image = Some(SourceImageCapability::Required);
+        let profile = resolve_generation_profile(mesh);
+        let capabilities = profile
+            .default_recipe()
+            .unwrap()
+            .capabilities
+            .mesh
+            .as_ref()
+            .unwrap();
+
+        assert!(capabilities
+            .workflow_modes
+            .contains(&MeshWorkflowMode::MeshRoundtrip));
+        assert_eq!(
+            capabilities.mesh_input.as_ref().map(|input| input.mode),
+            Some(ControlMode::Adjustable)
+        );
+        assert_eq!(
+            capabilities.texture.mode,
+            if cfg!(feature = "mesh-texture") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
             }
         );
     }

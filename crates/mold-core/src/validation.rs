@@ -2470,15 +2470,16 @@ fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
         if references.len() != 1
             || !matches!(references[0], crate::GenerationReference::Mesh { .. })
         {
-            return Err("mesh-input texturing requires exactly one mesh reference".to_string());
+            return Err("mesh input requires exactly one mesh reference".to_string());
         }
-        if req.mesh.as_ref().and_then(|mesh| mesh.texture) != Some(true) {
-            return Err("a mesh reference requires mesh.texture = true".to_string());
-        }
-        if !source_present {
-            return Err(
-                "mesh-input texturing requires an appearance image in source_image".to_string(),
-            );
+        if req.mesh.as_ref().and_then(|mesh| mesh.texture) == Some(true) {
+            if !source_present {
+                return Err(
+                    "mesh-input texturing requires an appearance image in source_image".to_string(),
+                );
+            }
+        } else if source_present {
+            return Err("mesh round trips do not accept an appearance image".to_string());
         }
     } else {
         if !references.is_empty() {

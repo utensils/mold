@@ -357,10 +357,10 @@ async fn drive_job(
                 update_manifest_from_db(db, &current)?;
             }
             NextAction::SubmitMesh { attempt_epoch } => {
-                let label = if matches!(request, CreateMeshWorkflowRequest::TextToMesh { .. }) {
-                    "mesh"
-                } else {
-                    "texture"
+                let label = match request {
+                    CreateMeshWorkflowRequest::TextToMesh { .. } => "mesh",
+                    CreateMeshWorkflowRequest::MeshTexture { .. } => "texture",
+                    CreateMeshWorkflowRequest::MeshRoundtrip { .. } => "roundtrip",
                 };
                 let mut child = crate::mesh_workflow_media::hydrate_for_admission(
                     workflows_root,
@@ -747,6 +747,7 @@ fn workflow_mesh_request(request: &CreateMeshWorkflowRequest) -> &mold_core::Gen
     match request {
         CreateMeshWorkflowRequest::TextToMesh { mesh_request, .. } => mesh_request,
         CreateMeshWorkflowRequest::MeshTexture { texture_request } => texture_request,
+        CreateMeshWorkflowRequest::MeshRoundtrip { roundtrip_request } => roundtrip_request,
     }
 }
 
