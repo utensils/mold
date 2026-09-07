@@ -396,6 +396,7 @@ impl ModelPaths {
             Some(path) => PathBuf::from(path),
             None if model_cfg.family.as_deref().is_some_and(|family| {
                 family == "ltx2"
+                    || family == crate::manifest::HUNYUAN3D_FAMILY
                     || crate::manifest::UTILITY_FAMILIES.contains(&family)
                     || crate::manifest::UPSCALER_FAMILIES.contains(&family)
             }) =>
@@ -446,7 +447,13 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.low_noise_transformer.as_deref()),
             "MOLD_LOW_NOISE_TRANSFORMER_PATH",
         );
-        let vae = Self::resolve_path(model_cfg.and_then(|m| m.vae.as_deref()), "MOLD_VAE_PATH")?;
+        let vae = Self::resolve_path(model_cfg.and_then(|m| m.vae.as_deref()), "MOLD_VAE_PATH")
+            .or_else(|| {
+                model_cfg
+                    .and_then(|model| model.family.as_deref())
+                    .is_some_and(|family| family == crate::manifest::HUNYUAN3D_FAMILY)
+                    .then(PathBuf::new)
+            })?;
         let spatial_upscaler = Self::resolve_path(
             model_cfg.and_then(|m| m.spatial_upscaler.as_deref()),
             "MOLD_SPATIAL_UPSCALER_PATH",
@@ -2218,5 +2225,27 @@ mod file_completeness_tests {
         let path = dir.path().join("absent.safetensors");
         assert!(!Config::file_is_complete(&path, 0));
         assert!(!Config::file_is_complete(&path, 194));
+    }
+}
+
+#[cfg(test)]
+mod combined_checkpoint_path_tests {
+    use super::{ModelConfig, ModelPaths};
+
+    #[test]
+    fn a_custom_hunyuan3d_model_resolves_its_combined_checkpoint_without_a_vae_path() {
+        let config = ModelConfig {
+            transformer: Some("/models/shape.gguf".to_string()),
+            family: Some(crate::manifest::HUNYUAN3D_FAMILY.to_string()),
+            ..Default::default()
+        };
+        let paths = ModelPaths::resolve_from_model_config_exact(&config).unwrap();
+        assert_eq!(
+            paths.transformer,
+            std::path::Path::new("/models/shape.gguf")
+        );
+        assert!(paths.vae.as_os_str().is_empty());
+        let paths = ModelPaths::resolve_from_model_config(Some(&config)).unwrap();
+        assert!(paths.vae.as_os_str().is_empty());
     }
 }

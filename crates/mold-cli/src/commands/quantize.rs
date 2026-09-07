@@ -70,6 +70,7 @@ pub fn run(
     });
     derived.transformer = Some(output.to_string_lossy().into_owned());
     derived.transformer_shards = None;
+    derived.vae = Some(String::new());
     derived.family = Some(HUNYUAN3D_FAMILY.to_string());
     derived.description = Some(format!(
         "{} ({tier}, locally derived from {source_name})",
