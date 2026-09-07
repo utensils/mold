@@ -71,7 +71,7 @@ fn manifest_fallback_names() -> Vec<String> {
         .collect()
 }
 
-fn defaults_from_manifest(
+pub(crate) fn defaults_from_manifest(
     manifest: &mold_core::manifest::ModelManifest,
 ) -> mold_core::ModelDefaults {
     mold_core::ModelDefaults {
@@ -109,7 +109,7 @@ fn defaults_from_manifest(
 /// hot path here is always a quick `RwLock::read`. Falls back to the static
 /// manifest if the cache is still cold so users never see "Loading options
 /// failed" due to a slow first fetch.
-async fn autocomplete_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
+pub(crate) async fn autocomplete_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
     let partial = partial.to_string();
     let data = ctx.data();
     let work = async {
@@ -819,7 +819,7 @@ fn fit_attachment_dims(
 /// Download an attachment and sanity-check that it looks like a PNG or JPEG
 /// before we ship the bytes to the server (which will reject anything else
 /// with a less friendly error).
-async fn fetch_source_image(att: &serenity::Attachment) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch_source_image(att: &serenity::Attachment) -> Result<Vec<u8>, String> {
     if att.size as u64 > MAX_SOURCE_IMAGE_BYTES {
         return Err(format!(
             "Source image is too large ({:.1} MiB). Keep it under {} MiB.",

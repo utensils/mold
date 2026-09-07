@@ -81,7 +81,8 @@ features:
   - icon:
       src: /icons/discord.svg
     title: Discord Bot
-    details: Built-in Discord bot with /generate, /identity, /expand, /remix,
+    details:
+      Built-in Discord bot with /generate, /mesh, /identity, /expand, /remix,
       /models, and /status slash commands. Run standalone or embedded in the server.
   - icon:
       src: /icons/layers.svg

@@ -568,6 +568,8 @@ pub enum ParamField {
     Offload,
     // Advanced — Source
     SourceImage,
+    /// Semantic front/left/back/right image set for Hunyuan3D multiview.
+    NamedViews,
     References,
     /// The ordered `edit_images` group a reference-editing recipe takes.
     /// Distinct from `References`, which is MiniMax H3's uploaded Ref2VA
@@ -637,6 +639,7 @@ impl ParamField {
             Self::Expand => "Expand prompt",
             Self::Offload => "Offload",
             Self::SourceImage => "Source",
+            Self::NamedViews => "Named views",
             Self::References => "References",
             Self::ReferenceImages => "References",
             Self::Strength => "Strength",
@@ -802,6 +805,8 @@ pub struct GenerateParams {
     /// reuse does not read as "this print had no source"; cleared as soon
     /// as a source is attached or the row is cleared. Never sent.
     pub source_image_recall: Option<String>,
+    /// Semantic multiview image paths in canonical front/left/back/right order.
+    pub named_view_paths: Vec<crate::named_views::NamedViewPath>,
     /// Ordered H3 reference paths. This transient state is deliberately not
     /// serialized; only basename + digest provenance crosses the wire.
     pub reference_paths: Vec<crate::h3_references::ReferencePath>,
@@ -979,6 +984,7 @@ impl GenerateParams {
             upscale_model: None,
             source_image_path: None,
             source_image_recall: None,
+            named_view_paths: Vec::new(),
             reference_paths: Vec::new(),
             edit_image_paths: Vec::new(),
             strength: 0.75,
@@ -1092,6 +1098,11 @@ impl GenerateParams {
                 0 => "\u{27e8}none\u{27e9}".to_string(),
                 1 => "1 ordered file".to_string(),
                 count => format!("{count} ordered files"),
+            },
+            ParamField::NamedViews => match self.named_view_paths.len() {
+                0 => "\u{27e8}none\u{27e9}".to_string(),
+                1 => "1 named view".to_string(),
+                count => format!("{count} named views"),
             },
             ParamField::ReferenceImages => match self.edit_image_paths.len() {
                 0 => "\u{27e8}none\u{27e9}".to_string(),
@@ -2357,6 +2368,11 @@ pub enum Popup {
         input: String,
         error: Option<String>,
     },
+    /// Semantic Hunyuan3D multiview paths as `front=/a.png; left=/b.png`.
+    NamedViewsInput {
+        input: String,
+        error: Option<String>,
+    },
     /// Ordered reference-image paths for an `edit_images` recipe, as
     /// `a.png; b.jpg`. Local paths only; the bytes are read at dispatch.
     ReferenceImagesInput {
@@ -3385,6 +3401,9 @@ impl App {
         // group that recipe's request builder would never read.
         if self.generate.capabilities.reference_images_row().is_none() {
             self.generate.params.edit_image_paths.clear();
+        }
+        if self.generate.capabilities.named_views_row().is_none() {
+            self.generate.params.named_view_paths.clear();
         }
         // `id_start_step` is bounded by the step count, which every model
         // switch can move; a restored 20 against a 4-step model would be
@@ -4659,6 +4678,32 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::NamedViewsInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => match crate::named_views::parse_named_view_paths(input) {
+                        Ok(paths) => {
+                            if !paths.is_empty() {
+                                self.generate.params.source_image_path = None;
+                                self.generate.params.source_image_recall = None;
+                            }
+                            self.generate.params.named_view_paths = paths;
+                            self.close_popup();
+                        }
+                        Err(message) => *error = Some(message),
+                    },
+                    KeyCode::Char(c)
+                        if input.len() + c.len_utf8()
+                            <= crate::source_image::REFERENCE_INPUT_MAX_BYTES =>
+                    {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
                 Some(Popup::ReferenceImagesInput { input, error }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
@@ -4757,6 +4802,9 @@ impl App {
                                     // parks the source.
                                     if self.reference_group_replaces_source() {
                                         self.generate.params.edit_image_paths.clear();
+                                    }
+                                    if self.generate.capabilities.named_views_row().is_some() {
+                                        self.generate.params.named_view_paths.clear();
                                     }
                                     self.generate.params.source_image_path = Some(path);
                                     self.generate.params.source_image_recall = None;
@@ -6422,6 +6470,7 @@ impl App {
             | ParamField::Lora
             | ParamField::StgBlocks
             | ParamField::SourceImage
+            | ParamField::NamedViews
             | ParamField::IdentityImage
             | ParamField::References
             | ParamField::ReferenceImages
@@ -7335,8 +7384,8 @@ impl App {
         });
     }
 
-    /// `x` / Backspace on a Create-form row: drop the attached file on the
-    /// two path rows. Every other row keeps its value — a typed number is
+    /// `x` / Backspace on a Create-form row: drop the attached file or set on
+    /// media rows. Every other row keeps its value — a typed number is
     /// not something to lose to a stray key.
     fn clear_current_param(&mut self) {
         use crate::ui::create_form::CreateRow;
@@ -7353,6 +7402,7 @@ impl App {
                 self.generate.params.identity_image_path = None;
                 self.generate.identity_error = None;
             }
+            ParamField::NamedViews => self.generate.params.named_view_paths.clear(),
             _ => {}
         }
     }
@@ -7479,6 +7529,12 @@ impl App {
                     &self.generate.params.reference_paths,
                 );
                 self.popup = Some(Popup::ReferencesInput { input, error: None });
+            }
+            ParamField::NamedViews => {
+                let input = crate::named_views::display_named_view_paths(
+                    &self.generate.params.named_view_paths,
+                );
+                self.popup = Some(Popup::NamedViewsInput { input, error: None });
             }
             ParamField::ReferenceImages => {
                 let input = crate::source_image::format_reference_image_input(
@@ -8636,7 +8692,8 @@ impl App {
         // dispatch has to be the gate.
         if let Some(message) = crate::model_info::source_image_contract_error(
             self.source_image_contract(&self.generate.params.model),
-            self.generate.params.source_image_path.is_some(),
+            self.generate.params.source_image_path.is_some()
+                || !self.generate.params.named_view_paths.is_empty(),
             &family_for_model(&self.generate.params.model, &self.config),
         ) {
             self.generate.error_message = Some(message.to_string());

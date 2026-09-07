@@ -58,8 +58,8 @@ pub enum Action {
     Regenerate,
     /// Gallery: load parameters into Create view for editing.
     EditAndGenerate,
-    /// Create: clear the selected row's attached file (Source image,
-    /// Identity photo). `x` / Backspace on the row.
+    /// Create: clear the selected row's attached file or named-view set.
+    /// `x` / Backspace on the row.
     ClearField,
     /// Gallery: delete the selected image (shows confirmation).
     DeleteImage,

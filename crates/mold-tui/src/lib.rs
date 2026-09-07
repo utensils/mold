@@ -14,6 +14,7 @@ mod hosts;
 mod identity;
 mod model_info;
 mod motion;
+mod named_views;
 mod palette;
 mod prefs;
 mod session;

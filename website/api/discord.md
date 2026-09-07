@@ -28,6 +28,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | Command              | Description                                                                                                                                |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references |
+| `/mesh`              | Generate a Hunyuan3D GLB from one source image or semantic front/left/back/right multiview attachments                                     |
 | `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                        |
 | `/expand`            | Expand a short prompt into detailed generation prompts                                                                                     |
 | `/remix`             | Rewrite a prompt into subject-preserving alternatives, one creative dimension each (`dimensions`, `style`, `variations` 1-5)               |
@@ -68,6 +69,18 @@ cannot execute it) then the start step against the resolved step count, and
 finally the downloaded bytes. A server advertising no identity-capable model at
 all says so instead of guessing a checkpoint. The result embed carries an
 **Identity** row naming the photo, the strength, and the start step.
+
+### `/mesh`
+
+Mesh generation has its own compact command because `/generate` already uses
+Discord's 25-option ceiling. Attach `source` for a single-view Hunyuan3D model,
+or any non-empty subset of `front`, `left`, `back`, and `right` for a 2mv
+checkpoint. The two forms are mutually exclusive. If `model` is omitted,
+`source` selects the ordinary Hunyuan3D default and named views select the
+five-step `hunyuan3d-2mv-turbo:fp16` tier. Optional `seed`, `texture`,
+`octree`, `threshold`, and `target_faces` values ride the same generation
+request and admission checks as every other client. The response includes the
+poster and GLB using the existing Discord mesh delivery policy.
 
 ## Configuration
 
@@ -118,6 +131,7 @@ option as a sentinel rather than its own toggle.
 image-to-video run can be submitted with just a `source_image`. Discord caches
 command definitions, so **the bot's slash commands must be re-registered** after
 upgrading before users see the optional prompt or new `duration` option. The
+new `/mesh` command also appears only after re-registration. The
 prompt relaxation is guarded on both ends: the bot only skips the up-front
 check when visual conditioning (`source_image`, `source_video`, or keyframes)
 is attached, and the server's family-aware validator still rejects an empty

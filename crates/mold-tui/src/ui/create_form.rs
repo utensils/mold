@@ -212,6 +212,9 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
         AdvSection::Negative => Vec::new(),
         AdvSection::Source => {
             let mut fields = Vec::new();
+            if caps.named_views_row().is_some() {
+                fields.push(ParamField::NamedViews);
+            }
             if caps.supports_references {
                 fields.push(ParamField::References);
             }
@@ -362,6 +365,9 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
         }
         AdvSection::Source if !params.reference_paths.is_empty() => {
             format!("{} ordered", params.reference_paths.len())
+        }
+        AdvSection::Source if !params.named_view_paths.is_empty() => {
+            format!("{} named views", params.named_view_paths.len())
         }
         AdvSection::Source if !params.edit_image_paths.is_empty() => {
             format!("{} reference images", params.edit_image_paths.len())
@@ -1021,6 +1027,23 @@ mod tests {
         assert_eq!(
             section_fields(AdvSection::Source, &caps),
             vec![ParamField::References]
+        );
+    }
+
+    #[test]
+    fn multiview_mesh_profile_exposes_named_views_before_source() {
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        let recipe = catalog
+            .iter()
+            .find(|entry| entry.name == "hunyuan3d-2mv-turbo:fp16")
+            .and_then(|entry| entry.generation_profile.as_ref())
+            .and_then(|profile| profile.default_recipe())
+            .expect("built-in multiview profile");
+        let mut caps = capabilities_for_family("hunyuan3d");
+        crate::model_info::apply_recipe_capabilities(&mut caps, Some(&recipe.capabilities));
+        assert_eq!(
+            section_fields(AdvSection::Source, &caps),
+            vec![ParamField::NamedViews, ParamField::SourceImage]
         );
     }
 
