@@ -166,6 +166,19 @@ struct Cli {
 /// besides: these five only ever make sense together.
 #[derive(clap::Args, Debug, Clone, Default)]
 struct MeshArgs {
+    /// Front view for a Hunyuan3D 2mv reconstruction.
+    #[arg(long, value_name = "PATH", help_heading = "3D", value_hint = ValueHint::FilePath)]
+    front: Option<std::path::PathBuf>,
+    /// Left view for a Hunyuan3D 2mv reconstruction.
+    #[arg(long, value_name = "PATH", help_heading = "3D", value_hint = ValueHint::FilePath)]
+    left: Option<std::path::PathBuf>,
+    /// Back view for a Hunyuan3D 2mv reconstruction.
+    #[arg(long, value_name = "PATH", help_heading = "3D", value_hint = ValueHint::FilePath)]
+    back: Option<std::path::PathBuf>,
+    /// Right view for a Hunyuan3D 2mv reconstruction.
+    #[arg(long, value_name = "PATH", help_heading = "3D", value_hint = ValueHint::FilePath)]
+    right: Option<std::path::PathBuf>,
+
     /// Resolution of the query grid a 3-D model's occupancy field is
     /// evaluated on. Higher captures finer detail; cost is CUBIC, so 384 is
     /// roughly eight times 192. Defaults to 256.
@@ -173,7 +186,7 @@ struct MeshArgs {
     octree: Option<u32>,
 
     /// Iso-level at which the surface is extracted (0.0-1.0).
-    /// Defaults to 0.6.
+    /// Defaults to 0.5 for 2mv and 0.6 for single-view models.
     #[arg(long, value_name = "T", help_heading = "3D")]
     mesh_threshold: Option<f32>,
 
@@ -197,6 +210,10 @@ struct MeshArgs {
 impl MeshArgs {
     fn into_flags(self) -> commands::run::MeshFlags {
         commands::run::MeshFlags {
+            front: self.front,
+            left: self.left,
+            back: self.back,
+            right: self.right,
             octree: self.octree,
             threshold: self.mesh_threshold,
             target_faces: self.target_faces,
@@ -3571,6 +3588,23 @@ mod tests {
         assert!(try_parse(&["run", "m", "p", "--video-only", "--audio-file", "a.wav"]).is_err());
         assert!(try_parse(&["run", "m", "p", "--video-only", "--no-audio"]).is_ok());
         assert!(try_parse(&["run", "m", "p", "--video-only"]).is_ok());
+    }
+
+    #[test]
+    fn run_accepts_all_semantic_hunyuan3d_view_flags() {
+        assert!(try_parse(&[
+            "run",
+            "hunyuan3d-2mv:fp16",
+            "--front",
+            "front.png",
+            "--left",
+            "left.png",
+            "--back",
+            "back.png",
+            "--right",
+            "right.png",
+        ])
+        .is_ok());
     }
 
     #[test]

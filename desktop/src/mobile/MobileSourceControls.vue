@@ -37,6 +37,14 @@ import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import NamedViewsPanel from "@studio/components/NamedViewsPanel.vue";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  activeNamedViewsProfile,
+  namedViewValidationError,
+  setNamedView,
+  type NamedViewRole,
+} from "@studio/lib/namedViews";
 import { resolveExclusiveWells, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import {
   appendMinimaxH3PickedImageReferences,
@@ -102,6 +110,11 @@ const strength = computed(() => strengthSemantics(props.form.family));
 const canvasless = computed(() => caps.value.canvasless || isMeshFamily(props.form.family));
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
+const namedViewsProfile = computed(() =>
+  activeNamedViewsProfile(
+    effectiveGenerationRecipe(props.model, props.form.pipeline)?.capabilities.mesh?.named_views,
+  ),
+);
 const isAttachmentMode = computed(() => plan.value.kind === "attachments");
 const editFitMode = computed(() => coerceSourceFitForMaskless(props.form.sourceFit).mode);
 const sourceLimitLabel = computed(() =>
@@ -263,6 +276,8 @@ const controlSelectValue = computed(() =>
   controlCustomMode.value ? CUSTOM_CONTROL_MODEL : props.form.controlModel,
 );
 const validationError = computed(() => {
+  const namedError = namedViewValidationError(props.form.namedViews, namedViewsProfile.value);
+  if (namedError) return namedError;
   if (caps.value.sourceImageMode === "qwen-edit" && props.form.imageAttachments.length === 0) {
     return "Add a Target photo before generating an edit.";
   }
@@ -271,6 +286,33 @@ const validationError = computed(() => {
   }
   return null;
 });
+
+async function onNamedViewFile(role: NamedViewRole, file: File): Promise<void> {
+  if (!isAcceptedImage(file)) {
+    error.value = "Only PNG or JPEG photos can be used here.";
+    return;
+  }
+  if (
+    inlineGenerationMediaBytes(props.form, "namedViews") + file.size >
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
+  ) {
+    error.value = MOBILE_MEDIA_BUDGET_ERROR;
+    return;
+  }
+  const base64 = await fileToBase64(file);
+  const dimensions = imageDimensionsFromBase64(base64);
+  if (!dimensions) {
+    error.value = "Only PNG or JPEG photos can be used here.";
+    return;
+  }
+  error.value = "";
+  props.form.namedViews = setNamedView(props.form.namedViews, role, {
+    base64,
+    filename: file.name || `${role}.png`,
+    mimeType: file.type === "image/jpeg" ? "image/jpeg" : "image/png",
+    ...dimensions,
+  });
+}
 /**
  * Why the attached conditioning would be refused, in the order admission
  * checks it. Its own slot rather than a branch of `validationError`, because
@@ -572,7 +614,19 @@ function applyMask(mask: string): void {
 </script>
 
 <template>
-  <template v-if="plan.kind === 'h3-references'">
+  <template v-if="namedViewsProfile">
+    <NamedViewsPanel
+      :profile="namedViewsProfile"
+      :model-value="form.namedViews"
+      :error="namedViewValidationError(form.namedViews, namedViewsProfile)"
+      touch-friendly
+      :gallery="false"
+      @file="onNamedViewFile"
+      @clear="form.namedViews = setNamedView(form.namedViews, $event, null)"
+    />
+  </template>
+
+  <template v-else-if="plan.kind === 'h3-references'">
     <fieldset class="mobile-source-controls" data-test="mobile-h3-authoring">
       <legend class="mobile-source-legend">Ordered references · Required</legend>
       <MinimaxH3AuthoringPanel

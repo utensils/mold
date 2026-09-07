@@ -261,9 +261,17 @@ where
 /// from a full opaque frame, and conditions the vision tower on the whole
 /// canvas including the black transparent pixels.
 pub fn decode_oriented_srgb_rgba(bytes: &[u8]) -> Result<image::RgbaImage> {
-    let reader = image::ImageReader::new(Cursor::new(bytes))
+    decode_oriented_srgb_rgba_with_limits(bytes, image::Limits::no_limits())
+}
+
+pub fn decode_oriented_srgb_rgba_with_limits(
+    bytes: &[u8],
+    limits: image::Limits,
+) -> Result<image::RgbaImage> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .context("failed to sniff source image format")?;
+    reader.limits(limits);
     let mut decoder = reader
         .into_decoder()
         .context("failed to decode source image")?;

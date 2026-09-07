@@ -23,6 +23,7 @@ import {
   resolutionProfileFinding,
   type MeshCapabilitiesProfile,
 } from "@studio/lib/generationProfile";
+import { namedViewValidationError } from "@studio/lib/namedViews";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
@@ -75,7 +76,8 @@ export type InlineGenerationMediaField =
   | "audioFile"
   | "h3FirstFrame"
   | "h3LastFrame"
-  | "h3References";
+  | "h3References"
+  | "namedViews";
 
 export function decodedBase64Bytes(value: string | null | undefined): number {
   if (!value) return 0;
@@ -126,7 +128,17 @@ export function inlineGenerationMediaBytes(
       return sum + (media.authority === "inline" ? decodedBase64Bytes(media.data) : 0);
     }, 0);
   }
+  if (exclude !== "namedViews") {
+    total += Object.values(form.namedViews ?? {}).reduce(
+      (sum, image) => sum + decodedBase64Bytes(image?.base64),
+      0,
+    );
+  }
   return total;
+}
+
+export function namedViewsValidationError(form: GenerateForm): string | null {
+  return namedViewValidationError(form.namedViews, form.recipeCapabilities?.mesh?.named_views);
 }
 
 export function mobileMediaBudgetValidationError(form: GenerateForm): string | null {

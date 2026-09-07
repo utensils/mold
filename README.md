@@ -64,6 +64,7 @@ mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 
 # Turn a photo into a 3D mesh
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb
+mold run hunyuan3d-2mv-turbo --front chair-front.png --left chair-left.png --back chair-back.png -o chair.glb
 
 # Upscale a Library video as a durable framewise job
 mold video-upscale create clip.mp4 --wait
@@ -92,7 +93,7 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   identity photos, prompt expansion, and upscaling.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
   lip dub, text-to-audio, and MP4 output with generated audio.
-- **3D:** image-to-mesh with Hunyuan3D 2.0 and 2.1, with optional Hunyuan3D
+- **3D:** single-image and named multiview-to-mesh with Hunyuan3D 2.0 and 2.1, with optional Hunyuan3D
   Paint PBR materials in CUDA builds. Results are published to the Library as
   binary glTF with a rendered poster tile, exportable as OBJ, STL, or PLY, or
   shared as a turntable GIF, APNG, or WebP.

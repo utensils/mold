@@ -239,6 +239,11 @@ import {
   type MinimaxH3AuthoringState,
   type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
+import {
+  namedViewValidationError,
+  setNamedView,
+  type NamedViewRole,
+} from "@studio/lib/namedViews";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import {
   firstLastFrameRestoreNotice,
@@ -321,6 +326,7 @@ function openTargetPicker() {
 // One picker serves both FL2VA boundaries; the target names the slot.
 const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3ReferencePickerOpen = ref(false);
+const namedViewPickerTarget = ref<NamedViewRole | null>(null);
 /** The EXCLUSIVE recipe's reference-strip picker (FLUX.2 [klein]). */
 const showReferencePicker = ref(false);
 
@@ -2270,6 +2276,14 @@ function validateSubmit(): boolean {
     currentModel.value,
     form.state.value.pipeline,
   );
+  const namedError = namedViewValidationError(
+    form.state.value.namedViews,
+    recipe?.capabilities.mesh?.named_views,
+  );
+  if (namedError) {
+    composerError.value = namedError;
+    return false;
+  }
   // Fixed recipe controls are not user choices: a stale form value (draft
   // restored before the recipe landed, model swapped under it) snaps to the
   // value the disabled control displays instead of stranding Generate behind
@@ -3774,6 +3788,25 @@ function onPickH3Boundary(images: SourceImageState[]): void {
   composerError.value = null;
 }
 
+function onPickNamedView(images: SourceImageState[]): void {
+  const role = namedViewPickerTarget.value;
+  const image = images[0];
+  if (!role || !image?.width || !image.height || !image.mime) return;
+  form.state.value.namedViews = setNamedView(
+    form.state.value.namedViews,
+    role,
+    {
+      base64: image.base64,
+      filename: image.filename,
+      mimeType: image.mime,
+      width: image.width,
+      height: image.height,
+    },
+  );
+  namedViewPickerTarget.value = null;
+  composerError.value = null;
+}
+
 async function onPickH3References(images: SourceImageState[]): Promise<void> {
   const result = await appendMinimaxH3PickedImageReferences(
     form.state.value.h3Authoring,
@@ -4587,6 +4620,7 @@ onBeforeUnmount(() => {
                   h3BoundaryPickerTarget = 'lastFrame'
                 "
                 @open-h3-reference-picker="h3ReferencePickerOpen = true"
+                @open-named-view-picker="namedViewPickerTarget = $event"
                 @open-reference-picker="showReferencePicker = true"
                 @crop-h3-reference="h3CropIndex = $event"
               />
@@ -4827,6 +4861,7 @@ onBeforeUnmount(() => {
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
           @open-h3-reference-picker="h3ReferencePickerOpen = true"
+          @open-named-view-picker="namedViewPickerTarget = $event"
           @open-reference-picker="showReferencePicker = true"
           @crop-h3-reference="h3CropIndex = $event"
         />
@@ -4953,6 +4988,14 @@ onBeforeUnmount(() => {
       :multiple="true"
       @pick="onPickH3References"
       @close="h3ReferencePickerOpen = false"
+    />
+    <ImagePickerModal
+      :open="namedViewPickerTarget !== null"
+      :title="`Choose ${namedViewPickerTarget ?? 'object'} view`"
+      :multiple="false"
+      gallery-only
+      @pick="onPickNamedView"
+      @close="namedViewPickerTarget = null"
     />
     <!-- The EXCLUSIVE recipe's reference strip (FLUX.2 [klein]): the same
          picker every other strip uses, writing the second store. -->

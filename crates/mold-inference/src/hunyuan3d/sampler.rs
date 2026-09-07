@@ -54,7 +54,7 @@ use candle_core::{Result, Tensor};
 /// The sigma ladder plus how each step must be evaluated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SamplingPlan {
-    /// `steps + 1` entries, descending, terminating at exactly `0.0`.
+    /// `steps + 1` entries in the direction the checkpoint was trained for.
     pub sigmas: Vec<f64>,
     /// The CFG scale for a guided checkpoint, or `None` for a distilled one.
     pub cfg_scale: Option<f64>,
@@ -167,6 +167,72 @@ pub fn plan(
     }
 }
 
+/// Tencent's ordinary 2mv flow schedule.
+///
+/// `Hunyuan3DDiTFlowMatchingPipeline.__call__` passes an inclusive
+/// `np.linspace(0, 1, num_inference_steps)` to the scheduler, whose
+/// `set_timesteps` appends one more terminal `1.0`. Mold's transformer is the
+/// ComfyUI wrapper: it evaluates the official network at `1 - sigma` and
+/// negates its velocity. The sampler must therefore walk the complementary
+/// ladder from one to zero; reversing both time and velocity preserves the
+/// official Euler update exactly. The duplicate terminal zero preserves the
+/// official final no-op and progress count.
+pub fn multiview_plan(steps: usize, guidance: f64) -> SamplingPlan {
+    if steps == 0 {
+        return SamplingPlan {
+            sigmas: vec![0.0],
+            cfg_scale: Some(guidance),
+            guidance_embed: None,
+        };
+    }
+    let mut sigmas = Vec::with_capacity(steps + 1);
+    for step in 0..steps {
+        sigmas.push(if steps == 1 {
+            1.0
+        } else {
+            1.0 - step as f64 / (steps - 1) as f64
+        });
+    }
+    sigmas.push(0.0);
+    SamplingPlan {
+        sigmas,
+        cfg_scale: Some(guidance),
+        guidance_embed: None,
+    }
+}
+
+/// Tencent's `ConsistencyFlowMatchEulerDiscreteScheduler` for the 2mv Turbo
+/// checkpoint (`pcm_timesteps = 100`, `num_train_timesteps = 1000`).
+///
+/// The official scheduler walks from zero to one. As above, the ComfyUI model
+/// wrapper inverts time and velocity, so this plan is the exact complementary
+/// ladder from one to zero.
+pub fn multiview_turbo_plan(steps: usize, guidance: f64) -> SamplingPlan {
+    const PCM_TIMESTEPS: usize = 100;
+    const TRAIN_TIMESTEPS: usize = 1000;
+    const STEP_RATIO: usize = TRAIN_TIMESTEPS / PCM_TIMESTEPS;
+
+    let mut sigmas = Vec::with_capacity(steps.saturating_add(1));
+    for step in 0..steps {
+        // np.floor(np.linspace(0, pcm_timesteps, num=steps,
+        // endpoint=False)); integer arithmetic is the same operation without
+        // a platform-dependent float-to-index round trip.
+        let pcm_index = step * PCM_TIMESTEPS / steps;
+        let euler_index = if pcm_index == 0 {
+            0
+        } else {
+            pcm_index * STEP_RATIO - 1
+        };
+        sigmas.push(1.0 - euler_index as f64 / (TRAIN_TIMESTEPS - 1) as f64);
+    }
+    sigmas.push(0.0);
+    SamplingPlan {
+        sigmas,
+        cfg_scale: None,
+        guidance_embed: Some(guidance),
+    }
+}
+
 /// `uncond + (cond - uncond) * scale`, on velocities.
 ///
 /// See the module doc for why mixing velocities is identical to mixing
@@ -228,6 +294,37 @@ mod tests {
             assert_eq!(*sigmas.last().unwrap(), 0.0);
             assert!((sigmas[0] - 1.0).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn multiview_turbo_uses_tencents_five_step_consistency_ladder() {
+        let plan = multiview_turbo_plan(5, 5.0);
+        let expected = [
+            1.0,
+            800.0 / 999.0,
+            600.0 / 999.0,
+            400.0 / 999.0,
+            200.0 / 999.0,
+            0.0,
+        ];
+        assert_eq!(plan.sigmas.len(), expected.len());
+        for (actual, expected) in plan.sigmas.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+        }
+        assert_eq!(plan.cfg_scale, None);
+        assert_eq!(plan.guidance_embed, Some(5.0));
+        assert_eq!(plan.passes_per_step(), 1);
+    }
+
+    #[test]
+    fn ordinary_multiview_complements_tencents_flow_for_the_comfy_model_wrapper() {
+        let plan = multiview_plan(5, 5.0);
+        assert_eq!(plan.sigmas, vec![1.0, 0.75, 0.5, 0.25, 0.0, 0.0]);
+        assert_eq!(plan.cfg_scale, Some(5.0));
+        assert_eq!(plan.guidance_embed, None);
+        assert_eq!(plan.passes_per_step(), 2);
+        assert_eq!(multiview_plan(1, 5.0).sigmas, vec![1.0, 0.0]);
+        assert_eq!(multiview_plan(0, 5.0).sigmas, vec![0.0]);
     }
 
     #[test]

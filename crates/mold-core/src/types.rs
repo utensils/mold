@@ -2898,7 +2898,7 @@ impl MeshRequestOptions {
             req.mesh
                 .clone()
                 .unwrap_or_default()
-                .resolved_with_defaults(),
+                .resolved_with_defaults_for_model(&req.model),
         )
     }
 
@@ -2908,13 +2908,20 @@ impl MeshRequestOptions {
     /// that day". A decimation target and the texture stage stay as given:
     /// absence there is the rendered choice (raw surface, geometry only).
     pub fn resolved_with_defaults(&self) -> Self {
+        self.resolved_with_defaults_for_model("")
+    }
+
+    /// Resolve defaults using the selected model's recipe. Multiview shape
+    /// checkpoints use Tencent's zero-logit isosurface (0.5 after mold's
+    /// occupancy transform), while the single-view checkpoints use 0.6.
+    pub fn resolved_with_defaults_for_model(&self, model: &str) -> Self {
         Self {
             octree_resolution: self
                 .octree_resolution
                 .or(Some(crate::validation::MESH_DEFAULT_OCTREE_RESOLUTION)),
-            threshold: self
-                .threshold
-                .or(Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)),
+            threshold: self.threshold.or(Some(
+                crate::validation::mesh_default_threshold_for_model(model) as f32,
+            )),
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
@@ -5950,6 +5957,17 @@ mod tests {
         );
         assert_eq!(mesh.target_faces, Some(50_000));
 
+        let mut multiview = untouched.clone();
+        multiview.model = crate::manifest::HUNYUAN3D_2MV_TURBO_MODEL.into();
+        let mesh = OutputMetadata::from_generate_request(&multiview, 1, None, "test")
+            .mesh
+            .unwrap();
+        assert_eq!(
+            mesh.threshold,
+            Some(crate::validation::MESH_MULTIVIEW_DEFAULT_THRESHOLD as f32),
+            "multiview provenance must record the 0.5 threshold the engine rendered"
+        );
+
         // A pinned container alone (a catalog model the manifest cannot
         // resolve) is enough to mark the print as a mesh.
         let mut pinned: GenerateRequest = serde_json::from_str(json).unwrap();
@@ -6359,10 +6377,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(contextual.task, Some(ExpandTask::ImageToVideo));
-        assert!(serde_json::to_string(&legacy)
-            .unwrap()
-            .find("task")
-            .is_none());
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("task"));
     }
 
     #[test]

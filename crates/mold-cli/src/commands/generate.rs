@@ -1797,7 +1797,10 @@ pub async fn run(
                 req.mesh
                     .as_ref()
                     .and_then(|options| options.threshold)
-                    .map_or(mold_core::validation::MESH_DEFAULT_THRESHOLD, f64::from),
+                    .map_or_else(
+                        || mold_core::validation::mesh_default_threshold_for_model(&req.model),
+                        f64::from,
+                    ),
                 req.mesh.as_ref().and_then(|options| options.target_faces),
                 effective_steps,
             )

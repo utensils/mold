@@ -515,6 +515,12 @@ export function minimaxH3ReferenceBudget(
       images += 1;
       return;
     }
+    if (reference.kind === "named_image") {
+      errors.push(
+        `Reference ${oneBased} uses a named mesh view, which MiniMax H3 does not accept.`,
+      );
+      return;
+    }
     if (reference.kind === "video") {
       videos += 1;
       videoDurationMs += reference.duration_ms;
@@ -615,7 +621,9 @@ export function minimaxH3ReferenceName(
 export function minimaxH3ReferenceDurationMs(
   reference: GenerationReference,
 ): number | null {
-  return reference.kind === "image" ? null : reference.duration_ms;
+  return reference.kind === "image" || reference.kind === "named_image"
+    ? null
+    : reference.duration_ms;
 }
 
 export function moveMinimaxH3Reference(

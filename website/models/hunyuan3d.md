@@ -32,6 +32,24 @@ Iso threshold, Target faces) takes their place. See
 | `hunyuan3d-turbo:fp16`      | 5     | 4.6 GiB | ~6 GB                     | 1.1B, step-distilled                             |
 | `hunyuan3d:fp16`            | 30    | 4.6 GiB | ~6 GB                     | 1.1B, undistilled                                |
 | `hunyuan3d-2.1:fp16`        | 30    | 6.9 GiB | qualification in progress | 3.3B MoE shape transformer; separate 2.1 licence |
+| `hunyuan3d-2mv:fp16`        | 30    | 4.6 GiB | ~6 GB                     | 1–4 named views, undistilled                     |
+| `hunyuan3d-2mv-turbo:fp16`  | 5     | 4.6 GiB | ~6 GB                     | 1–4 named views, step-distilled                  |
+
+## Named multiview shape
+
+The 2mv checkpoints accept any non-empty subset of front, left, back, and
+right views. Slots are semantic: omitting `left` does not renumber `back`.
+
+```bash
+mold pull hunyuan3d-2mv-turbo --accept-license tencent-hunyuan3d-2.0
+mold run hunyuan3d-2mv-turbo \
+  --front chair-front.png --left chair-left.png --back chair-back.png \
+  -o chair.glb
+```
+
+Create shows the same four named wells on web, desktop, and phones. The MCP
+`generate_mesh` tool accepts the corresponding `front`, `left`, `back`, and
+`right` base64 fields when its `model` is a 2mv tier.
 
 Each is ONE self-contained file carrying the shape transformer, the shape VAE
 and an image encoder (DINOv2-large for 2.1, giant for 2.0), which is why a "0.6B" model is still 3.6 GiB

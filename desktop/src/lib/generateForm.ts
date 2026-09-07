@@ -114,6 +114,12 @@ import {
   stagedImageFromMinimaxH3Boundary,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
+import {
+  deserializeNamedViews,
+  emptyNamedViews,
+  serializeNamedViews,
+  type NamedViewsState,
+} from "@studio/lib/namedViews";
 
 /** Batch N has no product ceiling to speak of; the composer's Make chip stops here. */
 export const MAX_BATCH_SIZE = 10_000;
@@ -385,6 +391,10 @@ export interface GenerateForm {
   stylePreset: string;
   /** Dedicated H3 contract; never projected through edit_images. */
   h3Authoring?: MinimaxH3AuthoringState;
+  /** Semantically fixed front/left/back/right inputs for a mesh recipe whose
+   * profile advertises named views. Kept while another recipe is selected;
+   * the profile is the sole wire gate. */
+  namedViews?: NamedViewsState;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -455,6 +465,7 @@ export function newGenerateForm(): GenerateForm {
     cameraControl: null,
     stylePreset: "",
     h3Authoring: emptyMinimaxH3AuthoringState(),
+    namedViews: emptyNamedViews(),
   };
 }
 
@@ -502,6 +513,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
       : null,
     audioFile: form.audioFile ? { ...form.audioFile } : null,
     h3Authoring: cloneMinimaxH3AuthoringState(form.h3Authoring),
+    namedViews: { ...(form.namedViews ?? emptyNamedViews()) },
   };
 }
 
@@ -1090,6 +1102,12 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     output_format: form.outputFormat,
   };
 
+  const namedViews = serializeNamedViews(
+    form.namedViews,
+    form.recipeCapabilities?.mesh?.named_views,
+  );
+  if (namedViews.length) req.references = namedViews;
+
   if (parsedSeed !== undefined && Number.isFinite(parsedSeed)) req.seed = parsedSeed;
   if (req.prompt && form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
@@ -1644,6 +1662,7 @@ export function applyRequestToForm(
   form.identityWeight = request.id_weight ?? null;
   form.identityStartStep = request.id_start_step ?? null;
   form.imageAttachments = [...(request.edit_images ?? [])];
+  form.namedViews = deserializeNamedViews(request.references);
   form.maskImage = request.mask_image ?? null;
   form.controlImage = request.control_image ?? null;
   form.controlModel = request.control_model ?? "";

@@ -5,8 +5,8 @@ Manifest family: `hunyuan3d`.
 ## Prompt style
 
 Write no prompt. There is no text encoder anywhere in this family. The source
-image is the entire conditioning, nothing typed in the prompt field reaches
-the model, and a request without an image is refused rather than answered
+image or named multiview set is the entire conditioning; nothing typed in the prompt field reaches
+the model, and a request without images is refused rather than answered
 from nothing. The {{word_limit}}-word budget is therefore unused: spend the
 effort on the image instead. `mold expand` and `mold remix` say so and answer
 with the image advice below instead of calling a language model.
@@ -63,8 +63,8 @@ ground and every other prop cropped away.
 - The web, desktop, and mobile apps' export menu offers the same OBJ, STL,
   and PLY geometry exports and the GIF, APNG, and WebP turntables as
   `mold library export` and the `export_mesh` MCP tool.
-- Texturing, multi-view input, and text-to-3D are not
-  supported, so today's result is geometry only.
+- Text-to-3D is not supported. Select a 2mv tier for named front, left, back,
+  and right inputs; every other shape tier takes one source image.
 - Detail is bought with the octree resolution and its cost is cubic.
 
 ## CLI
@@ -81,6 +81,9 @@ mold run hunyuan3d --image chair.png --octree 320 -o chair.glb
 
 # Recover thin features by lowering the surface threshold
 mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
+
+# Named views keep semantic slots; any non-empty subset is accepted
+mold run hunyuan3d-2mv-turbo --front front.png --left left.png --back back.png -o object.glb
 
 # Export a saved mesh from the gallery as STL, OBJ, or PLY
 mold library export chair.glb --format stl -o chair.stl

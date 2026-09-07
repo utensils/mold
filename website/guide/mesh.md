@@ -11,6 +11,7 @@ trashes, restores and reuses its settings exactly like an image or a clip.
 mold licenses                                                   # read the terms
 mold pull hunyuan3d-mini-turbo --accept-license tencent-hunyuan3d-2.0
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb
+mold run hunyuan3d-2mv-turbo --front front.png --left left.png --back back.png -o chair.glb
 ```
 
 `mold pull` refuses until the licence is accepted. That is deliberate: the

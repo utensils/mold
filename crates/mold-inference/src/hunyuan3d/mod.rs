@@ -27,6 +27,7 @@ pub mod dino2;
 pub mod engine;
 pub mod glb;
 pub mod mesh;
+pub mod multiview;
 pub mod obj;
 pub mod paint_attention;
 pub mod paint_back_sample;
