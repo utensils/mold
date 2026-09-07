@@ -587,6 +587,33 @@ describe("prompt, strength, and mesh contract", () => {
     expect(advertisedGenerationProfile(modelWith(unknownWorkflow))).toBeNull();
   });
 
+  it("retains PBR and prompt contracts on hosts with the old hidden matting placeholder", () => {
+    const recipe = hunyuan3dRecipe();
+    const mesh = caps(recipe).mesh as LooseCaps;
+    mesh.texture = { mode: "adjustable", required: false };
+    mesh.matting = {
+      mode: "hidden",
+      required: false,
+      reason: "Not executable by this build",
+    };
+    const model = modelWith(recipe);
+    const before = structuredClone(model);
+    const resolved = effectiveGenerationRecipe(model);
+    expect(resolved?.capabilities.mesh?.texture.mode).toBe("adjustable");
+    expect(resolved?.capabilities.prompt?.mode).toBe("ignored");
+    expect(resolved?.capabilities.mesh?.matting).toBeUndefined();
+    expect(model).toEqual(before);
+    for (const invalid of [
+      { mode: "adjustable", required: false },
+      { mode: "hidden", required: true },
+      { mode: "hidden", required: false, default: "bogus" },
+      { mode: "hidden", required: false, choices: [] },
+    ]) {
+      mesh.matting = invalid;
+      expect(advertisedGenerationProfile(model)).toBeNull();
+    }
+  });
+
   it("fills the legacy adapter from the pre-profile family rules", () => {
     // A host that predates the profile still has the old client rules
     // applied to it, so behaviour there is unchanged: LTX-2 with visual

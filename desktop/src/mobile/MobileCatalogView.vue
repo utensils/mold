@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useMobileBack } from "./useMobileBack";
 import {
   computed,
   nextTick,
@@ -991,6 +992,15 @@ async function openDetail(entry: MobileCatalogEntry): Promise<void> {
       });
   }
 }
+
+useMobileBack(
+  computed(() => detailEntry.value !== null),
+  closeDetail,
+);
+useMobileBack(
+  computed(() => targetEntry.value !== null),
+  closeTargetPicker,
+);
 
 function closeDetail(): void {
   ++detailEpoch;

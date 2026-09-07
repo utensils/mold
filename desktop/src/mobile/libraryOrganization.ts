@@ -290,6 +290,44 @@ export function filterLibraryPrints<T extends { hostId: string; filename: string
   });
 }
 
+/** All words match across the logical print's copies and organization. The
+ * caller supplies the complete metadata listing, before thumbnail windowing. */
+export function matchesLibrarySearch(
+  query: string,
+  copies: readonly {
+    filename: string;
+    title?: string | null;
+    metadata?: { prompt?: string; model?: string; title?: string | null };
+  }[],
+  organization?: Pick<OrganizationUnion, "title" | "tags" | "collections">,
+  collections: readonly { name: string; slug: string }[] = [],
+): boolean {
+  const normalize = (text: string) => text.normalize("NFKC").toLocaleLowerCase();
+  const terms = normalize(query).trim().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const slugs = new Set(organization?.collections ?? []);
+  const text = normalize(
+    [
+      ...copies.flatMap((copy) => [
+        copy.filename,
+        copy.title,
+        copy.metadata?.title,
+        copy.metadata?.prompt,
+        copy.metadata?.model,
+      ]),
+      organization?.title,
+      ...(organization?.tags ?? []),
+      ...slugs,
+      ...collections
+        .filter((collection) => slugs.has(collection.slug))
+        .map((collection) => collection.name),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+  return terms.every((term) => text.includes(term));
+}
+
 // ── Tags across hosts ───────────────────────────────────────────────────────
 
 /** Case-insensitive union of every host's tag counts (counts summed — an

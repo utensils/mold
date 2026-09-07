@@ -1,45 +1,121 @@
 import { mount } from "@vue/test-utils";
 import { defineComponent, ref, nextTick } from "vue";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useMobileBack } from "./useMobileBack";
 vi.mock("./platform", () => ({ isNativeAndroidRuntime: () => true }));
 
-describe("mobile Android Back", () => {
-  it("dismisses only the top temporary surface and consumes Done without closing the one beneath", async () => {
-    const first = ref(false);
-    const second = ref(false);
-    const closeFirst = vi.fn(() => {
-      first.value = false;
+async function settle() {
+  for (let i = 0; i < 6; i++) await nextTick();
+}
+
+function setup() {
+  const states: unknown[] = [null];
+  let cursor = 0;
+  vi.spyOn(window.history, "state", "get").mockImplementation(() => states[cursor]);
+  vi.spyOn(window.history, "pushState").mockImplementation((state) => {
+    states.splice(cursor + 1);
+    states.push(state);
+    cursor++;
+  });
+  const go = vi.spyOn(window.history, "go").mockImplementation((delta = 0) => {
+    queueMicrotask(() => {
+      cursor += delta;
+      if (cursor < 0 || cursor >= states.length) throw new Error("History escaped the app");
+      window.dispatchEvent(new PopStateEvent("popstate", { state: states[cursor] }));
     });
-    const closeSecond = vi.fn(() => {
-      second.value = false;
-    });
-    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    const harness = mount(
-      defineComponent({
-        setup() {
-          useMobileBack(first, closeFirst);
-          useMobileBack(second, closeSecond);
-          return () => null;
-        },
-      }),
-    );
-    first.value = true;
-    second.value = true;
-    window.dispatchEvent(new PopStateEvent("popstate"));
-    expect(closeSecond).toHaveBeenCalledOnce();
-    expect(closeFirst).not.toHaveBeenCalled();
-    expect(first.value).toBe(true);
-    second.value = true;
+  });
+  const first = ref(false);
+  const second = ref(false);
+  const closeFirst = vi.fn(() => {
+    first.value = false;
+  });
+  const closeSecond = vi.fn(() => {
     second.value = false;
-    expect(back).toHaveBeenCalledOnce();
-    window.dispatchEvent(new PopStateEvent("popstate"));
-    expect(closeFirst).not.toHaveBeenCalled();
-    window.dispatchEvent(new PopStateEvent("popstate"));
-    expect(closeFirst).toHaveBeenCalledOnce();
+  });
+  const harness = mount(
+    defineComponent({
+      setup() {
+        useMobileBack(first, closeFirst);
+        useMobileBack(second, closeSecond);
+        return () => null;
+      },
+    }),
+  );
+  return { first, second, closeFirst, closeSecond, go, harness, cursor: () => cursor };
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("mobile Android Back", () => {
+  it("dismisses details before the viewer and Done leaves the viewer open", async () => {
+    const h = setup();
+    h.first.value = true;
+    h.second.value = true;
+    await settle();
+    h.go(-1);
+    await settle();
+    expect(h.closeSecond).toHaveBeenCalledOnce();
+    expect(h.closeFirst).not.toHaveBeenCalled();
+    h.second.value = true;
+    await settle();
+    h.second.value = false;
+    await settle();
+    expect(h.cursor()).toBe(1);
+    expect(h.closeFirst).not.toHaveBeenCalled();
+    h.go(-1);
+    await settle();
+    expect(h.closeFirst).toHaveBeenCalledOnce();
+    expect(h.cursor()).toBe(0);
+    h.harness.unmount();
+    await settle();
+  });
+
+  it("consumes a viewer and its details together when the viewer closes", async () => {
+    const h = setup();
+    h.first.value = true;
+    h.second.value = true;
+    await settle();
+    h.first.value = false;
+    h.second.value = false;
+    await settle();
+    expect(h.go).toHaveBeenCalledExactlyOnceWith(-2);
+    expect(h.cursor()).toBe(0);
+    expect(h.closeFirst).not.toHaveBeenCalled();
+    expect(h.closeSecond).not.toHaveBeenCalled();
+    h.harness.unmount();
+    await settle();
+  });
+
+  it("can replace a surface and skip its dismissed history slot", async () => {
+    const h = setup();
+    h.first.value = true;
+    await settle();
+    h.first.value = false;
+    h.second.value = true;
+    await settle();
+    h.go(-1);
+    await settle();
+    expect(h.closeSecond).toHaveBeenCalledOnce();
+    expect(h.closeFirst).not.toHaveBeenCalled();
+    expect(h.cursor()).toBe(0);
+    h.harness.unmount();
+    await settle();
+  });
+
+  it("preserves a reopened surface while its previous close is navigating", async () => {
+    const h = setup();
+    h.first.value = true;
+    await settle();
+    h.first.value = false;
     await nextTick();
-    harness.unmount();
-    back.mockRestore();
-    window.history.replaceState(null, "");
+    h.first.value = true;
+    await settle();
+    expect(h.first.value).toBe(true);
+    h.go(-1);
+    await settle();
+    expect(h.closeFirst).toHaveBeenCalledOnce();
+    expect(h.cursor()).toBe(0);
+    h.harness.unmount();
+    await settle();
   });
 });

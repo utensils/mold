@@ -75,8 +75,39 @@ export interface GenerationProfileModel {
 export function advertisedGenerationProfile(
   model: GenerationProfileModel | null | undefined,
 ): GenerationProfileSet | null {
-  const profile = model?.generation_profile;
+  const profile = normalizeLegacyHiddenMatting(model?.generation_profile);
   return isGenerationProfileSetV1(profile) ? profile : null;
+}
+
+/** Before matting became selectable, v1 hosts advertised a hidden feature
+ * placeholder. Treat exactly that old shape as an absent additive control;
+ * rejecting it would discard unrelated prompt, mesh and PBR capabilities.
+ * Never mutate a cached host snapshot or forgive malformed current controls. */
+function normalizeLegacyHiddenMatting(profile: unknown): unknown {
+  if (!isRecord(profile) || !Array.isArray(profile.recipes)) return profile;
+  let changed = false;
+  const recipes = profile.recipes.map((recipe: unknown) => {
+    if (
+      !isRecord(recipe) ||
+      !isRecord(recipe.capabilities) ||
+      !isRecord(recipe.capabilities.mesh)
+    )
+      return recipe;
+    const mesh = recipe.capabilities.mesh;
+    const matting = mesh.matting;
+    if (
+      !isFeatureControl(matting) ||
+      matting.mode !== "hidden" ||
+      matting.required !== false ||
+      "default" in matting ||
+      "choices" in matting
+    )
+      return recipe;
+    changed = true;
+    const { matting: _legacy, ...rest } = mesh;
+    return { ...recipe, capabilities: { ...recipe.capabilities, mesh: rest } };
+  });
+  return changed ? { ...profile, recipes } : profile;
 }
 
 /** Resolve one complete recipe; clients never merge recipe overrides. */

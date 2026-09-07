@@ -25,6 +25,9 @@ describe("mobile library sheet focus", () => {
     await wrapper.setProps({ open: true });
     await flushPromises();
     const panel = wrapper.get(".mobile-library-sheet-panel");
+    expect(
+      wrapper.get(".mobile-library-sheet-done").element.closest(".mobile-library-sheet-body"),
+    ).toBeNull();
     expect(document.activeElement).toBe(panel.element);
     await panel.trigger("keydown", { key: "Tab", shiftKey: true });
     expect(document.activeElement?.hasAttribute("data-sheet-close")).toBe(true);

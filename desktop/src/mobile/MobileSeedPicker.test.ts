@@ -22,6 +22,16 @@ function mountPicker(seed = "", lastSeed: number | null = null) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("MobileSeedPicker", () => {
+  it("dismisses the numeric editor on Done while retaining the seed", async () => {
+    const { wrapper, state } = mountPicker("1234");
+    const input = wrapper.get("[data-test='mobile-seed-input']");
+    const blur = vi.spyOn(input.element as HTMLElement, "blur");
+    await input.trigger("keydown", { key: "Enter" });
+    expect(blur).toHaveBeenCalledOnce();
+    expect(state.seed).toBe("1234");
+    wrapper.unmount();
+  });
+
   it("makes random generation explicit without showing a misleading empty input", () => {
     const { wrapper } = mountPicker();
 

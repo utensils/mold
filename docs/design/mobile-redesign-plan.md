@@ -21,15 +21,15 @@ Decision order: current user direction, current desktop behavior and shared capa
 
 Reviewed the archive's desktop, iPhone, and style-guide sources, and rendered the iPhone storyboard in a browser. Compared these against `docs/design/README.md`, current desktop/mobile source, recent commits, and live GitHub issue/PR state. The architecture graph at `.ua/knowledge-graph.json` predates the redesign (2026-08-28); it was useful for orientation only. Current source wins over its descriptions.
 
-| Recent work | Implication for mobile |
-| --- | --- |
-| #1565 and #1566: six shared themes | Reuse the shipped theme contract; mobile already initializes it before mount. |
-| #1595: desktop redesign | Adopt its visual language, plain wording, style picker, and result-first hierarchy. |
-| #1598: output sections and remembered styles | Use Still picture / Short clip / 3-D object and the shared last-used-style store. |
+| Recent work                                      | Implication for mobile                                                                                                                      |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| #1565 and #1566: six shared themes               | Reuse the shipped theme contract; mobile already initializes it before mount.                                                               |
+| #1595: desktop redesign                          | Adopt its visual language, plain wording, style picker, and result-first hierarchy.                                                         |
+| #1598: output sections and remembered styles     | Use Still picture / Short clip / 3-D object and the shared last-used-style store.                                                           |
 | #1600 and #1602: duration and backend follow-ups | Old claims that duration, storage totals, and save-to-gallery opt-out lack server support are stale. Gate presentation on actual host data. |
-| #1619: retire interactive scene authoring | Discard the archive's scenes screen. A short clip has one prompt and Length; internal splitting remains invisible. |
-| #1623: long-clip recovery fixes | Preserve durable admission, progress, restart, and result recovery when changing the screen. |
-| #1620 and #1624: Hunyuan3D expansion | Include current capability-driven mesh, texture, and named-view inputs, beyond the older storyboard. |
+| #1619: retire interactive scene authoring        | Discard the archive's scenes screen. A short clip has one prompt and Length; internal splitting remains invisible.                          |
+| #1623: long-clip recovery fixes                  | Preserve durable admission, progress, restart, and result recovery when changing the screen.                                                |
+| #1620 and #1624: Hunyuan3D expansion             | Include current capability-driven mesh, texture, and named-view inputs, beyond the older storyboard.                                        |
 
 Issues #1586 and #1597 are closed. Their checkboxes are not proof that phone adoption shipped: current mobile still renders Create/Library/Models, `meta.tone`, legacy CSS, and has no last-used-style-store consumer. Track these as mobile migration work instead of copying the closed issue's completion state.
 
@@ -103,12 +103,12 @@ The current `MobileApp.vue` is 12,928 lines and combines shell, orchestration, a
 
 Proposed boundaries: `MobileShell`, `MobileMakeView`, `MobileQueueView`, `MobileImagesView`, and a consolidated settings sheet. Existing Catalog, HostDetail, GalleryViewer, source wells, native bridges, and pure helpers remain useful. Component names are implementation suggestions, not a requirement to perform a wholesale file move.
 
-| Layer | Responsibility |
-| --- | --- |
-| `ui/` | Shared theme maps, icons, low-level primitives, accessible semantics. |
-| `studio/` | Shared capabilities, request policies, remembered styles, organization and queue presentation helpers. No Tauri imports. |
-| `desktop/src/mobile/` | Shared iOS/Android screens, mobile navigation and layout, orchestration with explicit targets. |
-| `apps/mobile/` and platform bridges | Secure credentials, pairing/discovery, media, background admission lease, appearance and insets. |
+| Layer                               | Responsibility                                                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `ui/`                               | Shared theme maps, icons, low-level primitives, accessible semantics.                                                    |
+| `studio/`                           | Shared capabilities, request policies, remembered styles, organization and queue presentation helpers. No Tauri imports. |
+| `desktop/src/mobile/`               | Shared iOS/Android screens, mobile navigation and layout, orchestration with explicit targets.                           |
+| `apps/mobile/` and platform bridges | Secure credentials, pairing/discovery, media, background admission lease, appearance and insets.                         |
 
 Replace mobile legacy tokens with `--mold-*` and remove the shell's fixed-radius overrides. Build mobile sizing on top of shared primitives: at least 44pt targets on iOS, 48dp on Android, and at least 16px editable text on iOS. Do not import desktop control metrics that shrink touch controls to 26px. Do not remove the shared legacy bridge until the web surface no longer needs it.
 
@@ -146,7 +146,6 @@ The main engineering risks are unmounting controls that currently report validit
 
 Before the first implementation slice, capture live baseline screens and resolve the small-phone keyboard layout in a working prototype. The static references do not prove that the result, editor, progress card, and five-tab bar fit while typing. Treat that as the first design validation, not as a late CSS adjustment.
 
-
 ## Locked plan review and milestone ledger
 
 Independent review: GPT-5.6 Sol, medium reasoning, `plan_review`. All seven findings addressed: functional Queue at shell rollout; safe Queue lifetime; incremental single-branch sync/push; one form and conditioning authority; shared navigation/overlay policy; physical Android acceptance; explicit short-tab vocabulary exception. No scene authoring is in scope.
@@ -155,9 +154,9 @@ Independent review: GPT-5.6 Sol, medium reasoning, `plan_review`. All seven find
 - [x] Independent plan review; resolve findings and lock plan.
 - [x] Baseline mobile tests: 52 files / 1,068 tests pass. Browser baseline at 393×852.
 - [x] Milestone 1: working five-tab navigation, initial Queue destination, direct theme tokens and navigation vocabulary. Later screen-specific vocabulary remains in milestones 2–4.
-- [ ] Milestone 2: Make, three output kinds, style memory, consolidated settings.
-- [ ] Milestone 3: Queue sections, details, safe offline state, exact-machine actions.
-- [ ] Milestone 4: Images, Styles, Machines, Settings.
+- [x] Milestone 2: Make, three output kinds, style memory, consolidated settings.
+- [x] Milestone 3: Queue sections, details, safe offline state, exact-machine actions.
+- [x] Milestone 4: Images, Styles, Machines, Settings.
 - [ ] Milestone 5: full regression, visual comparison, native iOS acceptance, Android acceptance.
 
 Sync baseline: `origin/main` remains `c38d569d` at plan lock; no new main commits.
@@ -170,7 +169,6 @@ Queue/keyboard slice: grouped active work into Being made, Waiting, Needs attent
 
 The user authorizes real generation UAT on Plato through its Tailscale IP. Live discovery confirms it is reachable, version 0.28.0 at server commit `271fa93a`, and has installed still/video/mesh models. Test the advertised server capabilities as they stand; client-main features absent from this host require fixture coverage or a later server update, not an implicit deployment.
 
-
 ### First TestFlight milestone
 
 The user now authorizes merging coherent milestones and will verify remotely through TestFlight. The first candidate delivers the shared navigation, Make and Queue foundation plus the initial Machines/Settings cleanup. This is an incremental delivery, not completion of the full acceptance matrix. Keep this branch for subsequent work, merge main after milestone integration, and track remaining physical-device and generation UAT explicitly.
@@ -178,3 +176,19 @@ The user now authorizes merging coherent milestones and will verify remotely thr
 Destination follow-up: saved machines lead their screen; Add a machine contains pairing/discovery/manual entry and starts expanded for an empty install. Settings uses shared vocabulary and platform-neutral appearance copy. Settings no longer renders Images or Machines underneath it. Library sheets contain keyboard focus and only the top sheet handles Escape; Settings participates in Android Back. Small-phone theme selection no longer scrolls the shell header out of view. Remove-background overrides now count in More settings.
 
 Validation: 56 mobile files / 1,083 tests pass; architecture passes. The prior Android native build produced its debug APK successfully. Browser review at 375×667 covered all six themes, and 844×390 covered landscape navigation. Signed native iOS rebuild/install/launch passed. Full frontend gate passed: Studio 1,688 tests, web 1,757 tests, desktop/shared 6,295 tests, plus web/desktop production builds. Generation UAT has not been submitted. Plato is reserved strictly for tests requiring actual generation; layout and navigation use local fixtures.
+
+### Keyboard acceptance follow-up
+
+The user merged #1629 at `9537a835`; this branch merged that main commit and continues without a history rewrite. TestFlight 0.28.0 (0.28.0.1308) reached VALID and Mold Internal tester access was verified by run 34090548322. This is the foundation delivery, not closure of the entire acceptance matrix.
+
+Expanded native keyboard testing found and fixed low numeric-field occlusion, rotated iPhone editor starvation, viewer viewport/safe-area sizing, and a scrolled-away sheet exit. All software-keyboard editors are revealed after viewport changes. Title and seed Done dismiss editing; manual machine setup traverses Name → Address → API key. Library sheets keep Done outside the scrolling body. Android transient history now handles nested viewer/details, catalog target selection, simultaneous close and reopening; the identity picker no longer double-registers its sheet.
+
+Native iPhone 17 Pro / iOS 26.5 checks cover prompt open/dismiss/rotation, custom Width/Height traversal, title focus, viewer tag and lower collection editors, and persistent sheet exit. Local fixtures handle layout without inference. Full frontend validation passes (Studio 1,694; web 1,757; desktop/shared 6,332 tests and production builds). Native simulator build/install succeeds. Physical iPhone acceptance remains with the user through TestFlight; Android emulator and generation acceptance remain tracked separately.
+
+### Primary controls and spacing follow-up
+
+Color / PBR now sits directly below Style for a host advertising adjustable mesh texture, with its advertised texture sizes. Hidden and fixed texture controls remain unavailable; geometry stays in More settings. Older hosts that advertised a hidden matting placeholder retain their otherwise valid mesh profile, without accepting malformed current matting contracts. Mesh source images no longer carry a misleading strength hint. Repeat this look follows desktop order: Keep, then Surprise me.
+
+My images searches all loaded metadata before thumbnail windowing: filenames, titles, prompts, styles, tags, and collection names, including every physical copy of a logical print. Queue group headings have consistent padding, and prompt-free mesh jobs use a model/machine title and accessible Actions label.
+
+The complete frontend gate passes: Studio 1,695, web 1,757, desktop/shared 6,339 tests, plus production builds. Native iPhone layout checks confirm primary PBR and texture sizes, old-host prompt-free behavior, Queue group spacing, and live filtering against the cached library. Android's initial 21 instrumentation tests passed; a subsequent visual audit found duplicate system insets, now consumed by the native container after it applies them, with all 21 instrumentation tests passing again. The rebuilt Android emulator confirms the gap is gone and the active editor and Generate remain above the software keyboard. No generations were used for these layout checks. Milestones 2–4 describe implemented screens; milestone 5 remains open until its acceptance evidence is complete.

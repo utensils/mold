@@ -367,6 +367,7 @@ import {
   deleteActionCopy,
   fanoutFailureMessage,
   filterLibraryPrints,
+  matchesLibrarySearch,
   libraryOrganizationSupport,
   logicalCopyIndex,
   logicalCopiesOf,
@@ -659,7 +660,6 @@ const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const GALLERY_TAGS_KEY = "mold.mobile.gallery-tags.v1";
-const GALLERY_VIEWER_HISTORY_KEY = "mold.mobile.gallery-viewer";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
@@ -725,6 +725,8 @@ const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const selectedDiscovered = ref<DiscoveredHost | null>(null);
 const discoveredApiKeyInput = ref<HTMLInputElement | null>(null);
+const hostAddressInput = ref<HTMLInputElement | null>(null);
+const hostApiKeyInput = ref<HTMLInputElement | null>(null);
 const discovering = ref(false);
 const pairing = ref(false);
 const pairingScannerOpen = ref(false);
@@ -1073,6 +1075,14 @@ const selectedPrint = ref<GalleryPrint | null>(null);
  * connected host advertises `capabilities.gallery.organize` / `.trash`. */
 const libraryScope = ref<MobileLibraryScope>("prints");
 const libraryFilters = reactive({ ...EMPTY_LIBRARY_FILTERS });
+const librarySearchQuery = ref("");
+watch(librarySearchQuery, (_query, _prior, onCleanup) => {
+  const timer = setTimeout(() => {
+    clearGallerySelection();
+    void requeueGallery();
+  }, 150);
+  onCleanup(() => clearTimeout(timer));
+});
 /** Per-host `/api/gallery/collections` and `/api/gallery/tags` listings. */
 const hostCollections = reactive<Record<string, Collection[]>>({});
 const hostTags = reactive<Record<string, TagCount[]>>({});
@@ -8410,12 +8420,6 @@ function galleryImageMimeType(print: GalleryImage, declared: string): string {
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
-  if (androidNativeRuntime && !window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]) {
-    window.history.pushState(
-      { ...(window.history.state ?? {}), [GALLERY_VIEWER_HISTORY_KEY]: true },
-      "",
-    );
-  }
 }
 
 const galleryPrintKey = (print: Pick<GalleryPrint, "hostId" | "filename">) =>
@@ -8720,6 +8724,7 @@ const trashRetention = computed(() =>
   trashRetentionSummary(trashRetentionHosts(connectedHosts.value, librarySupport.value)),
 );
 const libraryEmptyCopy = computed(() => {
+  if (librarySearchQuery.value.trim()) return "No prints match your search.";
   if (libraryScope.value === "trash") return "Trash is empty.";
   if (libraryScope.value === "collections" && activeCollection.value) {
     return "No prints in this collection yet. Add some from Select.";
@@ -8822,19 +8827,32 @@ function rebuildGalleryOrganization(): void {
 /** The representatives the grid pages through for the current scope + chips. */
 function visibleRepresentatives(): PendingGalleryPrint[] {
   const copies = scopeCopies();
-  const representatives = groupLogicalGalleryPrints(copies).map((group) => group.representative);
+  const groups = groupLogicalGalleryPrints(copies);
+  const representatives = groups.map((group) => group.representative);
+  const copiesByRepresentative = new Map(
+    groups.map((group) => [group.representative, group.copies]),
+  );
   const filters =
     libraryScope.value === "prints"
       ? { ...libraryFilters, collectionSlug: null }
       : libraryScope.value === "collections"
         ? { ...EMPTY_LIBRARY_FILTERS, collectionSlug: libraryFilters.collectionSlug }
         : { ...EMPTY_LIBRARY_FILTERS };
-  return filterLibraryPrints(
+  const filtered = filterLibraryPrints(
     representatives,
     filters,
     organizationOf,
-    (print) => logicalCopiesOf(copies, print),
+    (print) => copiesByRepresentative.get(print) ?? [print],
     libraryScope.value === "prints" ? hiddenCollectionSlugs.value : new Set(),
+  );
+  if (!librarySearchQuery.value.trim()) return filtered;
+  return filtered.filter((print) =>
+    matchesLibrarySearch(
+      librarySearchQuery.value,
+      copiesByRepresentative.get(print) ?? [print],
+      organizationOf(print),
+      libraryCollectionCards.value,
+    ),
   );
 }
 
@@ -10510,7 +10528,7 @@ function navigateSelectedPrint(delta: -1 | 1): void {
   selectedPrint.value = next;
 }
 
-function closePrint(syncAndroidHistory = true): void {
+function closePrint(): void {
   reusePrintEpoch += 1;
   reusePrintController?.abort();
   reusePrintController = null;
@@ -10520,7 +10538,7 @@ function closePrint(syncAndroidHistory = true): void {
   sourceUseController = null;
   usingPrintAsSource.value = false;
   reusePrintError.value = "";
-  dismissSelectedPrint(syncAndroidHistory);
+  dismissSelectedPrint();
   if (galleryRefreshDeferred || galleryRefreshRequested) {
     galleryRefreshDeferred = false;
     // The viewer normally restores focus to its tile. A deferred refresh — or
@@ -10533,20 +10551,14 @@ function closePrint(syncAndroidHistory = true): void {
   }
 }
 
-function dismissSelectedPrint(syncAndroidHistory = true): void {
+function dismissSelectedPrint(): void {
   selectedPrint.value = null;
-  if (
-    syncAndroidHistory &&
-    androidNativeRuntime &&
-    window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]
-  ) {
-    window.history.back();
-  }
 }
 
-function handleAndroidHistoryPop(): void {
-  if (androidNativeRuntime && selectedPrint.value) closePrint(false);
-}
+useMobileBack(
+  computed(() => selectedPrint.value !== null),
+  closePrint,
+);
 
 function reuseSelectedPrint(): void {
   const print = selectedPrint.value;
@@ -10992,9 +11004,33 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
 }
 
 const keyboardVisible = ref(false);
+let keyboardBaselineWidth = window.innerWidth;
+let keyboardBaselineHeight = window.innerHeight;
+let keyboardRotationOpen = false;
+let lastKeyboardViewportHeight = window.innerHeight;
 function syncVisualViewportOffset(): void {
   const viewport = window.visualViewport;
-  keyboardVisible.value = !!viewport && window.innerHeight - viewport.height > 120;
+  // UIKit may resize the WebView itself after the keyboard opens, making
+  // innerHeight equal visualViewport.height. Preserve the unobscured height
+  // for this orientation instead of mistaking that second resize for Done.
+  if (keyboardBaselineWidth !== window.innerWidth) {
+    keyboardRotationOpen = keyboardVisible.value && usesSoftwareKeyboard(document.activeElement);
+    keyboardBaselineWidth = window.innerWidth;
+    keyboardBaselineHeight = window.innerHeight;
+  }
+  keyboardBaselineHeight = Math.max(
+    keyboardBaselineHeight,
+    window.innerHeight,
+    viewport?.height ?? 0,
+  );
+  if (
+    !usesSoftwareKeyboard(document.activeElement) ||
+    (viewport && viewport.height - lastKeyboardViewportHeight > 120)
+  )
+    keyboardRotationOpen = false;
+  keyboardVisible.value =
+    !!viewport && (keyboardRotationOpen || keyboardBaselineHeight - viewport.height > 120);
+  lastKeyboardViewportHeight = viewport?.height ?? window.innerHeight;
   const pageTop = viewport?.pageTop ?? window.scrollY;
   document.documentElement.style.setProperty(
     "--mobile-visual-viewport-page-top",
@@ -11020,10 +11056,30 @@ function restoreNativeViewport(): void {
   void invoke("restore_mobile_viewport").catch(() => undefined);
 }
 
-function revealFocusedPrompt(editor: HTMLElement): void {
-  if (editor.id !== "mobile-prompt") return;
-  const field = editor.closest<HTMLElement>(".field") ?? editor;
-  field.scrollIntoView?.({ block: "center", inline: "nearest" });
+function revealFocusedEditor(editor: HTMLElement): void {
+  // Wait for viewport sizing and keyboard-only chrome to finish updating.
+  // Every editor needs this: WebKit's first pan can leave a low numeric,
+  // password, or sheet field underneath the resized content edge.
+  void nextTick(() => {
+    if (unmounted || document.activeElement !== editor) return;
+    editor.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function handleKeyboardViewportResize(): void {
+  const widthChanged = keyboardBaselineWidth !== window.innerWidth;
+  syncVisualViewportOffset();
+  if (widthChanged) {
+    cancelKeyboardViewportRestore();
+    keyboardViewportRestoreTimer = setTimeout(() => {
+      keyboardViewportRestoreTimer = null;
+      restoreNativeViewport();
+      const focused = document.activeElement;
+      if (usesSoftwareKeyboard(focused)) revealFocusedEditor(focused);
+    }, 400);
+  }
+  const editor = document.activeElement;
+  if (usesSoftwareKeyboard(editor)) revealFocusedEditor(editor);
 }
 
 function cancelKeyboardViewportRestore(): void {
@@ -11042,12 +11098,12 @@ function handleKeyboardFocusIn(event: FocusEvent): void {
   queueMicrotask(() => {
     if (unmounted || document.activeElement !== editor) return;
     restoreNativeViewport();
-    revealFocusedPrompt(editor);
+    revealFocusedEditor(editor);
     keyboardViewportRestoreTimer = setTimeout(() => {
       keyboardViewportRestoreTimer = null;
       if (document.activeElement !== editor) return;
       restoreNativeViewport();
-      revealFocusedPrompt(editor);
+      revealFocusedEditor(editor);
     }, KEYBOARD_VIEWPORT_SETTLE_MS);
   });
 }
@@ -11085,14 +11141,13 @@ onMounted(async () => {
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
   window.addEventListener("mold:native-gallery-upscale", upscaleNativeGalleryContextPrint);
-  window.addEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.addEventListener("scroll", scheduleMobileGalleryWindow, { passive: true });
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
   // still reports, and so a lift outside the grid always ends it.
   window.addEventListener("pointermove", moveGalleryPinch, { passive: false });
   window.addEventListener("pointerup", endGalleryPinch);
   window.addEventListener("pointercancel", endGalleryPinch);
-  window.visualViewport?.addEventListener("resize", syncVisualViewportOffset);
+  window.visualViewport?.addEventListener("resize", handleKeyboardViewportResize);
   window.visualViewport?.addEventListener("scroll", syncVisualViewportOffset);
   syncVisualViewportOffset();
   if ("__TAURI_INTERNALS__" in window) {
@@ -11183,7 +11238,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
   window.removeEventListener("mold:native-gallery-upscale", upscaleNativeGalleryContextPrint);
-  window.removeEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.removeEventListener("scroll", scheduleMobileGalleryWindow);
   nativeGalleryContextKey = null;
   finishGallerySelectionDrag();
@@ -11191,7 +11245,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", endGalleryPinch);
   window.removeEventListener("pointercancel", endGalleryPinch);
   resetPinch(galleryZoom, galleryColumns.value);
-  window.visualViewport?.removeEventListener("resize", syncVisualViewportOffset);
+  window.visualViewport?.removeEventListener("resize", handleKeyboardViewportResize);
   window.visualViewport?.removeEventListener("scroll", syncVisualViewportOffset);
   document.documentElement.style.removeProperty("--mobile-visual-viewport-page-top");
   document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
@@ -11896,7 +11950,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 v-model="printTitle"
                 class="control"
                 autocomplete="off"
-                enterkeyhint="next"
+                enterkeyhint="done"
+                @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
                 placeholder="Untitled print"
                 data-test="mobile-create-title"
               />
@@ -12149,6 +12204,36 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               {{ gallerySelectMode ? "Done" : "Select" }}
             </button>
           </div>
+        </div>
+        <div
+          v-if="libraryScope !== 'collections' || activeCollection"
+          class="mobile-library-search"
+        >
+          <label class="field">
+            <span class="sr-only">Search My images</span>
+            <input
+              v-model="librarySearchQuery"
+              class="control"
+              type="search"
+              placeholder="Search images…"
+              aria-label="Search My images"
+              autocomplete="off"
+              autocapitalize="none"
+              :spellcheck="false"
+              enterkeyhint="search"
+              data-test="mobile-library-search"
+              @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+            />
+          </label>
+          <button
+            v-if="librarySearchQuery"
+            type="button"
+            class="secondary-button"
+            aria-label="Clear image search"
+            @click="librarySearchQuery = ''"
+          >
+            Clear
+          </button>
         </div>
         <p v-if="emptyTrashConfirming" class="status-line" data-test="mobile-library-empty-prompt">
           Delete everything in the trash forever?
@@ -13012,6 +13097,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 ><input
                   ref="discoveredApiKeyInput"
                   v-model="hostInput.apiKey"
+                  autocapitalize="none"
+                  :spellcheck="false"
+                  enterkeyhint="done"
                   class="control"
                   type="password"
                   placeholder="Required by this machine"
@@ -13032,6 +13120,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 ><span>Name</span
                 ><input
                   v-model="hostInput.name"
+                  enterkeyhint="next"
+                  @keydown.enter.prevent="hostAddressInput?.focus()"
                   class="control"
                   placeholder="Studio Mac (optional)"
                   autocomplete="off"
@@ -13039,7 +13129,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               <label class="field"
                 ><span>Address or MagicDNS name</span
                 ><input
+                  ref="hostAddressInput"
                   v-model="hostInput.address"
+                  inputmode="url"
+                  :spellcheck="false"
+                  enterkeyhint="next"
+                  @keydown.enter.prevent="hostApiKeyInput?.focus()"
                   class="control"
                   placeholder="studio.tailnet.ts.net or 192.168.1.20"
                   autocapitalize="none"
@@ -13049,7 +13144,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               <label class="field"
                 ><span>API key</span
                 ><input
+                  ref="hostApiKeyInput"
                   v-model="hostInput.apiKey"
+                  autocapitalize="none"
+                  :spellcheck="false"
+                  enterkeyhint="done"
                   class="control"
                   type="password"
                   placeholder="If required"
@@ -13104,7 +13203,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 <div v-if="entry.kind === 'local'" class="mobile-generation-row">
                   <SwipeActionRow
                     :actions="mobileQueueRowActions(entry.local)"
-                    :label="entry.local.print.prompt"
+                    :label="
+                      entry.local.print.prompt.trim() ||
+                      `${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`
+                    "
                     :disabled="
                       entry.local.print.cancelling === true ||
                       queueControlHostIds.has(activityRowHostId(entry.local))

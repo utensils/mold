@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useMobileBack } from "./useMobileBack";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -364,6 +365,8 @@ function collapseSheet(): void {
   // replaces it on screen, so it is what replaces it in the focus order.
   sheetHandle.value?.focus?.();
 }
+
+useMobileBack(sheetExpanded, collapseSheet);
 
 function toggleSheet(): void {
   if (sheetExpanded.value) collapseSheet();

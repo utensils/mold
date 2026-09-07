@@ -885,7 +885,7 @@ function applyMask(mask: string): void {
         </label>
         <!-- The direction is the whole point of the hint, and a `title` is
              invisible on a phone: there is no pointer to hover with. -->
-        <p class="mobile-source-note" data-test="mobile-source-strength-hint">
+        <p v-if="!canvasless" class="mobile-source-note" data-test="mobile-source-strength-hint">
           {{ strength.hint }}
         </p>
 

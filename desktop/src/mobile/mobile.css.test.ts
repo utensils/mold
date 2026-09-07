@@ -64,7 +64,10 @@ describe("mobile gallery viewer", () => {
     expect(viewer?.[1]).toMatch(/position:\s*fixed\s*;/);
     expect(viewer?.[1]).toMatch(/inset:\s*0\s*;/);
     expect(viewer?.[1]).toMatch(/width:\s*auto\s*;/);
-    expect(viewer?.[1]).toMatch(/height:\s*auto\s*;/);
+    expect(viewer?.[1]).toMatch(/height:\s*var\(--mobile-visual-viewport-height, 100dvh\)\s*;/);
+    expect(viewer?.[1]).toContain(
+      "transform: translateY(var(--mobile-visual-viewport-page-top, 0px))",
+    );
     expect(viewer?.[1]).toMatch(/margin:\s*0\s*;/);
     expect(viewer?.[1]).not.toMatch(/(?:width|height):\s*100(?:%|dvh)\s*;/);
   });
@@ -724,7 +727,7 @@ describe("mobile Library organization", () => {
     const panel = css.match(/\.mobile-library-sheet-panel\s*\{([^}]*)\}/s);
     const field = css.match(/\.mobile-library-sheet-form \.field\s*\{([^}]*)\}/s);
     expect(panel?.[1]).toMatch(
-      /max-height:\s*min\(86dvh,\s*var\(--mobile-visual-viewport-height,\s*100dvh\)\)\s*;/,
+      /max-height:\s*min\(\s*86dvh,\s*calc\(var\(--mobile-visual-viewport-height,\s*100dvh\) - env\(safe-area-inset-top\)\)\s*\)\s*;/,
     );
     expect(field?.[1]).toMatch(/margin:\s*0\s*;/);
   });
