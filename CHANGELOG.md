@@ -11,6 +11,59 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-07
+
+- Add Hunyuan3D 2mv and 2mv Turbo shape generation from semantically named front, left, back, and right images across the server, desktop, web, mobile, CLI, and MCP surfaces.
+- **Hunyuan3D 2.1 shape.** Image-to-mesh generation with the MoE shape transformer, DINOv2-large conditioner and separate 2.1 licence gate.
+- **Hunyuan3D PBR paint.** Generate UV-unwrapped GLB meshes with embedded base-color and metallic/roughness textures from the same appearance image, with durable per-stage progress across local and remote clients.
+- **Mesh admission.** Price the selected checkpoint’s latent set and encoder size, including canvasless mini requests.
+- **Mesh geometry.** Read all static GLB scene primitives with their transforms and interleaved attributes, and reject accessors that escape their declared buffers.
+- **CUDA half-precision convolutions.** Use float32 accumulation for cuDNN Conv1D and Conv2D with float16 tensors, reducing accumulated numerical error while preserving float16 storage.
+- **Real-ESRGAN precision.** Keep RRDB residual and LeakyReLU scalars in float32 before rounding half-precision activations, matching upstream Torch arithmetic.
+- **Upscaler cancellation.** Stop RRDB inference between network blocks and reject cancellation during the final tile or output encoding before returning an image.
+- **Real-ESRGAN cuDNN dispatch.** Keep its first convolution on cuDNN when that backend is selected, avoiding an im2col rounding difference that accumulates through the residual network.
+- **A long clip survives a page reload again.** Reloading the browser while
+  the machine was rendering a long clip reported "server progress lost" while
+  the machine happily carried on stitching it. The page now picks the same
+  render back up where it left off
+  ([#1621](https://github.com/utensils/mold/issues/1621)).
+- **A clip paused by a restart now says so and stops.** When a machine parks a
+  long clip at shutdown it keeps every finished piece, ready to resume — but
+  the desktop app sat on that row forever, checking every few seconds and never
+  saying anything. It now tells you the clip is paused and points you at
+  Resume in the queue
+  ([#1622](https://github.com/utensils/mold/issues/1622)).
+- **Removed scene-by-scene clip authoring from the apps.** The desktop
+  `Simple | Scenes` strip and its timeline, the web and iPhone
+  `One shot | Sequence` output, the TUI chain composer, and the Discord
+  `/sequence` command are gone. Making a clip is now one flow: a prompt, the
+  model controls, and the length slider — including long clips, which the host
+  still renders as chained clips stitched into one video exactly as before
+  ([#1614](https://github.com/utensils/mold/issues/1614)).
+- **Sequence prints stay in your library.** Existing scene-authored clips keep
+  their thumbnails, provenance, downloads, and exports; **Use these settings
+  again** now restores a plain one-shot clip built from the first scene's
+  prompt instead of reopening a timeline.
+- **Scripted sequences are unchanged.** `mold run --script shot.toml`, repeated
+  `--prompt`, `--frames-per-clip`, `mold chain validate`, `mold jobs`, and the
+  `/api/chain-jobs` endpoints all still work for anyone driving sequences from
+  the CLI or the API.
+- **Reclaimed the space the retired composer was holding.** Removing it left
+  every saved scene draft — and the clip and opening images they referenced,
+  which can run to megabytes — stranded in browser storage with nothing left
+  that could read or free them. Both apps now clear that on launch.
+- **Website analytics popup removed.** Google Analytics now starts automatically
+  on the public documentation site, with no consent popup or preference button.
+- **Website analytics navigation.** Keep automatic scroll and link events
+  associated with the current documentation page after navigation.
+- **Optional website analytics.** The public documentation website now offers
+  consent-based Google Analytics with a persistent preference control and an
+  updated privacy disclosure. Mold apps and servers contain no new analytics.
+- **Performance-qualify Wan on Apple Metal.** Promote the backend to supported
+  after repeated real-checkpoint 1.3B BF16 and 5B Q8/FP16 video campaigns,
+  including image conditioning and sustained unified-memory pressure
+  ([#1094](https://github.com/utensils/mold/issues/1094)).
+
 ## [0.28.0] - 2026-09-06
 
 - **Restore uncached Wan 1.3B and dense 14B rendering.** Refuse residual caching
@@ -4567,7 +4620,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/utensils/mold/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/utensils/mold/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/utensils/mold/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/utensils/mold/compare/v0.26.0...v0.27.0
